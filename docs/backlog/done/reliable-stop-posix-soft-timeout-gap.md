@@ -1,6 +1,8 @@
 # Reliable stop: make POSIX `down --force` a pending graceful stop, not a timeout kill
 
-**Status:** open **Priority:** P0 / critical **Source:** [2026-07-16 down-command analysis](../analysis/down-command-issue.md)
+**Status:** done (shipped 2026-07-20) **Priority:** P0 / critical **Source:** [2026-07-16 down-command analysis](../../analysis/down-command-issue.md)
+
+> **Shipped 2026-07-20.** The POSIX soft rung (`_stop_via_signal`) no longer escalates to `SIGKILL` on timeout — it stays a pending graceful stop and retains every handle. By operator decision the same contract was extended to **Windows** (`_stop_via_pid_file` no longer tree-kills on a soft timeout), so `--force` never hard-kills on either platform and `--force-full` is the sole hard rung. See `docs/operations.md` and `docs/glossary.md`.
 
 Most of the reliable-stop work is already shipped: `run_process` timeout/interrupt, daemon-exit cleanup, and `--force-full` use the recorded active-agent handle and reap the whole subtree. The remaining gap is narrower and live-confirmed: on POSIX, a timed-out soft `down --force` still tries to kill the watcher after the grace period. That is both semantically wrong for a "graceful first" stop and operationally broken because it can leave the active provider process alive in its own session.
 
@@ -12,9 +14,7 @@ The live repro in `wastime-app-content` task `rework-ch04-calendars-2`, node `st
 stop: watcher 54483 did not exit in 30s; sent SIGKILL
 ```
 
-yet the provider artifact
-`.../.worc/logs/rework-ch04-calendars-2/stages/story_critic/run-000286/1-claude/stdout.log`
-kept receiving Claude output afterward, including a later heartbeat at `2026-07-16 18:48:24`.
+yet the provider artifact `.../.worc/logs/rework-ch04-calendars-2/stages/story_critic/run-000286/1-claude/stdout.log` kept receiving Claude output afterward, including a later heartbeat at `2026-07-16 18:48:24`.
 
 That means the active agent survived the timeout escalation. The operator decision is that `--force` should stay purely graceful; the hard interrupt path already exists as `--force-full`. So this is not a "make the timeout longer" issue and not a "kill the whole subtree better" issue. It is a stop-contract issue:
 

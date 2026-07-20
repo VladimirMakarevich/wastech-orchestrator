@@ -275,16 +275,20 @@ def test_stop_process_graceful_sends_sigterm_only(tmp_path: Path) -> None:
     assert not path.exists()
 
 
-def test_stop_process_escalates_to_hard_kill_after_timeout(tmp_path: Path) -> None:
+def test_stop_process_soft_timeout_stays_pending(tmp_path: Path) -> None:
+    # A timed-out soft stop is a *pending graceful stop*: no post-timeout kill, and every handle is
+    # retained so the daemon still sees the request and --force-full can still target it.
     path = tmp_path / "orchestrator.pid"
+    stop_file = pc.stop_file_path(tmp_path)
     pc.write_pid_file(path, pid=4242, start_time_fn=_start)
     fake = FakeProcess(alive=True)  # never dies on its own
     sleeps: list[float] = []
     outcome = pc.stop_process(
         path,
-        timeout=0.0,  # deadline == now: escalate on the first check
+        timeout=0.0,  # deadline == now: the grace period expires on the first check
         term_sig=TERM,
         kill_sig=KILL,
+        stop_file=stop_file,
         kill_fn=fake,
         sleep_fn=sleeps.append,
         now_fn=lambda: 0.0,
@@ -292,11 +296,46 @@ def test_stop_process_escalates_to_hard_kill_after_timeout(tmp_path: Path) -> No
         can_signal=True,
     )
     assert outcome.signaled is True
-    assert outcome.killed is True
+    assert outcome.killed is False  # soft never hard-kills, even on timeout
     assert outcome.timed_out is True
-    assert fake.signals == [TERM, KILL]
+    assert fake.signals == [TERM]  # SIGTERM only; no SIGKILL to the watcher
     assert sleeps == []
-    assert not path.exists()
+    assert path.exists()  # PID file kept: duplicate-watcher protection + a --force-full target
+    assert stop_file.exists()  # stop sentinel kept: the daemon still exits at its node boundary
+
+
+def test_stop_process_soft_timeout_never_reaps_the_agent_subtree(tmp_path: Path) -> None:
+    # Regression (P0 down-command gap): the POSIX soft-timeout must not reach the recorded active
+    # agent's subtree and must leave the children handle intact for a later --force-full.
+    path = tmp_path / "orchestrator.pid"
+    stop_path = tmp_path / "orchestrator.stop"
+    children_path = tmp_path / "orchestrator.children"
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+    pc.write_children_file(children_path, pid=777, pgid=777, start_time_fn=_start)
+    fake = FakeProcess(alive=True)  # daemon never exits within the grace period
+    subtree_calls: list[tuple[int, int]] = []
+    outcome = pc.stop_process(
+        path,
+        level="soft",
+        timeout=0.0,
+        term_sig=TERM,
+        kill_sig=KILL,
+        stop_file=stop_path,
+        children_file=children_path,
+        subtree_kill_fn=lambda pid, pgid: subtree_calls.append((pid, pgid)),
+        kill_fn=fake,
+        sleep_fn=lambda _s: None,
+        now_fn=lambda: 0.0,
+        start_time_fn=_start,
+        can_signal=True,
+    )
+    assert subtree_calls == []  # the recorded agent subtree is never reaped on a soft timeout
+    assert fake.signals == [TERM]  # no SIGKILL to the watcher PID
+    assert outcome.killed is False
+    assert outcome.timed_out is True
+    assert path.exists()  # PID, stop sentinel, and child handle all survive (pending stop)
+    assert stop_path.exists()
+    assert children_path.exists()
 
 
 # --- stop-file IPC (cross-platform graceful stop) -------------------------------------------------
@@ -367,8 +406,8 @@ def test_stop_via_pid_file_graceful_waits_for_pid_file_removal(tmp_path: Path) -
 
 
 def test_stop_via_pid_file_times_out_when_pid_file_persists(tmp_path: Path) -> None:
-    # Without a tree-kill seam, retain every handle: a duplicate watcher stays blocked and a later
-    # --force-full can still target the original daemon.
+    # A soft-stop timeout stays pending: retain every handle so a duplicate watcher stays blocked
+    # and a later --force-full can still target the original daemon.
     path = tmp_path / "orchestrator.pid"
     pc.write_pid_file(path, pid=4242, start_time_fn=_start)
     stop_file = pc.stop_file_path(tmp_path)
@@ -386,7 +425,9 @@ def test_stop_via_pid_file_times_out_when_pid_file_persists(tmp_path: Path) -> N
     assert stop_file.exists()
 
 
-def test_windows_soft_timeout_escalates_to_tree_kill_and_reaps_handles(tmp_path: Path) -> None:
+def test_windows_soft_timeout_stays_pending_even_with_hard_kill_seam(tmp_path: Path) -> None:
+    # Soft stop never hard-kills, even when a tree-kill seam is available. On timeout it stays a
+    # pending graceful stop and retains every handle; --force-full is the only hard rung.
     path = tmp_path / "orchestrator.pid"
     stop_file = pc.stop_file_path(tmp_path)
     children_file = pc.children_file_path(tmp_path)
@@ -399,19 +440,19 @@ def test_windows_soft_timeout_escalates_to_tree_kill_and_reaps_handles(tmp_path:
         timeout=0.0,
         stop_file=stop_file,
         children_file=children_file,
-        hard_kill_fn=killed.append,
+        hard_kill_fn=killed.append,  # available, but the soft path must not use it
         sleep_fn=lambda _s: None,
         now_fn=lambda: 0.0,
         can_signal=False,
     )
 
-    assert killed == [4242, 777]
+    assert killed == []  # the tree-kill seam is never invoked on a soft timeout
     assert outcome.timed_out is True
-    assert outcome.killed is True
-    assert outcome.tree_killed is True
-    assert not path.exists()
-    assert not stop_file.exists()
-    assert not children_file.exists()
+    assert outcome.killed is False
+    assert outcome.tree_killed is False
+    assert path.exists()  # PID, stop sentinel, and child handle all retained (pending stop)
+    assert stop_file.exists()
+    assert children_file.exists()
 
 
 def test_windows_full_stop_can_escalate_after_unconfirmed_soft_timeout(tmp_path: Path) -> None:

@@ -258,18 +258,45 @@ def test_cmd_stop_reports_tree_kill(
     assert "hard-stopped after the graceful timeout" in out and "process tree" in out
 
 
+def test_cmd_stop_soft_timeout_reports_pending_graceful_stop(
+    monkeypatch: pytest.MonkeyPatch, make_git_config: _ConfigFactory, tmp_path, capsys
+) -> None:
+    # POSIX soft-stop timeout: nothing was killed, the request stays pending, and the CLI still
+    # returns success while pointing the operator at --force-full.
+    config = make_git_config(tmp_path / "clone")
+    monkeypatch.setattr(cli, "load_config_for", lambda _a: config)
+    monkeypatch.setattr(cli, "has_active_task", lambda _c: True)
+    monkeypatch.setattr(sys, "stdin", io.StringIO())
+    monkeypatch.setattr(
+        cli.process_control,
+        "stop_process",
+        lambda _p, **_k: process_control.StopOutcome(
+            found=True, pid=1234, signaled=True, killed=False, already_dead=False, timed_out=True
+        ),
+    )
+    rc = cli.cmd_stop(cli.build_parser().parse_args(["stop", "--force"]))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "pending" in out
+    assert "--force-full" in out
+    assert "SIGKILL" not in out
+
+
 def test_timed_out_stop_message_windows_keeps_pid_for_force_full() -> None:
-    # Only used when no hard-kill seam was available: tell the operator the target remains intact.
+    # The graceful stop stays pending; tell the operator the target remains intact.
     msg = cli._timed_out_stop_message(1234, 30.0, is_windows=True)
     assert "did not confirm shutdown in 30s" in msg
     assert "kept its PID file" in msg
     assert "--force-full" in msg
 
 
-def test_timed_out_stop_message_posix_omits_taskkill() -> None:
-    # POSIX never reaches this branch in practice (it escalates to SIGKILL), but guard the wording.
+def test_timed_out_stop_message_posix_is_pending_and_points_at_force_full() -> None:
+    # The normal POSIX soft-timeout path: a pending graceful stop, never a SIGKILL. It names
+    # --force-full as the immediate interrupt but never mentions the Windows-only taskkill.
     msg = cli._timed_out_stop_message(1234, 30.0, is_windows=False)
     assert "did not confirm shutdown in 30s" in msg
+    assert "pending" in msg
+    assert "--force-full" in msg
     assert "taskkill" not in msg
 
 

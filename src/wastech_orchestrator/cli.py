@@ -2857,14 +2857,18 @@ def _gated_stop(
 def _timed_out_stop_message(pid: int | None, timeout: float, *, is_windows: bool) -> str:
     """Operator message for a soft stop that did not confirm shutdown within ``timeout``.
 
-    Only reachable when no hard-kill seam was available: normal CLI wiring escalates POSIX to
-    SIGKILL and Windows to ``taskkill /F /T``. The PID and stop-file remain intact, so the operator
-    can retry the hard rung without losing the target and a second watcher cannot start.
+    The graceful stop stays **pending**: POSIX never kills, and Windows keeps every handle when no
+    hard-kill seam is available. The PID and stop-file remain intact, so the daemon still exits at
+    its next node boundary, a second watcher cannot start, and ``--force-full`` remains the only
+    immediate interrupt.
     """
-    base = f"stop: watcher {pid} did not confirm shutdown in {timeout:g}s; kept its PID file"
+    base = (
+        f"stop: watcher {pid} did not confirm shutdown in {timeout:g}s; "
+        "graceful stop is still pending (kept its PID file)"
+    )
     if is_windows:
         return f"{base}; retry with --force-full to kill its process tree"
-    return base
+    return f"{base}; retry with --force-full to interrupt now and reap the agent subtree"
 
 
 def _has_unconfirmed_runtime_handles(
@@ -2923,8 +2927,6 @@ def cmd_stop(args: argparse.Namespace) -> int:
             f"stop: watcher {outcome.pid} hard-stopped{reason} (killed its process tree); "
             "it resumes from its checkpoint on next start"
         )
-    elif outcome.killed:
-        print(f"stop: watcher {outcome.pid} did not exit in {args.timeout:g}s; sent SIGKILL")
     elif outcome.timed_out:
         print(_timed_out_stop_message(outcome.pid, args.timeout, is_windows=os.name == "nt"))
     else:
@@ -2990,8 +2992,7 @@ def cmd_restart(args: argparse.Namespace) -> int:
         )
         return 1
     else:
-        suffix = " (SIGKILL)" if outcome.killed else ""
-        print(f"restart: stopped previous watcher {outcome.pid}{suffix}")
+        print(f"restart: stopped previous watcher {outcome.pid}")
     return cmd_watch(args)
 
 

@@ -403,13 +403,13 @@ def stop_process(
 
     Idempotent: an absent PID file is a no-op. ``level`` is the stop ladder's hardness:
 
-    * ``"soft"`` (default) — cooperative node-boundary stop. **POSIX**: write ``stop_file``, probe
-      liveness, send ``term_sig`` (SIGTERM) for an immediate wakeup, poll, and escalate to
-      ``kill_sig`` (SIGKILL) only if the daemon outlives the timeout. **Windows**: ``os.kill`` can't
-      reach an unrelated process, so write ``stop_file`` and wait for the daemon to remove its own
-      PID file. If it does not vanish within the timeout, use ``hard_kill_fn`` as the tree-kill
-      backstop; without that seam, retain every handle and report ``timed_out`` so a later full stop
-      can still target the daemon.
+    * ``"soft"`` (default) — cooperative node-boundary stop that **never hard-kills on either
+      platform**. **POSIX**: write ``stop_file``, probe liveness, send ``term_sig`` (SIGTERM) for an
+      immediate wakeup, and poll. **Windows**: ``os.kill`` can't reach an unrelated process, so
+      write ``stop_file`` and wait for the daemon to remove its own PID file. On either platform, if
+      the daemon outlives the timeout it stays a **pending graceful stop**: retain every handle and
+      report ``timed_out`` so the daemon still exits at its next node boundary, a duplicate watcher
+      is blocked, and a later ``--force-full`` can still target it.
     * ``"full"`` — hard stop. **POSIX**: SIGKILL the daemon's own process group (daemon + any checks
       child), **and** reap the recorded active agent's whole subtree via ``subtree_kill_fn`` (the
       agent leads its own group, so the daemon-group kill no longer reaches it — the recorded
@@ -420,8 +420,8 @@ def stop_process(
       **degrades to the soft path** and sets ``degraded_to_soft``.
 
     A recorded start-time guards every POSIX probe so a recycled PID is never signaled. Confirmed
-    terminal branches remove the PID, stop, and children files; an unconfirmed Windows soft timeout
-    deliberately retains them. Pure under test via the injectable seams.
+    terminal branches remove the PID, stop, and children files; an unconfirmed soft timeout (either
+    platform) deliberately retains them. Pure under test via the injectable seams.
     """
     if can_signal is None:
         can_signal = _can_signal()
@@ -455,15 +455,15 @@ def stop_process(
             timeout=timeout,
             poll=poll,
             term_sig=term_sig,
-            kill_sig=kill_sig,
             stop_file=stop_file,
             kill_fn=kill_fn,
             sleep_fn=sleep_fn,
             now_fn=now_fn,
             start_time_fn=start_time_fn,
         )
-    # Windows: no cross-process signal. A "full" request tree-kills via the injected seam if one is
-    # supplied; otherwise it degrades to the soft PID-file wait.
+    # Windows: no cross-process signal. Only a "full" request hard-kills, via the injected tree-kill
+    # seam if one is supplied; a soft request (or a "full" with no seam) does the cooperative
+    # PID-file wait, which stays pending on timeout.
     if level == "full" and hard_kill_fn is not None:
         return _stop_via_tree_kill(
             path,
@@ -478,8 +478,6 @@ def stop_process(
         timeout=timeout,
         poll=poll,
         stop_file=stop_file,
-        children_file=children_file,
-        hard_kill_fn=hard_kill_fn,
         sleep_fn=sleep_fn,
         now_fn=now_fn,
     )
@@ -594,14 +592,18 @@ def _stop_via_signal(
     timeout: float,
     poll: float,
     term_sig: int,
-    kill_sig: int,
     stop_file: Path | None,
     kill_fn: KillFn,
     sleep_fn: SleepFn,
     now_fn: NowFn,
     start_time_fn: StartTimeFn,
 ) -> StopOutcome:
-    """POSIX stop: probe liveness, SIGTERM (+ stop-file), poll, escalate to SIGKILL on timeout."""
+    """POSIX soft stop: probe liveness, SIGTERM (+ stop-file), poll for a cooperative exit.
+
+    On timeout this stays a **pending graceful stop**: it never kills and keeps every handle
+    (PID file, stop sentinel) intact, so the daemon still sees the request and exits at its next
+    node boundary. ``--force-full`` owns all hard-stop semantics.
+    """
     pid = record.pid
     expected = record.start_time
     if not is_running(pid, expected_start=expected, kill_fn=kill_fn, start_time_fn=start_time_fn):
@@ -622,28 +624,27 @@ def _stop_via_signal(
             stop_file.unlink(missing_ok=True)
         return StopOutcome(found=True, pid=pid, signaled=False, killed=False, already_dead=True)
 
-    killed = False
     timed_out = False
     deadline = now_fn() + timeout
     while is_running(pid, expected_start=expected, kill_fn=kill_fn, start_time_fn=start_time_fn):
         if now_fn() >= deadline:
             timed_out = True
-            try:
-                kill_fn(pid, kill_sig)
-                killed = True
-            except OSError as exc:  # exited just as we escalated
-                if not _is_no_such_process(exc):
-                    raise
-                killed = False
             break
         sleep_fn(poll)
 
+    if timed_out:
+        # Pending graceful stop: keep the PID file and stop sentinel (and thus the recorded child
+        # handle) intact so the daemon still sees the request and exits at its next node boundary.
+        # --force-full remains the only immediate interrupt.
+        return StopOutcome(
+            found=True, pid=pid, signaled=True, killed=False, already_dead=False, timed_out=True
+        )
+
+    # Cooperative exit confirmed: reap the PID file and stop sentinel.
     path.unlink(missing_ok=True)
     if stop_file is not None:
         stop_file.unlink(missing_ok=True)
-    return StopOutcome(
-        found=True, pid=pid, signaled=True, killed=killed, already_dead=False, timed_out=timed_out
-    )
+    return StopOutcome(found=True, pid=pid, signaled=True, killed=False, already_dead=False)
 
 
 def _stop_via_pid_file(
@@ -653,19 +654,17 @@ def _stop_via_pid_file(
     timeout: float,
     poll: float,
     stop_file: Path | None,
-    children_file: Path | None,
-    hard_kill_fn: HardKillFn | None,
     sleep_fn: SleepFn,
     now_fn: NowFn,
 ) -> StopOutcome:
-    """Windows stop: request via the stop-file, then wait for the daemon to remove its own PID file.
+    """Windows soft stop: request via the stop-file, then wait for the daemon to remove its own PID.
 
     No ``os.kill`` — it cannot reach an unrelated process. The daemon removes its own PID file on
-    a clean exit, so the file's disappearance confirms shutdown. If it persists past the timeout,
-    the grace period has expired: use the injected Windows tree-kill when available, then reap all
-    runtime handles. Without that seam the shutdown is unconfirmed, so keep the PID, stop sentinel,
-    and active-child handle intact; this honestly blocks a duplicate watcher and leaves a later
-    ``--force-full`` able to target the original process.
+    a clean exit, so the file's disappearance confirms shutdown. If it persists past the timeout the
+    graceful stop stays **pending**: never hard-kill, keep the PID, stop sentinel, and active-child
+    handle intact so the daemon still exits at its next node boundary; this honestly blocks a
+    duplicate watcher and leaves a later ``--force-full`` (the only hard rung) able to tree-kill the
+    original process.
     """
     pid = record.pid
     if stop_file is not None:
@@ -673,17 +672,6 @@ def _stop_via_pid_file(
     deadline = now_fn() + timeout
     while path.exists():
         if now_fn() >= deadline:
-            if hard_kill_fn is not None:
-                return replace(
-                    _stop_via_tree_kill(
-                        path,
-                        record,
-                        stop_file=stop_file,
-                        children_file=children_file,
-                        hard_kill_fn=hard_kill_fn,
-                    ),
-                    timed_out=True,
-                )
             return StopOutcome(
                 found=True, pid=pid, signaled=True, killed=False, already_dead=False, timed_out=True
             )
