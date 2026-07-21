@@ -1,50 +1,72 @@
-# WRI-004 — Centralize the `.worc` home literal into one injectable seam
+# WRI-004 — Introduce a typed runtime/control/exchange layout
 
-**Status:** open **Phase:** 2 (hard isolation) — prerequisite **Source:** [decision record](README.md), [follow_ups.md](follow_ups.md) **Dependencies:** WRI-001
+**Status:** open **Milestone:** 0 (foundation) **Source:** [decision record](README.md), [follow_ups.md](../follow_ups.md) **Dependencies:** —
 
 ## Problem
 
-The `.worc` home is a hardcoded literal duplicated across the codebase. The two named constants — `WORC_HOME` in `cli.py` and `_WORC_HOME` in `core/orchestrator.py` — are already tracked as tech debt in [follow_ups.md](follow_ups.md), but they understate the problem: at least ~8 further sites hardcode the `.worc` string independently rather than referencing a constant. The load-bearing ones (each of which assumes `<repo>/.worc`):
+The code uses one `artifacts_root` and reconstructs `<repo>/.worc` independently in the CLI, Core, memory, Git, output-policy, validation, install, and process-control paths. Treating every `.worc` literal as one replaceable value is also wrong: some consumers need the discoverable operator control plane, while others need private runtime state or the agent-facing exchange.
 
-- `memory/paths.py` — `MemoryLayout.for_repo` builds `Path(repo_root) / ".worc"` itself (the memory store's home, wholly independent of both constants). **If WRI-005 relocates the home but misses this, the memory store stays inside the repo.**
-- `git_manager.py` — `RUNTIME_EXCLUDED_DIRS`, the `RUNTIME_GITIGNORE_LINES` `.worc/` line, and the `.worc/state.db` `check-ignore` probes (×2).
-- `core/flow/output_policy.py` — `_PRIVATE_REPORT_DIR = ".worc/security-reports"`.
-- `config/validation.py` — the `== ".worc"` / `startswith(".worc/")` guard.
-- `config/loader.py` and `install/config_writer.py` — the quarantine default `./.worc/tasks/rejected`.
-
-Phase-2 relocation (WRI-005) needs a single, injectable private-home path; these scattered literals make that unsafe.
+The previous dependency direction was backwards: splitting writers first and introducing a layout seam later would force the same call graph to be threaded twice.
 
 ## Required outcome
 
-One source of truth for the private-home location, resolved through the composition/config seam, so the home can later be pointed outside the working tree without editing call sites. No behavior change in this task — the home stays at `<repo>/.worc/`; this only builds the seam.
+Introduce one provider-neutral immutable layout object, constructed in the composition/CLI boundary and passed to consumers by dependency injection:
+
+- `repo_root` — target working tree.
+- `control_home` — `<repo>/.worc`, holding `config.yaml`, guide, flows, tools, and install metadata.
+- `private_home` — initially the same `<repo>/.worc`, holding state, audit, secrets, memory, reports, rejected runtime tasks, and process-control files.
+- `exchange_root` — `<repo>/.worc-io`, reserved for WRI-001.
+- `internal_denied_paths` (or an equivalent typed policy input) — `control_home`, `private_home`, frozen control bundles, and resolved operator/runtime secret sources outside those roots, notably an explicit `--env-file` and provider-owned auth/config homes. It is internal provider policy, not the overloaded public `security.denied_read_paths` list.
+
+This task changes no on-disk behavior. It makes each consumer declare which surface it owns so WRI-001 and WRI-005 can change destinations without another global literal hunt.
 
 ## In scope
 
-- Collapse the duplicated `.worc` literal into a single constant/config-resolved value.
-- Thread the private-home path through composition so no consumer assumes `<repo>/.worc` — explicitly including `memory/paths.py`, `git_manager.py`, `output_policy.py`, `config/validation.py`, `config/loader.py`, and `install/config_writer.py`, not just the two named constants.
-- Leave the default path exactly as today (`<repo>/.worc/`).
+- Move the canonical directory names into a leaf module importable by CLI, composition, Core interfaces, Git Manager, and memory without cycles.
+- Add a typed layout factory whose default reproduces today's paths exactly.
+- Thread `control_home` to config discovery/install/upgrade, flow registry, tool registry, and shipped guide operations.
+- Thread `private_home` to state DB, logs/artifacts, ledger, memory, security reports, HITL, rejected runtime tasks, pid/stop/children files, and default `.env` resolution.
+- Resolve the actual default/explicit env-file path before provider construction and thread it through the internal deny policy; do not assume it is a child of `private_home`.
+- Thread `exchange_root` without writing to it yet.
+- Keep Git ignore/exclude logic explicit: `.worc/` is a control-home repo footprint, not an arbitrary private-home path.
+- Replace `MemoryLayout.for_repo(repo_root)` with a constructor that receives the resolved private home.
+- Update the existing duplicate-home follow-up only when the implementation is complete.
 
 ## Acceptance criteria
 
-- [ ] A single source resolves the private-home path; the `WORC_HOME` / `_WORC_HOME` duplication is removed.
-- [ ] All consumers obtain the home through the seam — memory store, git-ignore/exclusions, security-reports dir, config validation/loader, and install quarantine included; no path-construction site still hardcodes `.worc` (guard with grep / an import-linter or unit check; docstrings and packaged assets excepted).
-- [ ] No functional change — the resolved default path is unchanged; the full suite is green.
-- [ ] The corresponding [follow_ups.md](follow_ups.md) entry is closed/updated.
+- [ ] Composition constructs one layout and consumers receive the correct field; Core does not import CLI.
+- [ ] Config/flows/tools/guide use `control_home`; DB/logs/memory/reports/HITL/process control use `private_home`; exchange consumers have an explicit but unused `exchange_root`.
+- [ ] Control/private roots, frozen control bundles, an explicit `--env-file`, and provider credential/config homes are represented as internal deny targets without being added to redaction/skill-scanning config globs.
+- [ ] The default resolved paths and all observable behavior are byte-for-byte/path-for-path unchanged.
+- [ ] No consumer reconstructs a private runtime path from `repo_root / ".worc"`; legitimate control-home and gitignore literals remain allowed.
+- [ ] Persisted/displayed path strings use `Path.as_posix()`; filesystem operations keep `Path` values rather than round-tripping through display strings.
+- [ ] Windows drive/UNC, macOS, Linux, relative configured repo paths, symlinked repo roots, and linked Git worktrees are covered through injected path/platform seams.
+- [ ] The broken sibling link to `follow_ups.md` is fixed and the real follow-up is closed only after the code lands.
 
 ## Verification
 
-- A test or lint asserting there is one definition of the home literal.
-- Full suite green with the default path unchanged.
+- Unit tests for layout resolution on POSIX and Windows path fixtures.
+- Wiring tests proving every named consumer receives the intended field.
+- A guard test over path-construction call sites, not a brittle repository-wide ban on the `.worc` text.
+- Full project gates with no behavior/documentation drift.
 
 ## Out of scope
 
-- Actually moving the home outside the tree (WRI-005).
-- Any read-deny mechanism.
+- Moving an artifact to the exchange (WRI-001).
+- Portable task/node identity validation and path-builder containment (WRI-008).
+- Freezing and protecting live control inputs (WRI-010).
+- Provider enforcement (WRI-002/003).
+- Changing the default private-home location (WRI-005).
 
 ## Likely implementation areas
 
-- src/wastech_orchestrator/cli.py
-- src/wastech_orchestrator/core/orchestrator.py
+- src/wastech_orchestrator/runtime_layout.py (new leaf module or equivalent)
+- src/wastech_orchestrator/cli.py and cli_shell.py
 - src/wastech_orchestrator/composition.py
-- src/wastech_orchestrator/config
-- docs/backlog/follow_ups.md (close the duplicate-literal entry)
+- src/wastech_orchestrator/core/orchestrator.py and flow wiring
+- src/wastech_orchestrator/git_manager.py
+- src/wastech_orchestrator/memory/paths.py
+- src/wastech_orchestrator/core/flow/output_policy.py
+- src/wastech_orchestrator/config and install
+- src/wastech_orchestrator/process_control.py
+- tests/ and docs/backlog/follow_ups.md

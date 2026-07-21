@@ -21,7 +21,7 @@ The sequence is refinement → planning → implementation → checks fail → f
 
 | Artifact/path | Why an agent needs it | Destination |
 | --- | --- | --- |
-| Tracked task and skill files | Direct task/skill input | Repository; unchanged |
+| Validated task and selected tracked skill snapshots | Direct task/skill input | Exchange; source files remain ordinary repository content |
 | `plan.md` | `output_artifact: plan`, exposed as `{plan_path}` | Exchange |
 | `current.diff` | Exposed as `{diff_path}` | Exchange |
 | Redacted first failing checks log | Exposed as `{checks_path}` to `fixing` | Exchange |
@@ -62,6 +62,8 @@ During an active run after WRI-001, the trees are explicit:
 /work/app/
 ├── tasks/add-http-retry.md
 ├── .worc-io/add-http-retry/
+│   ├── task.md
+│   ├── skills/...
 │   ├── plan.md
 │   ├── current.diff
 │   ├── checks/run-000004.log
@@ -88,7 +90,7 @@ During an active run after WRI-001, the trees are explicit:
 
 There is no `.worc-io/logs/` segment. Related run ids may appear in both roots because one holds the curated projection and the other holds private evidence.
 
-After WRI-005, `config.yaml`, flows, tools, and guide remain under `/work/app/.worc`; private DB/log/memory/secret/process state moves to the platform user-state location. This topology reduction does not turn the Claude `Bash` residual into a hard deny.
+After WRI-005, `config.yaml`, flows, tools, and guide remain under `/work/app/.worc`; private DB/log/memory/secret/process state moves to the platform user-state location. The live control plane remains provider-denied, and later role/tool consumers use the task's frozen private control bundle. This topology reduction is defense in depth; the provider policy must still deny both roots.
 
 ## Live checks failure
 
@@ -106,7 +108,7 @@ This prevents a first-run/fresh-recovery behavioral mismatch.
 
 | Variable | Before | After |
 | --- | --- | --- |
-| `{task_path}` | `/work/app/tasks/add-http-retry.md` | Unchanged |
+| `{task_path}` | `/work/app/tasks/add-http-retry.md` | `/work/app/.worc-io/add-http-retry/task.md` |
 | `{plan_path}` | `/work/app/.worc/logs/add-http-retry/plan.md` | `/work/app/.worc-io/add-http-retry/plan.md` |
 | `{diff_path}` | `/work/app/.worc/logs/add-http-retry/current.diff` | `/work/app/.worc-io/add-http-retry/current.diff` |
 | `{checks_path}` | `/work/app/.worc/logs/add-http-retry/checks/run-000004.log` | `/work/app/.worc-io/add-http-retry/checks/run-000004.log` |
@@ -114,18 +116,22 @@ This prevents a first-run/fresh-recovery behavioral mismatch.
 | `{memory_path}` | Private task-log packet | Current exchange packet; store remains private |
 | `human_input_path` | Durable private interaction record | Sanitized exchange packet |
 
-The provider footer continues to contain paths only. `task.enriched.md` and supervisor/publish summaries do not move because no agent request consumes them.
+Selected skills similarly point to bounded immutable packages under the current exchange. The source task/skills remain ordinary repository files that a task may legitimately propose changing, but no later provider reads them as its live instructions. Applicable AGENTS/CLAUDE repository guidance is frozen privately and injected at controlled provider precedence. The provider footer continues to contain paths only. `task.enriched.md` and supervisor/publish summaries do not move because no agent request consumes them.
 
 ## Claude invocation contract
 
-The adapter adds orchestrator-owned, absolute platform-correct tool rules:
+The adapter creates one private, attempt-scoped settings policy and closes the other CLI extension surfaces:
 
-- Deny `Read` for the private-home root and descendants, including dotfiles.
-- Deny `Write` and `Edit` for the exchange root and descendants.
-- Keep exchange `Read` available.
-- Reject `extra_args` that replace the owned tools/settings/permission/workspace authority.
+1. Deny built-in `Read` for the private-home root and internal secret sources, including dotfiles.
+2. Deny built-in `Write`/`Edit` for the exchange and resolved Git control directories while keeping exchange reads available.
+3. On macOS/Linux/WSL2 enable Claude's Bash sandbox with `failIfUnavailable`, private `denyRead`, exchange/Git `denyWrite`, request-derived network rules, no exclusions, and no unsandboxed-command escape.
+4. On native Windows omit Bash from strict workspace-write because the current Claude sandbox does not support that host; use Edit/Write-only operation or provider fallback, never silent unsandboxed execution.
+5. Disable user/project/local customizations and MCP, and disable or inventory settings, hooks, plugins, agents, skills, Chrome/IDE/remote-control, and managed-policy surfaces before launch.
+6. Reject `extra_args` that replace or extend the owned tools/settings/permission/workspace/session authority.
 
-These rules apply to fresh/resume and read-only/workspace-write attempts. They are Claude tool policy, not an OS sandbox: workspace-write `Bash` is outside the claim.
+These controls apply to fresh/resume and agent/evaluator/supervisor attempts. Claude's OS sandbox covers Bash and child processes only; the built-in tool policy and minimized configuration cover the remaining admitted tool surface. Enterprise managed policy cannot be overridden by argv and is therefore an explicit trusted-computing-base input that must be positively shown safe.
+
+The orchestrator also hashes exchange and Git control state into parent-process memory immediately before an attempt and verifies it afterward. A mutation is rejected as a policy violation before any downstream node can read it; the changed tree is quarantined as evidence and cannot be used for continue unless an independent clean snapshot exists. This is detection in depth, not a substitute for either built-in tool policy or Bash containment.
 
 ## Codex invocation contract
 
@@ -140,7 +146,7 @@ That shape must be replaced, not extended. Permission profiles do not compose wi
 
 1. Generates an attempt-scoped profile with `:minimal`, `:workspace_roots`, exact private/exchange rules, configured denies, and the resolved network grant.
 2. Uses a private, orchestrator-controlled Codex home for auth/session state and generated `denied_commands` execpolicy; it does not silently copy credentials.
-3. Selects the profile with `default_permissions`, uses `--ignore-user-config` when supported, and forces the project `.codex` layer to `untrusted`.
+3. Selects the profile with `default_permissions`, uses `--ignore-user-config` when supported, forces the project `.codex` layer to `untrusted`, disables live project-doc discovery, and injects the frozen repository instruction manifest.
 4. Disables hooks and custom subagents and disables or positively inventories MCP/apps/plugins/computer-use surfaces.
 5. Passes neither `--sandbox` nor `sandbox_workspace_write.*` and rejects authority-bearing `extra_args`.
 6. Runs the exact effective profile through a no-model `codex sandbox` canary, then inspects effective rules/config/features/MCP inventory.
@@ -152,8 +158,11 @@ The filesystem policy is:
 | -------------------------- | -------------- | -------------------- |
 | Runtime/tool minimum       | Read           | Read                 |
 | Repository workspace       | Read           | Write                |
+| Resolved gitdir/common dir | Read           | Read                 |
 | Current exchange           | Read           | Read                 |
+| Live control home          | Deny           | Deny                 |
 | Private home               | Deny           | Deny                 |
+| Source task/lifecycle path | Read           | Read                 |
 | Configured sensitive paths | Deny           | Deny                 |
 
 More-specific exchange `read` overrides the broader workspace `write`; `deny` wins on the private paths. Exact native paths are emitted on each host. Unbounded deny globs are bounded or rejected where Codex needs pre-expansion.
@@ -164,20 +173,28 @@ Current Codex supports permission profiles on macOS, Linux, WSL, and native Wind
 
 After any terminal outcome, not only success:
 
-1. Build and verify a manifest of the active exchange.
-2. Move/copy it into the private task audit using the WRI-007 cross-platform protocol.
-3. Remove the active `.worc-io/add-http-retry` directory.
-4. Refuse the next provider launch if any stale/foreign active exchange remains.
+1. Close the provider process containment and prove no background/reparented descendant remains.
+2. Build and verify a manifest of the active exchange.
+3. Move/copy it into the private task audit using the WRI-007 cross-platform protocol.
+4. Remove the active `.worc-io/add-http-retry` directory.
+5. Refuse the next provider launch if any subtree is unproven or any stale/foreign active exchange remains.
 
-`rerun --continue` restores only the same task's verified latest snapshot. Fresh/restart starts clean. A retention toggle cannot expose an old terminal task to a new agent.
+`rerun --continue` from a terminal resumable status restores only the same task's verified latest snapshot. A parked/crashed nonterminal task verifies and reuses its already-active same-task exchange. Fresh/restart starts clean. A retention toggle cannot expose an old terminal task to a new agent.
+
+An exchange already flagged as Claude-mutated does not follow the clean-seal branch: it is quarantined with expected/observed manifests as contaminated evidence and is never eligible for restore.
 
 ## End-to-end assertions
 
-- Every provider orchestration path is either a tracked repository/task/skill path or inside the current exchange.
+- Every provider orchestration input path is inside the current exchange; only `repo_path` names the live workspace itself.
+- Live `.worc` control files are provider-denied; later prompts/tools come from the verified private task bundle and cannot be swapped by an earlier node.
 - The live fixing node receives `{checks_path}` before any recovery cycle.
 - Every exchange artifact is redacted; unredactable content remains private and receives a sanitized projection if the flow needs it.
 - Codex enforcement is proven on the effective generated profile plus the effective rules/config/tool inventory, not inferred from argv, `codex sandbox` alone, or fake-CLI output.
-- Claude's guarantee is limited to its Read/Write/Edit tool policy; `Bash` remains explicit.
-- Windows paths, junctions/reparse points, locks, permission-profile behavior, and native sandbox mode are tested alongside macOS/Linux behavior.
+- Claude uses built-in tool denies plus the supported Bash sandbox on macOS/Linux/WSL2; native-Windows strict workspace-write omits Bash.
+- Claude extension/configuration surfaces are minimized and inventoried; managed policy is explicitly inside the host trust boundary.
+- Claude exchange/Git integrity is checked pre/post attempt; detection is not mislabeled as containment.
+- No post-attempt manifest, check, Git command, seal, fallback, or next task runs before provider process-tree quiescence is proven.
+- Windows paths, junctions/reparse points, locks, Codex native sandbox behavior, Claude's native-Windows restricted branch, and macOS/Linux/WSL2 behavior are all tested.
 - Terminal exchange data is preserved privately, checksum-verified, and absent from the next task's readable surface.
 - Neither `.worc/` nor `.worc-io/` can be staged or committed.
+- The provider cannot mutate the Git index undetected, and every orchestrator commit validates the complete staged set rather than trusting its own scoped `git add` call.
