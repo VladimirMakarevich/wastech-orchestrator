@@ -22,6 +22,7 @@ from typing import Any, Protocol
 
 from wastech_orchestrator.config.schema import TelegramConfig
 from wastech_orchestrator.notify.interface import (
+    TRACE_REWORK_EXHAUSTED,
     AskHandle,
     AskKind,
     AskResult,
@@ -416,12 +417,16 @@ def _format_terminal_message(
 
 # Maps a node's edge-selecting outcome (NodeOutcome.kind) to a glanceable emoji. The distinct
 # leading glyph also keeps a trace line visually separable from HITL gate prompts in the same chat.
+# TRACE_REWORK_EXHAUSTED is the one synthetic label (not a raw NodeOutcome.kind): a non-blocking
+# evaluator that accepted only because its max_rework_per_stage budget ran out, rendered ⚠️ so it
+# reads as "moved on, may need follow-up" rather than a clean pass.
 _TRACE_EMOJI: dict[str, str] = {
     "done": "✅",
     "accept": "✅",
     "pass": "✅",
     "rework": "🔁",
     "fail": "❌",
+    TRACE_REWORK_EXHAUSTED: "⚠️",
 }
 
 

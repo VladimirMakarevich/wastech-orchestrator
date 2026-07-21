@@ -33,6 +33,8 @@
 #                     permission_profile (≤ flow permission_ceiling), when
 #   evaluator nodes also: blocking (failing verdict blocks vs advisory), max_rework_per_stage,
 #                     gate_severity (min finding severity that gates: high|medium|low|critical|blocking; default high)
+#     (a non-blocking evaluator that spends max_rework_per_stage with a finding still open accepts +
+#      continues — never manual — and warns you via a console warning + a ⚠️ telegram trace)
 #   Disabling a node is PER-TASK, not here: set `nodes.<id>.enabled: false` in the task file.
 # ----------------------------------------------------------------------------------------------------
 flow:

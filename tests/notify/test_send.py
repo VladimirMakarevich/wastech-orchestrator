@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from wastech_orchestrator.notify.interface import NullNotifier
+from wastech_orchestrator.notify.interface import TRACE_REWORK_EXHAUSTED, NullNotifier
 from wastech_orchestrator.notify.telegram import TelegramNotifier, _Secrets
 
 from .conftest import FakeTelegramClient
@@ -127,6 +127,15 @@ def test_send_trace_emoji_per_outcome(fake_client: FakeTelegramClient) -> None:
         fake_client.sent.clear()
         n.send_trace(task_id="t", node_id="review", outcome=outcome)
         assert emoji in fake_client.sent[0]["text"]
+
+
+def test_send_trace_rework_exhausted_renders_warning(fake_client: FakeTelegramClient) -> None:
+    # The synthetic budget-exhausted label renders ⚠️ (not a clean ✅) so the operator reads it as
+    # "moved on, may need follow-up".
+    n = _notifier(fake_client)
+    n.send_trace(task_id="t", node_id="review", outcome=TRACE_REWORK_EXHAUSTED)
+    text = fake_client.sent[0]["text"]
+    assert "⚠️" in text and TRACE_REWORK_EXHAUSTED in text
 
 
 def test_send_trace_failure_is_swallowed(fake_client: FakeTelegramClient) -> None:

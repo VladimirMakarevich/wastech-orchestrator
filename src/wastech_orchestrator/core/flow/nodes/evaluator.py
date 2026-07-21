@@ -12,7 +12,9 @@ every time it finds a blocking issue; the engine's named-loop budget bounds the 
 (exhaustion -> manual). A **non-blocking**
 evaluator (e.g. ``test_quality``) self-caps: it reworks until its own per-instance budget
 (``max_rework_per_stage``) is spent, then takes the ``accept`` edge (-> continue), **never** manual
-(P2.4). Each pass writes an immutable ``evaluations`` row (``in_flow_verdict``) namespaced by the
+(P2.4). That budget-exhausted accept sets ``NodeOutcome.rework_exhausted`` so the orchestrator warns
+the operator (console + Telegram trace) the stage moved on with findings still open. Each pass
+writes an immutable ``evaluations`` row (``in_flow_verdict``) namespaced by the
 source ``node_run`` id — the per-instance rework limit is derived by COUNTing those verdicts, not a
 mutable counter, so the core stays domain-free (the cap is the node's declared
 budget, not knowledge of the role). One mechanism serves every in-flow role (review / test_quality /
@@ -140,7 +142,7 @@ class EvaluatorNodeRunner:
             if outcome.result is not None
             else None
         )
-        kind = self._verdict(node, ctx, outcome, raw_findings)
+        kind, rework_exhausted = self._verdict(node, ctx, outcome, raw_findings)
         self._record_completion(run_id, outcome, kind)
         record_run_observability(
             self._s,
@@ -192,7 +194,7 @@ class EvaluatorNodeRunner:
         )
         return NodeResult(
             node_id=node.id,
-            outcome=NodeOutcome(kind, findings=findings),
+            outcome=NodeOutcome(kind, findings=findings, rework_exhausted=rework_exhausted),
             node_run_id=run_id,
         )
 
@@ -224,19 +226,27 @@ class EvaluatorNodeRunner:
         ctx: NodeContext,
         outcome: StageOutcome,
         raw_findings: list[dict[str, Any]] | None,
-    ) -> str:
+    ) -> tuple[str, bool]:
+        """Map the verdict to ``(edge_kind, rework_exhausted)``.
+
+        ``rework_exhausted`` is True only on the single ``accept`` where a NON-blocking evaluator
+        gave up: it still found a gating issue but its per-instance ``max_rework_per_stage`` budget
+        was spent, so it continues with findings still open. The orchestrator surfaces that as an
+        operator warning + Telegram trace so a human knows the stage may need follow-up; the flag is
+        never routing state (``accept`` is ``accept``).
+        """
         if outcome.result is None:
-            return "accept"  # dead for routing: run() raises EvaluatorInfraError before using this
+            return "accept", False  # dead for routing: run() raises EvaluatorInfraError first
         if raw_findings is None:
-            return "manual"  # dead for routing (run() raises); an accurate audit-trail label only
+            return "manual", False  # dead for routing (run() raises); accurate audit-trail label
         gate_rank = _severity_rank(node.gate_severity)
         if not any(self._is_blocking(f, gate_rank) for f in raw_findings):
-            return "accept"
+            return "accept", False
         if node.blocking:
             # A blocking evaluator gates every time it finds a blocking issue; the engine's
             # named-loop budget bounds the rework cycles (exhaustion → manual).
             # `max_rework_per_stage` is a non-blocking-only knob, intentionally NOT consulted here.
-            return "rework"
+            return "rework", False
         # A non-blocking evaluator (e.g. test_quality) self-caps: rework until its own per-instance
         # budget (max_rework_per_stage) is spent — counted from the immutable in_flow_verdict rows,
         # not a mutable counter — then accept (→ continue), never manual. The
@@ -244,7 +254,11 @@ class EvaluatorNodeRunner:
         prior_rework = self._s.store.count_rework_verdicts(
             ctx.task_id, node_id=node.id, subtask_order=ctx.subtask_order
         )
-        return "rework" if prior_rework < node.max_rework_per_stage else "accept"
+        if prior_rework < node.max_rework_per_stage:
+            return "rework", False
+        # Budget spent with a gating finding still open: accept and continue, but flag it so the
+        # orchestrator warns the operator the stage moved on with work possibly left to do.
+        return "accept", True
 
     def _build_request(
         self,

@@ -28,7 +28,7 @@ flowchart LR
 
 ## Loops and budgets
 
-One feedback edge: `finding_verification → threat_analysis` (`rework`, inline budget 2); `finding_verification` is non-blocking and self-caps at `max_rework_per_stage: 2` then accepts. The `dependency_scan` checker never gates (it always emits `pass`); whether its findings matter is expressed by the flow's edges, which here proceed unconditionally to `threat_analysis`.
+One feedback edge: `finding_verification → threat_analysis` (`rework`, inline budget 2); `finding_verification` is non-blocking and self-caps at `max_rework_per_stage: 2` then accepts. When it accepts only because that budget ran out (a finding still open), the orchestrator emits a console warning + a ⚠️ Telegram trace (`accept (rework budget exhausted)`) so the operator knows the audit moved on with a finding that may need follow-up. The `dependency_scan` checker never gates (it always emits `pass`); whether its findings matter is expressed by the flow's edges, which here proceed unconditionally to `threat_analysis`.
 
 As with `deep_research`, the flow declares `budgets.global_fix_iterations: 8` ([security_audit.yaml:60-61](../../../src/wastech_orchestrator/packaged/flows/security_audit.yaml#L60)) — the reserved key the engine's global cap reads — so cumulative rework stops at `min(8, agents.max_total_fix_iterations)`.
 

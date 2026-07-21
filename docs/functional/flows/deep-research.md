@@ -33,7 +33,7 @@ flowchart LR
 
 ## Loops and budgets
 
-All three feedback edges point back to `synthesis` with **inline** budgets (not named loops): `citation_check → synthesis` (`fail`, budget 1), `fact_verification → synthesis` (`rework`, budget 2), `critical_review → synthesis` (`rework`, budget 3). The two evaluators are **non-blocking**: each reworks up to its own `max_rework_per_stage` (counted from the immutable `in_flow_verdict` rows) then takes `accept` — never `manual` ([B30](../blocks/B30-flow-node-runners.md)).
+All three feedback edges point back to `synthesis` with **inline** budgets (not named loops): `citation_check → synthesis` (`fail`, budget 1), `fact_verification → synthesis` (`rework`, budget 2), `critical_review → synthesis` (`rework`, budget 3). The two evaluators are **non-blocking**: each reworks up to its own `max_rework_per_stage` (counted from the immutable `in_flow_verdict` rows) then takes `accept` — never `manual` ([B30](../blocks/B30-flow-node-runners.md)). When an evaluator accepts only because that budget ran out (a finding still open), the orchestrator emits a console warning + a ⚠️ Telegram trace (`accept (rework budget exhausted)`) so the operator knows the report shipped with open questions that may need follow-up.
 
 The flow declares `budgets.global_fix_iterations: 12` ([deep_research.yaml:79-80](../../../src/wastech_orchestrator/packaged/flows/deep_research.yaml#L79)) — the reserved key the engine's global cap reads (`run_state.GLOBAL_FIX_KEY`). The effective ceiling is `min(12, agents.max_total_fix_iterations)`, so cumulative rework across all feedback edges stops at 12 (tighter than the config default).
 

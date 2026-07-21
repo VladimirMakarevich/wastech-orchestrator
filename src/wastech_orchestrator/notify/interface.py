@@ -14,6 +14,13 @@ from typing import Literal, Protocol, runtime_checkable
 AskKind = Literal["question", "approval"]
 AskFailure = Literal["timeout", "transport_error", "invalid_response"]
 
+#: Synthetic ``send_trace`` outcome label for a non-blocking evaluator that accepted only because
+#: its whole ``max_rework_per_stage`` budget was spent (findings still open). Distinct from a clean
+#: ``accept`` so the live trace reads as a soft warning (⚠️) rather than a green pass — the
+#: operator layer produces this label, the transport maps it to an emoji. Kept here (notify
+#: vocabulary) so producer and transport share one source of truth.
+TRACE_REWORK_EXHAUSTED = "accept (rework budget exhausted)"
+
 
 @dataclass(frozen=True)
 class AskHandle:

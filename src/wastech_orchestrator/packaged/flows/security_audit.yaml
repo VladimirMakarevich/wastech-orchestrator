@@ -12,6 +12,8 @@
 #     network_access: true | false         per-node network grant/deny; default: flow network_policy (advisories)
 #   agent nodes also: timeout_seconds, extra_args, best_effort, permission_profile (≤ flow ceiling), when
 #   evaluator nodes also: blocking, max_rework_per_stage, gate_severity (min severity that gates; default high)
+#     (a non-blocking evaluator that spends max_rework_per_stage with a finding still open accepts +
+#      continues — never manual — and warns you via a console warning + a ⚠️ telegram trace)
 #   Disabling a node is PER-TASK: set `nodes.<id>.enabled: false` in the task file.
 # ----------------------------------------------------------------------------------------------------
 flow:

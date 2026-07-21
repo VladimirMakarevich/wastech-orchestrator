@@ -1691,8 +1691,29 @@ def test_test_quality_non_blocking_exhaustion_continues(tmp_path: Path) -> None:
     )
     first = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert first.outcome.kind == "rework"  # budget remaining → rework
+    assert first.outcome.rework_exhausted is False  # a plain rework, not a give-up
     second = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert second.outcome.kind == "accept"  # budget spent → continue, not manual
+    # The give-up accept is flagged so the orchestrator warns the operator the stage moved on with
+    # a gating finding still open (console + Telegram trace).
+    assert second.outcome.rework_exhausted is True
+
+
+def test_non_blocking_clean_accept_is_not_flagged_exhausted(tmp_path: Path) -> None:
+    # A non-blocking evaluator that accepts because it found nothing gating (not because its budget
+    # ran out) is an ordinary clean pass — rework_exhausted stays False, no operator warning fires.
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    node = _test_quality(max_rework_per_stage=1)
+    router, store = FakeRouter(_result({"findings": [{"severity": "low"}]})), FakeStore()
+    services = _services(
+        router,
+        store,
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "accept"
+    assert result.outcome.rework_exhausted is False
 
 
 def test_test_quality_does_not_write_tests(tmp_path: Path) -> None:
