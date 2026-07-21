@@ -66,7 +66,7 @@ from wastech_orchestrator.core.flow.recorder import (
 )
 from wastech_orchestrator.core.flow.registry import FlowRegistry, FlowResolutionError
 from wastech_orchestrator.core.flow.run_state import FlowRunState
-from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode
+from wastech_orchestrator.core.flow.schema import AgentNode, EvaluatorNode, FlowNode
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.core.flow.tools_registry import ToolRegistry
 from wastech_orchestrator.core.flow.validator import (
@@ -124,6 +124,7 @@ from wastech_orchestrator.memory import (
     ensure_store,
 )
 from wastech_orchestrator.notify import (
+    TRACE_REWORK_EXHAUSTED,
     Notifier,
     NullNotifier,
 )
@@ -2489,11 +2490,28 @@ class Orchestrator:
                     outcome_kind=outcome.kind,
                     final_message=outcome.final_message,
                 )
+            # A non-blocking evaluator that spent its whole `max_rework_per_stage` budget and
+            # accepted with findings still open: warn the operator (console, always — independent of
+            # Telegram) so a human knows the stage moved on and may need follow-up.
+            rework_exhausted = False
+            if isinstance(node, EvaluatorNode) and outcome.rework_exhausted:
+                rework_exhausted = True
+                self._log(p.task.id).warning(
+                    "evaluator accepted after exhausting its rework budget — continuing; "
+                    "stage may need follow-up",
+                    extra={
+                        "stage": node.id,
+                        "max_rework_per_stage": node.max_rework_per_stage,
+                        "findings": len(outcome.findings),
+                    },
+                )
             # Best-effort live progress trace: one message per executed node finish (never on a
             # skip). Gated on the flag alone — when Telegram is off the notifier is a NullNotifier
-            # and this is a no-op. Carries only node id + outcome (no secrets); never raises.
+            # and this is a no-op. Carries only node id + outcome (no secrets); never raises. A
+            # budget-exhausted accept traces as the ⚠️ TRACE_REWORK_EXHAUSTED label, not a clean ✅.
             if self._config.telegram.trace:
-                self._notifier.send_trace(task_id=p.task.id, node_id=node.id, outcome=outcome.kind)
+                trace_outcome = TRACE_REWORK_EXHAUSTED if rework_exhausted else outcome.kind
+                self._notifier.send_trace(task_id=p.task.id, node_id=node.id, outcome=trace_outcome)
             # Chronological per-run index: one line per executed node run of every kind, so an
             # operator can read a re-running node's sequence without listing run-*/ dirs. Runs that
             # raise before returning (evaluator schema-fail, checks/tool manual) are absent — they

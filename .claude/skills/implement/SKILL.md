@@ -60,7 +60,7 @@ Turn the understanding and the design judgments into an explicit, written delive
 
 ### 6. Sync docs (same change as the code)
 
-- When behavior, the CLI, config, or architecture changes, run **`/sync-docs`** to bring the affected docs (README, operations, configuration, cookbook, architecture, functional map) in line, and record any deferred work in [follow_ups.md](../../../docs/backlog/follow_ups.md). The Stop docs-sync gate enforces this. **Do not forget the shipped, operator-facing docs under `src/wastech_orchestrator/packaged/`** (the `guide/` quickstarts, `config.example.yaml`, the built-in flows / role prompts) — they live under `src/` and are routinely skipped, but they are the copy the operator reads after `install`.
+- When behavior, the CLI, config, or architecture changes, run **`/sync-docs`** to bring the affected docs (README, operations, configuration, cookbook, architecture) in line, and record any deferred work in [follow_ups.md](../../../docs/backlog/follow_ups.md). The Stop docs-sync gate enforces this. **Do not forget the shipped, operator-facing docs under `src/wastech_orchestrator/packaged/`** (the `guide/` quickstarts, `config.example.yaml`, the built-in flows / role prompts) — they live under `src/` and are routinely skipped, but they are the copy the operator reads after `install`.
 - Markdown is not hard-wrapped (one paragraph per line); run `npx prettier@3 --write "**/*.md"` after editing docs.
 - If you implemented a backlog ADR, update its status and move/link it per [docs/backlog/README.md](../../../docs/backlog/README.md) (open item → archived when done).
 

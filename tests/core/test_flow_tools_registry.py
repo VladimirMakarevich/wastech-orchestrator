@@ -162,11 +162,11 @@ def test_resolve_posix_finds_bare_extensionless_name(
     monkeypatch.setattr(os, "name", "posix")
     tools = tmp_path / "tools"
     tools.mkdir()
-    script = tools / "check_journey"
+    script = tools / "check_chapter"
     script.write_text("#!/usr/bin/env python3\nprint('ok')\n", encoding="utf-8")
     script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-    resolved = ToolRegistry(tools).resolve("check_journey")
-    assert resolved.name == "check_journey"
+    resolved = ToolRegistry(tools).resolve("check_chapter")
+    assert resolved.name == "check_chapter"
 
 
 def test_resolve_windows_finds_cmd_wrapper_for_bare_name(
@@ -178,10 +178,10 @@ def test_resolve_windows_finds_cmd_wrapper_for_bare_name(
     monkeypatch.setattr(os, "name", "nt")
     tools = tmp_path / "tools"
     tools.mkdir()
-    (tools / "check_journey").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
-    (tools / "check_journey.cmd").write_text('@python "%~dp0check_journey" %*\n', encoding="utf-8")
-    resolved = ToolRegistry(tools).resolve("check_journey")
-    assert resolved.name == "check_journey.cmd"
+    (tools / "check_chapter").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    (tools / "check_chapter.cmd").write_text('@python "%~dp0check_chapter" %*\n', encoding="utf-8")
+    resolved = ToolRegistry(tools).resolve("check_chapter")
+    assert resolved.name == "check_chapter.cmd"
 
 
 def test_resolve_windows_without_wrapper_fails_closed(
@@ -191,9 +191,9 @@ def test_resolve_windows_without_wrapper_fails_closed(
     monkeypatch.setattr(os, "name", "nt")
     tools = tmp_path / "tools"
     tools.mkdir()
-    (tools / "check_journey").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    (tools / "check_chapter").write_text("#!/usr/bin/env python3\n", encoding="utf-8")
     with pytest.raises(ToolResolutionError, match="not executable"):
-        ToolRegistry(tools).resolve("check_journey")
+        ToolRegistry(tools).resolve("check_chapter")
 
 
 def test_resolve_windows_traversal_still_fatal(
@@ -252,25 +252,25 @@ def test_check_flows_validates_tools(tmp_path: Path) -> None:
     assert present.error is None  # now OK
 
 
-def test_packaged_content_flows_require_delivered_check_journey(tmp_path: Path) -> None:
-    # The §5 coupling: the packaged content flows contain a `tool: check_journey` node, so a task
+def test_packaged_content_flows_require_delivered_check_chapter(tmp_path: Path) -> None:
+    # The §5 coupling: the packaged content flows contain a `tool: check_chapter` node, so a task
     # dispatching one resolves config-aware and needs that tool in `.worc/tools/` — which `worc
     # install` delivers. Preflight no longer validates flows; the coupling is enforced at dispatch
     # by `resolve` (and on demand by `worc validate-flow` for operator copies).
     worc = tmp_path / ".worc"
     flows = worc / "flows"
     # Deliver the built-in flows into .worc/flows/ as `worc install` would (the registry resolves
-    # only from there now); the content flows carry the `tool: check_journey` node under test.
+    # only from there now); the content flows carry the `tool: check_chapter` node under test.
     shutil.copytree(BUILTIN_FLOWS_DIR, flows)
     config = _config(tmp_path)
     content = ("content_chapter", "content_translate")
 
     missing = FlowRegistry(operator_flows_dir=flows, config=config)
     for name in content:
-        with pytest.raises(FlowValidationError, match="check_journey"):
+        with pytest.raises(FlowValidationError, match="check_chapter"):
             missing.resolve(name)
 
-    _install_tool(worc / "tools", base="check_journey")  # as `worc install` delivers it
+    _install_tool(worc / "tools", base="check_chapter")  # as `worc install` delivers it
     present = FlowRegistry(operator_flows_dir=flows, config=config)
     for name in content:
         present.resolve(name)  # no raise

@@ -1,6 +1,6 @@
 # Configuration Reference
 
-`config.yaml` controls repositories, providers, security, validation, checks, git publishing, and optional notification settings. The packaged example is [`config.example.yaml`](../src/wastech_orchestrator/packaged/config.example.yaml); `install` copies it verbatim to `.worc/config.example.yaml` as a commented, field-by-field reference beside the generated **executable** `.worc/config.yaml` (the reference is never loaded at runtime — only `config.yaml` is read). The canonical contract is the config schema in the code (`config/schema.py`); see the [Functional Map](functional/index.md). For definitions of all config keys and their purpose, see the [Glossary](glossary.md).
+`config.yaml` controls repositories, providers, security, validation, checks, git publishing, and optional notification settings. The packaged example is [`config.example.yaml`](../src/wastech_orchestrator/packaged/config.example.yaml); `install` copies it verbatim to `.worc/config.example.yaml` as a commented, field-by-field reference beside the generated **executable** `.worc/config.yaml` (the reference is never loaded at runtime — only `config.yaml` is read). The canonical contract is the config schema in the code (`config/schema.py`). For definitions of all config keys and their purpose, see the [Glossary](glossary.md).
 
 The loader is fail-closed:
 
@@ -575,7 +575,7 @@ telegram:
 | `bot_token_env` | string | `"TELEGRAM_BOT_TOKEN"` | Valid environment-variable name containing the bot token. |
 | `chat_id_env` | string | `"TELEGRAM_CHAT_ID"` | Valid environment-variable name containing the numeric target chat id. |
 | `ask_timeout_s` | integer | `28800` | Maximum wait for a human reply; must be greater than zero. |
-| `trace` | boolean | `false` | Live per-node progress feed (added in `schema_version` 21). When on, the orchestrator pushes one best-effort message per executed flow node finish — `<emoji> <node-id> → <outcome>` (e.g. `✅ implementation → done`, `🔁 review → rework`, `❌ testing → fail`), carrying only the node id + outcome (no diff/prompt/agent text). Fire-and-forget: a send failure never touches the pipeline, and it is a no-op when Telegram is disabled. |
+| `trace` | boolean | `false` | Live per-node progress feed (added in `schema_version` 21). When on, the orchestrator pushes one best-effort message per executed flow node finish — `<emoji> <node-id> → <outcome>` (e.g. `✅ implementation → done`, `🔁 review → rework`, `❌ testing → fail`), carrying only the node id + outcome (no diff/prompt/agent text). A non-blocking evaluator that accepted only because its `max_rework_per_stage` budget ran out traces as `⚠️ <node-id> → accept (rework budget exhausted)` (the same event is always logged as a console warning, independent of this flag). Fire-and-forget: a send failure never touches the pipeline, and it is a no-op when Telegram is disabled. |
 
 The config stores environment variable **names only**. Token and chat-id values are resolved from the orchestrator process environment at startup and are never written to config, SQLite, logs, or artifacts. Terminal delivery is best-effort and never changes a completed task outcome. A blocking question/approval is fail-closed: disabled/unconfigured transport, timeout, transport failure, or an ambiguous approval moves the task to `manual_action_required`.
 
@@ -662,7 +662,7 @@ The full set of optional per-node fields (all default to the value shown):
 | `permission_profile` | agent | flow `permission_ceiling` | May only be **≤** the ceiling; evaluators are forced `read-only`. |
 | `best_effort` | agent | `false` | Tolerate an infra failure (engine continues) instead of failing the task. |
 | `blocking` | evaluator | `true` | A failing verdict blocks (`true`) vs is advisory (`false`). |
-| `max_rework_per_stage` | evaluator | `1` | Rework loops a **non-blocking** evaluator (e.g. `test_quality`) may trigger before it accepts. **Ignored for a blocking evaluator** (the default): a blocking loop is bounded by the flow's named-loop budget (e.g. `budgets.review_fix`), then parks to `manual`. |
+| `max_rework_per_stage` | evaluator | `1` | Rework loops a **non-blocking** evaluator (e.g. `test_quality`) may trigger before it accepts. When the budget is spent with a finding still open it accepts and continues (never `manual`); the orchestrator emits a console warning + a ⚠️ Telegram trace (`accept (rework budget exhausted)`) so an operator knows the stage moved on and may need follow-up. **Ignored for a blocking evaluator** (the default): a blocking loop is bounded by the flow's named-loop budget (e.g. `budgets.review_fix`), then parks to `manual`. |
 | `gate_severity` | evaluator | `high` | Minimum finding severity that gates (`blocking`/`critical`/`high`/`medium`/`low`): a finding at least this severe drives `rework`, less-severe ones are advisory. Default `high` blocks high/critical/blocking. Lower it (e.g. `low`) so a content critic blocks on any finding — pair with a larger fix budget for the extra rework rounds. Orthogonal to `blocking`. |
 
 Note: **disabling** a node is not a flow field — it is a per-task override (`nodes.<id>.enabled: false` in the task file; see [operations.md](operations.md#disabling-flow-nodes-per-task)).
@@ -703,7 +703,7 @@ supervisor:
 | `reasoning` | string or null | `null` (absent block) / `high` (install) | Reasoning level (`low`/`medium`/`high`/`xhigh`/`max`); must be a known level. The delivered default is `high`, never a max tier — structured finalize turns **and** per-step observe turns are capped to `high` in code (observe is advisory and runs once per node-run, so a deep fix loop would otherwise pay a max tier many times over), so a max tier would only cost more without effect. |
 | `provider` | `codex` \| `claude` or null | `null` (absent block) / primary (install) | Which provider runs the supervisor layer; empty/null inherits the global primary. Validated ∈ `agents.allowed` and for reasoning support against the **resolved** provider, symmetric with flow nodes. Set it (e.g. `claude`) to keep the layer's `model` on a provider that accepts it when the global primary is the other provider. Model itself is passed through unverified — but when `provider` is unset and `model` plainly looks like the other vendor's (a `claude-*` model under a `codex` primary, say), config validation emits a **warning** (not fatal — the run degrades via fallback), so the mismatch is not silent. |
 
-What the layer does (see the [Functional Map](functional/blocks/B31-supervisor.md)):
+What the layer does:
 
 - It exists for **every** task under any flow shape — even a single agent node with no checks/review.
 - After each completed (non-skipped) step it runs **one read-only** observation on its own continuing session (~1 call/step) and records an immutable advisory `supervisor_step` row. Observation is **best-effort**: a failure is logged and swallowed.

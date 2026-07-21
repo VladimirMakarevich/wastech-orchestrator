@@ -5,24 +5,24 @@ import tools.stage_site_docs as site_docs
 
 def test_rewrite_links_keeps_public_docs_relative() -> None:
     root = Path("/repo").resolve()  # resolve() injects the drive on Windows; do it once up front
-    source = root / "docs/functional/index.md"
-    target = root / "docs/functional/blocks/B01-cli-and-operator-commands.md"
+    source = root / "docs/reference/index.md"
+    target = root / "docs/reference/pages/page-one.md"
     public = {source.resolve(), target.resolve()}
 
     rewritten = site_docs.rewrite_links(
-        "[B01](./blocks/B01-cli-and-operator-commands.md)",
+        "[Page One](./pages/page-one.md)",
         source,
         public,
         root,
         "v1.2.3",
     )
 
-    assert rewritten == "[B01](blocks/B01-cli-and-operator-commands.md)"
+    assert rewritten == "[Page One](pages/page-one.md)"
 
 
 def test_rewrite_links_points_private_paths_to_github() -> None:
     root = Path("/repo").resolve()  # resolve() injects the drive on Windows; do it once up front
-    source = root / "docs/functional/index.md"
+    source = root / "docs/reference/index.md"
     public = {source.resolve()}
 
     rewritten = site_docs.rewrite_links(

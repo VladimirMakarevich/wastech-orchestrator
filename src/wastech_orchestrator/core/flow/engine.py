@@ -120,12 +120,20 @@ class NodeOutcome:
     an explicit ``"route:<label>"``. ``structured_output`` / ``final_message`` carry the agent
     output so the post-node hook can persist a declared ``output_artifact`` slot and read the
     decomposition contract — the engine itself never inspects them.
+
+    ``rework_exhausted`` is set by the evaluator runner on the one ``accept`` where a
+    **non-blocking** evaluator gave up: it still found a gating issue but its per-instance
+    ``max_rework_per_stage`` budget was spent, so it takes ``accept`` (→ continue) with findings
+    still open. The engine never inspects it (``accept`` is ``accept`` for routing); the
+    orchestrator's post-node hook surfaces it as an operator warning + Telegram trace so a human
+    knows the stage moved on and may need follow-up.
     """
 
     kind: str
     findings: tuple[Finding, ...] = ()
     structured_output: Mapping[str, object] | None = None
     final_message: str | None = None
+    rework_exhausted: bool = False
 
 
 def skip_outcome(node: FlowNode) -> NodeOutcome:

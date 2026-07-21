@@ -111,7 +111,7 @@ Every node has an `id` (unique; see reserved ids below) and a `kind`. The six ki
 | `permission_profile` | `read-only` | `read-only` | **Forced read-only** (fatal otherwise). | Evaluators never write. |
 | `network_access` | bool \| null | `null` (inherit) | — | Per-node network override. |
 | `blocking` | bool | `true` | — | `true` = a `rework` verdict loops until the named-loop budget is spent, then parks to manual. `false` = advisory. |
-| `max_rework_per_stage` | int | `1` | **Only used when `blocking: false`.** | A non-blocking evaluator accepts after this many rework verdicts instead of looping. |
+| `max_rework_per_stage` | int | `1` | **Only used when `blocking: false`.** | A non-blocking evaluator accepts after this many rework verdicts instead of looping. When the budget is spent with a finding still open it accepts and continues (never `manual`) — and the orchestrator emits a **console warning + a ⚠️ Telegram trace** (`accept (rework budget exhausted)`) so you know the stage moved on and may need follow-up. |
 | `gate_severity` | `blocking` \| `critical` \| `high` \| `medium` \| `low` | `high` | Must be one of the five severities. | Minimum finding severity that gates: a finding at least this severe drives `rework`, less-severe ones are advisory. Default `high` blocks high/critical/blocking. Lower it (e.g. `low`) to make a critic block on any finding — pair with a larger fix budget so the extra rework rounds have headroom. Orthogonal to `blocking` (that decides whether the node gates at all; this decides which severities count). |
 | `provider` / `model` / `reasoning` | as agent | `null` | as agent | Per-node provider overrides. |
 | `when` | predicate | `null` | as agent | Conditional run. |

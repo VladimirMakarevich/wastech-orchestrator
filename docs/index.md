@@ -30,8 +30,6 @@ A lean orchestrator that turns Markdown tasks into reviewed Pull Requests — dr
 |  |  |
 | --- | --- |
 | [Architecture overview](worc_architecture.md) | High-level design rationale and the reasoning behind the key decisions |
-| [Functional map](functional/index.md) | Code-derived reference: contracts, state machine, routing, fallback, security, invariants |
-| [System flows](functional/system-flows.md) | Stage-by-stage pipeline, state transitions, and error paths |
 
 ---
 

@@ -195,7 +195,7 @@ def _run(tmp_path: Path, run_process: FakeRunProcess, store: FakeStore, **svc_kw
 
 def test_launch_argv_posix_runs_the_tool_directly(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(os, "name", "posix")
-    path = Path("/repo/.worc/tools/check_journey")
+    path = Path("/repo/.worc/tools/check_chapter")
     assert _launch_argv(path) == [str(path)]
 
 
@@ -204,7 +204,7 @@ def test_launch_argv_windows_batch_runs_through_comspec(monkeypatch: pytest.Monk
     # interpreter — else every content-flow run would park to manual on Windows.
     monkeypatch.setattr(os, "name", "nt")
     monkeypatch.setenv("COMSPEC", r"C:\Windows\System32\cmd.exe")
-    path = Path(r"C:\repo\.worc\tools\check_journey.cmd")
+    path = Path(r"C:\repo\.worc\tools\check_chapter.cmd")
     assert _launch_argv(path) == [r"C:\Windows\System32\cmd.exe", "/c", str(path)]
 
 

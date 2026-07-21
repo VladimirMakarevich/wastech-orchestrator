@@ -23,16 +23,7 @@ PUBLIC_MARKDOWN = [
     Path("docs/task-authoring.md"),
     Path("docs/telegram.md"),
     Path("docs/worc_architecture.md"),
-    Path("docs/functional/CONVENTIONS.md"),
-    Path("docs/functional/block-registry.md"),
-    Path("docs/functional/index.md"),
-    Path("docs/functional/system-flows.md"),
     Path("docs/likec4/README.md"),
-]
-
-PUBLIC_DIRS = [
-    Path("docs/functional/blocks"),
-    Path("docs/functional/flows"),
 ]
 
 PUBLIC_ASSETS = [
@@ -47,10 +38,7 @@ def repo_root() -> Path:
 
 
 def public_sources(root: Path) -> set[Path]:
-    sources = {root / path for path in PUBLIC_MARKDOWN}
-    for directory in PUBLIC_DIRS:
-        sources.update((root / directory).rglob("*.md"))
-    return {path.resolve() for path in sources}
+    return {(root / path).resolve() for path in PUBLIC_MARKDOWN}
 
 
 def destination_for(source: Path, root: Path) -> Path:

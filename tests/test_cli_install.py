@@ -228,9 +228,10 @@ def test_install_writes_config_and_guide_into_worc(
     assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
     worc = git_repo.clone / ".worc"
     # The generated config and the installed guide bundle land under .worc/. The guide includes the
-    # task docs, the copy-ready `worc-task` / `worc-deco-task` / `worc-config` skills gathered under
-    # a single `guide/skills/` folder, and the config helper subtree. (The built-in flows and their
-    # per-node prompt templates also land there — see the dedicated test below.)
+    # task docs, the copy-ready task/config skills (`worc-task` / `worc-deco-task` / `worc-config`)
+    # and the flow-authoring skills (`worc-flow` / `worc-flow-role` / `worc-flow-tune`) gathered
+    # under a single `guide/skills/` folder, and the config helper subtree. (The built-in flows and
+    # their per-node prompt templates also land there — see the dedicated test below.)
     assert (worc / "guide" / "README.md").is_file()
     assert (worc / "guide" / "tasks" / "task-minimal.md").is_file()
     assert (worc / "guide" / "tasks" / "task-rich.md").is_file()
@@ -238,6 +239,9 @@ def test_install_writes_config_and_guide_into_worc(
     assert (worc / "guide" / "skills" / "worc-deco-task" / "SKILL.md").is_file()
     assert (worc / "guide" / "config" / "README.md").is_file()
     assert (worc / "guide" / "skills" / "worc-config" / "SKILL.md").is_file()
+    assert (worc / "guide" / "skills" / "worc-flow" / "SKILL.md").is_file()
+    assert (worc / "guide" / "skills" / "worc-flow-role" / "SKILL.md").is_file()
+    assert (worc / "guide" / "skills" / "worc-flow-tune" / "SKILL.md").is_file()
     assert (worc / "config.yaml").is_file()
 
 
@@ -321,15 +325,15 @@ def test_install_delivers_packaged_tools(git_repo: Any, monkeypatch: pytest.Monk
     packaged_tools = BUILTIN_FLOWS_DIR.parent / "tools"
     # The prose-gate + size-floor executables and their Windows launchers are delivered,
     # byte-for-byte from source.
-    for name in ("check_journey", "check_journey.cmd", "check_length", "check_length.cmd"):
+    for name in ("check_chapter", "check_chapter.cmd", "check_length", "check_length.cmd"):
         assert (tools / name).read_bytes() == (packaged_tools / name).read_bytes()
     # On POSIX the delivered scripts must carry +x (a wheel / write_bytes drops the bit) so the
     # registry resolves them; on Windows executability is by suffix (the .cmd), so the bit is moot.
     if os.name != "nt":
-        assert os.access(tools / "check_journey", os.X_OK)
+        assert os.access(tools / "check_chapter", os.X_OK)
         assert os.access(tools / "check_length", os.X_OK)
     # And each resolves through the very registry the runtime + preflight use, on this OS.
-    for base in ("check_journey", "check_length"):
+    for base in ("check_chapter", "check_length"):
         expected = f"{base}.cmd" if os.name == "nt" else base
         assert ToolRegistry(tools).resolve(base).name == expected
 
@@ -340,7 +344,7 @@ def test_reconfigure_backs_up_and_refreshes_tools(
     _present(monkeypatch, "codex")
     assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
     worc = git_repo.clone / ".worc"
-    tool = worc / "tools" / "check_journey"
+    tool = worc / "tools" / "check_chapter"
     tool.write_text("# stale operator tool\n", encoding="utf-8")
     redo = _ni(git_repo.clone, "--provider", "codex", "--reconfigure", "--skip-preflight")
     assert cli.main(redo) == 0
@@ -349,7 +353,7 @@ def test_reconfigure_backs_up_and_refreshes_tools(
     # ...but the operator's edit stays recoverable from the timestamped backup dir under .worc/.
     backups = list(worc.glob("tools.bak-*"))
     assert len(backups) == 1
-    assert (backups[0] / "check_journey").read_text(encoding="utf-8") == "# stale operator tool\n"
+    assert (backups[0] / "check_chapter").read_text(encoding="utf-8") == "# stale operator tool\n"
 
 
 def test_install_gitignore_append_is_idempotent(

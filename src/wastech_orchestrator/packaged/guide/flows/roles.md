@@ -37,6 +37,8 @@ An `evaluator` node's `role` field selects its lens. Four built-ins ship; any ot
 | `verifier` | Fact/finding verification (often `blocking: false`). | Research fact-checks, security-finding verification. |
 | `test_quality` | Judges the _quality_ of tests, not just pass/fail (often non-blocking with a `max_rework_per_stage`). | Test-adequacy gates. |
 
+A non-blocking evaluator (`blocking: false`) never parks the task: once its `max_rework_per_stage` budget is spent with a finding still open it accepts and the flow continues. That "moved on" is not silent — the orchestrator logs a console warning and (when `telegram.trace` is on) pushes a ⚠️ trace so you know that stage may still need follow-up. See the `max_rework_per_stage` row in [reference.md](reference.md).
+
 `role` is an audit/behavior discriminator, not a permission — every evaluator is forced `read-only` and can never use `editing_lineage` (see [reference.md](reference.md)).
 
 ## Named output slots (`output_artifact`)

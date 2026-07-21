@@ -71,8 +71,8 @@ def main() -> int:
             "docs/backlog/follow_ups.md. Also check the shipped operator-facing docs under "
             "src/wastech_orchestrator/packaged/ (the guide/ quickstarts, config.example.yaml, the "
             "built-in flows / role prompts) — they live under src/ and are routinely forgotten. "
-            "Note: docs/functional/ and docs/likec4/ are updated separately via weekly reverse "
-            "engineering — DO NOT TOUCH THEM HERE. "
+            "Note: docs/likec4/ is updated separately via weekly reverse "
+            "engineering — DO NOT TOUCH IT HERE. "
             "If the change has no documentation impact, say so explicitly and finish."
         )
         print(json.dumps({"decision": "block", "reason": reason}))

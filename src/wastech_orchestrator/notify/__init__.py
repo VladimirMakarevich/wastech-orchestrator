@@ -9,6 +9,7 @@ so the pipeline behaves exactly as it did before.
 from __future__ import annotations
 
 from wastech_orchestrator.notify.interface import (
+    TRACE_REWORK_EXHAUSTED,
     AskFailure,
     AskHandle,
     AskKind,
@@ -19,6 +20,7 @@ from wastech_orchestrator.notify.interface import (
 from wastech_orchestrator.notify.telegram import TelegramNotifier, build_notifier
 
 __all__ = [
+    "TRACE_REWORK_EXHAUSTED",
     "AskFailure",
     "AskHandle",
     "AskKind",

@@ -8,7 +8,7 @@ Tasks can be Markdown (`.md`) or JSON (`.json`). Markdown is the normal operator
 
 Start from the packaged example tasks — `task-minimal.md` and `task-rich.md`, installed under `<repo>/.worc/guide/tasks/` — as editable starting points. Compose a task in the repo's `tasks/preparing/` staging directory (the watcher never scans it, so a half-written draft is never picked up mid-write), then `worc promote <id>` moves it into the repo's own `tasks/pending/` directory at the repository root; commit and push it there — that is how a teammate hands the orchestrator work over git. The `tasks/` lifecycle directories are git-tracked and intentionally not ignored; only the orchestrator's own `.worc/` home is gitignored.
 
-The canonical task rules are enforced by the validation gate in the code (`src/wastech_orchestrator/task/`); see the [Functional Map](functional/index.md). For the meaning of all task-file fields, task statuses, and related vocabulary, see the [Glossary](glossary.md).
+The canonical task rules are enforced by the validation gate in the code (`src/wastech_orchestrator/task/`). For the meaning of all task-file fields, task statuses, and related vocabulary, see the [Glossary](glossary.md).
 
 ## Markdown Shape
 

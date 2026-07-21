@@ -22,7 +22,7 @@
 # every writing node stays offline and workspace-write, so a Codex writer with network is never
 # constructed. The deterministic gate `check_length` here is a sanity floor against the edit
 # accidentally gutting the piece, not a growth mandate — its defaults are intentionally low (see the
-# node below); there is no structural gate like `check_journey` here — a free-form blog post has no
+# node below); there is no structural gate like `check_chapter` here — a free-form blog post has no
 # fixed structure, so all remaining quality is evaluator-driven.
 #
 # The supervisor is a constant layer above the flow (not a node); `emit_follow_ups` is deliberately

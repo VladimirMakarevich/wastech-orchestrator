@@ -8,7 +8,7 @@ Read the task ({task_path}) first — it names the existing article's file path 
 - **A content-writing guide** — language, links, formats, workflow.
 - **A list of the author's signature phrases** — the owner's characteristic conversational register to lean into, so the piece still sounds like them after the edit.
 
-If the article touches this project's own long-form narrative content (e.g. a book/journey produced by a flow like `content_chapter`), skim it for canonical facts — but a blog article stays its own free-form piece, not a chapter of that book.
+If the article touches this project's own long-form narrative content (e.g. a book produced by a flow like `content_chapter`), skim it for canonical facts — but a blog article stays its own free-form piece, not a chapter of that book.
 
 Return a brief (analysis only, in the output schema) that the editor will act on:
 

@@ -19,5 +19,8 @@
         ]
       }
     ]
+  },
+  "permissions": {
+    "defaultMode": "bypassPermissions"
   }
 }

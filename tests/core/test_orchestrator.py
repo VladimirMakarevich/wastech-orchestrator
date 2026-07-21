@@ -465,6 +465,110 @@ def test_step_trace_off_by_default_emits_nothing(git_repo, make_git_config, tmp_
     assert notifier.trace_calls == []
 
 
+# A flow whose review is a NON-blocking evaluator with a tiny rework budget: it reworks once, then
+# (budget spent, finding still open) accepts and continues → exercises the rework-exhausted signal.
+_NON_BLOCKING_REVIEW_FLOW = """
+flow:
+  name: implementation
+  task_type: implementation
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: pull_request
+  nodes:
+    - id: implementation
+      kind: agent
+      role_file: roles/implementation.md
+      session_scope: editing_lineage
+      permission_profile: workspace-write
+    - id: review
+      kind: evaluator
+      role: review
+      role_file: roles/review.md
+      blocking: false
+      max_rework_per_stage: 1
+    - id: fixing
+      kind: agent
+      role_file: roles/fixing.md
+      session_scope: editing_lineage
+      permission_profile: workspace-write
+    - id: publish
+      kind: publish
+      policy: pull_request
+  edges:
+    - { from: implementation, to: review }
+    - { from: review, to: fixing, outcome: rework, loop: review_fix }
+    - { from: fixing, to: review }
+    - { from: review, to: publish, outcome: accept }
+  budgets:
+    global_fix_iterations: 30
+    review_fix: 5
+"""
+
+
+def test_rework_budget_exhausted_warns_operator_and_marks_trace(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # When a non-blocking evaluator spends its whole max_rework_per_stage budget and accepts with a
+    # gating finding still open, the flow continues (DONE) but the orchestrator warns the operator
+    # (console) and marks the live Telegram trace with the ⚠️ rework-exhausted label so a human knows
+    # the stage may need follow-up.
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+    from wastech_orchestrator.notify import TRACE_REWORK_EXHAUSTED
+
+    flows = tmp_path / "flows"
+    (flows / "roles").mkdir(parents=True)
+    (flows / "roles" / "implementation.md").write_text("Implement {task_path}.", "utf-8")
+    (flows / "roles" / "review.md").write_text("Review the change.", "utf-8")
+    (flows / "roles" / "fixing.md").write_text("Fix the issue.", "utf-8")
+    (flows / "implementation.yaml").write_text(_NON_BLOCKING_REVIEW_FLOW, "utf-8")
+
+    gating = {"findings": [{"severity": "high", "path": None, "what": "boom", "fix": None}]}
+    providers = _both(outputs={"review": ("needs work", gating)})
+    notifier = RecordingNotifier()
+    orch, _store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+        config_kwargs={"telegram_trace": True},
+    )
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
+
+    orig = providers[ProviderId.CLAUDE].run
+    writes = {"n": 0}
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id in ("implementation", "fixing"):
+            writes["n"] += 1
+            (git_repo.clone / "feature.py").write_text(f"x = {writes['n']}\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    messages: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    logger = logging.getLogger("wastech_orchestrator")
+    handler = _Collect()
+    logger.addHandler(handler)
+    try:
+        result = orch.run_task(_complete_task(tmp_path, "task-rbx"))
+    finally:
+        logger.removeHandler(handler)
+
+    assert result.final_status is Status.DONE  # exhaustion accepts and continues, never manual
+    review_traces = [c["outcome"] for c in notifier.trace_calls if c["node_id"] == "review"]
+    # review ran twice: pass 1 reworked (budget remaining), pass 2 exhausted → the ⚠️ label.
+    assert "rework" in review_traces
+    assert TRACE_REWORK_EXHAUSTED in review_traces
+    assert any("exhausting its rework budget" in m for m in messages)
+
+
 def _run_complete_task_store_dir(
     git_repo, make_git_config, tmp_path: Path, *, memory_enabled: bool
 ) -> Path:
