@@ -19,7 +19,7 @@ Where a fact and a style rule seem to conflict, the continuity reference wins on
 - **Headings are alive.** They answer the page's actual thought through its content; never a service label naming which voice or section type it is ("What this is", "Philosophy", "How it works", "Usage", "Author's note", …) or any project-specific banned label its style guide names.
 - **Structure:** `##` = Part, `###` = a logical block, `####` = one mobile/production page. `Purpose` and `Emotional point` are the required service headings for the part, not reader-facing pages.
 - **One thought per `####` page.** If a page carries two, split it — expand and finish each half properly rather than mechanically slicing the text.
-- **Rhythm.** Even in a mode with no hard length gate, keep pages in whatever target band this project's style guide sets (a field-tested default is 500–800 characters, ≤3 paragraphs) — tight, well-scoped pages read better and make a later translation/adaptation honest. Vary the rhythm across pages; don't make everything equally dense or equally sparse.
+- **Rhythm.** Even where the gate sets no hard length cap, keep pages tight and well-scoped — one thought per page, in whatever target band this project's style guide sets — because tight pages read better and make a later translation/adaptation honest. Vary the rhythm across pages; don't make everything equally dense or equally sparse.
 - **Tone:** warm, honest, simple, unhurried; no corporate clichés, buzzwords, or motivational uplift; no recognizable AI-generated patterns (the "not X, but Y" antithesis chief among them) and no tonal hedges that pre-explain how a line should feel when the prose itself can carry it.
 
 # What to return

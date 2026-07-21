@@ -8,7 +8,7 @@ Read the task ({task_path}) first — it names the topic, the intended angle/aud
 - **A content-writing guide** — language, links, formats, workflow.
 - **A list of the author's signature phrases** — the owner's characteristic conversational register to lean into, so the piece sounds like them and reads as part of the same blog.
 
-If the topic touches this project's own long-form narrative content (e.g. a book/journey produced by a flow like `content_chapter`), skim it for canonical facts and voice — but a blog article is its own free-form piece, not a chapter of that book.
+If the topic touches this project's own long-form narrative content (e.g. a book produced by a flow like `content_chapter`), skim it for canonical facts and voice — but a blog article is its own free-form piece, not a chapter of that book.
 
 Return a brief (analysis only, in the output schema) that the writer will act on:
 

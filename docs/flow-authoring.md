@@ -95,7 +95,7 @@ Implement the task at {task_path} in the repository {repo_path}. Follow the plan
 
 **How it is enforced.** For the two report policies an after-stage guard fail-closes the task to `manual_action_required` the moment a writing node touches anything outside its report directory ([`agent.py` → `_apply_output_containment_guard`](../src/wastech_orchestrator/core/flow/nodes/agent.py)); `private_control_workspace_report` additionally refuses to publish if its report is git-trackable (a leak). `code_change` has **no** report directory, so that containment guard is off and the ordinary dangerous-diff guard applies instead.
 
-**The common trap.** A brand-new document committed under `blog/`, `docs/`, or anywhere that is **not** a `docs/research/*` sources-manifest bundle is a `code_change`, not a `repository_document` — exactly like the packaged `content_chapter` / `content_book` / `content_translate` flows, whose `.md` deliverables all declare `output_policy: code_change`. Reaching for `repository_document` because the phrase reads like "it's a document" confines every write to `docs/research/<task_id>/`, so the real file lands outside it and the task hard-stops instead of finishing.
+**The common trap.** A brand-new document committed under `blog/`, `docs/`, or anywhere that is **not** a `docs/research/*` sources-manifest bundle is a `code_change`, not a `repository_document` — exactly like the packaged `content_chapter` / `content_translate` flows, whose `.md` deliverables all declare `output_policy: code_change`. Reaching for `repository_document` because the phrase reads like "it's a document" confines every write to `docs/research/<task_id>/`, so the real file lands outside it and the task hard-stops instead of finishing.
 
 ## Node kinds
 
@@ -194,7 +194,7 @@ A `tool` node runs **your own** program instead of an LLM — any language, by c
 
 **Where a tool lives.** Put the executable at `.worc/tools/<name>` and reference it from a flow by that **one name**, never a path. Resolution is cross-platform from the single name: on POSIX the bare `<name>` must be `chmod +x`; on Windows the resolver also tries launcher suffixes, so the same flow name finds `<name>.cmd`/`.exe` (and a `.cmd`/`.bat` is launched through the command interpreter, since Windows cannot start a batch file directly). The registry resolves the name to a contained, executable file and rejects anything else (a missing tool, a traversal, a symlink out of `.worc/tools/`) **fatally at preflight**, before any task starts.
 
-**Built-in tools ship with the orchestrator.** `worc install` delivers packaged tools into `.worc/tools/` (per machine, so the launcher always matches the OS), exactly as it delivers the built-in flows — a plain re-run fills in missing files, `--reconfigure` snapshots the existing dir first. The content flows' `check_journey` prose gate and the blog flows' `check_length` size floor are two such tools (see [`check_journey`](#the-check_journey-prose-gate) and [`check_length`](#the-check_length-size-floor-gate) below). Because a packaged `tool` node is validated in every repo at preflight, its executable must be delivered everywhere — which the installer guarantees.
+**Built-in tools ship with the orchestrator.** `worc install` delivers packaged tools into `.worc/tools/` (per machine, so the launcher always matches the OS), exactly as it delivers the built-in flows — a plain re-run fills in missing files, `--reconfigure` snapshots the existing dir first. The content flows' `check_chapter` prose gate and the blog flows' `check_length` size floor are two such tools (see [`check_chapter`](#the-check_chapter-prose-gate) and [`check_length`](#the-check_length-size-floor-gate) below). Because a packaged `tool` node is validated in every repo at preflight, its executable must be delivered everywhere — which the installer guarantees.
 
 **The contract (like a Claude Code hook).** The orchestrator runs the tool through the same launch ceiling as an agent — an argv list (never a shell string), a mandatory timeout, and exactly the allowlisted `security.allowed_environment` (the parent environment is never inherited). It feeds a small JSON **context on stdin** — only allowlisted paths + your `args`, never secrets, the full environment, or a session id:
 
@@ -245,25 +245,27 @@ edges:
 
 `roles/fix.md` shows the agent exactly the findings, via one path line: `Report: {md-check_path}`.
 
-### The check_journey prose gate
+### The check_chapter prose gate
 
-`check_journey` is the built-in `tool` shipped for the content-authoring flows — one parametrized validator selected by `args.mode`. It is a self-contained script (no third-party dependencies), delivered on install as an extensionless `+x` file plus a `check_journey.cmd` Windows launcher.
+`check_chapter` is the built-in `tool` shipped for the content-authoring flows (`content_chapter`, `content_translate`). It is a self-contained script (no third-party dependencies), delivered on install as an extensionless `+x` file plus a `check_chapter.cmd` Windows launcher.
 
-It reports through the standard tool contract above (JSON `{"outcome", "data"}` on stdout, exit `0`/non-zero). **Scope is only the changed chapters**: it reads the changed `.md` paths from the run's `diff_path`, falls back to `.md` files named in `task_path`, and if neither yields a chapter it is a vacuous `pass` — so the gate never fails on pre-existing issues in untouched chapters. Rules per mode:
+It reports through the standard tool contract above (JSON `{"outcome", "data"}` on stdout, exit `0`/non-zero). **Scope is only the changed chapters**: it reads the changed `.md` paths from the run's `diff_path`, falls back to `.md` files named in `task_path`, and if neither yields a chapter it is a vacuous `pass` — so the gate never fails on pre-existing issues in untouched chapters.
 
-| `mode` | Enforces |
+The **structural rules always run**: ≤1 title per page; `## → ### → ####` hierarchy (no skipped level); pages open with a `## Part`; `Purpose` + `Emotional point` present; the `not …, but …` AI-antithesis pattern (+ a small English cliché list); no service-label headings (`What this is`, `Philosophy`, `How it works`, `Usage`, `Author's note`). The **per-page length rules are opt-in** — they run only when the flow passes the matching `args`, exactly like [`check_length`](#the-check_length-size-floor-gate):
+
+| `args` key | Enforces |
 | --- | --- |
-| `ru` | ≤1 title per page; `## → ### → ####` hierarchy (no skipped level); `Purpose` + `Emotional point` present; the `не …, а …` AI-antithesis pattern (+ a small cliché list); no service-label headings (`Что это`, `Философия`, …). **No character limit.** |
-| `en` | all `ru` rules **plus** per-page length 500–800 chars (hard max 800) and ≤3 paragraphs. |
-| `book` | the length-bearing `en` ruleset applied across every assembled page. |
+| `min_chars` | A page's prose must be at least this many characters. Omit or set `0` to disable. |
+| `max_chars` | A page's prose must be at most this many characters (a hard cap). Omit or set `0` to disable. |
+| `max_paragraphs` | A page may have at most this many paragraphs. Omit or set `0` to disable. |
 
-Its rule set is deliberately opinionated for one long-form book format, not a generic prose linter — the constants under "domain constants (tunable)" in the delivered script are a starting point to fork and tune under your own `.worc/tools/check_journey` for a different book's structure, language, or house style.
+So `content_chapter` runs the gate with `args: {}` (structure only) and `content_translate` adds `args: { min_chars: 500, max_chars: 800, max_paragraphs: 3 }` (structure + per-page length). Its rule set is deliberately opinionated for one long-form chapter format, not a generic prose linter — the constants under "domain constants (tunable)" in the delivered script are a starting point to fork and tune under your own `.worc/tools/check_chapter` for a different project's structure, language, or house style.
 
 ### The check_length size-floor gate
 
 `check_length` is the built-in `tool` shipped for the blog flows (`blog_article` / `blog_article_revise`) — a generic minimum-size floor, usable by any flow's `tool` node, not tied to blogging specifically. It is a self-contained script (no third-party dependencies), delivered on install as an extensionless `+x` file plus a `check_length.cmd` Windows launcher.
 
-It reports through the standard tool contract above (JSON `{"outcome", "data"}` on stdout, exit `0`/non-zero). Unlike `check_journey`, scope resolution has **no task-text fallback**: it reads the changed `.md` paths from the run's `diff_path` alone, and an absent/empty diff is always a vacuous `pass`. A prose task body routinely names reference docs (a tone-of-voice guide, an idea doc) that are not the deliverable; falling back to "any `.md` named in the task text" once made the gate measure those instead of the actual output on a run where nothing had been written yet (see docs/backlog/follow_ups.md, the 2026-07-14 codex-Windows-sandbox post-mortem, finding F3). For each resolved file it strips markdown heading lines, groups what remains into paragraphs on blank-line boundaries, and fails if the prose falls short of either floor in `args`:
+It reports through the standard tool contract above (JSON `{"outcome", "data"}` on stdout, exit `0`/non-zero). Unlike `check_chapter`, scope resolution has **no task-text fallback**: it reads the changed `.md` paths from the run's `diff_path` alone, and an absent/empty diff is always a vacuous `pass`. A prose task body routinely names reference docs (a tone-of-voice guide, an idea doc) that are not the deliverable; falling back to "any `.md` named in the task text" once made the gate measure those instead of the actual output on a run where nothing had been written yet (see docs/backlog/follow_ups.md, the 2026-07-14 codex-Windows-sandbox post-mortem, finding F3). For each resolved file it strips markdown heading lines, groups what remains into paragraphs on blank-line boundaries, and fails if the prose falls short of either floor in `args`:
 
 | `args` key | Enforces |
 | --- | --- |

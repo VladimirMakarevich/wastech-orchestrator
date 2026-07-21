@@ -16,7 +16,7 @@ If you only want to change _what a step says_, you do not need a new flow — ed
 - **Prompts:** each flow **owns its prompts** in a sibling folder named after the `task_type` — `.worc/flows/<task_type>/*.md`. `role_file` values in the YAML are relative to `.worc/flows/` and point into that folder (e.g. `role_file: my_flow/implement.md`).
 - **Supervisor prompts:** the supervisor is a constant layer above all flows (not a node). Its global default observe lens is `.worc/flows/roles/supervisor.md`, but a flow may own its supervisor wording with a `supervisor:` block (see "Flow-local supervisor prompts" below); a flow with no such block uses the shared `roles/supervisor.md`.
 
-`install` seeds editable, active copies of the built-in flows — `implementation`, `deep_research`, `security_audit`, `merge`, and the content-authoring flows `content_chapter` / `content_translate` / `blog_article` / `blog_article_revise` — plus the executables their `tool` nodes resolve against (e.g. the `check_journey` prose gate, the `check_length` minimum-size floor) under `.worc/tools/`. The packaged copies inside the wheel are delivery-only (never read at run time), so those seeded copies under `.worc/flows/` are already yours to edit.
+`install` seeds editable, active copies of the built-in flows — `implementation`, `deep_research`, `security_audit`, `merge`, and the content-authoring flows `content_chapter` / `content_translate` / `blog_article` / `blog_article_revise` — plus the executables their `tool` nodes resolve against (e.g. the `check_chapter` prose gate, the `check_length` minimum-size floor) under `.worc/tools/`. The packaged copies inside the wheel are delivery-only (never read at run time), so those seeded copies under `.worc/flows/` are already yours to edit.
 
 **Tracking flows in git:** `install` gitignores the whole `.worc/` runtime home as one unit, so `.worc/flows/` has no git history by default. To track it (review changes via PR, share flows with teammates), replace the blanket `.worc/` line `install` wrote in the repo's tracked `.gitignore` with:
 
@@ -76,7 +76,7 @@ flow:
 
 `output_policy` is a **closed set of three** — you choose which _shape_ of deliverable the flow produces, and the engine resolves that name to a fixed write area and required files. You cannot specify anything else or point a flow at an arbitrary directory, and the name is a **contract, not a description**.
 
-- **`code_change`** — the diff (anywhere in the repo) **is** the deliverable; no required files. Use for code **and** for a brand-new prose/Markdown file committed to the repo — a blog post, a chapter, a translation (the packaged `content_chapter` / `content_book` / `content_translate` flows all use this). Pair with `pull_request` / `documentation_pull_request`.
+- **`code_change`** — the diff (anywhere in the repo) **is** the deliverable; no required files. Use for code **and** for a brand-new prose/Markdown file committed to the repo — a blog post, a chapter, a translation (the packaged `content_chapter` / `content_translate` flows all use this). Pair with `pull_request` / `documentation_pull_request`.
 - **`repository_document`** — writes are confined to `docs/research/<task_id>/` and must include `report.md` + `sources.json` (the `deep_research` shape; a `citation` node checks the manifest). Pair with `documentation_pull_request`.
 - **`private_control_workspace_report`** — writes are confined to `.worc/security-reports/<task_id>/`, produce `report.md`, and **never enter git** (the `security_audit` shape). Pair with `none`.
 
@@ -114,7 +114,7 @@ One node exposes exactly one output — to publish several results, split into s
 
 ## Custom tool nodes (`kind: tool`)
 
-A `tool` node runs **your own** executable (any language) from `.worc/tools/` instead of an LLM — for deterministic logic that is neither "smart" work (`agent`) nor a built-in gate (`checks`). Drop the program at `.worc/tools/<name>` (on POSIX, `chmod +x`; on Windows add a `.cmd`/`.exe` — the resolver finds `<name>.cmd` from the same flow name), or use a built-in tool `install` already delivered (e.g. `check_journey`, `check_length`), then reference it by name:
+A `tool` node runs **your own** executable (any language) from `.worc/tools/` instead of an LLM — for deterministic logic that is neither "smart" work (`agent`) nor a built-in gate (`checks`). Drop the program at `.worc/tools/<name>` (on POSIX, `chmod +x`; on Windows add a `.cmd`/`.exe` — the resolver finds `<name>.cmd` from the same flow name), or use a built-in tool `install` already delivered (e.g. `check_chapter`, `check_length`), then reference it by name:
 
 ```yaml
 nodes:

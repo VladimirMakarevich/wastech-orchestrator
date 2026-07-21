@@ -1,34 +1,36 @@
 #!/usr/bin/env python3
-"""check_journey — deterministic prose-constraint gate for the content_chapter / content_book /
-content_translate flows.
+"""check_chapter — deterministic prose-constraint gate for the content_chapter / content_translate
+flows.
 
 This is a **delivered operator tool**, not orchestrator code: `worc install` copies it into
 `<repo>/.worc/tools/`, and the packaged content flows reference it as a `tool` node
-(`tool: check_journey`). It runs out-of-process under the tool-node ceiling — it receives only an
+(`tool: check_chapter`). It runs out-of-process under the tool-node ceiling — it receives only an
 allowlisted path context + the flow's `args` on **stdin (JSON)**, never secrets or the environment,
 and it writes nothing to the repository. It reports back through its **exit code** (0 = pass, non-0
 = fail) and a JSON object on stdout whose `outcome` is authoritative.
 
 Because it is a self-contained script (any interpreter, no third-party imports) it stays portable:
-POSIX runs it via its shebang + `+x` bit; Windows runs the sibling `check_journey.cmd` wrapper.
+POSIX runs it via its shebang + `+x` bit; Windows runs the sibling `check_chapter.cmd` wrapper.
 
-Its rule set is deliberately opinionated, not a generic prose linter: it encodes one project's
-long-form reflective book format — required `Purpose`/`Emotional point` framing per part, a fixed
-heading hierarchy, a small set of banned service-label headings and AI-tell phrases (tuned for
-Russian-language drafts), and EN/book per-page length bands. Treat every value under "domain
-constants (tunable)" below as a starting point: fork this delivered copy under your own
-`.worc/tools/check_journey` and edit the constants to match your own book's structure, language,
-and house style.
+It enforces one long-form chapter format: a required `Purpose`/`Emotional point` framing per part, a
+fixed heading hierarchy, one thought per page, a small set of banned service-label headings and
+AI-tell phrases, and — when the flow asks for them via `args` — per-page length and paragraph
+ceilings. The structural rules are always on; the length rules are opt-in per flow (see Args below),
+so the same tool serves a flow that only wants structure (`content_chapter`) and one that also caps
+page length (`content_translate`). Treat every value under "domain constants (tunable)" below as a
+starting point: fork this delivered copy under your own `.worc/tools/check_chapter` and edit the
+constants to match your own project's structure, language, and house style.
 
 Scope = only changed chapters: the changed `.md` files are read from the run's diff artifact
 (`paths.diff_path`); if that is absent, from the `.md` files named in the task file
 (`paths.task_path`); if neither yields a chapter, the run is a vacuous pass (nothing to validate) —
 so the gate never fails on pre-existing violations in untouched chapters.
 
-Modes (`args.mode`):
-  * `ru`   — structural rules only (no character limit; RU pages are legitimately longer).
-  * `en`   — the RU rules plus per-page length 500–800 chars (hard max 800) and ≤3 paragraphs.
-  * `book` — the same length-bearing ruleset as `en`, applied across every assembled page.
+Args (all OPTIONAL, all page-level ceilings/floors — omit or set `0` to disable that one; the
+structural rules run regardless):
+  * `min_chars`      — a page's prose must be at least this many characters.
+  * `max_chars`      — a page's prose must be at most this many characters (a hard cap).
+  * `max_paragraphs` — a page may have at most this many paragraphs.
 """
 
 from __future__ import annotations
@@ -40,41 +42,35 @@ from pathlib import Path
 
 # -- domain constants (tunable) ----------------------------------------------------------------
 
-# Level-2 headings that are author-facing metadata, never user pages — excluded from the page and
+# Level-2 headings that are author-facing metadata, never reader pages — excluded from the page and
 # hierarchy checks and never scanned for prose clichés.
 _SERVICE_SECTIONS = frozenset({"purpose", "emotional point", "notes"})
 
-# Headings must be alive and flow from the page content, never naming which of the three voices the
+# Headings must be alive and flow from the page content, never naming which voice or section type the
 # page belongs to. These literal service labels (and anything starting with them) are banned in
 # `###`/`####` titles. Lowercased for case-insensitive comparison.
 _BANNED_HEADING_LABELS = (
-    "что это",
-    "философия",
-    "как это",
-    "использование",
-    "комментарии автора",
+    "what this is",
+    "philosophy",
+    "how it works",
+    "usage",
+    "author's note",
 )
 
-# The explicit AI-tell antithesis "не X, а Y" (a rhetorical construction the drafts overuse). The
-# span forbids sentence-ending punctuation and newlines so a match stays inside ONE clause — else
-# an unrelated "не …" and a later ", а …" in the next sentence would false-positive. The subtler,
+# The explicit AI-tell antithesis "not X, but Y" (a rhetorical construction the drafts overuse). The
+# span forbids sentence-ending punctuation and newlines so a match stays inside ONE clause — else an
+# unrelated "not …" and a later ", but …" in the next sentence would false-positive. The subtler,
 # semantic clichés are the story_critic evaluator's job — this deterministic list stays small.
-_ANTITHESIS_RE = re.compile(r"\bне\s+[^.!?\n]{1,80}?,\s*а\s+", re.IGNORECASE)
+_ANTITHESIS_RE = re.compile(r"\bnot\s+[^.!?\n]{1,80}?,\s*but\s+", re.IGNORECASE)
 _AI_CLICHES = (
-    "в мире, где",
-    "давайте разберёмся",
-    "давайте разберемся",
-    "стоит отметить",
+    "in a world where",
+    "let's dive in",
+    "let's dive into",
+    "it's worth noting",
 )
-
-# EN/book per-page length band (characters) and paragraph ceiling.
-_EN_MIN_CHARS = 500
-_EN_MAX_CHARS = 800
-_EN_MAX_PARAGRAPHS = 3
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*\S)\s*$")
 _NUMERIC_PREFIX_RE = re.compile(r"^\d+(?:\.\d+)*\.?\s*")
-_MODES_WITH_LENGTH = frozenset({"en", "book"})
 
 
 class Heading:
@@ -104,7 +100,7 @@ def _headings(lines: list[str]) -> list[Heading]:
 
 def _is_chapter(lines: list[str], headings: list[Heading]) -> bool:
     """A file is a chapter iff it carries the chapter skeleton — a `Purpose`/`Pages` heading or any
-    mobile page (`####`). Anything else in scope (a README, notes) is skipped, not failed."""
+    page (`####`). Anything else in scope (a README, notes) is skipped, not failed."""
     for h in headings:
         low = h.title.lower()
         if h.level == 2 and low == "purpose":
@@ -188,7 +184,7 @@ def _paragraphs(prose_lines: list[str]) -> list[str]:
 def _scan_prose_for_ai(text: str) -> list[str]:
     issues: list[str] = []
     if _ANTITHESIS_RE.search(text):
-        issues.append('AI antithesis pattern "не …, а …" — rephrase without the cliché')
+        issues.append('AI antithesis pattern "not …, but …" — rephrase without the cliché')
     low = text.lower()
     for cliche in _AI_CLICHES:
         if cliche in low:
@@ -196,7 +192,9 @@ def _scan_prose_for_ai(text: str) -> list[str]:
     return issues
 
 
-def evaluate_chapter(text: str, mode: str) -> list[str]:
+def evaluate_chapter(
+    text: str, *, min_chars: int, max_chars: int, max_paragraphs: int
+) -> list[str]:
     """Return the ordered list of violation messages for one chapter's markdown (empty = clean)."""
     lines = text.splitlines()
     headings = _headings(lines)
@@ -234,22 +232,21 @@ def evaluate_chapter(text: str, mode: str) -> list[str]:
         prose = "\n".join(prose_lines).strip()
         for issue in _scan_prose_for_ai(prose):
             violations.append(f"page {page.title!r}: {issue}")
-        if mode in _MODES_WITH_LENGTH:
-            length = len(prose)
-            if length > _EN_MAX_CHARS:
-                violations.append(
-                    f"page {page.title!r} is {length} chars — exceeds the hard maximum "
-                    f"{_EN_MAX_CHARS}"
-                )
-            elif length < _EN_MIN_CHARS:
-                violations.append(
-                    f"page {page.title!r} is {length} chars — below the {_EN_MIN_CHARS} minimum"
-                )
+        length = len(prose)
+        if max_chars and length > max_chars:
+            violations.append(
+                f"page {page.title!r} is {length} chars — exceeds the hard maximum {max_chars}"
+            )
+        elif min_chars and length < min_chars:
+            violations.append(
+                f"page {page.title!r} is {length} chars — below the {min_chars} minimum"
+            )
+        if max_paragraphs:
             paras = _paragraphs(prose_lines)
-            if len(paras) > _EN_MAX_PARAGRAPHS:
+            if len(paras) > max_paragraphs:
                 violations.append(
                     f"page {page.title!r} has {len(paras)} paragraphs — the maximum is "
-                    f"{_EN_MAX_PARAGRAPHS}"
+                    f"{max_paragraphs}"
                 )
     return violations
 
@@ -257,7 +254,7 @@ def evaluate_chapter(text: str, mode: str) -> list[str]:
 # -- scope resolution --------------------------------------------------------------------------
 
 _DIFF_NEW_PATH_RE = re.compile(r"^\+\+\+ b/(.*)$")
-# Allow single spaces between path segments — the roadmap directory name legitimately contains them
+# Allow single spaces between path segments — a directory name may legitimately contain them
 # (`roadmap (raw and working data)`). A leading stray word ("Edit foo.md") is trimmed at resolution.
 _MD_TOKEN_RE = re.compile(r"[\w./()\-]+(?: [\w./()\-]+)*\.md")
 
@@ -265,8 +262,8 @@ _MD_TOKEN_RE = re.compile(r"[\w./()\-]+(?: [\w./()\-]+)*\.md")
 def _changed_from_diff(diff_text: str) -> list[str]:
     """Repo-relative `.md` paths added/modified in a unified diff (`+++ b/…`; `/dev/null` skipped).
 
-    The `+++ b/` line carries the path literally (spaces included), which the roadmap directory name
-    needs, so it is preferred over the ambiguous `diff --git` line.
+    The `+++ b/` line carries the path literally (spaces included), which a space-containing
+    directory name needs, so it is preferred over the ambiguous `diff --git` line.
     """
     paths: list[str] = []
     for line in diff_text.splitlines():
@@ -332,9 +329,12 @@ def main() -> int:
         return 1
 
     args = payload.get("args") or {}
-    mode = str(args.get("mode", "ru")).lower()
-    if mode not in ("ru", "en", "book"):
-        print(json.dumps({"outcome": "fail", "data": {"error": f"unknown mode {mode!r}"}}))
+    try:
+        min_chars = int(args.get("min_chars") or 0)
+        max_chars = int(args.get("max_chars") or 0)
+        max_paragraphs = int(args.get("max_paragraphs") or 0)
+    except (TypeError, ValueError) as exc:
+        print(json.dumps({"outcome": "fail", "data": {"error": f"invalid args: {exc}"}}))
         return 1
 
     repo, rel_paths = _resolve_scope(payload.get("paths") or {})
@@ -345,12 +345,15 @@ def main() -> int:
         if text is None:
             continue  # deleted or unreadable — nothing to validate
         checked.append(rel)
-        issues = evaluate_chapter(text, mode)
+        issues = evaluate_chapter(
+            text, min_chars=min_chars, max_chars=max_chars, max_paragraphs=max_paragraphs
+        )
         if issues:
             violations[rel] = issues
 
     outcome = "fail" if violations else "pass"
-    data = {"mode": mode, "checked": checked, "violations": violations}
+    limits = {"min_chars": min_chars, "max_chars": max_chars, "max_paragraphs": max_paragraphs}
+    data = {"limits": limits, "checked": checked, "violations": violations}
     print(json.dumps({"outcome": outcome, "data": data}, ensure_ascii=False))
     return 1 if violations else 0
 

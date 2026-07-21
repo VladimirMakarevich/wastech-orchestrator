@@ -16,7 +16,7 @@
 # every writing node stays offline and workspace-write, so a Codex writer with network is never
 # constructed. The one deterministic gate is `check_length` (a minimum chars/paragraphs floor for the
 # drafted article, delivered to `.worc/tools/` by `worc install`); there is no structural gate like
-# `check_journey` here — a free-form blog post has no fixed structure, so all remaining quality is
+# `check_chapter` here — a free-form blog post has no fixed structure, so all remaining quality is
 # evaluator-driven.
 #
 # The supervisor is a constant layer above the flow (not a node); `emit_follow_ups` is deliberately

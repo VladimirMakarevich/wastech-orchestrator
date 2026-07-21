@@ -15,7 +15,7 @@ Because it is a self-contained script (any interpreter, no third-party imports) 
 POSIX runs it via its shebang + `+x` bit; Windows runs the sibling `check_length.cmd` wrapper.
 
 Scope = only changed documents, from the run's diff artifact (`paths.diff_path`) alone — no
-task-text fallback like `check_journey` has. A blog/article task body routinely names reference docs
+task-text fallback like `check_chapter` has. A blog/article task body routinely names reference docs
 (a tone-of-voice guide, an idea doc) that are not the deliverable; falling back to "any `.md` named
 in the task text" on an empty diff would measure THOSE instead and report a misleading pass/fail on
 files the run never touched (this happened in the field — see docs/backlog/follow_ups.md, the
@@ -103,7 +103,7 @@ def _read(path: Path) -> str | None:
 def _resolve_scope(paths: dict[str, object]) -> tuple[Path, list[str]]:
     """(repo_dir, list of repo-relative document paths to check), from the diff alone.
 
-    Deliberately no task-text fallback (unlike `check_journey`) — see the module docstring.
+    Deliberately no task-text fallback (unlike `check_chapter`) — see the module docstring.
     """
     repo = Path(str(paths.get("repo") or "."))
     diff_path = paths.get("diff_path")

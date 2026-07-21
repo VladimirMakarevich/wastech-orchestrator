@@ -1,10 +1,11 @@
-# Packaged built-in flow: content_translate — adapt an approved RU block into an EN production file.
+# Packaged built-in flow: content_translate — adapt an approved source-language chapter into an
+# English production file.
 #
-# Sibling of `content_chapter`: same book-project assumptions (see that flow's header). EN is a
+# Sibling of `content_chapter`: same book-project assumptions (see that flow's header). English is a
 # separate flow (not a branch of content_chapter): it adapts rather than edits, and it adds the hard
-# EN limits (per-page 500–800 chars, ≤3 paragraphs) that RU deliberately omits. adapt_en
-# rewrites the approved RU chapter into idiomatic English; the deterministic `check_journey` gate
-# (mode: en) enforces the structural + length rules; an EN critic blocks on whether it reads as an
+# per-page length limits that content_chapter deliberately omits. adapt_en rewrites the approved
+# source chapter into idiomatic English; the deterministic `check_chapter` gate (here with length
+# `args`) enforces the structural + length rules; an EN critic blocks on whether it reads as an
 # adaptation (not a literal translation) with meaning and tone preserved and no AI patterns. Every
 # gate/rework routes through `fixing`, which re-enters the gate (`fixing → constraints_en`).
 #
@@ -26,8 +27,11 @@ flow:
       permission_profile: workspace-write
     - id: constraints_en
       kind: tool
-      tool: check_journey
-      args: { mode: en }
+      tool: check_chapter
+      # Same tool as content_chapter, here also carrying the per-page length limits the English
+      # production files must hold. Tune the numbers to your own format; set any to `0` to disable
+      # that one bound.
+      args: { min_chars: 1000, max_chars: 1400, max_paragraphs: 8 }
     - id: en_critic
       kind: evaluator
       role: critic

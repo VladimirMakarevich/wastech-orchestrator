@@ -793,7 +793,7 @@ def _tools_root() -> Traversable:
     wheel).
 
     ``install`` copies this tree so a packaged flow's ``tool`` node resolves against a real
-    executable on the install host: the shipped ``check_journey`` prose gate arrives as an
+    executable on the install host: the shipped ``check_chapter`` prose gate arrives as an
     extensionless ``+x`` script (POSIX) plus a ``.cmd`` wrapper (Windows). Like ``flows/`` these are
     delivered per machine (never committed — ``.worc/`` is gitignored), so the launcher always
     matches the install OS.
@@ -3836,7 +3836,7 @@ def cmd_install(args: argparse.Namespace) -> int:
     if flows_written:
         print(f"install: wrote built-in flows + node prompts to {worc_home / 'flows'}")
     # The executables that packaged `tool` nodes resolve against (e.g. the content-flow prose gate
-    # `check_journey`) land in .worc/tools/, delivered per machine so the launcher matches the OS.
+    # `check_chapter`) land in .worc/tools/, delivered per machine so the launcher matches the OS.
     # --reconfigure snapshots the existing dir first; a plain re-run only fills in missing files.
     if args.reconfigure:
         tools_backup = _backup_tools_dir(worc_home)

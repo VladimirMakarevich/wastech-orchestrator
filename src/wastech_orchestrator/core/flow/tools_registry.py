@@ -54,10 +54,10 @@ class ToolRegistry:
         The returned path is the resolved (symlink-followed) real path, guaranteed inside
         ``tools_dir``, a regular file, and executable on the host OS.
 
-        A packaged flow names one fixed tool (e.g. ``check_journey``) that must resolve on every OS,
+        A packaged flow names one fixed tool (e.g. ``check_chapter``) that must resolve on every OS,
         but a POSIX tool is an extensionless ``+x`` script while a Windows tool needs a launchable
         suffix. So on Windows the bare name is also tried with each launcher suffix appended
-        (``check_journey`` → ``check_journey.cmd``); every candidate passes the identical
+        (``check_chapter`` → ``check_chapter.cmd``); every candidate passes the identical
         containment/existence/executability checks, so the fail-closed boundary is unchanged.
         """
         if not name or not name.strip():

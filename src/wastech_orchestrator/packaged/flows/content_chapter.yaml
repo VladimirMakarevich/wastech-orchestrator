@@ -1,25 +1,26 @@
-# Packaged built-in flow: content_chapter — a long-form book/journey chapter editor (the workhorse).
+# Packaged built-in flow: content_chapter — a long-form book chapter editor (the workhorse).
 #
 # Reworks one chapter of a content repo in place: a read-only scout builds a brief from the
 # project's own continuity/style references, an editor revises the chapter, a deterministic prose
-# gate (the `check_journey` tool) enforces this book's structural constraints, a story critic blocks
+# gate (the `check_chapter` tool) enforces this book's structural constraints, a story critic blocks
 # on narrative quality, and a style pass polishes the language before publish. Every gate/rework
 # routes through `fixing`, which re-enters the deterministic gate (`fixing → constraints`) so a fix
 # can never break the limits.
 #
-# This flow — together with `check_journey` — is deliberately opinionated for one kind of project: a
+# This flow — together with `check_chapter` — is deliberately opinionated for one kind of project: a
 # reflective, multi-voice long-form book (with `content_translate` adapting each chapter into a
 # second language). If your project's structure differs, fork the delivered copies under
-# `.worc/flows/content_chapter/` and `.worc/tools/check_journey` and tune them — see
+# `.worc/flows/content_chapter/` and `.worc/tools/check_chapter` and tune them — see
 # docs/flow-authoring.md.
 #
 # output_policy: code_change — the chapter `.md` files are edited in place; the diff IS the
 # deliverable. publishing: pull_request is the ceiling; run the content repo with
 # `git.create_pull_request: false` (install `--no-create-pr`) to land edits as a local commit with no
-# PR. The deterministic gate is `check_journey` (delivered to `.worc/tools/` by `worc install`); it
-# reads only the changed chapter paths from the diff and enforces the mode-specific prose rules
-# (heading hierarchy, required Purpose/Emotional-point sections, the AI-antithesis pattern, and for
-# `en`/`book` a hard per-page length cap) — never pre-existing issues elsewhere.
+# PR. The deterministic gate is `check_chapter` (delivered to `.worc/tools/` by `worc install`); it
+# reads only the changed chapter paths from the diff and enforces the structural prose rules (heading
+# hierarchy, required Purpose/Emotional-point sections, the AI-antithesis pattern, service-label
+# headings) — never pre-existing issues elsewhere. This flow asks it for structure only (no length
+# `args`); `content_translate` is the sibling that also caps per-page length.
 #
 # A fact/accuracy check against some external source of truth is deliberately NOT a node here — field
 # use found it didn't generalize (most content projects have no such source, and where one exists it
@@ -81,8 +82,11 @@ flow:
       # reasoning: high
     - id: constraints
       kind: tool
-      tool: check_journey
-      args: { mode: ru }
+      tool: check_chapter
+      # Structural rules only for this flow (heading hierarchy, Purpose/Emotional-point, one thought
+      # per page, banned service-label headings + AI-antithesis). No length `args`, so pages are not
+      # capped here — `content_translate` sets min_chars/max_chars/max_paragraphs on the same tool.
+      args: {}
     - id: story_critic
       kind: evaluator
       role: critic

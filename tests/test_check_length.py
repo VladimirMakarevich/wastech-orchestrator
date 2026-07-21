@@ -106,7 +106,7 @@ def test_no_diff_and_no_task_is_vacuous_pass(tmp_path: Path) -> None:
 
 
 def test_task_text_never_falls_back_when_diff_is_absent(tmp_path: Path) -> None:
-    # Unlike check_journey, a task body naming an unrelated .md (a rules/reference doc, say) must
+    # Unlike check_chapter, a task body naming an unrelated .md (a rules/reference doc, say) must
     # NOT be picked up as the checked document when there is no diff — see finding F3: this exact
     # fallback once made the gate measure reference docs instead of the actual deliverable.
     repo = _doc_repo(tmp_path, _LONG_DOC)
