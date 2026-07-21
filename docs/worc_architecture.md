@@ -2,7 +2,7 @@
 
 Date: 2026-06-21 (rewritten for the flow-engine architecture). Goal: describe the architecture of a console application that runs on Windows/macOS/Linux, watches a task folder, runs each task through a **deterministic flow** (a validated graph of typed nodes) executed by external coding agents (Codex CLI and/or Claude Code CLI), and publishes the result to a dedicated Git branch.
 
-> This is the high-level **design rationale**. The code-derived reference — contracts, the state machine, routing, fallback, the security policy, and per-flow node graphs, each with `file:line` bindings — is the [Functional Map](functional/index.md), which is the source of truth on any discrepancy.
+> This is the high-level **design rationale**. For the exact contracts, state machine, routing, fallback, and security policy, the code is the source of truth on any discrepancy — see `src/wastech_orchestrator/` and [.agents/rules/architecture.md](../.agents/rules/architecture.md).
 
 ---
 
@@ -140,7 +140,7 @@ A transport-neutral `Notifier` provides terminal notifications and one durable q
 | `deep_research` | `deep_research` | a documentation PR (`docs/research/<id>/`) | `external_research` (network-gated), a `citation` checker, two non-blocking evaluators |
 | `security_audit` | `security_audit` | a **private** report under `.worc/security-reports/<id>/` | a `dependency_scan` checker; `publishing: none` (no git at all) |
 
-All three use the same engine, the same supervisor, the same HITL machinery — they differ only in nodes, ceilings (`network_policy` grants research/advisory network access), and the publishing policy. Per-flow node graphs are in [functional/flows/](functional/flows/index.md).
+All three use the same engine, the same supervisor, the same HITL machinery — they differ only in nodes, ceilings (`network_policy` grants research/advisory network access), and the publishing policy. Per-flow node graphs are defined in `packaged/flows/`.
 
 ### The default `implementation` flow
 

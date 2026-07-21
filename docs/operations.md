@@ -1,6 +1,6 @@
 # Operations guide
 
-How to install, authorize, run, and diagnose **wastech-orchestrator** in production. The orchestrator drives coding agents (OpenAI Codex CLI, Anthropic Claude Code CLI) through a deterministic pipeline and publishes the result to a Pull Request. It **owns** git (commit/push/PR); the agents only edit files in a dedicated clone. This guide is for the operator who runs it; the architecture reference is the [Functional Map](functional/index.md) and the security policy is [security.md](../.agents/rules/security.md).
+How to install, authorize, run, and diagnose **wastech-orchestrator** in production. The orchestrator drives coding agents (OpenAI Codex CLI, Anthropic Claude Code CLI) through a deterministic pipeline and publishes the result to a Pull Request. It **owns** git (commit/push/PR); the agents only edit files in a dedicated clone. This guide is for the operator who runs it; the architecture reference is [worc_architecture.md](worc_architecture.md) and the security policy is [security.md](../.agents/rules/security.md).
 
 > The orchestrator never installs or authorizes the CLIs and never stores credentials. Authorization for git and for each agent is configured **outside** the orchestrator (see below).
 

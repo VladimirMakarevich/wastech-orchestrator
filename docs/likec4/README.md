@@ -2,7 +2,7 @@
 
 "Architecture as code": the system model lives in [`workspace.likec4`](./workspace.likec4), from which consistent C4 views are generated with interactive navigation, zoom, and clickable links to block documents.
 
-The model is derived from executable code — it is the same factual model as in [`../functional/`](../functional/index.md). This is a navigable top-level map; detailed step-by-step flows, errors, and `file:line` bindings remain in `docs/functional/`.
+The model is derived from executable code. This is a navigable top-level map of the system's components and relationships.
 
 ## C4 in a Nutshell
 
@@ -20,7 +20,7 @@ How this maps onto the orchestrator:
 | Context | operator, human-in-the-loop, `codex`/`claude`, `git`/`gh`, Telegram | `landscape` |
 | Container | single process + `state.db` / `.worc/` artifact storage | `containers` |
 | Component | **functional blocks B01–B32** | `components` |
-| Code | — | (skipped; details in `docs/functional/`) |
+| Code | — | (skipped; see the source under `src/`) |
 
 L2 is intentionally thin here: the orchestrator is a **single process**, so "containers" means the process itself plus the storage it owns; child CLIs are external systems launched as subprocesses.
 
@@ -69,13 +69,9 @@ npx likec4@latest export png docs/likec4 -o docs/likec4/img
 
 A `dynamic view` is analogous to a sequence diagram: it shows the order of interactions over time.
 
-## Traceability to Code
-
-Each component carries a `link` to its block document in `docs/functional/blocks/` — from the diagram you can click through to a description with `file:line` bindings. This is the bridge between the abstract C4 model and the code-verified documentation.
-
 ## Applied Best Practices and How to Extend
 
-Already in the model: typed element kinds (`actor`/`system`/`externalSystem`/`container`/`component`/`store`) with styles (shape, color), semantic tags (`spine`/`entrypoint`/`crosscutting`/`external`/`datastore`), descriptions and `technology`, multiple targeted views, a dynamic run, and `link` to block documents.
+Already in the model: typed element kinds (`actor`/`system`/`externalSystem`/`container`/`component`/`store`) with styles (shape, color), semantic tags (`spine`/`entrypoint`/`crosscutting`/`external`/`datastore`), descriptions and `technology`, multiple targeted views, and a dynamic run.
 
 To extend further:
 
@@ -87,10 +83,10 @@ To extend further:
 
 ## Keeping in Sync with Code (important)
 
-The model is **manual** and has **no** `file:line` bindings (unlike `docs/functional/`). Therefore:
+The model is **manual** and has **no** `file:line` bindings. Therefore:
 
 - when block boundaries, relationships, external systems, or storage change, update the model **in the same change** — this is enforced by the skill [`sync-docs`](../../.claude/skills/sync-docs/SKILL.md);
 - keep exactly one model owner;
-- the source of truth for details is the code and `docs/functional/`; this is the top-level map.
+- the source of truth for details is the code; this is the top-level map.
 
 > Note: on the first `likec4 dev` run, watch for any warnings about `link` and `dynamic view` (their syntax was not verified locally at the time the file was created). Any edits are immediately visible in the preview; the easiest way to fix a bad line is to follow the LikeC4 validator's suggestion.

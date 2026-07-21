@@ -113,7 +113,7 @@ Each edge is `{ from, to, outcome? }`. A `checks` or `tool` node emits `pass`/`f
 
 ## Role files (prompts)
 
-A node's prompt is the content of its `role_file`. Role files render only an allowlisted set of path/metadata variables — `{task_path}`, `{repo_path}`, `{plan_path}`, `{diff_path}`, `{review_path}`, `{skills_path}`, `{memory_path}`, `{subtask_order}`/`{subtask_count}`/`{subtask_spec_path}`, and a few more — never task bodies, diffs, env, or secrets. A variable that is empty for a given node renders as the empty string; wrap optional references in a conditional block `{?name}…{/name}` so they drop cleanly when empty. For the full variable contract and which runner populates each, see [configuration.md → Prompt templates](configuration.md#prompt-templates-no-longer-a-config-block) and the functional block [B15](functional/blocks/B15-prompt-templates.md).
+A node's prompt is the content of its `role_file`. Role files render only an allowlisted set of path/metadata variables — `{task_path}`, `{repo_path}`, `{plan_path}`, `{diff_path}`, `{review_path}`, `{skills_path}`, `{memory_path}`, `{subtask_order}`/`{subtask_count}`/`{subtask_spec_path}`, and a few more — never task bodies, diffs, env, or secrets. A variable that is empty for a given node renders as the empty string; wrap optional references in a conditional block `{?name}…{/name}` so they drop cleanly when empty. For the full variable contract and which runner populates each, see [configuration.md → Prompt templates](configuration.md#prompt-templates-no-longer-a-config-block).
 
 `role_file` paths are contained to the flow directory: a path with `..` or an absolute path is rejected at load. Keep prompts inside your `<task_type>/` folder.
 
@@ -324,4 +324,3 @@ worc --config ./.worc/config.yaml preflight
 - [Configuration → Flows](configuration.md#flows-task_type-dispatch-and-operator-flows) — the flow/config split and the full validation contract.
 - [Cookbook → Customize a node's prompt](cookbook.md#7a-customize-a-nodes-prompt) — editing a prompt without a new flow.
 - [Task authoring](task-authoring.md) — how a task selects a flow via `task_type`.
-- Functional map: [B29 flow definition & validation](functional/blocks/B29-flow-definition-and-validation.md), [B30 flow node runners](functional/blocks/B30-flow-node-runners.md).

@@ -2,7 +2,7 @@
 
 This cookbook shows common ways to use **wastech-orchestrator**. It is written for operators who run the orchestrator and for developers who want a practical path from "empty workspace" to "task processed into a Pull Request".
 
-The canonical product reference remains the [Functional Map](functional/index.md). The full CLI surface (`install`, `preflight`, `telegram-test`, `run`, `rerun`, `finalize`, `prs`, `merge-task`, `watch`, `stop`, `restart`, `status`, `top`, `shell`, `list`, `tasks`, `completion`, `logs`, `upgrade-config`, `upgrade-docs`) exists in the current codebase; this guide focuses on the everyday subset.
+The canonical product reference remains the code and [worc_architecture.md](worc_architecture.md). The full CLI surface (`install`, `preflight`, `telegram-test`, `run`, `rerun`, `finalize`, `prs`, `merge-task`, `watch`, `stop`, `restart`, `status`, `top`, `shell`, `list`, `tasks`, `completion`, `logs`, `upgrade-config`, `upgrade-docs`) exists in the current codebase; this guide focuses on the everyday subset.
 
 ## 1. Install Into A Repository
 

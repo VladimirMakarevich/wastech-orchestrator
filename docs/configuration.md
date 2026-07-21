@@ -1,6 +1,6 @@
 # Configuration Reference
 
-`config.yaml` controls repositories, providers, security, validation, checks, git publishing, and optional notification settings. The packaged example is [`config.example.yaml`](../src/wastech_orchestrator/packaged/config.example.yaml); `install` copies it verbatim to `.worc/config.example.yaml` as a commented, field-by-field reference beside the generated **executable** `.worc/config.yaml` (the reference is never loaded at runtime — only `config.yaml` is read). The canonical contract is the config schema in the code (`config/schema.py`); see the [Functional Map](functional/index.md). For definitions of all config keys and their purpose, see the [Glossary](glossary.md).
+`config.yaml` controls repositories, providers, security, validation, checks, git publishing, and optional notification settings. The packaged example is [`config.example.yaml`](../src/wastech_orchestrator/packaged/config.example.yaml); `install` copies it verbatim to `.worc/config.example.yaml` as a commented, field-by-field reference beside the generated **executable** `.worc/config.yaml` (the reference is never loaded at runtime — only `config.yaml` is read). The canonical contract is the config schema in the code (`config/schema.py`). For definitions of all config keys and their purpose, see the [Glossary](glossary.md).
 
 The loader is fail-closed:
 
@@ -703,7 +703,7 @@ supervisor:
 | `reasoning` | string or null | `null` (absent block) / `high` (install) | Reasoning level (`low`/`medium`/`high`/`xhigh`/`max`); must be a known level. The delivered default is `high`, never a max tier — structured finalize turns **and** per-step observe turns are capped to `high` in code (observe is advisory and runs once per node-run, so a deep fix loop would otherwise pay a max tier many times over), so a max tier would only cost more without effect. |
 | `provider` | `codex` \| `claude` or null | `null` (absent block) / primary (install) | Which provider runs the supervisor layer; empty/null inherits the global primary. Validated ∈ `agents.allowed` and for reasoning support against the **resolved** provider, symmetric with flow nodes. Set it (e.g. `claude`) to keep the layer's `model` on a provider that accepts it when the global primary is the other provider. Model itself is passed through unverified — but when `provider` is unset and `model` plainly looks like the other vendor's (a `claude-*` model under a `codex` primary, say), config validation emits a **warning** (not fatal — the run degrades via fallback), so the mismatch is not silent. |
 
-What the layer does (see the [Functional Map](functional/blocks/B31-supervisor.md)):
+What the layer does:
 
 - It exists for **every** task under any flow shape — even a single agent node with no checks/review.
 - After each completed (non-skipped) step it runs **one read-only** observation on its own continuing session (~1 call/step) and records an immutable advisory `supervisor_step` row. Observation is **best-effort**: a failure is logged and swallowed.

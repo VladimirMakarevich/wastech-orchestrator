@@ -127,6 +127,6 @@ Milestone 2 is defense in depth and operational separation. It does not claim th
 - Preserve provider syntax inside provider adapters and keep the Core provider-neutral.
 - Every behavior change has tests; no real model/agent calls run in the deterministic unit/integration suite.
 - Host sandbox smokes run through `codex sandbox` or an equivalent no-model capability probe and record the CLI version and platform. They are paired with a no-model effective config/rules/tool-surface inventory; a sandbox smoke alone is not whole-agent proof.
-- Update architecture, security, configuration, operations, functional map, and shipped `packaged/` docs in the same implementation change.
+- Update architecture, security, configuration, operations, and shipped `packaged/` docs in the same implementation change.
 - The relevant full suite must pass on Windows, Linux, and macOS before the cluster is complete.
 - No prompt warning, path obscurity, directory move, or redaction-only fallback may be reported as access-control enforcement.

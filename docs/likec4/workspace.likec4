@@ -1,9 +1,8 @@
 // wastech-orchestrator — Architecture as Code (C4 via LikeC4).
 //
-// This model is derived from executable code — it is the same factual model as in docs/functional/.
+// This model is derived from executable code.
 // It is MANUAL (not generated from Python and has no `file:line` bindings): when block boundaries,
 // relationships, external systems, or stores change, update it in the same change (see skill `sync-docs`).
-// Details, errors, and code references for each block are in docs/functional/blocks/.
 //
 // File structure: specification (kinds + tags + styles) → model (elements + relationships) → views.
 // For a large model this can be split into spec.likec4 / model.likec4 / views.likec4 —
@@ -78,64 +77,46 @@ model {
 
       cli = component 'B01 CLI' 'Argument parsing, subcommand dispatcher, exit codes' {
         #entrypoint
-        link ../functional/blocks/B01-cli-and-operator-commands.md 'Block B01'
       }
       watch = component 'B02 watch daemon' 'Periodic discovery of pending tasks, one at a time' {
         #entrypoint
-        link ../functional/blocks/B02-watch-daemon-and-scheduling.md 'Block B02'
       }
       config = component 'B05 Configuration' 'Load and validate config.yaml (fail-closed)' {
-        link ../functional/blocks/B05-configuration.md 'Block B05'
       }
       pipeline = component 'B06 Orchestrator wrapper' 'Spine: gate · slot · branch · terminal cleanup; hands the graph to the engine' {
         #spine
-        link ../functional/blocks/B06-orchestrator-pipeline.md 'Block B06'
       }
       engine = component 'B28 Flow Engine' 'Drives the node graph: routes outcomes, owns budgets, writes checkpoints' {
         #spine
-        link ../functional/blocks/B28-flow-engine.md 'Block B28'
       }
       supervisor = component 'B31 Supervisor' 'Constant read-only advisory layer; writes the PR summary at task close' {
-        link ../functional/blocks/B31-supervisor.md 'Block B31'
       }
       state = component 'B07 State Store' 'State machine + persistence in SQLite' {
-        link ../functional/blocks/B07-state-machine-and-store.md 'Block B07'
       }
       gate = component 'B16 Task Gate' 'Parsing and §19 validation before slot and branch' {
-        link ../functional/blocks/B16-task-parsing-and-validation-gate.md 'Block B16'
       }
       router = component 'B17 Router' 'Provider selection + fallback (infrastructure failures only)' {
-        link ../functional/blocks/B17-agent-router-and-fallback.md 'Block B17'
       }
       providers = component 'B18 Providers' 'Codex/Claude adapters: argv, parsing, classification' {
-        link ../functional/blocks/B18-agent-providers.md 'Block B18'
       }
       subprocess = component 'B19 Subprocess Runner' 'run_process: argv without shell, timeout, env allowlist' {
-        link ../functional/blocks/B19-subprocess-runner.md 'Block B19'
       }
       resolver = component 'B23 Check Resolution' 'Normalize command_sets; diff-select which sets run (no discovery)' {
-        link ../functional/blocks/B23-check-discovery.md 'Block B23'
       }
       checks = component 'B24 Checks' 'Run all selected command sets; launch-fail / quality-fail / skip' {
-        link ../functional/blocks/B24-check-execution.md 'Block B24'
       }
       gitmgr = component 'B22 Git Manager' 'The only component that does commit/push/PR (idempotent)' {
-        link ../functional/blocks/B22-git-manager.md 'Block B22'
       }
       security = component 'B25 Security' 'Non-weakening policy: env, forbidden, injections, isolation' {
         #crosscutting
-        link ../functional/blocks/B25-security-policy.md 'Block B25'
       }
       redaction = component 'B21 Redaction' 'Strip secrets from streams/logs/artifacts' {
         #crosscutting
-        link ../functional/blocks/B21-secret-redaction.md 'Block B21'
       }
       notifier = component 'B26 Telegram' 'Notifier contract + Telegram transport' {
-        link ../functional/blocks/B26-notifications-telegram.md 'Block B26'
       }
       observ = component 'B27 Observability' 'Secret-free logging + heartbeat' {
         #crosscutting
-        link ../functional/blocks/B27-observability.md 'Block B27'
       }
 
       // Remaining blocks — components of the same proc; added by the same pattern:

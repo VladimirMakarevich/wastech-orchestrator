@@ -12,7 +12,7 @@ Keep the documentation in lockstep with the code. Run this after changing behavi
 1. **See what changed.** `git status --porcelain` and `git diff` (vs `HEAD`) for the working set. Classify each change and decide its documentation impact.
 2. **Update the docs that match the change** (only the ones it actually affects):
 
-   > **Out of scope — do not touch:** `docs/functional/` and `docs/likec4/` are regenerated weekly via reverse engineering and must not be edited here.
+   > **Out of scope — do not touch:** `docs/likec4/` is regenerated weekly via reverse engineering and must not be edited here.
 
    > **Always also check `src/wastech_orchestrator/packaged/`** — the shipped, operator-facing docs (the `guide/` quickstarts, `config.example.yaml`, the built-in flows and their role prompts) are documentation too, and they are the copy the operator actually reads after `install`. They are routinely forgotten because they live under `src/`. For any change below, ask whether the matching packaged file also drifted and update it in the same change.
    - **CLI** (new/changed command or flag) → [README.md](../../../README.md), [docs/operations.md](../../../docs/operations.md), [docs/cookbook.md](../../../docs/cookbook.md), and the **Entry points** section of [docs/glossary.md](../../../docs/glossary.md) (add/remove/rename the term there too).
