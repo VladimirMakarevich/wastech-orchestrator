@@ -33,9 +33,10 @@ Use the platform-appropriate user-state/data API rather than hardcoded `~/.local
 - Add an explicit config field for the absolute private-runtime override and bump/upgrade the configuration schema; update both packaged and repository example configs.
 - Define the platform default and repository identity/hash behavior for Windows, macOS, and Linux/WSL.
 - Migrate runtime consumers: state DB, task logs/audit, memory, `.env`, security reports, rejected files, HITL, supervisor files, PID/sentinel/children records, and provider-attempt state.
+- Classify the install-created `.worc/workspace/` directory, which no code writes today: remove it from `WORC_RUNTIME_DIRS` or migrate it with the private state — do not leave an unclassified in-repo runtime path.
 - Keep flows, roles, tools, guide, and `config.yaml` under `control_home`; WRI-010 keeps the live control plane provider-denied and supplies frozen private execution inputs even after `private_home` moves.
 - Preserve `.worc/` ignore/exclude handling because the control plane remains in the repo. Add/retain the separate `.worc-io/` ignore and scoped-staging protection.
-- Update install, upgrade, preflight, recovery, cleanup, watch/down, status, diagnostics, and config-env-file discovery in the same implementation.
+- Update install, upgrade, preflight, recovery, cleanup, watch/down, status, diagnostics, and config-env-file discovery in the same implementation. Update every tool that documents or reads the in-repo private layout in the same change, including the repository's own `.claude/skills/analyze-task-run` skill and the operator guide.
 - Define greenfield adoption clearly: no production DB migration is promised, but install/upgrade must detect an old in-repo private-state layout and refuse ambiguous split-brain use with an actionable message.
 
 ## Acceptance criteria
@@ -72,6 +73,7 @@ Use the platform-appropriate user-state/data API rather than hardcoded `~/.local
 - src/wastech_orchestrator/config/
 - src/wastech_orchestrator/providers/artifacts.py
 - src/wastech_orchestrator/core/recovery.py and orchestrator.py
-- src/wastech_orchestrator/runtime/
-- tests/config/, tests/core/, tests/runtime/, tests/providers/
+- src/wastech_orchestrator/process_control.py and src/wastech_orchestrator/memory/
+- .claude/skills/analyze-task-run/
+- tests/config/, tests/core/, tests/providers/
 - docs/operations.md, docs/configuration.md, docs/how-to.md, and packaged guide

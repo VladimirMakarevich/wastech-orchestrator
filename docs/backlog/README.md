@@ -21,6 +21,7 @@ Where to find the design detail:
 | [runtime_provider_capacity_gate.md](archive/runtime_provider_capacity_gate.md) | Detailed backlog task for checking Codex and Claude capacity before autonomous `watch` admits a pending task. |
 | [archive/concurrent-task-worktrees.md](archive/concurrent-task-worktrees.md) | Decision record for processing tasks in parallel via `git worktree`: chosen as the v2 concurrency primitive (not for isolation), gated on a mandatory provider capacity gate. |
 | [archive/token_optimization.md](archive/token_optimization.md) | Detailed backlog task for measuring and reducing token usage. |
+| [archive/codex-controlled-provider-home.md](archive/codex-controlled-provider-home.md) | Deferred hardening split out of the read-isolation cluster (WRI-003, review decision F7): run autonomous Codex from an orchestrator-controlled `CODEX_HOME` (auth/session/config by construction) instead of layer-isolating the operator home; requires an explicit one-time operator `codex login` contract. |
 
 ## Completed backlog
 

@@ -48,6 +48,7 @@ The operator may deliberately modify the live control plane between tasks. Such 
 - Moving the editable operator control plane out of the repository.
 - Allowing an autonomous task to edit its own active orchestrator configuration.
 - General signing or distribution of operator tools.
+- Provider read access to `.worc/guide/`: the control-plane deny also covers the packaged guide, so an orchestrator-run task that needs guide content must receive it as ordinary frozen task inputs; interactive (operator-session) authoring keeps using the live guide and is unaffected.
 
 ## Likely implementation areas
 

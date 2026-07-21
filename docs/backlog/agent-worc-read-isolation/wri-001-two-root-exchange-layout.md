@@ -40,9 +40,10 @@ The task/skill source files remain in the repository but are not live provider i
 - Keep the full durable HITL JSON private and create a separate redacted packet containing only the answer/approval needed by the rerun.
 - Preserve authoritative private check logs and copy the redacted first quality-failure log into the exchange; set `NodeInputs.checks_path` before returning the checks `fail` outcome.
 - Preserve private audit evidence for tool/agent/evaluator outputs either in existing provider/state artifacts or an explicit private copy; the split must not silently reduce the current audit record.
+- Migrate the packaged `security_audit` report node off its agent-written `.worc/security-reports/` contract: the node returns the report as structured output and the orchestrator writes `report.md` privately through the standard slot/postprocess capture. `output_policy` report directories stay private, the role prompt loses its write instruction, and no agent-writable path remains in either root.
 - Gitignore `.worc-io/` in both the tracked install-managed ignore block and clone-local `.git/info/exclude`, with a dedicated `git check-ignore` probe target.
 - Classify `.worc-io/` as a runtime artifact everywhere Git paths are filtered, but do not treat ignore/filtering as sufficient commit protection; WRI-009 owns index mutation detection and full staged-set validation.
-- Define fresh/restart/continue behavior: fresh and restart start with a clean exchange after archiving the prior attempt; continue uses the active/restored exchange and never resolves stale files from another attempt.
+- Define fresh/restart/continue behavior: fresh and restart start with a clean exchange after archiving the prior attempt; continue uses the active/restored exchange and never resolves stale files from another attempt. In CLI terms: fresh/restart is `rerun` (including its restart-in-place branch for pre-checkpoint tasks on operator-owned branches), continue is `rerun --continue`; the daemon `restart` command is unrelated.
 - Add a pre-launch invariant that the active exchange root contains at most the current task directory. Terminal sealing/restoration is implemented by WRI-007.
 - Update all operator and shipped documentation.
 
@@ -66,10 +67,11 @@ If a source cannot be made safe, it stays private and the task must define a dif
 - [ ] `human_input_path` points to an answer-only exchange packet and the private Telegram/durable handle is not provider-readable.
 - [ ] A live checks failure sets `{checks_path}` before the fixing node runs; restart produces the same path semantics.
 - [ ] `enriched_spec`, publish/supervisor summaries, checker JSON, and all private audit/attempt files remain private.
+- [ ] The `security_audit` report is produced through orchestrator-captured structured output; no packaged flow or role prompt instructs an agent to write outside the repository workspace.
 - [ ] Every exchange file passes seeded-secret redaction tests and is written atomically.
 - [ ] Latest-run fan-in selects the newest run containing the requested file and never crosses task/attempt boundaries.
 - [ ] The exchange is ignored by Git, cannot be staged by code or audit commits, and has its own ignore probe.
-- [ ] WRI-009 integration proves a force-added exchange file cannot survive to any orchestrator commit.
+- [ ] WRI-009 integration proves a force-added exchange file cannot survive to any orchestrator commit (cluster exit criterion — verified when WRI-009 lands, not a gate for closing this task).
 - [ ] A pre-existing symlink/junction/reparse point in any exchange path fails closed before a provider launch.
 - [ ] Hard-linked/special files, case-fold collisions, unexpected paths, and NTFS alternate data streams fail closed before launch; a clean exchange manifest covers file type, link identity/count, relative name, size, and content digest.
 - [ ] The implementation is node-id/topic agnostic and covers every packaged flow plus a custom-flow fixture.
@@ -103,4 +105,5 @@ If a source cannot be made safe, it stays private and the task must define a dif
 - src/wastech_orchestrator/core/decomposition.py and core/orchestrator.py recovery/handoff paths
 - src/wastech_orchestrator/check_runner.py and git_manager.py
 - src/wastech_orchestrator/composition.py and cli.py
+- src/wastech_orchestrator/core/flow/output_policy.py and packaged/flows/security_audit/ (report-node migration)
 - tests/, docs/, .agents/rules/, and src/wastech_orchestrator/packaged/

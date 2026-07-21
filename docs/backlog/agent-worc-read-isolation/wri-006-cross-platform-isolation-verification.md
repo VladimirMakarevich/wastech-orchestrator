@@ -21,7 +21,7 @@ Windows, macOS, and Linux all run deterministic isolation coverage in CI. A sepa
 
 When a compatible Codex CLI is installed, use `codex sandbox` (or its supported no-model equivalent), never `codex exec`, to test the exact generated profile:
 
-1. Record OS, architecture, Codex version, native Windows sandbox mode, controlled-home identity, and generated-profile/rules digests.
+1. Record OS, architecture, Codex version, the native Windows sandbox mode surface actually exposed by the CLI (re-verify on a Windows host: 0.144.4 marks the older elevated/experimental Windows sandbox feature flags removed), the resolved `CODEX_HOME` identity, and generated-profile/rules digests.
 2. Confirm a direct read of the private fixture is denied.
 3. Confirm a shell/interpreter-mediated read of the same fixture is denied.
 4. Confirm repository and exchange reads are allowed.
@@ -57,7 +57,7 @@ The smoke is a capability probe, not an exact-version gate. If the profile surfa
 
 - [ ] The CI workflow has required Windows, macOS, and Linux isolation jobs.
 - [ ] All deterministic tests run without provider credentials or real model calls; any separate authenticated Claude host lane is isolated, minimal, and clearly identified.
-- [ ] Codex host smokes combine no-model sandbox execution with effective config/rules/tool-surface inspection and distinguish `unsupported`, `policy failed`, and `passed` without silently downgrading strict isolation.
+- [ ] Codex host smokes combine no-model sandbox execution with effective config/rules/tool-surface inspection and distinguish `unsupported`, `policy failed`, and `passed` without silently downgrading strict isolation; `unsupported` maps to the pre-model `CAPABILITY_UNAVAILABLE` classification and `policy failed` to the non-fallback security result.
 - [ ] Native Windows tests the supported Codex sandbox rather than expecting a preflight failure merely because of the OS.
 - [ ] Claude evidence distinguishes built-in tool policy from Bash OS enforcement. Supported-host enforcement is exercised on a real sandbox; native Windows proves strict no-Bash behavior.
 - [ ] Fake-CLI, generated-policy, and real-host evidence are labeled separately in test/docs output.

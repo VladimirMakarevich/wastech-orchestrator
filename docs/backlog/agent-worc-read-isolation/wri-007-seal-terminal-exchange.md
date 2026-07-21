@@ -10,7 +10,7 @@ The required invariant is stronger: immediately before any provider launch, `.wo
 
 ## Required outcome
 
-After WRI-012 proves the provider process containment empty, every terminal status (`DONE`, `FAILED`, `MANUAL_ACTION_REQUIRED`) seals a checksum-verified snapshot of the current exchange into that task's private audit and removes the active in-repo directory. `rerun --continue` from such a terminal resumable state may restore and verify the latest sealed snapshot before resuming. A stopped/crashed/parked nonterminal task keeps its same-task active exchange and verifies it on continue. Fresh/restart creates a clean exchange. There is no configuration option that retains an agent-readable terminal exchange.
+After WRI-012 proves the provider process containment empty, every terminal status (`DONE`, `FAILED`, `MANUAL_ACTION_REQUIRED`) seals a checksum-verified snapshot of the current exchange into that task's private audit and removes the active in-repo directory. `rerun --continue` from such a terminal resumable state may restore and verify the latest sealed snapshot before resuming. A stopped/crashed/parked nonterminal task keeps its same-task active exchange and verifies it on continue. Fresh/restart creates a clean exchange. In CLI terms: fresh/restart is `rerun` (including its restart-in-place branch for pre-checkpoint tasks), continue is `rerun --continue`; the daemon `restart` command is unrelated to this lifecycle. There is no configuration option that retains an agent-readable terminal exchange.
 
 ## In scope
 
@@ -18,7 +18,7 @@ After WRI-012 proves the provider process containment empty, every terminal stat
 - Hook sealing into every terminal producer, including normal pipeline completion and out-of-band finalize/status paths. Centralize at a terminal transition seam where possible; otherwise enumerate and test all producers.
 - Store snapshots under the private task audit with a manifest containing task id, run/attempt identity, source layout version, relative file names, sizes, and cryptographic checksums. Never archive symlink/junction/reparse targets.
 - If WRI-002 reports agent-side exchange mutation, move the tree to a clearly contaminated evidence location and record the parent-held expected manifest plus observed manifest. Never label or restore that tree as a clean sealed snapshot; if no independent clean seal exists, continue is refused and fresh/restart is required.
-- Seal all terminal outcomes. Debugging uses the private snapshot and raw audit, not an in-repo retention escape.
+- Seal all terminal outcomes. Debugging uses the private snapshot and raw audit, not an in-repo retention escape. Update the operator debugging guidance and every tool that reads terminal-task artifacts in the same change — `worc logs`/status docs and the repository's own `.claude/skills/analyze-task-run` skill must point at the sealed/private locations.
 - Restore a sealed snapshot only for an authorized `rerun --continue`/HITL continuation of the same terminal resumable task. For a nonterminal parked/crashed task, verify/reuse the already-active same-task exchange instead of overwriting it from an older seal. A fresh/restart rerun archives old private state per existing semantics and starts empty.
 - Preserve run-number fan-in and the exact exchange layout. Restoration must not shadow newer private/checkpoint state.
 - Before every provider launch, reject a missing expected current exchange, multiple task directories, a mismatched task id, an unverified restore, or any stale terminal exchange. Never silently clean unknown data and continue.
@@ -66,4 +66,4 @@ After WRI-012 proves the provider process containment empty, every terminal stat
 - src/wastech_orchestrator/providers/artifacts.py
 - src/wastech_orchestrator/core/recovery.py
 - tests/core/ and tests/providers/
-- docs/operations.md and packaged guide
+- docs/operations.md, packaged guide, and .claude/skills/analyze-task-run/

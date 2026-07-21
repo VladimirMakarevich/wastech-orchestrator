@@ -35,7 +35,7 @@ The sequence is refinement → planning → implementation → checks fail → f
 | Durable HITL record and transport handle | Recovery/transport state | Private |
 | State DB, flows/tools, `.env`, memory store, process control | Orchestrator control/runtime | Private/control |
 
-Every exchange write passes through one symlink-safe, atomic redaction publisher. A file is not exchange-eligible merely because it currently lives in the task log directory.
+Every exchange write passes through one symlink-safe, atomic redaction publisher. A file is not exchange-eligible merely because it currently lives in the task log directory. Agent-written files exist in neither root: the one legacy contract that had the agent write into `.worc` (the `security_audit` report node) migrates to the same orchestrator-captured structured output as every other slot.
 
 ## Before and active-run layout
 
@@ -125,7 +125,7 @@ The adapter creates one private, attempt-scoped settings policy and closes the o
 1. Deny built-in `Read` for the private-home root and internal secret sources, including dotfiles.
 2. Deny built-in `Write`/`Edit` for the exchange and resolved Git control directories while keeping exchange reads available.
 3. On macOS/Linux/WSL2 enable Claude's Bash sandbox with `failIfUnavailable`, private `denyRead`, exchange/Git `denyWrite`, request-derived network rules, no exclusions, and no unsandboxed-command escape.
-4. On native Windows omit Bash from strict workspace-write because the current Claude sandbox does not support that host; use Edit/Write-only operation or provider fallback, never silent unsandboxed execution.
+4. On native Windows omit Bash from strict workspace-write because the current Claude sandbox does not support that host; use Edit/Write-only operation, or route to another provider through the pre-model `CAPABILITY_UNAVAILABLE` infrastructure classification — never silent unsandboxed execution.
 5. Disable user/project/local customizations and MCP, and disable or inventory settings, hooks, plugins, agents, skills, Chrome/IDE/remote-control, and managed-policy surfaces before launch.
 6. Reject `extra_args` that replace or extend the owned tools/settings/permission/workspace/session authority.
 
@@ -145,7 +145,7 @@ codex exec --sandbox workspace-write \
 That shape must be replaced, not extended. Permission profiles do not compose with legacy `--sandbox`/`sandbox_mode`; any loaded legacy setting makes Codex use the old policy instead. The new adapter therefore:
 
 1. Generates an attempt-scoped profile with `:minimal`, `:workspace_roots`, exact private/exchange rules, configured denies, and the resolved network grant.
-2. Uses a private, orchestrator-controlled Codex home for auth/session state and generated `denied_commands` execpolicy; it does not silently copy credentials.
+2. Keeps authentication and session state in the operator's `CODEX_HOME` (credentials stay outside the orchestrator) while denying sandboxed commands read access to that home; generated `denied_commands` execpolicy is supplied through an orchestrator-owned rules layer, and operator-home rule/hook layers that could authorize a bypass fail the strict preflight. A dedicated orchestrator-controlled Codex home is deferred ([archived task](../archive/codex-controlled-provider-home.md)).
 3. Selects the profile with `default_permissions`, uses `--ignore-user-config` when supported, forces the project `.codex` layer to `untrusted`, disables live project-doc discovery, and injects the frozen repository instruction manifest.
 4. Disables hooks and custom subagents and disables or positively inventories MCP/apps/plugins/computer-use surfaces.
 5. Passes neither `--sandbox` nor `sandbox_workspace_write.*` and rejects authority-bearing `extra_args`.
@@ -165,7 +165,7 @@ The filesystem policy is:
 | Source task/lifecycle path | Read           | Read                 |
 | Configured sensitive paths | Deny           | Deny                 |
 
-More-specific exchange `read` overrides the broader workspace `write`; `deny` wins on the private paths. Exact native paths are emitted on each host. Unbounded deny globs are bounded or rejected where Codex needs pre-expansion.
+More-specific exchange `read` overrides the broader workspace `write`; `deny` wins on the private paths. Exact native paths are emitted on each host. Unbounded deny globs are bounded or rejected where Codex needs pre-expansion. The "Source task/lifecycle path" rows cover the entire `tasks/` lifecycle tree: providers may read it, but writes anywhere in it are denied, so a node can neither corrupt lifecycle bookkeeping nor inject new task files for the daemon to pick up. Workspace-write Codex nodes also keep the existing hard rule: no network grant — network is resolvable only for read-only Codex nodes.
 
 Current Codex supports permission profiles on macOS, Linux, WSL, and native Windows. The orchestrator does not generate Seatbelt/Landlock/ACL policy and does not automatically fail Windows. It records capability evidence and fails strict isolation if either the requested effective policy or the minimized Codex tool/config surface cannot be demonstrated on that host/CLI.
 
@@ -179,7 +179,7 @@ After any terminal outcome, not only success:
 4. Remove the active `.worc-io/add-http-retry` directory.
 5. Refuse the next provider launch if any subtree is unproven or any stale/foreign active exchange remains.
 
-`rerun --continue` from a terminal resumable status restores only the same task's verified latest snapshot. A parked/crashed nonterminal task verifies and reuses its already-active same-task exchange. Fresh/restart starts clean. A retention toggle cannot expose an old terminal task to a new agent.
+`rerun --continue` from a terminal resumable status restores only the same task's verified latest snapshot. A parked/crashed nonterminal task verifies and reuses its already-active same-task exchange. Fresh/restart-in-place (`rerun`) starts clean; the daemon `restart` command is unrelated to this lifecycle. A retention toggle cannot expose an old terminal task to a new agent.
 
 An exchange already flagged as Claude-mutated does not follow the clean-seal branch: it is quarantined with expected/observed manifests as contaminated evidence and is never eligible for restore.
 
