@@ -304,7 +304,7 @@ worc top --log-file ./logs/daemon.jsonl          # live monitor; q (then Enter) 
 
 ```bash
 pip install wastech-orchestrator[shell]
-worc shell                                       # attach-or-idle; up / enqueue / promote / ps / down / quit
+worc shell                                       # attach-or-idle; up / enqueue / promote / ps / clear / down / quit
 ```
 
 ## 7. Choose Which Provider Runs a Node

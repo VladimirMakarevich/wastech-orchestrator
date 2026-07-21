@@ -67,6 +67,21 @@ def test_dispatch_unknown_command(make_git_config: _ConfigFactory, tmp_path: Pat
     assert "unknown command" in _out(ctx)
 
 
+def test_clear_forwards_to_the_cli_verb(make_git_config: _ConfigFactory, tmp_path: Path) -> None:
+    # `clear` is forwarded like status/tasks — the screen-wipe lives once in cmd_clear.
+    calls: list[list[str]] = []
+    ctx = _ctx(make_git_config(tmp_path / "clone"), run_cli=lambda argv: calls.append(argv) or 0)
+    result = cli_shell.dispatch("clear", ctx)
+    assert result.quit is False
+    assert calls == [["--config", "/cfg.yaml", "clear"]]
+
+
+def test_clear_listed_in_help(make_git_config: _ConfigFactory, tmp_path: Path) -> None:
+    ctx = _ctx(make_git_config(tmp_path / "clone"))
+    cli_shell.dispatch("help", ctx)
+    assert "clear" in _out(ctx)
+
+
 def test_enqueue_copies_file_into_pending(make_git_config: _ConfigFactory, tmp_path: Path) -> None:
     config = make_git_config(tmp_path / "clone")
     ctx = _ctx(config)

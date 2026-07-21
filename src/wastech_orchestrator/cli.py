@@ -422,6 +422,8 @@ def build_parser() -> argparse.ArgumentParser:
         help="daemon log file to spawn-with and tail (default: .worc/logs/daemon.log)",
     )
 
+    sub.add_parser("clear", help="clear the terminal screen (and scrollback); no files are deleted")
+
     list_cmd = sub.add_parser(
         "list", help="enumerate the active / pending / recent tasks (read-only)"
     )
@@ -3259,6 +3261,11 @@ def build_top_snapshot(
 _TOP_DEFAULT_POLL_SECONDS = 2.0
 _TOP_LOG_TAIL_LINES = 12
 
+# ANSI for `clear`: cursor home + clear screen + clear scrollback — wipes the visible console and
+# its history. The trailing scrollback wipe is what sets it apart from the top loop's per-frame
+# clear (which must keep scrollback). The shell's `clear` verb forwards to `worc clear` (cmd_clear).
+_CLEAR_SCREEN = "\x1b[H\x1b[2J\x1b[3J"
+
 
 def render_top(snapshot: TopSnapshot) -> str:
     """Render one read-only monitor frame as plain text (pure; golden-tested).
@@ -3409,6 +3416,15 @@ def cmd_top(args: argparse.Namespace) -> int:
         )
     except KeyboardInterrupt:
         return 0
+
+
+def cmd_clear(args: argparse.Namespace) -> int:
+    """Clear the terminal screen (and scrollback). A visual wipe only — no logs or files are removed
+    (``logs clean`` deletes on-disk logs). The shell's ``clear`` verb forwards here.
+    """
+    sys.stdout.write(_CLEAR_SCREEN)
+    sys.stdout.flush()
+    return 0
 
 
 def cmd_shell(args: argparse.Namespace) -> int:
@@ -3883,6 +3899,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_top(args)
         if args.command == "shell":
             return cmd_shell(args)
+        if args.command == "clear":
+            return cmd_clear(args)
         if args.command == "list":
             return cmd_list(args)
         if args.command == "completion":
