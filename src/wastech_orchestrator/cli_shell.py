@@ -56,6 +56,7 @@ commands:
   status [<id>]               persisted status of the active/latest task (or <id>)
   tasks                       list every known task (read-only)
   logs [<id>]                 tail the active/<id> agent stdout.log
+  clear                       clear the console screen (and scrollback); logs on disk are untouched
   prs                         list orchestrator PRs awaiting merge
   merge-task <id>             merge a reviewed PR (refuses while the daemon is up)
   finalize ... | rerun ...    one-shot lifecycle verbs (refuse while the daemon is up)
@@ -67,7 +68,7 @@ commands:
 """
 
 # Verbs forwarded verbatim to the existing CLI dispatch; their own slot/daemon guards apply.
-_FORWARD_VERBS = frozenset({"status", "tasks", "prs", "merge-task", "finalize", "list"})
+_FORWARD_VERBS = frozenset({"status", "tasks", "prs", "merge-task", "finalize", "list", "clear"})
 
 
 @dataclass
