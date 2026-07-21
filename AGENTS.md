@@ -1,41 +1,52 @@
-# AGENTS.md — instructions for Codex CLI in this repository
+# AGENTS.md — instructions for coding agents in this repository
 
-You are working on **wastech-orchestrator** — an orchestrator that launches coding agents (Codex / Claude Code) to carry out development tasks and publish the result to Git.
+You are working on **wastech-orchestrator** — an orchestrator that launches coding agents (Claude Code / Codex) to carry out development — or any other — tasks and (optionally) publish the result to Git.
 
-This file is for Codex. The full set of rules matches [CLAUDE.md](CLAUDE.md) and [.agents/rules/](.agents/rules/); below is the gist.
+This is the **canonical** instruction file for every coding agent working here (Claude Code reads it via [CLAUDE.md](CLAUDE.md)). The full set of rules lives in **[.agents/rules/](.agents/rules/)**; the design rationale is in [docs/worc_architecture.md](docs/worc_architecture.md). Below is the gist — the rules and the code are the source of truth.
 
 ## Before writing code
 
-1. Read the [docs/worc_architecture.md](docs/worc_architecture.md) gives the design rationale).
-2. Follow the rules in **[.agents/rules/](.agents/rules/)**: `architecture.md`, `coding-style.md`, `security.md`, `git-workflow.md`, `testing.md`.
+1. Read [docs/worc_architecture.md](docs/worc_architecture.md) for the design rationale.
+2. Check against the rules in **[.agents/rules/](.agents/rules/)** — they are mandatory:
+   - [architecture.md](.agents/rules/architecture.md) — invariants that must not be violated
+   - [coding-style.md](.agents/rules/coding-style.md) — Python style
+   - [security.md](.agents/rules/security.md) — security policy
+   - [git-workflow.md](.agents/rules/git-workflow.md) — branches, commits, PRs
+   - [testing.md](.agents/rules/testing.md) — what to test and how
 
 ## Hard invariants (must not be violated)
 
-- **The core does not know the CLI syntax.** Provider-specific logic lives only in `src/wastech_orchestrator/providers/`. The core only ever calls `AgentProvider`.
-- **Only the orchestrator does commit / push / PR**, not the provider.
-- **Fallback is only for infrastructure errors** of the provider. Test/review errors → the `fixing` stage.
-- **The security policy cannot be weakened** through a task or `extra_args`; no flags that bypass sandbox/approvals.
-- **Secrets** do not end up in logs, SQLite, or artifacts. Processes get only allowlisted env.
-- **Call the CLI with an argument list**, without shell interpolation of user strings.
+- **The core does not know the CLI syntax.** All provider-specific logic lives only in `src/wastech_orchestrator/providers/`. The core only ever calls the `AgentProvider` interface — it never builds provider-specific commands.
+- **Only the orchestrator does commit / push / PR**, not the agent provider. Providers do not perform fallback and do not change the state machine.
+- **Fallback is only for infrastructure error classes** of the provider. Failed tests/linters, review findings, incomplete fulfillment, Git errors, an invalid task/config, or a security violation are never fallback — they route to `fixing` / `failed` / `manual_action_required`.
+- **The security envelope cannot be weakened** through a task, `extra_args`, or a flow node. Flags that disable approvals/sandbox/hook-trust wholesale (`--dangerously*`, `--yolo`, Claude `--dangerously-skip-permissions`) are absolutely forbidden by the config validator.
+- **No secrets** in logs, in SQLite, or in artifacts. Pass only allowlisted env variables to processes.
+- **Launch the CLI without shell interpolation** of user strings (an argument list, not a string). Task content reaches providers only as file paths, never as CLI argv.
+- **Cross-platform (Windows / Linux / macOS) is mandatory** for every feature — design and test for all three as you build (see [coding-style.md](.agents/rules/coding-style.md)). In short: `pathlib` + `Path.as_posix()` for any stored/compared/displayed path string; `newline=""` (or bytes) for committed/templated files; no `os.kill`/`signal` assumptions for cross-process control on Windows (use a sentinel file / the self-managed PID file); branch platform differences explicitly and test both.
 
-## Canonical names
-
-- Providers: `codex`, `claude`.
-- Stages: `refinement`, `planning`, `implementation`, `testing`, `review`, `fixing`, `summary`, `publishing`.
-- Default task branch: `repo.branch_prefix/<task-id>-<slug>` (`worc/...` by default); task `branch_name` may override the full branch name after validation.
-
-## Check commands
+## Commands
 
 ```bash
-pip install -e ".[dev]"
-pre-commit install      # local gate; + `pre-commit install --hook-type pre-push`
-ruff check .
-ruff format --check .   # CI runs this; use `ruff format .` to fix
-mypy src
-lint-imports            # architectural import contracts (.importlinter)
-pytest
-# further CI gates: interrogate src · vulture · deptry src
+pip install -e ".[dev]"   # install
+pre-commit install        # local gate; + `pre-commit install --hook-type pre-push`
+ruff check .              # lint (+ Phase-2 complexity/size ratchets)
+ruff format --check .     # formatting (CI runs this — `ruff format .` to fix)
+mypy src                  # types
+lint-imports              # architectural import-boundary contracts (.importlinter)
+pytest                    # tests
 ```
+
+CI also runs `interrogate src` (docstring coverage), `vulture` (dead code), and `deptry src` (dependency hygiene). There is a skill for running all checks: `/run-checks`.
+
+## Working style
+
+- Make minimal, focused changes; follow the style of the surrounding code.
+- When adding/changing behavior — add or update tests (see [testing.md](.agents/rules/testing.md)).
+- **Ignore any `.md` file that lives under a gitignored path** (e.g. `.archive/`) when researching, citing, or treating something as current project documentation — verify with `git ls-files`/`git check-ignore -v` before citing a doc as authoritative. Such files may still exist on disk (readable by file-search tools regardless of git status) but are not part of the tracked, current source of truth; a doc getting gitignored/removed from tracking is itself a signal it was deliberately retired. See [git-workflow.md](.agents/rules/git-workflow.md). Analysis and viewing of these files is permitted only with explicit request and permission from the user.
+- When you change behavior/CLI/config/architecture — update the affected docs **in the same change** (use `/sync-docs`). **Doc-sync includes the shipped, operator-facing docs under `src/wastech_orchestrator/packaged/`** — the `guide/` quickstarts, `config.example.yaml`, and the built-in flows / role prompts — not just `docs/`; these live under `src/` and are the copy the operator reads after `install`, so they are the most-often-forgotten half of a doc change.
+- **Markdown docs are not hard-wrapped.** Write prose as one paragraph per line (rely on editor soft-wrap); never insert manual mid-paragraph line breaks. Formatting is enforced by Prettier (`proseWrap: never`, `.prettierrc.json`) — run `npx prettier@3 --write "**/*.md"` after editing docs. `logs/`, `tasks/`, `src/`, and `packaged/guide/` are excluded (`.prettierignore`); don't reformat them.
+- Before committing, run `ruff check .`, `ruff format --check .`, `mypy src`, `pytest` (CI enforces `ruff format --check`).
+- Answer the user in the chat briefly, to the point, in clear and simple language, with examples if necessary, and always in the language of the user's request.
 
 ## Definition of Done for a change
 

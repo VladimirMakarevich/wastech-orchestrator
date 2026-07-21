@@ -4,7 +4,15 @@
 
 ## Problem
 
-The `.worc` home is a hardcoded literal duplicated across the codebase — `WORC_HOME` in `cli.py` and `_WORC_HOME` in `core/orchestrator.py` (already tracked as tech debt in [follow_ups.md](follow_ups.md)). Phase-2 relocation (WRI-005) needs a single, injectable private-home path; scattered literals make that unsafe.
+The `.worc` home is a hardcoded literal duplicated across the codebase. The two named constants — `WORC_HOME` in `cli.py` and `_WORC_HOME` in `core/orchestrator.py` — are already tracked as tech debt in [follow_ups.md](follow_ups.md), but they understate the problem: at least ~8 further sites hardcode the `.worc` string independently rather than referencing a constant. The load-bearing ones (each of which assumes `<repo>/.worc`):
+
+- `memory/paths.py` — `MemoryLayout.for_repo` builds `Path(repo_root) / ".worc"` itself (the memory store's home, wholly independent of both constants). **If WRI-005 relocates the home but misses this, the memory store stays inside the repo.**
+- `git_manager.py` — `RUNTIME_EXCLUDED_DIRS`, the `RUNTIME_GITIGNORE_LINES` `.worc/` line, and the `.worc/state.db` `check-ignore` probes (×2).
+- `core/flow/output_policy.py` — `_PRIVATE_REPORT_DIR = ".worc/security-reports"`.
+- `config/validation.py` — the `== ".worc"` / `startswith(".worc/")` guard.
+- `config/loader.py` and `install/config_writer.py` — the quarantine default `./.worc/tasks/rejected`.
+
+Phase-2 relocation (WRI-005) needs a single, injectable private-home path; these scattered literals make that unsafe.
 
 ## Required outcome
 
@@ -13,13 +21,13 @@ One source of truth for the private-home location, resolved through the composit
 ## In scope
 
 - Collapse the duplicated `.worc` literal into a single constant/config-resolved value.
-- Thread the private-home path through composition so no consumer assumes `<repo>/.worc`.
+- Thread the private-home path through composition so no consumer assumes `<repo>/.worc` — explicitly including `memory/paths.py`, `git_manager.py`, `output_policy.py`, `config/validation.py`, `config/loader.py`, and `install/config_writer.py`, not just the two named constants.
 - Leave the default path exactly as today (`<repo>/.worc/`).
 
 ## Acceptance criteria
 
 - [ ] A single source resolves the private-home path; the `WORC_HOME` / `_WORC_HOME` duplication is removed.
-- [ ] All consumers obtain the home through the seam; no new hardcoded `.worc` literal is introduced (guard with grep / an import-linter or unit check).
+- [ ] All consumers obtain the home through the seam — memory store, git-ignore/exclusions, security-reports dir, config validation/loader, and install quarantine included; no path-construction site still hardcodes `.worc` (guard with grep / an import-linter or unit check; docstrings and packaged assets excepted).
 - [ ] No functional change — the resolved default path is unchanged; the full suite is green.
 - [ ] The corresponding [follow_ups.md](follow_ups.md) entry is closed/updated.
 
