@@ -15,6 +15,9 @@
 - **[flows/reference.md](flows/reference.md)** — the **complete field reference** for flows: every flow-level and node-level field (including `output_policy`, `publishing`, `permission_ceiling`, `network_policy`), plus edges and validation.
 - **[flows/roles.md](flows/roles.md)** — author a flow's **role prompts**: the built-in evaluator roles, the per-node output contract, output slots, and the supervisor layer.
 - **[flows/prompt-variables.md](flows/prompt-variables.md)** — the `{name}` variable allowlist role prompts may reference.
+- **[skills/worc-flow/SKILL.md](skills/worc-flow/SKILL.md)** — a copy-ready skill that authors a new custom flow (graph, output kind, route) end-to-end.
+- **[skills/worc-flow-role/SKILL.md](skills/worc-flow-role/SKILL.md)** — a copy-ready skill that writes or revises a single node's role prompt without a new flow.
+- **[skills/worc-flow-tune/SKILL.md](skills/worc-flow-tune/SKILL.md)** — a copy-ready skill that tunes a flow's per-node provider/model/reasoning/budgets without changing the graph.
 
 ## What the orchestrator does with your task
 
