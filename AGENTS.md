@@ -54,5 +54,3 @@ CI also runs `interrogate src` (docstring coverage), `vulture` (dead code), and 
 - tests are added/updated when behavior changes;
 - docs are updated in the same change when behavior/CLI/config/architecture change (use `/sync-docs`), and deferred work is recorded in [docs/backlog/follow_ups.md](docs/backlog/follow_ups.md) — the Stop docs-sync gate enforces this;
 - the invariants above are not violated.
-
-@RTK.md
