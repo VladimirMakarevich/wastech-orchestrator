@@ -1,6 +1,6 @@
 # Supervisor P0: детерминированный SupervisorPacket → fresh finalize → пропуск tool/checks
 
-**Статус:** proposal **Приоритет:** P0 (самый крупный и самый безопасный резерв экономии в content-pipeline) **Источник:** [2026-07-16 варианты оптимизации supervisor](../analysis/2026-07-16-supervisor-token-optimization-options.md) (§7 SupervisorPacket, §8 P0, Варианты A/E/F). Смежные задачи: [normalized-usage-accounting.md](normalized-usage-accounting.md) (мерная подложка для A/B), [content-flow-token-hygiene.md](content-flow-token-hygiene.md).
+**Статус:** proposal **Приоритет:** P0 (самый крупный и самый безопасный резерв экономии в content-pipeline) **Источник:** [2026-07-16 варианты оптимизации supervisor](../../analysis/2026-07-16-supervisor-token-optimization-options.md) (§7 SupervisorPacket, §8 P0, Варианты A/E/F). Смежные задачи: [normalized-usage-accounting.md](normalized-usage-accounting.md) (мерная подложка для A/B), [content-flow-token-hygiene.md](content-flow-token-hygiene.md).
 
 **Дорожная карта:** **P0 (этот документ)** → [P1 — управляемый cadence](supervisor-observation-cadence-p1.md) → [P2 — разделение обязанностей и telemetry](supervisor-responsibility-split-p2.md).
 

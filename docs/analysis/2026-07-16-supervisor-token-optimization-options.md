@@ -3,7 +3,7 @@
 - **Основание:** прогон `blog-review-happy-in-my-misfortunes-4`
 - **Связанный отчёт:** [полный анализ токенов](2026-07-16-blog-review-happy-in-my-misfortunes-4-token-analysis.md)
 - **Зона изменений:** `SupervisorConfig`, constant supervisor layer, post-node hook, summary finalization
-- **Статус:** proposal, код и конфигурация пока не изменены. Этот документ — трекер отдельной задачи «оптимизация supervisor»; P0-срез оформлен как отдельный backlog-документ [supervisor-finalize-packet-and-cadence.md](../backlog/supervisor-finalize-packet-and-cadence.md) (packet → fresh finalize → пропуск tool/checks), а сопутствующая задача по нормализации usage вынесена в [normalized-usage-accounting.md](../backlog/normalized-usage-accounting.md).
+- **Статус:** proposal, код и конфигурация пока не изменены. Этот документ — трекер отдельной задачи «оптимизация supervisor»; P0-срез оформлен как отдельный backlog-документ [supervisor-finalize-packet-and-cadence.md](../backlog/token-optimization/supervisor-finalize-packet-and-cadence.md) (packet → fresh finalize → пропуск tool/checks), а сопутствующая задача по нормализации usage вынесена в [normalized-usage-accounting.md](../backlog/token-optimization/normalized-usage-accounting.md).
 
 ---
 
@@ -17,7 +17,7 @@
 - model/reasoning/provider supervisor **уже** конфигурируемы (`SupervisorConfig`, `packaged/config.example.yaml`), но cadence / `observation_mode` / раздельные observe-vs-finalize настройки — нет; их добавление (§8 P1) трогает ~5 точек: `config/schema.py`, `config/loader.py`, `config/validation.py`, `packaged/config.example.yaml` и условие в hook.
 - Механизм fresh-finalize из digest (Вариант E) уже реализован как recovery-путь `Supervisor._finalize_digest` — задача в том, чтобы сделать его основным.
 
-CODEX WARNING остаётся в силе: для Codex-supervisor resume кумулятивен, поэтому точный token-budget (Вариант I) требует нормализованного usage из [normalized-usage-accounting.md](../backlog/normalized-usage-accounting.md) как предпосылки.
+CODEX WARNING остаётся в силе: для Codex-supervisor resume кумулятивен, поэтому точный token-budget (Вариант I) требует нормализованного usage из [normalized-usage-accounting.md](../backlog/token-optimization/normalized-usage-accounting.md) как предпосылки.
 
 CODEX WARNING: Важно заметить, что для Codex проблема еще более губительная, так как там при resume команде заново передается весь предыдущий контектс, из за чего потребление увеличивается по экспоненте!
 

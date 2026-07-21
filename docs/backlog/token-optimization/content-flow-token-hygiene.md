@@ -1,6 +1,6 @@
 # Content-flow token hygiene (session-scope cost docs + packaged content-flow defaults)
 
-**Status:** implemented 2026-07-16 **Priority:** P1 **Source:** [2026-07-16 token analysis](../analysis/2026-07-16-blog-review-happy-in-my-misfortunes-4-token-analysis.md) (F2 doc-follow-up, F3, F5)
+**Status:** implemented 2026-07-16 **Priority:** P1 **Source:** [2026-07-16 token analysis](../../analysis/2026-07-16-blog-review-happy-in-my-misfortunes-4-token-analysis.md) (F2 doc-follow-up, F3, F5)
 
 Two small, low-risk changes that reduce raw token growth on content flows without touching the engine. Both are safe to ship independently.
 

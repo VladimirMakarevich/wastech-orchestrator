@@ -1,6 +1,6 @@
 # Normalized token-usage accounting (provider-aware, persisted per attempt)
 
-**Status:** implemented 2026-07-16 **Priority:** P0 (measurement substrate — blocks any token A/B) **Source:** [2026-07-16 token analysis](../analysis/2026-07-16-blog-review-happy-in-my-misfortunes-4-token-analysis.md) (F1 / P0), realizes Phase 0 of [archive/token_optimization.md](archive/token_optimization.md)
+**Status:** implemented 2026-07-16 **Priority:** P0 (measurement substrate — blocks any token A/B) **Source:** [2026-07-16 token analysis](../../analysis/2026-07-16-blog-review-happy-in-my-misfortunes-4-token-analysis.md) (F1 / P0), realizes Phase 0 of [archive/token_optimization.md](../archive/token_optimization.md)
 
 ## Problem
 
@@ -44,12 +44,12 @@ One provider-aware normalized usage record, persisted per attempt in SQLite alon
 
 ## Out of scope
 
-- Migration / backfill machinery — greenfield, nothing is deployed (see [greenfield-mvp-no-migration] memory / [architecture.md](../../.agents/rules/architecture.md)). Add the schema directly, no migration path.
+- Migration / backfill machinery — greenfield, nothing is deployed (see [greenfield-mvp-no-migration] memory / [architecture.md](../../../.agents/rules/architecture.md)). Add the schema directly, no migration path.
 - **Cost capture** (Claude `total_cost_usd`) — deferred to a follow-up (see Decisions); tokens only in this task.
 - **Read/report surface** (a `worc` token report or summary section) — separate follow-up; this task only persists.
 - Cross-provider dollar normalization by billing rate (Codex ran on subscription and records no cost) — raw totals are a within-provider rate-limit/relative signal only.
-- Deterministic artifact reduction (sink B) and RTK (sink A) — those are Phase 1/2 of [archive/token_optimization.md](archive/token_optimization.md), separate work.
-- Supervisor cadence — tracked separately (see [../analysis/2026-07-16-supervisor-token-optimization-options.md](../analysis/2026-07-16-supervisor-token-optimization-options.md)).
+- Deterministic artifact reduction (sink B) and RTK (sink A) — those are Phase 1/2 of [archive/token_optimization.md](../archive/token_optimization.md), separate work.
+- Supervisor cadence — tracked separately (see [../analysis/2026-07-16-supervisor-token-optimization-options.md](../../analysis/2026-07-16-supervisor-token-optimization-options.md)).
 
 ## Likely implementation areas
 

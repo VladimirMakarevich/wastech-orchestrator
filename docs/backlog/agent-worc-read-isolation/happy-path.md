@@ -1,249 +1,183 @@
-# Happy path — worked example (before / after)
+# Worked path — before and after the isolation change
 
-Companion to the [decision record](README.md). This traces **one** task run end to end under the two-root design so every concrete change is visible, and verifies that the agent still receives every input it needs while the private home becomes unreachable. All paths, node ids and file names below are concrete.
+Companion to the [decision record](README.md). This example follows one task through a recoverable checks failure, a fix, accepted review, documentation, publish, and terminal sealing. It is a successful end-to-end path while exercising the live `{checks_path}` contract that the current implementation misses.
 
-## Example setup
+## Example
 
-| Thing | Value |
-| --- | --- |
-| Repo working tree (agent `cwd`) | `/work/app` |
-| Task id | `add-http-retry` |
-| Task branch | `worc/add-http-retry` |
-| Task file (tracked, outside both homes) | `/work/app/tasks/add-http-retry.md` |
-| Flow | packaged `implementation`: refinement → planning → implementation → testing → review → documentation → publish (fix loops through `fixing`) |
-| `implementation` provider | `codex` (`workspace-write`) |
-| `review` provider | `claude` (read-only profile) |
-| **`private_home`** (today) | `/work/app/.worc/` |
-| **`exchange_root`** (new) | `/work/app/.worc-io/add-http-retry/` (layout note: if the artifact-dir builders are reused, this becomes `.worc-io/logs/add-http-retry/`; WRI-001 must reconcile) |
+| Item                                | Value                               |
+| ----------------------------------- | ----------------------------------- |
+| Repository and provider `cwd`       | `/work/app`                         |
+| Task                                | `add-http-retry`                    |
+| Task file                           | `/work/app/tasks/add-http-retry.md` |
+| Flow                                | packaged `implementation`           |
+| Editing provider                    | Codex, `workspace-write`, offline   |
+| Review provider                     | Claude, `read-only`                 |
+| Control/private home before WRI-005 | `/work/app/.worc`                   |
+| Exchange                            | `/work/app/.worc-io/add-http-retry` |
 
-Happy path = no rework: `review` **accepts**, so `fixing` is skipped; `documentation` then runs (an ordinary workspace-write agent that resumes the implementation lineage and updates the target project's docs — its edits join the same diff), and `publish` commits/PRs.
+The sequence is refinement → planning → implementation → checks fail → fixing → checks pass → review accepts → documentation → publish → `DONE`. The exact node ids remain flow-owned; exchange routing is based on typed artifact roles, not these example names.
 
-## The node sequence and where each output goes
+## What crosses the boundary
 
-| Node | Reads (path variables) | Produces | Agent-facing copy → `exchange` | Audit/secret copy → `private_home` |
-| --- | --- | --- | --- | --- |
-| refinement | `{task_path}` | `task.enriched.md` (audit-only slot, no variable) | — | `task.enriched.md` |
-| planning | `{task_path}` | `plan.md` (`output_artifact: plan`, task root) | `plan.md` | rendered prompt + raw provider I/O |
-| implementation | `{task_path}`, `{plan_path}`, `{memory_path}` | edits + `implementation.out.md` (run dir) + `current.diff` (task root) | `implementation.out.md`, `current.diff` | rendered prompt + raw provider I/O |
-| testing / checks | `{diff_path}` | checks report (task root) | `checks/…` report | check logs, raw I/O |
-| review | `{task_path}`, `{plan_path}`, `{diff_path}`, `{memory_path}` | `findings.json` + evaluator `summary.md` | `findings.json` (`{review_path}`) | evaluator `summary.md`, rendered prompt + raw provider I/O |
-| documentation | `{task_path}`, `{plan_path}`, `{diff_path}`, `{review_path}` | doc edits (join the diff) + `documentation.out.md` (run dir) | `documentation.out.md`, updated `current.diff` | rendered prompt + raw provider I/O |
-| publish | (orchestrator-only; no agent) | commit / push / PR from `summary.md` | — | `summary.md`, `summary.json` (PR body) |
-
-Rule of thumb: **only the artifacts a downstream node is pointed at by a `{…_path}` variable go to `exchange`; everything else — rendered prompts, prompt-audit, raw provider streams, the PR-body summary, and all the standing stores — stays in `private_home`.**
-
-```mermaid
-flowchart TD
-    REF["refinement"] --> PLAN["planning"] --> IMPL["implementation"] --> TEST["testing / checks"] --> REV["review"] --> DOC["documentation"] --> PUB["publish"]
-
-    PLAN -->|"plan.md"| EX
-    IMPL -->|"implementation.out.md + current.diff"| EX
-    TEST -->|"checks report"| EX
-    REV -->|"findings.json"| EX
-    DOC -->|"documentation.out.md + updated current.diff"| EX
-
-    REF -->|"task.enriched.md (audit)"| PH
-    REV -->|"evaluator summary.md (audit)"| PH
-    SUP["supervisor layer (above the flow)"] -->|"summary.md / summary.json (PR body)"| PH
-    PUB -->|"reads the supervisor summary.md, then commits and PRs"| PH
-
-    EX["exchange_root<br/>.worc-io/add-http-retry/<br/>AGENT READS THIS"]
-    PH[".worc/ private_home<br/>HIDDEN FROM AGENT<br/>also holds every node's rendered-prompt.md and raw provider I/O"]
-```
-
-Note: the PR-body `summary.md` is written by the constant **supervisor layer** at whole-task close (before publish), not by the `review` node — `review`'s own `summary.md` is the evaluator's audit summary inside its run dir.
-
-On **successful** completion (`Status.DONE`, after `publish`), the task's exchange dir `.worc-io/add-http-retry/` is torn down automatically (WRI-007) — its curated results are no longer needed by any node, and leaving them would clutter the next task's agent read surface. The private home `.worc/logs/add-http-retry/` (the whole audit trail) is retained. A `FAILED` or `manual_action_required` outcome keeps the exchange for debugging/resume.
-
-## Before / after — the on-disk artifact tree for this run
-
-**BEFORE** — one tree; the agent (its `cwd` is `/work/app`) can read all of it:
-
-```
-/work/app/
-├── tasks/add-http-retry.md                       # tracked, {task_path}
-└── .worc/                                         # gitignored — but fully readable by the agent
-    ├── .env                                       # real tokens
-    ├── state.db                                   # state + raw session ids + unredacted findings
-    ├── flows/implementation/roles/*.md            # system prompts (own + other nodes')
-    ├── memory/…                                   # cross-task memory store
-    └── logs/add-http-retry/
-        ├── task.enriched.md
-        ├── plan.md                                # {plan_path}  (task-root output_artifact slot)
-        ├── current.diff                           # {diff_path}  (task-root, NOT under a run dir)
-        ├── summary.md  summary.json               # PR body (supervisor layer, at whole-task close)
-        ├── checks/run-000004.log                  # {checks_path} (latest FAILED check log; may be absent on a clean run)
-        ├── memory/implementation.md               # {memory_path} packet (store lives at .worc/memory/)
-        ├── prompt-audit/…                         # full prompts
-        └── stages/
-            ├── planning/run-000002/{rendered-prompt.md, 1-codex/…}
-            ├── implementation/run-000003/
-            │   ├── implementation.out.md          # {implementation_path}
-            │   ├── rendered-prompt.md
-            │   └── 1-codex/{request.json,stdout.log,stderr.log,events.jsonl,result.json}
-            ├── review/run-000005/
-            │   ├── findings.json                  # {review_path}
-            │   ├── summary.md                      # evaluator audit summary
-            │   ├── rendered-prompt.md
-            │   └── 1-claude/…
-            └── documentation/run-000006/
-                ├── documentation.out.md           # {documentation_path}
-                ├── rendered-prompt.md
-                └── 1-codex/…
-```
-
-**AFTER** — the same run, split across two roots. The agent-facing files move to `.worc-io/`; the audit/secret files stay in `.worc/`. Note that `run-000003/` now exists in **both** trees:
-
-```
-/work/app/
-├── tasks/add-http-retry.md                       # tracked, {task_path} — UNCHANGED
-│
-├── .worc-io/add-http-retry/                       # NEW gitignored root — the ONLY ".worc*" the agent reads
-│   ├── plan.md                                    # {plan_path}  (task-root slot)
-│   ├── current.diff                               # {diff_path}  (task-root, NOT under a run dir)
-│   ├── checks/run-000004.log                      # {checks_path}
-│   ├── memory/implementation.md                   # {memory_path} — retrieval packet only (redacted at store-ingest)
-│   └── stages/
-│       ├── implementation/run-000003/
-│       │   └── implementation.out.md              # {implementation_path}
-│       ├── review/run-000005/
-│       │   └── findings.json                      # {review_path}
-│       └── documentation/run-000006/
-│           └── documentation.out.md               # {documentation_path}
-│
-└── .worc/                                         # private_home — DENIED / unreachable to the agent
-    ├── .env  state.db  flows/  memory/  security-reports/
-    └── logs/add-http-retry/
-        ├── task.enriched.md
-        ├── summary.md  summary.json               # PR body (orchestrator reads it, not the agent)
-        ├── prompt-audit/…
-        └── stages/
-            ├── planning/run-000002/{rendered-prompt.md, 1-codex/…}
-            ├── implementation/run-000003/{rendered-prompt.md, 1-codex/…}
-            ├── review/run-000005/{rendered-prompt.md, summary.md, 1-claude/…}
-            └── documentation/run-000006/{rendered-prompt.md, 1-codex/…}
-```
-
-Note: the task-root files (`plan.md`, `current.diff`, `checks/`, `memory/` packet) move to the exchange task root, while `task.enriched.md`, `prompt-audit/`, the supervisor `summary.md`, and every `rendered-prompt.md` / raw-provider dir stay in the private home. `run-000003/` therefore exists in **both** trees.
-
-The audit trail is **not weakened**: `rendered-prompt.md`, `prompt-audit/`, the `1-codex/` / `1-claude/` raw streams, `state.db` and the PR-body `summary.md` are all still written — they just stop being agent-readable.
-
-## Before / after — the paths handed to the agent
-
-Nothing about _how_ context is delivered changes: the orchestrator still injects **paths**, never inlined content (the path-only prompt invariant holds). Only the destination flips from `.worc/logs/` to `.worc-io/`.
-
-| Variable | BEFORE | AFTER |
+| Artifact/path | Why an agent needs it | Destination |
 | --- | --- | --- |
-| `{task_path}` | `/work/app/tasks/add-http-retry.md` | _unchanged_ |
-| `{plan_path}` | `.worc/logs/add-http-retry/plan.md` | `.worc-io/add-http-retry/plan.md` |
-| `{diff_path}` | `.worc/logs/add-http-retry/current.diff` (task root) | `.worc-io/add-http-retry/current.diff` (task root) |
-| `{checks_path}` | `.worc/logs/add-http-retry/checks/run-000004.log` | `.worc-io/add-http-retry/checks/run-000004.log` |
-| `{implementation_path}` | `.worc/logs/add-http-retry/stages/implementation/run-000003/implementation.out.md` | `.worc-io/add-http-retry/stages/implementation/run-000003/implementation.out.md` |
-| `{review_path}` | `.worc/logs/add-http-retry/stages/review/run-000005/findings.json` | `.worc-io/add-http-retry/stages/review/run-000005/findings.json` |
-| `{memory_path}` | packet under `.worc/logs/add-http-retry/memory/<node>.md` | `.worc-io/add-http-retry/memory/<node>.md` (packet only; the `memory/` **store** stays private) |
+| Tracked task and skill files | Direct task/skill input | Repository; unchanged |
+| `plan.md` | `output_artifact: plan`, exposed as `{plan_path}` | Exchange |
+| `current.diff` | Exposed as `{diff_path}` | Exchange |
+| Redacted first failing checks log | Exposed as `{checks_path}` to `fixing` | Exchange |
+| Evaluator `findings.json` | Exposed as `{review_path}` on rework/documentation paths | Exchange |
+| Generic agent/tool output | Exposed only when the flow produces a downstream `{node_id_path}` | Exchange |
+| Subtask spec, handoff, memory retrieval packet | Explicit downstream provider input | Exchange |
+| Sanitized answer-only HITL packet | `AgentRunRequest.human_input_path` | Exchange |
+| `task.enriched.md` | Refinement/audit slot; no provider input field | Private |
+| Supervisor/publish `summary.md` and `summary.json` | Orchestrator publish input | Private |
+| Checker JSON, rendered prompts, prompt audit, raw provider attempts | Audit/diagnostics, never context paths | Private |
+| Durable HITL record and transport handle | Recovery/transport state | Private |
+| State DB, flows/tools, `.env`, memory store, process control | Orchestrator control/runtime | Private/control |
 
-Concrete "Context files" footer the `review` node's prompt ends with:
+Every exchange write passes through one symlink-safe, atomic redaction publisher. A file is not exchange-eligible merely because it currently lives in the task log directory.
 
-```diff
-  Context files (read them as needed; do not assume their contents):
-  - task: /work/app/tasks/add-http-retry.md
-- - plan: /work/app/.worc/logs/add-http-retry/plan.md
-- - diff: /work/app/.worc/logs/add-http-retry/current.diff
-+ - plan: /work/app/.worc-io/add-http-retry/plan.md
-+ - diff: /work/app/.worc-io/add-http-retry/current.diff
-```
+## Before and active-run layout
 
-## Before / after — the provider invocation
-
-**`review` on Claude.** A dedicated internal deny of the private home is appended to `--disallowedTools` (it is _not_ routed through the overloaded `security.denied_read_paths`). The exchange lives at `.worc-io/`, a sibling path, so the private-home deny glob does not touch it.
-
-The deny must be **absolute-anchored**, not a bare relative `.worc/**`. The paths Claude is handed in the "Context files" footer carry the full `/work/app/.worc/…` prefix (they are rooted at `repo.local_path`), and `_deny_read_tools_for` forwards patterns verbatim with no anchoring — so a relative `Read(.worc/**)` would not match the path the tool is invoked with. Use the same `//`-anchored absolute form `_native_memory_deny_tools` already emits for `~/.claude`:
-
-```diff
-  claude -p --output-format stream-json --verbose \
-    --permission-mode default \
-    --allowedTools Read,Glob,Grep \
--   --disallowedTools "Read(.env),Read(secrets/**),Read(~/.claude/**),Write(~/.claude/**),Edit(~/.claude/**)"
-+   --disallowedTools "Read(.env),Read(secrets/**),Read(//work/app/.worc),Read(//work/app/.worc/**),Read(~/.claude/**),Write(~/.claude/**),Edit(~/.claude/**)"
-```
-
-(Confirm the `/**` also matches the hidden `/work/app/.worc/.env`; if the matcher skips leading-dot entries, add an explicit dotfile deny — see WRI-002.)
-
-**`implementation` on Codex.** Phase 1 cannot enforce a per-path read deny (Codex's OS sandbox governs writes/network, not reads), so the argv is **unchanged** — the isolation in Phase 1 is only that the agent is handed `.worc-io/` paths and a role-prompt hygiene note. Real enforcement arrives in Phase 2.
+Before the change, agent inputs and private audit share one readable subtree:
 
 ```text
-# Phase 1 argv — identical before and after (obscurity only, no read enforcement):
-codex --ask-for-approval never exec --cd /work/app --sandbox workspace-write --json \
-      --output-last-message /work/app/.worc/logs/add-http-retry/stages/implementation/run-000003/1-codex/last-message.txt -
-
-# Phase 2 — a generated OS-sandbox profile denies reads of the (now out-of-tree) private home:
-#   macOS Seatbelt : (deny file-read* (subpath "<private_home>"))
-#   Linux Landlock : no read handle granted for "<private_home>"
-#   Windows        : no OS sandbox -> fail preflight under strict_isolation
+/work/app/.worc/
+├── .env
+├── state.db
+├── flows/
+├── memory/
+└── logs/add-http-retry/
+    ├── plan.md
+    ├── current.diff
+    ├── checks/run-000004.log
+    ├── summary.md
+    ├── prompt-audit/
+    └── stages/.../{rendered-prompt.md, provider attempts, outputs}
 ```
 
-## The read-access boundary
+During an active run after WRI-001, the trees are explicit:
 
-```mermaid
-flowchart LR
-    subgraph BEFORE["BEFORE"]
-        A1["agent, cwd = /work/app"]
-        A1 --> B1["repo source files"]
-        A1 --> B2["tasks/add-http-retry.md"]
-        A1 --> B4[".worc/ — .env, state.db, flows,<br/>memory, prompts, raw I/O, OTHER tasks"]
-    end
-    subgraph AFTER["AFTER"]
-        A2["agent, cwd = /work/app"]
-        A2 --> C1["repo source files"]
-        A2 --> C2["tasks/add-http-retry.md"]
-        A2 --> C3[".worc-io/add-http-retry/ — curated results"]
-        A2 -.->|"denied / out of reach"| C4[".worc/ — all private_home"]
-    end
+```text
+/work/app/
+├── tasks/add-http-retry.md
+├── .worc-io/add-http-retry/
+│   ├── plan.md
+│   ├── current.diff
+│   ├── checks/run-000004.log
+│   ├── memory/fixing.md
+│   └── stages/
+│       ├── implementation/run-000003/implementation.out.md
+│       ├── review/run-000007/findings.json
+│       └── documentation/run-000008/documentation.out.md
+└── .worc/
+    ├── .env
+    ├── state.db
+    ├── config.yaml
+    ├── flows/
+    ├── tools/
+    ├── memory/
+    └── logs/add-http-retry/
+        ├── task.enriched.md
+        ├── summary.md
+        ├── summary.json
+        ├── durable HITL/checker/audit files
+        ├── prompt-audit/
+        └── stages/.../{rendered-prompt.md, raw provider attempts}
 ```
 
-How strong the "denied" arrow is, honestly, by phase:
+There is no `.worc-io/logs/` segment. Related run ids may appear in both roots because one holds the curated projection and the other holds private evidence.
 
-| Provider | Phase 1 (hygiene) | Phase 2 (hard isolation) |
+After WRI-005, `config.yaml`, flows, tools, and guide remain under `/work/app/.worc`; private DB/log/memory/secret/process state moves to the platform user-state location. This topology reduction does not turn the Claude `Bash` residual into a hard deny.
+
+## Live checks failure
+
+The existing check runner already computes `CheckOutcome.first_failure_log`, but the live checks node does not assign `NodeInputs.checks_path`; only recovery rehydrates it. The corrected live path is:
+
+1. Write the authoritative full check log privately.
+2. Produce a redacted first-failure projection at `.worc-io/add-http-retry/checks/run-000004.log`.
+3. Set `NodeInputs.checks_path` to that exchange path before returning the `fail` outcome.
+4. Render the fixing prompt with the path; never inline the log body.
+5. On restart/continue, resolve the same semantic input through the active or verified restored exchange.
+
+This prevents a first-run/fresh-recovery behavioral mismatch.
+
+## Paths in provider requests
+
+| Variable | Before | After |
 | --- | --- | --- |
-| Claude | absolute-anchored `Read(//…/.worc/**)` deny is real (once anchored + dotfile-covering — see WRI-002); residual hole: `Bash(cat .worc/.env)` still works under `workspace-write` | private home moved out of the tree → `Bash` can't reach it either |
-| Codex | not handed `.worc` paths + role-prompt note — **obscurity, not enforcement** | generated OS-sandbox read-deny (macOS/Linux); Windows fails preflight under `strict_isolation` |
+| `{task_path}` | `/work/app/tasks/add-http-retry.md` | Unchanged |
+| `{plan_path}` | `/work/app/.worc/logs/add-http-retry/plan.md` | `/work/app/.worc-io/add-http-retry/plan.md` |
+| `{diff_path}` | `/work/app/.worc/logs/add-http-retry/current.diff` | `/work/app/.worc-io/add-http-retry/current.diff` |
+| `{checks_path}` | `/work/app/.worc/logs/add-http-retry/checks/run-000004.log` | `/work/app/.worc-io/add-http-retry/checks/run-000004.log` |
+| `{review_path}` | Private run path | Current exchange run path |
+| `{memory_path}` | Private task-log packet | Current exchange packet; store remains private |
+| `human_input_path` | Durable private interaction record | Sanitized exchange packet |
 
-## One node run in detail (`review`, after)
+The provider footer continues to contain paths only. `task.enriched.md` and supervisor/publish summaries do not move because no agent request consumes them.
 
-```mermaid
-sequenceDiagram
-    participant O as Orchestrator
-    participant EX as exchange
-    participant PH as private_home
-    participant A as Agent
+## Claude invocation contract
 
-    Note over EX: plan.md and current.diff already written by upstream nodes
-    O->>O: render prompt with EXCHANGE paths + Context-files footer
-    O->>PH: persist rendered-prompt.md (audit)
-    O->>A: launch Claude, disallowedTools Read(//abs/.worc/**)
-    A->>EX: read plan.md, current.diff (allowed)
-    A-xPH: read .worc/state.db via Read tool (DENIED)
-    A-->>O: streamed node output
-    O->>EX: write findings.json (redacted) = review_path
-    O->>PH: write 1-claude/ raw stdout, stderr, events (audit)
+The adapter adds orchestrator-owned, absolute platform-correct tool rules:
+
+- Deny `Read` for the private-home root and descendants, including dotfiles.
+- Deny `Write` and `Edit` for the exchange root and descendants.
+- Keep exchange `Read` available.
+- Reject `extra_args` that replace the owned tools/settings/permission/workspace authority.
+
+These rules apply to fresh/resume and read-only/workspace-write attempts. They are Claude tool policy, not an OS sandbox: workspace-write `Bash` is outside the claim.
+
+## Codex invocation contract
+
+The current provider shape is conceptually:
+
+```text
+codex exec --sandbox workspace-write \
+  -c sandbox_workspace_write.network_access=false ...
 ```
 
-## Correctness checklist
+That shape must be replaced, not extended. Permission profiles do not compose with legacy `--sandbox`/`sandbox_mode`; any loaded legacy setting makes Codex use the old policy instead. The new adapter therefore:
 
-Verifying the happy path is complete and sound:
+1. Generates an attempt-scoped profile with `:minimal`, `:workspace_roots`, exact private/exchange rules, configured denies, and the resolved network grant.
+2. Uses a private, orchestrator-controlled Codex home for auth/session state and generated `denied_commands` execpolicy; it does not silently copy credentials.
+3. Selects the profile with `default_permissions`, uses `--ignore-user-config` when supported, and forces the project `.codex` layer to `untrusted`.
+4. Disables hooks and custom subagents and disables or positively inventories MCP/apps/plugins/computer-use surfaces.
+5. Passes neither `--sandbox` nor `sandbox_workspace_write.*` and rejects authority-bearing `extra_args`.
+6. Runs the exact effective profile through a no-model `codex sandbox` canary, then inspects effective rules/config/features/MCP inventory.
+7. Launches the model only after both the filesystem controls and the non-shell tool-surface proof pass.
 
-- [x] **Every path variable the flow uses resolves into `exchange`** (`{plan_path}`, `{diff_path}`, `{checks_path}`, `{implementation_path}`, `{review_path}`, `{documentation_path}`, `{memory_path}`); `{task_path}` is unchanged and already outside both homes.
-- [x] **Each node's inputs exist in `exchange` before it runs** — planning's `plan.md` is there for implementation, review and documentation; implementation's `current.diff` is there for testing, review and documentation; review's `findings.json` is there for documentation and a would-be `fixing` node.
-- [x] **Nothing the agent needs is left only in `private_home`** — `task.enriched.md` (audit-only, no variable) and the supervisor `summary.md` (read by the orchestrator at publish, not by an agent) are the only agent-untouched outputs.
-- [x] **Audit completeness is unchanged** — rendered prompts, prompt-audit, raw provider streams, the evaluator `summary.md`, `state.db` and the PR-body summary are all still written, to `private_home`.
-- [x] **Neither home is ever committed** — `exchange_root` is gitignored (its own tracked-`.gitignore` + `.git/info/exclude` line and its own `check-ignore` probe target), so scoped staging skips it via the ignore — not via a staging pathspec.
-- [x] **The deny is non-weakenable** — it is an internal rule, not `denied_read_paths`, and cannot be removed by the task, `extra_args`, or a flow node.
-- [x] **Path-only prompt invariant preserved** — still paths, only the destination changed.
-- [~] **The Claude deny actually matches** — only once it is absolute-anchored and dotfile-covering (WRI-002); a bare relative `Read(.worc/**)` would not match the footer paths.
-- [~] **Cross-platform** — Phase-1 Claude deny holds on all OSes; Codex enforcement is Phase 2, fail-closed on Windows under `strict_isolation`.
-- [~] **Decomposition** — a decomposed subtask adds a `sub-<NN>/` level; the exchange routing must cover it (out of this walkthrough's single-task scope; tracked in WRI-001).
+The filesystem policy is:
 
-Items to confirm during implementation (also tracked in the ADR's Open questions):
+| Path                       | Read-only node | Workspace-write node |
+| -------------------------- | -------------- | -------------------- |
+| Runtime/tool minimum       | Read           | Read                 |
+| Repository workspace       | Read           | Write                |
+| Current exchange           | Read           | Read                 |
+| Private home               | Deny           | Deny                 |
+| Configured sensitive paths | Deny           | Deny                 |
 
-- The exchange artifacts are **not uniformly redacted at write**: `findings.json` (raw model structured output), `plan.md` (the slot, written raw), the checks **stdout** log, and the per-run checker JSON are not scrubbed at write; the `{memory_path}` packet is redacted at store-ingest, not at packet write. All are agent-readable today (no net-new exposure), but confirm and decide whether any needs a write-time pass.
-- Confirmed: no packaged flow points a node **at** `task.enriched.md` — it is the `enriched_spec` slot with a `None` inputs field, so it has no prompt variable and correctly stays private. Re-check for custom flows.
+More-specific exchange `read` overrides the broader workspace `write`; `deny` wins on the private paths. Exact native paths are emitted on each host. Unbounded deny globs are bounded or rejected where Codex needs pre-expansion.
+
+Current Codex supports permission profiles on macOS, Linux, WSL, and native Windows. The orchestrator does not generate Seatbelt/Landlock/ACL policy and does not automatically fail Windows. It records capability evidence and fails strict isolation if either the requested effective policy or the minimized Codex tool/config surface cannot be demonstrated on that host/CLI.
+
+## Terminal lifecycle
+
+After any terminal outcome, not only success:
+
+1. Build and verify a manifest of the active exchange.
+2. Move/copy it into the private task audit using the WRI-007 cross-platform protocol.
+3. Remove the active `.worc-io/add-http-retry` directory.
+4. Refuse the next provider launch if any stale/foreign active exchange remains.
+
+`rerun --continue` restores only the same task's verified latest snapshot. Fresh/restart starts clean. A retention toggle cannot expose an old terminal task to a new agent.
+
+## End-to-end assertions
+
+- Every provider orchestration path is either a tracked repository/task/skill path or inside the current exchange.
+- The live fixing node receives `{checks_path}` before any recovery cycle.
+- Every exchange artifact is redacted; unredactable content remains private and receives a sanitized projection if the flow needs it.
+- Codex enforcement is proven on the effective generated profile plus the effective rules/config/tool inventory, not inferred from argv, `codex sandbox` alone, or fake-CLI output.
+- Claude's guarantee is limited to its Read/Write/Edit tool policy; `Bash` remains explicit.
+- Windows paths, junctions/reparse points, locks, permission-profile behavior, and native sandbox mode are tested alongside macOS/Linux behavior.
+- Terminal exchange data is preserved privately, checksum-verified, and absent from the next task's readable surface.
+- Neither `.worc/` nor `.worc-io/` can be staged or committed.
