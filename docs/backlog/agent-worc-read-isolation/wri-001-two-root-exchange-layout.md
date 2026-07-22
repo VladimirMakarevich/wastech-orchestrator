@@ -1,6 +1,8 @@
 # WRI-001 — Split private artifacts from the curated exchange
 
-**Status:** open **Milestone:** 0 (foundation) **Source:** [decision record](README.md), [happy path](happy-path.md) **Dependencies:** WRI-004, WRI-008
+**Status:** implemented **Milestone:** 0 (foundation) **Source:** [decision record](README.md), [happy path](happy-path.md) **Dependencies:** WRI-004, WRI-008
+
+> **Re-verified 2026-07-22** after its dependencies WRI-004 (typed layout) and WRI-008 (portable identities) landed — this task shipped ahead of both and handed them interim shims. Both consolidations are confirmed absorbed: the exchange root now flows from `layout.exchange_root` (no inline `EXCHANGE_HOME`), `git_manager` builds its ignore footprint from the shared `runtime_layout` constants, and both roots share one `assert_contained_path` belt plus the `security/identifiers` segment grammar. One test-coverage gap was closed during the re-review: the `security_audit` report-slot structured-output capture had no regression guard and the flow integration test's fake agent still modelled the old agent-written `.worc/security-reports/` contract (`tests/core/test_flow_postprocess.py` + `tests/core/test_flow_security_audit.py`).
 
 ## Problem
 
@@ -62,20 +64,20 @@ If a source cannot be made safe, it stays private and the task must define a dif
 
 ## Acceptance criteria
 
-- [ ] The on-disk layout is exactly `<repo>/.worc-io/<task-id>/...`, never `.worc-io/logs/...`.
-- [ ] Every non-`None` provider orchestration input path is contained under the current task exchange; `repo_path` remains workspace metadata, but no live task/skill/control/private path appears in a request, rendered prompt footer, or tool-node stdin path object.
-- [ ] `human_input_path` points to an answer-only exchange packet and the private Telegram/durable handle is not provider-readable.
-- [ ] A live checks failure sets `{checks_path}` before the fixing node runs; restart produces the same path semantics.
-- [ ] `enriched_spec`, publish/supervisor summaries, checker JSON, and all private audit/attempt files remain private.
-- [ ] The `security_audit` report is produced through orchestrator-captured structured output; no packaged flow or role prompt instructs an agent to write outside the repository workspace.
-- [ ] Every exchange file passes seeded-secret redaction tests and is written atomically.
-- [ ] Latest-run fan-in selects the newest run containing the requested file and never crosses task/attempt boundaries.
-- [ ] The exchange is ignored by Git, cannot be staged by code or audit commits, and has its own ignore probe.
+- [x] The on-disk layout is exactly `<repo>/.worc-io/<task-id>/...`, never `.worc-io/logs/...`.
+- [x] Every non-`None` provider orchestration input path is contained under the current task exchange; `repo_path` remains workspace metadata, but no live task/skill/control/private path appears in a request, rendered prompt footer, or tool-node stdin path object.
+- [x] `human_input_path` points to an answer-only exchange packet and the private Telegram/durable handle is not provider-readable.
+- [x] A live checks failure sets `{checks_path}` before the fixing node runs; restart produces the same path semantics.
+- [x] `enriched_spec`, publish/supervisor summaries, checker JSON, and all private audit/attempt files remain private.
+- [x] The `security_audit` report is produced through orchestrator-captured structured output; no packaged flow or role prompt instructs an agent to write outside the repository workspace.
+- [x] Every exchange file passes seeded-secret redaction tests and is written atomically.
+- [x] Latest-run fan-in selects the newest run containing the requested file and never crosses task/attempt boundaries.
+- [x] The exchange is ignored by Git, cannot be staged by code or audit commits, and has its own ignore probe.
 - [ ] WRI-009 integration proves a force-added exchange file cannot survive to any orchestrator commit (cluster exit criterion — verified when WRI-009 lands, not a gate for closing this task).
-- [ ] A pre-existing symlink/junction/reparse point in any exchange path fails closed before a provider launch.
-- [ ] Hard-linked/special files, case-fold collisions, unexpected paths, and NTFS alternate data streams fail closed before launch; a clean exchange manifest covers file type, link identity/count, relative name, size, and content digest.
-- [ ] The implementation is node-id/topic agnostic and covers every packaged flow plus a custom-flow fixture.
-- [ ] Agent, evaluator, supervisor observe/finalize, fresh, and resumed provider calls all pass the same prelaunch exchange/private-path invariant.
+- [x] A pre-existing symlink/junction/reparse point in any exchange path fails closed before a provider launch.
+- [x] Hard-linked/special files, case-fold collisions, unexpected paths, and NTFS alternate data streams fail closed before launch; a clean exchange manifest covers file type, link identity/count, relative name, size, and content digest.
+- [x] The implementation is node-id/topic agnostic and covers every packaged flow plus a custom-flow fixture.
+- [x] Agent, evaluator, supervisor observe/finalize, fresh, and resumed provider calls all pass the same prelaunch exchange/private-path invariant.
 
 ## Verification
 
