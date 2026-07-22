@@ -85,7 +85,7 @@ def _patch_providers(
             "codex", healthy=healthy.get("codex", True), degraded_reasons=degraded.get("codex", ())
         ),
     }
-    monkeypatch.setattr(cli, "build_providers", lambda _c, *, artifacts_root: providers)
+    monkeypatch.setattr(cli, "build_providers", lambda _c, *, layout: providers)
     monkeypatch.setattr(cli, "preflight_gh", lambda: gh_result)
 
 

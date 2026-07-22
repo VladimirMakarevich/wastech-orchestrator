@@ -27,7 +27,7 @@ _AUDIT = AuditContext(timestamp="2026-07-01T00:00:00Z", task_id="cleanup")
 
 
 def _service(tmp_path: Path) -> MemoryService:
-    return MemoryService(MemoryLayout.for_repo(tmp_path), config=MemoryConfig(enabled=True))
+    return MemoryService(MemoryLayout(tmp_path / ".worc"), config=MemoryConfig(enabled=True))
 
 
 def _entity(service: MemoryService, entity_id: str, paths: tuple[str, ...]) -> None:

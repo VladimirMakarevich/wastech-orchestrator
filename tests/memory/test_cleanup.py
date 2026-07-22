@@ -30,7 +30,7 @@ _AUDIT = AuditContext(timestamp="2026-06-30T00:00:00Z")
 
 @pytest.fixture
 def layout(tmp_path: Path) -> MemoryLayout:
-    return MemoryLayout.for_repo(tmp_path)
+    return MemoryLayout(tmp_path / ".worc")
 
 
 def _service(layout: MemoryLayout) -> MemoryService:
@@ -99,7 +99,7 @@ def test_expires_episodes_past_ttl_only(layout: MemoryLayout) -> None:
 
 
 def test_stale_entity_is_quarantined_never_deleted(tmp_path: Path) -> None:
-    layout = MemoryLayout.for_repo(tmp_path)
+    layout = MemoryLayout(tmp_path / ".worc")
     service = _service(layout)
     _entity(service, "e1", ("src/gone.py",))  # path neither tracked nor on disk
     report = _job(service, _index(tmp_path, set())).run_once(audit=_AUDIT)
@@ -111,7 +111,7 @@ def test_stale_entity_is_quarantined_never_deleted(tmp_path: Path) -> None:
 
 
 def test_moved_entity_is_remapped_by_basename(tmp_path: Path) -> None:
-    layout = MemoryLayout.for_repo(tmp_path)
+    layout = MemoryLayout(tmp_path / ".worc")
     service = _service(layout)
     _entity(service, "e1", ("src/old/foo.py",))
     index = _index(tmp_path, {"src/new/foo.py"})  # the file moved (same basename, one candidate)
@@ -128,7 +128,7 @@ def test_moved_entity_is_remapped_by_basename(tmp_path: Path) -> None:
 def test_moved_entity_merges_into_existing_new_path_card(tmp_path: Path) -> None:
     # The supervisor may propose a fresh card at the new path before cleanup runs; the remap then
     # rewrites the moved card's key onto that path — collapse to one card (memory V2 ADR, move 3).
-    layout = MemoryLayout.for_repo(tmp_path)
+    layout = MemoryLayout(tmp_path / ".worc")
     service = _service(layout)
     _entity(service, "old", ("src/old/foo.py",))  # canonical=src/old/foo.py (the moved file)
     _entity(service, "new", ("src/new/foo.py",))  # already re-proposed at the new path
@@ -141,7 +141,7 @@ def test_moved_entity_merges_into_existing_new_path_card(tmp_path: Path) -> None
 
 
 def test_present_entity_is_left_alone(tmp_path: Path) -> None:
-    layout = MemoryLayout.for_repo(tmp_path)
+    layout = MemoryLayout(tmp_path / ".worc")
     service = _service(layout)
     _entity(service, "e1", ("src/a.py",))
     report = _job(service, _index(tmp_path, {"src/a.py"})).run_once(audit=_AUDIT)
@@ -183,7 +183,7 @@ def _scoped_lesson(service: MemoryService, subject: str, path: str) -> str:
 def test_moved_lesson_is_remapped_not_quarantined(tmp_path: Path) -> None:
     # A lesson scoped to a moved file is remapped in place (scope + re-derived id), not quarantined
     # — a refactor no longer loses durable knowledge (memory V2 ADR, move 3).
-    layout = MemoryLayout.for_repo(tmp_path)
+    layout = MemoryLayout(tmp_path / ".worc")
     service = _service(layout)
     _scoped_lesson(service, "keep pathlib", "src/old/foo.py")
     report = _job(service, _index(tmp_path, {"src/new/foo.py"})).run_once(audit=_AUDIT)
@@ -198,7 +198,7 @@ def test_moved_lesson_is_remapped_not_quarantined(tmp_path: Path) -> None:
 def test_stale_lesson_with_ambiguous_path_is_quarantined(tmp_path: Path) -> None:
     # No unique basename candidate (deleted, or two matches) → the whole lesson quarantines, never a
     # silent delete (Q2).
-    layout = MemoryLayout.for_repo(tmp_path)
+    layout = MemoryLayout(tmp_path / ".worc")
     service = _service(layout)
     _scoped_lesson(service, "gone lesson", "src/gone.py")
     report = _job(service, _index(tmp_path, set())).run_once(audit=_AUDIT)
@@ -212,7 +212,7 @@ def test_moved_lesson_merges_into_existing_new_id(tmp_path: Path) -> None:
     # A lesson re-proposed at the new path (different wording, same path-derived id) before cleanup
     # collides on that id when the moved lesson is remapped — collapse by id, never two rows.
     # Distinct subjects prove it is the id collapse, not the subject-keyed pass (memory V2, move 3).
-    layout = MemoryLayout.for_repo(tmp_path)
+    layout = MemoryLayout(tmp_path / ".worc")
     service = _service(layout)
     _scoped_lesson(service, "old wording", "src/old/foo.py")
     new_id = _scoped_lesson(service, "new wording", "src/new/foo.py")
@@ -225,7 +225,7 @@ def test_moved_lesson_merges_into_existing_new_id(tmp_path: Path) -> None:
 
 
 def test_never_promotes_and_keeps_promoted_zero(tmp_path: Path) -> None:
-    layout = MemoryLayout.for_repo(tmp_path)
+    layout = MemoryLayout(tmp_path / ".worc")
     service = _service(layout)
     _entity(service, "e1", ("src/gone.py",))
     before = len(service.read_long_term(LongTermKind.SEMANTIC))
@@ -247,7 +247,7 @@ def test_edit_budget_is_respected(layout: MemoryLayout) -> None:
 
 
 def test_snapshot_precedes_the_batch(tmp_path: Path) -> None:
-    layout = MemoryLayout.for_repo(tmp_path)
+    layout = MemoryLayout(tmp_path / ".worc")
     service = _service(layout)
     _entity(service, "e1", ("src/gone.py",))
     report = _job(service, _index(tmp_path, set())).run_once(audit=_AUDIT)
@@ -256,7 +256,7 @@ def test_snapshot_precedes_the_batch(tmp_path: Path) -> None:
 
 
 def test_empty_store_is_a_noop(tmp_path: Path) -> None:
-    layout = MemoryLayout.for_repo(tmp_path)
+    layout = MemoryLayout(tmp_path / ".worc")
     service = _service(layout)
     report = _job(service, _index(tmp_path, set())).run_once(audit=_AUDIT)
     assert report.ran is False  # nothing on disk → no snapshot, no work

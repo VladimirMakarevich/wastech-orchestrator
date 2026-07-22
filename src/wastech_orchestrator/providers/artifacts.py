@@ -39,11 +39,6 @@ from wastech_orchestrator.providers.base import AgentRunResult
 
 _CHECKSUM_CHUNK = 65536
 
-#: The provider-readable exchange root directory name — sibling of the private ``.worc`` home. The
-#: one literal for ``<repo>/.worc-io`` until WRI-004 exposes it as a typed layout field. Mirrors
-#: ``cli.WORC_HOME``.
-EXCHANGE_HOME = ".worc-io"
-
 REQUEST_FILENAME = "request.json"
 STDOUT_FILENAME = "stdout.log"
 STDERR_FILENAME = "stderr.log"

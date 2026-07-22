@@ -41,6 +41,7 @@ from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.providers.process import ProcessResult, run_process
 from wastech_orchestrator.providers.redaction import read_denied_secrets, redact_text
 from wastech_orchestrator.routing.snapshots import PartialChange, WorkingTreeSnapshot
+from wastech_orchestrator.runtime_layout import CONTROL_HOME_DIRNAME, EXCHANGE_HOME_DIRNAME
 from wastech_orchestrator.security.env import build_child_env
 from wastech_orchestrator.state_store import PublishOpRow, StateStore
 from wastech_orchestrator.task.model import BRANCH_NAME_MAX_LEN
@@ -81,7 +82,7 @@ _PUSH_RETRY_BACKOFF_SECONDS = 1.5
 # (`paths.tasks_dir`, default "tasks") is also excluded from the code commit — it is tracked but
 # rides the separate audit commit — but that name is per-config, so it is added per instance (see
 # `__init__`). Together they form `self._excluded_dirs`.
-RUNTIME_EXCLUDED_DIRS = (".worc", ".worc-io")
+RUNTIME_EXCLUDED_DIRS = (CONTROL_HOME_DIRNAME, EXCHANGE_HOME_DIRNAME)
 
 _RUNTIME_IGNORE_COMMENT = (
     "# wastech-orchestrator runtime home + exchange (auto-appended by `worc install`)"
@@ -95,15 +96,15 @@ _RUNTIME_IGNORE_COMMENT = (
 # `.worc-io/` (WRI-001) is the provider-readable exchange — a sibling runtime root that must also
 # never enter a commit. `tasks/` is intentionally NOT ignored — it holds the committed audit trail.
 _RUNTIME_IGNORE_ROOTS: tuple[tuple[str, str], ...] = (
-    (".worc/state.db", ".worc/"),
-    (".worc-io/probe", ".worc-io/"),
+    (f"{CONTROL_HOME_DIRNAME}/state.db", f"{CONTROL_HOME_DIRNAME}/"),
+    (f"{EXCHANGE_HOME_DIRNAME}/probe", f"{EXCHANGE_HOME_DIRNAME}/"),
 )
 
 # The full ignore block (comment + both roots), kept as the public constant install/docs reference.
 RUNTIME_GITIGNORE_LINES: tuple[str, ...] = (
     _RUNTIME_IGNORE_COMMENT,
-    ".worc/",
-    ".worc-io/",
+    f"{CONTROL_HOME_DIRNAME}/",
+    f"{EXCHANGE_HOME_DIRNAME}/",
 )
 
 

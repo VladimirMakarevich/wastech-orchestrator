@@ -286,6 +286,7 @@ def _build_orchestrator(
     from wastech_orchestrator.ledger import Ledger
     from wastech_orchestrator.providers.process import ProcessResult
     from wastech_orchestrator.routing.router import AgentRouter
+    from wastech_orchestrator.runtime_layout import RuntimeLayout
     from wastech_orchestrator.task.validation_gate import ValidationGate
 
     art = tmp_path / "art"
@@ -327,7 +328,12 @@ def _build_orchestrator(
         gate=ValidationGate(
             config, store_has_task_id=store.task_id_exists, ledger_has_task_id=ledger.has_task_id
         ),
-        artifacts_root=str(art),
+        layout=RuntimeLayout(
+            repo_root=Path(config.repo.local_path),
+            control_home=Path(config.repo.local_path) / ".worc",
+            private_home=art,
+            exchange_root=Path(config.repo.local_path) / ".worc-io",
+        ),
         notifier=notifier,
     )
     return orch, store, ledger, art, git

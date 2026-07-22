@@ -192,6 +192,18 @@ def _deny_read_tools_for(denied_read_paths: Sequence[str]) -> list[str]:
     return patterns
 
 
+def claude_config_home() -> Path:
+    """The Claude Code config/credential home: ``$CLAUDE_CONFIG_DIR`` or the ``~/.claude`` default.
+
+    Resolved from the same environment the spawned child inherits. Shared with the WRI-004
+    ``InternalDenyPolicy`` assembly (composition root) so the provider-owned auth/config home is a
+    single source of truth instead of a literal duplicated across the deny surfaces.
+    """
+    raw = os.environ.get("CLAUDE_CONFIG_DIR")
+    config_dir = Path(raw) if raw else Path.home() / ".claude"
+    return config_dir.resolve()
+
+
 def _native_memory_deny_tools() -> list[str]:
     """Deny ``Write``/``Edit``/``Read`` on the Claude Code config dir so the spawned agent cannot
     read, inject, or leak **native project memory** outside the target working tree (F37).
@@ -203,13 +215,11 @@ def _native_memory_deny_tools() -> list[str]:
     ``CLAUDE_CONFIG_DIR``: the config dir also holds credentials (file-based on Linux/Windows), so
     redirecting it would break subscription auth there — a deny is auth-safe and cross-platform.
 
-    The config dir is ``CLAUDE_CONFIG_DIR`` (resolved from the same env the child inherits) or the
-    ``~/.claude`` default. Emitted as Claude's ``//``-anchored absolute-path glob with POSIX slashes
-    (the Node CLI normalizes them), which covers both the default and a custom absolute config dir.
+    The config dir (:func:`claude_config_home`) is ``CLAUDE_CONFIG_DIR`` or the ``~/.claude``
+    default. Emitted as Claude's ``//``-anchored absolute-path glob with POSIX slashes (the Node CLI
+    normalizes them), which covers both the default and a custom absolute config dir.
     """
-    raw = os.environ.get("CLAUDE_CONFIG_DIR")
-    config_dir = Path(raw) if raw else Path.home() / ".claude"
-    glob = "//" + config_dir.resolve().as_posix().lstrip("/") + "/**"
+    glob = "//" + claude_config_home().as_posix().lstrip("/") + "/**"
     return [f"Write({glob})", f"Edit({glob})", f"Read({glob})"]
 
 

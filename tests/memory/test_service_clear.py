@@ -24,7 +24,7 @@ _AUDIT = AuditContext(timestamp="2026-07-08T00:00:00Z")
 
 @pytest.fixture
 def layout(tmp_path: Path) -> MemoryLayout:
-    return MemoryLayout.for_repo(tmp_path)
+    return MemoryLayout(tmp_path / ".worc")
 
 
 @pytest.fixture

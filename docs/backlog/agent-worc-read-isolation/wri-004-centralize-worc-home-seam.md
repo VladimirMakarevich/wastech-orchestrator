@@ -1,6 +1,6 @@
 # WRI-004 — Introduce a typed runtime/control/exchange layout
 
-**Status:** open **Milestone:** 0 (foundation) **Source:** [decision record](README.md), [follow_ups.md](../follow_ups.md) **Dependencies:** —
+**Status:** implemented **Milestone:** 0 (foundation) **Source:** [decision record](README.md), [follow_ups.md](../follow_ups.md) **Dependencies:** —
 
 ## Problem
 
@@ -20,13 +20,15 @@ Introduce one provider-neutral immutable layout object, constructed in the compo
 
 This task changes no on-disk behavior. It makes each consumer declare which surface it owns so WRI-001 and WRI-005 can change destinations without another global literal hunt.
 
-## Gap handed over by WRI-001 (decoupled build)
+## Gap handed over by WRI-001 (decoupled build) — consolidated
 
-WRI-001 shipped **before** this task, so it computes the exchange root inline instead of reading a typed layout field. When WRI-004 lands it must absorb that shim:
+WRI-001 shipped **before** this task and computed the exchange root inline. WRI-004 has absorbed that shim:
 
-- `providers/artifacts.py` defines the constant `EXCHANGE_HOME = ".worc-io"`, and `core/orchestrator.py.__init__` sets `self._exchange_root = Path(config.repo.local_path) / EXCHANGE_HOME`. Replace that inline construction with `layout.exchange_root` and remove the ad-hoc join. The same `.worc-io` literal is duplicated in `git_manager.py` (`RUNTIME_EXCLUDED_DIRS`, `RUNTIME_GITIGNORE_LINES`, `_IGNORE_PROBE_PATHS`); fold those onto the typed layout too.
-- **Do not** change the exchange builders'/publisher's `exchange_root` **parameter** convention — `exchange_task_dir(exchange_root, …)`, `exchange_node_run_dir(exchange_root, …)`, `exchange_latest_run_file(exchange_root, …)`, and the `providers/exchange.py` publisher all take the root as an argument, mirroring the existing `task_artifact_dir(artifacts_root, …)`. WRI-004 only changes where the value comes from, not the signatures.
-- The pre-launch invariant `assert_exchange_current_task_only(self._exchange_root, …)` and the interim `clear_exchange_task_dir(self._exchange_root, …)` calls in the orchestrator should switch to `layout.exchange_root` as part of the same sweep.
+- `providers/artifacts.EXCHANGE_HOME` was removed; the canonical `.worc-io` name now lives in `runtime_layout.EXCHANGE_HOME_DIRNAME`, and `core/orchestrator.py.__init__` reads `layout.exchange_root` instead of joining `Path(config.repo.local_path) / EXCHANGE_HOME`. The duplicated `.worc-io` literals in `git_manager.py` (`RUNTIME_EXCLUDED_DIRS`, `_RUNTIME_IGNORE_ROOTS`, `RUNTIME_GITIGNORE_LINES`) are now built from the shared constants; the per-root ignore logic stays explicit.
+- The exchange builders'/publisher's `exchange_root` **parameter** convention is unchanged — `exchange_task_dir(exchange_root, …)`, `exchange_node_run_dir(exchange_root, …)`, `exchange_latest_run_file(exchange_root, …)`, and the `providers/exchange.py` publisher still take the root as an argument (mirroring `task_artifact_dir(artifacts_root, …)`). WRI-004 changed only where the value comes from.
+- The pre-launch `assert_exchange_current_task_only(self._exchange_root, …)` and interim `clear_exchange_task_dir(self._exchange_root, …)` calls now flow from `layout.exchange_root` via `self._exchange_root`.
+
+**Frozen-bundle shim (handed forward to WRI-010):** the `internal_denied_paths` policy names the control/private homes, the resolved env-file, and provider auth/config homes today. The live control plane's **frozen control bundle** is a further deny target owned by WRI-010 and is intentionally absent from `InternalDenyPolicy` until then (see wri-010).
 
 ## In scope
 
@@ -42,14 +44,14 @@ WRI-001 shipped **before** this task, so it computes the exchange root inline in
 
 ## Acceptance criteria
 
-- [ ] Composition constructs one layout and consumers receive the correct field; Core does not import CLI.
-- [ ] Config/flows/tools/guide use `control_home`; DB/logs/memory/reports/HITL/process control use `private_home`; exchange consumers have an explicit but unused `exchange_root`.
-- [ ] Control/private roots, frozen control bundles, an explicit `--env-file`, and provider credential/config homes are represented as internal deny targets without being added to redaction/skill-scanning config globs.
-- [ ] The default resolved paths and all observable behavior are byte-for-byte/path-for-path unchanged.
-- [ ] No consumer reconstructs a private runtime path from `repo_root / ".worc"`; legitimate control-home and gitignore literals remain allowed.
-- [ ] Persisted/displayed path strings use `Path.as_posix()`; filesystem operations keep `Path` values rather than round-tripping through display strings.
-- [ ] Windows drive/UNC, macOS, Linux, relative configured repo paths, symlinked repo roots, and linked Git worktrees are covered through injected path/platform seams.
-- [ ] The broken sibling link to `follow_ups.md` is fixed and the real follow-up is closed only after the code lands.
+- [x] Composition constructs one layout and consumers receive the correct field; Core does not import CLI (`composition.build_orchestrator`/`build_providers` take `layout`; `runtime_layout` is a stdlib-only leaf — `lint-imports` green).
+- [x] Config/flows/tools/guide use `control_home`; DB/logs/memory/reports/HITL/process control use `private_home` (via `worc_home_for` → `layout.private_home`); exchange consumers have an explicit but unused `exchange_root`.
+- [x] Control/private roots, an explicit `--env-file`, and provider credential/config homes are represented as internal deny targets (`InternalDenyPolicy`) without being added to redaction/skill-scanning config globs. **Frozen control bundles are deferred to WRI-010** (documented shim above).
+- [x] The default resolved paths and all observable behavior are byte-for-byte/path-for-path unchanged (`RuntimeLayout.default` reproduces `<repo>/.worc` and `<repo>/.worc-io`; covered by `tests/core/test_composition_layout.py` and `tests/test_runtime_layout.py`).
+- [x] No consumer reconstructs a private runtime path from `repo_root / ".worc"`; legitimate control-home config-default/validation literals remain allowed (guarded by `tests/test_worc_home_call_sites.py`, an AST call-site check — not a text ban).
+- [x] Persisted/displayed path strings use `Path.as_posix()`; filesystem operations keep `Path` values rather than round-tripping through display strings.
+- [x] Windows drive/UNC, macOS, Linux, and relative configured repo paths are covered through the injected `RuntimeLayout.default` seam; the layout performs **no** path resolution, so symlinked repo roots and linked Git worktrees pass through unchanged (nothing to canonicalize here — alias/symlink identity checks belong to the exchange/provider tasks).
+- [x] The header `follow_ups.md` link resolves (`../follow_ups.md`) and the real follow-up (2026-06-22 `_WORC_HOME` dedup) is closed now that the code has landed.
 
 ## Verification
 

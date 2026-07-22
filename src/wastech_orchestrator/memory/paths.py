@@ -49,13 +49,11 @@ class MemoryLayout:
     :func:`ensure_store`) to materialize the directories.
     """
 
-    def __init__(self, worc_home: str | Path) -> None:
-        self._worc_home = Path(worc_home)
-
-    @classmethod
-    def for_repo(cls, repo_root: str | Path) -> MemoryLayout:
-        """Build the layout for a repo whose runtime home is ``<repo_root>/.worc``."""
-        return cls(Path(repo_root) / ".worc")
+    def __init__(self, private_home: str | Path) -> None:
+        # The resolved private runtime home (``layout.private_home``, WRI-004), injected by the
+        # caller — the memory store lives under ``<private_home>/memory/``. No literal ``.worc`` is
+        # reconstructed here; the layout owns that name.
+        self._worc_home = Path(private_home)
 
     @property
     def root(self) -> Path:

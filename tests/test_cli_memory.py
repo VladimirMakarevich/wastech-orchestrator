@@ -32,7 +32,7 @@ def clone(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def layout(clone: Path) -> MemoryLayout:
-    return MemoryLayout.for_repo(clone)
+    return MemoryLayout(clone / ".worc")
 
 
 def _config(clone: Path) -> object:

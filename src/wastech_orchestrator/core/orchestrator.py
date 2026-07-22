@@ -135,7 +135,6 @@ from wastech_orchestrator.notify import (
 )
 from wastech_orchestrator.observability.logging import bind
 from wastech_orchestrator.providers.artifacts import (
-    EXCHANGE_HOME,
     append_node_history,
     archive_task_artifacts,
     node_run_dir,
@@ -157,6 +156,7 @@ from wastech_orchestrator.providers.redaction import (
     secret_env_values,
 )
 from wastech_orchestrator.routing.router import AgentRouter
+from wastech_orchestrator.runtime_layout import InternalDenyPolicy, RuntimeLayout
 from wastech_orchestrator.security.env import build_child_env
 from wastech_orchestrator.security.isolation import IsolationCheck, check_isolation
 from wastech_orchestrator.state_store import (
@@ -184,10 +184,6 @@ from wastech_orchestrator.task.validation_gate import (
 )
 
 _LOG = logging.getLogger(__name__)
-
-# The gitignored runtime home holding operator flows under ``<repo>/.worc/flows/`` (P4.1). Mirrors
-# ``cli.WORC_HOME``; duplicated here because the core must not import the CLI (would be circular).
-_WORC_HOME = ".worc"
 
 # The lifecycle folders a task file moves between under ``tasks/`` (registration → done/failed).
 # "Currently running" is tracked by the task's ``state.db`` status, not a physical folder.
@@ -435,7 +431,8 @@ class Orchestrator:
         store: StateStore,
         ledger: Ledger,
         gate: ValidationGate,
-        artifacts_root: str | Path,
+        layout: RuntimeLayout,
+        deny_policy: InternalDenyPolicy | None = None,
         clock: Callable[[], str] = _utc_now_iso,
         monotonic: Callable[[], float] = time.monotonic,
         notifier: Notifier | None = None,
@@ -452,12 +449,19 @@ class Orchestrator:
         self._store = store
         self._ledger = ledger
         self._gate = gate
-        self._artifacts_root = artifacts_root
+        # The one provider-neutral runtime layout (WRI-004). Each consumer reads the surface it
+        # owns: private runtime state (DB/logs/memory/HITL/process-control) from ``private_home``,
+        # the operator control plane (flows/tools) from ``control_home``, and the agent-facing
+        # exchange from ``exchange_root``. ``control_home`` and ``private_home`` are the same today.
+        self._layout = layout
+        self._artifacts_root: Path = layout.private_home
+        # Internal provider deny policy (WRI-004 groundwork): the control/private homes, resolved
+        # env-file, and provider auth homes to deny. Stored here for WRI-002/003 to project into
+        # provider enforcement; not consumed yet.
+        self._deny_policy = deny_policy
         # The provider-readable exchange root ``<repo>/.worc-io`` (WRI-001), a sibling of the
-        # private ``.worc`` home. Computed inline from the repo path until WRI-004 exposes it typed
-        # layout field; every exchange builder/publisher still takes it as an argument, so WRI-004
-        # only has to replace this one construction site.
-        self._exchange_root = Path(config.repo.local_path) / EXCHANGE_HOME
+        # private ``.worc`` home; every exchange builder/publisher still takes it as an argument.
+        self._exchange_root = layout.exchange_root
         self._clock = clock
         self._monotonic = monotonic
         # The orchestrator-wide ``--heartbeat-seconds`` interval (shared with providers/git/checks),
@@ -482,13 +486,13 @@ class Orchestrator:
         # flows/`` and override packaged built-ins (P4.1); passing the config turns on the
         # config-aware validation layer (P4.2) on every resolve, including resume.
         self._flow_registry = FlowRegistry(
-            operator_flows_dir=Path(config.repo.local_path) / _WORC_HOME / "flows",
+            operator_flows_dir=layout.control_home / "flows",
             config=config,
         )
         # Operator tool registry (P5): resolves a ``tool`` node's name → its executable under
         # ``<repo>/.worc/tools/`` at run time. Stateless (just the dir), built once and shared by
         # every unit's NodeServices; the FlowRegistry above validates the same tools at resolve.
-        self._tool_registry = ToolRegistry(Path(config.repo.local_path) / _WORC_HOME / "tools")
+        self._tool_registry = ToolRegistry(layout.control_home / "tools")
         # The constant supervisor layer (P2.1) — rebuilt per task in ``_engine_run`` (it carries the
         # task's own resume_own_lineage session). Single-slot, so one live instance at a time.
         self._supervisor: Supervisor | None = None
@@ -2433,11 +2437,11 @@ class Orchestrator:
         """
         if not self._config.memory.enabled:
             return None
-        layout = MemoryLayout.for_repo(self._config.repo.local_path)
-        ensure_store(layout, created_at=self._clock())
-        index = DerivedIndex(self._config.repo.local_path, derived_dir=layout.derived)
+        mem_layout = MemoryLayout(self._layout.private_home)
+        ensure_store(mem_layout, created_at=self._clock())
+        index = DerivedIndex(self._config.repo.local_path, derived_dir=mem_layout.derived)
         return MemoryService(
-            layout,
+            mem_layout,
             config=self._config.memory,
             marker=self._memory_marker,
             index=index,
@@ -2467,8 +2471,10 @@ class Orchestrator:
         ``{memory_path}`` (node-driven), so a disabled config touches nothing (Q10)."""
         if not self._config.memory.enabled:
             return None
-        layout = MemoryLayout.for_repo(self._config.repo.local_path)
-        return PacketBuilder(MemoryService(layout, config=self._config.memory), self._config.memory)
+        mem_layout = MemoryLayout(self._layout.private_home)
+        return PacketBuilder(
+            MemoryService(mem_layout, config=self._config.memory), self._config.memory
+        )
 
     def _memory_marker(self, row: Mapping[str, Any]) -> None:
         """Mirror one memory audit row into the existing ``evaluations`` decision trail (Q6)."""

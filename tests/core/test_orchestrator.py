@@ -43,6 +43,7 @@ from wastech_orchestrator.providers.base import (
     ProviderId,
     RunStatus,
 )
+from wastech_orchestrator.runtime_layout import RuntimeLayout
 from wastech_orchestrator.state_store import PublishOpRow, StateStore, TaskRow
 from wastech_orchestrator.task.validation_gate import ValidationGate
 
@@ -332,7 +333,12 @@ def _build(
         store=store,
         ledger=ledger,
         gate=gate,
-        artifacts_root=str(art),
+        layout=RuntimeLayout(
+            repo_root=Path(config.repo.local_path),
+            control_home=Path(config.repo.local_path) / ".worc",
+            private_home=art,
+            exchange_root=Path(config.repo.local_path) / ".worc-io",
+        ),
         notifier=notifier,
         resolver=CheckResolver(config),  # normalize checks.command_sets (production wires this)
         **extra,
@@ -573,9 +579,13 @@ def test_rework_budget_exhausted_warns_operator_and_marks_trace(
 def _run_complete_task_store_dir(
     git_repo, make_git_config, tmp_path: Path, *, memory_enabled: bool
 ) -> Path:
-    """Drive one complete happy-path task; return the ``.worc/memory`` store dir (may not exist)."""
+    """Drive one complete happy-path task; return the private-home ``memory`` store dir.
+
+    The memory store lives under ``layout.private_home`` (WRI-004) — here the injected ``art`` dir,
+    which coincides with ``<repo>/.worc`` in production. The dir may not exist (memory disabled).
+    """
     providers = _both()
-    orch, _store, _ledger, _ = _build(
+    orch, _store, _ledger, art = _build(
         git_repo,
         make_git_config,
         tmp_path,
@@ -593,7 +603,7 @@ def _run_complete_task_store_dir(
 
     providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
     assert orch.run_task(task_file).final_status is Status.DONE
-    return git_repo.clone / ".worc" / "memory"
+    return art / "memory"
 
 
 def test_memory_disabled_run_writes_no_store(git_repo, make_git_config, tmp_path: Path) -> None:

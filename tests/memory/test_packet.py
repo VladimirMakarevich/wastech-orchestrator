@@ -35,7 +35,7 @@ _NO_SCOPE = Scope()  # module-level singleton (avoids a call in a default argume
 
 @pytest.fixture
 def service(tmp_path: Path) -> MemoryService:
-    return MemoryService(MemoryLayout.for_repo(tmp_path))
+    return MemoryService(MemoryLayout(tmp_path / ".worc"))
 
 
 def _builder(service: MemoryService, **overrides: object) -> PacketBuilder:

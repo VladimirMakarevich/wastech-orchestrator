@@ -18,12 +18,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from wastech_orchestrator.core.flow.contracts import OutputPolicy
+from wastech_orchestrator.runtime_layout import PRIVATE_HOME_DIRNAME
 
 #: Report directory layout (repo-relative). ``repository_document`` deliverables are committable
 #: documents under ``docs/research/``; ``private_control_workspace_report`` deliverables live under
-#: the gitignored ``.worc/`` control workspace and never enter a commit.
+#: the gitignored private ``.worc/`` home (``PRIVATE_HOME_DIRNAME``) and never enter a commit.
 _RESEARCH_DIR = "docs/research"
-_PRIVATE_REPORT_DIR = ".worc/security-reports"
+_PRIVATE_REPORT_DIR = f"{PRIVATE_HOME_DIRNAME}/security-reports"
 
 
 @dataclass(frozen=True, slots=True)

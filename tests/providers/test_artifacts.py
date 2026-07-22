@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from wastech_orchestrator.providers.artifacts import (
-    EXCHANGE_HOME,
     ArtifactPaths,
     PathIdentityError,
     append_node_history,
@@ -32,6 +31,7 @@ from wastech_orchestrator.providers.base import (
     NormalizedError,
     RunStatus,
 )
+from wastech_orchestrator.runtime_layout import EXCHANGE_HOME_DIRNAME
 
 
 def test_attempt_dir_layout(tmp_path: Path) -> None:
@@ -61,7 +61,7 @@ def test_subtask_dir_is_zero_padded(tmp_path: Path) -> None:
 
 
 def test_exchange_task_dir_has_no_logs_segment(tmp_path: Path) -> None:
-    exchange_root = tmp_path / EXCHANGE_HOME
+    exchange_root = tmp_path / EXCHANGE_HOME_DIRNAME
     td = exchange_task_dir(exchange_root, "add-http-retry")
     assert td == exchange_root / "add-http-retry"
     assert "logs" not in td.parts
@@ -72,7 +72,7 @@ def test_exchange_task_dir_has_no_logs_segment(tmp_path: Path) -> None:
 
 
 def test_exchange_node_run_dir_layout(tmp_path: Path) -> None:
-    exchange_root = tmp_path / EXCHANGE_HOME
+    exchange_root = tmp_path / EXCHANGE_HOME_DIRNAME
     run_dir = exchange_node_run_dir(exchange_root, "t", "implementation", 3)
     assert run_dir == exchange_root / "t" / "stages" / "implementation" / "run-000003"
     sub = exchange_node_run_dir(exchange_root, "t", "implementation", 3, subtask=2)
@@ -81,7 +81,7 @@ def test_exchange_node_run_dir_layout(tmp_path: Path) -> None:
 
 
 def test_exchange_latest_run_file_picks_newest_with_content(tmp_path: Path) -> None:
-    exchange_root = tmp_path / EXCHANGE_HOME
+    exchange_root = tmp_path / EXCHANGE_HOME_DIRNAME
     for run_id, has_file in ((1, True), (2, False)):
         d = exchange_node_run_dir(exchange_root, "t", "impl", run_id)
         d.mkdir(parents=True)

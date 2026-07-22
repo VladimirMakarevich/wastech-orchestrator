@@ -16,7 +16,7 @@ The operator may deliberately modify the live control plane between tasks. Such 
 
 ## In scope
 
-- Add `control_home` and the task's frozen control bundle to the provider-internal denied-root policy. WRI-002/003 project the policy into provider-specific enforcement; the Core remains provider-neutral.
+- Add `control_home` and the task's frozen control bundle to the provider-internal denied-root policy. WRI-002/003 project the policy into provider-specific enforcement; the Core remains provider-neutral. **Shim handed over from WRI-004:** the typed `InternalDenyPolicy` (`runtime_layout.py`, assembled in `composition.build_internal_deny_policy`) already carries `control_home`, `private_home`, the resolved env-file, and provider auth/config homes; it has **no** frozen-bundle field yet. WRI-010 adds the frozen control bundle to that policy (extend `InternalDenyPolicy` + the composition assembly) rather than inventing a parallel deny set.
 - Snapshot the selected flow definition, every referenced agent/evaluator/supervisor role file, resolved tool bundle/executable identity, and the effective configuration/version metadata needed to reproduce the run. Store it under `private_home`, never the exchange.
 - Bind flow runners, supervisor prompt rendering, and tool-node resolution to the frozen bundle. Do not retain a live `flow_dir`/`tools_dir` fallback after the first untrusted provider attempt.
 - Hash the relevant live control inputs into parent-held state before each provider attempt and verify them only after WRI-012 proves the provider containment empty. A change is a non-fallback security violation; do not execute a changed tool/prompt, silently refresh the snapshot, or destroy operator-owned evidence.

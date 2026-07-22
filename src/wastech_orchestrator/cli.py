@@ -77,6 +77,7 @@ from wastech_orchestrator.observability.logging import configure_logging, set_lo
 from wastech_orchestrator.preflight import preflight_gh
 from wastech_orchestrator.providers import process as agent_process
 from wastech_orchestrator.providers.base import ProviderId
+from wastech_orchestrator.runtime_layout import CONTROL_HOME_DIRNAME, RuntimeLayout
 from wastech_orchestrator.security.isolation import check_isolation
 from wastech_orchestrator.state_store import IncompatibleStateError, StateStore, TaskRow
 from wastech_orchestrator.task.model import DEFAULT_QUEUE, priority_rank
@@ -105,10 +106,11 @@ _EXIT_BY_STATUS: dict[Status, int] = {
 # Default count for `list --recent` (and the "recent" section of the default overview).
 _LIST_RECENT_DEFAULT = 10
 
-# The orchestrator's runtime home inside the target repo. Everything the orchestrator
+# The orchestrator's runtime home inside the target repo is named by `runtime_layout`
+# (`CONTROL_HOME_DIRNAME` / `PRIVATE_HOME_DIRNAME`, both `.worc` today). Everything the orchestrator
 # generates or installs lives under `<repo>/.worc/` — gitignored as a whole — except the audit
-# trail: the task lifecycle dirs below sit at the repo root and are audit-committed.
-WORC_HOME = ".worc"
+# trail: the task lifecycle dirs below sit at the repo root and are audit-committed. Consumers reach
+# the home via `layout_for(config)` (private) / `.control_home`, never a rebuilt `.worc` literal.
 
 # Task lifecycle dirs created at the repo root by `install` (tracked; the audit commit captures the
 # task file + its `<id>.summary.md` in done/failed). `tasks/rejected` is the quarantine and
@@ -891,7 +893,7 @@ def resolve_config_path(args: argparse.Namespace) -> str | None:
         return str(explicit)
     info = detect.git_info(Path.cwd())
     if info is not None:
-        candidate = info.root / WORC_HOME / "config.yaml"
+        candidate = RuntimeLayout.default(info.root).control_home / "config.yaml"
         if candidate.is_file():
             return str(candidate)
     return None
@@ -914,7 +916,7 @@ def resolve_env_file_path(args: argparse.Namespace) -> tuple[Path | None, bool]:
         return Path(config_path).parent / ".env", False
     info = detect.git_info(Path.cwd())
     if info is not None:
-        return info.root / WORC_HOME / ".env", False
+        return RuntimeLayout.default(info.root).private_home / ".env", False
     return None, False
 
 
@@ -1085,14 +1087,25 @@ def load_config_for(args: argparse.Namespace) -> OrchestratorConfig | None:
     return config
 
 
-def worc_home_for(config: OrchestratorConfig) -> Path:
-    """The orchestrator's gitignored runtime home: ``<repo>/.worc/``.
+def layout_for(config: OrchestratorConfig) -> RuntimeLayout:
+    """The one provider-neutral :class:`RuntimeLayout` for the configured repo (WRI-004).
 
-    Everything the orchestrator generates — ``state.db``, ``logs/``, ``orchestrator.pid``,
-    ``workspace/``, ``checks/``, the resolved check profile, validation reports — lives here, plus
-    the installed ``config.yaml``, ``templates/``, and ``guide/``. The whole dir is gitignored.
+    Built here at the CLI composition boundary and injected into consumers so each declares which
+    surface it owns. ``control_home`` and ``private_home`` both resolve to ``<repo>/.worc`` today.
     """
-    return Path(config.repo.local_path) / WORC_HOME
+    return RuntimeLayout.default(config.repo.local_path)
+
+
+def worc_home_for(config: OrchestratorConfig) -> Path:
+    """The gitignored **private** runtime home — ``layout.private_home`` (``<repo>/.worc/`` today).
+
+    Everything the orchestrator generates privately — ``state.db``, ``logs/``, ``orchestrator.pid``,
+    ``workspace/``, ``checks/``, the resolved check profile, validation reports, the memory store —
+    lives here. It is the private-surface accessor; control-plane consumers
+    (config/flows/tools/guide) use ``layout_for(config).control_home`` instead. The two coincide
+    until WRI-005 relocates the private home.
+    """
+    return layout_for(config).private_home
 
 
 def tasks_root_for(config: OrchestratorConfig) -> Path:
@@ -1531,7 +1544,7 @@ def _build_cleanup_hook(config: OrchestratorConfig) -> Callable[[], None] | None
             return  # rate-limited: too soon since the last pass
         state["last"] = now
         try:
-            layout = MemoryLayout.for_repo(config.repo.local_path)
+            layout = MemoryLayout(layout_for(config).private_home)
             if not layout.root.exists():
                 return  # nothing written yet — no work
             service = MemoryService(layout, config=config.memory)
@@ -1641,7 +1654,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
     orchestrator = build_orchestrator(
         config,
-        artifacts_root=worc_home_for(config),
+        layout=layout_for(config),
+        env_file=resolve_env_file_path(args)[0],
         heartbeat_seconds=args.heartbeat_seconds,
     )
     # Refuse an explicit run of a dependent whose dependencies are not merged — never build it on a
@@ -1813,7 +1827,8 @@ def cmd_rerun(args: argparse.Namespace) -> int:
     target_id: str = args.task_id
     orchestrator = build_orchestrator(
         config,
-        artifacts_root=root,
+        layout=layout_for(config),
+        env_file=resolve_env_file_path(args)[0],
         heartbeat_seconds=args.heartbeat_seconds,
         is_recovery_rerun=lambda i: i == target_id,
     )
@@ -1943,7 +1958,10 @@ def cmd_finalize(args: argparse.Namespace) -> int:
 
     declared = _FINALIZE_STATUS[args.as_]
     orchestrator = build_orchestrator(
-        config, artifacts_root=root, heartbeat_seconds=args.heartbeat_seconds
+        config,
+        layout=layout_for(config),
+        env_file=resolve_env_file_path(args)[0],
+        heartbeat_seconds=args.heartbeat_seconds,
     )
     plan = orchestrator.plan_finalize(
         args.task_id, declared=declared, pr_url=args.pr_url, verify=not args.no_verify_pr
@@ -2044,7 +2062,10 @@ def _cmd_prs_sync(args: argparse.Namespace, config: OrchestratorConfig, root: Pa
             print(f"prs --sync: the watch daemon is running (pid {pid}); stop it first")
             return 1
     orchestrator = build_orchestrator(
-        config, artifacts_root=root, heartbeat_seconds=args.heartbeat_seconds
+        config,
+        layout=layout_for(config),
+        env_file=resolve_env_file_path(args)[0],
+        heartbeat_seconds=args.heartbeat_seconds,
     )
     entries = orchestrator.sync_external_merges(write=args.yes)
     if not entries:
@@ -2109,7 +2130,10 @@ def cmd_merge_task(args: argparse.Namespace) -> int:
         return 2
 
     orchestrator = build_orchestrator(
-        config, artifacts_root=root, heartbeat_seconds=args.heartbeat_seconds
+        config,
+        layout=layout_for(config),
+        env_file=resolve_env_file_path(args)[0],
+        heartbeat_seconds=args.heartbeat_seconds,
     )
     plan = orchestrator.plan_merge(args.task_id, verify=True)
     if plan.refusals:
@@ -2266,7 +2290,7 @@ def cmd_memory(args: argparse.Namespace) -> int:
     if not config.memory.enabled:
         print("memory: disabled in config (memory.enabled: false) — nothing to do")
         return 0
-    layout = MemoryLayout.for_repo(config.repo.local_path)
+    layout = MemoryLayout(layout_for(config).private_home)
     action = args.memory_action
     if action == "show":
         return _cmd_memory_show(layout)
@@ -2491,7 +2515,7 @@ def run_preflight(
     as a health line here — the only place the ``.env`` notice appears.
     """
     lines: list[str] = [_env_preflight_line(env_file)]
-    providers = build_providers(config, artifacts_root=worc_home_for(config))
+    providers = build_providers(config, layout=layout_for(config))
     ok = True
     for pid in config.agents.allowed:
         provider = providers.get(pid)
@@ -2574,7 +2598,9 @@ def cmd_validate_flow(args: argparse.Namespace) -> int:
     config = load_config_for(args)
     if config is None:
         return 2
-    registry = FlowRegistry(operator_flows_dir=worc_home_for(config) / "flows", config=config)
+    registry = FlowRegistry(
+        operator_flows_dir=layout_for(config).control_home / "flows", config=config
+    )
     available = registry.operator_flow_names()
     if args.all_flows and args.name is not None:
         print("validate-flow: pass a flow NAME or --all, not both")
@@ -2693,7 +2719,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
     if poll <= 0:
         orchestrator = build_orchestrator(
             config,
-            artifacts_root=worc_home_for(config),
+            layout=layout_for(config),
+            env_file=resolve_env_file_path(args)[0],
             heartbeat_seconds=args.heartbeat_seconds,
         )
         return _summarize_watch(
@@ -2728,7 +2755,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
     )
     orchestrator = build_orchestrator(
         config,
-        artifacts_root=worc_home_for(config),
+        layout=layout_for(config),
+        env_file=resolve_env_file_path(args)[0],
         heartbeat_seconds=args.heartbeat_seconds,
         agent_handle_recorder=recorder,
         is_cancelled=lambda: (
@@ -3719,7 +3747,7 @@ def _install_create_dirs(repo_local_path: Path) -> None:
     Idempotent. The repo task dirs are created empty, so they do not appear in ``git status`` until
     a task writes into them; everything under ``.worc/`` is gitignored as a whole.
     """
-    worc_home = repo_local_path / WORC_HOME
+    worc_home = RuntimeLayout.default(repo_local_path).control_home
     for rel in REPO_TASK_DIRS:
         (repo_local_path / rel).mkdir(parents=True, exist_ok=True)
     for rel in WORC_RUNTIME_DIRS:
@@ -3758,7 +3786,7 @@ def _install_print_plan(
     print(f"  would create {worc_home / 'guide'}/ (agent task-authoring docs)")
     print(f"  would create {worc_home / 'flows'}/ (built-in flows + node prompt templates)")
     print(f"  would create {worc_home / ENV_EXAMPLE_FILENAME} (secrets template)")
-    print(f"  would ignore {WORC_HOME}/ via .gitignore")
+    print(f"  would ignore {CONTROL_HOME_DIRNAME}/ via .gitignore")
     if missing:
         print(f"  note: provider(s) not on PATH: {', '.join(p.value for p in missing)}")
 
@@ -3803,7 +3831,7 @@ def cmd_install(args: argparse.Namespace) -> int:
         return 1
 
     spec = outcome.spec
-    worc_home = (spec.repo_local_path / WORC_HOME).resolve()
+    worc_home = RuntimeLayout.default(spec.repo_local_path).control_home.resolve()
     config_path = worc_home / "config.yaml"
 
     if args.dry_run:
@@ -3853,7 +3881,7 @@ def cmd_install(args: argparse.Namespace) -> int:
         print(f"install: wrote {worc_home / ENV_EXAMPLE_FILENAME} (copy to .worc/.env, fill in)")
     # Gitignore the whole .worc/ runtime home so the operator's `git status` stays clean.
     if append_runtime_excludes(spec.repo_local_path):
-        print(f"install: ignored {WORC_HOME}/ via .gitignore")
+        print(f"install: ignored {CONTROL_HOME_DIRNAME}/ via .gitignore")
     if outcome.missing_providers:
         names = ", ".join(p.value for p in outcome.missing_providers)
         print(f"install: note — selected provider(s) not on PATH yet: {names}")

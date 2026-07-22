@@ -168,6 +168,18 @@ def _resources_dir_for_package(package_root: Path) -> Path:
     return package_root / name
 
 
+def codex_config_home() -> Path:
+    """The Codex config/credential home: ``$CODEX_HOME`` or the ``~/.codex`` default.
+
+    Codex authenticates through the operator's own home (credentials stay outside the orchestrator).
+    Shared with the WRI-004 ``InternalDenyPolicy`` assembly (composition root) so the provider-owned
+    auth/config home is a single source of truth rather than a duplicated literal.
+    """
+    raw = os.environ.get("CODEX_HOME")
+    config_dir = Path(raw) if raw else Path.home() / ".codex"
+    return config_dir.resolve()
+
+
 def resolve_codex_resources_dir(
     command: str,
     *,

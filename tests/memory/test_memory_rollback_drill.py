@@ -29,7 +29,7 @@ def _tier_bytes(service: MemoryService) -> dict[str, bytes]:
 
 
 def test_restore_returns_byte_identical_pre_cleanup_state(tmp_path: Path) -> None:
-    layout = MemoryLayout.for_repo(tmp_path)
+    layout = MemoryLayout(tmp_path / ".worc")
     service = MemoryService(layout, config=MemoryConfig(enabled=True))
     # Two entities, one of which the cleanup will find stale (its path is gone) and quarantine.
     service.append(
@@ -76,7 +76,7 @@ def test_restore_returns_byte_identical_pre_cleanup_state(tmp_path: Path) -> Non
 
 
 def test_rollback_is_recorded_as_an_audit_row(tmp_path: Path) -> None:
-    layout = MemoryLayout.for_repo(tmp_path)
+    layout = MemoryLayout(tmp_path / ".worc")
     service = MemoryService(layout, config=MemoryConfig(enabled=True))
     service.append(
         EntityRecord(

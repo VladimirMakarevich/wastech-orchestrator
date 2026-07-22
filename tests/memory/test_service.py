@@ -31,7 +31,7 @@ _AUDIT = AuditContext(timestamp="2026-06-30T00:00:00Z")
 
 @pytest.fixture
 def service(tmp_path: Path) -> MemoryService:
-    return MemoryService(MemoryLayout.for_repo(tmp_path))
+    return MemoryService(MemoryLayout(tmp_path / ".worc"))
 
 
 def _semantic(statement: str, *, trust: TrustLevel = TrustLevel.HUMAN_CURATED) -> LongTermRecord:
@@ -110,7 +110,7 @@ def test_append_entity_round_trips(service: MemoryService) -> None:
 @pytest.mark.parametrize("secret", [FAKE_GH, FAKE_OPENAI, FAKE_AWS])
 def test_planted_token_is_redacted_before_disk(tmp_path: Path, secret: str) -> None:
     # AC-SF1: a secret-shaped string in any record field never lands in a memory file.
-    service = MemoryService(MemoryLayout.for_repo(tmp_path))
+    service = MemoryService(MemoryLayout(tmp_path / ".worc"))
     service.append(
         LongTermRecord(
             memory_id="ltm1",
@@ -132,7 +132,7 @@ def test_planted_token_is_redacted_before_disk(tmp_path: Path, secret: str) -> N
 
 def test_literal_extra_secret_is_redacted_before_disk(tmp_path: Path) -> None:
     secret = "super-secret-passphrase-value"
-    service = MemoryService(MemoryLayout.for_repo(tmp_path), extra_secrets=[secret])
+    service = MemoryService(MemoryLayout(tmp_path / ".worc"), extra_secrets=[secret])
     service.append(
         EntityRecord(
             entity_id="e1",
@@ -150,7 +150,7 @@ def test_literal_extra_secret_is_redacted_before_disk(tmp_path: Path) -> None:
 
 
 def test_replace_all_rewrites_file_and_still_redacts(tmp_path: Path) -> None:
-    service = MemoryService(MemoryLayout.for_repo(tmp_path), extra_secrets=["topsecretvalue"])
+    service = MemoryService(MemoryLayout(tmp_path / ".worc"), extra_secrets=["topsecretvalue"])
     service.append(_semantic("first"), audit=_AUDIT)
     service.append(_semantic("second"), audit=_AUDIT)
     assert len(service.read_long_term(LongTermKind.SEMANTIC)) == 2

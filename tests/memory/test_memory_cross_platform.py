@@ -53,7 +53,7 @@ def _indexed_service(repo: Path) -> MemoryService:
     filesystem stat — which is exactly the Windows behavior AC-X1 needs to exercise.
     """
     index = DerivedIndex(repo, tracked_paths_provider=lambda _root: frozenset())
-    return MemoryService(MemoryLayout.for_repo(repo), index=index)
+    return MemoryService(MemoryLayout(repo / ".worc"), index=index)
 
 
 # --- (a) a POSIX-stored path resolves against the native (Windows) filesystem ----------------
@@ -82,7 +82,7 @@ def test_posix_path_resolves_against_native_filesystem(tmp_path: Path) -> None:
 def test_entity_card_end_to_end_stores_posix_path(tmp_path: Path) -> None:
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "a.py").write_text("x = 1\n", encoding="utf-8")
-    layout = MemoryLayout.for_repo(tmp_path)
+    layout = MemoryLayout(tmp_path / ".worc")
     service = _indexed_service(tmp_path)
     delta = CandidateDelta(
         entities=(
@@ -111,7 +111,7 @@ def test_entity_card_end_to_end_stores_posix_path(tmp_path: Path) -> None:
 
 
 def test_tier_file_is_lf_and_deterministic(tmp_path: Path) -> None:
-    layout = MemoryLayout.for_repo(tmp_path)
+    layout = MemoryLayout(tmp_path / ".worc")
     service = _indexed_service(tmp_path)
     service.apply_delta(
         None, episode=_episode(), source=WriteSource.SUCCESS, audit=AuditContext(timestamp=_TS)

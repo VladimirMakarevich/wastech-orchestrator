@@ -15,7 +15,6 @@ from pathlib import Path
 import pytest
 
 from wastech_orchestrator.providers.artifacts import (
-    EXCHANGE_HOME,
     exchange_task_dir,
     sha256_file,
 )
@@ -30,6 +29,7 @@ from wastech_orchestrator.providers.exchange import (
     posix_file_facts,
     publish_to_exchange,
 )
+from wastech_orchestrator.runtime_layout import EXCHANGE_HOME_DIRNAME
 
 GH_TOKEN = "ghp_" + "A" * 24
 SK_KEY = "sk-" + "B" * 24
@@ -39,7 +39,7 @@ LITERAL = "supersecretliteral123"
 
 @pytest.fixture
 def task_dir(tmp_path: Path) -> Path:
-    return exchange_task_dir(tmp_path / EXCHANGE_HOME, "add-http-retry")
+    return exchange_task_dir(tmp_path / EXCHANGE_HOME_DIRNAME, "add-http-retry")
 
 
 def _fake_inspector(overrides: dict[Path, FileFacts]) -> Callable[[Path], FileFacts]:
@@ -242,7 +242,7 @@ def test_manifest_rejects_case_fold_collision(task_dir: Path) -> None:
 
 
 def test_current_task_only_accepts_absent_empty_and_single(tmp_path: Path) -> None:
-    exchange_root = tmp_path / EXCHANGE_HOME
+    exchange_root = tmp_path / EXCHANGE_HOME_DIRNAME
     assert_exchange_current_task_only(exchange_root, "t")  # absent → ok
     exchange_root.mkdir()
     assert_exchange_current_task_only(exchange_root, "t")  # empty → ok
@@ -251,7 +251,7 @@ def test_current_task_only_accepts_absent_empty_and_single(tmp_path: Path) -> No
 
 
 def test_current_task_only_rejects_foreign_dir_and_stray_file(tmp_path: Path) -> None:
-    exchange_root = tmp_path / EXCHANGE_HOME
+    exchange_root = tmp_path / EXCHANGE_HOME_DIRNAME
     (exchange_root / "other-task").mkdir(parents=True)
     with pytest.raises(ExchangeError):
         assert_exchange_current_task_only(exchange_root, "t")
@@ -263,14 +263,14 @@ def test_current_task_only_rejects_foreign_dir_and_stray_file(tmp_path: Path) ->
 def test_current_task_only_rejects_symlinked_root(tmp_path: Path) -> None:
     real = tmp_path / "real"
     real.mkdir()
-    exchange_root = tmp_path / EXCHANGE_HOME
+    exchange_root = tmp_path / EXCHANGE_HOME_DIRNAME
     exchange_root.symlink_to(real, target_is_directory=True)
     with pytest.raises(ExchangeError):
         assert_exchange_current_task_only(exchange_root, "t")
 
 
 def test_current_task_only_rejects_simulated_windows_reparse_root(tmp_path: Path) -> None:
-    exchange_root = tmp_path / EXCHANGE_HOME
+    exchange_root = tmp_path / EXCHANGE_HOME_DIRNAME
     exchange_root.mkdir()
     facts = FileFacts(
         is_symlink=True, is_dir=False, is_regular=False, link_count=1, alt_streams=(), size=0
@@ -299,7 +299,7 @@ def _request(exchange_root: Path, repo: Path, **paths: str | tuple[str, ...]) ->
 
 
 def test_paths_contained_accepts_exchange_paths(tmp_path: Path) -> None:
-    exchange_root = tmp_path / EXCHANGE_HOME
+    exchange_root = tmp_path / EXCHANGE_HOME_DIRNAME
     td = exchange_task_dir(exchange_root, "t")
     req = _request(
         exchange_root,
@@ -312,7 +312,7 @@ def test_paths_contained_accepts_exchange_paths(tmp_path: Path) -> None:
 
 
 def test_paths_contained_rejects_a_path_outside_the_exchange(tmp_path: Path) -> None:
-    exchange_root = tmp_path / EXCHANGE_HOME
+    exchange_root = tmp_path / EXCHANGE_HOME_DIRNAME
     req = _request(
         exchange_root,
         tmp_path / "repo",
@@ -323,7 +323,7 @@ def test_paths_contained_rejects_a_path_outside_the_exchange(tmp_path: Path) -> 
 
 
 def test_paths_contained_ignores_working_directory(tmp_path: Path) -> None:
-    exchange_root = tmp_path / EXCHANGE_HOME
+    exchange_root = tmp_path / EXCHANGE_HOME_DIRNAME
     req = _request(exchange_root, tmp_path / "repo")  # only working_directory set
     assert_orchestration_paths_contained(req, exchange_root)  # does not raise
 
