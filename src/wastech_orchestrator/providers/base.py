@@ -79,6 +79,13 @@ class ErrorClass(StrEnum):
     # distinguishable from a genuine PROCESS_CRASHED. Deliberately NOT in FALLBACK_ELIGIBLE (never
     # respawn a fresh agent after a stop) nor TRANSIENT_RETRYABLE; the Core parks the task instead.
     CANCELLED = "cancelled"
+    # The provider process-tree quiescence barrier could not prove the containment empty (WRI-012):
+    # a background/detached/reparented descendant may still be running and writing the repo/exchange
+    # after the root exited. This is a SECURITY / manual-action condition, never a quality failure.
+    # Deliberately NOT in FALLBACK_ELIGIBLE (never respawn a fresh agent while an unknown writer may
+    # be live) nor PARK_ELIGIBLE (an auto-resume must not paper over an uncontained process); the
+    # Core routes it to ``manual_action_required`` and the children-file handle is retained.
+    CONTAINMENT_UNVERIFIED = "containment_unverified"
 
 
 # Error classes that unconditionally allow fallback.

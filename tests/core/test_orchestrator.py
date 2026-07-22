@@ -1261,6 +1261,30 @@ def test_rate_limited_exhaustion_parks_task_resumable(
     assert not (art / "logs" / "task-limit" / "failure_report.json").exists()
 
 
+def test_containment_unverified_goes_manual_action_required(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # WRI-012: an unproven provider process tree on implementation is a security / manual-action
+    # condition. Unlike a transient infra class it must NOT park (an auto-resume must not paper over
+    # an uncontained writer), and unlike a quality failure it must NOT fall back — the task goes
+    # terminal MANUAL_ACTION_REQUIRED so an operator intervenes, and publish never runs.
+    providers = _both(
+        infra_fail={"implementation"}, infra_error_class=ErrorClass.CONTAINMENT_UNVERIFIED
+    )
+    orch, store, ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-contain"))
+
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+    task = store.get_task("task-contain")
+    assert task is not None and task.status is Status.MANUAL_ACTION_REQUIRED
+    assert "publish" not in _ran_nodes(store, "task-contain")  # nothing downstream ran
+    assert ledger.records()[0]["final_status"] == "manual_action_required"
+
+
 def test_stop_cancellation_parks_task_resumable(git_repo, make_git_config, tmp_path: Path) -> None:
     # Reliable-stop: an operator stop kills the implementation agent (surfaces as PROCESS_CRASHED),
     # the Router reclassifies it as CANCELLED (is_cancelled True) instead of falling back, and the

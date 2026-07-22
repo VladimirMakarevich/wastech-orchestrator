@@ -406,6 +406,21 @@ class BaseCliProvider:
         )
         Path(paths.events_path).write_text(redacted_stdout, encoding="utf-8")
 
+        # WRI-012 quiescence barrier: before ANY output is parsed or trusted, the provider process
+        # tree must be proven quiescent. If ``run_process`` could not prove the containment empty, a
+        # background/detached descendant may still be writing the repo/exchange — a fail-closed
+        # SECURITY condition, never a quality failure and never a fallback. Finalize the failed
+        # attempt and raise the non-fallback ``CONTAINMENT_UNVERIFIED`` so the Router does not fall
+        # over (the Core routes it to manual-action and the children-file handle is retained). The
+        # ``detail`` is secret-free (platform + a member count + pids only).
+        if proc.quiescence is not None and not proc.quiescence.proven:
+            error = NormalizedError(
+                ErrorClass.CONTAINMENT_UNVERIFIED,
+                f"{message_for(ErrorClass.CONTAINMENT_UNVERIFIED)} ({proc.quiescence.detail})",
+            )
+            self._finalize_failure(paths, request, started_at, finished_at, proc, error)
+            raise ProviderError(error.error_class, error.message)
+
         # True infrastructure failure (launch / timeout) → no usable stream → classify + raise.
         if proc.launch_error is not None or proc.timed_out:
             error = classify(

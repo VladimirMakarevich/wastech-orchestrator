@@ -2105,6 +2105,20 @@ class Orchestrator:
                 # queue. The checkpoint is already persisted; the next watch tick / process start
                 # resumes from current_node (or fails it past agents.retry.max_blocked_s).
                 return self._park(p, run_state, exc)
+            if exc.error_class is ErrorClass.CONTAINMENT_UNVERIFIED:
+                # WRI-012: the provider process tree could not be proven quiescent — an unknown
+                # background/reparented descendant may still be writing. This is a security /
+                # manual-action condition, never a quality fail and never an auto-resumable park:
+                # surface it to an operator (terminal ``manual_action_required`` blocks continuation
+                # and the next task) with a secret-free failure report. ``run_process`` deliberately
+                # kept the children-file handle so a ``stop``/recovery can still reap the survivor.
+                return self._fail(
+                    p,
+                    str(exc),
+                    status=Status.MANUAL_ACTION_REQUIRED,
+                    node_id=run_state.current_node,
+                    run_state=run_state,
+                )
             return self._fail(p, str(exc), node_id=run_state.current_node, run_state=run_state)
         self._sync_counters_from_run_state(p, run_state)
         return self._finish_engine_run(p, result)

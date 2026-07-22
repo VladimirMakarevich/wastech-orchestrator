@@ -37,11 +37,33 @@ def test_infra_classes_always_fall_back(error_class: ErrorClass) -> None:
         ErrorClass.TASK_FAILURE,
         ErrorClass.INVALID_INVOCATION,
         ErrorClass.MODEL_REQUEST_INVALID,
+        # WRI-012: an unproven process-tree quiescence is a security/manual-action condition — never
+        # respawn a fresh agent on the other provider while an unknown writer may still be live.
+        ErrorClass.CONTAINMENT_UNVERIFIED,
     ],
 )
 def test_non_fallback_classes_never_fall_back(error_class: ErrorClass) -> None:
     # Even with an equal/stricter profile, a non-infra class is never eligible.
     assert not fallback_allowed(error_class, primary_profile=WORKSPACE, fallback_profile=READONLY)
+
+
+def test_containment_unverified_raised_does_not_fall_back(
+    config: OrchestratorConfig,
+    make_fake_provider: Callable[..., object],
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # WRI-012 end-to-end through the router: a raised CONTAINMENT_UNVERIFIED is terminal for the
+    # stage — the other provider is never invoked, so no fresh agent races the unproven subtree.
+    primary = make_fake_provider(ProviderId.CODEX, raises=ErrorClass.CONTAINMENT_UNVERIFIED)
+    fallback = make_fake_provider(ProviderId.CLAUDE)  # would succeed if (wrongly) invoked
+    router = AgentRouter(config, {ProviderId.CODEX: primary, ProviderId.CLAUDE: fallback})
+    outcome = router.run_stage(
+        make_request(node_id="review"), router.resolve_route("review", ProviderId.CODEX)
+    )
+    assert outcome.result is None
+    assert outcome.terminal_error is not None
+    assert outcome.terminal_error.error_class is ErrorClass.CONTAINMENT_UNVERIFIED
+    assert fallback.run_count == 0  # the fallback provider was never launched
 
 
 @pytest.mark.parametrize("error_class", sorted(CONDITIONAL_FALLBACK, key=lambda e: e.value))

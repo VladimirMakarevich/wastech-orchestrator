@@ -26,7 +26,7 @@ from wastech_orchestrator.providers.base import (
     build_effective_prompt,
 )
 from wastech_orchestrator.providers.claude import ClaudeCodeProvider
-from wastech_orchestrator.providers.process import ProcessResult
+from wastech_orchestrator.providers.process import ProcessResult, QuiescenceResult
 
 FIXED_TIME = datetime(2026, 6, 11, 12, 0, 0, tzinfo=UTC)
 FAKE_GH_TOKEN = "ghp_" + "abcdef0123456789abcdef0123"
@@ -56,6 +56,11 @@ class FakeRun:
     exit_code: int = 0
     timed_out: bool = False
     launch_error: str | None = None
+    # WRI-012: the containment quiescence result the runner reports. Default proven so existing
+    # tests are unaffected; a test sets an unproven result to exercise the fail-closed gate.
+    quiescence: QuiescenceResult | None = field(
+        default_factory=lambda: QuiescenceResult(proven=True, detail="fake")
+    )
     calls: int = 0
     captured: dict[str, Any] = field(default_factory=dict)
 
@@ -82,6 +87,7 @@ class FakeRun:
             duration_seconds=0.5,
             stdout_path=str(stdout_path),
             stderr_text=self.stderr,
+            quiescence=self.quiescence,
         )
 
 
@@ -168,6 +174,34 @@ def test_nonzero_exit_with_terminal_error_event_is_task_failure_not_crash(
     assert "error_max_turns" in result.error.message
     # Surfaced structurally so the flow layer detects the gate trigger without substring-matching.
     assert result.error.failure_subtype == "error_max_turns"
+
+
+def test_unproven_quiescence_fails_closed_before_parsing_output(
+    claude_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # WRI-012: even with a perfectly valid success stream and exit 0, an unproven process-tree
+    # quiescence result makes run() fail closed with the non-fallback CONTAINMENT_UNVERIFIED BEFORE
+    # the output is parsed or trusted — an unknown descendant may still be writing.
+    fake = FakeRun(
+        stdout=_success_stream(),
+        exit_code=0,
+        quiescence=QuiescenceResult(
+            proven=False, detail="posix: survivors=[999]", survivors=(999,)
+        ),
+    )
+    provider = _provider(claude_config, security_config, tmp_path, fake)
+    with pytest.raises(ProviderError) as exc:
+        provider.run(make_request())
+    assert exc.value.error_class is ErrorClass.CONTAINMENT_UNVERIFIED
+    assert "999" in str(exc.value)  # secret-free diagnostic reaches the message
+    # Never fallback-eligible: a live unknown writer must not trigger a fresh agent on the other
+    # provider (and never an auto-resumable park either).
+    assert ErrorClass.CONTAINMENT_UNVERIFIED not in FALLBACK_ELIGIBLE
+    # The failed attempt is still persisted for the audit trail.
+    assert (_attempt_dir(tmp_path) / "result.json").exists()
 
 
 def test_nonzero_exit_without_terminal_event_is_process_crashed(

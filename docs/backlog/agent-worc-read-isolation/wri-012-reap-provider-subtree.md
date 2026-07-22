@@ -1,6 +1,8 @@
 # WRI-012 — Prove provider process-tree quiescence
 
-**Status:** open **Milestone:** 0 (security prerequisite) **Source:** [decision record](README.md) **Dependencies:** —
+**Status:** implemented **Milestone:** 0 (security prerequisite) **Source:** [decision record](README.md) **Dependencies:** —
+
+Shipped as an injected `ProcessContainment` seam in `providers/process.py` (a POSIX process-group + during-run descendant tracker, and a Windows kill-on-close Job Object via ctypes), a `run_process` quiescence barrier on every exit path, a non-fallback/non-park `ErrorClass.CONTAINMENT_UNVERIFIED` that the Core routes to `manual_action_required`, and an adapter-side fail-closed gate before parse. Windows Job Object real-behaviour is verified under the WRI-006 native gate (unit-tested here via the injected Win32 seam); residual hardening (cgroup v2 / PID-namespace, the sub-poll `setsid`+reparent gap, the Job assign micro-race, a longer-lived PID-reuse guard) is recorded in [follow_ups.md](../follow_ups.md).
 
 ## Problem
 
@@ -27,12 +29,12 @@ Every provider attempt runs inside a platform-appropriate process containment ob
 
 ## Acceptance criteria
 
-- [ ] A provider that returns exit 0 after spawning a background writer cannot modify the repository/exchange after `run_process` returns.
-- [ ] Nested, reparented, new-session/process-group, and stdio-detached fixtures are terminated or make strict isolation fail before any manifest/check/Git action.
-- [ ] Windows uses a containment primitive that still owns descendants after the root exits; missing Job Object support cannot silently fall back to unverifiable `taskkill` semantics.
-- [ ] Normal exit, timeout, exception, cancellation, soft/hard stop, and fake-provider parse failure all clear the handle only after bounded quiescence proof.
-- [ ] An unkillable/unknown subtree blocks fallback and the next task and preserves actionable, secret-free diagnostics.
-- [ ] Existing cross-platform stop semantics remain intact; this task does not make a graceful operator stop implicitly hard-kill an active node before the existing contract says so.
+- [x] A provider that returns exit 0 after spawning a background writer cannot modify the repository/exchange after `run_process` returns. (POSIX real-process fixture `test_background_in_group_writer_is_reaped_after_exit`; Windows via the Job Object, real-behaviour under WRI-006.)
+- [x] Nested, reparented, new-session/process-group, and stdio-detached fixtures are terminated or make strict isolation fail before any manifest/check/Git action. (`test_process_quiescence_posix.py`: nested/reparented in-group + `setsid`-detached tracked-and-reaped; the sub-poll `setsid`+immediate-reparent gap is the documented residual closable only by a kernel container.)
+- [x] Windows uses a containment primitive that still owns descendants after the root exits; missing Job Object support cannot silently fall back to unverifiable `taskkill` semantics. (Kill-on-close Job Object with a `QueryInformationJobObject` emptiness proof; if the job cannot be created/assigned the proof **fails closed** rather than degrading to `taskkill`.)
+- [x] Normal exit, timeout, exception, cancellation, soft/hard stop, and fake-provider parse failure all clear the handle only after bounded quiescence proof. (`run_process` clears the children-file only when `quiescence.proven`; `test_recorder_handle_retained_when_quiescence_unproven`.)
+- [x] An unkillable/unknown subtree blocks fallback and the next task and preserves actionable, secret-free diagnostics. (`CONTAINMENT_UNVERIFIED` → non-fallback → `manual_action_required` (terminal, blocks the next task) with a platform+count+pids detail; `test_containment_unverified_*`.)
+- [x] Existing cross-platform stop semantics remain intact; this task does not make a graceful operator stop implicitly hard-kill an active node before the existing contract says so. (Children-file `(pid,pgid)` contract, `start_new_session` group-leader launch, router cancellation-before-fallback, and pending-graceful-stop preserved by name; `test_process_control.py` + routing/process regressions green.)
 
 ## Verification
 
