@@ -19,6 +19,14 @@ Before the first untrusted provider attempt, freeze every agent instruction/cont
 
 Provider requests use the frozen task/skill paths, and provider-native live project instruction discovery is disabled. Each adapter injects the frozen repository instruction set through an orchestrator-owned supported high-priority instruction surface. Fresh, resume, evaluator, supervisor, and provider fallback all use the same manifest digest. Ordinary repository source remains live and editable.
 
+## Gap handed over by WRI-001 (decoupled build)
+
+WRI-001 shipped the exchange publication seam **before** this task, so it publishes the _live_ content of the task file and selected skills rather than a frozen snapshot. When WRI-011 lands it replaces these interim shims:
+
+- `core/orchestrator.py._publish_task_snapshot` reads the live task file and publishes it (redacted) to `.worc-io/<task-id>/task.md`, re-pointing `{task_path}`. Replace it with the frozen, digested task snapshot + immutable manifest, and disable provider-native live task-file discovery. WRI-001's `publish_to_exchange` / `exchange_task_dir` primitives are the layout/write seam to build on.
+- `core/orchestrator.py._skill_paths_by_node` copies each selected `SKILL.md` individually into `.worc-io/<task-id>/skills/<name>/SKILL.md` (a naive per-file copy, missing package-closure and instruction precedence) and falls back to the live path when a file is absent. Replace it with WRI-011's package-closure discovery + freezing + precedence, and disable live project/skill instruction discovery.
+- WRI-001 already threads `exchange_root` and the pre-launch containment gate through the constant supervisor's `AgentRunRequest` (`core/supervisor.py`), but the supervisor still receives task title/description inline for the skill proposal (README "High" finding). WRI-011 owns freezing the task + bounded skill inventory before that proposal and passing exchange paths/metadata instead of task bodies.
+
 ## In scope
 
 - Publish a redacted, immutable task packet under the current exchange and point `AgentRunRequest.task_path` to it. Deny provider writes to the entire `tasks/` lifecycle tree (reads stay allowed) so status/rerun bookkeeping cannot be corrupted and an agent cannot inject new task files for the daemon to execute; WRI-009 verifies the lifecycle file against this packet's digest before the audit commit stages it. Tasks whose subject is editing task files are unsupported under strict isolation.

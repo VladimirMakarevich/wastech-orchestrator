@@ -52,7 +52,12 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeManualRequired,
     NodeServices,
 )
-from wastech_orchestrator.core.flow.output_policy import is_within
+from wastech_orchestrator.core.flow.nodes.exchange_publish import (
+    publish_artifact,
+    publish_file,
+    publish_node_run_file,
+)
+from wastech_orchestrator.core.flow.output_policy import is_within, resolve_output_policy
 from wastech_orchestrator.core.flow.postprocess import (
     apply_output_artifact,
     read_decomposition,
@@ -130,6 +135,7 @@ from wastech_orchestrator.notify import (
 )
 from wastech_orchestrator.observability.logging import bind
 from wastech_orchestrator.providers.artifacts import (
+    EXCHANGE_HOME,
     append_node_history,
     archive_task_artifacts,
     node_run_dir,
@@ -140,6 +146,10 @@ from wastech_orchestrator.providers.base import (
     PARK_ELIGIBLE,
     ErrorClass,
     ProviderId,
+)
+from wastech_orchestrator.providers.exchange import (
+    assert_exchange_current_task_only,
+    clear_exchange_task_dir,
 )
 from wastech_orchestrator.providers.redaction import (
     read_denied_secrets,
@@ -443,6 +453,11 @@ class Orchestrator:
         self._ledger = ledger
         self._gate = gate
         self._artifacts_root = artifacts_root
+        # The provider-readable exchange root ``<repo>/.worc-io`` (WRI-001), a sibling of the
+        # private ``.worc`` home. Computed inline from the repo path until WRI-004 exposes it typed
+        # layout field; every exchange builder/publisher still takes it as an argument, so WRI-004
+        # only has to replace this one construction site.
+        self._exchange_root = Path(config.repo.local_path) / EXCHANGE_HOME
         self._clock = clock
         self._monotonic = monotonic
         # The orchestrator-wide ``--heartbeat-seconds`` interval (shared with providers/git/checks),
@@ -1116,6 +1131,8 @@ class Orchestrator:
         slug = row.slug or slugify(row.title)
         prior = _ledger_attempt_count(self._ledger, task_id)
         archive_task_artifacts(self._artifacts_root, task_id, prior)
+        # Fresh rerun starts with a clean exchange; the run re-publishes into it (WRI-001).
+        clear_exchange_task_dir(self._exchange_root, task_id)
         self._git.reset_branch_to_base(
             task_id,
             slug,
@@ -1153,6 +1170,8 @@ class Orchestrator:
             )
         prior = _ledger_attempt_count(self._ledger, task_id)
         archive_task_artifacts(self._artifacts_root, task_id, prior)
+        # Restart-in-place also starts clean; the run re-publishes into the exchange (WRI-001).
+        clear_exchange_task_dir(self._exchange_root, task_id)
         self._store.reset_task_for_rerun(task_id)  # DB-only reset; the branch is left untouched
         self._rerun_attempt[task_id] = prior + 1
         self._log(task_id).info("rerun: restart in place", extra={"attempt": prior + 1})
@@ -1663,7 +1682,10 @@ class Orchestrator:
             decomposition=decomposition,
             branch=row.branch or "",
             slug=row.slug or slugify(task.title),
-            plan_path=str(task_artifact_dir(self._artifacts_root, plan.task_id) / "plan.md"),
+            # _restore_engine_inputs owns the plan path on resume: it republishes plan.md into the
+            # exchange when it exists (WRI-001). No private pre-seed here (it would leak a private
+            # path when planning has not produced plan.md yet).
+            plan_path=None,
             skip=effective_skip(task),
         )
 
@@ -1730,13 +1752,25 @@ class Orchestrator:
         """Repopulate the artifact paths a resumed fixing/review node reads: the diff, the latest
         failed check log, the review findings, and the plan — from disk + the store, scoped to the
         active subtask when decomposed."""
+        # Recovery parity (WRI-001): a resumed node must read the SAME exchange paths a fresh run
+        # produced, never the private originals. Re-publish each restored artifact into the current
+        # task's exchange and point NodeInputs at the exchange copy.
+        secrets = self._memory_extra_secrets()
         task_dir = task_artifact_dir(self._artifacts_root, p.task.id)
         diff = task_dir / "current.diff"
         if diff.exists():
-            inputs.diff_path = str(diff)
+            inputs.diff_path = publish_file(
+                str(self._exchange_root),
+                p.task.id,
+                "current.diff",
+                str(diff),
+                extra_secrets=secrets,
+            )
         plan = task_dir / "plan.md"
         if plan.exists():
-            inputs.plan_path = str(plan)
+            inputs.plan_path = publish_file(
+                str(self._exchange_root), p.task.id, "plan.md", str(plan), extra_secrets=secrets
+            )
         # Review findings are now per-run under stages/<node>/run-<id>/findings.json (history
         # preserved across fix→review cycles). The store's evaluations table is the source of truth
         # for which run produced the latest verdict: take the last in_flow_verdict row (skip the
@@ -1754,14 +1788,29 @@ class Orchestrator:
                     / "findings.json"
                 )
                 if review.exists():
-                    inputs.review_path = str(review)
+                    inputs.review_path = publish_node_run_file(
+                        str(self._exchange_root),
+                        p.task.id,
+                        last.node_id,
+                        last.source_node_run_id,
+                        "findings.json",
+                        review.read_bytes(),
+                        extra_secrets=secrets,
+                        private_path=str(review),
+                    )
         # The per-node skill map is restored separately by ``_resolve_skill_layers`` (from
         # ``skill_map.json``), since it must be in place for a fresh run too — not only on resume.
         # P1: the fixing-resume check log is task-scoped — a decomposed subtask re-runs its region
         # from the top (region entry), regenerating its own check log.
         latest_check = self._store.latest_failed_check_log(p.task.id, None)
         if latest_check and Path(latest_check).exists():
-            inputs.checks_path = latest_check
+            inputs.checks_path = publish_file(
+                str(self._exchange_root),
+                p.task.id,
+                f"checks/{Path(latest_check).name}",
+                latest_check,
+                extra_secrets=secrets,
+            )
 
     def _rebuild_decomposition(self, task_id: str, row: TaskRow) -> DecompositionDecision:
         if not row.decomposition_accepted:
@@ -1835,6 +1884,7 @@ class Orchestrator:
             store=self._store,
             repo_dir=self._config.repo.local_path,
             artifacts_root=str(self._artifacts_root),
+            exchange_root=str(self._exchange_root),
             clock=self._clock,
             git=self._git,
             notifier=self._notifier,
@@ -1861,6 +1911,23 @@ class Orchestrator:
             # Custom tool nodes (P5): the operator tool registry + the flow-wide default timeout.
             tool_registry=self._tool_registry,
             tools_default_timeout_seconds=self._config.tools.default_timeout_seconds,
+        )
+
+    def _publish_task_snapshot(self, p: _Pipeline, inputs: NodeInputs) -> None:
+        """Publish the validated task packet into the exchange as ``{task_path}`` (WRI-001).
+
+        The source task file stays ordinary repository content; the provider only ever reads the
+        redacted exchange snapshot. WRI-011 replaces this with a frozen/digested snapshot and an
+        immutable manifest, and disables provider-native live task discovery.
+        """
+        if inputs.task_path is None:  # merge flow / a flow with no task packet
+            return
+        inputs.task_path = publish_file(
+            str(self._exchange_root),
+            p.task.id,
+            "task.md",
+            inputs.task_path,
+            extra_secrets=self._memory_extra_secrets(),
         )
 
     def _resolve_merge_flow(self) -> FlowSnapshot:
@@ -1948,6 +2015,10 @@ class Orchestrator:
     ) -> PipelineResult:
         """Build the node services/inputs and drive the flow (fresh or resumed). The preamble
         (preflight, branch) + terminal handling live in the callers; this is the engine core."""
+        # WRI-001 pre-launch invariant (fresh + resume): the exchange root may hold at most this
+        # task's directory. Fails closed on a stale/foreign exchange before any provider launches.
+        # Terminal seal/restore is WRI-007.
+        assert_exchange_current_task_only(self._exchange_root, p.task.id)
         snapshot = self._resolve_flow(p)  # task_type → flow (P0.4 dispatch)
         assert snapshot.source_path is not None
         node_overrides = self._resolve_node_overrides(p, snapshot)
@@ -1966,6 +2037,9 @@ class Orchestrator:
             branch_mode=self._branch_mode(p.task),
             publish_scope=p.task.publish,
         )
+        # Publish the validated task packet as the {task_path} the provider reads (WRI-001). WRI-011
+        # replaces this live snapshot with a frozen, digested one and disables live task discovery.
+        self._publish_task_snapshot(p, inputs)
         if resume:
             self._restore_engine_inputs(p, inputs)  # diff/checks/review/plan paths from disk
         # Resolve the per-node skill selection before any node runs: discover the inventory, apply
@@ -2192,8 +2266,15 @@ class Orchestrator:
         for index, unit in enumerate(units):
             if unit.order in committed:
                 continue
-            inputs.subtask_spec_path = str(
-                subtask_spec_path(self._artifacts_root, p.task.id, unit.order, unit.slug)
+            # Private spec stays the audit/immutable record; the redacted exchange copy is the
+            # {subtask_spec_path} the edit nodes read (WRI-001).
+            private_spec = subtask_spec_path(self._artifacts_root, p.task.id, unit.order, unit.slug)
+            inputs.subtask_spec_path = publish_file(
+                str(self._exchange_root),
+                p.task.id,
+                f"subtasks/{private_spec.name}",
+                str(private_spec),
+                extra_secrets=self._memory_extra_secrets(),
             )
             # Two-layer handoff brief for this subtask's committed ``depends_on`` predecessors
             # (subtask-context-handoff ADR); ``None`` when the subtask has no predecessors.
@@ -2250,7 +2331,15 @@ class Orchestrator:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         self._register_artifact(p.task.id, "subtask_handoff", str(path))
-        return path.as_posix()
+        # Private brief stays the audit record; the redacted exchange copy is {predecessor_context}.
+        return publish_artifact(
+            str(self._exchange_root),
+            p.task.id,
+            f"subtasks/{path.name}",
+            content,
+            extra_secrets=self._memory_extra_secrets(),
+            private_path=path.as_posix(),
+        )
 
     def _commit_subtask(self, p: _Pipeline, unit: SubtaskSpec) -> None:
         """Commit one completed subtask + persist its SHA."""
@@ -2276,6 +2365,7 @@ class Orchestrator:
             store=self._store,
             repo_dir=self._config.repo.local_path,
             artifacts_root=str(self._artifacts_root),
+            exchange_root=str(self._exchange_root),
             flow_dir=snapshot.source_path.parent,
             # Flow-local supervisor prompts + the follow-ups opt-in (prompt-and-supervisor ADR);
             # ``None`` when the flow declares no ``supervisor:`` block (global config + built-ins).
@@ -2478,6 +2568,12 @@ class Orchestrator:
         # Redaction literals for the node-output writer, harvested once per run (same set the memory
         # write path uses): raw structured output is not adapter-redacted, so scrub it at write.
         node_output_secrets = self._memory_extra_secrets()
+        # The flow's private report dir (or None) for a `report` output_artifact slot: the migrated
+        # security_audit report node returns the report as structured output, which the orchestrator
+        # writes here privately (WRI-001) instead of the agent writing into .worc/ itself.
+        report_dir = resolve_output_policy(snapshot.doc.output_policy, p.task.id).report_dir(
+            self._config.repo.local_path
+        )
 
         def post_node(node: FlowNode, outcome: NodeOutcome, node_run_id: int) -> None:
             # The constant supervisor layer observes every completed step read-only (advisory) —
@@ -2544,6 +2640,9 @@ class Orchestrator:
                 task_id=p.task.id,
                 inputs=inputs,
                 register=self._register_artifact,
+                exchange_root=str(self._exchange_root),
+                extra_secrets=node_output_secrets,
+                report_dir=report_dir,
             )
             # Generic node-output channel: persist every agent node's output as {<node_id>_path}
             # (redaction-scrubbed, local/uncommitted). A node filling a special slot above writes no
@@ -2556,6 +2655,7 @@ class Orchestrator:
                 node_run_id=node_run_id,
                 register=self._register_artifact,
                 extra_secrets=node_output_secrets,
+                exchange_root=str(self._exchange_root),
             )
             # Operator-authored splits are materialized at preflight (the decision comes from the
             # ``subtasks:`` manifest, not this node), so this post-hook is a no-op for them.
@@ -2629,7 +2729,7 @@ class Orchestrator:
         map_file = task_artifact_dir(self._artifacts_root, p.task.id) / "skill_map.json"
         if resume and map_file.exists():
             p.skill_map = self._load_skill_map(map_file)
-            inputs.skill_paths_by_node = self._skill_paths_by_node(p.skill_map)
+            inputs.skill_paths_by_node = self._skill_paths_by_node(p.task.id, p.skill_map)
             return
         p.skill_inventory = self._skill_scanner.collect()
         agent_nodes = [n for n in snapshot.doc.nodes if isinstance(n, AgentNode)]
@@ -2644,7 +2744,7 @@ class Orchestrator:
         }
         p.skill_map = {nid: refs for nid, refs in skill_map.items() if refs}
         self._persist_skill_map(p, map_file)
-        inputs.skill_paths_by_node = self._skill_paths_by_node(p.skill_map)
+        inputs.skill_paths_by_node = self._skill_paths_by_node(p.task.id, p.skill_map)
 
     def _enforce_pin_strictness(self, p: _Pipeline, pins: dict[str, SkillSelection]) -> None:
         """Strict/warn handling for unresolved operator pins (a dynamic proposal is never an error).
@@ -2703,13 +2803,38 @@ class Orchestrator:
         }
 
     def _skill_paths_by_node(
-        self, skill_map: dict[str, tuple[SkillRef, ...]]
+        self, task_id: str, skill_map: dict[str, tuple[SkillRef, ...]]
     ) -> dict[str, tuple[str, ...]]:
-        """Node id → absolute POSIX reference paths (repo-relative identity joined to the clone)."""
+        """Node id → the selected skills' exchange-published ``SKILL.md`` reference paths (WRI-001).
+
+        Each selected skill's live ``SKILL.md`` is copied (redacted) into
+        ``.worc-io/<task-id>/skills/<name>/`` so the provider reads the immutable exchange copy, not
+        the live repository file. WRI-011 replaces this per-file copy with package-closure freezing,
+        instruction precedence, and disabling provider-native live skill discovery. A ref whose file
+        is missing falls back to the live path (unchanged from before) rather than failing the run.
+        """
         repo = Path(self._config.repo.local_path)
-        return {
-            nid: tuple((repo / r.path).as_posix() for r in refs) for nid, refs in skill_map.items()
-        }
+        secrets = self._memory_extra_secrets()
+        resolved: dict[str, tuple[str, ...]] = {}
+        for nid, refs in skill_map.items():
+            paths: list[str] = []
+            for ref in refs:
+                source = repo / ref.path
+                if not source.is_file():
+                    paths.append(source.as_posix())
+                    continue
+                relpath = f"skills/{Path(ref.path).parent.name}/{Path(ref.path).name}"
+                paths.append(
+                    publish_file(
+                        str(self._exchange_root),
+                        task_id,
+                        relpath,
+                        str(source),
+                        extra_secrets=secrets,
+                    )
+                )
+            resolved[nid] = tuple(paths)
+        return resolved
 
     def _finish_engine_run(self, p: _Pipeline, result: FlowRunResult) -> PipelineResult:
         """Map a terminal :class:`FlowRunResult` to a :class:`PipelineResult` (+ auto-merge)."""
@@ -3007,6 +3132,12 @@ class Orchestrator:
             "terminal",
             extra={"final_status": final.value, "pr_url": pr_url, "cleanup_safe": cleanup.safe},
         )
+        # Interim exchange teardown (WRI-001): drop this task's active exchange so the next task's
+        # pre-launch "current-task-only" invariant holds under the single-active-slot model. WRI-007
+        # replaces this with a quiescence-gated seal → checksum-verify into private audit → remove
+        # (and contaminated-tree quarantine); until then a `rerun --continue` from a terminal state
+        # rebuilds the exchange from the private artifacts on resume.
+        clear_exchange_task_dir(self._exchange_root, p.task.id)
         return PipelineResult(task_id=p.task.id, final_status=final, pr_url=pr_url)
 
     def _move_task_file(self, p: _Pipeline, final: Status) -> Path | None:

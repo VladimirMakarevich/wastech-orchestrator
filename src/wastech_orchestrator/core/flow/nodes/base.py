@@ -258,6 +258,10 @@ class NodeServices:
     repo_dir: str
     artifacts_root: str
     clock: Callable[[], str]
+    #: the provider-readable exchange root ``<repo>/.worc-io`` (WRI-001). Node runners publish their
+    #: agent-facing artifacts here through :mod:`~wastech_orchestrator.providers.exchange` and
+    #: resolve the exchange fan-in from it. Empty in a unit harness that does no publication.
+    exchange_root: str = ""
     default_timeout_seconds: int = 7200
     snapshot: SnapshotHook | None = None  # git snapshot hook for provider observability
     #: the orchestrator's git manager (it owns git; providers/flows never touch it). Set for any

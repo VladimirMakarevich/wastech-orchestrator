@@ -30,6 +30,7 @@ from wastech_orchestrator.ledger import Ledger, LedgerRecord
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult, Notifier
 from wastech_orchestrator.providers.artifacts import (
     create_attempt_dir,
+    exchange_node_run_dir,
     node_run_dir,
     task_artifact_dir,
 )
@@ -1061,7 +1062,13 @@ def test_resume_restores_review_path_from_latest_verdict_run(
 
     inputs = NodeInputs(flow_dir=str(tmp_path))
     orch._restore_engine_inputs(SimpleNamespace(task=SimpleNamespace(id=tid)), inputs)
-    assert inputs.review_path == str(findings)
+    # Recovery re-publishes the latest verdict's findings into the exchange and points {review_path}
+    # there (WRI-001); the private findings.json stays the audit record.
+    expected = (
+        exchange_node_run_dir(orch._exchange_root, tid, "review", 9) / "findings.json"
+    ).as_posix()
+    assert inputs.review_path == expected
+    assert findings.exists()
 
 
 def test_fix_budget_exhausted_is_manual(git_repo, make_git_config, tmp_path: Path) -> None:

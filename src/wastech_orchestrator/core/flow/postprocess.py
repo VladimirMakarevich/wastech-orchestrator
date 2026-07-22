@@ -23,6 +23,10 @@ from pathlib import Path
 from wastech_orchestrator.core.decomposition import DecompositionDecision, decide_decomposition
 from wastech_orchestrator.core.flow.engine import NodeOutcome
 from wastech_orchestrator.core.flow.nodes.base import NodeInputs, RegisterArtifact
+from wastech_orchestrator.core.flow.nodes.exchange_publish import (
+    publish_artifact,
+    publish_node_run_file,
+)
 from wastech_orchestrator.core.flow.schema import AgentNode
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
 from wastech_orchestrator.providers.redaction import redact_text
@@ -37,14 +41,24 @@ class _Slot:
     #: the :class:`NodeInputs` attribute to point at the slot file, or ``None`` for an audit-only
     #: slot not fed to any prompt (the enriched spec has no ``{...}`` variable).
     inputs_field: str | None
+    #: whether this slot is agent-facing and its ``inputs_field`` must resolve to the redacted
+    #: exchange copy (WRI-001). Only ``plan`` feeds a downstream provider path; ``enriched_spec`` is
+    #: audit-only and ``summary`` is an orchestrator publish input — both stay private.
+    exchange: bool = False
+    #: whether this slot is written into the flow's private ``output_policy`` report directory
+    #: (redacted) instead of the task artifact dir. The ``report`` slot migrates the security_audit
+    #: node off its old agent-written ``.worc/security-reports/`` contract (WRI-001): the agent now
+    #: returns the report as structured output and the orchestrator writes it here privately.
+    report: bool = False
 
 
 #: Core-fixed slot table: where each node's ``output_artifact`` lands. The set of keys equals the
 #: loader allowlist ``snapshot._OUTPUT_ARTIFACT_SLOTS``.
 OUTPUT_SLOTS: dict[str, _Slot] = {
     "enriched_spec": _Slot("task.enriched.md", "enriched", None),
-    "plan": _Slot("plan.md", "plan", "plan_path"),
+    "plan": _Slot("plan.md", "plan", "plan_path", exchange=True),
     "summary": _Slot("summary.md", "summary_md", "summary_body_path"),
+    "report": _Slot("report.md", "report", None, report=True),
 }
 
 
@@ -56,12 +70,18 @@ def apply_output_artifact(
     task_id: str,
     inputs: NodeInputs,
     register: RegisterArtifact,
+    exchange_root: str = "",
+    extra_secrets: Iterable[str] = (),
+    report_dir: Path | None = None,
 ) -> str | None:
-    """Persist an ``output_artifact`` slot from the agent output; return its path or ``None``.
+    """Persist an ``output_artifact`` slot from the agent output; return its private path or None.
 
     No-op (returns ``None``) when the node declares no slot. The content is the agent's
     ``structured_output["content"]`` (refinement/planning typed output) or, absent that, its
-    ``final_message`` (the free-form summary agent) — see :func:`_slot_content`.
+    ``final_message`` (the free-form summary agent), via :func:`_slot_content`. An agent-facing slot
+    (``plan``) also publishes a redacted copy to the exchange and points its ``inputs_field`` at it;
+    a ``report`` slot is written (redacted) into the flow's private ``report_dir`` instead of the
+    task artifact dir. The private slot file stays the audit record (WRI-001).
     """
     slot_name = node.output_artifact
     if slot_name is None:
@@ -70,13 +90,28 @@ def apply_output_artifact(
     content = _slot_content(outcome)
     if not content:
         return None  # nothing to persist (e.g. a best-effort node that failed) — fallback applies
-    task_dir = task_artifact_dir(artifacts_root, task_id)
-    task_dir.mkdir(parents=True, exist_ok=True)
-    path = task_dir / slot.filename
-    path.write_text(content, encoding="utf-8")
+    if slot.report:
+        if report_dir is None:  # defensive: a report slot with no report output_policy
+            return None
+        target_dir, body = report_dir, redact_text(content, extra_secrets=extra_secrets)
+    else:
+        target_dir, body = task_artifact_dir(artifacts_root, task_id), content
+    target_dir.mkdir(parents=True, exist_ok=True)
+    path = target_dir / slot.filename
+    path.write_text(body, encoding="utf-8")
     register(task_id, slot.artifact_kind, str(path))
     if slot.inputs_field is not None:
-        setattr(inputs, slot.inputs_field, str(path))
+        field_path = str(path)
+        if slot.exchange:
+            field_path = publish_artifact(
+                exchange_root,
+                task_id,
+                slot.filename,
+                content,
+                extra_secrets=extra_secrets,
+                private_path=str(path),
+            )
+        setattr(inputs, slot.inputs_field, field_path)
     return str(path)
 
 
@@ -89,6 +124,7 @@ def write_node_output(
     node_run_id: int,
     register: RegisterArtifact,
     extra_secrets: Iterable[str] = (),
+    exchange_root: str = "",
 ) -> str | None:
     """Persist a node's output to ``<artifacts>/<node_id>.out.md``; return the path or ``None``.
 
@@ -116,8 +152,21 @@ def write_node_output(
     run_dir = node_run_dir(artifacts_root, task_id, node.id, node_run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     path = run_dir / f"{node.id}.out.md"
-    path.write_text(redact_text(content, extra_secrets=extra_secrets), encoding="utf-8")
+    redacted = redact_text(content, extra_secrets=extra_secrets)
+    path.write_text(redacted, encoding="utf-8")
     register(task_id, "node_output", str(path))
+    # The private .out.md stays the audit record; the redacted exchange copy is what the downstream
+    # {<node_id>_path} fan-in resolves (WRI-001).
+    publish_node_run_file(
+        exchange_root,
+        task_id,
+        node.id,
+        node_run_id,
+        f"{node.id}.out.md",
+        redacted,
+        extra_secrets=extra_secrets,
+        private_path=str(path),
+    )
     return str(path)
 
 

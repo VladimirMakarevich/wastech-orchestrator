@@ -78,7 +78,7 @@ flow:
 
 - **`code_change`** — the diff (anywhere in the repo) **is** the deliverable; no required files. Use for code **and** for a brand-new prose/Markdown file committed to the repo — a blog post, a chapter, a translation (the packaged `content_chapter` / `content_translate` flows all use this). Pair with `pull_request` / `documentation_pull_request`.
 - **`repository_document`** — writes are confined to `docs/research/<task_id>/` and must include `report.md` + `sources.json` (the `deep_research` shape; a `citation` node checks the manifest). Pair with `documentation_pull_request`.
-- **`private_control_workspace_report`** — writes are confined to `.worc/security-reports/<task_id>/`, produce `report.md`, and **never enter git** (the `security_audit` shape). Pair with `none`.
+- **`private_control_workspace_report`** — the report node returns its report as structured output and the orchestrator writes `report.md` into the private `.worc/security-reports/<task_id>/` (via `output_artifact: report`); it **never enters git** (the `security_audit` shape). The node stays `read-only` — no agent write. Pair with `none`.
 
 **Common trap:** a brand-new document that is not a `docs/research/*` sources bundle — e.g. a blog post under `blog/` — is a `code_change`, not a `repository_document`. Choosing `repository_document` because "it's a document" confines every write to `docs/research/<task_id>/`, so the real file lands outside it and the flow hard-stops at `manual_action_required` on the first successful write. See `docs/flow-authoring.md → Output policy` for the full contract.
 
@@ -142,11 +142,12 @@ The core re-validates every typed result itself, so a malformed result fails the
 
 ### Named output slots (`output_artifact`)
 
-Besides the generic `{<id>_path}` channel above, an agent node can fill one of three fixed slots with `output_artifact:`, landing its `content` in a well-known file that later nodes read by a stable variable:
+Besides the generic `{<id>_path}` channel above, an agent node can fill one of four fixed slots with `output_artifact:`, landing its `content` in a well-known file that the orchestrator writes (the node returns the content as its structured output; it does not write files itself):
 
 - `output_artifact: enriched_spec` → writes `task.enriched.md` (audit only; no downstream variable).
 - `output_artifact: plan` → writes `plan.md`, read downstream as `{plan_path}`.
 - `output_artifact: summary` → writes `summary.md` as `{summary_body_path}` (normally the supervisor layer fills this, not a flow node).
+- `output_artifact: report` → the orchestrator writes `report.md` into the flow's private report directory (`private_control_workspace_report` output policy — the `security_audit` shape). The node is `read-only`; no agent write is needed.
 
 The slot vocabulary is fixed to these three; a flow only chooses which node fills each, and one node fills at most one slot.
 

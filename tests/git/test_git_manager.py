@@ -435,16 +435,23 @@ def test_append_runtime_excludes_respects_operators_flows_tracking_scheme(
 ) -> None:
     # `install --reconfigure` calls append_runtime_excludes() again; it must not append a blanket
     # `.worc/` line after an operator's own `.worc/*` + `!.worc/flows/` scheme (docs/how-to.md) —
-    # that would silently re-exclude `.worc/flows/` from the tracked .gitignore.
+    # that would silently re-exclude `.worc/flows/` from the tracked .gitignore. It still adds the
+    # `.worc-io/` exchange line, which the operator scheme does not cover (WRI-001, per-root).
     gitignore = git_repo.clone / ".gitignore"
     gitignore.write_text(".worc/*\n!.worc/flows/\n", encoding="utf-8")
-    assert append_runtime_excludes(git_repo.clone) == []
-    assert gitignore.read_text(encoding="utf-8") == ".worc/*\n!.worc/flows/\n"
+    appended = append_runtime_excludes(git_repo.clone)
+    assert ".worc/" not in appended  # blanket line NOT re-appended (operator negation preserved)
+    assert ".worc-io/" in appended  # exchange line added
+    text = gitignore.read_text(encoding="utf-8")
+    assert ".worc/*\n!.worc/flows/\n" in text  # operator scheme untouched
+    assert ".worc-io/" in text
     (git_repo.clone / ".worc" / "flows").mkdir(parents=True, exist_ok=True)
     flow_file = git_repo.clone / ".worc" / "flows" / "my_flow.yaml"
     flow_file.write_text("flow: {}\n", encoding="utf-8")
     with pytest.raises(subprocess.CalledProcessError):
         git_run(["check-ignore", "-q", str(flow_file.relative_to(git_repo.clone))], git_repo.clone)
+    # The exchange is now ignored (exit 0 = ignored).
+    git_run(["check-ignore", "-q", ".worc-io/probe"], git_repo.clone)
 
 
 def test_diff_stat_returns_stat_only(

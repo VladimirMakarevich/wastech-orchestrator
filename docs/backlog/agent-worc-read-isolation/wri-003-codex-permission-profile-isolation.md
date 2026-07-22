@@ -25,6 +25,14 @@ The orchestrator uses Codex's supported cross-platform permission surface. It do
 
 Use exact subtree rules for the private home and exchange. For configurable deny globs, either emit portable bounded forms or set and bound `glob_scan_max_depth`; an unbounded `**` that cannot be proven on Linux, WSL, or native Windows is rejected under strict isolation.
 
+## Provided by WRI-001 (and what stays core-side until this task)
+
+WRI-001 built the exchange and a **core-side, detection-only** containment layer; WRI-003 supplies the OS-enforced Codex permission profile that makes the exchange read-only and denies the private/control roots:
+
+- `providers/exchange.py.assert_orchestration_paths_contained` (before every `run_stage`) and `assert_exchange_current_task_only` (pre-launch) are containment/preflight assertions, not enforcement. WRI-003's generated profile is what actually grants the exchange as read-only and denies `<repo>/.worc`.
+- The exchange root to keep read-only and the private/control root to deny are `<repo>/.worc-io` and `<repo>/.worc` (`EXCHANGE_HOME` in `providers/artifacts.py`); WRI-004 hands these over as typed `layout.exchange_root` / `private_home` fields, and `internal_denied_paths` carries the resolved secret sources.
+- `build_exchange_manifest` (`providers/exchange.py`) is available for a parent-side pre/post integrity check paralleling the Claude one; a detected mutation is a non-fallback security result.
+
 ## In scope
 
 - Replace the provider's legacy `--sandbox` and `sandbox_workspace_write.*` emission with a generated permission profile for both fresh `exec` and resume invocations.

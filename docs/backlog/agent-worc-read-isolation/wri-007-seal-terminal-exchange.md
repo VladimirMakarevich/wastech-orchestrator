@@ -12,6 +12,15 @@ The required invariant is stronger: immediately before any provider launch, `.wo
 
 After WRI-012 proves the provider process containment empty, every terminal status (`DONE`, `FAILED`, `MANUAL_ACTION_REQUIRED`) seals a checksum-verified snapshot of the current exchange into that task's private audit and removes the active in-repo directory. `rerun --continue` from such a terminal resumable state may restore and verify the latest sealed snapshot before resuming. A stopped/crashed/parked nonterminal task keeps its same-task active exchange and verifies it on continue. Fresh/restart creates a clean exchange. In CLI terms: fresh/restart is `rerun` (including its restart-in-place branch for pre-checkpoint tasks), continue is `rerun --continue`; the daemon `restart` command is unrelated to this lifecycle. There is no configuration option that retains an agent-readable terminal exchange.
 
+## Gap handed over by WRI-001 (decoupled build)
+
+WRI-001 shipped a **minimal interim** terminal teardown that this task replaces with the real sealing protocol:
+
+- `core/orchestrator.py._go_terminal` calls `clear_exchange_task_dir(self._exchange_root, p.task.id)` with **no** seal, checksum-verify, or contaminated-tree quarantine. Replace it with the WRI-012-quiescence-gated flow: seal a checksum-verified snapshot into the task's private audit, then remove the active directory (and quarantine a mutation-flagged tree instead of sealing it).
+- The `rerun --continue`-from-terminal path does **not** restore a sealed snapshot yet — WRI-001's `_restore_engine_inputs` re-publishes the private artifacts into a fresh exchange on resume. WRI-007 adds the restore-and-verify-the-latest-sealed-snapshot path.
+- The primitives to build on already exist in `providers/exchange.py`: `build_exchange_manifest` (file type, link identity/count, relative name, size, content digest) is the checksum/manifest surface to seal and diff, and `assert_exchange_current_task_only` is the pre-launch "at most the current task dir" gate to extend with the stale-exchange next-task block.
+- The fresh/restart `clear_exchange_task_dir` calls in `rerun_task` / `restart_task_in_place` stay as-is (fresh starts clean); only the terminal-seal semantics change.
+
 ## In scope
 
 - Introduce explicit `seal`, `restore_for_continue`, and `ensure_current_exchange` operations owned by the artifact/lifecycle layer.

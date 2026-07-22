@@ -11,6 +11,18 @@ Per-attempt artifacts: ``request.json`` (redacted), ``stdout.log``, ``stderr.log
 rendered prompt, generic ``<node_id>.out.md``, checks reports, tool streams) are written by the flow
 nodes one level up, under :func:`node_run_dir` — the same never-overwrite, ``node_run_id``-keyed
 rule, so a re-running node keeps every pass; :func:`append_node_history` indexes them per node.
+
+This module also holds the **pure path builders** for the provider-readable *exchange* root at
+``<repo>/.worc-io/<task-id>/`` (:func:`exchange_task_dir` / :func:`exchange_node_run_dir` /
+:func:`exchange_latest_run_file`) — deliberately **without** a ``logs/`` segment. Writing to the
+exchange is a redaction/path-safety boundary and lives in
+:mod:`~wastech_orchestrator.providers.exchange`; the builders here only compute paths, keeping this
+module free of any redaction/provider-syntax import.
+
+:func:`assert_contained_path` is the single containment belt both roots share (the private write
+boundary here and the exchange publisher): a built path proven to resolve under its trusted root, so
+a traversing/absolute identifier that slipped past the portable-identity validators
+(:mod:`~wastech_orchestrator.security.identifiers`) still cannot escape the artifact layout.
 """
 
 from __future__ import annotations
@@ -26,6 +38,11 @@ from typing import Any
 from wastech_orchestrator.providers.base import AgentRunResult
 
 _CHECKSUM_CHUNK = 65536
+
+#: The provider-readable exchange root directory name — sibling of the private ``.worc`` home. The
+#: one literal for ``<repo>/.worc-io`` until WRI-004 exposes it as a typed layout field. Mirrors
+#: ``cli.WORC_HOME``.
+EXCHANGE_HOME = ".worc-io"
 
 REQUEST_FILENAME = "request.json"
 STDOUT_FILENAME = "stdout.log"
@@ -59,6 +76,37 @@ class ArtifactPaths:
     result_path: str
 
 
+class PathIdentityError(Exception):
+    """A dynamic identifier or built path escaped its artifact root — a reject, never a fallback.
+
+    Raised by :func:`assert_contained_path` (and re-raised as an ``ExchangeError`` at the exchange
+    boundary). Signals a path-traversal/identity breach that portable-identity validation should
+    have stopped upstream; the containment assertion is the defense-in-depth belt behind it.
+    """
+
+
+def assert_contained_path(root: str | Path, target: str | Path) -> Path:
+    """Return ``target`` proven to resolve under ``root``; raise :class:`PathIdentityError` if not.
+
+    The shared containment belt behind the identity validators, used at every artifact write
+    boundary in the private and exchange roots. Even if a caller bypasses task-id/node-id validation
+    and joins a ``..``, absolute, drive-relative, or UNC segment, the built path is refused before
+    any directory is created or file written. Both sides are ``resolve()``-d so the check collapses
+    ``..`` and (for the existing prefix) symlinks; a not-yet-created ``target`` is fine — resolution
+    normalizes it lexically. ``root`` is a trusted root; ``target`` is the path built under it.
+    """
+    root_resolved = Path(root).resolve()
+    target_resolved = Path(target).resolve()
+    try:
+        target_resolved.relative_to(root_resolved)
+    except ValueError:
+        raise PathIdentityError(
+            f"artifact path {target_resolved.as_posix()} escapes its root "
+            f"{root_resolved.as_posix()}"
+        ) from None
+    return Path(target)
+
+
 def task_artifact_dir(artifacts_root: str | Path, task_id: str) -> Path:
     """Return ``<artifacts_root>/logs/<task-id>/`` — the root of one task's artifacts.
 
@@ -87,6 +135,39 @@ def node_run_dir(artifacts_root: str | Path, task_id: str, node_id: str, node_ru
     return (
         task_artifact_dir(artifacts_root, task_id) / "stages" / node_id / f"run-{node_run_id:06d}"
     )
+
+
+def exchange_task_dir(exchange_root: str | Path, task_id: str) -> Path:
+    """Return ``<exchange_root>/<task-id>/`` — the provider-readable exchange for one task.
+
+    The exchange counterpart of :func:`task_artifact_dir`, but **without** a ``logs/`` segment: the
+    exchange root *is* ``<repo>/.worc-io`` and holds only per-task dirs, so a ``logs/`` would be
+    dead structure. The layout is exactly ``.worc-io/<task-id>/...``, never
+    ``.worc-io/logs/...``. A **pure** builder; publication goes through the redaction/path-safety
+    seam in :mod:`~wastech_orchestrator.providers.exchange`, never a plain write onto this path.
+    """
+    return Path(exchange_root) / task_id
+
+
+def exchange_node_run_dir(
+    exchange_root: str | Path,
+    task_id: str,
+    node_id: str,
+    node_run_id: int,
+    *,
+    subtask: int | None = None,
+) -> Path:
+    """Return ``<task>/stages/<node_id>/[sub-NN/]run-<node_run_id:06d>/`` in the exchange.
+
+    The exchange mirror of :func:`node_run_dir` — same ``stages/<node>/[sub-NN/]run-<NNNNNN>`` shape
+    and never-overwrite ``node_run_id`` keying, so the downstream ``{<node_id>_path}`` fan-in
+    (:func:`exchange_latest_run_file`) resolves a node's newest published output. A **pure** builder
+    that does not create the directory.
+    """
+    stage_dir = exchange_task_dir(exchange_root, task_id) / "stages" / node_id
+    if subtask is not None:
+        stage_dir = stage_dir / f"sub-{subtask:02d}"
+    return stage_dir / f"run-{node_run_id:06d}"
 
 
 def node_history_path(artifacts_root: str | Path, task_id: str, node_id: str) -> Path:
@@ -127,6 +208,30 @@ def latest_run_file(
     run's real output. This preserves the pre-per-run last-writer-wins-with-content behavior.
     """
     stage_dir = task_artifact_dir(artifacts_root, task_id) / "stages" / node_id
+    return _latest_run_file_in(stage_dir, filename)
+
+
+def exchange_latest_run_file(
+    exchange_root: str | Path, task_id: str, node_id: str, filename: str
+) -> Path | None:
+    """The newest exchange ``stages/<node_id>/run-*/<filename>`` that exists, or ``None``.
+
+    The exchange counterpart of :func:`latest_run_file` for the downstream ``{<node_id>_path}``
+    fan-in. Because the exchange holds only the current task, it structurally cannot cross a
+    task/attempt boundary; the "newest run *containing* the file wins" rule is otherwise identical.
+    """
+    return _latest_run_file_in(
+        exchange_task_dir(exchange_root, task_id) / "stages" / node_id, filename
+    )
+
+
+def _latest_run_file_in(stage_dir: Path, filename: str) -> Path | None:
+    """Newest ``run-*/<filename>`` under ``stage_dir`` (descending ``node_run_id``), else ``None``.
+
+    Shared by the private (:func:`latest_run_file`) and exchange (:func:`exchange_latest_run_file`)
+    fan-in resolvers. The first run *containing* ``filename`` wins, so an empty or infra-failed
+    newest run does not shadow a prior run's real output.
+    """
     if not stage_dir.exists():
         return None
 
@@ -205,6 +310,9 @@ def create_attempt_dir(
     if subtask is not None:
         stage_dir = stage_dir / f"sub-{subtask:02d}"
     attempt_dir = stage_dir / f"run-{node_run_id:06d}" / f"{attempt}-{provider}"
+    # Defense in depth behind the identity validators (task-id gate / node-id flow load): refuse a
+    # traversing/absolute id at the private write boundary before creating the directory tree.
+    assert_contained_path(Path(artifacts_root) / "logs", attempt_dir)
     attempt_dir.mkdir(parents=True, exist_ok=False)
     return ArtifactPaths(
         attempt_dir=str(attempt_dir),

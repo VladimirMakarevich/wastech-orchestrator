@@ -41,6 +41,7 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeManualRequired,
     NodeServices,
 )
+from wastech_orchestrator.core.flow.nodes.exchange_publish import publish_node_run_file
 from wastech_orchestrator.core.flow.schema import FlowNode, ToolNode
 from wastech_orchestrator.core.flow.tools_registry import ToolResolutionError
 from wastech_orchestrator.providers.artifacts import (
@@ -123,7 +124,19 @@ class ToolNodeRunner:
         redacted_stdout = self._write_redacted_artifacts(node_dir, stdout_path, result)
         # Expose the redacted stdout artifact downstream as {<node_id>_path} (symmetric with an
         # agent node), regardless of outcome — a partial output on failure is still useful context.
+        # The private stdout.txt stays the audit record; the redacted exchange copy is what the
+        # fan-in resolves (stderr stays private — provider-denied). WRI-001.
         self._register(ctx.task_id, node.id, str(stdout_path))
+        publish_node_run_file(
+            self._s.exchange_root,
+            ctx.task_id,
+            node.id,
+            run_id,
+            TOOL_STDOUT_FILENAME,
+            redacted_stdout,
+            extra_secrets=self._s.prompt_secrets,
+            private_path=str(stdout_path),
+        )
 
         # (1) Infrastructure failure — launch error / timeout → manual, never a quality fail. It
         #     mirrors the one existing external-command gate (checks command-profile); no fix loop.

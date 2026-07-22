@@ -20,6 +20,14 @@ Introduce one provider-neutral immutable layout object, constructed in the compo
 
 This task changes no on-disk behavior. It makes each consumer declare which surface it owns so WRI-001 and WRI-005 can change destinations without another global literal hunt.
 
+## Gap handed over by WRI-001 (decoupled build)
+
+WRI-001 shipped **before** this task, so it computes the exchange root inline instead of reading a typed layout field. When WRI-004 lands it must absorb that shim:
+
+- `providers/artifacts.py` defines the constant `EXCHANGE_HOME = ".worc-io"`, and `core/orchestrator.py.__init__` sets `self._exchange_root = Path(config.repo.local_path) / EXCHANGE_HOME`. Replace that inline construction with `layout.exchange_root` and remove the ad-hoc join. The same `.worc-io` literal is duplicated in `git_manager.py` (`RUNTIME_EXCLUDED_DIRS`, `RUNTIME_GITIGNORE_LINES`, `_IGNORE_PROBE_PATHS`); fold those onto the typed layout too.
+- **Do not** change the exchange builders'/publisher's `exchange_root` **parameter** convention — `exchange_task_dir(exchange_root, …)`, `exchange_node_run_dir(exchange_root, …)`, `exchange_latest_run_file(exchange_root, …)`, and the `providers/exchange.py` publisher all take the root as an argument, mirroring the existing `task_artifact_dir(artifacts_root, …)`. WRI-004 only changes where the value comes from, not the signatures.
+- The pre-launch invariant `assert_exchange_current_task_only(self._exchange_root, …)` and the interim `clear_exchange_task_dir(self._exchange_root, …)` calls in the orchestrator should switch to `layout.exchange_root` as part of the same sweep.
+
 ## In scope
 
 - Move the canonical directory names into a leaf module importable by CLI, composition, Core interfaces, Git Manager, and memory without cycles.

@@ -38,6 +38,11 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeInputs,
     NodeServices,
 )
+from wastech_orchestrator.core.flow.nodes.exchange_publish import (
+    assert_request_contained,
+    publish_file,
+    publish_node_run_file,
+)
 from wastech_orchestrator.core.flow.observability import record_run_observability
 from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file, render_role_prompt
 from wastech_orchestrator.core.flow.schema import SEVERITY_ORDER, EvaluatorNode, FlowNode
@@ -136,6 +141,7 @@ class EvaluatorNodeRunner:
         request = self._build_request(
             node, ctx, route, run_id, session_id, guard_output_baseline(baseline)
         )
+        assert_request_contained(request, self._s.exchange_root)
         outcome = self._s.router.run_stage(request, route, snapshot=self._s.snapshot)
         raw_findings = (
             self._findings_or_none(outcome.result.structured_output)
@@ -211,14 +217,22 @@ class EvaluatorNodeRunner:
         run_dir = node_run_dir(self._s.artifacts_root, ctx.task_id, node.id, run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
         findings_path = run_dir / "findings.json"
-        findings_path.write_text(
-            json.dumps({"findings": findings}, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+        findings_json = json.dumps({"findings": findings}, indent=2, ensure_ascii=False) + "\n"
+        findings_path.write_text(findings_json, encoding="utf-8")
         (run_dir / "summary.md").write_text(
             (summary or "(no review summary)") + "\n", encoding="utf-8"
         )
-        self._in.review_path = str(findings_path)
+        # Private findings.json stays the audit record; the redacted exchange copy is {review_path}.
+        self._in.review_path = publish_node_run_file(
+            self._s.exchange_root,
+            ctx.task_id,
+            node.id,
+            run_id,
+            "findings.json",
+            findings_json,
+            extra_secrets=self._s.prompt_secrets,
+            private_path=str(findings_path),
+        )
 
     def _verdict(
         self,
@@ -386,7 +400,16 @@ class EvaluatorNodeRunner:
         written = builder.write_packet(
             node_id=node.id, task_type=self._in.task_type, touched_paths=touched, dest=dest
         )
-        return str(written) if written is not None else None
+        if written is None:
+            return None
+        # The store + private packet stay private; only the redacted packet crosses (WRI-001).
+        return publish_file(
+            self._s.exchange_root,
+            ctx.task_id,
+            f"memory/{node.id}.md",
+            str(written),
+            extra_secrets=self._s.prompt_secrets,
+        )
 
     def _record_completion(self, run_id: int, outcome: StageOutcome, kind: str) -> None:
         result = outcome.result

@@ -107,6 +107,8 @@ Implement the task at {task_path} in the repository {repo_path}. Follow the plan
 
 Nodes never pick the next node or commit anything — the engine routes on edge outcomes, and only the orchestrator does Git.
 
+Every node `id` must be a **portable single-segment token**: `^[a-z0-9][a-z0-9_-]{0,63}$` and not a Windows device name (`con`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`). The id becomes an artifact directory name and, for `agent`/`tool` nodes, the `{<node-id>_path}` prompt variable — so a dot, an uppercase letter, a path separator, or a device name is rejected at flow load, host-independently (never sanitized). Agent/tool ids additionally may not shadow a reserved core variable (`plan`, `diff`, `review`, …, or a `subtask`-prefixed name).
+
 ## Edges, outcomes, and loops
 
 Each edge is `{ from, to, outcome? }`. A `checks` or `tool` node emits `pass`/`fail` (a `tool` may also emit `route:*`); an `evaluator` emits `accept`/`rework`; a plain `agent` edge needs no `outcome`. Any `fail`/`rework` edge that loops back must carry a `loop:` name (or a `budget:`) and be bounded in `budgets:`. Exactly **one** entry node (no incoming edges) is allowed, and every node must be able to reach a terminal — the validator enforces both.
@@ -292,7 +294,7 @@ An unknown `task_type` (no matching flow file) fails the task at flow resolution
 
 Every flow file — packaged and operator — is loaded and validated at `install` and at `preflight`; any failure makes `preflight` report `NOT ready` and blocks the run. Three layers run:
 
-- **Graph integrity** — edges resolve, outcomes are valid per node kind, every `fail`/`rework` edge is bounded, exactly one entry node, every node reaches a terminal, and every `lineage_affinity` target is an `editing_lineage` owner with no affinity of its own (no chains).
+- **Graph integrity** — every node `id` is a portable single-segment token (not a dot/separator/uppercase/Windows device name), edges resolve, outcomes are valid per node kind, every `fail`/`rework` edge is bounded, exactly one entry node, every node reaches a terminal, and every `lineage_affinity` target is an `editing_lineage` owner with no affinity of its own (no chains).
 - **Security ceiling** — no node's `permission_profile` exceeds the flow `permission_ceiling`; evaluators are forced read-only; `role_file` paths contain no traversal; unknown fields fail closed.
 - **Config consistency** — a pinned `provider` is in `agents.allowed`, its `reasoning` is supported by that provider, and (under `security.strict_isolation`) no `extra_args` selects a full-access sandbox mode.
 

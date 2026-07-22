@@ -14,6 +14,7 @@ from wastech_orchestrator.core.hitl import (
     handle_from_artifact,
     parse_typed_output,
     reset_pending_interactions,
+    sanitized_answer_packet,
 )
 from wastech_orchestrator.git_manager import ChangedPath
 
@@ -120,6 +121,44 @@ def test_persisted_handle_rejects_invalid_kind() -> None:
                 }
             }
         )
+
+
+def test_sanitized_answer_packet_is_answer_only() -> None:
+    # The durable HITL record (write_waiting_interaction + write_answer shape) carries the transport
+    # handle, interaction id, Telegram message id, deadline, and status — none of which may cross
+    # into the provider-readable exchange (WRI-001). Only kind/question/answer/approved survive.
+    durable = {
+        "schema_version": 1,
+        "interaction_id": "h-secret-1",
+        "task_id": "t",
+        "node_id": "planning",
+        "subtask": None,
+        "status": "answered",
+        "request": {
+            "kind": "question",
+            "question": "Which database?",
+            "context": "The task does not select one.",
+            "risk": "clarification",
+            "paths": [],
+        },
+        "handle": {"interaction_id": "h-secret-1", "message_id": 123, "update_offset": 456},
+        "telegram_message_id": 123,
+        "deadline": 999.0,
+        "answer": "Use PostgreSQL.",
+        "approved": None,
+        "failure": None,
+    }
+    packet = sanitized_answer_packet(durable)
+    assert packet == {
+        "kind": "question",
+        "question": "Which database?",
+        "answer": "Use PostgreSQL.",
+        "approved": None,
+    }
+    # No transport/durable bookkeeping leaks through.
+    forbidden = ("handle", "interaction_id", "telegram_message_id", "deadline", "status", "failure")
+    for key in forbidden:
+        assert key not in packet
 
 
 def test_ordinary_diff_needs_no_approval() -> None:

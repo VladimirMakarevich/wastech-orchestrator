@@ -42,6 +42,7 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeManualRequired,
     NodeServices,
 )
+from wastech_orchestrator.core.flow.nodes.exchange_publish import publish_file
 from wastech_orchestrator.core.flow.output_policy import resolve_output_policy
 from wastech_orchestrator.core.flow.schema import ChecksNode, FlowNode
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
@@ -101,6 +102,7 @@ class ChecksNodeRunner:
                 "code must not be handed on unchecked"
             )
         if outcome.any_quality_failed:
+            self._publish_first_failure_log(ctx, outcome)
             return self._complete(run_id, node, passed=False)
         if self._mutated_working_tree(before):
             # Green-but-dirtying guard: a passing check that rewrote commit-candidate files must not
@@ -114,6 +116,25 @@ class ChecksNodeRunner:
                 "check must not pass silently"
             )
         return self._complete(run_id, node, passed=True)
+
+    def _publish_first_failure_log(self, ctx: NodeContext, outcome: CheckOutcome) -> None:
+        """Publish the redacted first-failure log and set ``{checks_path}`` before the fail edge.
+
+        The authoritative full log is already written privately by the CheckRunner; this copies the
+        first failing command's log (redacted) into the exchange and points ``checks_path`` at it,
+        so the live ``fixing`` node receives ``{checks_path}`` with no restart (WRI-001). With no
+        exchange wired (a unit harness) it points at the private log (previously it stayed unset).
+        """
+        log = outcome.first_failure_log
+        if log is None:
+            return
+        self._in.checks_path = publish_file(
+            self._s.exchange_root,
+            ctx.task_id,
+            f"checks/{Path(log).name}",
+            str(log),
+            extra_secrets=self._s.prompt_secrets,
+        )
 
     # -- citation (P3.1) ------------------------------------------------------
 

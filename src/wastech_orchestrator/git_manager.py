@@ -81,14 +81,29 @@ _PUSH_RETRY_BACKOFF_SECONDS = 1.5
 # (`paths.tasks_dir`, default "tasks") is also excluded from the code commit — it is tracked but
 # rides the separate audit commit — but that name is per-config, so it is added per instance (see
 # `__init__`). Together they form `self._excluded_dirs`.
-RUNTIME_EXCLUDED_DIRS = (".worc",)
+RUNTIME_EXCLUDED_DIRS = (".worc", ".worc-io")
 
-# The single ignore line `install` appends to a target repo's tracked `.gitignore`: the
-# whole `.worc/` runtime home, so an operator's `git status` stays clean. `tasks/` is intentionally
-# NOT ignored — it carries the committed audit trail.
+_RUNTIME_IGNORE_COMMENT = (
+    "# wastech-orchestrator runtime home + exchange (auto-appended by `worc install`)"
+)
+
+# Each runtime root as (probe path, ignore line). The probe is a representative path under the root
+# (a directory has no ignorable entry of its own); the ignore line is appended only when that probe
+# is not already ignored, so each root is handled independently — a repo that already ignores
+# `.worc/` (e.g. an operator's `.worc/*` + `!.worc/flows/` scheme) still gets the `.worc-io/`
+# exchange line without a blanket `.worc/` re-append that would defeat the operator's negation.
+# `.worc-io/` (WRI-001) is the provider-readable exchange — a sibling runtime root that must also
+# never enter a commit. `tasks/` is intentionally NOT ignored — it holds the committed audit trail.
+_RUNTIME_IGNORE_ROOTS: tuple[tuple[str, str], ...] = (
+    (".worc/state.db", ".worc/"),
+    (".worc-io/probe", ".worc-io/"),
+)
+
+# The full ignore block (comment + both roots), kept as the public constant install/docs reference.
 RUNTIME_GITIGNORE_LINES: tuple[str, ...] = (
-    "# wastech-orchestrator runtime home (auto-appended by `worc install`)",
+    _RUNTIME_IGNORE_COMMENT,
     ".worc/",
+    ".worc-io/",
 )
 
 
@@ -111,18 +126,12 @@ def _append_missing_lines(target: Path, lines: Sequence[str]) -> list[str]:
     return additions
 
 
-def _worc_runtime_already_ignored(repo_root: str | Path) -> bool:
-    """Whether a runtime-only ``.worc`` path is already covered by an existing ignore rule.
-
-    Guards :func:`append_runtime_excludes` against stomping an operator's own ``.worc/*`` +
-    ``!.worc/flows/`` scheme (see ``docs/how-to.md``) on ``install --reconfigure``: appending the
-    blanket ``.worc/`` line after such a negation would silently re-exclude ``.worc/flows/``, since
-    a parent-directory exclusion from any source blocks re-inclusion of its children.
-    """
+def _git_path_ignored(repo_root: str | Path, probe: str) -> bool:
+    """Whether ``git check-ignore`` reports ``probe`` as ignored in ``repo_root`` (exit code 0)."""
     with tempfile.TemporaryDirectory() as scratch:
         stdout_path = Path(scratch) / "stdout"
         result = run_process(
-            ["git", "check-ignore", "-q", ".worc/state.db"],
+            ["git", "check-ignore", "-q", probe],
             cwd=repo_root,
             env=dict(os.environ),
             timeout_seconds=30,
@@ -131,16 +140,31 @@ def _worc_runtime_already_ignored(repo_root: str | Path) -> bool:
     return result.exit_code == 0
 
 
-def append_runtime_excludes(repo_root: str | Path) -> list[str]:
-    """Idempotently add the ``.worc/`` ignore line to the repo's tracked ``.gitignore``.
+def _missing_runtime_ignore_lines(is_ignored: Callable[[str], bool]) -> list[str]:
+    """The ignore lines for the runtime roots not yet covered, per root (empty when all covered).
 
-    A no-op when a runtime-only path is already ignored by an existing rule — see
-    :func:`_worc_runtime_already_ignored`. Returns the lines actually appended — empty when
-    everything was already present or the append was skipped.
+    Each root (``.worc/``, ``.worc-io/``) is decided independently against its own probe, so an
+    operator's own ``.worc/*`` + ``!.worc/flows/`` scheme (see ``docs/how-to.md``) is never stomped:
+    when ``.worc/`` is already ignored, the blanket ``.worc/`` line is skipped (re-appending it
+    would silently re-exclude ``.worc/flows/`` — a parent-dir exclusion from any source blocks
+    re-inclusion of its children), while the ``.worc-io/`` exchange line is still added if missing
+    (WRI-001). The comment header rides along only when at least one root line is added.
     """
-    if _worc_runtime_already_ignored(repo_root):
+    lines = [line for probe, line in _RUNTIME_IGNORE_ROOTS if not is_ignored(probe)]
+    return [_RUNTIME_IGNORE_COMMENT, *lines] if lines else []
+
+
+def append_runtime_excludes(repo_root: str | Path) -> list[str]:
+    """Idempotently add the ``.worc/`` + ``.worc-io/`` ignore lines to the tracked ``.gitignore``.
+
+    Adds only the runtime roots not already covered by an existing rule (per root — see
+    :func:`_missing_runtime_ignore_lines`). Returns the lines actually appended — empty when every
+    root was already ignored.
+    """
+    lines = _missing_runtime_ignore_lines(lambda probe: _git_path_ignored(repo_root, probe))
+    if not lines:
         return []
-    return _append_missing_lines(Path(repo_root) / ".gitignore", RUNTIME_GITIGNORE_LINES)
+    return _append_missing_lines(Path(repo_root) / ".gitignore", lines)
 
 
 # publish_operations.kind values (idempotency keys).
@@ -698,7 +722,7 @@ class GitManager:
     # --- footprint ------------------------------------------------------------------------
 
     def ensure_runtime_excludes(self) -> None:
-        """Ensure this clone ignores ``.worc/`` via its LOCAL ``.git/info/exclude``.
+        """Ensure this clone ignores ``.worc/`` + ``.worc-io/`` via its LOCAL ``.git/info/exclude``.
 
         ``install`` writes the *tracked* ``.gitignore`` (operator-facing, committed as part of
         setup). This per-run fallback uses the clone-local, untracked exclude instead — so the
@@ -708,20 +732,22 @@ class GitManager:
         ``git status``; ``tasks/`` stays trackable — it carries the audit trail. Idempotent.
         Resolved via ``rev-parse --git-path`` so it is correct for clones and linked worktrees.
 
-        Skipped when a runtime-only path (``.worc/state.db``) is already ignored by some existing
-        rule — e.g. an operator's own ``.worc/*`` + ``!.worc/flows/`` scheme in the tracked
-        ``.gitignore`` that deliberately un-ignores ``.worc/flows/`` to track flows in git (see
-        ``docs/how-to.md``). Appending the blanket ``.worc/`` line unconditionally would silently
-        defeat that negation: a parent-directory exclusion from *any* source blocks re-inclusion of
-        its children, regardless of which file or line it comes from.
+        Adds only the runtime roots not already covered per root (see
+        :func:`_missing_runtime_ignore_lines`), so an operator's own ``.worc/*`` + ``!.worc/flows/``
+        scheme that deliberately un-ignores ``.worc/flows/`` to track flows in git (see
+        ``docs/how-to.md``) is never stomped — the blanket ``.worc/`` line is not re-appended —
+        while the newer ``.worc-io/`` exchange line is still added when missing (WRI-001).
         """
-        if self._git("check-ignore", "-q", ".worc/state.db").ok:
+        lines = _missing_runtime_ignore_lines(
+            lambda probe: self._git("check-ignore", "-q", probe).ok
+        )
+        if not lines:
             return
         rel = self._git("rev-parse", "--git-path", "info/exclude").stdout.strip()
         if not rel:
             return
         exclude_path = Path(rel) if Path(rel).is_absolute() else Path(self._clone) / rel
-        _append_missing_lines(exclude_path, RUNTIME_GITIGNORE_LINES)
+        _append_missing_lines(exclude_path, lines)
 
     # --- SnapshotHook --------------------------------------------------------------
 

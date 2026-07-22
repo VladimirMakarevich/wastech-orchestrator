@@ -45,6 +45,7 @@ from wastech_orchestrator.core.flow.schema import (
     WhenPredicate,
 )
 from wastech_orchestrator.providers.base import ProviderId
+from wastech_orchestrator.security.identifiers import NODE_ID_PATTERN, is_valid_node_id
 
 
 class FlowLoadError(Exception):
@@ -151,7 +152,7 @@ _CHECKER_KINDS = frozenset({"command_profile", "citation", "dependency_scan"})
 
 # Output-artifact slots (P1.4): the well-known names an agent node may persist its output to. The
 # slot vocabulary is core-fixed (a flow may not invent a slot — fail-closed at load).
-_OUTPUT_ARTIFACT_SLOTS = frozenset({"enriched_spec", "plan", "summary"})
+_OUTPUT_ARTIFACT_SLOTS = frozenset({"enriched_spec", "plan", "summary", "report"})
 
 # Reserved core-variable prefixes an **agent or tool** node id may not collide with (node-output
 # ADR + P5): both node kinds expose ``{<id>_path}``, so an id equal to one of these — or starting
@@ -312,6 +313,22 @@ def _parse_hitl_settings(raw: Any) -> HitlSettings | None:
     )
 
 
+def _validate_node_id(nid: str, kind: str) -> None:
+    """Fail-closed: a node id must be a portable single path segment / prompt token.
+
+    Every node id becomes an artifact path component (``stages/<id>/…`` in both the private and the
+    exchange roots) and — for agent/tool nodes — the ``{<id>_path}`` prompt token, so it must be one
+    bounded lowercase segment writable on every OS. Rejected here at load, before any lookup map,
+    artifact directory, or DB run row is built. Reject, never sanitize — an incompatible custom id
+    gets this precise upgrade error, not a silently rewritten name.
+    """
+    if not is_valid_node_id(nid):
+        raise FlowLoadError(
+            f"{kind} node id {nid!r} is not a portable identifier; expected "
+            f"{NODE_ID_PATTERN.pattern} and not a Windows device name (con, nul, com1-9, lpt1-9, …)"
+        )
+
+
 def _check_reserved_node_id(nid: str, kind: str) -> None:
     """Fail-closed: a kind that exposes ``{<id>_path}`` (agent, tool) may not shadow a core var.
 
@@ -329,6 +346,7 @@ def _check_reserved_node_id(nid: str, kind: str) -> None:
 
 def _parse_agent_node(raw: dict[str, Any]) -> AgentNode:
     nid = str(_require(raw, "id", "agent node"))
+    _validate_node_id(nid, "agent")
     ctx = f"agent node '{nid}'"
     _reject_unknown(raw, _AGENT_FIELDS, ctx)
     _check_reserved_node_id(nid, "agent")
@@ -386,6 +404,7 @@ def _parse_gate_severity(value: Any, ctx: str) -> str:
 
 def _parse_evaluator_node(raw: dict[str, Any], defaults: EvaluatorDefaults) -> EvaluatorNode:
     nid = str(_require(raw, "id", "evaluator node"))
+    _validate_node_id(nid, "evaluator")
     ctx = f"evaluator node '{nid}'"
     _reject_unknown(raw, _EVALUATOR_FIELDS, ctx)
     role = str(_require(raw, "role", ctx))
@@ -417,6 +436,7 @@ def _parse_evaluator_node(raw: dict[str, Any], defaults: EvaluatorDefaults) -> E
 
 def _parse_checks_node(raw: dict[str, Any]) -> ChecksNode:
     nid = str(_require(raw, "id", "checks node"))
+    _validate_node_id(nid, "checks")
     ctx = f"checks node '{nid}'"
     _reject_unknown(raw, _CHECKS_FIELDS, ctx)
     checker = str(_require(raw, "checker", ctx))
@@ -459,6 +479,7 @@ def _parse_tool_args(raw: Any, ctx: str) -> dict[str, str | int | float | bool]:
 
 def _parse_tool_node(raw: dict[str, Any]) -> ToolNode:
     nid = str(_require(raw, "id", "tool node"))
+    _validate_node_id(nid, "tool")
     ctx = f"tool node '{nid}'"
     _reject_unknown(raw, _TOOL_FIELDS, ctx)
     _check_reserved_node_id(nid, "tool")
@@ -474,6 +495,7 @@ def _parse_tool_node(raw: dict[str, Any]) -> ToolNode:
 
 def _parse_hitl_node(raw: dict[str, Any]) -> HitlNode:
     nid = str(_require(raw, "id", "hitl node"))
+    _validate_node_id(nid, "hitl")
     ctx = f"hitl node '{nid}'"
     _reject_unknown(raw, _HITL_NODE_FIELDS, ctx)
     signal = str(_require(raw, "signal", ctx))
@@ -492,6 +514,7 @@ def _parse_hitl_node(raw: dict[str, Any]) -> HitlNode:
 
 def _parse_publish_node(raw: dict[str, Any]) -> PublishNode:
     nid = str(_require(raw, "id", "publish node"))
+    _validate_node_id(nid, "publish")
     ctx = f"publish node '{nid}'"
     _reject_unknown(raw, _PUBLISH_FIELDS, ctx)
     policy = str(_require(raw, "policy", ctx))

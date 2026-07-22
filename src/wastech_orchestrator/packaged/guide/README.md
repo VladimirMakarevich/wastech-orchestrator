@@ -56,7 +56,7 @@ Only the fields below are allowed. **Any other key makes the task rejected** (`u
 
 | Field | Required | Type | Meaning |
 | --- | --: | --- | --- |
-| `id` | **yes** | string | Stable id. Must match `^[a-z0-9][a-z0-9._-]{0,63}$` (lowercase; no spaces, uppercase, or leading separator). |
+| `id` | **yes** | string | Stable id. Must match `^[a-z0-9][a-z0-9._-]{0,63}$` (lowercase; no spaces, uppercase, or leading separator), have no trailing dot, and not be a Windows device name (`con`/`nul`/`com1`–`com9`/`lpt1`–`lpt9`). It becomes a directory/branch name, so the rule is host-independent. |
 | `title` | **yes** | string | Short, non-empty human title. Used for the default branch slug, PR title, and reports. |
 | `task_type` | no | string | Flow selector — which pipeline runs the task. Omit ⇒ `implementation` (the default coding pipeline). Built-ins: `implementation`, `deep_research`, `security_audit`; an operator may add others as `<repo>/.worc/flows/<task_type>.yaml`. An unknown `task_type` (no matching flow) fails the task before any branch is created. The task only _names_ the flow — it never edits the graph. See the decision guide. |
 | `branch_name` | no | string \| null | Full branch-name override. Omit for `<repo.branch_prefix>/<id>-<slug(title)>`; set to match a project's branch convention. Ignored in `existing`/`current` branch mode. |

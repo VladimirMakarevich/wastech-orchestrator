@@ -11,6 +11,7 @@ import pytest
 from wastech_orchestrator.core.recovery import RecoveryAction, RecoveryReconciler
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult, Notifier
+from wastech_orchestrator.providers.artifacts import exchange_task_dir
 from wastech_orchestrator.providers.base import AgentRunRequest, ProviderId
 from wastech_orchestrator.state_store import CheckRunRow, StateStore, SubtaskRow, TaskRow
 
@@ -524,7 +525,13 @@ def test_resume_continues_persisted_checkpoint(
     if current_node in {"testing", "review", "fixing"}:
         assert all(request.node_id != "implementation" for request in all_requests)
     if current_node == "fixing":
-        assert node_requests[0].check_artifacts_path == str(failed_check)
+        # Recovery re-publishes the failed check log into the exchange and points {checks_path}
+        # there (WRI-001); the private log stays the audit record.
+        expected_checks = (
+            exchange_task_dir(orch._exchange_root, task_id) / "checks" / "001.log"
+        ).as_posix()
+        assert node_requests[0].check_artifacts_path == expected_checks
+        assert failed_check.exists()
 
 
 def test_resume_restores_skill_map_without_re_proposing(
@@ -676,7 +683,16 @@ def test_resume_waits_on_persisted_planning_prompt_without_resending(
     assert notifier.waited == [handle]
     planning_requests = providers[ProviderId.CLAUDE].requests
     assert planning_requests[0].node_id == "planning"
-    assert planning_requests[0].human_input_path == str(path)
+    # The provider receives only the sanitized answer-only exchange packet, never the durable record
+    # (WRI-001): human_input_path points under the exchange, not at the durable interaction file.
+    # (The active exchange is torn down at the terminal outcome; the packet's answer-only shape is
+    # unit-tested in test_hitl.py::test_sanitized_answer_packet_is_answer_only.)
+    exchange_hitl = (
+        exchange_task_dir(orch._exchange_root, task_id) / "hitl" / "planning.answer.json"
+    ).as_posix()
+    assert planning_requests[0].human_input_path == exchange_hitl
+    assert planning_requests[0].human_input_path != str(path)
+    # The full durable interaction record stays private and unchanged.
     persisted = load_interaction(path)
     assert persisted is not None
     assert persisted["status"] == "consumed"

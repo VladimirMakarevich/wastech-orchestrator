@@ -1,6 +1,6 @@
 # WRI-008 — Validate portable artifact path identities
 
-**Status:** open **Milestone:** 0 (security prerequisite) **Source:** [decision record](README.md) **Dependencies:** —
+**Status:** implemented **Milestone:** 0 (security prerequisite) **Source:** [decision record](README.md) **Dependencies:** —
 
 ## Problem
 
@@ -11,6 +11,14 @@ WRI-001 would copy the same unchecked identities into a second security-sensitiv
 ## Required outcome
 
 Define shared, reject-not-sanitize validators for every dynamic identity used as an artifact path component and apply them before any state row, branch, directory, prompt-variable name, or provider run is created.
+
+## Gap handed over by WRI-001 (decoupled build) — resolved
+
+WRI-001 shipped **before** this task, so its exchange builders and publisher initially trusted the ids they were handed and carried only a local, exchange-specific safety net. WRI-008 has consolidated this:
+
+- The shared segment-grammar validators now live in `security/identifiers.py` (`is_valid_task_id`, `is_valid_node_id`, `is_portable_path_segment`, `is_windows_reserved_name`) — a stdlib-only leaf that `providers`, `core`, and `task` all import (so the same rules apply in every root without breaking `providers-are-leaf`). Task ids are validated at the §19 gate and node ids at flow load, so every id reaching the private or exchange builders is already portable; `task.model` re-exports the task-id validators for its long-standing import site.
+- The publisher `publish_to_exchange` in `providers/exchange.py` now delegates its per-segment relpath grammar to the shared `is_portable_path_segment` (dropping the duplicated `..`/backslash/drive/`:` checks) and keeps only the exchange-specific parts: the empty/absolute whole-string checks, and the symlink/reparse/hard-link/NTFS-ADS refusal plus case-fold/NFC sibling collision in `build_exchange_manifest`.
+- Containment is now one shared helper, `providers.artifacts.assert_contained_path` (raising `PathIdentityError`): the private write boundary (`create_attempt_dir`) calls it, and the exchange's `_assert_contained` delegates to it (re-raising as `ExchangeError`), so there is a single containment belt across both roots rather than a second one.
 
 ## Portable identity contract
 
@@ -31,12 +39,12 @@ Define shared, reject-not-sanitize validators for every dynamic identity used as
 
 ## Acceptance criteria
 
-- [ ] `../x`, `a/b`, `a\b`, drive/UNC/absolute forms, empty/overlong ids, trailing dot, and Windows device names are rejected identically on Windows, macOS, and Linux fixtures.
-- [ ] Every flow node kind is validated; an invalid node id fails flow load before any artifact directory or DB run row is created.
-- [ ] Every accepted agent/tool node id forms a token the prompt renderer can actually substitute as `{<node-id>_path}`.
-- [ ] Private and exchange builders refuse a resolved path outside their expected task/run root even if a caller bypasses the identity validator.
-- [ ] All packaged flows and valid existing task fixtures still pass; incompatible custom ids receive a precise upgrade error rather than silent sanitization.
-- [ ] Windows device-name tests include `con`, `con.txt`, `prn`, `aux`, `nul`, `com1`–`com9`, and `lpt1`–`lpt9`, case-insensitively.
+- [x] `../x`, `a/b`, `a\b`, drive/UNC/absolute forms, empty/overlong ids, trailing dot, and Windows device names are rejected identically on Windows, macOS, and Linux fixtures. (The identity validators are pure and host-independent — no platform seam to inject — so the same string is rejected on every OS; containment covers absolute/parent-traversal escapes.)
+- [x] Every flow node kind is validated; an invalid node id fails flow load before any artifact directory or DB run row is created. (`_validate_node_id` runs in all six node parsers during `load_flow`, ahead of the map/graph build and every orchestrator side effect.)
+- [x] Every accepted agent/tool node id forms a token the prompt renderer can actually substitute as `{<node-id>_path}`. (Verified against the real renderer token grammar via `referenced_variables`.)
+- [x] Private and exchange builders refuse a resolved path outside their expected task/run root even if a caller bypasses the identity validator. (`assert_contained_path` at `create_attempt_dir` and the exchange publisher.)
+- [x] All packaged flows and valid existing task fixtures still pass; incompatible custom ids receive a precise upgrade error rather than silent sanitization. (All packaged flow node ids already satisfy the grammar; the gate/flow-load errors name the exact rule.)
+- [x] Windows device-name tests include `con`, `con.txt`, `prn`, `aux`, `nul`, `com1`–`com9`, and `lpt1`–`lpt9`, case-insensitively.
 
 ## Verification
 

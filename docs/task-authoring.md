@@ -52,7 +52,7 @@ Allowed fields:
 
 | Field | Required | Type | Meaning |
 | --- | --: | --- | --- |
-| `id` | yes | string | Stable task id. Must match `^[a-z0-9][a-z0-9._-]{0,63}$`. |
+| `id` | yes | string | Stable task id. Must match `^[a-z0-9][a-z0-9._-]{0,63}$`, must not end in `.`, and must not be a Windows device name (`con`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, with or without an extension). It becomes a directory/file name and a branch fragment, so the rule is host-independent (rejected on macOS/Linux too, never sanitized). |
 | `title` | yes | string | Short human-readable title. Used for the default branch slug, PR title, commit messages, and reports. **Plain text only** — like every front-matter value it must not contain argv-shaped tokens (`` ` ``, `;`, `\|`, `$(`, a leading `-`); put code/shell snippets in the body, not the title. See [front-matter values are plain text](#front-matter-values-are-plain-text). |
 | `task_type` | no | string | Selects the flow that runs the task. Omitted ⇒ `implementation` (the default coding pipeline). Built-ins: `implementation`, `deep_research`, `security_audit`; an operator flow in `<repo>/.worc/flows/<task_type>.yaml` may add others. An unknown `task_type` (no matching flow) fails the task before any branch is created. The task only _names_ the flow — it never edits the graph. To author a new flow, see [flow-authoring.md](flow-authoring.md). |
 | `branch_name` | no | string \| null | Full task branch override (only in `new` branch mode). Omitted ⇒ `<repo.branch_prefix>/<id>-<slug(title)>`; set it to match a project's branch naming policy. Ignored (a validation warning) in `existing`/`current` mode. See [`branch_name`](#branch_name). |
@@ -106,9 +106,11 @@ id: Task-001 # uppercase
 id: "task 001" # whitespace
 id: "../task-001" # path traversal shape
 id: "-task-001" # leading separator
+id: "task-001." # trailing dot (Windows strips it → a different on-disk name)
+id: con # Windows device name (also con.txt, nul, com1–com9, lpt1–lpt9)
 ```
 
-The orchestrator rejects invalid ids; it does not sanitize them.
+The orchestrator rejects invalid ids; it does not sanitize them. The device-name and trailing-dot rules are host-independent — an id that is not portable to Windows is rejected on macOS and Linux too, so the same task behaves the same on every supported OS.
 
 ## `branch_name`
 

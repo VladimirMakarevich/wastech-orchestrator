@@ -43,6 +43,7 @@ from wastech_orchestrator.providers.base import (
     ProviderId,
     build_effective_prompt,
 )
+from wastech_orchestrator.providers.exchange import assert_orchestration_paths_contained
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import EvaluationRow, NodeLineageRow
 
@@ -404,6 +405,7 @@ class Supervisor:
         repo_dir: str,
         artifacts_root: str | Path,
         flow_dir: Path,
+        exchange_root: str | Path = "",
         flow_supervisor: SupervisorBlock | None = None,
         register_artifact: RegisterArtifact | None = None,
         prompt_audit: bool = False,
@@ -415,6 +417,9 @@ class Supervisor:
         self._store = store
         self._repo_dir = repo_dir
         self._artifacts_root = artifacts_root
+        # The provider-readable exchange root ``<repo>/.worc-io`` (WRI-001); the supervisor's own
+        # provider call passes the same pre-launch containment gate as agent/evaluator (Part C).
+        self._exchange_root = exchange_root
         self._flow_dir = flow_dir
         # Flow-local supervisor prompt overrides + the follow-ups opt-in (prompt-and-supervisor
         # ADR). ``None`` → the global config prompt + built-in finalize, free-text finalize (today).
@@ -759,6 +764,11 @@ class Supervisor:
                 output_schema=output_schema,
                 session_id=self._resume_session(task_id, route) if resume_session else None,
             )
+            # Same pre-launch containment invariant as agent/evaluator (WRI-001). The supervisor
+            # sets no artifact path fields, so this is a trivial pass today; it guards a future
+            # field that would need exchange routing before this read-only provider call.
+            if self._exchange_root:
+                assert_orchestration_paths_contained(request, str(self._exchange_root))
             outcome = self._router.run_stage(request, route)
         except Exception as exc:
             _LOG.warning(

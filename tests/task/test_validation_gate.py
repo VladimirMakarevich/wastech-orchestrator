@@ -305,6 +305,15 @@ def test_invalid_task_id(config: OrchestratorConfig) -> None:
     assert result.reason is ValidationReason.INVALID_TASK_ID
 
 
+@pytest.mark.parametrize("task_id", ["con", "nul.txt", "com1", "lpt9", "task."])
+def test_non_portable_task_id_rejected(config: OrchestratorConfig, task_id: str) -> None:
+    # A Windows device name or a trailing dot is rejected host-independently (the id becomes a
+    # directory/file component and a branch fragment), never sanitized.
+    text = f"---\nid: {task_id!r}\ntitle: T\n---\n\n## Description\n\nx\n"
+    result = _gate(config).validate(_src(text))
+    assert result.reason is ValidationReason.INVALID_TASK_ID
+
+
 def test_duplicate_task_id_in_store(config: OrchestratorConfig) -> None:
     result = _gate(config, store_ids={"task-001"}).validate(_src(_GOOD))
     assert result.reason is ValidationReason.DUPLICATE_TASK_ID

@@ -19,6 +19,14 @@ Every Claude fresh/resume attempt runs with one adapter-owned, non-weakening eff
 
 Relocation in WRI-005 remains defense in depth; it is not used as proof of enforcement.
 
+## Provided by WRI-001 (and what stays core-side until this task)
+
+WRI-001 built the exchange and a **core-side, detection-only** containment layer; WRI-002 supplies the actual OS/tool enforcement that makes the exchange read-only for Claude:
+
+- `providers/exchange.py.assert_orchestration_paths_contained` (called before every agent/evaluator/supervisor `run_stage`) and `assert_exchange_current_task_only` (pre-launch) are containment/preflight assertions, not access control. WRI-002's built-in `Write`/`Edit` denies for the exchange + Git dirs, plus the supported-host Bash sandbox `denyWrite`, are what actually stop a mutation.
+- `providers/exchange.py.build_exchange_manifest` (file type, link count, digest, …) is the ready-made primitive for the required pre/post-attempt exchange integrity check; a mutation it detects is a non-fallback policy violation, and the changed copy must not be consumed downstream.
+- The exchange root and the private/control roots WRI-002 must deny are `<repo>/.worc-io` and `<repo>/.worc` (see `EXCHANGE_HOME` in `providers/artifacts.py`); WRI-004 will hand these over as typed `layout.exchange_root` / `private_home` fields.
+
 ## In scope
 
 ### Tool and Bash filesystem policy
