@@ -76,6 +76,20 @@ def test_deny_policy_includes_configured_provider_homes(
     )
 
 
+def test_deny_policy_includes_frozen_control_bundle_root(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # WRI-010 (cluster-exit hook for WRI-002/003): the frozen-control-bundle root under private_home
+    # is a named deny target so the provider projection denies it by name, not by coincidence of
+    # location — and it survives WRI-005 relocating private_home.
+    config = make_git_config(git_repo.clone, checks=["pytest"])
+    layout = _distinct_layout(git_repo.clone, tmp_path)
+    policy = build_internal_deny_policy(config, layout, env_file=None)
+    bundle_root = layout.private_home / "control-bundles"
+    assert policy.frozen_control_bundle == bundle_root
+    assert bundle_root in policy.denied_paths
+
+
 def test_cli_layout_for_reproduces_default_paths(git_repo, make_git_config) -> None:
     # Path-for-path: the CLI composition boundary resolves the byte-identical pre-WRI-004 home.
     config = make_git_config(git_repo.clone, checks=["pytest"])

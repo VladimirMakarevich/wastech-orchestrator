@@ -119,6 +119,8 @@ A node's prompt is the content of its `role_file`. Role files render only an all
 
 `role_file` paths are contained to the flow directory: a path with `..` or an absolute path is rejected at load. Keep prompts inside your `<task_type>/` folder.
 
+> **Prompts and tools are frozen per task (WRI-010).** When a task starts, the orchestrator snapshots the flow YAML, every role/supervisor prompt it references, and each `tool` executable into a private per-task bundle and runs the whole task against that frozen copy. So **editing a prompt or tool in `.worc/` while a task is running does not affect that task** — the change lands on the **next fresh task** (or a `rerun`). A `rerun --continue` keeps the task's original frozen prompts; use a fresh `rerun`/restart to adopt live edits. This is transparent to authoring — you still edit `.worc/flows/` normally.
+
 ## Per-node overrides
 
 Every `agent`/`evaluator` node may pin its own `provider` (`codex` | `claude`), `model`, and `reasoning`; omit any and the node inherits the `config.yaml` provider defaults (`provider` ⇒ the global primary). A node may also set `network_access: true|false` to override the flow-wide network default for that node alone. Spend more reasoning where rework is decided (review), less on mechanical steps. See [configuration.md → Per-node overrides in flows](configuration.md#per-node-overrides-in-flows).

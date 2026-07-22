@@ -25,7 +25,11 @@ from wastech_orchestrator.providers import claude, codex
 from wastech_orchestrator.providers.base import AgentProvider, ProviderId
 from wastech_orchestrator.providers.process import AgentHandleRecorder
 from wastech_orchestrator.routing.router import AgentRouter
-from wastech_orchestrator.runtime_layout import InternalDenyPolicy, RuntimeLayout
+from wastech_orchestrator.runtime_layout import (
+    CONTROL_BUNDLE_DIRNAME,
+    InternalDenyPolicy,
+    RuntimeLayout,
+)
 from wastech_orchestrator.security.isolation import IsolationCheck
 from wastech_orchestrator.state_store import StateStore
 from wastech_orchestrator.task.validation_gate import ValidationGate
@@ -55,12 +59,12 @@ def build_internal_deny_policy(
     """Assemble the WRI-004 internal deny policy at the composition boundary.
 
     Collects the control/private homes from the provider-neutral ``layout``, the resolved
-    default/explicit ``env_file`` (which may live outside ``private_home``), and the config or
-    credential homes of the *configured* providers (:data:`_PROVIDER_CONFIG_HOMES`). Resolving homes
-    here — not inside :class:`RuntimeLayout` — keeps the layout provider-neutral. The live control
-    plane's frozen bundle is a further deny target owned by WRI-010 and is deliberately absent.
+    default/explicit ``env_file`` (which may live outside ``private_home``), the config or
+    credential homes of the *configured* providers (:data:`_PROVIDER_CONFIG_HOMES`), and the WRI-010
+    frozen-control-bundle root (``<private_home>/control-bundles``). Resolving the provider homes
+    here — not inside :class:`RuntimeLayout` — keeps the layout provider-neutral.
 
-    WRI-004 only represents these targets; WRI-002/003 project them into provider enforcement.
+    WRI-004/010 only represent these targets; WRI-002/003 project them into provider enforcement.
     """
     provider_homes = tuple(
         _PROVIDER_CONFIG_HOMES[pid]()
@@ -72,6 +76,7 @@ def build_internal_deny_policy(
         private_home=layout.private_home,
         env_file=env_file,
         provider_homes=provider_homes,
+        frozen_control_bundle=layout.private_home / CONTROL_BUNDLE_DIRNAME,
     )
 
 

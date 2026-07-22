@@ -38,6 +38,13 @@ CONTROL_HOME_DIRNAME = ".worc"
 PRIVATE_HOME_DIRNAME = ".worc"
 EXCHANGE_HOME_DIRNAME = ".worc-io"
 
+# The private-home subdirectory that holds the per-task frozen control bundles (WRI-010). Each
+# task's immutable control snapshot is ``<private_home>/<CONTROL_BUNDLE_DIRNAME>/<task-id>/``. The
+# whole root is a provider deny target (see :class:`InternalDenyPolicy.frozen_control_bundle`); it
+# lives under ``private_home`` so WRI-005 relocates it out of tree together with the rest of the
+# private runtime state.
+CONTROL_BUNDLE_DIRNAME = "control-bundles"
+
 
 @dataclass(frozen=True)
 class RuntimeLayout:
@@ -75,27 +82,37 @@ class InternalDenyPolicy:
     This is **internal provider policy**, deliberately kept separate from the overloaded public
     ``security.denied_read_paths`` config list (which also drives redaction and skill scanning). It
     names the roots and secret sources the agent must not read: the control home, the private home,
-    the resolved default/explicit ``--env-file`` (which may live outside ``private_home``), and the
-    provider-owned auth/config homes (``~/.claude`` / ``$CLAUDE_CONFIG_DIR``, ``$CODEX_HOME``).
+    the resolved default/explicit ``--env-file`` (which may live outside ``private_home``), the
+    provider-owned auth/config homes (``~/.claude`` / ``$CLAUDE_CONFIG_DIR``, ``$CODEX_HOME``), and
+    the per-task frozen control bundle root (WRI-010).
+
+    ``frozen_control_bundle`` is the root under which WRI-010 writes each task's immutable control
+    snapshot (``<private_home>/control-bundles/``). It lives under ``private_home`` and so is
+    already covered by that deny transitively; naming it explicitly makes the WRI-002/003 projection
+    deny it by name (not by coincidence of location) and keeps it denied after WRI-005 relocates
+    ``private_home``. The orchestrator reads the bundle to render prompts / launch tools; the
+    provider must never read it.
 
     WRI-004 only *represents* these targets; the provider-specific projection/enforcement lands in
-    WRI-002/003, and the live control plane's **frozen control bundle** — a further deny target — is
-    owned by WRI-010 and intentionally absent here (documented shim). Because it has no enforcement
-    consumer yet in WRI-004, it is exercised by tests and threaded through composition unread.
+    WRI-002/003. Because it has no enforcement consumer yet, the policy is exercised by tests and
+    threaded through composition unread.
     """
 
     control_home: Path
     private_home: Path
     env_file: Path | None
     provider_homes: tuple[Path, ...]
+    frozen_control_bundle: Path | None = None
 
     @property
     def denied_paths(self) -> tuple[Path, ...]:
-        """The full deny set, ordered and de-duplicated (homes, env-file, provider homes)."""
+        """The full deny set, ordered and de-duplicated (homes, env-file, provider homes+bundle)."""
         ordered: list[Path] = [self.control_home, self.private_home]
         if self.env_file is not None:
             ordered.append(self.env_file)
         ordered.extend(self.provider_homes)
+        if self.frozen_control_bundle is not None:
+            ordered.append(self.frozen_control_bundle)
         seen: set[Path] = set()
         unique: list[Path] = []
         for path in ordered:

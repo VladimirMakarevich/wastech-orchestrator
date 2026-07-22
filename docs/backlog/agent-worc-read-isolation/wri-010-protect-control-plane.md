@@ -1,6 +1,8 @@
 # WRI-010 — Isolate and freeze the in-repo control plane
 
-**Status:** open **Milestone:** 0 (security prerequisite) **Source:** [decision record](README.md) **Dependencies:** WRI-004, WRI-012
+**Status:** implemented **Milestone:** 0 (security prerequisite) **Source:** [decision record](README.md) **Dependencies:** WRI-004, WRI-012
+
+Shipped as `core/flow/control_bundle.py` (freeze / load+verify / live-digest, reusing the WRI-001 no-follow inspector, the containment belt, and `sha256_file` — no new identity code), a freeze/bind step in `Orchestrator._engine_run` (fresh/restart freezes and persists `tasks.control_bundle_digest`; continue loads+verifies and reuses the frozen bytes), a per-node live-mutation verify in `_engine_post_node` routed to `manual_action_required` (Core-detected, never fallback/park), and the `InternalDenyPolicy.frozen_control_bundle` deny target. See [follow_ups.md](../follow_ups.md) for the shipped entry and deferrals (provider-deny projection is a WRI-002/003 cluster-exit; tool dependency-graph freezing and the ephemeral merge flow are out of scope).
 
 ## Problem
 
@@ -27,13 +29,13 @@ The operator may deliberately modify the live control plane between tasks. Such 
 
 ## Acceptance criteria
 
-- [ ] No provider request can read or write live `.worc` control files under strict isolation; private/runtime and control roots remain denied after WRI-005 separates them.
-- [ ] Editing a later role/supervisor prompt during an agent attempt cannot change the prompt used by a subsequent call in the same task.
-- [ ] Replacing a referenced `.worc/tools` executable or dependency during an agent attempt cannot make a later orchestrator tool node execute provider-selected bytes.
-- [ ] Config/flow/tool mutation is detected before downstream execution and before the next task; it is a security/manual-action result, never infrastructure fallback.
-- [ ] Continue/resume uses the original verified control-bundle digest. Fresh/restart may adopt a newly validated operator version and records the new digest.
-- [ ] The snapshot refuses symlink/junction/reparse escapes, hard-linked aliases, special files, case collisions, and Windows alternate data streams.
-- [ ] Legitimate install/upgrade/operator edits between tasks remain supported and do not require relocating the control plane.
+- [~] No provider request can read or write live `.worc` control files under strict isolation; private/runtime and control roots remain denied after WRI-005 separates them. **(Cluster-exit: WRI-010 names `control_home` + the frozen bundle in `InternalDenyPolicy`; the provider-side projection lands in WRI-002/003.)**
+- [x] Editing a later role/supervisor prompt during an agent attempt cannot change the prompt used by a subsequent call in the same task. (Consumers bound to the frozen bundle; the live edit is also detected post-node and routed to manual — `test_live_control_plane_edit_during_run_is_manual_not_fallback`.)
+- [x] Replacing a referenced `.worc/tools` executable or dependency during an agent attempt cannot make a later orchestrator tool node execute provider-selected bytes. (Tool nodes launch the frozen executable via a per-task `ToolRegistry(bundle.tools_dir)`; a live swap is detected — `test_live_digest_diverges_when_tool_executable_replaced`. Only the entry executable is copied; a tool's sibling dependencies are covered by detection + the future provider deny, not by copying — see follow-ups.)
+- [x] Config/flow/tool mutation is detected before downstream execution and before the next task; it is a security/manual-action result, never infrastructure fallback. (`_engine_post_node` re-hash → `NodeManualRequired`; a `manual_action_required` terminal blocks the next task under the single-slot invariant.)
+- [x] Continue/resume uses the original verified control-bundle digest. Fresh/restart may adopt a newly validated operator version and records the new digest. (`_prepare_control_bundle`: continue = `load_control_bundle` against the persisted digest; fresh/restart re-freezes and overwrites — `test_continue_after_parked_live_edit_is_conflict_manual`, `test_parked_task_resumes_when_provider_recovers`.)
+- [x] The snapshot refuses symlink/junction/reparse escapes, hard-linked aliases, special files, case collisions, and Windows alternate data streams. (`_inspect_source` + case-fold key check, via the injected inspector — `test_freeze_refuses_non_single_link_regular_source`.)
+- [x] Legitimate install/upgrade/operator edits between tasks remain supported and do not require relocating the control plane. (The freeze copies from live `control_home` and never writes it; a fresh task re-freezes and adopts the operator's current version.)
 
 ## Verification
 

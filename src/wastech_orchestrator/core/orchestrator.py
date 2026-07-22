@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -33,6 +34,13 @@ from wastech_orchestrator.core.decomposition import (
     subtask_spec_path,
     update_subtask_index,
     write_subtask_artifacts,
+)
+from wastech_orchestrator.core.flow.control_bundle import (
+    ControlBundleError,
+    FrozenControlBundle,
+    digest_live_control_inputs,
+    freeze_control_bundle,
+    load_control_bundle,
 )
 from wastech_orchestrator.core.flow.engine import (
     FlowCancelled,
@@ -72,7 +80,7 @@ from wastech_orchestrator.core.flow.recorder import (
 from wastech_orchestrator.core.flow.registry import FlowRegistry, FlowResolutionError
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import AgentNode, EvaluatorNode, FlowNode
-from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
+from wastech_orchestrator.core.flow.snapshot import FlowSnapshot, load_flow
 from wastech_orchestrator.core.flow.tools_registry import ToolRegistry
 from wastech_orchestrator.core.flow.validator import (
     FlowValidationError,
@@ -156,7 +164,11 @@ from wastech_orchestrator.providers.redaction import (
     secret_env_values,
 )
 from wastech_orchestrator.routing.router import AgentRouter
-from wastech_orchestrator.runtime_layout import InternalDenyPolicy, RuntimeLayout
+from wastech_orchestrator.runtime_layout import (
+    CONTROL_BUNDLE_DIRNAME,
+    InternalDenyPolicy,
+    RuntimeLayout,
+)
 from wastech_orchestrator.security.env import build_child_env
 from wastech_orchestrator.security.isolation import IsolationCheck, check_isolation
 from wastech_orchestrator.state_store import (
@@ -1719,10 +1731,11 @@ class Orchestrator:
 
         Hydrates the :class:`FlowRunState` from ``node_runs`` + the ``tasks`` checkpoint and
         continues from ``current_node`` (the decomposed re-entry is handled in :meth:`_run_phases`).
-        A task with no flow checkpoint (interrupted before the engine started, or a flow whose
-        fingerprint no longer matches) restarts from the top. Side-effect idempotency (commit/push/
-        PR) lives in ``publish_operations``, so a resumed run never duplicates them."""
-        snapshot = self._resolve_flow(p)
+        A task with no flow checkpoint (interrupted before the engine started) restarts from the
+        top. Under WRI-010 a checkpointed continue reuses the **frozen** control bundle (verified in
+        :meth:`_engine_run`), so a live-flow edit no longer silently restarts the run — it is a
+        parked-conflict the operator resolves with a fresh rerun/restart. Side-effect idempotency
+        (commit/push/PR) lives in ``publish_operations``, so a resumed run never duplicates them."""
         run_state = hydrate_run_state(self._store, p.task.id)
         # B-lite ceiling: a task parked because every provider was transiently unavailable resumes
         # here. If it has stayed parked longer than ``agents.retry.max_blocked_s`` (total parked
@@ -1735,9 +1748,9 @@ class Orchestrator:
                 node_id=run_state.current_node if run_state is not None else None,
                 run_state=run_state,
             )
-        if run_state is None or run_state.flow_fingerprint != snapshot.flow_fingerprint:
-            # No usable checkpoint (interrupted before the engine wrote one, or the flow changed) →
-            # restart from the top via the full driver (re-does preflight + branch prep + engine).
+        if run_state is None:
+            # No usable checkpoint (interrupted before the engine wrote one) → restart from the top
+            # via the full driver (re-does preflight + branch prep + a fresh freeze + engine).
             if p.status not in (Status.NEW, Status.PENDING, Status.VALIDATED):
                 self._store.set_status(p.task.id, Status.VALIDATED)  # reset to re-enter the driver
                 p.status = Status.VALIDATED
@@ -1859,6 +1872,98 @@ class Orchestrator:
         except (FlowResolutionError, FlowValidationError) as exc:
             raise PipelineFailed(str(exc)) from exc
 
+    def _control_bundle_dir(self, task_id: str) -> Path:
+        """The private per-task frozen-control-bundle dir (a provider deny target, WRI-010)."""
+        return self._layout.private_home / CONTROL_BUNDLE_DIRNAME / task_id
+
+    def _prepare_control_bundle(
+        self, p: _Pipeline, *, resume: bool
+    ) -> tuple[FlowSnapshot, FrozenControlBundle, Path]:
+        """Freeze (fresh/restart) or load+verify (continue) this task's control plane (WRI-010).
+
+        Returns the flow snapshot to execute, the bound frozen bundle, and the **live** flow dir
+        (the baseline the post-node hook re-hashes to detect an in-run mutation).
+
+        * Fresh/restart snapshots the live flow YAML, every referenced role file, the supervisor
+          prompts, and the referenced tool executables into a fresh private bundle and records its
+          digest in the state store.
+        * Continue reuses the original frozen bytes, verified against the parent-held digest, and
+          reconstitutes the flow from the frozen YAML. An operator edit to this flow's live control
+          inputs made while the task was parked is a conflict: continue refuses it (fail closed) so
+          the operator fresh/restarts to adopt it, rather than silently ignoring the edit.
+
+        Raises :class:`ControlBundleError` on any identity/integrity/parked-conflict failure; the
+        caller routes it to ``manual_action_required``.
+        """
+        from wastech_orchestrator import __version__
+
+        bundle_dir = self._control_bundle_dir(p.task.id)
+        if not resume:
+            live = self._resolve_flow(p)
+            assert live.source_path is not None
+            live_flow_dir = live.source_path.parent
+            if bundle_dir.exists():
+                shutil.rmtree(bundle_dir)
+            bundle_dir.mkdir(parents=True, exist_ok=True)
+            bundle = freeze_control_bundle(
+                bundle_dir,
+                live,
+                live_flow_dir,
+                self._tool_registry,
+                metadata={"orchestrator_version": __version__},
+            )
+            self._store.update_task(p.task.id, control_bundle_digest=bundle.bundle_digest)
+            self._log(p.task.id).info(
+                "control plane frozen", extra={"bundle_digest": bundle.bundle_digest[:12]}
+            )
+            return live, bundle, live_flow_dir
+
+        expected = self._store.get_control_bundle_digest(p.task.id)
+        if expected is None:
+            raise ControlBundleError(
+                "no persisted control-bundle digest to resume against; use a fresh rerun"
+            )
+        bundle = load_control_bundle(bundle_dir, expected)
+        frozen = load_flow(bundle.flow_source_path)
+        # Parked-conflict guard: an edit to THIS flow's live control inputs while the task was
+        # parked is a conflict — continue keeps the frozen bytes and refuses to ignore the edit.
+        try:
+            live = self._resolve_flow(p)
+            assert live.source_path is not None
+            live_flow_dir = live.source_path.parent
+            live_digest = digest_live_control_inputs(frozen, live_flow_dir, self._tool_registry)
+        except (PipelineFailed, ControlBundleError) as exc:
+            raise ControlBundleError(
+                f"live control plane changed since the task was frozen ({exc}); "
+                "use a fresh rerun/restart"
+            ) from exc
+        if live_digest != bundle.bundle_digest:
+            raise ControlBundleError(
+                "live control plane was edited while the task was parked; "
+                "use a fresh rerun/restart to adopt it"
+            )
+        return frozen, bundle, live_flow_dir
+
+    def _verify_control_plane_unchanged(
+        self, snapshot: FlowSnapshot, live_flow_dir: Path, expected_digest: str
+    ) -> None:
+        """Fail closed (manual) unless the live control plane still matches the frozen digest.
+
+        Re-hashes the live flow/role/tool inputs the bundle was frozen from and compares to the
+        parent-held digest. A planted symlink/hard-link (surfaced by the no-follow identity checks)
+        or any content change is a non-fallback security violation — the provider tree is already
+        proven quiescent (WRI-012), so a change means a control file was mutated under the run.
+        """
+        try:
+            live_digest = digest_live_control_inputs(snapshot, live_flow_dir, self._tool_registry)
+        except ControlBundleError as exc:
+            raise NodeManualRequired(f"control plane changed during the run: {exc}") from exc
+        if live_digest != expected_digest:
+            raise NodeManualRequired(
+                "control plane (flow / role prompt / tool) was modified during a provider attempt; "
+                "refusing to run downstream nodes on provider-selected control bytes"
+            )
+
     def _resolve_node_overrides(
         self, p: _Pipeline, snapshot: FlowSnapshot
     ) -> Mapping[str, Mapping[str, object]]:
@@ -1874,13 +1979,19 @@ class Orchestrator:
         return resolution.overlay
 
     def _build_engine_services(
-        self, p: _Pipeline, *, finalize: Callable[[], str | None] | None
+        self,
+        p: _Pipeline,
+        *,
+        finalize: Callable[[], str | None] | None,
+        tool_registry: ToolRegistry | None = None,
     ) -> NodeServices:
         """Assemble the per-unit :class:`NodeServices` for an engine run.
 
         Shared by the task driver (:meth:`_engine_run`) and the operator merge routine
         (:meth:`_run_merge_flow`). ``finalize`` is the publish node's hook; ``None`` for a flow with
         no PR-publishing node (the merge flow's ``policy: none`` terminal never calls it).
+        ``tool_registry`` is the WRI-010 frozen-bundle registry on the task path; ``None`` falls
+        back to the shared live-``.worc/tools`` registry (the ephemeral merge flow, not frozen).
         """
         return build_node_services(
             router=self._router,
@@ -1912,8 +2023,9 @@ class Orchestrator:
             trust_level=(p.task.trust_level or self._config.security.trust_level),
             protected_paths=self._config.security.protected_paths,
             packet_builder=self._packet_builder(),
-            # Custom tool nodes (P5): the operator tool registry + the flow-wide default timeout.
-            tool_registry=self._tool_registry,
+            # Custom tool nodes (P5): the per-task frozen registry (WRI-010) when given, else the
+            # shared live one; plus the flow-wide default timeout.
+            tool_registry=tool_registry if tool_registry is not None else self._tool_registry,
             tools_default_timeout_seconds=self._config.tools.default_timeout_seconds,
         )
 
@@ -2023,17 +2135,34 @@ class Orchestrator:
         # task's directory. Fails closed on a stale/foreign exchange before any provider launches.
         # Terminal seal/restore is WRI-007.
         assert_exchange_current_task_only(self._exchange_root, p.task.id)
-        snapshot = self._resolve_flow(p)  # task_type → flow (P0.4 dispatch)
+        # WRI-010: freeze (fresh/restart) or load+verify (continue) the control plane before any
+        # node runs, then bind every flow/supervisor/tool consumer to the frozen bundle instead of
+        # live ``.worc``. A freeze/verify/parked-conflict failure is a fail-closed manual condition.
+        try:
+            snapshot, bundle, live_flow_dir = self._prepare_control_bundle(p, resume=resume)
+        except ControlBundleError as exc:
+            return self._go_terminal(
+                p, Status.MANUAL_ACTION_REQUIRED, manual_reason=f"control plane: {exc}"
+            )
         assert snapshot.source_path is not None
         node_overrides = self._resolve_node_overrides(p, snapshot)
         if run_state is None:
             run_state = FlowRunState(flow_fingerprint=snapshot.flow_fingerprint)
+        elif snapshot.flow_fingerprint != run_state.flow_fingerprint:
+            # The frozen graph must match the checkpoint it is resumed against (defense in depth on
+            # top of the load-time digest verify) — otherwise the bundle and checkpoint are from
+            # different freezes.
+            return self._go_terminal(
+                p,
+                Status.MANUAL_ACTION_REQUIRED,
+                manual_reason="control plane: frozen flow does not match checkpoint; rerun fresh",
+            )
         # The constant supervisor layer starts at task start and lives the whole cycle (P2.1); it
-        # carries this task's own resume_own_lineage session.
-        self._supervisor = self._build_supervisor(p, snapshot)
+        # carries this task's own resume_own_lineage session. It reads the frozen prompts.
+        self._supervisor = self._build_supervisor(p, snapshot, flow_dir=bundle.flow_dir)
         inputs = build_node_inputs(
             p,
-            flow_dir=snapshot.source_path.parent,
+            flow_dir=bundle.flow_dir,
             check_sets=self._check_sets(p),  # normalized command_sets; () = no gate
             pull_request_title=p.task.title,
             commit_message=f"feat({p.task.id}): {p.task.title}",
@@ -2050,7 +2179,13 @@ class Orchestrator:
         # operator pins (strict/warn) + the supervisor's once-per-task proposal, and thread the
         # effective map into ``inputs``. On resume the persisted map is restored (no re-proposal).
         self._resolve_skill_layers(p, snapshot, inputs, resume=resume)
-        services = self._build_engine_services(p, finalize=lambda: self._engine_finalize(p))
+        # Tool nodes launch the FROZEN executables (WRI-010): a per-task registry rooted at the
+        # bundle, not the shared live ``.worc/tools`` one.
+        services = self._build_engine_services(
+            p,
+            finalize=lambda: self._engine_finalize(p),
+            tool_registry=ToolRegistry(bundle.tools_dir),
+        )
         recorder = StateStoreRunRecorder(
             self._store, p.task.id, artifacts_root=self._artifacts_root
         )
@@ -2065,6 +2200,8 @@ class Orchestrator:
                 completeness,
                 node_overrides=node_overrides,
                 resume=resume,
+                live_flow_dir=live_flow_dir,
+                control_digest=bundle.bundle_digest,
             )
         except NodeManualRequired as exc:
             self._sync_counters_from_run_state(p, run_state)
@@ -2200,6 +2337,8 @@ class Orchestrator:
         *,
         node_overrides: Mapping[str, Mapping[str, object]] = MappingProxyType({}),
         resume: bool = False,
+        live_flow_dir: Path | None = None,
+        control_digest: str | None = None,
     ) -> FlowRunResult:
         """Drive the flow in phases. Fresh: a flow with no decomposition runs in one pass; a
         decomposed one runs pre (entry…proposed_by) once, the sub_flow region once per subtask
@@ -2207,7 +2346,9 @@ class Orchestrator:
         run still in ``pre`` re-runs pre (planning re-decides), a single-unit run continues from
         ``current_node``, and a decomposed run re-enters the active uncommitted subtask at the
         region entry (committed subtasks are skipped, never re-committed)."""
-        post_node = self._engine_post_node(p, inputs, snapshot)
+        post_node = self._engine_post_node(
+            p, inputs, snapshot, live_flow_dir=live_flow_dir, control_digest=control_digest
+        )
         facts = self._engine_facts(completeness, snapshot)
         if resume and run_state.current_node is None:
             resume = False  # no checkpoint position to resume from → start fresh
@@ -2369,12 +2510,15 @@ class Orchestrator:
         self._store.set_subtask_commit(p.task.id, unit.order, sha, "committed")
         self._store.update_task(p.task.id, subtasks_completed=unit.order)
 
-    def _build_supervisor(self, p: _Pipeline, snapshot: FlowSnapshot) -> Supervisor:
+    def _build_supervisor(
+        self, p: _Pipeline, snapshot: FlowSnapshot, *, flow_dir: Path
+    ) -> Supervisor:
         """Construct the per-task supervisor layer from ``config.yaml: supervisor`` (P2.1).
 
-        It runs read-only on the global primary; ``role_file`` is resolved inside the packaged flow
-        dir (same containment as a node ``role_file``). Built fresh per task so its own session does
-        not leak across tasks.
+        It runs read-only on the global primary; ``role_file`` is resolved inside ``flow_dir`` (same
+        containment as a node ``role_file``). ``flow_dir`` is the WRI-010 frozen control bundle's
+        flow dir, so supervisor prompts are read from the frozen bytes, not live ``.worc``. Built
+        fresh per task so its own session does not leak across tasks.
         """
         assert snapshot.source_path is not None
         return Supervisor(
@@ -2384,7 +2528,7 @@ class Orchestrator:
             repo_dir=self._config.repo.local_path,
             artifacts_root=str(self._artifacts_root),
             exchange_root=str(self._exchange_root),
-            flow_dir=snapshot.source_path.parent,
+            flow_dir=flow_dir,
             # Flow-local supervisor prompts + the follow-ups opt-in (prompt-and-supervisor ADR);
             # ``None`` when the flow declares no ``supervisor:`` block (global config + built-ins).
             flow_supervisor=snapshot.doc.supervisor,
@@ -2579,11 +2723,18 @@ class Orchestrator:
         return facts
 
     def _engine_post_node(
-        self, p: _Pipeline, inputs: NodeInputs, snapshot: FlowSnapshot
+        self,
+        p: _Pipeline,
+        inputs: NodeInputs,
+        snapshot: FlowSnapshot,
+        *,
+        live_flow_dir: Path | None = None,
+        control_digest: str | None = None,
     ) -> Callable[[FlowNode, NodeOutcome, int], None]:
-        """Engine post-node hook: let the supervisor layer observe the completed step, persist a
-        node's output_artifact slot + its generic ``<node_id>.out.md``, resolve plan skills, and —
-        for the decomposition ``proposed_by`` node — decide + materialize the decomposition."""
+        """Engine post-node hook: verify the live control plane is unchanged (WRI-010), let the
+        supervisor layer observe the completed step, persist a node's output_artifact slot + its
+        generic ``<node_id>.out.md``, resolve plan skills, and — for the decomposition
+        ``proposed_by`` node — decide + materialize the decomposition."""
         decomp = snapshot.doc.decomposition
         # Redaction literals for the node-output writer, harvested once per run (same set the memory
         # write path uses): raw structured output is not adapter-redacted, so scrub it at write.
@@ -2596,6 +2747,12 @@ class Orchestrator:
         )
 
         def post_node(node: FlowNode, outcome: NodeOutcome, node_run_id: int) -> None:
+            # WRI-010: before any downstream consumer runs, prove the live control plane (flow /
+            # role / tool) has not changed since freeze. WRI-012 has already proven the provider
+            # tree quiescent for this node's attempt(s), so a diff here means a control file was
+            # mutated under the running task — a non-fallback manual-action security violation.
+            if live_flow_dir is not None and control_digest is not None:
+                self._verify_control_plane_unchanged(snapshot, live_flow_dir, control_digest)
             # The constant supervisor layer observes every completed step read-only (advisory) —
             # except the terminal publish node, whose finalize hook already wrote the summary.
             if self._supervisor is not None and node.kind != "publish":

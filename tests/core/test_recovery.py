@@ -435,6 +435,25 @@ def _impl_fingerprint() -> str:
     return registry.resolve("implementation").flow_fingerprint
 
 
+def _seed_control_bundle(orch, store: StateStore, task_id: str) -> None:
+    """Seed the WRI-010 frozen control bundle a real interrupted task would have left on disk.
+
+    A resume verifies the bundle against the persisted digest before reusing it; these recovery
+    tests seed the checkpoint directly (bypassing the fresh run that freezes), so they must also
+    freeze the implementation-flow bundle the checkpoint fingerprints and record its digest.
+    """
+    from wastech_orchestrator.core.flow.control_bundle import freeze_control_bundle
+
+    snapshot = orch._flow_registry.resolve("implementation")
+    assert snapshot.source_path is not None
+    bundle_dir = orch._control_bundle_dir(task_id)
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    bundle = freeze_control_bundle(
+        bundle_dir, snapshot, snapshot.source_path.parent, orch._tool_registry
+    )
+    store.update_task(task_id, control_bundle_digest=bundle.bundle_digest)
+
+
 @pytest.mark.parametrize(
     ("current_node", "expected_provider", "expected_first_stage"),
     [
@@ -500,6 +519,7 @@ def test_resume_continues_persisted_checkpoint(
             flow_fingerprint=_impl_fingerprint(),
             fix_iterations=0,
         )
+        _seed_control_bundle(orch, store, task_id)
     failed_check = art / "logs" / task_id / "checks" / "001.log"
     if current_node == "fixing":
         failed_check.parent.mkdir(parents=True, exist_ok=True)
@@ -581,6 +601,7 @@ def test_resume_restores_skill_map_without_re_proposing(
         flow_fingerprint=_impl_fingerprint(),
         fix_iterations=0,
     )
+    _seed_control_bundle(orch, store, task_id)
     # The skill exists in the clone; the per-node map was persisted before the interruption.
     # Identity is the repo-relative POSIX path (joined onto the clone when surfaced to a provider).
     skill_md = git_repo.clone / ".claude" / "skills" / "safe-change" / "SKILL.md"
@@ -658,6 +679,7 @@ def test_resume_waits_on_persisted_planning_prompt_without_resending(
         flow_fingerprint=_impl_fingerprint(),
         fix_iterations=0,
     )
+    _seed_control_bundle(orch, store, task_id)
 
     path = interaction_path(art, task_id, "planning")
     handle = AskHandle(
@@ -767,6 +789,7 @@ def test_resume_decomposed_at_subtask_without_duplicate_commit(
         flow_fingerprint=_impl_fingerprint(),
         fix_iterations=0,
     )
+    _seed_control_bundle(orch, store, task_id)
     store.insert_subtasks(
         [
             SubtaskRow(task_id, 1, "s1", "First", "committed", (), commit_sha=sha1),

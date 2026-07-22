@@ -129,6 +129,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE tasks ADD COLUMN test_fix_total INTEGER NOT NULL DEFAULT 0")
     if "review_fix_total" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN review_fix_total INTEGER NOT NULL DEFAULT 0")
+    # WRI-010: the frozen control-bundle digest (parent-held identity a continue/resume verifies).
+    if "control_bundle_digest" not in task_cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN control_bundle_digest TEXT")
     # v16: normalized token usage — the per-run delta on ``provider_attempts`` and the running
     # cumulative snapshot on the two lineage tables. All nullable, so no defaults.
     attempt_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(provider_attempts)")}
@@ -222,7 +225,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     current_node TEXT,
     flow_run_counters TEXT,
     flow_fingerprint TEXT,
-    blocked_since TEXT
+    blocked_since TEXT,
+    control_bundle_digest TEXT
 );
 
 CREATE TABLE IF NOT EXISTS node_runs (
@@ -1046,6 +1050,22 @@ class StateStore:
         if row is None:
             raise KeyError(task_id)
         return row["current_node"], row["flow_run_counters"], row["flow_fingerprint"]
+
+    def get_control_bundle_digest(self, task_id: str) -> str | None:
+        """Return the task's persisted WRI-010 frozen-control-bundle digest, or ``None``.
+
+        ``None`` when the task was never frozen (legacy row / never reached the engine). A
+        continue/resume verifies the on-disk bundle against this parent-held value; fresh/restart
+        overwrites it via :meth:`update_task` when it re-freezes from the live control plane.
+        """
+        cur = self._conn.execute(
+            "SELECT control_bundle_digest FROM tasks WHERE task_id = ?", (task_id,)
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise KeyError(task_id)
+        digest = row["control_bundle_digest"]
+        return None if digest is None else str(digest)
 
     def record_provider_attempt(
         self, attempt: ProviderAttemptRow, conn: sqlite3.Connection | None = None

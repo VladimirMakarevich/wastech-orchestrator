@@ -1285,6 +1285,71 @@ def test_containment_unverified_goes_manual_action_required(
     assert ledger.records()[0]["final_status"] == "manual_action_required"
 
 
+def test_live_control_plane_edit_during_run_is_manual_not_fallback(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # WRI-010: an agent that rewrites a live control file (here the flow YAML) during a provider
+    # attempt is caught by the post-node verify — the provider tree is already proven quiescent
+    # (WRI-012), so a live diff means a control file was mutated under the run. It is a non-fallback
+    # manual-action security violation, and no downstream node runs on the provider-selected bytes.
+    providers = _both()
+    orch, store, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    flow_yaml = git_repo.clone / ".worc" / "flows" / "implementation.yaml"
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_mutate(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "planning":  # mutate a live control input mid-attempt
+            flow_yaml.write_text(
+                flow_yaml.read_text(encoding="utf-8") + "\n# tampered by agent\n", encoding="utf-8"
+            )
+        if request.node_id == "implementation":
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_mutate  # type: ignore[method-assign]
+
+    result = orch.run_task(_complete_task(tmp_path, "task-mut"))
+
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+    ran = _ran_nodes(store, "task-mut")
+    assert "planning" in ran  # the mutating node completed
+    assert "implementation" not in ran  # ...but nothing downstream ran on the mutated control
+    assert "publish" not in ran
+    assert ledger.records()[0]["final_status"] == "manual_action_required"
+
+
+def test_continue_after_parked_live_edit_is_conflict_manual(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # WRI-010 parked-conflict: a task parks at implementation, then the operator edits the live
+    # flow while it is parked. `continue` must NOT silently ignore the edit nor merge it — it reuses
+    # the frozen bundle and refuses the drift, routing to manual so the operator fresh/restarts.
+    providers = _both(
+        infra_fail={"implementation"}, infra_error_class=ErrorClass.PROVIDER_UNAVAILABLE
+    )
+    orch, store, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    first = orch.run_task(_complete_task(tmp_path, "task-parkconf"))
+    assert first.final_status is Status.RUNNING  # parked, resumable
+
+    for provider in providers.values():
+        provider.heal()
+    flow_yaml = git_repo.clone / ".worc" / "flows" / "implementation.yaml"
+    flow_yaml.write_text(
+        flow_yaml.read_text(encoding="utf-8") + "\n# operator edit while parked\n", encoding="utf-8"
+    )
+
+    result = orch.resume()
+
+    assert result is not None and result.final_status is Status.MANUAL_ACTION_REQUIRED
+    assert ledger.records()[0]["final_status"] == "manual_action_required"
+
+
 def test_stop_cancellation_parks_task_resumable(git_repo, make_git_config, tmp_path: Path) -> None:
     # Reliable-stop: an operator stop kills the implementation agent (surfaces as PROCESS_CRASHED),
     # the Router reclassifies it as CANCELLED (is_cancelled True) instead of falling back, and the
