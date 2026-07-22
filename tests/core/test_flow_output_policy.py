@@ -111,9 +111,15 @@ class _Git:
         self.calls.append("commit_code")
         return "sha"
 
-    def commit_audit(self, task_id: str) -> str | None:
+    def commit_audit(self, task_id: str, *, task_packet_digest: str | None = None) -> str | None:
         self.calls.append("commit_audit")
         return "sha"
+
+    def capture_git_control_state(self) -> object:
+        return object()
+
+    def compare_git_control_state(self, before: object) -> None:
+        return None
 
     def push(self, task_id: str, branch: str, **_: object) -> bool:
         self.calls.append("push")

@@ -73,7 +73,7 @@ If a source cannot be made safe, it stays private and the task must define a dif
 - [x] Every exchange file passes seeded-secret redaction tests and is written atomically.
 - [x] Latest-run fan-in selects the newest run containing the requested file and never crosses task/attempt boundaries.
 - [x] The exchange is ignored by Git, cannot be staged by code or audit commits, and has its own ignore probe.
-- [ ] WRI-009 integration proves a force-added exchange file cannot survive to any orchestrator commit (cluster exit criterion — verified when WRI-009 lands, not a gate for closing this task).
+- [x] WRI-009 integration proves a force-added exchange file cannot survive to any orchestrator commit (verified: WRI-009 landed — the full staged-set gate rejects it; `test_code_commit_rejects_force_added_exchange_file`).
 - [x] A pre-existing symlink/junction/reparse point in any exchange path fails closed before a provider launch.
 - [x] Hard-linked/special files, case-fold collisions, unexpected paths, and NTFS alternate data streams fail closed before launch; a clean exchange manifest covers file type, link identity/count, relative name, size, and content digest.
 - [x] The implementation is node-id/topic agnostic and covers every packaged flow plus a custom-flow fixture.

@@ -97,8 +97,14 @@ class _FakeGit:
     def commit_code(self, task_id: str, message: str) -> str | None:
         return "sha"
 
-    def commit_audit(self, task_id: str) -> str | None:
+    def commit_audit(self, task_id: str, *, task_packet_digest: str | None = None) -> str | None:
         return "sha-audit"
+
+    def capture_git_control_state(self) -> object:
+        return object()
+
+    def compare_git_control_state(self, before: object) -> None:
+        return None
 
     def push(self, task_id: str, branch: str, **_: object) -> bool:
         return True

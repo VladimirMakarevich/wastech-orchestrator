@@ -14,6 +14,7 @@ operator's own environment.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -113,6 +114,22 @@ def has_gh() -> bool:
     The raising runtime gate built on this lives in :mod:`wastech_orchestrator.preflight`.
     """
     return find_executable("gh") is not None
+
+
+def git_version() -> tuple[int, int] | None:
+    """The installed git's ``(major, minor)``, or ``None`` when git is absent/unparseable.
+
+    Runs ``git --version`` through the safe runner (it needs no repo). Feeds the WRI-009 preflight
+    gate that fails fast when git is too old to honor ``-c core.hooksPath`` (< 2.9), which would
+    otherwise leave the hook-neutralization silently ineffective.
+    """
+    rc, out = _run_git(["--version"], Path.cwd())
+    if rc != 0:
+        return None
+    match = re.search(r"git version (\d+)\.(\d+)", out)
+    if match is None:
+        return None
+    return int(match.group(1)), int(match.group(2))
 
 
 def gh_auth_ok() -> bool | None:

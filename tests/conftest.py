@@ -34,12 +34,22 @@ def seed_builtin_flows(clone: Path) -> None:
     that runs the orchestrator against a clone needs them physically present — call this in the
     harness that builds a task-running orchestrator (not in the pure config builder, so
     flow-content tests like
-    ``validate-flow`` keep full control of ``.worc/flows/``). ``.worc/`` is excluded from the
-    dirty-tree gate and from staging, so seeding never dirties git. Idempotent.
+    ``validate-flow`` keep full control of ``.worc/flows/``). ``.worc/``/``.worc-io/`` are excluded
+    via the clone-local ``.git/info/exclude`` (as ``worc install`` does), so seeding never dirties
+    git and even a merge's ``git add -A`` skips them (WRI-009's commit gate refuses a staged
+    ``.worc``). Idempotent.
     """
     worc_flows = clone / ".worc" / "flows"
     if not worc_flows.exists():
         shutil.copytree(BUILTIN_FLOWS_DIR, worc_flows)
+    # Mirror install's runtime-exclude so `git add -A` (the merge path) never stages the seeded
+    # `.worc/`. `.git/info/exclude` is clone-local (not a working-tree file), so it dirties nothing.
+    exclude = clone / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    present = exclude.read_text(encoding="utf-8").splitlines() if exclude.exists() else []
+    missing = [ln for ln in (".worc/", ".worc-io/") if ln not in present]
+    if missing:
+        exclude.write_text("\n".join([*present, *missing]) + "\n", encoding="utf-8")
 
 
 # A broad-but-explicit env allowlist so git runs under the orchestrator's allowlisted environment on

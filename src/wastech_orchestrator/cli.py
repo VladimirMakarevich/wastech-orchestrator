@@ -1649,6 +1649,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     config = load_config_for(args)
     if config is None:
         return 2
+    preflight.require_git_control()  # WRI-009: git must honor `core.hooksPath` (>= 2.9)
     if config.git.create_pull_request:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
         preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
@@ -1848,6 +1849,7 @@ def cmd_rerun(args: argparse.Namespace) -> int:
         _report_rerun_plan(plan)
         return 0
 
+    preflight.require_git_control()  # WRI-009: git must honor `core.hooksPath` (>= 2.9)
     if config.git.create_pull_request:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
         preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
@@ -2699,6 +2701,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     config = load_config_for(args)
     if config is None:
         return 2
+    preflight.require_git_control()  # WRI-009: git must honor `core.hooksPath` (>= 2.9)
     if config.git.create_pull_request:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
         preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out

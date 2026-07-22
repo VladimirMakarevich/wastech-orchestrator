@@ -24,7 +24,7 @@ from wastech_orchestrator.config.schema import (
     BranchMode,
     PublishScope,
 )
-from wastech_orchestrator.git_manager import ChangedPath
+from wastech_orchestrator.git_manager import ChangedPath, GitControlDrift, GitControlState
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult
 from wastech_orchestrator.providers.base import AgentRunRequest, ErrorClass, ProviderId
 from wastech_orchestrator.providers.process import ProcessResult, run_process
@@ -231,7 +231,15 @@ class GitPort(Protocol):
 
     def commit_subtask(self, task_id: str, order: int, slug: str, message: str) -> str: ...
 
-    def commit_audit(self, task_id: str) -> str | None: ...
+    def commit_audit(
+        self, task_id: str, *, task_packet_digest: str | None = None
+    ) -> str | None: ...
+
+    #: WRI-009: fingerprint the Git control state before a workspace-write attempt and compare it
+    #: after (the agent node runner brackets ``run_stage`` with these); drift is a policy violation.
+    def capture_git_control_state(self) -> GitControlState: ...
+
+    def compare_git_control_state(self, before: GitControlState) -> GitControlDrift | None: ...
 
     def push(self, task_id: str, branch: str, *, mode: BranchMode = BranchMode.NEW) -> bool: ...
 
@@ -289,6 +297,10 @@ class NodeServices:
     #: lifecycle folder + write the committed ``<id>.summary.md`` (so both enter the audit commit),
     #: returning that summary path (used as the PR body). ``None`` → no finalize (e.g. a unit test).
     finalize: Callable[[], str | None] | None = None
+    #: WRI-009: the frozen task-packet sha256 (WRI-011) the publish node passes to ``commit_audit``
+    #: so it verifies the lifecycle ``<id>.md`` was not rewritten under the run. ``None`` in a
+    #: flow with no frozen packet (a unit harness / the ephemeral merge flow).
+    task_packet_digest: str | None = None
     #: the ``dependency_scan`` checker's process runner + its allowlisted child env + per-scanner
     #: timeout. ``process_env`` is the same allowlisted env the Check Runner uses
     #: (``build_child_env(config.security.allowed_environment)``); empty in unit harnesses.

@@ -1540,11 +1540,14 @@ class Orchestrator:
                     raise PipelineFailed(
                         f"the merge flow produced no clean, passing tree; PR left open: {pr_url}"
                     )
-                self._git.commit_merge_resolution(
-                    task_id, f"merge({task_id}): resolve base-merge conflicts"
-                )
             else:
                 log.info("[MERGE-TASK] clean base merge", extra={"branch": branch})
+            # WRI-009: finalize the merge — the clean ``--no-commit`` staged tree OR the resolved
+            # conflict — through the gated commit path. A no-op when nothing is in flight (a
+            # fast-forward / already-current branch), so those still make no commit.
+            self._git.commit_merge_resolution(
+                task_id, f"merge({task_id}): integrate base '{self._config.repo.base_branch}'"
+            )
             self._git.push_branch_update(branch)
             outcome = self._git.merge_pr(
                 task_id, pr_url, strategy=strategy, wait_for_checks=wait_for_checks
@@ -2032,6 +2035,9 @@ class Orchestrator:
             prompt_secrets=self._prompt_secrets(),
             register_artifact=self._register_artifact,
             finalize=finalize,
+            # WRI-009: the frozen task-packet digest the publish node's audit commit verifies the
+            # staged lifecycle ``<id>.md`` against (``None`` for the not-frozen merge flow).
+            task_packet_digest=self._task_packet_digest(p),
             # The dependency_scan checker launches its argv scanners through the same safe runner
             # and allowlisted env the Check Runner uses (a test's fake runner drives both).
             run_process=self._checks.run_process,
@@ -2051,6 +2057,13 @@ class Orchestrator:
     def _instruction_bundle_dir(self, task_id: str) -> Path:
         """The private per-task frozen-instruction-bundle dir (a provider deny target, WRI-011)."""
         return instruction_bundle_dir(self._layout.private_home, task_id)
+
+    def _task_packet_digest(self, p: _Pipeline) -> str | None:
+        """The frozen task-packet sha256 (WRI-011) the audit commit verifies its lifecycle file
+        against (WRI-009); ``None`` before the packet is frozen or when the run has none."""
+        return next(
+            (digest for key, digest in p.instruction_entries if key == TASK_PACKET_KEY), None
+        )
 
     def _freeze_task_and_repo_instructions(
         self, p: _Pipeline, inputs: NodeInputs, *, resume: bool
@@ -3411,7 +3424,7 @@ class Orchestrator:
             moved = self._finalize_task_artifacts(p, status) is not None
             verb = "failed attempt" if status is Status.FAILED else "manual action required"
             self._git.commit_code(p.task.id, f"chore({p.task.id}): {verb} — {p.task.title}")
-            self._git.commit_audit(p.task.id)
+            self._git.commit_audit(p.task.id, task_packet_digest=self._task_packet_digest(p))
             self._git.push(p.task.id, p.branch)
         except (GitCommandError, OSError) as exc:
             self._log(p.task.id).warning(

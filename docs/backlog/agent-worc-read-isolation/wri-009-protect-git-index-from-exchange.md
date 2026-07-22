@@ -1,6 +1,8 @@
 # WRI-009 — Protect Git control state and commits from provider poisoning
 
-**Status:** open **Milestone:** 0 (security prerequisite) **Source:** [decision record](README.md) **Dependencies:** WRI-001, WRI-012
+**Status:** implemented **Milestone:** 0 (security prerequisite) **Source:** [decision record](README.md) **Dependencies:** WRI-001, WRI-012
+
+Shipped as the orchestrator-side parent-held gate in `git_manager.py`: a Git control-state fingerprint (`capture`/`compare_git_control_state` over index/HEAD/task-ref/repo-local config/hooks/operation markers, identities+hashes only, redacted drift), a single-chokepoint subprocess neutralization (private empty `core.hooksPath` + editor/pager/signing/fsmonitor off + `--no-textconv --no-ext-diff` + no-prompt env), a repo-local filter/driver refuse-gate, a full staged-set allowlist gate (`assert_staged_allowed`/`assert_exchange_never_staged`) before every commit, the audit-commit lifecycle-vs-frozen-packet digest check, a clean-index-at-start preflight, `git merge --no-commit` so a clean merge is finalized through the gated path, the compare bracket in `AgentNodeRunner._invoke` (drift → `manual_action_required`, never fallback), and a `require_git_control()` preflight (git ≥ 2.9). See [follow_ups.md](../follow_ups.md) for the shipped entry and the cluster-exit deferrals (the Codex/Claude provider grants + typed policy, the fake-provider cross-provider mutation matrix, the `allowed_git_filters` operator escape hatch, opt-in signed commits, and the `gh`-residual all land with WRI-002/003).
 
 ## Problem
 
@@ -29,17 +31,17 @@ The orchestrator owns Git control state during a task. Provider attempts cannot 
 
 ## Acceptance criteria
 
-- [ ] `git add -f .worc-io/<task>/plan.md` during a fake Claude/Codex attempt is detected before downstream/publish and cannot reach any commit.
-- [ ] Direct file writes or Git commands that change config, HEAD/task ref, hooks, index, or operation-control markers are detected before downstream/publish.
-- [ ] Add/delete/rename and intent-to-add index mutations are detected with spaces, quotes, Unicode, and Windows path rendering using `-z` parsing.
-- [ ] Code, merge-resolution, audit, and retry/idempotent commit paths reject a foreign staged file even when their own `git add` succeeds.
-- [ ] `.worc/`, `.worc-io/`, task lifecycle paths not owned by the current audit operation, and unrelated code paths are absent from the complete staged set at commit time.
-- [ ] Codex receives read-only grants for normal and linked-worktree gitdir/common-dir paths; Claude receives matching Write/Edit denies; wrapped-command/direct-file-write tests prove the parent-held gate still catches bypasses.
-- [ ] A provider-created file under `tasks/` (self-injected task) and a provider-rewritten lifecycle task file are both blocked: the write is denied by provider policy, and the audit commit refuses a lifecycle file whose digest differs from the frozen task packet.
-- [ ] Orchestrator commit/push/fetch paths cannot execute target-repository hooks or an agent-written `core.hooksPath` target.
-- [ ] Agent-controlled `.gitattributes`/repo config cannot make orchestrator Git run a new hook, filter, textconv, diff, signing, pager, or editor process; any supported external filter is explicitly operator-authorized and audited.
-- [ ] Existing/current branch modes preserve or explicitly refuse operator staged state according to one documented contract; no automatic reset silently discards it.
-- [ ] A violation is a security/manual-action result, not provider infrastructure fallback.
+- [x] `git add -f .worc-io/<task>/plan.md` during a fake Claude/Codex attempt is detected before downstream/publish and cannot reach any commit. (Fingerprint index drift + the code-commit staged-set gate; `test_control_state_detects_force_added_exchange_file`, `test_code_commit_rejects_force_added_exchange_file`.)
+- [x] Direct file writes or Git commands that change config, HEAD/task ref, hooks, index, or operation-control markers are detected before downstream/publish. (`capture`/`compare_git_control_state`; the `test_control_state_detects_*` matrix.)
+- [x] Add/delete/rename and intent-to-add index mutations are detected with spaces, quotes, Unicode, and Windows path rendering using `-z` parsing. (`git ls-files --stage -z`/`diff --cached --name-status -z` via the centralized parsers; `test_control_state_detects_intent_to_add`, `test_commit_code_succeeds_with_unicode_rename`.)
+- [x] Code, merge-resolution, audit, and retry/idempotent commit paths reject a foreign staged file even when their own `git add` succeeds. (`assert_staged_allowed` at all commit sites; idempotent retries return the cached ref without re-staging.)
+- [x] `.worc/`, `.worc-io/`, task lifecycle paths not owned by the current audit operation, and unrelated code paths are absent from the complete staged set at commit time. (`test_code_commit_rejects_foreign_tasks_file`, `test_audit_commit_rejects_foreign_task_lifecycle_file`.)
+- [~] Codex receives read-only grants for normal and linked-worktree gitdir/common-dir paths; Claude receives matching Write/Edit denies; wrapped-command/direct-file-write tests prove the parent-held gate still catches bypasses. **(Cluster-exit: the provider grants land with WRI-002/003; the parent-held-gate half — the definitive check — is implemented and tested here.)**
+- [~] A provider-created file under `tasks/` (self-injected task) and a provider-rewritten lifecycle task file are both blocked: the write is denied by provider policy, and the audit commit refuses a lifecycle file whose digest differs from the frozen task packet. (Audit-commit digest half done — `test_audit_commit_refuses_rewritten_task_file`; the provider write-deny half is a WRI-002/003 cluster-exit.)
+- [x] Orchestrator commit/push/fetch paths cannot execute target-repository hooks or an agent-written `core.hooksPath` target. (`-c core.hooksPath=<private empty dir>` on every git call; `test_repo_pre_commit_hook_does_not_run_during_orchestrator_commit`, `test_agent_hookspath_target_does_not_run` — POSIX; Windows under WRI-006.)
+- [~] Agent-controlled `.gitattributes`/repo config cannot make orchestrator Git run a new hook, filter, textconv, diff, signing, pager, or editor process; any supported external filter is explicitly operator-authorized and audited. (The neutralization + repo-local filter/driver refuse-gate are done — `test_commit_refuses_untrusted_repo_local_filter_driver`, `test_commit_succeeds_despite_agent_signing_config`; the operator-authorized-filter allowlist is a deferred follow-up.)
+- [x] Existing/current branch modes preserve or explicitly refuse operator staged state according to one documented contract; no automatic reset silently discards it. (`assert_index_clean_at_start` refuses a pre-staged non-artifact baseline; unstaged edits are untouched — `test_prepare_branch_refuses_pre_staged_baseline`, `test_prepare_branch_allows_unstaged_dirty_tree`.)
+- [x] A violation is a security/manual-action result, not provider infrastructure fallback. (`ManualActionRequired`/`NodeManualRequired` → `manual_action_required`; `test_workspace_write_git_control_drift_is_manual`.)
 
 ## Verification
 

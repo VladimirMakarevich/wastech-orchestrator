@@ -340,6 +340,16 @@ class AgentNodeRunner:
 
     # -- shared invocation ----------------------------------------------------
 
+    def _is_workspace_write(self, node: AgentNode, ctx: NodeContext) -> bool:
+        """True iff this node's resolved permission profile is workspace-write (WRI-009).
+
+        Only workspace-write attempts can mutate the clone, so only they are bracketed by the Git
+        control-state capture/compare and get the post-edit diff guard; a read-only agent/evaluator
+        attempt cannot mutate git, so it is neither captured nor compared.
+        """
+        resolved = node.permission_profile or ctx.snapshot.doc.permission_ceiling
+        return resolved == PermissionProfile.WORKSPACE_WRITE
+
     def _invoke(
         self,
         node: AgentNode,
@@ -371,6 +381,15 @@ class AgentNodeRunner:
             node, ctx, route, run_id, human_input_path, session_id, guard_output_baseline(baseline)
         )
         assert_request_contained(request, self._s.exchange_root)
+        # WRI-009: fingerprint the Git control state before a workspace-write attempt; the compare
+        # after `run_stage` (below) runs before any orchestrator git touches the possibly-poisoned
+        # clone. A read-only attempt cannot mutate git, so it is not captured.
+        git = self._s.git
+        control_before = (
+            git.capture_git_control_state()
+            if git is not None and self._is_workspace_write(node, ctx)
+            else None
+        )
         outcome = self._s.router.run_stage(request, route, snapshot=self._s.snapshot)
         self._record_completion(run_id, outcome)
         record_run_observability(
@@ -395,6 +414,16 @@ class AgentNodeRunner:
                 f"agent node {node.id!r}: no provider could complete it ({err})",
                 error_class=error_class,
             )
+        # WRI-009: the result is trusted (WRI-012 proved provider-tree quiescence inside the
+        # adapter), so compare now — before `_apply_post_edit_guard`'s `git diff`/commit touch the
+        # clone. Control-state drift is a non-fallback policy violation → manual action.
+        if control_before is not None and git is not None:
+            drift = git.compare_git_control_state(control_before)
+            if drift is not None:
+                raise NodeManualRequired(
+                    f"agent node {node.id!r}: git control state changed during a provider attempt "
+                    f"({drift.summary()})"
+                )
         self._persist_session(node, ctx, outcome)
         return run_id, outcome
 
@@ -408,8 +437,7 @@ class AgentNodeRunner:
         pre-approval); on denial the stage reconsiders once with the denial context and, if the diff
         is still dangerous, fails closed to manual review.
         """
-        resolved = node.permission_profile or ctx.snapshot.doc.permission_ceiling
-        if resolved != PermissionProfile.WORKSPACE_WRITE or self._s.git is None:
+        if not self._is_workspace_write(node, ctx) or self._s.git is None:
             return
         private_diff = self._s.git.write_current_diff(ctx.task_id)
         # Keep the private authoritative diff as the audit artifact; expose only the redacted

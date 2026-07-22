@@ -62,7 +62,7 @@ def _advance_base(git_run: GitRunner, clone: Path, path: str, content: str) -> N
     git_run(["push", "origin", "main"], clone)
 
 
-def test_update_branch_with_base_clean_auto_commits(
+def test_update_branch_with_base_clean_stages_without_committing(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
 ) -> None:
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
@@ -72,10 +72,12 @@ def test_update_branch_with_base_clean_auto_commits(
     conflicted = gm.update_branch_with_base("worc/t1", "main")
 
     assert conflicted is False
-    assert gm.merge_in_progress() is False
+    # WRI-009: `--no-commit` leaves a clean 3-way merge STAGED with MERGE_HEAD live (not
+    # auto-committed), so the orchestrator finalizes it through the gated commit_merge_resolution.
+    assert gm.merge_in_progress() is True
     head = git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone)
     assert head == "worc/t1"
-    # The branch now contains both the task change and base's change (merge auto-committed).
+    # Both changes are present in the (staged) working tree.
     assert (git_repo.clone / "BASE.md").read_text(encoding="utf-8") == "base\n"
     assert (git_repo.clone / "feature.txt").read_text(encoding="utf-8") == "feature\n"
 

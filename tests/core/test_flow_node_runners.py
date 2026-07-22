@@ -2116,9 +2116,15 @@ class FakeGit:
         self.calls.append(("commit_code", task_id, message))
         return "sha-code"
 
-    def commit_audit(self, task_id: str) -> str | None:
+    def commit_audit(self, task_id: str, *, task_packet_digest: str | None = None) -> str | None:
         self.calls.append(("commit_audit", task_id))
         return "sha-audit"
+
+    def capture_git_control_state(self) -> object:
+        return object()  # WRI-009 baseline token; compare returns None (no drift) below
+
+    def compare_git_control_state(self, before: object) -> None:
+        return None
 
     def push(self, task_id: str, branch: str, **kw: object) -> bool:
         self.calls.append(("push", task_id, branch, kw.get("mode")))
@@ -2580,3 +2586,62 @@ def test_max_turns_gate_restart_deny_goes_manual(tmp_path: Path) -> None:
     with pytest.raises(NodeManualRequired):
         runner.run(node, ctx)
     assert router.calls == 0  # stopped at the gate, never ran the provider
+
+
+# -- WRI-009: git control-state drift around a workspace-write attempt ---------
+
+
+def test_workspace_write_git_control_drift_is_manual(tmp_path: Path) -> None:
+    # WRI-009: control-state drift across a workspace-write attempt is a terminal manual-action
+    # violation (not a fixing route, not fallback), raised before any post-edit git runs.
+    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
+    from wastech_orchestrator.git_manager import GitControlDrift, GitControlDriftItem
+
+    class _DriftGit(FakeGit):
+        def compare_git_control_state(self, before: object) -> GitControlDrift:
+            item = GitControlDriftItem("index", "staged entry changed: .worc-io/x")
+            return GitControlDrift((item,))
+
+    (tmp_path / "roles").mkdir()
+    (tmp_path / "roles" / "impl.md").write_text("Implement {task_path}", "utf-8")
+    node = AgentNode(
+        id="impl",
+        kind="agent",
+        role_file="roles/impl.md",
+        session_scope=SessionScope.EDITING_LINEAGE,
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
+    services = _services(
+        FakeRouter(_result()),
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=_DriftGit(),
+    )
+    with pytest.raises(NodeManualRequired):
+        AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+
+def test_read_only_node_skips_git_control_capture(tmp_path: Path) -> None:
+    # A read-only attempt cannot mutate git, so it is neither captured nor compared — a git whose
+    # capture would explode is never called.
+    class _ExplodingGit(FakeGit):
+        def capture_git_control_state(self) -> object:
+            raise AssertionError("a read-only node must not capture git control state")
+
+    (tmp_path / "roles").mkdir()
+    (tmp_path / "roles" / "review.md").write_text("Review {diff_path}", "utf-8")
+    node = AgentNode(
+        id="review",
+        kind="agent",
+        role_file="roles/review.md",
+        session_scope=SessionScope.EDITING_LINEAGE,
+        permission_profile=PermissionProfile.READ_ONLY,
+    )
+    services = _services(
+        FakeRouter(_result()),
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=_ExplodingGit(),
+    )
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "done"  # completed; the git control capture was skipped
