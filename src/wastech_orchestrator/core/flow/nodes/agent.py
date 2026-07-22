@@ -581,6 +581,7 @@ class AgentNodeRunner:
             check_artifacts_path=self._in.checks_path,
             review_artifacts_path=self._in.review_path,
             human_input_path=human_input_path,
+            repository_instructions_path=self._in.repository_instructions_path,
             skill_reference_paths=self._in.skills_for(node.id),
             output_schema=output_schema,
             model=node.model,

@@ -431,6 +431,23 @@ class GitManager:
             item for item in result.stdout.split("\0") if item and item.split("/")[-1] == "SKILL.md"
         )
 
+    def list_tracked_files(self, *pathspecs: str) -> tuple[str, ...]:
+        """Repo-relative POSIX paths of every tracked file, optionally under ``pathspecs``.
+
+        Used by WRI-011 to discover which root repository-instruction files (``AGENTS.md`` etc.) are
+        tracked and to enumerate a selected skill's package closure (``ls-files -- <package-dir>``).
+        ``ls-files`` is ignore-aware, bounded (untracked build/vendor trees never appear), and emits
+        forward-slash paths on every platform. Best-effort: a working copy with no git data yields
+        ``()`` so a caller degrades to "nothing tracked" rather than failing the task.
+        """
+        args = ["ls-files", "-z"]
+        if pathspecs:
+            args += ["--", *pathspecs]
+        result = self._git(*args)
+        if not result.ok:
+            return ()
+        return tuple(item for item in result.stdout.split("\0") if item)
+
     # --- branch flow ----------------------------------------------------------------------
 
     def branch_name(

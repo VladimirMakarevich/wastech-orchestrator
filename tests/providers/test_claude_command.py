@@ -35,6 +35,32 @@ def test_argv_is_claude_print_with_stream_json(
     assert "--verbose" in argv
 
 
+def test_disables_project_setting_sources(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # WRI-011: no user/project/local setting sources are loaded, so live CLAUDE.md / project
+    # settings / skills / plugins / hooks / MCP are never discovered. The empty value = load none.
+    argv = _argv(claude_config, make_request())
+    assert argv[argv.index("--setting-sources") + 1] == ""
+
+
+def test_injects_frozen_repository_instructions_file_when_present(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # WRI-011: the frozen repository instructions arrive through --append-system-prompt-file (the
+    # adapter-owned system-prompt surface), never live CLAUDE.md discovery.
+    path = "/x/.worc-io/task-001/instructions/repository.md"
+    argv = _argv(claude_config, make_request(repository_instructions_path=path))
+    assert argv[argv.index("--append-system-prompt-file") + 1] == path
+
+
+def test_no_append_system_prompt_when_no_repo_instructions(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(claude_config, make_request())  # repository_instructions_path defaults to None
+    assert "--append-system-prompt-file" not in argv
+
+
 def test_workspace_write_maps_to_accept_edits(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:

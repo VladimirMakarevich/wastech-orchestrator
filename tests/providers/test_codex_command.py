@@ -30,6 +30,15 @@ def _config_values(argv: list[str]) -> list[str]:
 
 def _assert_reasoning_config(argv: list[str], value: str) -> None:
     assert f'model_reasoning_effort="{value}"' in _config_values(argv)
+
+
+def test_disables_project_doc_discovery(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # WRI-011: live AGENTS.md project-doc discovery is disabled (the frozen instructions are
+    # injected on stdin instead). Project ``.codex`` config *trust* is a separate control (WRI-003).
+    argv = _argv(codex_config, make_request())
+    assert "project_doc_max_bytes=0" in _config_values(argv)
     assert "--reasoning-effort" not in argv
 
 
@@ -66,10 +75,11 @@ def test_network_access_off_by_default_no_sandbox_network_flag(
 def test_web_search_disabled_when_offline(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # F5: an offline node must also deny the host web_search tool (backend-side, outside the sandbox
-    # network toggle) so network_access=false is truly offline.
+    # F5: an offline node must also deny the host web_search tool (backend-side, outside the
+    # sandbox network toggle) so network_access=false is truly offline. Assert membership (WRI-011
+    # adds ``project_doc_max_bytes=0`` as another ``-c``, so first-``-c`` position is not stable).
     argv = _argv(codex_config, make_request())
-    assert argv[argv.index("-c") + 1] == 'web_search="disabled"'
+    assert 'web_search="disabled"' in argv
 
 
 def test_web_search_not_disabled_when_network_granted(
@@ -85,7 +95,7 @@ def test_network_access_enables_sandbox_network_when_granted(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
     argv = _argv(codex_config, make_request(network_access=True))
-    assert argv[argv.index("-c") + 1] == "sandbox_workspace_write.network_access=true"
+    assert "sandbox_workspace_write.network_access=true" in argv
     # Network is the only thing toggled — the sandbox + approval policy are unchanged.
     assert argv[argv.index("--sandbox") + 1] == "workspace-write"
     assert argv[:4] == ["codex", "--ask-for-approval", "never", "exec"]

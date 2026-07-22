@@ -1,6 +1,8 @@
 # WRI-011 — Freeze task, skill, and repository instruction inputs
 
-**Status:** open **Milestone:** 0 (security prerequisite) **Source:** [decision record](README.md) **Dependencies:** WRI-001, WRI-010
+**Status:** implemented **Milestone:** 0 (security prerequisite) **Source:** [decision record](README.md) **Dependencies:** WRI-001, WRI-010
+
+Shipped as `core/flow/instruction_bundle.py` (freeze task packet / repository instructions / skill package-closure + composite `instruction_manifest_digest` + load/verify, reusing the shared `core/flow/frozen_bundle.py` identity/digest/collision primitives extracted from WRI-010's `control_bundle.py`), a `_freeze_task_and_repo_instructions` + `_skill_paths_by_node` (package-closure) + `_finalize_instruction_bundle` staging in `Orchestrator._engine_run` (fresh/restart freezes + persists `tasks.instruction_manifest_digest`; continue loads+verifies and refuses a differing digest), the supervisor de-inline (`propose_skill_map`/`finalize` read the task from the frozen exchange packet path + bounded skill metadata, no inline title/description), the `AgentRunRequest.repository_instructions_path` field, and the provider injection + discovery-disable (Codex `project_doc_max_bytes=0` + a top-of-turn developer block via `_stdin_text`; Claude `--setting-sources ""` + `--append-system-prompt-file`). The `InternalDenyPolicy.frozen_instruction_bundle` deny target is named for the WRI-002/003 projection. See [follow_ups.md](../follow_ups.md) for the shipped entry and the cluster-exit deferrals (read-only exchange enforcement, `control_home`/bundle provider-deny, and the adapter-isolated supervisor call land with WRI-002/003).
 
 ## Problem
 

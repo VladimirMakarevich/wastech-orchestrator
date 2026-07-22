@@ -63,6 +63,20 @@ _SUPERVISOR_LINEAGE_NODE_ID = "__supervisor__"
 # small, autoincrement) node-run id, so the three turn kinds never collide on the same path.
 _PROPOSAL_RUN_ID = 999_999
 
+# WRI-011: skill descriptions are untrusted ``SKILL.md`` frontmatter, so the inlined proposal
+# metadata is bounded to this many characters (name/path are identifier-sized and pass unbounded);
+# the full skill package is only read from the frozen exchange after the Core accepts the proposal.
+_SKILL_DESCRIPTION_INLINE_CAP = 200
+
+
+def _bounded_description(description: str) -> str:
+    """Truncate an untrusted skill description to the recorded inline cap for the proposal."""
+    text = description.strip()
+    if len(text) <= _SKILL_DESCRIPTION_INLINE_CAP:
+        return text
+    return text[: _SKILL_DESCRIPTION_INLINE_CAP - 1].rstrip() + "…"
+
+
 # Base for the subtask-boundary handoff turns' artifact-dir namespace (subtask-context-handoff ADR).
 # Each handoff uses ``_HANDOFF_RUN_ID_BASE + subtask_order`` so multiple handoffs in one task (a
 # chain, or a diamond) write to DISTINCT dirs — ``create_attempt_dir`` forbids overwriting
@@ -489,7 +503,13 @@ class Supervisor:
     # -- whole-task finalize ---------------------------------------------------
 
     def finalize(
-        self, *, task_id: str, task_title: str, emit_delta: bool = False
+        self,
+        *,
+        task_id: str,
+        task_title: str,
+        task_path: str | None = None,
+        repository_instructions_path: str | None = None,
+        emit_delta: bool = False,
     ) -> FinalizeResult:
         """Synthesize the whole-task summary (once, at task close) and record ``supervisor_final``.
 
@@ -517,8 +537,16 @@ class Supervisor:
                 "finalize re-synthesized from recorded observations (session unavailable)",
                 extra={"task_id": task_id, "have_digest": digest is not None},
             )
+        # ``task_title`` is used only for the orchestrator-side PR-body H1 / summary.json below (not
+        # a provider prompt surface); the finalize *prompt* reads the task from the frozen exchange
+        # packet path (WRI-011 — no inline task body/title reaches the provider).
         summary_text, delta, follow_ups = self._finalize_turn(
-            task_id, task_title, emit_delta, digest=digest, resume=warm
+            task_id,
+            emit_delta,
+            digest=digest,
+            resume=warm,
+            task_path=task_path,
+            repository_instructions_path=repository_instructions_path,
         )
         self._record(
             task_id,
@@ -558,11 +586,12 @@ class Supervisor:
     def _finalize_turn(
         self,
         task_id: str,
-        task_title: str,
         emit_delta: bool,
         *,
         digest: str | None = None,
         resume: bool = True,
+        task_path: str | None = None,
+        repository_instructions_path: str | None = None,
     ) -> tuple[str | None, CandidateDelta | None, tuple[FollowUp, ...]]:
         """Run the single finalize turn. Free-text when neither memory nor follow-ups are enabled
         (today's behavior — AC-S4); otherwise a structured ``{summary, ...}`` turn, so every enabled
@@ -575,16 +604,17 @@ class Supervisor:
         if not emit_delta and not with_follow_ups:
             text = self._run(
                 task_id,
-                self._finalize_prompt(task_id, task_title, digest=digest),
+                self._finalize_prompt(task_id, digest=digest),
                 node_run_id=0,
                 resume_session=resume,
+                task_path=task_path,
+                repository_instructions_path=repository_instructions_path,
             )
             return text, None, ()
         result = self._run_result(
             task_id,
             self._finalize_prompt(
                 task_id,
-                task_title,
                 with_delta=emit_delta,
                 with_follow_ups=with_follow_ups,
                 digest=digest,
@@ -592,6 +622,8 @@ class Supervisor:
             node_run_id=0,
             output_schema=_finalize_schema(with_delta=emit_delta, with_follow_ups=with_follow_ups),
             resume_session=resume,
+            task_path=task_path,
+            repository_instructions_path=repository_instructions_path,
         )
         if result is None or result.structured_output is None:
             return None, None, ()
@@ -663,7 +695,8 @@ class Supervisor:
         task_id: str,
         agent_node_ids: Sequence[str],
         inventory: SkillInventory,
-        task_spec_text: str,
+        task_path: str | None = None,
+        repository_instructions_path: str | None = None,
     ) -> dict[str, tuple[str, ...]]:
         """Propose a ``node → skills`` map once per task (read-only, propose-only — Core decides).
 
@@ -673,12 +706,21 @@ class Supervisor:
         any failure (no provider, infra error, malformed output) is logged and yields ``{}``, and
         the run continues on operator pins alone. The supervisor only *proposes* tokens; the
         orchestrator resolves them against the inventory and merges them with the static pins.
+
+        WRI-011: the task body is **never** inlined here — the proposal reads it from the frozen
+        exchange packet (``task_path``, rendered in the context footer); only bounded, allowlisted
+        skill metadata (name/path + a length-bounded description) reaches the prompt.
         """
         if not inventory.skills:
             return {}
-        prompt = self._proposal_prompt(task_id, agent_node_ids, inventory, task_spec_text)
+        prompt = self._proposal_prompt(task_id, agent_node_ids, inventory)
         result = self._run_result(
-            task_id, prompt, node_run_id=_PROPOSAL_RUN_ID, output_schema=_SKILL_MAP_SCHEMA
+            task_id,
+            prompt,
+            node_run_id=_PROPOSAL_RUN_ID,
+            output_schema=_SKILL_MAP_SCHEMA,
+            task_path=task_path,
+            repository_instructions_path=repository_instructions_path,
         )
         proposal = _parse_skill_map(result.structured_output) if result is not None else {}
         self._record(
@@ -704,6 +746,8 @@ class Supervisor:
         subtask: int | None = None,
         resume_session: bool = True,
         cap_reasoning: bool = False,
+        task_path: str | None = None,
+        repository_instructions_path: str | None = None,
     ) -> str | None:
         """Run one read-only supervisor turn and return its final message (``None`` on failure)."""
         result = self._run_result(
@@ -713,6 +757,8 @@ class Supervisor:
             subtask=subtask,
             resume_session=resume_session,
             cap_reasoning=cap_reasoning,
+            task_path=task_path,
+            repository_instructions_path=repository_instructions_path,
         )
         return result.final_message if result is not None else None
 
@@ -726,6 +772,8 @@ class Supervisor:
         output_schema: dict[str, Any] | None = None,
         resume_session: bool = True,
         cap_reasoning: bool = False,
+        task_path: str | None = None,
+        repository_instructions_path: str | None = None,
     ) -> AgentRunResult | None:
         """Run one read-only supervisor LLM turn on its own session; return the full result.
 
@@ -763,10 +811,15 @@ class Supervisor:
                 reasoning=reasoning,
                 output_schema=output_schema,
                 session_id=self._resume_session(task_id, route) if resume_session else None,
+                # WRI-011: the task reaches the supervisor as the frozen exchange packet path (never
+                # inline title/description), and the frozen repository instructions ride the same
+                # controlled layer as for graph nodes — never live project-doc discovery.
+                task_path=task_path,
+                repository_instructions_path=repository_instructions_path,
             )
-            # Same pre-launch containment invariant as agent/evaluator (WRI-001). The supervisor
-            # sets no artifact path fields, so this is a trivial pass today; it guards a future
-            # field that would need exchange routing before this read-only provider call.
+            # Same pre-launch containment invariant as agent/evaluator (WRI-001/011): the supervisor
+            # now carries the frozen exchange ``task_path`` + ``repository_instructions_path``, so
+            # this asserts both resolve under the current-task exchange before the read-only call.
             if self._exchange_root:
                 assert_orchestration_paths_contained(request, str(self._exchange_root))
             outcome = self._router.run_stage(request, route)
@@ -920,10 +973,15 @@ class Supervisor:
         task_id: str,
         agent_node_ids: Sequence[str],
         inventory: SkillInventory,
-        task_spec_text: str,
     ) -> str:
         nodes = "\n".join(f"- {nid}" for nid in agent_node_ids) or "- (none)"
-        skills = "\n".join(f"- {s.name} — {s.description} [{s.path}]" for s in inventory.skills)
+        # Skill descriptions come from untrusted repository ``SKILL.md`` frontmatter, so they are
+        # bounded to a recorded cap here (name/path are identifier-sized); the full skill package is
+        # read from the frozen exchange only after the Core accepts the proposal.
+        skills = "\n".join(
+            f"- {s.name} — {_bounded_description(s.description)} [{s.path}]"
+            for s in inventory.skills
+        )
         return (
             self._base_prompt(task_id)
             + "\n\n## Skill map proposal\n"
@@ -937,13 +995,13 @@ class Supervisor:
             + "that need skills; omit the rest.\n\n"
             + f"### Flow nodes (agent)\n{nodes}\n\n"
             + f"### Available skills\n{skills}\n\n"
-            + f"### Task\n{task_spec_text}\n"
+            + "### Task\nThe task specification is provided as the task packet referenced in the "
+            + "context below — read it there; it is not inlined here.\n"
         )
 
     def _finalize_prompt(
         self,
         task_id: str,
-        task_title: str,
         *,
         with_delta: bool = False,
         with_follow_ups: bool = False,
@@ -951,8 +1009,13 @@ class Supervisor:
     ) -> str:
         # The finalize lens (flow ``finalize_role_file`` → built-in) carries the summary emphasis;
         # only the machine-contract additions (task context, follow-ups, memory delta) are appended
-        # in code, so a flow author reshapes wording but never the parsed schema.
-        prompt = self._finalize_base(task_id) + f"\n\n## Task under review\n{task_title}\n"
+        # in code, so a flow author reshapes wording but never the parsed schema. WRI-011: the task
+        # reaches the turn as the frozen exchange packet (context footer), never inline title/body.
+        prompt = (
+            self._finalize_base(task_id)
+            + "\n\n## Task under review\nThe task specification is provided as the task packet "
+            + "referenced in the context below — read it there; it is not inlined here.\n"
+        )
         if digest:
             # Revive path: the working session that accumulated per-step context is gone, so seed
             # the synthesis from the recorded observations instead of relying on session memory.

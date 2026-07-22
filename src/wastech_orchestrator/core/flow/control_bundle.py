@@ -35,14 +35,17 @@ never import ``core`` — so this module keeps the import-linter contract green.
 
 from __future__ import annotations
 
-import hashlib
 import json
-import os
 import shutil
-import unicodedata
 from dataclasses import dataclass
 from pathlib import Path
 
+from wastech_orchestrator.core.flow.frozen_bundle import (
+    FrozenBundleError,
+    digest_entries,
+    inspect_frozen_source,
+    reject_key_collisions,
+)
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.core.flow.tools_registry import ToolRegistry, ToolResolutionError
 from wastech_orchestrator.providers.artifacts import assert_contained_path, sha256_file
@@ -60,7 +63,7 @@ MANIFEST_NAME = "manifest.json"
 _BUNDLE_FORMAT = 1
 
 
-class ControlBundleError(Exception):
+class ControlBundleError(FrozenBundleError):
     """Raised when a control bundle cannot be frozen, verified, or re-hashed (fail-closed)."""
 
 
@@ -131,48 +134,8 @@ def _referenced_inputs(snapshot: FlowSnapshot, flow_dir: Path, tools: ToolRegist
 
 
 def _inspect_source(path: Path, inspector: FileInspector) -> None:
-    """Fail closed unless ``path`` is an existing regular, single-link, ADS-free, non-symlink file.
-
-    A no-follow inspection (the WRI-001 seam): the source must not be a symlink/reparse point, must
-    be a regular file (not a fifo/socket/device), must have exactly one hard link (no alias back to
-    another live location), and must carry no NTFS alternate data stream.
-    """
-    if not os.path.lexists(path):
-        raise ControlBundleError(f"control input does not exist: {path.as_posix()}")
-    facts = inspector(path)
-    if facts.is_symlink:
-        raise ControlBundleError(f"control input is a symlink/reparse point: {path.as_posix()}")
-    if not facts.is_regular:
-        raise ControlBundleError(f"control input is not a regular file: {path.as_posix()}")
-    if facts.link_count != 1:
-        raise ControlBundleError(
-            f"control input is hard-linked ({facts.link_count}): {path.as_posix()}"
-        )
-    if facts.alt_streams:
-        raise ControlBundleError(
-            f"control input has NTFS alternate data streams {facts.alt_streams!r}: "
-            f"{path.as_posix()}"
-        )
-
-
-def _reject_key_collisions(refs: list[_Ref]) -> None:
-    """Fail closed if two referenced inputs map to a case-fold/NFC-colliding bundle key.
-
-    On a case-insensitive filesystem two keys differing only in case/NFC form would clobber each
-    other during the copy, so a collision is rejected before any byte is written.
-    """
-    seen: dict[str, str] = {}
-    for ref in refs:
-        norm = unicodedata.normalize("NFC", ref.key).casefold()
-        if norm in seen:
-            raise ControlBundleError(f"control-input name collision: {ref.key!r} vs {seen[norm]!r}")
-        seen[norm] = ref.key
-
-
-def _digest_entries(entries: list[tuple[str, str]]) -> str:
-    """A stable SHA-256 over the sorted ``(bundle-key, file-sha256)`` pairs — the bundle id."""
-    payload = "\n".join(f"{key}\x00{digest}" for key, digest in sorted(entries))
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    """No-follow identity gate for a control input (shared :func:`inspect_frozen_source`)."""
+    inspect_frozen_source(path, inspector, label="control input", error_cls=ControlBundleError)
 
 
 def freeze_control_bundle(
@@ -194,7 +157,9 @@ def freeze_control_bundle(
     """
     inspector = inspect or default_file_inspector()
     refs = _referenced_inputs(snapshot, flow_dir, tools)
-    _reject_key_collisions(refs)
+    reject_key_collisions(
+        [ref.key for ref in refs], label="control-input", error_cls=ControlBundleError
+    )
     assert snapshot.source_path is not None  # guaranteed by _referenced_inputs
 
     entries: list[tuple[str, str]] = []
@@ -205,7 +170,7 @@ def freeze_control_bundle(
         shutil.copy2(ref.source, dest)
         entries.append((ref.key, sha256_file(dest)))
 
-    digest = _digest_entries(entries)
+    digest = digest_entries(entries)
     flow_source = f"{_FLOWS_SUBDIR}/{snapshot.source_path.name}"
     manifest = {
         "format": _BUNDLE_FORMAT,
@@ -277,7 +242,7 @@ def load_control_bundle(
         path = assert_contained_path(bundle_dir, bundle_dir / key)
         _inspect_source(path, inspector)
         entries.append((key, sha256_file(path)))
-    if _digest_entries(entries) != expected_digest:
+    if digest_entries(entries) != expected_digest:
         raise ControlBundleError(
             f"frozen control bundle content drifted from its recorded digest "
             f"({bundle_dir.as_posix()})"
@@ -308,7 +273,7 @@ def digest_live_control_inputs(
     inspector = inspect or default_file_inspector()
     refs = _referenced_inputs(snapshot, flow_dir, tools)
     entries = [(ref.key, sha256_file(_checked(ref.source, inspector))) for ref in refs]
-    return _digest_entries(entries)
+    return digest_entries(entries)
 
 
 def _checked(path: Path, inspector: FileInspector) -> Path:

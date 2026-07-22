@@ -314,6 +314,12 @@ def build_claude_argv(
         "--output-format",
         "stream-json",
         "--verbose",
+        # WRI-011: load NO user/project/local setting sources, so Claude never discovers the live
+        # ``CLAUDE.md`` / project settings / skills / plugins / hooks / MCP. The frozen repository
+        # instructions arrive only through ``--append-system-prompt-file`` below; admin-managed
+        # policy + auth still apply (they are the trusted-computing-base, not a repo-editable file).
+        "--setting-sources",
+        "",
         _PERMISSION_MODE_FLAG,
         mode,
     ]
@@ -342,6 +348,12 @@ def build_claude_argv(
             "--json-schema",
             json.dumps(request.output_schema, separators=(",", ":"), sort_keys=True),
         ]
+    # WRI-011: inject the frozen repository instructions through the adapter-owned system-prompt
+    # surface (appended above the flow role / task on the user turn), replacing live ``CLAUDE.md``
+    # discovery (disabled by ``--setting-sources ""`` above). It is the redacted exchange copy the
+    # orchestrator published from the immutable frozen snapshot — never the live repo file.
+    if request.repository_instructions_path:
+        argv += ["--append-system-prompt-file", request.repository_instructions_path]
     # ``None`` (config ``max_turns: none`` / ``max`` / null) means no orchestrator-imposed cap:
     # omit ``--max-turns`` so the CLI runs without a turn limit. A positive int caps the turns.
     if config.max_turns is not None:

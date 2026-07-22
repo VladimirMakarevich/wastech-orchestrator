@@ -3757,3 +3757,79 @@ def test_reject_dependency_quarantines_and_records_failed(
     record = ledger.records()[-1]
     assert record["id"] == "task-001"
     assert record["validation_reason"] == "invalid_depends_on"
+
+
+# -- WRI-011: frozen agent instruction inputs --------------------------------------------------
+
+
+def _commit_agents_md(git_repo, git_run, body: str) -> Path:
+    """Add + commit a tracked root ``AGENTS.md`` so WRI-011 discovers/freezes it."""
+    agents = git_repo.clone / "AGENTS.md"
+    agents.write_text(body, encoding="utf-8")
+    git_run(["add", "AGENTS.md"], git_repo.clone)
+    git_run(["commit", "-m", "add agents"], git_repo.clone)
+    return agents
+
+
+def test_wri011_freezes_instruction_inputs_end_to_end(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # A complete task persists a composite instruction-manifest digest and freezes the task packet
+    # + repository-instruction payload into the private bundle. (The exchange copies are cleared by
+    # the interim terminal teardown, so assert on the persisted private bundle + recorded requests.)
+    _commit_agents_md(git_repo, git_run, "ORIGINAL REPO RULES\n")
+    providers = _both()
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    result = orch.run_task(_complete_task(tmp_path, "task-frz"))
+    assert result.final_status is Status.DONE
+
+    assert store.get_instruction_manifest_digest("task-frz")  # composite digest persisted
+    bundle = art / "instruction-bundles" / "task-frz"
+    assert (bundle / "task" / "task.md").is_file()  # frozen (private) task packet
+    repo_instr = bundle / "instructions" / "repository.md"
+    assert repo_instr.is_file() and "ORIGINAL REPO RULES" in repo_instr.read_text(encoding="utf-8")
+    # the implementation node was launched with the frozen repository-instruction (exchange) path
+    impl = [r for r in providers[ProviderId.CLAUDE].requests if r.node_id == "implementation"]
+    assert impl and all(r.repository_instructions_path for r in impl)
+
+
+def test_wri011_midrun_agents_edit_does_not_change_frozen_instructions(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # AC3: a node that edits AGENTS.md mid-run cannot change the instruction bundle used later in
+    # the same task — the frozen snapshot is immutable (the live edit is just an ordinary proposed
+    # diff on the task branch). Assert on the private frozen canonical, which is never rewritten.
+    agents = _commit_agents_md(git_repo, git_run, "ORIGINAL REPO RULES\n")
+    providers = _both()
+    orch, _, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_mutate(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "planning":
+            agents.write_text("TAMPERED RULES\n", encoding="utf-8")  # rewrite the live repo file
+        if request.node_id == "implementation":
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_mutate  # type: ignore[method-assign]
+
+    orch.run_task(_complete_task(tmp_path, "task-imm"))
+
+    frozen = (
+        art / "instruction-bundles" / "task-imm" / "instructions" / "repository.md"
+    ).read_text(encoding="utf-8")
+    assert "ORIGINAL REPO RULES" in frozen  # the frozen copy the agent reads is unchanged
+    assert "TAMPERED" not in frozen

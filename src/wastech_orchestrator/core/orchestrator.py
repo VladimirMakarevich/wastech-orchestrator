@@ -17,7 +17,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any
 
@@ -52,6 +52,20 @@ from wastech_orchestrator.core.flow.engine_driver import (
     DecompositionRegions,
     drive_flow,
     partition_decomposition,
+)
+from wastech_orchestrator.core.flow.instruction_bundle import (
+    REPO_INSTRUCTION_NAMES,
+    REPO_INSTRUCTIONS_KEY,
+    TASK_PACKET_KEY,
+    InstructionBundleError,
+    assert_no_required_secret,
+    discover_repository_instructions,
+    freeze_repository_instructions,
+    freeze_skill_package,
+    freeze_task_packet,
+    instruction_bundle_dir,
+    load_instruction_bundle,
+    write_instruction_manifest,
 )
 from wastech_orchestrator.core.flow.nodes.base import (
     EvaluatorInfraError,
@@ -373,6 +387,11 @@ class _Pipeline:
     # `_resolve_skill_layers`). Both are populated in `_engine_run`, not at construction.
     skill_inventory: SkillInventory = field(default_factory=SkillInventory)
     skill_map: dict[str, tuple[SkillRef, ...]] = field(default_factory=dict)
+    # WRI-011 instruction-bundle staging: the frozen ``(bundle-key, sha256)`` entries accumulated
+    # while the agent inputs are frozen (task packet first, then repository instructions, then the
+    # per-node skill packages after the supervisor proposal). Combined with the WRI-010 control
+    # digest into the composite ``instruction_manifest_digest`` by ``_finalize_instruction_bundle``.
+    instruction_entries: list[tuple[str, str]] = field(default_factory=list)
     # Per-task disabled flow node ids (``nodes.<id>.enabled: false``). Re-derived every run/resume
     # from front-matter, so a restart recovers it without persistence (node-disable control).
     skip: frozenset[str] = frozenset()
@@ -2029,22 +2048,113 @@ class Orchestrator:
             tools_default_timeout_seconds=self._config.tools.default_timeout_seconds,
         )
 
-    def _publish_task_snapshot(self, p: _Pipeline, inputs: NodeInputs) -> None:
-        """Publish the validated task packet into the exchange as ``{task_path}`` (WRI-001).
+    def _instruction_bundle_dir(self, task_id: str) -> Path:
+        """The private per-task frozen-instruction-bundle dir (a provider deny target, WRI-011)."""
+        return instruction_bundle_dir(self._layout.private_home, task_id)
 
-        The source task file stays ordinary repository content; the provider only ever reads the
-        redacted exchange snapshot. WRI-011 replaces this with a frozen/digested snapshot and an
-        immutable manifest, and disables provider-native live task discovery.
+    def _freeze_task_and_repo_instructions(
+        self, p: _Pipeline, inputs: NodeInputs, *, resume: bool
+    ) -> None:
+        """Freeze the task packet + root repository instructions into the bundle (WRI-011 stage 1).
+
+        The source task file and ``AGENTS.md``/``CLAUDE.md`` stay ordinary repository content; the
+        provider only ever reads the redacted exchange copies published here from the immutable
+        frozen canonical (never live) — immutability comes from the canonical digest, not from the
+        exchange copy (which is the redacted projection). Skill packages are frozen later, after the
+        supervisor proposal (``_skill_paths_by_node``), because the proposal reads the frozen task.
+
+        Fresh/restart re-freezes from live and gates each required input against a known secret
+        (fail-closed, AC7). Continue verifies the persisted composite digest first (AC9), then
+        republishes the verified frozen copies to the restored exchange.
         """
-        if inputs.task_path is None:  # merge flow / a flow with no task packet
+        bundle_dir = self._instruction_bundle_dir(p.task.id)
+        if resume:
+            expected = self._store.get_instruction_manifest_digest(p.task.id)
+            if expected is None:
+                raise InstructionBundleError(
+                    "no persisted instruction-manifest digest to resume against; rerun fresh"
+                )
+            load_instruction_bundle(bundle_dir, expected)  # fail-closed verify
+            self._publish_frozen_task_and_instructions(p, inputs, bundle_dir)
             return
-        inputs.task_path = publish_file(
-            str(self._exchange_root),
-            p.task.id,
-            "task.md",
-            inputs.task_path,
-            extra_secrets=self._memory_extra_secrets(),
+        if bundle_dir.exists():
+            shutil.rmtree(bundle_dir)
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        secrets = self._memory_extra_secrets()
+        # Freeze the task packet only when there is a real source file. A flow with no task packet
+        # (merge flow) has ``task_path is None``; a restart with no source file on disk leaves it
+        # absent — both skip gracefully (mirroring the pre-WRI-011 publish no-op), so the frozen
+        # bundle simply carries no task entry rather than failing on a phantom file. A real task
+        # always has its lifecycle file, so its packet is always frozen.
+        if inputs.task_path and Path(inputs.task_path).is_file():
+            canonical, entry = freeze_task_packet(bundle_dir, Path(inputs.task_path))
+            assert_no_required_secret(
+                canonical.read_text(encoding="utf-8", errors="replace"),
+                extra_secrets=secrets,
+                label="task packet",
+            )
+            p.instruction_entries.append(entry)
+        repo_root = Path(self._config.repo.local_path)
+        tracked = frozenset(self._git.list_tracked_files(*REPO_INSTRUCTION_NAMES))
+        files = discover_repository_instructions(repo_root, tracked)
+        entries, concat = freeze_repository_instructions(bundle_dir, files)
+        if concat is not None:
+            assert_no_required_secret(
+                concat.read_text(encoding="utf-8", errors="replace"),
+                extra_secrets=secrets,
+                label="repository instructions",
+            )
+        p.instruction_entries.extend(entries)
+        self._publish_frozen_task_and_instructions(p, inputs, bundle_dir)
+
+    def _publish_frozen_task_and_instructions(
+        self, p: _Pipeline, inputs: NodeInputs, bundle_dir: Path
+    ) -> None:
+        """Re-point ``task_path``/``repository_instructions_path`` at redacted exchange copies.
+
+        Published from the frozen canonical files (verified on resume), so the exchange copy is a
+        redaction of the immutable snapshot — never a re-read of the live file.
+        """
+        secrets = self._memory_extra_secrets()
+        if (bundle_dir / TASK_PACKET_KEY).is_file():
+            inputs.task_path = publish_file(
+                str(self._exchange_root),
+                p.task.id,
+                "task.md",
+                str(bundle_dir / TASK_PACKET_KEY),
+                extra_secrets=secrets,
+            )
+        if (bundle_dir / REPO_INSTRUCTIONS_KEY).is_file():
+            inputs.repository_instructions_path = publish_file(
+                str(self._exchange_root),
+                p.task.id,
+                REPO_INSTRUCTIONS_KEY,
+                str(bundle_dir / REPO_INSTRUCTIONS_KEY),
+                extra_secrets=secrets,
+            )
+
+    def _finalize_instruction_bundle(
+        self, p: _Pipeline, *, control_digest: str, resume: bool
+    ) -> None:
+        """Write the composite manifest + persist the ``instruction_manifest_digest`` (WRI-011).
+
+        Fresh/restart folds the task/instruction/skill entries and the WRI-010 control digest into
+        one composite digest and persists it (the parent-held identity a later continue verifies).
+        Continue is a no-op: the digest was already verified in stage 1 against the persisted value.
+        """
+        if resume:
+            return
+        from wastech_orchestrator import __version__
+
+        bundle_dir = self._instruction_bundle_dir(p.task.id)
+        digest = write_instruction_manifest(
+            bundle_dir,
+            entries=p.instruction_entries,
+            control_digest=control_digest,
+            metadata={"orchestrator_version": __version__},
         )
+        self._store.update_task(p.task.id, instruction_manifest_digest=digest)
+        self._log(p.task.id).info("agent inputs frozen", extra={"instruction_digest": digest[:12]})
 
     def _resolve_merge_flow(self) -> FlowSnapshot:
         """Resolve the configured ``git.merge_flow`` to a validated snapshot (operator-editable).
@@ -2170,20 +2280,32 @@ class Orchestrator:
             branch_mode=self._branch_mode(p.task),
             publish_scope=p.task.publish,
         )
-        # Publish the validated task packet as the {task_path} the provider reads (WRI-001). WRI-011
-        # replaces this live snapshot with a frozen, digested one and disables live task discovery.
-        self._publish_task_snapshot(p, inputs)
-        if resume:
-            self._restore_engine_inputs(p, inputs)  # diff/checks/review/plan paths from disk
-        # Resolve the per-node skill selection before any node runs: discover the inventory, apply
-        # operator pins (strict/warn) + the supervisor's once-per-task proposal, and thread the
-        # effective map into ``inputs``. On resume the persisted map is restored (no re-proposal).
-        self._resolve_skill_layers(p, snapshot, inputs, resume=resume)
+        # WRI-011: freeze the agent inputs into a private, immutable bundle and expose only redacted
+        # exchange copies. Staged because the skill packages can only be frozen after the supervisor
+        # proposal (which itself reads the frozen task packet). Fresh/restart freezes + records the
+        # composite ``instruction_manifest_digest``; continue loads+verifies it and refuses to
+        # resume a session whose digest differs. A freeze/verify/secret-gate failure is a
+        # fail-closed manual condition (Core-detected, never fallback).
+        try:
+            self._freeze_task_and_repo_instructions(p, inputs, resume=resume)
+            if resume:
+                self._restore_engine_inputs(p, inputs)  # diff/checks/review/plan paths from disk
+            # Resolve the per-node skill selection before any node runs: discover the inventory,
+            # apply operator pins (strict/warn) + the supervisor's proposal, and thread the
+            # effective map into ``inputs``. On resume the persisted map is restored (no
+            # reproposal). Skill
+            # *packages* are frozen here too (fresh) via ``_skill_paths_by_node``.
+            self._resolve_skill_layers(p, snapshot, inputs, resume=resume)
+            self._finalize_instruction_bundle(p, control_digest=bundle.bundle_digest, resume=resume)
+        except InstructionBundleError as exc:
+            return self._go_terminal(
+                p, Status.MANUAL_ACTION_REQUIRED, manual_reason=f"agent inputs: {exc}"
+            )
         # Tool nodes launch the FROZEN executables (WRI-010): a per-task registry rooted at the
         # bundle, not the shared live ``.worc/tools`` one.
         services = self._build_engine_services(
             p,
-            finalize=lambda: self._engine_finalize(p),
+            finalize=lambda: self._engine_finalize(p, inputs),
             tool_registry=ToolRegistry(bundle.tools_dir),
         )
         recorder = StateStoreRunRecorder(
@@ -2540,7 +2662,7 @@ class Orchestrator:
             prompt_secrets=self._prompt_secrets(),
         )
 
-    def _engine_finalize(self, p: _Pipeline) -> str | None:
+    def _engine_finalize(self, p: _Pipeline, inputs: NodeInputs) -> str | None:
         """The publish node's finalize hook: write the supervisor summary, move the task file, and
         write the committed summary (P2.1).
 
@@ -2559,7 +2681,11 @@ class Orchestrator:
             started = time.monotonic()
             memory_on = self._config.memory.enabled
             finalized = self._supervisor.finalize(
-                task_id=p.task.id, task_title=p.task.title, emit_delta=memory_on
+                task_id=p.task.id,
+                task_title=p.task.title,
+                task_path=inputs.task_path,
+                repository_instructions_path=inputs.repository_instructions_path,
+                emit_delta=memory_on,
             )
             if memory_on:
                 self._write_memory(p, finalized.candidate_delta, WriteSource.SUCCESS)
@@ -2906,13 +3032,13 @@ class Orchestrator:
         map_file = task_artifact_dir(self._artifacts_root, p.task.id) / "skill_map.json"
         if resume and map_file.exists():
             p.skill_map = self._load_skill_map(map_file)
-            inputs.skill_paths_by_node = self._skill_paths_by_node(p.task.id, p.skill_map)
+            inputs.skill_paths_by_node = self._skill_paths_by_node(p, p.skill_map, resume=True)
             return
         p.skill_inventory = self._skill_scanner.collect()
         agent_nodes = [n for n in snapshot.doc.nodes if isinstance(n, AgentNode)]
         pins = {n.id: resolve_skills(n.skills, p.skill_inventory) for n in agent_nodes}
         self._enforce_pin_strictness(p, pins)
-        proposed = self._propose_skill_map(p, agent_nodes)
+        proposed = self._propose_skill_map(p, agent_nodes, inputs)
         # Effective set per node = Core_filter(pins ∪ accepted proposal). Dynamic tokens that do
         # not resolve are dropped here (only ``.refs`` kept); pins already passed strict/warn.
         skill_map = {
@@ -2921,7 +3047,7 @@ class Orchestrator:
         }
         p.skill_map = {nid: refs for nid, refs in skill_map.items() if refs}
         self._persist_skill_map(p, map_file)
-        inputs.skill_paths_by_node = self._skill_paths_by_node(p.task.id, p.skill_map)
+        inputs.skill_paths_by_node = self._skill_paths_by_node(p, p.skill_map, resume=False)
 
     def _enforce_pin_strictness(self, p: _Pipeline, pins: dict[str, SkillSelection]) -> None:
         """Strict/warn handling for unresolved operator pins (a dynamic proposal is never an error).
@@ -2940,9 +3066,14 @@ class Orchestrator:
         )
 
     def _propose_skill_map(
-        self, p: _Pipeline, agent_nodes: list[AgentNode]
+        self, p: _Pipeline, agent_nodes: list[AgentNode], inputs: NodeInputs
     ) -> dict[str, tuple[str, ...]]:
-        """The supervisor's once-per-task proposal (when ``dynamic`` and skills exist), else {}."""
+        """The supervisor's once-per-task proposal (when ``dynamic`` and skills exist), else {}.
+
+        WRI-011: the proposal reads the task from the frozen exchange packet (``inputs.task_path``,
+        already set by stage-1 freezing) — the task title/description is never inlined into the
+        supervisor prompt.
+        """
         if not self._config.skills.dynamic or not p.skill_inventory.skills:
             return {}
         if self._supervisor is None:  # defensive — the layer is built before this runs
@@ -2951,13 +3082,9 @@ class Orchestrator:
             task_id=p.task.id,
             agent_node_ids=[n.id for n in agent_nodes],
             inventory=p.skill_inventory,
-            task_spec_text=self._skill_task_spec_text(p),
+            task_path=inputs.task_path,
+            repository_instructions_path=inputs.repository_instructions_path,
         )
-
-    def _skill_task_spec_text(self, p: _Pipeline) -> str:
-        """A bounded task spec (title + description) the proposal uses to judge skill relevance."""
-        text = f"{p.task.title}\n\n{(p.task.description or '').strip()}".strip()
-        return text[:8000]
 
     def _persist_skill_map(self, p: _Pipeline, map_file: Path) -> None:
         """Persist the effective per-node skill map so a resume restores it without re-proposing."""
@@ -2980,38 +3107,113 @@ class Orchestrator:
         }
 
     def _skill_paths_by_node(
-        self, task_id: str, skill_map: dict[str, tuple[SkillRef, ...]]
+        self, p: _Pipeline, skill_map: dict[str, tuple[SkillRef, ...]], *, resume: bool
     ) -> dict[str, tuple[str, ...]]:
-        """Node id → the selected skills' exchange-published ``SKILL.md`` reference paths (WRI-001).
+        """Node id → the selected skills' frozen-exchange ``SKILL.md`` reference paths (WRI-011).
 
-        Each selected skill's live ``SKILL.md`` is copied (redacted) into
-        ``.worc-io/<task-id>/skills/<name>/`` so the provider reads the immutable exchange copy, not
-        the live repository file. WRI-011 replaces this per-file copy with package-closure freezing,
-        instruction precedence, and disabling provider-native live skill discovery. A ref whose file
-        is missing falls back to the live path (unchanged from before) rather than failing the run.
+        Each selected skill is frozen as a *package closure* (every tracked regular file inside its
+        ``SKILL.md`` directory, caps + link/special/ADS/collision refused) into the private bundle,
+        then the whole package is published redacted (read-only under WRI-002/003) to the exchange
+        under ``skills/<folder>/...`` so the agent reads the immutable copy (with sibling resources
+        intact) and never the live repository file. There is no live-path fallback — a missing or
+        unrepresentable package fails strict resolution (AC7). Continue re-points to the packages
+        already frozen (and verified in stage 1) without re-freezing.
+
+        The folder name is the ``SKILL.md`` parent-directory basename; two selected skills whose
+        packages share a basename collide and fail strict (rather than silently clobbering).
         """
-        repo = Path(self._config.repo.local_path)
+        bundle_dir = self._instruction_bundle_dir(p.task.id)
+        repo_root = Path(self._config.repo.local_path)
         secrets = self._memory_extra_secrets()
-        resolved: dict[str, tuple[str, ...]] = {}
-        for nid, refs in skill_map.items():
-            paths: list[str] = []
-            for ref in refs:
-                source = repo / ref.path
-                if not source.is_file():
-                    paths.append(source.as_posix())
-                    continue
-                relpath = f"skills/{Path(ref.path).parent.name}/{Path(ref.path).name}"
-                paths.append(
-                    publish_file(
-                        str(self._exchange_root),
-                        task_id,
-                        relpath,
-                        str(source),
-                        extra_secrets=secrets,
-                    )
+        # Freeze/publish each unique selected skill package once; map ref.path -> exchange SKILL.md.
+        unique_refs = {ref.path: ref for refs in skill_map.values() for ref in refs}
+        folders: dict[str, str] = {}  # folder -> ref.path (cross-package collision guard)
+        skill_md_by_path: dict[str, str] = {}
+        for rel, ref in sorted(unique_refs.items()):
+            folder = PurePosixPath(rel).parent.name
+            if folders.setdefault(folder, rel) != rel:
+                raise InstructionBundleError(
+                    f"selected skills collide on package folder {folder!r}: "
+                    f"{folders[folder]!r} vs {rel!r}"
                 )
-            resolved[nid] = tuple(paths)
-        return resolved
+            skill_md_by_path[rel] = self._freeze_and_publish_skill(
+                p, bundle_dir, repo_root, ref, folder, secrets, resume=resume
+            )
+        return {
+            nid: tuple(skill_md_by_path[ref.path] for ref in refs)
+            for nid, refs in skill_map.items()
+        }
+
+    def _freeze_and_publish_skill(
+        self,
+        p: _Pipeline,
+        bundle_dir: Path,
+        repo_root: Path,
+        ref: SkillRef,
+        folder: str,
+        secrets: tuple[str, ...],
+        *,
+        resume: bool,
+    ) -> str:
+        """Freeze (fresh) then publish one skill package to the exchange; return its SKILL.md path.
+
+        Fresh/restart freezes the package closure into the bundle and records its entries; continue
+        reuses the already-verified frozen files. Either way every package file is gated against a
+        known secret and published (redacted) to the exchange from the frozen canonical, so a
+        mid-task edit to a ``SKILL.md`` or resource cannot change what the agent reads.
+        """
+        skill_md_key = f"skills/{folder}/SKILL.md"
+        if not resume:
+            package_files = list(self._git.list_tracked_files(str(PurePosixPath(ref.path).parent)))
+            package = freeze_skill_package(bundle_dir, folder, ref.path, package_files, repo_root)
+            p.instruction_entries.extend(package.entries)
+            keys = [key for key, _ in package.entries]
+            skill_md_key = package.skill_md_key
+        else:
+            skill_root = bundle_dir / "skills" / folder
+            keys = sorted(
+                f"skills/{folder}/{path.relative_to(skill_root).as_posix()}"
+                for path in skill_root.rglob("*")
+                if path.is_file()
+            )
+        skill_md_path = ""
+        for key in keys:
+            published = self._gate_and_publish_instruction_file(
+                p, bundle_dir / key, key, secrets, label=f"skill {folder!r}"
+            )
+            if key == skill_md_key:
+                skill_md_path = published
+        return skill_md_path
+
+    def _gate_and_publish_instruction_file(
+        self,
+        p: _Pipeline,
+        canonical: Path,
+        exchange_relpath: str,
+        secrets: tuple[str, ...],
+        *,
+        label: str,
+    ) -> str:
+        """Gate a frozen instruction file against a secret, then publish it redacted to exchange.
+
+        A non-UTF-8 file cannot be faithfully projected to the (text) exchange, so it is an
+        unrepresentable resource that fails closed (AC7) rather than being shipped as mojibake.
+        """
+        try:
+            text = canonical.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise InstructionBundleError(
+                f"{label} file {exchange_relpath!r} is not readable UTF-8 text and cannot be "
+                f"safely projected to the agent-readable exchange: {exc}"
+            ) from exc
+        assert_no_required_secret(text, extra_secrets=secrets, label=f"{label}:{exchange_relpath}")
+        return publish_file(
+            str(self._exchange_root),
+            p.task.id,
+            exchange_relpath,
+            str(canonical),
+            extra_secrets=secrets,
+        )
 
     def _finish_engine_run(self, p: _Pipeline, result: FlowRunResult) -> PipelineResult:
         """Map a terminal :class:`FlowRunResult` to a :class:`PipelineResult` (+ auto-merge)."""

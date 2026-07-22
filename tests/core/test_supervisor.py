@@ -277,7 +277,7 @@ def test_supervisor_propose_skill_map_parses_and_records(tmp_path: Path) -> None
         task_id=_TASK,
         agent_node_ids=["implementation", "review"],
         inventory=_INV,
-        task_spec_text="do x",
+        task_path="/x/.worc-io/t/task.md",
     )
     # The supervisor proposes verbatim tokens (the Core resolves them against the inventory later).
     assert proposed == {"implementation": ("safe-change", "ghost")}
@@ -299,7 +299,7 @@ def test_supervisor_propose_skill_map_skips_when_inventory_empty(tmp_path: Path)
         task_id=_TASK,
         agent_node_ids=["implementation"],
         inventory=SkillInventory(),
-        task_spec_text="x",
+        task_path=None,
     )
     assert proposed == {}
     assert router.requests == []  # no LLM call when there is nothing to propose
@@ -313,7 +313,7 @@ def test_supervisor_propose_skill_map_best_effort_on_infra_failure(tmp_path: Pat
         task_id=_TASK,
         agent_node_ids=["implementation"],
         inventory=_INV,
-        task_spec_text="x",
+        task_path=None,
     )
     assert proposed == {}  # advisory: a failed proposal never raises, the run continues on pins
     evals = store.get_evaluations(_TASK)

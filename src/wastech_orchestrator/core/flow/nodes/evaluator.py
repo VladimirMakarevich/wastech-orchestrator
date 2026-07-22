@@ -300,6 +300,7 @@ class EvaluatorNodeRunner:
             diff_path=self._in.diff_path,
             check_artifacts_path=self._in.checks_path,
             review_artifacts_path=self._in.review_path,
+            repository_instructions_path=self._in.repository_instructions_path,
             output_schema=_FINDINGS_SCHEMA,  # F19: mandatory; fail-closed if not honored (run())
             model=node.model,
             reasoning=node.reasoning,

@@ -222,6 +222,16 @@ class BaseCliProvider:
         """Extra provider-specific keys for the request artifact (inserted before ``argv``)."""
         return {}
 
+    def _stdin_text(self, request: AgentRunRequest) -> str:
+        """The text fed to the CLI on stdin. Default: the Core prompt + context-files footer.
+
+        WRI-011: a provider whose CLI has no system/developer instruction flag (Codex ``exec``)
+        overrides this to prepend the frozen repository-instruction block at the top of the turn;
+        a provider that injects instructions through a dedicated flag (Claude
+        ``--append-system-prompt-file``) keeps this default.
+        """
+        return build_effective_prompt(request)
+
     def _augment_child_env(self, env: dict[str, str]) -> dict[str, str]:
         """Subclass hook: adjust the allowlisted child env just before preflight/probe/run.
 
@@ -384,7 +394,7 @@ class BaseCliProvider:
                 env=env,
                 timeout_seconds=request.timeout_seconds,
                 stdout_path=paths.stdout_path,
-                stdin_text=build_effective_prompt(request),
+                stdin_text=self._stdin_text(request),
                 monotonic=self._monotonic,
                 recorder=self._agent_handle_recorder,
             ),

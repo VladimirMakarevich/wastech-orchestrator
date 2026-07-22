@@ -328,6 +328,11 @@ class NodeInputs:
     diff_path: str | None = None
     checks_path: str | None = None
     review_path: str | None = None
+    #: WRI-011 frozen repository-instruction injection file (redacted exchange copy of the root
+    #: AGENTS.md/CLAUDE.md/AGENTS.override.md concatenation). ``None`` when the repo defines no
+    #: tracked root instruction files. The adapters inject it through their instruction layer and
+    #: disable provider-native live project-instruction discovery; it is never re-read live.
+    repository_instructions_path: str | None = None
     #: per-node read-only skill reference paths (absolute POSIX), keyed by node id — the effective
     #: set the Core resolved for each node (operator pins ∪ accepted dynamic proposal). A node with
     #: no skills is simply absent from the map (``skills_for`` returns ``()``).

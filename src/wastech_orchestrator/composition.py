@@ -27,6 +27,7 @@ from wastech_orchestrator.providers.process import AgentHandleRecorder
 from wastech_orchestrator.routing.router import AgentRouter
 from wastech_orchestrator.runtime_layout import (
     CONTROL_BUNDLE_DIRNAME,
+    INSTRUCTION_BUNDLE_DIRNAME,
     InternalDenyPolicy,
     RuntimeLayout,
 )
@@ -60,11 +61,12 @@ def build_internal_deny_policy(
 
     Collects the control/private homes from the provider-neutral ``layout``, the resolved
     default/explicit ``env_file`` (which may live outside ``private_home``), the config or
-    credential homes of the *configured* providers (:data:`_PROVIDER_CONFIG_HOMES`), and the WRI-010
-    frozen-control-bundle root (``<private_home>/control-bundles``). Resolving the provider homes
-    here — not inside :class:`RuntimeLayout` — keeps the layout provider-neutral.
+    credential homes of the *configured* providers (:data:`_PROVIDER_CONFIG_HOMES`), the WRI-010
+    frozen-control-bundle root (``<private_home>/control-bundles``), and the WRI-011
+    frozen-instruction-bundle root (``<private_home>/instruction-bundles``). Resolving the provider
+    homes here — not inside :class:`RuntimeLayout` — keeps the layout provider-neutral.
 
-    WRI-004/010 only represent these targets; WRI-002/003 project them into provider enforcement.
+    WRI-004/010/011 only represent these targets; WRI-002/003 project them into provider policy.
     """
     provider_homes = tuple(
         _PROVIDER_CONFIG_HOMES[pid]()
@@ -77,6 +79,7 @@ def build_internal_deny_policy(
         env_file=env_file,
         provider_homes=provider_homes,
         frozen_control_bundle=layout.private_home / CONTROL_BUNDLE_DIRNAME,
+        frozen_instruction_bundle=layout.private_home / INSTRUCTION_BUNDLE_DIRNAME,
     )
 
 

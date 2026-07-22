@@ -43,6 +43,7 @@ from wastech_orchestrator.providers.base import (
     UsageScope,
     build_context_footer,
     build_effective_prompt,
+    build_repository_instruction_block,
 )
 from wastech_orchestrator.providers.capabilities import normalize_codex_reasoning
 from wastech_orchestrator.providers.errors import (
@@ -272,6 +273,11 @@ def build_codex_argv(
         "--output-last-message",
         last_message_path,
     ]
+    # WRI-011: disable Codex's live ``AGENTS.md`` project-doc discovery. The frozen repository
+    # instructions are injected through the developer block on stdin instead (``_stdin_text``), so a
+    # mid-task edit to a live ``AGENTS.md`` can never become a later run's instruction source.
+    # Project ``.codex`` config *trust* is a SEPARATE control owned by WRI-003 (tested separately).
+    argv += ["-c", "project_doc_max_bytes=0"]
     if request.network_access:
         # The flow granted network (network_policy). Codex blocks network in the sandbox by default;
         # enable it for the workspace-write sandbox. This toggles ONLY network — the sandbox's
@@ -579,6 +585,21 @@ class CodexProvider(BaseCliProvider):
             last_message_path=last_message_path,
         )
         return argv, (last_message_path, schema_path is not None)
+
+    def _stdin_text(self, request: AgentRunRequest) -> str:
+        """Prepend the frozen repository-instruction block above the turn (WRI-011).
+
+        Codex ``exec`` has no system/developer-prompt flag, so the instructions ride the top of the
+        stdin turn — above the flow role and task — while ``build_codex_argv`` disables live
+        ``AGENTS.md`` discovery (``project_doc_max_bytes=0``). Together, a mid-task edit to a live
+        ``AGENTS.md`` cannot change what a later Codex run is instructed with.
+        """
+        base = build_effective_prompt(request)
+        if request.repository_instructions_path:
+            block = build_repository_instruction_block(request.repository_instructions_path)
+            if block:
+                return f"{block}\n\n{base}"
+        return base
 
     def _parse(
         self,

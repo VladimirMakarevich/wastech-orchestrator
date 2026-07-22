@@ -45,6 +45,14 @@ EXCHANGE_HOME_DIRNAME = ".worc-io"
 # private runtime state.
 CONTROL_BUNDLE_DIRNAME = "control-bundles"
 
+# The private-home subdirectory that holds the per-task frozen instruction bundles (WRI-011): the
+# canonical (unredacted) task packet, selected skill packages, and root repository instruction
+# files, plus the composite manifest. Each task's snapshot is
+# ``<private_home>/<INSTRUCTION_BUNDLE_DIRNAME>/<task-id>/``. Like the control bundle it is a
+# provider deny target (see :class:`InternalDenyPolicy.frozen_instruction_bundle`); the redacted,
+# agent-readable *injection* copies go to the exchange, never here.
+INSTRUCTION_BUNDLE_DIRNAME = "instruction-bundles"
+
 
 @dataclass(frozen=True)
 class RuntimeLayout:
@@ -87,11 +95,13 @@ class InternalDenyPolicy:
     the per-task frozen control bundle root (WRI-010).
 
     ``frozen_control_bundle`` is the root under which WRI-010 writes each task's immutable control
-    snapshot (``<private_home>/control-bundles/``). It lives under ``private_home`` and so is
-    already covered by that deny transitively; naming it explicitly makes the WRI-002/003 projection
-    deny it by name (not by coincidence of location) and keeps it denied after WRI-005 relocates
-    ``private_home``. The orchestrator reads the bundle to render prompts / launch tools; the
-    provider must never read it.
+    snapshot (``<private_home>/control-bundles/``); ``frozen_instruction_bundle`` is the WRI-011
+    root for each task's frozen agent inputs (``<private_home>/instruction-bundles/`` — the
+    canonical task packet, skill packages, and root repository instruction files). Both live under
+    ``private_home`` and so are already covered by that deny transitively; naming them explicitly
+    makes the WRI-002/003 projection deny them by name (not by coincidence of location) and keeps
+    them denied after WRI-005 relocates ``private_home``. The orchestrator reads the bundles to
+    freeze/inject; the provider never reads them (it receives only the redacted exchange copies).
 
     WRI-004 only *represents* these targets; the provider-specific projection/enforcement lands in
     WRI-002/003. Because it has no enforcement consumer yet, the policy is exercised by tests and
@@ -103,16 +113,19 @@ class InternalDenyPolicy:
     env_file: Path | None
     provider_homes: tuple[Path, ...]
     frozen_control_bundle: Path | None = None
+    frozen_instruction_bundle: Path | None = None
 
     @property
     def denied_paths(self) -> tuple[Path, ...]:
-        """The full deny set, ordered and de-duplicated (homes, env-file, provider homes+bundle)."""
+        """The full deny set, ordered + de-duplicated (homes, env-file, provider homes, bundles)."""
         ordered: list[Path] = [self.control_home, self.private_home]
         if self.env_file is not None:
             ordered.append(self.env_file)
         ordered.extend(self.provider_homes)
         if self.frozen_control_bundle is not None:
             ordered.append(self.frozen_control_bundle)
+        if self.frozen_instruction_bundle is not None:
+            ordered.append(self.frozen_instruction_bundle)
         seen: set[Path] = set()
         unique: list[Path] = []
         for path in ordered:

@@ -435,14 +435,31 @@ def _impl_fingerprint() -> str:
     return registry.resolve("implementation").flow_fingerprint
 
 
-def _seed_control_bundle(orch, store: StateStore, task_id: str) -> None:
-    """Seed the WRI-010 frozen control bundle a real interrupted task would have left on disk.
+def _seed_control_bundle(
+    orch,
+    store: StateStore,
+    task_id: str,
+    *,
+    skill_packages: tuple[tuple[str, str, list[str]], ...] = (),
+) -> None:
+    """Seed the WRI-010 control + WRI-011 instruction bundle an interrupted task left on disk.
 
-    A resume verifies the bundle against the persisted digest before reusing it; these recovery
-    tests seed the checkpoint directly (bypassing the fresh run that freezes), so they must also
-    freeze the implementation-flow bundle the checkpoint fingerprints and record its digest.
+    A resume verifies both frozen bundles against their persisted digests before reusing them; these
+    recovery tests seed the checkpoint directly (bypassing the fresh run that freezes), so they must
+    also freeze the implementation-flow control bundle the checkpoint fingerprints AND a minimal
+    instruction bundle (task packet + any tracked root repo instructions + any selected skill
+    packages), recording both digests. ``skill_packages`` is ``(folder, skill_md_rel, files_rel)``
+    per selected skill (matching what a fresh run would freeze for a resumed skill map).
     """
     from wastech_orchestrator.core.flow.control_bundle import freeze_control_bundle
+    from wastech_orchestrator.core.flow.instruction_bundle import (
+        REPO_INSTRUCTION_NAMES,
+        discover_repository_instructions,
+        freeze_repository_instructions,
+        freeze_skill_package,
+        freeze_task_packet,
+        write_instruction_manifest,
+    )
 
     snapshot = orch._flow_registry.resolve("implementation")
     assert snapshot.source_path is not None
@@ -452,6 +469,25 @@ def _seed_control_bundle(orch, store: StateStore, task_id: str) -> None:
         bundle_dir, snapshot, snapshot.source_path.parent, orch._tool_registry
     )
     store.update_task(task_id, control_bundle_digest=bundle.bundle_digest)
+
+    ib_dir = orch._instruction_bundle_dir(task_id)
+    ib_dir.mkdir(parents=True, exist_ok=True)
+    src = ib_dir.parent / f"{task_id}.seed-task.md"
+    src.write_text("# seeded task\n", encoding="utf-8")
+    _, task_entry = freeze_task_packet(ib_dir, src)
+    repo_root = Path(orch._config.repo.local_path)
+    tracked = frozenset(orch._git.list_tracked_files(*REPO_INSTRUCTION_NAMES))
+    repo_entries, _ = freeze_repository_instructions(
+        ib_dir, discover_repository_instructions(repo_root, tracked)
+    )
+    entries = [task_entry, *repo_entries]
+    for folder, skill_md_rel, files_rel in skill_packages:
+        package = freeze_skill_package(ib_dir, folder, skill_md_rel, files_rel, repo_root)
+        entries.extend(package.entries)
+    digest = write_instruction_manifest(
+        ib_dir, entries=entries, control_digest=bundle.bundle_digest
+    )
+    store.update_task(task_id, instruction_manifest_digest=digest)
 
 
 @pytest.mark.parametrize(
@@ -601,12 +637,25 @@ def test_resume_restores_skill_map_without_re_proposing(
         flow_fingerprint=_impl_fingerprint(),
         fix_iterations=0,
     )
-    _seed_control_bundle(orch, store, task_id)
     # The skill exists in the clone; the per-node map was persisted before the interruption.
     # Identity is the repo-relative POSIX path (joined onto the clone when surfaced to a provider).
     skill_md = git_repo.clone / ".claude" / "skills" / "safe-change" / "SKILL.md"
     skill_md.parent.mkdir(parents=True, exist_ok=True)
-    skill_md.write_text("---\nname: safe-change\ndescription: d\n---\n# Body\n", encoding="utf-8")
+    skill_md.write_text("---\nname: safe-change\ndescription: d\n---\n# Body\n", "utf-8")
+    # A fresh run would have frozen the selected skill's package into the instruction bundle; seed
+    # it so resume reconstructs the same frozen exchange path (not a re-read of the live SKILL.md).
+    _seed_control_bundle(
+        orch,
+        store,
+        task_id,
+        skill_packages=(
+            (
+                "safe-change",
+                ".claude/skills/safe-change/SKILL.md",
+                [".claude/skills/safe-change/SKILL.md"],
+            ),
+        ),
+    )
     skill_map = art / "logs" / task_id / "skill_map.json"
     skill_map.parent.mkdir(parents=True, exist_ok=True)
     skill_map.write_text(

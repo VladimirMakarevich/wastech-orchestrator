@@ -100,7 +100,7 @@ def _utc_now_iso() -> str:
 # the running-cumulative ``usage_snapshot`` on ``editing_lineage`` and ``node_lineage``. All
 # nullable, so ``_migrate`` adds them on a brand-new (``0``) database; an older versioned DB is
 # refused fail-closed and recreated (greenfield).
-DB_SCHEMA_VERSION = 16
+DB_SCHEMA_VERSION = 17
 
 
 class IncompatibleStateError(Exception):
@@ -132,6 +132,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # WRI-010: the frozen control-bundle digest (parent-held identity a continue/resume verifies).
     if "control_bundle_digest" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN control_bundle_digest TEXT")
+    # v17 (WRI-011): the frozen agent-input instruction-manifest digest (task packet + skill
+    # packages + root repository instructions + the WRI-010 control digest). Parent-held identity a
+    # continue/resume verifies; a differing digest is never resumed into the same provider session.
+    if "instruction_manifest_digest" not in task_cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN instruction_manifest_digest TEXT")
     # v16: normalized token usage — the per-run delta on ``provider_attempts`` and the running
     # cumulative snapshot on the two lineage tables. All nullable, so no defaults.
     attempt_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(provider_attempts)")}
@@ -226,7 +231,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     flow_run_counters TEXT,
     flow_fingerprint TEXT,
     blocked_since TEXT,
-    control_bundle_digest TEXT
+    control_bundle_digest TEXT,
+    instruction_manifest_digest TEXT
 );
 
 CREATE TABLE IF NOT EXISTS node_runs (
@@ -1065,6 +1071,23 @@ class StateStore:
         if row is None:
             raise KeyError(task_id)
         digest = row["control_bundle_digest"]
+        return None if digest is None else str(digest)
+
+    def get_instruction_manifest_digest(self, task_id: str) -> str | None:
+        """Return the task's persisted WRI-011 frozen-instruction-manifest digest, or ``None``.
+
+        ``None`` when the task's agent inputs were never frozen (legacy row / never reached the
+        engine). A continue/resume verifies the on-disk instruction bundle against this parent-held
+        value and refuses to resume a provider session whose digest differs; fresh/restart
+        overwrites it via :meth:`update_task` when it re-freezes from the live inputs.
+        """
+        cur = self._conn.execute(
+            "SELECT instruction_manifest_digest FROM tasks WHERE task_id = ?", (task_id,)
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise KeyError(task_id)
+        digest = row["instruction_manifest_digest"]
         return None if digest is None else str(digest)
 
     def record_provider_attempt(
