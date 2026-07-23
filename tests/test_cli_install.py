@@ -26,6 +26,9 @@ from wastech_orchestrator.core.flow.tools_registry import ToolRegistry
 from wastech_orchestrator.observability import logging as obslog
 from wastech_orchestrator.providers.base import ProviderId
 
+# Every test here is a slow integration test (the install wizard does heavy real-filesystem work).
+pytestmark = pytest.mark.slow
+
 GitRunner = Callable[[list[str], Path], str]
 
 

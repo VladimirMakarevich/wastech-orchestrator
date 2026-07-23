@@ -34,6 +34,9 @@ from wastech_orchestrator.providers.codex import CodexProvider
 from wastech_orchestrator.routing.router import AgentRouter
 from wastech_orchestrator.routing.snapshots import PartialChange, WorkingTreeSnapshot
 
+# Every test here is a slow integration test (real git / subprocess / process tree).
+pytestmark = pytest.mark.slow
+
 
 @pytest.fixture(autouse=True)
 def _make_clone(tmp_path: Path) -> None:

@@ -508,9 +508,16 @@ class GitManager:
         Every ``git`` invocation is hardened first (WRI-009, :meth:`_harden_git_argv`) so a
         target-repo hook/filter/editor/pager/signing program can never execute in an
         orchestrator-owned git process. ``gh`` argv is left unchanged (env-only hardening).
+
+        ``git`` runs under the *trusted* containment (``trusted=True``): the process group still
+        contains and reaps the whole subtree, but the per-call ``ps`` descendant sweep is skipped —
+        a large speedup for the many small git calls a task makes. It is sound because a hardened
+        git process cannot spawn a ``setsid``-escaped writer (no hooks/pager/ext-diff/textconv/
+        signing helpers). ``gh`` is less constrained, so it keeps the full WRI-012 barrier.
         """
         argv = list(argv)
         hardened = self._harden_git_argv(argv)
+        trusted = bool(argv) and argv[0] == "git"
         with tempfile.TemporaryDirectory() as scratch:
             stdout_path = Path(scratch) / "stdout"
             context: dict[str, object] = {"component": argv[0] if argv else "process"}
@@ -525,6 +532,7 @@ class GitManager:
                     env=self._env,
                     timeout_seconds=GIT_TIMEOUT_SECONDS,
                     stdout_path=str(stdout_path),
+                    trusted=trusted,
                 ),
                 logger=log,
                 message="git operation heartbeat",

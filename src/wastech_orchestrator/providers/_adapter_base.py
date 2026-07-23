@@ -188,6 +188,7 @@ class BaseCliProvider:
         clock: Callable[[], datetime] = _utc_now,
         monotonic: Callable[[], float] = time.monotonic,
         run_process: RunProcess = run_process,
+        preflight_timeout_seconds: float = _PREFLIGHT_TIMEOUT_SECONDS,
         heartbeat_seconds: float = 30.0,
         artifact_level: str = "full",
         agent_handle_recorder: AgentHandleRecorder | None = None,
@@ -203,6 +204,10 @@ class BaseCliProvider:
         self._clock = clock
         self._monotonic = monotonic
         self._run_process = run_process
+        # One-time preflight/probe launch ceiling. Injected so tests running under heavy parallel
+        # load (`pytest -n auto`) can grant a generous budget without touching the production
+        # default — a real cold-start CLI probe finishes in well under this.
+        self._preflight_timeout_seconds = preflight_timeout_seconds
         self._heartbeat_seconds = heartbeat_seconds
         # Set only by the watch daemon: records the launched agent's (pid, pgid) so a hard stop can
         # reap its whole subtree. None everywhere else (one-shot CLI, tests) and never for the
@@ -317,7 +322,7 @@ class BaseCliProvider:
                 [self._config.command, "--version"],
                 cwd=scratch,
                 env=env,
-                timeout_seconds=_PREFLIGHT_TIMEOUT_SECONDS,
+                timeout_seconds=self._preflight_timeout_seconds,
                 stdout_path=stdout_path,
                 monotonic=self._monotonic,
             )
@@ -402,7 +407,7 @@ class BaseCliProvider:
                 argv,
                 cwd=scratch,
                 env=env,
-                timeout_seconds=_PREFLIGHT_TIMEOUT_SECONDS,
+                timeout_seconds=self._preflight_timeout_seconds,
                 stdout_path=out,
                 monotonic=self._monotonic,
             )

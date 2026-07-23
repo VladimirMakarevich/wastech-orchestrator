@@ -25,7 +25,10 @@ from wastech_orchestrator.providers.process import (
     run_process,
 )
 
-pytestmark = pytest.mark.skipif(os.name == "nt", reason="POSIX process-group topology")
+pytestmark = [
+    pytest.mark.skipif(os.name == "nt", reason="POSIX process-group topology"),
+    pytest.mark.slow,  # spawns real process trees and polls for their reaping
+]
 
 # An agent that leads its own group (launched with start_new_session) and spawns a grandchild in a
 # SEPARATE new session/group. The grandchild pid is written to argv[1] so the test can watch it.

@@ -16,6 +16,9 @@ from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.ledger import Ledger, LedgerRecord
 from wastech_orchestrator.state_store import StateStore, TaskRow
 
+# Every test here is a slow integration test (real git / subprocess / process tree).
+pytestmark = pytest.mark.slow
+
 _ENV = ["PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA"]
 
 

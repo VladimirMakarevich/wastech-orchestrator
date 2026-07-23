@@ -20,6 +20,9 @@ from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.observability import logging as obslog
 from wastech_orchestrator.state_store import StateStore, TaskRow
 
+# Every test here is a slow integration test (real git / subprocess / process tree).
+pytestmark = pytest.mark.slow
+
 
 @pytest.fixture(autouse=True)
 def _reset_package_logger() -> Iterator[None]:

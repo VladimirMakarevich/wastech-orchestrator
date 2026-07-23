@@ -54,6 +54,9 @@ from wastech_orchestrator.runtime_layout import RuntimeLayout
 from wastech_orchestrator.state_store import PublishOpRow, StateStore, TaskRow
 from wastech_orchestrator.task.validation_gate import ValidationGate
 
+# Every test here is a slow integration test (real git / subprocess / process tree).
+pytestmark = pytest.mark.slow
+
 
 class FakeProvider:
     """An in-memory AgentProvider returning scripted results, used to drive the Core."""

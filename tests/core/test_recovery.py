@@ -15,6 +15,9 @@ from wastech_orchestrator.providers.artifacts import exchange_task_dir
 from wastech_orchestrator.providers.base import AgentRunRequest, ProviderId
 from wastech_orchestrator.state_store import CheckRunRow, StateStore, SubtaskRow, TaskRow
 
+# Every test here is a slow integration test (real git / subprocess / process tree).
+pytestmark = pytest.mark.slow
+
 
 class FakeGit:
     """A stand-in exposing only ``commit_on_branch`` for reconciliation unit tests."""

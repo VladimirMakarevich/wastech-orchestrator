@@ -23,7 +23,11 @@ from wastech_orchestrator.git_manager import (
     append_runtime_excludes,
 )
 from wastech_orchestrator.providers.artifacts import sha256_file
+from wastech_orchestrator.providers.process import ProcessResult
 from wastech_orchestrator.state_store import PublishOpRow, StateStore, TaskRow
+
+# Every test here is a slow integration test (real git / subprocess / process tree).
+pytestmark = pytest.mark.slow
 
 GitRunner = Callable[[Sequence[str], Path], str]
 ConfigFactory = Callable[..., object]
@@ -66,6 +70,35 @@ _EPOCH = 1700000000
 # Dirs kept out of the code commit under the default config: the gitignored runtime home plus the
 # default task lifecycle dir (`paths.tasks_dir` defaults to "tasks").
 _DEFAULT_EXCLUDED_DIRS = (*RUNTIME_EXCLUDED_DIRS, "tasks")
+
+
+def test_git_calls_use_trusted_containment_but_gh_does_not(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    """P0: hardened ``git`` runs under the trusted (no-``ps``-sweep) containment, while ``gh`` —
+    less constrained — keeps the full WRI-012 barrier. Asserts the ``trusted`` flag the runner
+    receives per binary, so the fast path is scoped to git alone."""
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    seen: list[tuple[str, bool]] = []
+
+    def spy_run_process(argv, **kwargs) -> ProcessResult:
+        seen.append((argv[0], bool(kwargs.get("trusted", False))))
+        Path(kwargs["stdout_path"]).write_text("", encoding="utf-8")
+        return ProcessResult(
+            exit_code=0,
+            timed_out=False,
+            launch_error=None,
+            duration_seconds=0.0,
+            stdout_path=str(kwargs["stdout_path"]),
+            stderr_text="",
+        )
+
+    gm._run_process = spy_run_process  # type: ignore[assignment]
+    gm._git("status", "--porcelain")
+    gm._run(["gh", "--version"])
+
+    assert ("git", True) in seen  # hardened git → trusted fast path
+    assert ("gh", False) in seen  # gh → full descendant-tracking barrier
 
 
 def test_prepare_branch_creates_task_branch(

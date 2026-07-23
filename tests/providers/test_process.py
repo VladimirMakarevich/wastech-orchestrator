@@ -16,6 +16,9 @@ import pytest
 import wastech_orchestrator.providers.process as process_mod
 from wastech_orchestrator.providers.process import AgentHandleRecorder, run_process
 
+# Every test here is a slow integration test (real git / subprocess / process tree).
+pytestmark = pytest.mark.slow
+
 
 def _py(code: str) -> list[str]:
     return [sys.executable, "-c", code]
@@ -234,6 +237,39 @@ def test_posix_containment_leads_its_own_session_group() -> None:
     assert process_mod.WindowsJobObjectContainment(win32=object()).popen_kwargs() == {  # type: ignore[arg-type]
         "start_new_session": False
     }
+
+
+def test_trusted_run_contains_and_still_proves_quiescence(tmp_path: Path) -> None:
+    """``trusted=True`` (the orchestrator-git fast path) still launches inside a real containment
+    and proves quiescence on return — it only skips the POSIX ``ps`` descendant sweep, not the
+    group isolation or the emptiness proof."""
+    result = run_process(
+        _py("pass"),
+        cwd=tmp_path,
+        env={},
+        timeout_seconds=30,
+        stdout_path=tmp_path / "o.log",
+        trusted=True,
+    )
+    assert result.exit_code == 0
+    assert result.timed_out is False
+    assert result.quiescence is not None and result.quiescence.proven is True
+
+
+def test_explicit_make_containment_overrides_trusted(tmp_path: Path) -> None:
+    """An explicitly injected ``make_containment`` wins over ``trusted`` — the test seam is
+    preserved, so ``trusted`` only chooses the default factory when none is injected."""
+    fake = _FakeContainment()
+    run_process(
+        _py("pass"),
+        cwd=tmp_path,
+        env={},
+        timeout_seconds=30,
+        stdout_path=tmp_path / "o.log",
+        trusted=True,
+        make_containment=lambda: fake,
+    )
+    assert fake.prove_calls == 1  # the injected fake ran, not the trusted factory
 
 
 def test_recorder_records_the_child_then_clears_on_reap(tmp_path: Path) -> None:

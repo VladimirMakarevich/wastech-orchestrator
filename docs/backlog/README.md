@@ -18,6 +18,7 @@ Where to find the design detail:
 | Document | Purpose |
 | --- | --- |
 | [follow_ups.md](follow_ups.md) | **Open** implementation follow-ups / tech-debt discovered while building — distinct from product features. Recorded via `/sync-docs`. Completed/superseded entries are archived in [archive/follow_ups_history.md](archive/follow_ups_history.md). |
+| [test-suite-performance.md](test-suite-performance.md) | Measured analysis of why `pytest` was slow (~44 min serial) and how it was sped up: trusted-git containment removing the per-call WRI-012 `ps`-scan tax (**P0**) + `pytest-xdist` parallelization (**P1**), both **shipped 2026-07-23** — **44 min → a few minutes** end-to-end, all green, plus a `slow` marker so `pytest -m "not slow"` is a ~12 s inner loop. Living doc with an implementation log; P0 edits the WRI-012 boundary (wants `/security-review`). |
 | [runtime_provider_capacity_gate.md](archive/runtime_provider_capacity_gate.md) | Detailed backlog task for checking Codex and Claude capacity before autonomous `watch` admits a pending task. |
 | [archive/concurrent-task-worktrees.md](archive/concurrent-task-worktrees.md) | Decision record for processing tasks in parallel via `git worktree`: chosen as the v2 concurrency primitive (not for isolation), gated on a mandatory provider capacity gate. |
 | [archive/token_optimization.md](archive/token_optimization.md) | Detailed backlog task for measuring and reducing token usage. |

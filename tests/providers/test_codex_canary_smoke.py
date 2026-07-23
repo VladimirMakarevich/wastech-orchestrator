@@ -38,10 +38,13 @@ from wastech_orchestrator.providers.codex_profile import (
 )
 from wastech_orchestrator.runtime_layout import InternalDenyPolicy, ProviderWriteGuardPolicy
 
-pytestmark = pytest.mark.skipif(
-    shutil.which("codex") is None,
-    reason="needs the real codex CLI (local/manual gate; hosted CI ships none)",
-)
+pytestmark = [
+    pytest.mark.skipif(
+        shutil.which("codex") is None,
+        reason="needs the real codex CLI (local/manual gate; hosted CI ships none)",
+    ),
+    pytest.mark.slow,  # invokes the real codex CLI
+]
 
 
 @pytest.fixture

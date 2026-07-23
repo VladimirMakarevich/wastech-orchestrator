@@ -497,6 +497,32 @@ def _default_make_containment() -> ProcessContainment:
     return PosixProcessContainment()
 
 
+def _no_descendants(_root: int) -> list[int]:
+    """A no-op descendant snapshot for the trusted-containment path (never enumerates the process
+    table). Used only where the launched process cannot spawn a ``setsid``-escaped writer."""
+    return []
+
+
+def _trusted_make_containment() -> ProcessContainment:
+    """Containment for a *trusted*, argv-controlled, fast orchestrator subprocess (see the
+    ``trusted`` parameter on :func:`run_process`).
+
+    Identical isolation and kill semantics to :func:`_default_make_containment` — a new
+    session/process group and SIGKILL of the whole group with a bounded emptiness proof — but on
+    POSIX it **skips the per-call ``ps`` descendant sweep** (:data:`_posix_descendants`) and proves
+    quiescence via the O(1) ``killpg(pgid, 0)`` group probe alone. That is sound only when the child
+    cannot spawn a descendant that breaks away into its own session (``setsid``), because such an
+    escapee is exactly what the sweep exists to catch. It is **not** a weaker sandbox: the process
+    group still contains and reaps the whole in-group subtree; only the extra escaped-descendant
+    detection is dropped. The full WRI-012 barrier for untrusted agent subtrees is unchanged.
+    Windows already contains via a kill-on-close Job Object with no per-call scan, so it is returned
+    unchanged.
+    """
+    if os.name == "nt":  # pragma: no cover - Windows-only branch (WRI-006 gate)
+        return WindowsJobObjectContainment(win32=_RealWin32())
+    return PosixProcessContainment(snapshot_fn=_no_descendants)
+
+
 def run_process(
     argv: Sequence[str],
     *,
@@ -507,7 +533,8 @@ def run_process(
     stdin_text: str | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     recorder: AgentHandleRecorder | None = None,
-    make_containment: Callable[[], ProcessContainment] = _default_make_containment,
+    trusted: bool = False,
+    make_containment: Callable[[], ProcessContainment] | None = None,
 ) -> ProcessResult:
     """Launch ``argv`` safely and return a raw :class:`ProcessResult`.
 
@@ -523,8 +550,14 @@ def run_process(
         ``(pid, pgid)`` is recorded on spawn and cleared on reap so a hard stop can find it. The
         handle is cleared **only after** quiescence is proven — an unproven subtree keeps it so a
         later stop/recovery can still reap the survivor.
+    :param trusted: select the trusted-containment path (:func:`_trusted_make_containment`) for a
+        fast, argv-controlled child that cannot spawn a ``setsid``-escaped descendant — the process
+        group still contains and reaps the whole subtree, but the per-call ``ps`` descendant sweep
+        is skipped (a large speedup for the orchestrator's many small ``git`` calls). Leave it
+        ``False`` for every untrusted agent launch. Ignored when ``make_containment`` is explicit.
     :param make_containment: factory for the platform :class:`ProcessContainment` (injected in
-        tests); defaults to a Windows Job Object or the POSIX process-group containment.
+        tests); when ``None`` it is resolved from ``trusted`` — a Windows Job Object or the POSIX
+        process-group containment (full descendant tracking unless ``trusted``).
     :returns: a :class:`ProcessResult` carrying the :class:`QuiescenceResult`. A failed launch
         (missing/!executable binary) is reported via ``launch_error`` rather than raised; a timeout
         via ``timed_out``.
@@ -540,6 +573,10 @@ def run_process(
     so the drain can return (classification stays ``timed_out``); on a propagating interrupt it is
     killed before re-raising, so a foreground ``worc run`` never orphans the agent.
     """
+    make_containment = make_containment or (
+        _trusted_make_containment if trusted else _default_make_containment
+    )
+
     start = monotonic()
     timed_out = False
     launch_error: str | None = None

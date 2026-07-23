@@ -14,11 +14,16 @@ from .conftest import FakeTelegramClient
 
 
 def _notifier(client: FakeTelegramClient) -> TelegramNotifier:
+    # Pin BOTH clocks so the deadline is deterministic. `wait_for_answer` computes it as
+    # `monotonic() + (expires_at - wall_clock())`; leaving `wall_clock` real makes `remaining` =
+    # timeout minus real elapsed time, which drifts under load (flaky under `pytest -n` — the drift
+    # exceeds `approx`'s tolerance). A constant `wall_clock` → `remaining` == timeout, exactly.
     return TelegramNotifier(
         client=client,
         secrets=_Secrets(bot_token="bot-token-secret-1234", chat_id="123456"),
         ask_timeout_s=5,
         monotonic=lambda: 100.0,
+        wall_clock=lambda: 1000.0,
     )
 
 

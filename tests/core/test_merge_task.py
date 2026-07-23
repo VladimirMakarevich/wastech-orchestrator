@@ -21,6 +21,9 @@ from wastech_orchestrator.git_manager import KIND_PR, KIND_PR_MERGE, GitResult
 from wastech_orchestrator.runtime_layout import RuntimeLayout
 from wastech_orchestrator.state_store import PublishOpRow, StateStore, TaskRow
 
+# Every test here is a slow integration test (real git / subprocess / process tree).
+pytestmark = pytest.mark.slow
+
 GitRunner = Callable[[Sequence[str], Path], str]
 _ENV = [
     "PATH",

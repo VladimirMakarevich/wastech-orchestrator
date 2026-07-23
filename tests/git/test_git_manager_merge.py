@@ -21,6 +21,9 @@ from wastech_orchestrator.git_manager import (
 )
 from wastech_orchestrator.state_store import StateStore, TaskRow
 
+# Every test here is a slow integration test (real git / subprocess / process tree).
+pytestmark = pytest.mark.slow
+
 GitRunner = Callable[[Sequence[str], Path], str]
 ConfigFactory = Callable[..., object]
 

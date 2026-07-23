@@ -21,9 +21,12 @@ import pytest
 import wastech_orchestrator.providers.process as process_mod
 from wastech_orchestrator.providers.process import PosixProcessContainment, run_process
 
-pytestmark = pytest.mark.skipif(
-    os.name == "nt", reason="POSIX process-group + descendant-tracking containment fixtures"
-)
+pytestmark = [
+    pytest.mark.skipif(
+        os.name == "nt", reason="POSIX process-group + descendant-tracking containment fixtures"
+    ),
+    pytest.mark.slow,  # spawns real multi-generation process trees + fixed quiescence waits
+]
 
 # A child sleeps this long before writing its marker; the test then waits past it. If the barrier
 # reaped the child the marker never appears; if it leaked, the marker shows up after the sleep.
@@ -112,6 +115,30 @@ def test_setsid_detached_writer_is_tracked_and_reaped(tmp_path: Path) -> None:
     assert result.quiescence is not None and result.quiescence.proven is True
     time.sleep(_WAIT_PAST)
     assert not marker.exists()  # the escaped setsid writer was tracked and reaped
+
+
+def test_trusted_containment_skips_the_descendant_scan() -> None:
+    """The trusted factory (what ``GitManager`` git calls use, ``trusted=True``) builds a POSIX
+    containment whose descendant snapshot is the no-op — it never runs the per-call ``ps`` sweep,
+    proving quiescence via the ``killpg(pgid, 0)`` group probe alone. This is the P0 speedup."""
+    containment = process_mod._trusted_make_containment()
+    assert isinstance(containment, PosixProcessContainment)
+    assert containment._snapshot is process_mod._no_descendants
+
+
+def test_trusted_containment_still_reaps_an_in_group_writer(tmp_path: Path) -> None:
+    """Dropping the descendant sweep does NOT weaken in-group containment: a background child in the
+    same process group (what a hardened git subprocess could at most spawn — it cannot ``setsid``
+    away) is still SIGKILLed by the group reap before ``run_process`` returns, and quiescence is
+    proven. Only the escaped-``setsid`` case (impossible for hardened git) is intentionally dropped
+    vs the default barrier."""
+    marker = tmp_path / "trusted_bg.txt"
+    root = _spawn(_writer(marker)) + "sys.exit(0)"
+    result = _run(root, tmp_path, make_containment=process_mod._trusted_make_containment)
+    assert result.exit_code == 0
+    assert result.quiescence is not None and result.quiescence.proven is True
+    time.sleep(_WAIT_PAST)
+    assert not marker.exists()  # the in-group writer was reaped even without the ps sweep
 
 
 def test_recorder_handle_retained_when_quiescence_unproven(tmp_path: Path) -> None:
