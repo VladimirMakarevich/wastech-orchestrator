@@ -1,7 +1,23 @@
 name: ci
 
-# Run the quality gate (ruff, ruff format, mypy, pytest) on every pull request and on pushes to
-# main, so regressions are caught before a release tag is cut. Mirrors the gate in release.yml.
+# Quality gate on every pull request and on pushes to main.
+#
+# WRI-006 (cross-platform isolation verification): cross-platform behaviour is a hard repository
+# invariant, so the deterministic test suite — which exercises provider command generation, the typed
+# layout, exchange publication, lifecycle sealing/restoration, redaction, and security validation —
+# runs NATIVELY on Windows, macOS, and Linux (the `test` matrix below), not only Ubuntu. The static
+# gates (ruff/mypy/import-linter/interrogate/vulture/deptry) stay on Ubuntu: runtime parity is proven
+# by the three-OS `test` matrix, so re-running lint/format on every OS would add cost without adding
+# signal.
+#
+# The deterministic suite injects the platform/path seams (`system=`, the Codex profile `to_native=`
+# renderer, the Claude `SandboxCapability` probe) AND runs the real filesystem tests natively on each
+# runner. It never authenticates to a model provider or spends tokens. The real host-enforcement
+# smokes (`codex sandbox` / Claude's Bash sandbox) need the actual CLIs, which hosted GitHub runners
+# do not ship; those smokes are skip-gated (`shutil.which` guards in tests/providers/*_smoke.py) and
+# are run locally / manually + surfaced to operators by `worc preflight`'s no-model capability smoke.
+# WSL2 is the Linux policy branch and is likewise covered by a documented local/manual smoke — see
+# docs/operations.md. This keeps ordinary CI deterministic and credential-free.
 on:
   pull_request:
   push:
@@ -17,19 +33,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  checks:
+  static:
+    name: static gates (ubuntu)
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # Test the declared floor (requires-python = ">=3.12") plus the next minor.
-        python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.13"
           cache: pip
           cache-dependency-path: pyproject.toml
 
@@ -58,6 +70,35 @@ jobs:
 
       - name: Dependency hygiene (deptry)
         run: deptry src
+
+  test:
+    name: tests (${{ matrix.os }} / py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Windows / macOS / Linux are all required isolation jobs (WRI-006). Ubuntu also covers the
+        # declared Python floor (requires-python = ">=3.12") plus the next minor; macOS (the priciest
+        # runner) and Windows run the primary version — enough to prove native cross-platform parity
+        # without doubling the most expensive minutes.
+        include:
+          - { os: ubuntu-latest, python-version: "3.12" }
+          - { os: ubuntu-latest, python-version: "3.13" }
+          - { os: macos-latest, python-version: "3.13" }
+          - { os: windows-latest, python-version: "3.13" }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+
+      - name: Install (with dev deps)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
 
       - name: Tests (pytest)
         run: pytest -q

@@ -2223,6 +2223,12 @@ class Orchestrator:
         orchestrator commits the merge and merges the PR afterward. Returns ``False`` when a bounded
         loop is exhausted (markers/checks unresolved) so the caller aborts the merge."""
         assert snapshot.source_path is not None
+        # M2 (deliberate): the merge flow is ephemeral and NOT frozen (WRI-010/011), so it sets no
+        # `repository_instructions_path` — its conflict agent gets neither live nor frozen
+        # `AGENTS.md`/`CLAUDE.md`. That is intentional and acceptable for a mechanical marker
+        # resolution + checks pass (the WRI-011 discovery-disable argv is unconditional, so live
+        # discovery is off here too). If a future merge agent needs repository conventions, freeze +
+        # inject a merge-scoped instruction copy here — tracked in follow_ups.
         inputs = build_node_inputs(
             p,
             flow_dir=snapshot.source_path.parent,
@@ -3702,6 +3708,15 @@ class Orchestrator:
             except ExchangeCleanupBlocked as exc:
                 self._store.update_task(task_id, exchange_active_unsafe=1)
                 log.error("contaminated exchange quarantine blocked", extra={"error": str(exc)})
+            except OSError as exc:
+                # M7: the quarantine move (mkdir/copy2/rename) can raise a bare OSError (ENOSPC /
+                # EACCES) that is not an ExchangeCleanupBlocked. Honor "Never raises": flag the tree
+                # unsafe (blocks later launches) instead of crashing into H1's path with no signal.
+                self._store.update_task(task_id, exchange_active_unsafe=1)
+                log.error(
+                    "contaminated exchange quarantine failed (unexpected OS error)",
+                    extra={"error": str(exc)},
+                )
             return
         try:
             result = seal_exchange(
@@ -3725,6 +3740,16 @@ class Orchestrator:
             # file): the tree is not a clean snapshot. Block later launches and surface it.
             self._store.update_task(task_id, exchange_active_unsafe=1)
             log.error("terminal exchange seal failed (unsafe surface)", extra={"error": str(exc)})
+        except OSError as exc:
+            # M7: mkdir/copy2/write_text can raise a bare OSError (ENOSPC on a full disk, EACCES)
+            # after the terminal status + ledger were already written — not an ExchangeError/
+            # ExchangeSealError. Honor the "Never raises" contract: flag the tree unsafe (blocks
+            # every later launch) and log the precise target, instead of silently crashing into the
+            # H1 daemon-crash path with no signal and no unsafe flag.
+            self._store.update_task(task_id, exchange_active_unsafe=1)
+            log.error(
+                "terminal exchange seal failed (unexpected OS error)", extra={"error": str(exc)}
+            )
 
     def _move_task_file(self, p: _Pipeline, final: Status) -> Path | None:
         """Move the task file to its lifecycle folder; see _relocate_task_file."""

@@ -149,18 +149,21 @@ def test_canary_passes_then_run_proceeds_and_writes_evidence(
     tmp_path: Path,
     make_request: Callable[..., AgentRunRequest],
 ) -> None:
-    # WRI-003: with a deny set present, the pre-launch canary runs; when its deny probes hold, the
-    # real launch proceeds and the evidence is recorded. task_path=None → only the 2 private probes.
+    # WRI-003 + H4: with a deny set present, the pre-launch canary runs; the frozen exchange task
+    # packet is the mandatory positive control. Probe order: private-read, private-shell-read,
+    # exchange-read (allowed), exchange-write (denied). When they hold, the real launch proceeds.
     fake = FakeRun(stdout=_success_stream(), last_message='{"summary":"ok"}')
-    canary = FakeCanary(results=[(1, "operation not permitted")])
-    request = make_request()
+    canary = FakeCanary(results=[(1, "denied"), (1, "denied"), (0, "task"), (1, "denied")])
+    exchange = tmp_path / "task.md"
+    exchange.write_text("EXCHANGE_TASK", encoding="utf-8")
+    request = make_request(task_path=str(exchange))
     provider = _isolated_provider(
         codex_config, security_config, tmp_path, fake, canary=canary, deny=_deny_for(request)
     )
     result = provider.run(request)
     assert result.status is RunStatus.SUCCEEDED
     assert fake.calls == 1  # launched only AFTER the canary passed
-    assert canary.calls == 2  # two private-deny probes
+    assert canary.calls == 4  # 2 private-deny + exchange-read (positive control) + exchange-write
     canary_json = _attempt_dir(tmp_path) / "canary.json"
     assert json.loads(canary_json.read_text())["ok"] is True
 

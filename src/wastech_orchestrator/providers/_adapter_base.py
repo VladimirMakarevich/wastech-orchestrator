@@ -99,6 +99,23 @@ class ParsedEvents:
     rate_limited: bool = False
 
 
+@dataclass(frozen=True)
+class IsolationCapabilityReport:
+    """A provider's live, no-model isolation capability-probe verdict for ``worc preflight`` (H7).
+
+    ``ok`` is pass/fail; ``status`` a short machine label (e.g. ``passed``/``unsupported``/
+    ``policy-failed``); ``detail`` a secret-free operator line. ``fatal`` marks a result that must
+    fail preflight regardless of a fallback provider — a proven policy leak is a non-fallback
+    security result — versus an advisory host-capability gap that degrades like a missing capability
+    (fatal only when the provider has no fallback).
+    """
+
+    ok: bool
+    status: str
+    detail: str
+    fatal: bool
+
+
 def coerce_usage_int(value: object) -> int | None:
     """A plain ``int`` from a raw usage value, or ``None`` for an absent / non-integer / bool value.
 
@@ -274,6 +291,17 @@ class BaseCliProvider:
         :class:`ProviderError` to fail closed pre-model (e.g. Codex proves its generated permission
         profile is actually enforced with a ``codex sandbox`` canary — WRI-003). Default: no-op, so
         no paid model call is a structural guarantee for providers that need no pre-launch proof.
+        """
+        return None
+
+    def isolation_capability_smoke(self, *, home_dir: Path) -> IsolationCapabilityReport | None:
+        """Subclass hook: a live, no-model isolation capability probe for ``worc preflight`` (H7).
+
+        Default ``None`` — no live probe (the offline ``isolation_reasons`` gate already covers the
+        provider). A subclass (Codex) stands up a throwaway fixture under *home_dir* — which MUST be
+        a real, non-``/tmp`` path — and runs its ``codex sandbox`` capability smoke, mapping the
+        outcome. Called ONLY by ``worc preflight`` (behind an explicit opt-in), never during a task
+        run, so a normal run never pays for it. The returned ``detail`` must be secret-free.
         """
         return None
 

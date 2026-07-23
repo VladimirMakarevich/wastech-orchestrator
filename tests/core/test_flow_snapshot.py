@@ -599,6 +599,17 @@ def test_invalid_network_policy_rejected(tmp_path: Path) -> None:
         load_flow(_write(tmp_path, body))
 
 
+def test_duplicate_node_id_rejected(tmp_path: Path) -> None:
+    # A second node with the same id would silently collapse (last-wins) into one map entry; fail
+    # closed instead so the shadowed node / its edges can never vanish unnoticed.
+    body = _VALID_BODY.replace(
+        "  edges: []\n",
+        "    - { id: a, kind: agent, role_file: roles/a.md }\n  edges: []\n",
+    )
+    with pytest.raises(FlowLoadError, match=r"duplicate node id 'a'"):
+        load_flow(_write(tmp_path, body))
+
+
 def test_invalid_enum_wrapped_in_flow_load_error(tmp_path: Path) -> None:
     body = _VALID_BODY.replace(_PUB, "  publishing: telepathy\n")
     with pytest.raises(FlowLoadError, match=r"invalid PublishingPolicy 'telepathy'"):

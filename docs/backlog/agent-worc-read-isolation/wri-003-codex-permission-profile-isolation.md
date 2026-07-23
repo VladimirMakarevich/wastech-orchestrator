@@ -77,7 +77,7 @@ WRI-001 built the exchange and a **core-side, detection-only** containment layer
 - [ ] Config and flow `extra_args` cannot remove, shadow, or replace the owned permission, config-isolation, workspace-root, or network settings.
 - [ ] Authentication and fresh/resume sessions keep working through the operator's `CODEX_HOME` while sandboxed commands cannot read its auth/config/session files and no credential material is copied into logs/artifacts.
 - [ ] Project `.codex` config/rules/hooks are skipped as untrusted; live `AGENTS.md` discovery is independently disabled and replaced by WRI-011's frozen manifest; hooks and custom subagents are disabled; enabled MCP/app/plugin/computer-use surfaces are empty or proven to share the boundary.
-- [ ] `security.denied_commands` has generated Codex execpolicy coverage, while external allow-rule layers cannot silently authorize out-of-sandbox execution.
+- [~] `security.denied_commands` Codex execpolicy coverage — **descoped** (operator-decided; see the note at the top of this doc and [follow_ups](../follow_ups.md)). The commands are already contained (network off in every profile, a local `git commit` caught by WRI-009's fingerprint, orchestrator-only commit/push/PR); external allow-rule layers are neutralized by `--ignore-user-config` + the untrusted project layer, and the no-model capability smoke records the effective `codex mcp list` inventory.
 - [ ] User/project/system/managed configuration cannot cause a false positive: sandbox and tool-surface preflights inspect the effective behavior after all remaining Codex layers have been applied.
 - [ ] A missing/changed permission-profile surface or a failing canary produces a deterministic pre-model policy error under `strict_isolation`, never a best-effort run.
 - [ ] Native Windows is covered as a supported branch; no source or documentation claims that Codex lacks a Windows sandbox.
@@ -87,7 +87,7 @@ WRI-001 built the exchange and a **core-side, detection-only** containment layer
 
 - Table-driven argv/config tests for profiles, network modes, controlled-home auth/session behavior, project trust, disabled features/tools, fresh/resume, native/WSL path rendering, and every reserved-argument collision.
 - Generated-policy tests for exact deny precedence, exchange read-only carving, portable globs, and no secret contents.
-- Generated execpolicy and `codex execpolicy check` tests for direct/wrapped denied commands and absence/rejection of external allow layers.
+- (Descoped: generated execpolicy / `codex execpolicy check` tests for denied commands — see the descope note above. External allow layers are covered by the `--ignore-user-config` + untrusted-project argv tests and the capability smoke's MCP-inventory evidence.)
 - Real host no-model canary tests for direct/indirect denied reads, allowed/read-only controls, effective features/rules, and an empty/approved MCP inventory. Record Codex version, platform, native sandbox mode, and result.
 - Fake-CLI integration tests prove wiring and error routing only; they do not count as OS-enforcement proof.
 - WRI-006 Windows/Linux/macOS gate.

@@ -19,6 +19,7 @@ import pytest
 from wastech_orchestrator import cli
 from wastech_orchestrator.notify import AskResult
 from wastech_orchestrator.observability import logging as obslog
+from wastech_orchestrator.providers._adapter_base import IsolationCapabilityReport
 from wastech_orchestrator.providers.base import AgentRunRequest, ProviderHealth, ProviderId
 
 
@@ -41,10 +42,12 @@ class _FakeHealthProvider:
         *,
         healthy: bool = True,
         degraded_reasons: tuple[str, ...] = (),
+        smoke: IsolationCapabilityReport | None = None,
     ) -> None:
         self.id = provider_id
         self._healthy = healthy
         self._degraded_reasons = degraded_reasons
+        self._smoke = smoke
 
     def preflight(self) -> ProviderHealth:
         return ProviderHealth(
@@ -56,6 +59,9 @@ class _FakeHealthProvider:
             message="available" if self._healthy else "executable not found",
             degraded_reasons=self._degraded_reasons,
         )
+
+    def isolation_capability_smoke(self, *, home_dir: object) -> IsolationCapabilityReport | None:
+        return self._smoke
 
     def run(self, request: AgentRunRequest) -> object:  # pragma: no cover - never called
         raise NotImplementedError
@@ -71,18 +77,24 @@ def _patch_providers(
     *,
     gh_result: tuple[bool, str] = (True, "gh: OK"),
     degraded: dict[str, tuple[str, ...]] | None = None,
+    smokes: dict[str, IsolationCapabilityReport] | None = None,
     **healthy: bool,
 ) -> None:
     monkeypatch.setattr(cli, "_load_config", lambda _path: config)
     degraded = degraded or {}
+    smokes = smokes or {}
     providers = {
         ProviderId.CLAUDE: _FakeHealthProvider(
             "claude",
             healthy=healthy.get("claude", True),
             degraded_reasons=degraded.get("claude", ()),
+            smoke=smokes.get("claude"),
         ),
         ProviderId.CODEX: _FakeHealthProvider(
-            "codex", healthy=healthy.get("codex", True), degraded_reasons=degraded.get("codex", ())
+            "codex",
+            healthy=healthy.get("codex", True),
+            degraded_reasons=degraded.get("codex", ()),
+            smoke=smokes.get("codex"),
         ),
     }
     monkeypatch.setattr(cli, "build_providers", lambda _c, *, layout: providers)
@@ -185,6 +197,71 @@ def test_preflight_fails_on_isolation(
     assert rc == 1
     assert "isolation: FAIL" in out
     assert "codex: sandbox is forbidden" in out
+
+
+# --- H7: the live no-model Codex isolation capability smoke surfaced in `worc preflight` --------
+
+
+def test_preflight_capability_smoke_ok(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _patch_providers(
+        monkeypatch,
+        make_git_config(git_repo.clone),
+        smokes={
+            "codex": IsolationCapabilityReport(
+                ok=True,
+                status="passed",
+                detail="codex workspace-write sandbox: OS-enforced",
+                fatal=False,
+            )
+        },
+    )
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "isolation smoke OK" in out
+    assert "preflight: ready" in out
+
+
+def test_preflight_capability_smoke_policy_leak_is_fatal(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A proven leak is a non-fallback security result → NOT ready even though claude is a fallback.
+    _patch_providers(
+        monkeypatch,
+        make_git_config(git_repo.clone),
+        smokes={
+            "codex": IsolationCapabilityReport(
+                ok=False, status="policy-failed", detail="a denied path was readable", fatal=True
+            )
+        },
+    )
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "FAIL — isolation smoke" in out
+    assert "preflight: NOT ready" in out
+
+
+def test_preflight_capability_smoke_unsupported_warns_with_fallback(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # An undemonstrable sandbox degrades like a capability gap: WARN when a fallback exists.
+    _patch_providers(
+        monkeypatch,
+        make_git_config(git_repo.clone),
+        smokes={
+            "codex": IsolationCapabilityReport(
+                ok=False, status="unsupported", detail="sandbox could not run here", fatal=False
+            )
+        },
+    )
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "WARN — isolation smoke" in out
+    assert "preflight: ready" in out
 
 
 def test_preflight_telegram_skip(

@@ -65,7 +65,7 @@ claude_total_input = input_tokens
 После нормализации получается другая картина.
 
 | Срез | Codex | Claude | Комментарий |
-| --- | ---: | ---: | --- |
+| --- | --: | --: | --- |
 | Буквальная сумма `result.usage.input_tokens` | 424 163 | 35 | Некорректно с обеих сторон |
 | Исправленный полный input | 282 699 | 683 078 | Claude включает 10 запусков, Codex — 2 |
 | Cache-read / cached subset | 187 904 | 560 305 | У Codex subset, у Claude отдельная категория |
@@ -82,7 +82,7 @@ claude_total_input = input_tokens
 ### 2.1. Что записано в node artifacts
 
 | Нода | Режим | Model / effort | `input_tokens` | `cached_input_tokens` | `output_tokens` | `reasoning_output_tokens` |
-| --- | --- | --- | ---: | ---: | ---: | ---: |
+| --- | --- | --- | --: | --: | --: | --: |
 | `revise` | fresh | `gpt-5.4` / `xhigh` | 141 464 | 76 288 | 8 329 | 5 935 |
 | `polish` | resume `revise` | `gpt-5.4` / `medium` | 282 699 | 187 904 | 9 364 | 6 066 |
 | **Наивная сумма** | — | — | **424 163** | **264 192** | **17 693** | **12 001** |
@@ -92,7 +92,7 @@ claude_total_input = input_tokens
 ### 2.2. Правильная дельта
 
 | Нода | Input | Cached | Uncached | Output | Reasoning | Output без reasoning |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| --- | --: | --: | --: | --: | --: | --: |
 | `revise` | 141 464 | 76 288 | 65 176 | 8 329 | 5 935 | 2 394 |
 | `polish`, реальная дельта | 141 235 | 111 616 | 29 619 | 1 035 | 131 | 904 |
 | **Codex session total** | **282 699** | **187 904** | **94 795** | **9 364** | **6 066** | **3 298** |
@@ -113,7 +113,7 @@ polish.reasoning =   6 066 -   5 935 =     131
 Исходный rollout содержит `last_token_usage`, которого нет в task-level `events.jsonl`. Он позволяет увидеть реальную механику расхода.
 
 | Нода | Модельный ход | Input | Cached | Uncached | Output | Reasoning |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| --- | --: | --: | --: | --: | --: | --: |
 | revise | 1 | 11 841 | 0 | 11 841 | 897 | 392 |
 | revise | 2 | 16 944 | 11 264 | 5 680 | 568 | 94 |
 | revise | 3 | 23 546 | 16 384 | 7 162 | 847 | 564 |
@@ -132,7 +132,7 @@ polish.reasoning =   6 066 -   5 935 =     131
 ### 2.4. Что делал Codex
 
 | Нода | Модельных ходов | Shell-команд | Вывод команд | Agent messages | File changes |
-| --- | ---: | ---: | ---: | ---: | ---: |
+| --- | --: | --: | --: | --: | --: |
 | `revise` | 6 | 15 | 56 123 chars | 7 | 1 patch |
 | `polish` | 4 | 6 | 20 794 chars | 4 | 1 patch |
 
@@ -155,7 +155,7 @@ polish.reasoning =   6 066 -   5 935 =     131
 В таблице `Total input` уже рассчитан по трём Claude-полям. `Supervisor after X` обозначает advisory-вызов после соответствующей ноды.
 
 | Нода | Model / effort | Direct input | Cache create | Cache read | Total input | Output | Cost, USD |
-| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| --- | --- | --: | --: | --: | --: | --: | --: |
 | context | `claude-opus-4-8` / xhigh | 5 | 21 611 | 61 221 | 82 837 | 10 580 | 0.5127 |
 | supervisor after context | `claude-sonnet-5` / high | 2 | 13 444 | 20 769 | 34 215 | 1 604 | 0.1137 |
 | research | `claude-opus-4-8` / xhigh | 4 | 8 127 | 34 408 | 42 539 | 1 279 | 0.1315 |
@@ -171,7 +171,7 @@ polish.reasoning =   6 066 -   5 935 =     131
 Разбивка по назначению показывает настоящий центр расходов Claude.
 
 | Группа | Runs | Total input | Cache read | Output | Cost, USD |
-| --- | ---: | ---: | ---: | ---: | ---: |
+| --- | --: | --: | --: | --: | --: |
 | context + research + tone_style | 3 | 202 785 | 155 817 | 20 631 | 1.0671 |
 | supervisor | 7 | 480 293 | 404 488 | 12 706 | 0.7694 |
 
@@ -193,12 +193,12 @@ Supervisor получил 70,3 % всего Claude input. Он advisory-only и 
 
 В этой задаче завышение точно равно первой стадии.
 
-| Метрика | Наивный total | Правильный total | Завышение |
-| --- | ---: | ---: | ---: |
-| Input | 424 163 | 282 699 | 141 464 |
-| Cached input | 264 192 | 187 904 | 76 288 |
-| Output | 17 693 | 9 364 | 8 329 |
-| Reasoning | 12 001 | 6 066 | 5 935 |
+| Метрика      | Наивный total | Правильный total | Завышение |
+| ------------ | ------------: | ---------------: | --------: |
+| Input        |       424 163 |          282 699 |   141 464 |
+| Cached input |       264 192 |          187 904 |    76 288 |
+| Output       |        17 693 |            9 364 |     8 329 |
+| Reasoning    |        12 001 |            6 066 |     5 935 |
 
 Направление старой находки `TEST-FINDINGS F47` про рост Codex transcript остаётся верным. Её количественное сравнение `Codex input_tokens` с маленьким Claude `input_tokens` нужно пересчитать. Там смешаны cumulative Codex snapshots и Claude direct-input без cache fields.
 
@@ -321,11 +321,11 @@ expected session total: latest snapshot only, input=282699
 
 `context` должен возвращать structured field вроде `needs_research: true|false` и короткий `research_question`. Edge выбирает `research` только при `true`. Для этой задачи точная экономия составила бы.
 
-| Убираемый вызов | Input | Output | Cost, USD |
-| --- | ---: | ---: | ---: |
-| research | 42 539 | 1 279 | 0.1315 |
-| supervisor after research | 37 891 | 215 | 0.0356 |
-| **Итого** | **80 430** | **1 494** | **0.1670** |
+| Убираемый вызов           |      Input |    Output |  Cost, USD |
+| ------------------------- | ---------: | --------: | ---------: |
+| research                  |     42 539 |     1 279 |     0.1315 |
+| supervisor after research |     37 891 |       215 |     0.0356 |
+| **Итого**                 | **80 430** | **1 494** | **0.1670** |
 
 Ручное `nodes: { research: { enabled: false } }` уже возможно, но для general quality pass оператор не обязан заранее знать вывод scout. Структурное ветвление надёжнее.
 
@@ -396,7 +396,7 @@ Quality gate для A/B должен сравнивать число нужны�
 ## 6. Приоритетный план реализации
 
 | Приоритет | Изменение | Файл/слой | Эффект на этот run | Риск |
-| --- | --- | --- | ---: | --- |
+| --- | --- | --- | --: | --- |
 | P0 | Нормализация cumulative Codex usage | provider contract + lineage persistence + tests | Отчётный Codex total `424 163 → 282 699` | Низкий, если raw usage сохраняется |
 | P0 | Fresh/conditional `polish` | `WastimeApp/.worc/flows/blog_article_revise.yaml` | Оценка 60–80k input; максимум 141 235 | Средний, проверить rereads и voice |
 | P0 | Conditional `research` | context schema + flow edge | 80 430 Claude input, $0.1670 | Низкий при явном флаге |

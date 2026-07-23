@@ -27,6 +27,7 @@ from wastech_orchestrator.providers.base import (
 )
 from wastech_orchestrator.providers.claude import ClaudeCodeProvider, SandboxCapability
 from wastech_orchestrator.providers.process import ProcessResult, QuiescenceResult
+from wastech_orchestrator.runtime_layout import InternalDenyPolicy
 
 FIXED_TIME = datetime(2026, 6, 11, 12, 0, 0, tzinfo=UTC)
 FAKE_GH_TOKEN = "ghp_" + "abcdef0123456789abcdef0123"
@@ -414,6 +415,51 @@ def test_request_json_redacts_prompt_secret(
     assert FAKE_GH_TOKEN not in request_json
 
 
+def test_workspace_write_run_with_deny_policy_writes_sandbox_settings(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # M8: the other run tests use deny_policy=None (an UNISOLATED config). Prove the isolated path
+    # end-to-end: with an InternalDenyPolicy on a sandbox-capable host, a workspace-write run writes
+    # the OS Bash-sandbox settings file and passes `--settings`, with the private home in denyRead.
+    deny = InternalDenyPolicy(
+        control_home=tmp_path / ".worc",
+        private_home=tmp_path / ".worc",
+        env_file=None,
+        provider_homes=(),
+    )
+    fake = FakeRun(stdout=_success_stream())
+    provider = ClaudeCodeProvider(
+        claude_config,
+        security=security_config,
+        artifacts_root=tmp_path,
+        clock=lambda: FIXED_TIME,
+        run_process=fake,
+        sandbox_probe=lambda: SandboxCapability.MACOS,
+        deny_policy=deny,
+    )
+    provider.run(_make_ws_request(tmp_path))
+
+    argv = fake.captured["argv"]
+    assert "--settings" in argv
+    settings = json.loads(Path(argv[argv.index("--settings") + 1]).read_text(encoding="utf-8"))
+    sandbox = settings["sandbox"]
+    assert sandbox["enabled"] is True and sandbox["failIfUnavailable"] is True
+    assert (tmp_path / ".worc").as_posix() in sandbox["filesystem"]["denyRead"]
+
+
+def _make_ws_request(tmp_path: Path) -> AgentRunRequest:
+    return AgentRunRequest(
+        task_id="task-001",
+        node_id="implementation",
+        working_directory=str(tmp_path / "clone"),
+        prompt="do it",
+        permission_profile="workspace-write",
+        timeout_seconds=7200,
+        attempt=1,
+        node_run_id=1,
+    )
+
+
 def test_preflight_reports_version_when_binary_runs(
     claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
 ) -> None:
@@ -433,3 +479,99 @@ def test_preflight_missing_binary(
     health = provider.preflight()
     assert health.executable_found is False
     assert health.version is None
+
+
+# --- H2: Claude capability/degraded preflight (claude --help flag-drift guard) -----------------
+
+# The isolation-critical + resume/injection flags a healthy Claude CLI advertises (2.1.x surface).
+_FULL_CLAUDE_HELP = (
+    "  --permission-mode <mode>       Permission mode to use for the session\n"
+    "  --setting-sources <sources>    Comma-separated list of setting sources\n"
+    "  --strict-mcp-config            Only use MCP servers from --mcp-config\n"
+    "  --tools <tools...>             Specify the list of available tools\n"
+    "  -r, --resume [value]           Resume a conversation by session ID\n"
+    "  --append-system-prompt <p>     Append a system prompt\n"
+)
+
+
+class _ProbingClaudeRun:
+    """A fake runner answering ``claude --version`` and ``claude --help`` by argv (H2 preflight)."""
+
+    def __init__(self, *, help_text: str) -> None:
+        self._help_text = help_text
+        self.argvs: list[list[str]] = []
+
+    def __call__(
+        self,
+        argv: list[str],
+        *,
+        cwd: Any,
+        env: Any,
+        timeout_seconds: int,
+        stdout_path: Any,
+        stdin_text: str | None = None,
+        monotonic: Any = None,
+        recorder: Any = None,
+    ) -> ProcessResult:
+        self.argvs.append(list(argv))
+        out = "2.1.217 (Claude Code)\n" if "--version" in argv else self._help_text
+        Path(stdout_path).write_text(out, encoding="utf-8")
+        return ProcessResult(
+            exit_code=0,
+            timed_out=False,
+            launch_error=None,
+            duration_seconds=0.1,
+            stdout_path=str(stdout_path),
+            stderr_text="",
+        )
+
+
+def _probing_provider(
+    config: ProviderConfig, security: SecurityConfig, tmp_path: Path, fake: _ProbingClaudeRun
+) -> ClaudeCodeProvider:
+    return ClaudeCodeProvider(
+        config,
+        security=security,
+        artifacts_root=tmp_path,
+        clock=lambda: FIXED_TIME,
+        run_process=fake,
+        sandbox_probe=lambda: SandboxCapability.MACOS,
+    )
+
+
+def test_preflight_passes_when_help_advertises_isolation_flags(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    fake = _ProbingClaudeRun(help_text=_FULL_CLAUDE_HELP)
+    health = _probing_provider(claude_config, security_config, tmp_path, fake).preflight()
+    assert health.supports_required_features is True
+    assert health.degraded_reasons == ()
+    assert any("--help" in argv for argv in fake.argvs)  # the capability probe ran
+
+
+def test_preflight_fails_when_isolation_flag_missing(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # A CLI that dropped --setting-sources changed the read-isolation surface: block BEFORE a paid
+    # model call rather than failing mid-run with "unknown option".
+    help_text = _FULL_CLAUDE_HELP.replace(
+        "  --setting-sources <sources>    Comma-separated list of setting sources\n", ""
+    )
+    fake = _ProbingClaudeRun(help_text=help_text)
+    health = _probing_provider(claude_config, security_config, tmp_path, fake).preflight()
+    assert health.supports_required_features is False
+    assert "--setting-sources" in health.message
+
+
+def test_preflight_degrades_when_resume_flag_missing(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # Losing --resume degrades resume nodes but not fresh runs → advisory (fallback-aware upstream),
+    # not a hard capability failure.
+    help_text = _FULL_CLAUDE_HELP.replace(
+        "  -r, --resume [value]           Resume a conversation by session ID\n", ""
+    )
+    fake = _ProbingClaudeRun(help_text=help_text)
+    health = _probing_provider(claude_config, security_config, tmp_path, fake).preflight()
+    assert health.supports_required_features is True  # isolation-critical flags still present
+    assert any("--resume" in reason for reason in health.degraded_reasons)

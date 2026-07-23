@@ -252,6 +252,16 @@ def load_flow(path: Path) -> FlowSnapshot:
     fp = fingerprint(raw_flow)
     doc = _parse_flow_doc(raw_flow, source=str(path))
 
+    # A duplicate node id would silently collapse into one map entry (last-wins), so the shadowed
+    # node — and any edge into it — would vanish without warning. Fail closed instead: each id must
+    # be unique (each is also a `{<id>_path}` prompt token and an artifact-dir component).
+    seen_ids: set[str] = set()
+    for node in doc.nodes:
+        if node.id in seen_ids:
+            raise FlowLoadError(
+                f"duplicate node id {node.id!r} in {path} (node ids must be unique)"
+            )
+        seen_ids.add(node.id)
     nodes_by_id: dict[str, FlowNode] = {n.id: n for n in doc.nodes}
     adj: dict[str, list[Edge]] = {}
     for edge in doc.edges:

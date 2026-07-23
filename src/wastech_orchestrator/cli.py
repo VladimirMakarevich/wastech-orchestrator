@@ -57,6 +57,7 @@ from wastech_orchestrator.git_manager import (
     KIND_PR,
     GitCommandError,
     GitManager,
+    ManualActionRequired,
     append_runtime_excludes,
 )
 from wastech_orchestrator.install import config_writer, detect, wizard
@@ -2505,7 +2506,7 @@ def _snapshot_labels(layout: MemoryLayout) -> list[str]:
 
 
 def run_preflight(
-    config: OrchestratorConfig, *, env_file: Path | None = None
+    config: OrchestratorConfig, *, env_file: Path | None = None, capability_smoke: bool = False
 ) -> tuple[bool, list[str]]:
     """Compute the read-only preflight verdict + report lines; no task is processed.
 
@@ -2515,6 +2516,13 @@ def run_preflight(
     contract. Shared by ``cmd_preflight`` and the installer's post-write auto-preflight.
     ``env_file`` is the resolved ``.env`` path (already loaded at startup); its status is reported
     as a health line here — the only place the ``.env`` notice appears.
+
+    ``capability_smoke`` (set only by ``worc preflight``, never the installer's auto-run) opts into
+    each healthy provider's live no-model isolation capability probe (H7): Codex runs a real
+    ``codex sandbox`` smoke of the generated profile so an old CLI / missing sandbox helper /
+    mis-generated policy surfaces here rather than mid-run. A proven policy leak fails preflight
+    unconditionally; an undemonstrable sandbox degrades like a capability gap (fatal only with no
+    fallback provider).
     """
     lines: list[str] = [_env_preflight_line(env_file)]
     providers = build_providers(config, layout=layout_for(config))
@@ -2541,6 +2549,25 @@ def run_preflight(
             else:
                 ok = False
                 lines.append(f"{pid.value}: FAIL — {reason} (no fallback provider)")
+
+        # H7: live no-model isolation capability smoke (Codex ``codex sandbox``), opt-in via
+        # ``worc preflight`` and only for a healthy provider under strict isolation. A proven leak
+        # is unconditionally fatal (non-fallback security result); an undemonstrable sandbox
+        # degrades like a capability gap (fatal only with no fallback provider).
+        if capability_smoke and healthy and config.security.strict_isolation:
+            smoke = getattr(provider, "isolation_capability_smoke", None)
+            report = smoke(home_dir=Path.home()) if callable(smoke) else None
+            if report is not None:
+                if report.ok:
+                    lines.append(f"{pid.value}: isolation smoke OK — {report.detail}")
+                elif report.fatal or not has_fallback:
+                    ok = False
+                    lines.append(f"{pid.value}: FAIL — isolation smoke: {report.detail}")
+                else:
+                    lines.append(
+                        f"{pid.value}: WARN — isolation smoke: {report.detail} "
+                        "(a fallback provider will cover)"
+                    )
 
     reasons = check_isolation(config, ISOLATION_CHECKS)
     if reasons:
@@ -2580,7 +2607,9 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     if config is None:
         return 2
     env_file, _ = resolve_env_file_path(args)
-    ok, lines = run_preflight(config, env_file=env_file)
+    # ``worc preflight`` opts into the live no-model capability smoke (H7); the installer's
+    # auto-preflight (``_install_run_preflight``) keeps the default (offline) to stay fast.
+    ok, lines = run_preflight(config, env_file=env_file, capability_smoke=True)
     for line in lines:
         print(line)
     return 0 if ok else 1
@@ -3956,6 +3985,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_memory(args)
     except (ConfigError, IncompatibleStateError, preflight.GhNotAvailableError) as exc:
         print(f"error: {exc}")
+        return 2
+    except ManualActionRequired as exc:
+        # A foreground command (e.g. `rerun`'s reset-to-base filter refuse-gate, M5) hit a condition
+        # that needs an operator to act. Surface it as a clean message + exit 2, not a traceback. In
+        # the daemon/run paths catch ManualActionRequired internally and map it to a status,
+        # so it never reaches here.
+        print(f"manual action required: {exc}")
         return 2
     raise SystemExit(f"Unknown command '{args.command}'.")
 

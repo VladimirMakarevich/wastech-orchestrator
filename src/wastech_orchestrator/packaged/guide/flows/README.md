@@ -149,7 +149,7 @@ Besides the generic `{<id>_path}` channel above, an agent node can fill one of f
 - `output_artifact: summary` → writes `summary.md` as `{summary_body_path}` (normally the supervisor layer fills this, not a flow node).
 - `output_artifact: report` → the orchestrator writes `report.md` into the flow's private report directory (`private_control_workspace_report` output policy — the `security_audit` shape). The node is `read-only`; no agent write is needed.
 
-The slot vocabulary is fixed to these three; a flow only chooses which node fills each, and one node fills at most one slot.
+The slot vocabulary is fixed to these four; a flow only chooses which node fills each, and one node fills at most one slot.
 
 ### Overriding the schema (the one real foot-gun)
 

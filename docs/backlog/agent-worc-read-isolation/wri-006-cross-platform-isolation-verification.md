@@ -1,6 +1,6 @@
 # WRI-006 — Add the cross-platform isolation verification gate
 
-**Status:** open **Milestone:** 1 **Source:** [decision record](README.md) **Dependencies:** WRI-002, WRI-003, WRI-007
+**Status:** implemented (2026-07-23) **Milestone:** 1 **Source:** [decision record](README.md) **Dependencies:** WRI-002, WRI-003, WRI-007
 
 ## Problem
 
@@ -55,13 +55,13 @@ The smoke is a capability probe, not an exact-version gate. If the profile surfa
 
 ## Acceptance criteria
 
-- [ ] The CI workflow has required Windows, macOS, and Linux isolation jobs.
-- [ ] All deterministic tests run without provider credentials or real model calls; any separate authenticated Claude host lane is isolated, minimal, and clearly identified.
-- [ ] Codex host smokes combine no-model sandbox execution with effective config/rules/tool-surface inspection and distinguish `unsupported`, `policy failed`, and `passed` without silently downgrading strict isolation; `unsupported` maps to the pre-model `CAPABILITY_UNAVAILABLE` classification and `policy failed` to the non-fallback security result.
-- [ ] Native Windows tests the supported Codex sandbox rather than expecting a preflight failure merely because of the OS.
-- [ ] Claude evidence distinguishes built-in tool policy from Bash OS enforcement. Supported-host enforcement is exercised on a real sandbox; native Windows proves strict no-Bash behavior.
-- [ ] Fake-CLI, generated-policy, and real-host evidence are labeled separately in test/docs output.
-- [ ] WSL coverage and any hosted-runner limitation are explicitly documented.
+- [x] The CI workflow has required Windows, macOS, and Linux isolation jobs — the `test` matrix in [.github/workflows/ci.yml](../../../.github/workflows/ci.yml) runs the deterministic suite on `ubuntu-latest`/`macos-latest`/`windows-latest` (`fail-fast: false`); static gates stay on Ubuntu.
+- [x] All deterministic tests run without provider credentials or real model calls. Per the implementation decision, no authenticated Claude host lane runs in CI; the deterministic matrix is credential-free, and the real Claude Bash-sandbox enforcement is an operator-run smoke (documented) since the CLI exposes no credential-free runner.
+- [x] Codex host smokes combine no-model sandbox execution with effective config/rules/tool-surface inspection (`run_codex_capability_smoke`: probe battery + `codex mcp list` inventory) and distinguish `passed` / `unsupported` (→ pre-model `CAPABILITY_UNAVAILABLE`) / `policy-failed` (→ non-fallback `CONFIGURATION_ERROR`) without silently downgrading. Surfaced by `worc preflight` (H7) and `tests/providers/test_codex_canary_smoke.py`.
+- [x] Native Windows tests the supported Codex sandbox rather than a preflight failure merely for the OS — the deterministic Windows job exercises the argv/profile via the platform seams, and the host smoke now runs on native Windows when the CLI is present (no blanket Windows skip).
+- [x] Claude evidence distinguishes built-in tool policy from Bash OS enforcement — the deterministic suite labels the settings/tool wiring as wiring only; native-Windows strict no-Bash is proven deterministically (`resolve_claude_tools`), and supported-host OS enforcement is an operator-run authenticated smoke (documented), not reported from fake-CLI/serialization.
+- [x] Fake-CLI, generated-policy, and real-host evidence are labeled separately — the `*_smoke.py` docstrings + `operations.md` state the deterministic suite proves wiring while the smokes prove OS enforcement.
+- [x] WSL coverage and hosted-runner limitations are explicitly documented — CI workflow header comment + `operations.md` "Cross-platform verification (WRI-006)".
 
 ## Verification
 

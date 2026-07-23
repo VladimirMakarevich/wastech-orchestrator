@@ -779,6 +779,10 @@ class GitManager:
         # shadowed by that override; it only mints a name in the degenerate "no stored branch" case,
         # where ``delete_branch`` below is a no-op anyway.
         branch = self.branch_name(task_id, slug, epoch=int(time.time()), override=branch_name)
+        # M5: `checkout base` + `pull` update tracked files → run smudge filters; mirror the
+        # commit/checkout refuse-gate. Rerun is foreground, so raising ManualActionRequired
+        # (surfaced cleanly by the CLI) is the right signal for a poisoned repo-local driver.
+        self._assert_no_untrusted_filters()
         self._git("fetch", "origin")
         self._git_checked("checkout", base)
         self._git("pull", "--ff-only")
@@ -875,6 +879,19 @@ class GitManager:
         base = self._config.repo.base_branch
         current = self._git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
         if current != base:
+            return
+        # M5: `pull` updates tracked files → runs smudge filters, so mirror the commit/checkout
+        # filter refuse-gate. This best-effort discovery runs in the watch loop and must NOT raise
+        # (that would crash the loop), so a poisoned repo-local driver skips the pull (leaves the
+        # working copy untouched, per this method's contract) and logs it — the per-task fingerprint
+        # drift gate remains the definitive catch on the next agent run.
+        programs = self._untrusted_config_programs()
+        if programs:
+            _LOG.warning(
+                "refresh_base skipped: target-repo local git config defines an untrusted "
+                "program-launching driver (%s); not running fetch/pull that could execute it",
+                ", ".join(sorted(set(programs))),
+            )
             return
         self._git("fetch", "origin")
         self._git("pull", "--ff-only")
@@ -2073,6 +2090,17 @@ class GitManager:
                 target_branch=base,
                 error=f"working tree has unaccounted changes: {', '.join(sorted(dirty))}",
             )
+            self._write_cleanup_artifact(task_id, outcome, completed=False)
+            return outcome
+
+        # M5: `checkout base` runs smudge filters; mirror the commit/checkout refuse-gate. This
+        # method reports unsafe outcomes rather than raising, so convert the refusal to one — a
+        # poisoned repo-local driver leaves the slot blocked (fail-closed) until the operator clears
+        # it, exactly like a failed checkout below.
+        try:
+            self._assert_no_untrusted_filters()
+        except ManualActionRequired as exc:
+            outcome = CleanupOutcome(safe=False, target_branch=base, error=str(exc))
             self._write_cleanup_artifact(task_id, outcome, completed=False)
             return outcome
 

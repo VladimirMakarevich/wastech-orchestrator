@@ -28,6 +28,7 @@ from typing import Any
 from wastech_orchestrator.config.schema import ProviderConfig
 from wastech_orchestrator.providers._adapter_base import (
     BaseCliProvider,
+    IsolationCapabilityReport,
     ParsedEvents,
     coerce_usage_int,
     read_text,
@@ -47,9 +48,11 @@ from wastech_orchestrator.providers.base import (
 )
 from wastech_orchestrator.providers.capabilities import normalize_codex_reasoning
 from wastech_orchestrator.providers.codex_canary import (
+    CAPABILITY_POLICY_FAILED,
     CanaryRunner,
     default_canary_runner,
     run_codex_canary,
+    run_codex_capability_smoke,
 )
 from wastech_orchestrator.providers.codex_profile import (
     PROFILE_NAME,
@@ -64,6 +67,7 @@ from wastech_orchestrator.providers.errors import (
 )
 from wastech_orchestrator.providers.redaction import redact_text
 from wastech_orchestrator.runtime_layout import InternalDenyPolicy
+from wastech_orchestrator.security.env import build_child_env
 from wastech_orchestrator.security.forbidden_args import (
     FORBIDDEN_SANDBOX_VALUE,
     find_forbidden_args,
@@ -87,8 +91,12 @@ _OUTPUT_SCHEMA_FILENAME = "output-schema.json"
 
 # Codex feature flags disabled for an autonomous orchestrator attempt (WRI-003): the non-shell tool
 # surfaces that could reach the local filesystem or spawn work outside the profiled shell
-# sandbox — hooks, custom subagents/multi-agent, computer use, in-app browser, and apps/plugins. The
-# canary additionally proves the MCP inventory is empty. Each maps to ``-c features.<name>=false``.
+# sandbox — hooks, custom subagents/multi-agent, computer use, in-app browser, apps/plugins. Each
+# maps to ``-c features.<name>=false``. The MCP inventory is neutralized by ``--ignore-user-config``
+# + the untrusted project layer (no server loads); the no-model capability smoke
+# (:func:`codex_canary.run_codex_capability_smoke`, run by ``worc preflight`` / the host gate)
+# records the effective ``codex mcp list`` inventory as evidence. The per-attempt canary proves the
+# filesystem deny/read-only boundary only — it makes no MCP-inventory claim.
 _DISABLED_FEATURES: tuple[str, ...] = (
     "hooks",
     "multi_agent",
@@ -663,6 +671,34 @@ class CodexProvider(BaseCliProvider):
         if not outcome.ok:
             assert outcome.error_class is not None  # set whenever ok is False
             raise ProviderError(outcome.error_class, outcome.message)
+
+    def isolation_capability_smoke(self, *, home_dir: Path) -> IsolationCapabilityReport | None:
+        """Prove the generated profile is OS-enforced on this host, no model (H7 / WRI-006).
+
+        Surfaced by ``worc preflight`` so the operator learns BEFORE a run that the Codex sandbox
+        cannot enforce here (old CLI / missing sandbox helper) or is mis-generated — instead of a
+        mid-run ``CAPABILITY_UNAVAILABLE`` / ``CONFIGURATION_ERROR`` that reads like a bug. Runs the
+        no-model :func:`codex_canary.run_codex_capability_smoke` on the configured profile under a
+        throwaway fixture. A proven leak is fatal (a non-fallback result); an undemonstrable
+        sandbox is advisory (degrades like a capability gap). Returns ``None`` for the operator
+        full-access escape (no profile, no isolation claim) or when strict isolation is off.
+        """
+        if not self._security.strict_isolation or self._config.sandbox == FORBIDDEN_SANDBOX_VALUE:
+            return None
+        env = self._augment_child_env(build_child_env(self._security.allowed_environment))
+        report = run_codex_capability_smoke(
+            command=self._config.command,
+            home_dir=home_dir,
+            env=env,
+            permission_profile=self._config.permission_profile or _DEFAULT_PROFILE,
+            runner=self._canary_runner,
+        )
+        return IsolationCapabilityReport(
+            ok=report.ok,
+            status=report.status,
+            detail=report.detail,
+            fatal=report.status == CAPABILITY_POLICY_FAILED,
+        )
 
     def _sandbox_needs_windows_helper(self) -> bool:
         """Whether the configured permission profile engages the Windows sandbox helper (WRI-003).

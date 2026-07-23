@@ -1891,6 +1891,54 @@ def test_commit_refuses_untrusted_repo_local_filter_driver(
         gm.commit_code("task-001", "feat")
 
 
+def test_reset_branch_to_base_refuses_untrusted_filter_driver(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # M5: reset-to-base (fresh rerun) checks out base + pulls → runs smudge filters. A repo-local
+    # program-launching driver must refuse before that git runs, exactly like commit/checkout.
+    gm = _armed(git_repo, store, tmp_path / "art", make_git_config)
+    git_run(["config", "filter.evil.smudge", "/bin/false"], git_repo.clone)
+    with pytest.raises(ManualActionRequired):
+        gm.reset_branch_to_base("task-001", "x", branch_name="worc/x")
+
+
+def test_terminal_cleanup_refuses_untrusted_filter_driver(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # M5: terminal cleanup checks out base → runs smudge filters. This method reports outcomes
+    # (never raises), so a poisoned driver leaves the slot fail-closed rather than crashing.
+    gm = _armed(git_repo, store, tmp_path / "art", make_git_config)
+    git_run(["config", "filter.evil.smudge", "/bin/false"], git_repo.clone)
+    outcome = gm.terminal_cleanup("task-001", mode=BranchMode.NEW)
+    assert outcome.safe is False
+    assert "untrusted" in (outcome.error or "")
+
+
+def test_refresh_base_skips_pull_on_untrusted_filter_driver(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # M5: refresh_base runs in the watch loop and must NOT raise (that would crash the loop); a
+    # poisoned repo-local driver skips the fetch/pull (leaving the working copy untouched) so the
+    # smudge filter never runs. Prove the pull was skipped: advance the remote, then assert the
+    # clone's base did not move.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    git_run(["checkout", "main"], git_repo.clone)
+    before = git_run(["rev-parse", "HEAD"], git_repo.clone)
+    # A second clone advances origin/main so an unfiltered refresh WOULD fast-forward.
+    other = tmp_path / "other"
+    git_run(["clone", str(git_repo.remote), str(other)], tmp_path)
+    git_run(["config", "user.email", "t@e.com"], other)
+    git_run(["config", "user.name", "T"], other)
+    (other / "new.txt").write_text("x\n", encoding="utf-8")
+    git_run(["add", "new.txt"], other)
+    git_run(["commit", "-m", "advance"], other)
+    git_run(["push", "origin", "main"], other)
+
+    git_run(["config", "filter.evil.smudge", "/bin/false"], git_repo.clone)
+    gm.refresh_base()  # must not raise
+    assert git_run(["rev-parse", "HEAD"], git_repo.clone) == before  # pull was skipped
+
+
 def test_commit_succeeds_despite_agent_signing_config(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
 ) -> None:

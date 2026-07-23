@@ -402,6 +402,28 @@ _RESERVED_CLAUDE_FLAGS: frozenset[str] = frozenset(
 )
 
 
+# The Claude flags the adapter's read-isolation policy hard-depends on. A CLI that renamed or
+# dropped any of them would otherwise reach a paid model call and only then fail at runtime with
+# "unknown option": ``--permission-mode`` (the strict headless mode), ``--setting-sources`` (closes
+# user/project/local + skill/plugin/hook discovery), ``--strict-mcp-config`` (no stray MCP server),
+# ``--tools`` (the hard built-in-tool existence gate). Probed at preflight so enum/flag drift is
+# caught before the model runs (WRI-002 / final-review H2 — the Claude counterpart to Codex's
+# ``exec --help`` ``-c/--config`` probe).
+_REQUIRED_CLAUDE_FLAGS: tuple[str, ...] = (
+    "--permission-mode",
+    "--setting-sources",
+    "--strict-mcp-config",
+    "--tools",
+)
+
+# Claude flags whose loss degrades — but does not break — a run: ``--resume`` backs every
+# durable-session resume node, and ``--append-system-prompt`` (incl. ``[-file]``) carries
+# the WRI-011 frozen repository instructions. A CLI missing either still runs fresh, non-instruction
+# nodes, so this is fallback-aware (fatal only when claude is the sole allowed provider), mirroring
+# Codex's ``exec resume`` degradation probe.
+_DEGRADABLE_CLAUDE_FLAGS: tuple[str, ...] = ("--resume", "--append-system-prompt")
+
+
 def _find_reserved_claude_args(args: Sequence[str]) -> list[str]:
     """Return a reason per ``extra_args`` token that is a reserved authority-bearing Claude flag.
 
@@ -825,6 +847,49 @@ class ClaudeCodeProvider(BaseCliProvider):
 
     def _signatures(self) -> Sequence[StderrSignature]:
         return _CLAUDE_SIGNATURES
+
+    def _preflight_capability_error(self, env: Mapping[str, str]) -> str | None:
+        """Verify ``claude --help`` still exposes the isolation-critical flags (WRI-002 / H2).
+
+        The adapter's read-isolation rests on :data:`_REQUIRED_CLAUDE_FLAGS`. A CLI that renamed or
+        removed any would otherwise reach a paid model call and only then fail with "unknown
+        option". Probe ``claude --help`` and fail preflight if any is absent — the Claude
+        counterpart to Codex's ``exec --help`` config-override probe, so CLI drift cannot reach a
+        model invocation. A probe that does not cleanly exit is inconclusive (no block); the version
+        check already passed. Light grep contract (mirrors Codex): substring presence in the help.
+        """
+        ok, help_text = self._probe([self._config.command, "--help"], env)
+        if not ok:
+            return None
+        missing = [flag for flag in _REQUIRED_CLAUDE_FLAGS if flag not in help_text]
+        if missing:
+            return (
+                f"claude --help no longer exposes {', '.join(missing)}, required by the "
+                "orchestrator's read-isolation policy (permission mode / closed setting sources / "
+                "strict MCP / hard tool gate); upgrade or pin a compatible Claude CLI"
+            )
+        return None
+
+    def _preflight_degraded_reasons(self, env: Mapping[str, str]) -> tuple[str, ...]:
+        """Flag Claude CLI drift that breaks resume / frozen-instruction injection nodes (H2).
+
+        ``--resume`` backs every durable-session resume node and ``--append-system-prompt[-file]``
+        carries the WRI-011 frozen repository instructions. A CLI missing either still runs fresh,
+        non-instruction nodes, so — like Codex's ``exec resume`` probe — this is advisory: fatal
+        only when claude has no fallback provider, else a warning. Empty ``--help`` output is
+        inconclusive (no flag).
+        """
+        ok, help_text = self._probe([self._config.command, "--help"], env)
+        if not ok or not help_text.strip():
+            return ()  # inconclusive — the probe produced nothing to grep
+        missing = [flag for flag in _DEGRADABLE_CLAUDE_FLAGS if flag not in help_text]
+        if not missing:
+            return ()
+        return (
+            f"claude --help no longer exposes {', '.join(missing)}; resume nodes and WRI-011 "
+            "frozen repository-instruction injection will fail on claude — pin a compatible Claude "
+            "CLI or route these nodes to another provider",
+        )
 
     def _build_argv(self, request: AgentRunRequest, paths: ArtifactPaths) -> tuple[list[str], None]:
         self._write_output_schema(paths, request)

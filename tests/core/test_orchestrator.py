@@ -3939,6 +3939,30 @@ def test_seal_terminal_exchange_quarantines_on_mutation(
     assert not exchange_seal_root(art, "task-contam").exists()  # never sealed / restore-eligible
 
 
+def test_seal_terminal_exchange_survives_bare_oserror(
+    git_repo, make_git_config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # M7: seal_exchange can raise a bare OSError (ENOSPC on a full disk / EACCES) AFTER the terminal
+    # status + ledger are committed. `_seal_terminal_exchange` promises "Never raises" — it must
+    # flag the tree unsafe (blocking later launches) instead of crashing into the H1 daemon-crash
+    # path with no signal.
+    orch, store, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    store.insert_task(TaskRow(task_id="task-enospc", title="t", status=Status.RUNNING))
+    task_dir = exchange_task_dir(orch._exchange_root, "task-enospc")
+    task_dir.mkdir(parents=True)
+    (task_dir / "plan.md").write_text("the plan\n", encoding="utf-8")
+
+    def _boom(*_a: object, **_k: object) -> object:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("wastech_orchestrator.core.orchestrator.seal_exchange", _boom)
+    orch._seal_terminal_exchange("task-enospc", final=Status.DONE)  # must not raise
+
+    assert store.get_exchange_guard("task-enospc")[1] is True  # exchange_active_unsafe set
+
+
 def test_containment_unverified_marks_exchange_unsafe_and_skips_seal(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
