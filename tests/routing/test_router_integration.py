@@ -51,7 +51,6 @@ def _build_provider(
             timeout_seconds=7200,
             permission_profile="workspace-write",
             extra_args=(),
-            sandbox="workspace-write",
         )
         return CodexProvider(cfg, security=security, artifacts_root=artifacts_root)
     cfg = ProviderConfig(

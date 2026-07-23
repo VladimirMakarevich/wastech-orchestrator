@@ -1,6 +1,11 @@
 # WRI-003 — Enforce the boundary with Codex permission profiles
 
-**Status:** open **Milestone:** 1 **Source:** [decision record](README.md) **Dependencies:** WRI-009, WRI-011, WRI-012
+**Status:** implemented **Milestone:** 1 **Source:** [decision record](README.md) **Dependencies:** WRI-009, WRI-011, WRI-012
+
+> **Implementation note.** Delivered against codex-cli 0.144.4. Isolation is a generated, attempt-scoped permission profile (`[permissions.worc]`, selected as `default_permissions`; injected as one inline-table `-c` value so the operator's `CODEX_HOME` is never mutated) proven by a no-model `codex sandbox -P` canary before every `codex exec`. Two scoping decisions were taken with the operator:
+>
+> - **Execpolicy projection of `security.denied_commands` is out of scope for this change** (see [follow_ups](../follow_ups.md)). Those commands are already contained without it — push/PR need network (disabled in every profile) and a local `git commit` is caught by WRI-009's git-control fingerprint — and Codex's execpolicy rule surface (a Starlark DSL) plus its `codex exec` ingestion are underdocumented on the beta CLI. No `.rules` are generated.
+> - **Native Windows is encoded fail-closed but empirically verified by the WRI-006 CI gate**, not on the (macOS) dev host: 0.144.4 marks the old `elevated_windows_sandbox`/`experimental_windows_sandbox` flags removed, and Codex itself refuses to run unsandboxed when its Windows sandbox cannot enforce a split policy — the canary surfaces that as `CAPABILITY_UNAVAILABLE`.
 
 ## Problem
 

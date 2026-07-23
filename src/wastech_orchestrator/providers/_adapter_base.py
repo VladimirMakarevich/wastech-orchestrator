@@ -260,6 +260,23 @@ class BaseCliProvider:
         """
         return None
 
+    def _pre_launch_check(
+        self,
+        request: AgentRunRequest,
+        argv: list[str],
+        env: Mapping[str, str],
+        paths: ArtifactPaths,
+    ) -> None:
+        """Subclass hook: a deterministic, no-model check run AFTER argv is built and the request
+        artifact written, but BEFORE the model process launches.
+
+        Runs on the same augmented ``env`` the real launch uses. A subclass raises
+        :class:`ProviderError` to fail closed pre-model (e.g. Codex proves its generated permission
+        profile is actually enforced with a ``codex sandbox`` canary — WRI-003). Default: no-op, so
+        no paid model call is a structural guarantee for providers that need no pre-launch proof.
+        """
+        return None
+
     # --- shared lifecycle ----------------------------------------------------------------------
 
     def preflight(self) -> ProviderHealth:
@@ -386,6 +403,10 @@ class BaseCliProvider:
         self._write_request(paths, request, argv=argv)
 
         env = self._augment_child_env(build_child_env(self._security.allowed_environment))
+        # Deterministic no-model pre-launch check on the real launch env (WRI-003 Codex canary): a
+        # ProviderError here fails closed BEFORE any model call. The request artifact is already
+        # written; a subclass may record its own evidence under ``paths``.
+        self._pre_launch_check(request, argv, env, paths)
         log = bind(
             _LOG,
             task_id=request.task_id,

@@ -19,7 +19,6 @@ def codex_config() -> ProviderConfig:
         timeout_seconds=7200,
         permission_profile="workspace-write",
         extra_args=(),
-        sandbox="workspace-write",
     )
 
 

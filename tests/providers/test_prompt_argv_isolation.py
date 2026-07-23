@@ -53,7 +53,6 @@ def test_codex_argv_is_independent_of_prompt() -> None:
         timeout_seconds=10,
         permission_profile="workspace-write",
         extra_args=(),
-        sandbox="workspace-write",
     )
     kwargs = {"output_schema_path": None, "last_message_path": "/tmp/last.txt"}
     benign = build_codex_argv(config, _request("do the thing"), **kwargs)

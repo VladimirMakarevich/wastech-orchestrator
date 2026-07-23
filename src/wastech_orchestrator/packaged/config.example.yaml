@@ -2,7 +2,7 @@
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 # This is the packaged copy used by `wastech-orchestrator init` (the only example config; nothing else to sync).
 
-schema_version: 30                  # config format version; the orchestrator refuses newer configs
+schema_version: 31                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -86,8 +86,13 @@ agents:
       model: "gpt-5.4"         # "" = use the Codex CLI/account default
       reasoning: high          # minimal | low | medium | high | xhigh | max->xhigh
       timeout_seconds: 7200    # per-attempt CLI wall-clock ceiling (seconds)
-      sandbox: "workspace-write"   # workspace-write | read-only | danger-full-access (needs strict_isolation: false)
-      permission_profile: "workspace-write"   # access level; codex's real isolation knob is `sandbox` above
+      permission_profile: "workspace-write"   # read-only | workspace-write — codex's isolation knob:
+                               # a generated permission profile grants only this level, denies the
+                               # private/control homes + secrets + CODEX_HOME, and keeps the exchange
+                               # read-only, proven by a no-model `codex sandbox` canary before each run
+      # sandbox: "danger-full-access"   # OPT-OUT: removes codex isolation; loads only under
+                               # `strict_isolation: false` (you own the risk). read-only/workspace-write
+                               # are NOT valid here anymore — use permission_profile above.
       extra_args: []           # raw CLI flags appended verbatim; forbidden ones fail preflight
 
 security:

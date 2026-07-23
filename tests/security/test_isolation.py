@@ -101,6 +101,13 @@ def test_codex_bypass_extra_arg_is_flagged(codex_config: ProviderConfig) -> None
     assert reasons
 
 
+def test_codex_reserved_extra_arg_is_flagged(codex_config: ProviderConfig) -> None:
+    # WRI-003: an authority-bearing flag that would select/replace the owned profile/config surface
+    # (here ``-c``, which could inject a competing permissions override) is flagged at preflight.
+    reasons = codex_mod.isolation_reasons(replace(codex_config, extra_args=("-c", "x=1")))
+    assert reasons and any("reserved" in r for r in reasons)
+
+
 # --- WRI-002: host-aware sandbox availability + reserved Claude extra_args
 # -------------------------
 

@@ -39,6 +39,9 @@ from wastech_orchestrator.config.schema import CONFIG_SCHEMA_VERSION
 # v25: ``security.deletion_approval_exempt_paths`` is gone — replaced by the ``trust_level`` policy
 # (added from template) plus the always-ask ``security.protected_paths`` floor; the old allowlist
 # has no equivalent under the new model, so it is stripped (not migrated).
+# v31 (WRI-003): a Codex ``sandbox: read-only|workspace-write`` is not removed but *folded* into
+# ``permission_profile`` (a conditional value transform, see ``_migrate_codex_sandbox``);
+# ``danger-full-access`` is kept as the operator escape.
 # The parent-path may be dotted (walked segment by segment).
 _REMOVED_KEYS: tuple[tuple[str, str], ...] = (
     ("", "prompts"),
@@ -98,8 +101,27 @@ def upgrade_config_mapping(
     added: list[str] = []
     merged = _merge(template, operator, prefix="", added=added)
     removed = _strip_removed_keys(merged)
+    _migrate_codex_sandbox(merged)
     merged["schema_version"] = CONFIG_SCHEMA_VERSION
     return merged, added, removed
+
+
+def _migrate_codex_sandbox(merged: dict[str, Any]) -> None:
+    """v31 (WRI-003): fold a Codex ``sandbox`` into the neutral ``permission_profile``, in place.
+
+    A legacy ``agents.providers.codex.sandbox: read-only|workspace-write`` becomes
+    ``permission_profile`` (an explicit operator value wins) and the ``sandbox`` key
+    is dropped. ``danger-full-access`` is left untouched — it remains the operator's full-access
+    escape under ``strict_isolation: false``. Not tracked in ``_REMOVED_KEYS`` because it is a
+    conditional value transform, not an unconditional strip.
+    """
+    providers = merged.get("agents", {}).get("providers", {}) if isinstance(merged, dict) else {}
+    codex = providers.get("codex") if isinstance(providers, dict) else None
+    if not isinstance(codex, dict):
+        return
+    if codex.get("sandbox") in ("read-only", "workspace-write"):
+        codex.setdefault("permission_profile", codex["sandbox"])
+        del codex["sandbox"]
 
 
 def _strip_removed_keys(merged: dict[str, Any]) -> list[str]:

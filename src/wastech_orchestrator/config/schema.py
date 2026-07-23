@@ -160,7 +160,11 @@ from wastech_orchestrator.providers.base import ProviderId
 # stay); false never returns (global off); true forces new + existing to return; current always
 # stays. Old (absent) configs take null => today's `new`-mode behavior is preserved. `config_writer`
 # does NOT write it on a fresh install; documented in `config.example.yaml` only.
-CONFIG_SCHEMA_VERSION = 30
+# v31 (WRI-003): a Codex node's isolation is now a generated permission profile driven by
+# `permission_profile`; the legacy `agents.providers.codex.sandbox: read-only|workspace-write` is
+# rejected by the validator and folded into `permission_profile` by `upgrade-config`. `sandbox`
+# survives only as the `danger-full-access` escape (gated by `strict_isolation: false`).
+CONFIG_SCHEMA_VERSION = 31
 
 
 class AuditBranch(StrEnum):
@@ -285,7 +289,11 @@ class ProviderConfig:
     timeout_seconds: int
     permission_profile: str
     extra_args: tuple[str, ...] = ()
-    # Provider-specific (optional): Codex sandbox; Claude max_turns.
+    # Codex escape: the sole remaining value is ``danger-full-access`` — the operator's explicit,
+    # loudly-unisolated opt-out, gated by ``strict_isolation: false`` (WRI-003). The access level
+    # (``read-only`` | ``workspace-write``) now lives in the provider-neutral ``permission_profile``
+    # above; a legacy ``sandbox: read-only|workspace-write`` is rejected (migrate via
+    # ``upgrade-config``). Inert on Claude.
     sandbox: str | None = None
     # Claude turn cap: positive int, or ``None`` = no cap. The loader maps ``"none"``/``"max"``/
     # ``null`` to ``None`` (adapter omits ``--max-turns``); config default 400.

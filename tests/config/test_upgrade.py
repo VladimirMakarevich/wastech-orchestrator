@@ -39,6 +39,33 @@ def test_never_overwrites_existing_leaf() -> None:
     assert added == []
 
 
+def _codex_after_upgrade(operator_codex: dict[str, object]) -> dict[str, object]:
+    template = {"agents": {"providers": {"codex": {"command": "codex"}}}}
+    operator = {"agents": {"providers": {"codex": {"command": "codex", **operator_codex}}}}
+    merged, _, _ = upgrade_config_mapping(template, operator)
+    codex = merged["agents"]["providers"]["codex"]
+    assert isinstance(codex, dict)
+    return codex
+
+
+def test_migrates_safe_codex_sandbox_to_permission_profile() -> None:
+    # WRI-003: a legacy safe `sandbox` folds into the neutral `permission_profile` and is dropped.
+    codex = _codex_after_upgrade({"sandbox": "read-only"})
+    assert "sandbox" not in codex
+    assert codex["permission_profile"] == "read-only"
+
+
+def test_keeps_danger_full_access_sandbox() -> None:
+    codex = _codex_after_upgrade({"sandbox": "danger-full-access"})
+    assert codex["sandbox"] == "danger-full-access"  # the full-access escape is preserved
+
+
+def test_explicit_permission_profile_wins_over_migrated_sandbox() -> None:
+    codex = _codex_after_upgrade({"sandbox": "read-only", "permission_profile": "workspace-write"})
+    assert "sandbox" not in codex
+    assert codex["permission_profile"] == "workspace-write"
+
+
 def test_preserves_operator_only_keys() -> None:
     template = {"agents": {"providers": {"claude": {"command": "claude"}}}}
     operator = {

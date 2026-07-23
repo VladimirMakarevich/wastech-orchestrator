@@ -25,8 +25,33 @@ def _with_security(config: OrchestratorConfig, **changes: object) -> Orchestrato
     return replace(config, security=replace(config.security, **changes))
 
 
+def _with_codex(config: OrchestratorConfig, **changes: object) -> OrchestratorConfig:
+    providers = dict(config.agents.providers)
+    providers[ProviderId.CODEX] = replace(providers[ProviderId.CODEX], **changes)
+    return _with_agents(config, providers=providers)
+
+
 def test_packaged_config_validates_clean(base_config: OrchestratorConfig) -> None:
     assert validate_config(base_config) == []
+
+
+@pytest.mark.parametrize("value", ["read-only", "workspace-write"])
+def test_legacy_codex_sandbox_value_is_rejected(
+    base_config: OrchestratorConfig, value: str
+) -> None:
+    # WRI-003: the access level lives in permission_profile; a safe legacy `sandbox` is rejected.
+    cfg = _with_codex(base_config, sandbox=value)
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any(".sandbox" in issue and "permission_profile" in issue for issue in exc.value.issues)
+
+
+def test_danger_full_access_sandbox_passes_config_validation(
+    base_config: OrchestratorConfig,
+) -> None:
+    # The full-access escape still loads at config time — strict_isolation gates it at preflight.
+    cfg = _with_codex(base_config, sandbox="danger-full-access")
+    assert validate_config(cfg) == []
 
 
 def test_protected_paths_globs_validate_clean(base_config: OrchestratorConfig) -> None:
