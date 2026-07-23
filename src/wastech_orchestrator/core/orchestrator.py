@@ -135,6 +135,7 @@ from wastech_orchestrator.core.skills import (
 from wastech_orchestrator.core.state_machine import Status, assert_transition
 from wastech_orchestrator.core.supervisor import Supervisor
 from wastech_orchestrator.git_manager import (
+    CleanupOutcome,
     GitCommandError,
     GitManager,
     ManualActionRequired,
@@ -224,6 +225,15 @@ _LOG = logging.getLogger(__name__)
 # The lifecycle folders a task file moves between under ``tasks/`` (registration → done/failed).
 # "Currently running" is tracked by the task's ``state.db`` status, not a physical folder.
 _LIFECYCLE_FOLDERS = ("pending", "done", "failed")
+
+# Infra error classes that are a fail-closed SECURITY / manual-action condition for ANY node kind
+# (agent or evaluator): a provider tree that could not be proven quiescent (WRI-012
+# ``CONTAINMENT_UNVERIFIED``) or a missing host isolation capability with no qualifying fallback
+# (WRI-002 ``CAPABILITY_UNAVAILABLE``). Never a quality fail, never a park, never a shippable green
+# diff — the error-class dispatch checks this before the evaluator-vs-node split (C1).
+_CONTAINMENT_MANUAL_CLASSES = frozenset(
+    {ErrorClass.CONTAINMENT_UNVERIFIED, ErrorClass.CAPABILITY_UNAVAILABLE}
+)
 
 
 def _utc_now_iso() -> str:
@@ -2101,7 +2111,13 @@ class Orchestrator:
                 raise InstructionBundleError(
                     "no persisted instruction-manifest digest to resume against; rerun fresh"
                 )
-            load_instruction_bundle(bundle_dir, expected)  # fail-closed verify
+            loaded = load_instruction_bundle(bundle_dir, expected)  # fail-closed verify
+            # WRI-009/H3: repopulate the frozen (key, digest) entries from the verified manifest so
+            # ``_task_packet_digest`` is not ``None`` on resume — otherwise the audit commit would
+            # silently skip ``_assert_lifecycle_matches_packet`` and a task file rewritten while the
+            # task was parked could be committed unchecked (the fresh path always records the digest
+            # via ``freeze_task_packet``).
+            p.instruction_entries.extend(loaded.entries)
             self._publish_frozen_task_and_instructions(p, inputs, bundle_dir)
             return
         if bundle_dir.exists():
@@ -2270,7 +2286,16 @@ class Orchestrator:
         (preflight, branch) + terminal handling live in the callers; this is the engine core."""
         # WRI-001 pre-launch invariant (fresh + resume): the exchange root may hold at most this
         # task's directory. Fails closed on a stale/foreign exchange before any provider launches.
-        assert_exchange_current_task_only(self._exchange_root, p.task.id)
+        # H1: a stale/foreign/locked entry is an operator-remediable condition — route it to a clean
+        # ``manual_action_required`` (naming the offending entry) instead of letting the bare
+        # ``ExchangeError`` escape uncaught and crash-loop the daemon (the border already holds — no
+        # provider has launched). Mirrors the adjacent ``ExchangeSealError`` handling below.
+        try:
+            assert_exchange_current_task_only(self._exchange_root, p.task.id)
+        except ExchangeError as exc:
+            return self._go_terminal(
+                p, Status.MANUAL_ACTION_REQUIRED, manual_reason=f"exchange not clean: {exc}"
+            )
         # WRI-007: on a continue, establish the verified current-task exchange before any node runs:
         # restore + verify the latest sealed snapshot (terminal continue), verify-and-reuse the
         # still-active exchange (parked/crashed continue), or refuse a contaminated/unsafe task. A
@@ -2388,12 +2413,20 @@ class Orchestrator:
                 NodeInfraError(str(exc), error_class=ErrorClass.CANCELLED),
             )
         except EvaluatorInfraError as exc:
+            self._sync_counters_from_run_state(p, run_state)
+            # C1: the error-class dispatch comes BEFORE the evaluator degrade-to-manual. A
+            # containment/capability failure is a security condition for every node kind — an
+            # evaluator's (green) diff does not make an unproven process tree or a missing isolation
+            # capability shippable — so it must take the same fail-closed path as an agent node
+            # (flag the exchange unsafe, skip the seal, withhold Git), never the honest-terminal
+            # degrade below.
+            if exc.error_class in _CONTAINMENT_MANUAL_CLASSES:
+                return self._terminal_infra_manual(p, exc, run_state)
             # An evaluator that could not *run* (infra/misconfig) must not discard an already-green
             # diff: degrade to manual (branch preserved, operator reviews/publishes), not failed.
             # ``str(exc)`` already carries the real cause (e.g. ``agent_no_progress``); when the
             # branch has no diff, say so plainly so the manual terminal never implies a change to
             # review that does not exist (F7 — honest terminal).
-            self._sync_counters_from_run_state(p, run_state)
             reason = str(exc)
             # EXPERIMENTAL(no-work-infra): empty-diff annotation on the degrade-to-manual reason.
             if not read_final_diff(self._artifacts_root, p.task.id).strip():
@@ -2416,33 +2449,34 @@ class Orchestrator:
                 # queue. The checkpoint is already persisted; the next watch tick / process start
                 # resumes from current_node (or fails it past agents.retry.max_blocked_s).
                 return self._park(p, run_state, exc)
-            if exc.error_class in (
-                ErrorClass.CONTAINMENT_UNVERIFIED,
-                ErrorClass.CAPABILITY_UNAVAILABLE,
-            ):
-                # WRI-012 ``CONTAINMENT_UNVERIFIED``: the provider process tree could not be proven
-                # quiescent — an unknown background/reparented descendant may still be writing.
-                # WRI-002 ``CAPABILITY_UNAVAILABLE`` (no qualifying fallback): a required host
-                # isolation capability is missing and no same-or-stricter provider could isolate the
-                # node here (or Claude has no fallback). Both are security / manual-action
-                # conditions, never a quality fail and never an auto-resumable park: surface to an
-                # operator (terminal ``manual_action_required`` blocks continuation and the next
-                # task) to install the dependency, switch host, or knowingly relax isolation.
-                if exc.error_class is ErrorClass.CONTAINMENT_UNVERIFIED:
-                    # WRI-007: the provider tree is not proven quiescent, so the active exchange may
-                    # still be mutated by an unknown descendant. Mark it unsafe so the terminal seam
-                    # does not seal it and every later launch is blocked until an operator resolves.
-                    self._store.update_task(p.task.id, exchange_active_unsafe=1)
-                return self._fail(
-                    p,
-                    str(exc),
-                    status=Status.MANUAL_ACTION_REQUIRED,
-                    node_id=run_state.current_node,
-                    run_state=run_state,
-                )
+            if exc.error_class in _CONTAINMENT_MANUAL_CLASSES:
+                return self._terminal_infra_manual(p, exc, run_state)
             return self._fail(p, str(exc), node_id=run_state.current_node, run_state=run_state)
         self._sync_counters_from_run_state(p, run_state)
         return self._finish_engine_run(p, result)
+
+    def _terminal_infra_manual(
+        self, p: _Pipeline, exc: NodeInfraError, run_state: FlowRunState
+    ) -> PipelineResult:
+        """Route a containment/capability infra error to a fail-closed manual terminal (C1).
+
+        Shared by the evaluator and non-evaluator infra handlers so the security dispatch is
+        identical regardless of node kind. ``CONTAINMENT_UNVERIFIED`` flags the active exchange
+        unsafe FIRST (WRI-007): the provider tree is not proven quiescent, so an unknown descendant
+        may still be writing — the terminal seam must not seal it, and the terminal Git/cleanup is
+        withheld (``_fail`` / ``_go_terminal`` honor the flag), holding the tree until an operator
+        resolves. ``CAPABILITY_UNAVAILABLE`` (WRI-002) has no live writer, so only the manual
+        terminal applies.
+        """
+        if exc.error_class is ErrorClass.CONTAINMENT_UNVERIFIED:
+            self._store.update_task(p.task.id, exchange_active_unsafe=1)
+        return self._fail(
+            p,
+            str(exc),
+            status=Status.MANUAL_ACTION_REQUIRED,
+            node_id=run_state.current_node,
+            run_state=run_state,
+        )
 
     def _park(self, p: _Pipeline, run_state: FlowRunState, exc: NodeInfraError) -> PipelineResult:
         """Soft, resumable pause on transient infra exhaustion or an operator stop (B-lite). NOT a
@@ -3441,6 +3475,19 @@ class Orchestrator:
 
     # --- terminal handling ----------------------------------------------------------------
 
+    def _exchange_active_unsafe(self, task_id: str) -> bool:
+        """True when the task's active exchange is flagged unsafe (WRI-012 quiescence barrier).
+
+        The provider tree could not be proven quiescent, so no Git action, cleanup checkout, or
+        exchange seal may run against a tree an unknown descendant might still be writing
+        (architecture.md: no manifest, check, Git action, seal, or next task before quiescence is
+        proven). A task with no row yet (never registered) reads as safe."""
+        try:
+            _contaminated, active_unsafe = self._store.get_exchange_guard(task_id)
+        except KeyError:
+            return False
+        return active_unsafe
+
     def _fail(
         self,
         p: _Pipeline,
@@ -3467,6 +3514,17 @@ class Orchestrator:
         """
         self._write_infra_failure_report(p, node_id=node_id, error=error, run_state=run_state)
         if not p.branch:
+            return self._go_terminal(p, status, manual_reason=error)
+        if self._exchange_active_unsafe(p.task.id):
+            # WRI-012 quiescence barrier: the provider tree is not proven quiescent, so no Git
+            # action may run against a tree an unknown descendant might still be writing. Withhold
+            # the terminal commit/push (the failure report is already written); ``_go_terminal``
+            # likewise withholds the cleanup checkout and the seal, and the flag blocks the next
+            # launch until an operator resolves.
+            self._log(p.task.id).warning(
+                "infra-terminal publish withheld: provider tree not proven quiescent "
+                "(exchange unsafe); no commit/push"
+            )
             return self._go_terminal(p, status, manual_reason=error)
         moved = False
         try:
@@ -3529,11 +3587,26 @@ class Orchestrator:
         after the cleanup checkout.
         """
         final = status
-        cleanup = self._observe(
-            p,
-            "terminal cleanup",
-            lambda: self._git.terminal_cleanup(p.task.id, mode=self._branch_mode(p.task)),
-        )
+        if self._exchange_active_unsafe(p.task.id):
+            # WRI-012 quiescence barrier: do not run a checkout/cleanup Git action while an unknown
+            # descendant may still be writing the working tree. Leave HEAD as-is and report unsafe;
+            # the seal is withheld downstream and the flag holds the next task (the pre-launch
+            # ``assert_exchange_current_task_only`` refuses to start over an un-cleared exchange)
+            # until an operator resolves.
+            cleanup = CleanupOutcome(
+                safe=False,
+                target_branch=self._config.repo.base_branch,
+                error="terminal cleanup withheld: provider tree not proven quiescent (WRI-012)",
+            )
+            self._log(p.task.id).warning(
+                "terminal cleanup withheld: provider tree not proven quiescent; HEAD left as-is"
+            )
+        else:
+            cleanup = self._observe(
+                p,
+                "terminal cleanup",
+                lambda: self._git.terminal_cleanup(p.task.id, mode=self._branch_mode(p.task)),
+            )
         if not cleanup.safe and status is Status.DONE:
             # Publishing finished but the working copy could not be safely restored → manual.
             final = Status.MANUAL_ACTION_REQUIRED

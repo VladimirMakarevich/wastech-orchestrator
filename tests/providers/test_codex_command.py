@@ -217,7 +217,22 @@ def test_forbidden_extra_args_in_request_are_rejected(
 
 @pytest.mark.parametrize(
     "flag",
-    ["-c", "--config", "-p", "--profile", "-P", "--sandbox", "--add-dir", "--ignore-user-config"],
+    [
+        "-c",
+        "--config",
+        "-p",
+        "--profile",
+        "-P",
+        "--sandbox",
+        "--add-dir",
+        "--ignore-user-config",
+        # C2 (WRI-003 AC6): approval/sandbox-mode selectors an operator must not slip in — they
+        # replace the ``never`` approval policy the adapter owns and/or turn on a ``--sandbox`` mode
+        # that makes Codex drop our ``default_permissions="worc"`` profile (private-file denials).
+        "--full-auto",
+        "-a",
+        "--ask-for-approval",
+    ],
 )
 def test_reserved_authority_extra_args_are_rejected(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest], flag: str
@@ -230,6 +245,16 @@ def test_reserved_authority_extra_args_are_rejected(
     # inline form is caught too
     with pytest.raises(ProviderError):
         _argv(replace(codex_config, extra_args=(f"{flag}=x",)), make_request())
+
+
+def test_reserved_approval_flag_in_request_extra_args_is_rejected(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # A flow node's ``extra_args`` (request-level) is checked exactly like config-level, so a node
+    # cannot weaken the envelope with ``--full-auto`` either (envelope-cannot-be-weakened rule).
+    with pytest.raises(ProviderError) as exc:
+        _argv(codex_config, make_request(extra_args=["--full-auto"]))
+    assert exc.value.error_class is ErrorClass.CONFIGURATION_ERROR
 
 
 def test_benign_extra_args_are_appended(

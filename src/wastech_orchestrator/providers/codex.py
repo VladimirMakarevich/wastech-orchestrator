@@ -114,6 +114,15 @@ _RESERVED_CODEX_FLAGS: frozenset[str] = frozenset(
         "--permission-profile",
         "-s",
         "--sandbox",
+        # Approval/sandbox-mode selectors: ``--full-auto`` turns on ``--sandbox workspace-write``
+        # (and an auto approval policy), and any ``-a``/``--ask-for-approval`` overrides the
+        # ``never`` policy the adapter owns. Selecting a ``--sandbox`` mode makes Codex stop
+        # applying our generated ``default_permissions="worc"`` profile, so the private-file read
+        # denials (``.worc``/``.env``/``state.db``) silently vanish — the isolation this cluster
+        # exists to enforce. Reserved regardless of ``strict_isolation`` (WRI-003 AC6).
+        "--full-auto",
+        "-a",
+        "--ask-for-approval",
         "--add-dir",
         "--ignore-user-config",
         "--ignore-rules",
@@ -378,7 +387,8 @@ def build_codex_argv(
     Raises :class:`ProviderError` (``CONFIGURATION_ERROR``) when ``extra_args`` would weaken or
     replace the owned authority: the absolutely-forbidden ``--dangerously*`` / ``--yolo`` /
     ``--ignore-rules`` / bare ``--sandbox`` flags, and the reserved authority-bearing flags
-    (``-c``/``--config``, ``-p``/``--profile``, ``-P``, ``-s``/``--sandbox``, ``--add-dir``,
+    (``-c``/``--config``, ``-p``/``--profile``, ``-P``, ``-s``/``--sandbox``, the approval/sandbox
+    selectors ``--full-auto`` / ``-a``/``--ask-for-approval``, ``--add-dir``,
     ``--ignore-user-config``, ``--enable``/``--disable``, ...). Isolation is a generated permission
     profile via ``default_permissions`` (:func:`_isolation_argv`); the full-access escape is
     reached only through the ``sandbox: danger-full-access`` config field, gated by

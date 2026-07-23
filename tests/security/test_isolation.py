@@ -108,6 +108,16 @@ def test_codex_reserved_extra_arg_is_flagged(codex_config: ProviderConfig) -> No
     assert reasons and any("reserved" in r for r in reasons)
 
 
+@pytest.mark.parametrize("flag", ["--full-auto", "-a", "--ask-for-approval"])
+def test_codex_reserved_approval_extra_arg_is_flagged(
+    codex_config: ProviderConfig, flag: str
+) -> None:
+    # C2 (WRI-003 AC6): the approval/sandbox-mode selectors are reserved, so the OFFLINE preflight
+    # (strict_isolation gate) reports them before any launch — not only the run-time argv builder.
+    reasons = codex_mod.isolation_reasons(replace(codex_config, extra_args=(flag, "on-failure")))
+    assert reasons and any("reserved" in r for r in reasons)
+
+
 # --- WRI-002: host-aware sandbox availability + reserved Claude extra_args
 # -------------------------
 

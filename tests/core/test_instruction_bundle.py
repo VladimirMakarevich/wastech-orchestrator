@@ -195,6 +195,23 @@ def test_manifest_roundtrip_verifies(tmp_path: Path) -> None:
     assert loaded.manifest_digest == digest
 
 
+def test_load_returns_file_entries_for_resume(tmp_path: Path) -> None:
+    # H3: a resumed run repopulates ``instruction_entries`` from the verified manifest so the
+    # WRI-009 lifecycle-vs-packet audit check runs on resume. ``load`` must therefore surface the
+    # real (key, sha256) file entries — including the task packet — and exclude the synthetic
+    # control-digest entry (which is not a file under the bundle).
+    import hashlib
+
+    bundle, digest = _frozen_bundle(tmp_path)
+    loaded = load_instruction_bundle(bundle, digest)
+    keys = {key for key, _ in loaded.entries}
+    assert TASK_PACKET_KEY in keys and REPO_INSTRUCTIONS_KEY in keys
+    assert not any(key.startswith("control::") for key, _ in loaded.entries)
+    # The task-packet digest recovered from the manifest is the sha256 of the frozen packet file.
+    packet_digest = next(d for key, d in loaded.entries if key == TASK_PACKET_KEY)
+    assert packet_digest == hashlib.sha256((bundle / TASK_PACKET_KEY).read_bytes()).hexdigest()
+
+
 def test_manifest_verify_rejects_wrong_parent_digest(tmp_path: Path) -> None:
     bundle, _ = _frozen_bundle(tmp_path)
     with pytest.raises(InstructionBundleError, match="!= expected"):

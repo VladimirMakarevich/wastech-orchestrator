@@ -3811,6 +3811,50 @@ def test_wri011_freezes_instruction_inputs_end_to_end(
     assert impl and all(r.repository_instructions_path for r in impl)
 
 
+def test_wri009_resume_repopulates_task_packet_digest(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # H3 (WRI-009 ↔ WRI-011): on ``rerun --continue`` the frozen (key, digest) entries must be
+    # repopulated from the verified manifest so ``_task_packet_digest`` is NOT None — otherwise
+    # ``commit_audit`` silently skips the lifecycle-vs-packet check on resume and a task file
+    # rewritten while the task was parked could be committed unchecked. The fresh path always
+    # records the digest; this asserts the resume freeze path recovers the SAME one.
+    from types import SimpleNamespace
+
+    from wastech_orchestrator.core.flow.nodes import NodeInputs
+
+    _commit_agents_md(git_repo, git_run, "REPO RULES\n")
+    providers = _both()
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    tid = "task-h3-resume"
+    result = orch.run_task(_complete_task(tmp_path, tid))
+    assert result.final_status is Status.DONE
+    fresh_digest = store.get_instruction_manifest_digest(tid)
+    assert fresh_digest  # fresh run persisted the composite manifest digest
+
+    # The resume freeze path loads + verifies the persisted bundle and repopulates the entries.
+    p = SimpleNamespace(task=SimpleNamespace(id=tid), instruction_entries=[])
+    orch._freeze_task_and_repo_instructions(p, NodeInputs(flow_dir=str(tmp_path)), resume=True)  # type: ignore[arg-type]
+    packet_digest = orch._task_packet_digest(p)  # type: ignore[arg-type]
+    assert packet_digest is not None  # regression: was None on resume (check silently skipped)
+    # And it is the sha256 of the frozen private task packet, so commit_audit verifies against it.
+    import hashlib
+
+    frozen_packet = art / "instruction-bundles" / tid / "task" / "task.md"
+    assert packet_digest == hashlib.sha256(frozen_packet.read_bytes()).hexdigest()
+
+
 def test_wri011_midrun_agents_edit_does_not_change_frozen_instructions(
     git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:
@@ -3913,3 +3957,58 @@ def test_containment_unverified_marks_exchange_unsafe_and_skips_seal(
     assert result.final_status is Status.MANUAL_ACTION_REQUIRED
     assert store.get_exchange_guard("task-unsafe")[1] is True  # exchange_active_unsafe set
     assert not exchange_seal_root(art, "task-unsafe").exists()  # no snapshot built over the tree
+    # C1 part 2: the terminal Git/cleanup is withheld while the tree is not proven quiescent — the
+    # cleanup checkout did not run (no Git action against a possibly-live working tree).
+    task = store.get_task("task-unsafe")
+    assert task is not None and task.cleanup_completed is False
+    assert task.cleanup_last_error is not None and "not proven quiescent" in task.cleanup_last_error
+
+
+def test_containment_unverified_on_evaluator_marks_unsafe_and_skips_seal(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # C1 (WRI-012 ↔ WRI-007 seam): an EVALUATOR node (review) whose provider tree cannot be proven
+    # quiescent must fail closed exactly like an agent node — even though its (green) diff would
+    # otherwise be shippable. Before the fix the evaluator branch degraded straight to manual
+    # WITHOUT flagging the exchange unsafe, so the seal ran and the leftover tree leaked to the next
+    # task. Now the error-class dispatch precedes the evaluator/agent split.
+    providers = _both(infra_fail={"review"}, infra_error_class=ErrorClass.CONTAINMENT_UNVERIFIED)
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-eval-unsafe"))
+
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+    assert "review" in _ran_nodes(store, "task-eval-unsafe")  # the evaluator did run
+    assert "publish" not in _ran_nodes(store, "task-eval-unsafe")  # nothing downstream
+    assert store.get_exchange_guard("task-eval-unsafe")[1] is True  # exchange_active_unsafe set
+    assert not exchange_seal_root(art, "task-eval-unsafe").exists()  # not sealed over the tree
+    task = store.get_task("task-eval-unsafe")
+    assert task is not None and task.cleanup_completed is False  # Git/cleanup withheld
+
+
+def test_stale_foreign_exchange_goes_manual_not_crash(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # H1: a stale/foreign entry left in the exchange root (e.g. a prior task whose seal was
+    # interrupted) must fail closed to manual_action_required — never let a bare ExchangeError
+    # escape uncaught and crash-loop the daemon. The border still holds (no provider launches over a
+    # dirty exchange), so nothing downstream runs.
+    providers = _both()
+    orch, store, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    exchange_root = Path(git_repo.clone) / ".worc-io"
+    (exchange_root / "task-OTHER").mkdir(parents=True)  # foreign leftover from a prior task
+
+    # Must NOT raise — returns a clean terminal instead of crashing.
+    result = orch.run_task(_complete_task(tmp_path, "task-h1"))
+
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+    task = store.get_task("task-h1")
+    assert task is not None and task.status is Status.MANUAL_ACTION_REQUIRED
+    assert not _ran_nodes(store, "task-h1")  # no node launched over the dirty exchange
+    assert task.cleanup_last_error is not None and "task-OTHER" in task.cleanup_last_error
+    assert ledger.records()[0]["final_status"] == "manual_action_required"

@@ -95,6 +95,11 @@ class LoadedInstructionBundle:
 
     root: Path
     manifest_digest: str
+    #: Every frozen ``(bundle-key, sha256)`` file entry (task packet, repository instructions, and
+    #: skill packages) recomputed during verification — the synthetic control-digest entry is
+    #: excluded. Lets a resumed run repopulate ``instruction_entries`` so the WRI-009 lifecycle-vs-
+    #: packet audit check runs on resume exactly as on the fresh path (H3).
+    entries: tuple[tuple[str, str], ...] = ()
 
 
 def instruction_bundle_dir(private_home: Path, task_id: str) -> Path:
@@ -339,6 +344,7 @@ def load_instruction_bundle(
     manifest_entries = manifest["entries"]
     assert isinstance(manifest_entries, list)  # validated by _read_manifest
     entries: list[tuple[str, str]] = []
+    file_entries: list[tuple[str, str]] = []  # real files only (no synthetic control entry)
     for entry in manifest_entries:
         if not isinstance(entry, dict) or "path" not in entry:
             raise InstructionBundleError("malformed instruction-bundle manifest entry")
@@ -352,10 +358,14 @@ def load_instruction_bundle(
         inspect_frozen_source(
             path, inspector, label="frozen instruction input", error_cls=InstructionBundleError
         )
-        entries.append((key, sha256_file(path)))
+        file_digest = sha256_file(path)
+        entries.append((key, file_digest))
+        file_entries.append((key, file_digest))
     if digest_entries(entries) != expected_digest:
         raise InstructionBundleError(
             f"frozen instruction bundle content drifted from its recorded digest "
             f"({bundle_dir.as_posix()})"
         )
-    return LoadedInstructionBundle(root=bundle_dir, manifest_digest=expected_digest)
+    return LoadedInstructionBundle(
+        root=bundle_dir, manifest_digest=expected_digest, entries=tuple(file_entries)
+    )
