@@ -283,6 +283,25 @@ def _run_claude(scenario: str, cli_args: list[str]) -> int:
     return 2
 
 
+def _run_codex_sandbox(cli_args: list[str]) -> int:
+    """Model ``codex sandbox -P`` for the WRI-003 no-model canary.
+
+    Faithfully simulates the orchestrator's generated permission profile: a read of the exchange
+    (``.worc-io``) is allowed; a read of the private home and any write are denied. Deliberately
+    **scenario-independent** — the canary must pass so the real ``exec`` scenario below plays out;
+    genuine OS enforcement is proven by the host smoke, not this stand-in. A probe command follows
+    the ``--`` separator (e.g. ``-- /bin/cat <path>`` or ``-- /bin/sh -c "printf x >> <path>"``).
+    """
+    probe = cli_args[cli_args.index("--") + 1 :] if "--" in cli_args else []
+    probe_str = " ".join(probe)
+    is_write = ">>" in probe_str
+    reads_exchange = ".worc-io" in probe_str  # exchange subtree (not a substring of `.worc/…`)
+    if reads_exchange and not is_write:
+        return 0
+    sys.stderr.write("sandbox: operation not permitted\n")
+    return 1
+
+
 _DIALECTS = {"codex": _run_codex, "claude": _run_claude}
 
 
@@ -331,6 +350,12 @@ def main() -> int:
     # Drain stdin (the prompt) so the parent's write never raises a broken pipe.
     with contextlib.suppress(OSError):
         sys.stdin.read()
+
+    # WRI-003: the Codex adapter runs a no-model ``codex sandbox -P`` canary BEFORE ``exec``. Model
+    # it scenario-independently (exchange readable, private/writes denied) so the canary passes and
+    # the ``exec`` scenario below is what the test actually exercises.
+    if cli_name == "codex" and cli_args and cli_args[0] == "sandbox":
+        return _run_codex_sandbox(cli_args)
 
     # ``success_edit`` behaves like ``success`` but also makes a deterministic code change in the
     # working directory (the clone), so a pipeline run has something to commit (phases 4–5 e2e).

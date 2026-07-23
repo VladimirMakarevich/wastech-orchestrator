@@ -7,11 +7,11 @@
 ## Зависимости
 
 - **Требует P0.** `observation_mode: none`/`events` безопасны только когда finalize уже независим от тёплой сессии и засеян `SupervisorPacket` (иначе на прогоне без наблюдений finalize теряет грунтинг). Не начинать P1, пока P0 не смёржен.
-- Точный token-budget (`max_digest_tokens` в токенах) опирается на уже реализованный [normalized-usage-accounting.md](normalized-usage-accounting.md); в P1 достаточно char/count-границ, токенную точность подключаем как уточнение.
+- **Актуализация 2026-07-23: substrate уже готов — `max_digest_tokens` вводим сразу в реальных токенах.** [normalized-usage-accounting.md](normalized-usage-accounting.md) смёржен (нормализованный usage per attempt: `NormalizedUsage`, `compute_usage_delta`, колонки на `provider_attempts`), поэтому промежуточная char/count-граница больше не нужна как обязательный этап — токенный бюджет берём из нормализованного usage с самого начала. (Char-граница остаётся допустимым запасным вариантом, но не предпосылкой.)
 
 ## Проблема
 
-После P0 finalize дешёвый и воспроизводимый, но per-step наблюдения по-прежнему запускаются на **каждой** executed non-`tool`/`checks` ноде и по-прежнему на тёплой растущей сессии. На исследованном прогоне шесть наблюдений стоили 375 726 input-токенов и $0.44, не влияя на исход задачи (supervisor advisory-only). Один общий `SupervisorConfig` (`role_file, model, reasoning, provider` — `config/schema.py:470`) применяется и к дешёвому наблюдению, и к сложному finalize: нельзя задать low для заметок и medium для синтеза, нельзя выключить наблюдения, сохранив summary. Flow-local блок (`SupervisorBlock`: `role_file, finalize_role_file, handoff_role_file, emit_follow_ups` — `core/flow/schema.py:195`) умеет менять только формулировки, не cadence.
+После P0 finalize дешёвый и воспроизводимый, но per-step наблюдения по-прежнему запускаются на **каждой** executed non-`tool`/`checks` ноде и по-прежнему на тёплой растущей сессии. На исследованном прогоне шесть наблюдений стоили 375 726 input-токенов и $0.44, не влияя на исход задачи (supervisor advisory-only). Один общий `SupervisorConfig` (`role_file, model, reasoning, provider` — `config/schema.py:478`) применяется и к дешёвому наблюдению, и к сложному finalize: нельзя задать low для заметок и medium для синтеза, нельзя выключить наблюдения, сохранив summary. Flow-local блок (`SupervisorBlock`: `role_file, finalize_role_file, handoff_role_file, emit_follow_ups` — `core/flow/schema.py:195`) умеет менять только формулировки, не cadence.
 
 ## Требуемый результат
 
@@ -67,11 +67,11 @@ flow:
 
 ## В объёме P1
 
-1. Расширить `SupervisorConfig` вложенными `observe`/`finalize`/`handoff` блоками; сохранить обратную совместимость плоских `model`/`reasoning`/`provider` (или явно смигрировать — greenfield, миграции не нужны). Bump версии схемы + `config/loader.py` + `config/validation.py` (reasoning ∈ allowlist, provider ∈ `agents.allowed`, mode/triggers валидны).
+1. Расширить `SupervisorConfig` вложенными `observe`/`finalize`/`handoff` блоками; сохранить обратную совместимость плоских `model`/`reasoning`/`provider` (или явно смигрировать — greenfield, миграции не нужны). Bump версии схемы (текущая `CONFIG_SCHEMA_VERSION = 31` → 32) + `config/loader.py` + `config/validation.py` (reasoning ∈ allowlist, provider ∈ `agents.allowed`, mode/triggers валидны).
 2. Добавить `observation_mode` в flow-local `SupervisorBlock` (сужение глобальной политики).
 3. В post-node hook **всегда** писать детерминированную step-запись (node/kind/outcome/факты, `note=""`), а LLM-observer вызывать **условно** по mode/триггерам. Это гарантирует полноту ledger/пакета даже когда наблюдения выключены.
 4. Реализовать event-детекцию (rework/failure/hitl/dangerous_diff/fallback/subtask_boundary) из данных, уже доступных в hook.
-5. Бюджеты `max_calls` + `max_digest_tokens` (char-граница в P1; токенная — через normalized usage) и `on_budget_exhausted: deterministic_only`.
+5. Бюджеты `max_calls` + `max_digest_tokens` (в реальных токенах через уже готовый normalized usage; char-граница — лишь запасной вариант) и `on_budget_exhausted: deterministic_only`.
 6. Packaged-дефолты: content-flow → `observation_mode: none`; `implementation` → `events`.
 7. Тесты (см. ниже) и синхронизация docs + `packaged/config.example.yaml` + `packaged/guide/`.
 

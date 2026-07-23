@@ -72,8 +72,6 @@ def _provider_block(pid: ProviderId, *, primary: bool) -> dict[str, Any]:
         "reasoning": reasoning,
         "timeout_seconds": 7200,
     }
-    if pid is ProviderId.CODEX:
-        block["sandbox"] = "workspace-write"
     if pid is ProviderId.CLAUDE:
         block["max_turns"] = 400
         # Off by default; when on, a run that hits ``max_turns`` pauses for a Telegram continue/stop

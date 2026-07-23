@@ -1,21 +1,32 @@
-# WRI-005 — Relocate private runtime state outside the working tree
+# Relocate private runtime state outside the working tree (deferred — out of scope)
 
-**Status:** open **Milestone:** 2 (defense in depth) **Source:** [decision record](README.md); shares runtime placement context with the tracked [worktree decision record](../archive/concurrent-task-worktrees.md) **Dependencies:** WRI-002, WRI-003, WRI-004, WRI-007, WRI-010
+Status: **out of scope / not scheduled** Date: 2026-07-23 Owner: Vladimir Makarevich Origin: shipped as task **WRI-005** (Milestone 2, defense in depth) of the `agent-worc-read-isolation` cluster; that cluster's implementation tasks are complete and its working folder is removed, so this proposal is archived here for traceability. It is **not planned** for implementation now — the orchestrator's private runtime state stays in-repo under `<repo>/.worc` for the time being.
+
+This is a stake-in-the-ground design record, not an active spec. Nothing here overrides the hard invariants in [.agents/rules/](../../../.agents/rules/).
+
+## Context (self-contained — the read-isolation cluster is gone)
+
+The `agent-worc-read-isolation` cluster drew a boundary between three on-disk surfaces the orchestrator uses, so a coding-agent (Claude Code / Codex) launched in the repository working copy can read only what it needs:
+
+- **`control_home` = `<repo>/.worc`** — the operator-editable control plane discovered relative to the repo: `config.yaml`, the packaged `guide/`, the seeded editable `flows/` (+ their role prompts), and `tools/` executables.
+- **`private_home`** (today also `<repo>/.worc`) — private runtime state the agent must never read: `.env`, `state.db`, `logs/` + audit, the memory store, security reports, rejected task files, durable HITL/process-control data (PID/sentinel/children), and provider-attempt artifacts.
+- **`exchange_root` = `<repo>/.worc-io`** — the redacted, agent-facing exchange holding only the current task's curated inputs (plan, diff, findings, checks input, HITL packet).
+
+The cluster shipped (all landed on `main`): a typed, injected runtime layout naming those three surfaces (so no consumer rebuilds `repo_root / ".worc"`); the two-root private/exchange split with a redaction/path-safety publication boundary; provider process-tree quiescence proof; a frozen, provider-denied control plane and frozen agent-input bundles; Claude sandbox + tool-policy isolation and the Codex permission-profile isolation; and terminal-exchange sealing/restore. Crucially, **`control_home` and `private_home` both resolve to `<repo>/.worc` today** — the cluster made the split a _typed seam_, deliberately leaving the physical move of `private_home` out of tree as this separate, lower-priority, defense-in-depth task.
+
+This proposal is that physical move. It was scoped as **defense in depth, not a containment boundary**: relocating private state reduces its discoverability and blast radius, but the real access control is each provider's independently verified deny policy (Codex profile / supported-host Claude sandbox; native-Windows strict Claude omits Bash). An unsafe provider mode can still read a known external absolute path, so relocation alone must never be sold as protection.
+
+**Why deferred:** the typed-layout seam already lets every consumer read `private_home` from one place, so moving it later is mechanical and non-urgent; the in-repo `.worc` is gitignored and provider-denied, so the residual risk is bounded; and the move carries real cross-platform bootstrap/identity/migration cost (below) for a defense-in-depth-only gain. Revisit if private state in the working copy becomes a concrete problem (e.g. a provider mode that can read arbitrary absolute paths, or an operator requirement to keep the repo free of runtime state).
 
 ## Problem
 
-The current `.worc` directory mixes two different responsibilities:
-
-- An operator-editable control plane discovered relative to the repository: `config.yaml`, packaged guide copies, flows/role prompts, and tools.
-- Private runtime state: `.env`, `state.db`, logs/audit, memory, security reports, rejected files, durable HITL/process-control data, and provider attempt artifacts.
-
-Moving all of `.worc` would break bootstrap: the orchestrator needs the repository-local config before it can discover any configured external location, and install/upgrade intentionally seed editable flows and tools into `.worc`. Conversely, leaving private state under the agent `cwd` increases discoverability and blast radius.
+The current `.worc` directory mixes two different responsibilities: the operator-editable control plane (discovered relative to the repository) and private runtime state. Moving all of `.worc` would break bootstrap: the orchestrator needs the repository-local config before it can discover any configured external location, and install/upgrade intentionally seed editable flows and tools into `.worc`. Conversely, leaving private state under the agent `cwd` increases discoverability and blast radius.
 
 Relocation alone is not a hard cross-provider access control. Codex and supported-host Claude policies must deny the resolved external path independently; native-Windows strict Claude operation must continue to omit Bash. An unsafe provider mode can still read a known external absolute path.
 
 ## Required outcome
 
-Keep `control_home = <repo>/.worc` for repository-local configuration, guide, flows, and tools. Move `private_home` to a configurable per-repository directory under the platform's user-state/data location. Keep `exchange_root = <repo>/.worc-io`. All consumers use the typed WRI-004 layout and no longer infer private paths from `control_home`.
+Keep `control_home = <repo>/.worc` for repository-local configuration, guide, flows, and tools. Move `private_home` to a configurable per-repository directory under the platform's user-state/data location. Keep `exchange_root = <repo>/.worc-io`. All consumers use the typed runtime layout and no longer infer private paths from `control_home`.
 
 ## Bootstrap contract
 
@@ -34,7 +45,7 @@ Use the platform-appropriate user-state/data API rather than hardcoded `~/.local
 - Define the platform default and repository identity/hash behavior for Windows, macOS, and Linux/WSL.
 - Migrate runtime consumers: state DB, task logs/audit, memory, `.env`, security reports, rejected files, HITL, supervisor files, PID/sentinel/children records, and provider-attempt state.
 - Classify the install-created `.worc/workspace/` directory, which no code writes today: remove it from `WORC_RUNTIME_DIRS` or migrate it with the private state — do not leave an unclassified in-repo runtime path.
-- Keep flows, roles, tools, guide, and `config.yaml` under `control_home`; WRI-010 keeps the live control plane provider-denied and supplies frozen private execution inputs even after `private_home` moves.
+- Keep flows, roles, tools, guide, and `config.yaml` under `control_home`; the frozen-control-plane protection keeps the live control plane provider-denied and supplies frozen private execution inputs even after `private_home` moves.
 - Preserve `.worc/` ignore/exclude handling because the control plane remains in the repo. Add/retain the separate `.worc-io/` ignore and scoped-staging protection.
 - Update install, upgrade, preflight, recovery, cleanup, watch/down, status, diagnostics, and config-env-file discovery in the same implementation. Update every tool that documents or reads the in-repo private layout in the same change, including the repository's own `.claude/skills/analyze-task-run` skill and the operator guide.
 - Define greenfield adoption clearly: no production DB migration is promised, but install/upgrade must detect an old in-repo private-state layout and refuse ambiguous split-brain use with an actionable message.
@@ -64,7 +75,7 @@ Use the platform-appropriate user-state/data API rather than hardcoded `~/.local
 
 - Treating topology as provider containment.
 - Moving the repository-local editable control plane.
-- Cross-task worktrees/concurrency.
+- Cross-task worktrees/concurrency (see [concurrent-task-worktrees.md](concurrent-task-worktrees.md)).
 
 ## Likely implementation areas
 

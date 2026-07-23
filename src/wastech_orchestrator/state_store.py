@@ -100,7 +100,7 @@ def _utc_now_iso() -> str:
 # the running-cumulative ``usage_snapshot`` on ``editing_lineage`` and ``node_lineage``. All
 # nullable, so ``_migrate`` adds them on a brand-new (``0``) database; an older versioned DB is
 # refused fail-closed and recreated (greenfield).
-DB_SCHEMA_VERSION = 17
+DB_SCHEMA_VERSION = 18
 
 
 class IncompatibleStateError(Exception):
@@ -137,6 +137,21 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # continue/resume verifies; a differing digest is never resumed into the same provider session.
     if "instruction_manifest_digest" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN instruction_manifest_digest TEXT")
+    # v18 (WRI-007): terminal-exchange sealing guard flags. ``exchange_contaminated`` records that
+    # WRI-002 detected an agent-side exchange mutation, so the terminal seam quarantines the tree as
+    # evidence instead of sealing it (and continue is refused). ``exchange_active_unsafe`` records
+    # that the active exchange could not be safely sealed/removed — provider-tree quiescence was
+    # unproven, or a Windows lock/read-only blocked cleanup — so every later provider launch is
+    # blocked until it is resolved. Both survive a restart (the mutation/lock may be detected in one
+    # run and acted on in the next).
+    if "exchange_contaminated" not in task_cols:
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN exchange_contaminated INTEGER NOT NULL DEFAULT 0"
+        )
+    if "exchange_active_unsafe" not in task_cols:
+        conn.execute(
+            "ALTER TABLE tasks ADD COLUMN exchange_active_unsafe INTEGER NOT NULL DEFAULT 0"
+        )
     # v16: normalized token usage — the per-run delta on ``provider_attempts`` and the running
     # cumulative snapshot on the two lineage tables. All nullable, so no defaults.
     attempt_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(provider_attempts)")}
@@ -232,7 +247,9 @@ CREATE TABLE IF NOT EXISTS tasks (
     flow_fingerprint TEXT,
     blocked_since TEXT,
     control_bundle_digest TEXT,
-    instruction_manifest_digest TEXT
+    instruction_manifest_digest TEXT,
+    exchange_contaminated INTEGER NOT NULL DEFAULT 0,
+    exchange_active_unsafe INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS node_runs (
@@ -851,6 +868,10 @@ class StateStore:
                 current_node=None,
                 flow_run_counters=None,
                 flow_fingerprint=None,
+                # WRI-007: a fresh rerun starts from a clean exchange, so any prior terminal guard
+                # (contaminated tree / unsafe active dir) no longer applies to the new attempt.
+                exchange_contaminated=0,
+                exchange_active_unsafe=0,
             )
             c.execute("DELETE FROM subtasks WHERE task_id = ?", (task_id,))
             c.execute("DELETE FROM node_runs WHERE task_id = ?", (task_id,))
@@ -1089,6 +1110,24 @@ class StateStore:
             raise KeyError(task_id)
         digest = row["instruction_manifest_digest"]
         return None if digest is None else str(digest)
+
+    def get_exchange_guard(self, task_id: str) -> tuple[bool, bool]:
+        """Return ``(contaminated, active_unsafe)`` — the WRI-007 terminal-exchange guard flags.
+
+        ``contaminated`` means WRI-002 detected an agent-side exchange mutation, so the terminal
+        seam quarantines the tree instead of sealing it and continue is refused. ``active_unsafe``
+        means the active exchange could not be safely sealed/removed (unproven quiescence or a
+        Windows lock), so every later provider launch is blocked until it is cleared. Both default
+        to ``False`` for a task that never tripped either condition.
+        """
+        cur = self._conn.execute(
+            "SELECT exchange_contaminated, exchange_active_unsafe FROM tasks WHERE task_id = ?",
+            (task_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise KeyError(task_id)
+        return bool(row["exchange_contaminated"]), bool(row["exchange_active_unsafe"])
 
     def record_provider_attempt(
         self, attempt: ProviderAttemptRow, conn: sqlite3.Connection | None = None

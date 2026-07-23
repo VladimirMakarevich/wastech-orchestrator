@@ -53,6 +53,13 @@ from wastech_orchestrator.core.flow.engine_driver import (
     drive_flow,
     partition_decomposition,
 )
+from wastech_orchestrator.core.flow.exchange_seal import (
+    ExchangeCleanupBlocked,
+    ExchangeSealError,
+    ensure_current_exchange,
+    quarantine_contaminated,
+    seal_exchange,
+)
 from wastech_orchestrator.core.flow.instruction_bundle import (
     REPO_INSTRUCTION_NAMES,
     REPO_INSTRUCTIONS_KEY,
@@ -75,6 +82,7 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeServices,
 )
 from wastech_orchestrator.core.flow.nodes.exchange_publish import (
+    ExchangeMutationManual,
     publish_artifact,
     publish_file,
     publish_node_run_file,
@@ -169,8 +177,10 @@ from wastech_orchestrator.providers.base import (
     ProviderId,
 )
 from wastech_orchestrator.providers.exchange import (
+    ExchangeError,
     assert_exchange_current_task_only,
     clear_exchange_task_dir,
+    diff_exchange_manifests,
 )
 from wastech_orchestrator.providers.redaction import (
     read_denied_secrets,
@@ -1419,6 +1429,10 @@ class Orchestrator:
             finished_at=self._clock(),
         )
         self._store.set_status(task_id, declared)  # out-of-band operator override (no assert)
+        # WRI-007: the operator finalize/merge/PR-sync paths are terminal producers that bypass
+        # ``_go_terminal``, so they must seal the exchange too. Idempotent — a no-op when the
+        # pipeline terminal already sealed and removed the active exchange for this task.
+        self._seal_terminal_exchange(task_id, final=declared)
         self._relocate_task_file(row.source_path, task_id, declared)
         consume_pending_interactions(self._artifacts_root, task_id)
         if delete_branch and row.branch:
@@ -2256,8 +2270,25 @@ class Orchestrator:
         (preflight, branch) + terminal handling live in the callers; this is the engine core."""
         # WRI-001 pre-launch invariant (fresh + resume): the exchange root may hold at most this
         # task's directory. Fails closed on a stale/foreign exchange before any provider launches.
-        # Terminal seal/restore is WRI-007.
         assert_exchange_current_task_only(self._exchange_root, p.task.id)
+        # WRI-007: on a continue, establish the verified current-task exchange before any node runs:
+        # restore + verify the latest sealed snapshot (terminal continue), verify-and-reuse the
+        # still-active exchange (parked/crashed continue), or refuse a contaminated/unsafe task. A
+        # fresh run starts from the clean exchange the rerun/restart path already cleared.
+        if resume:
+            try:
+                contaminated, active_unsafe = self._store.get_exchange_guard(p.task.id)
+                ensure_current_exchange(
+                    self._exchange_root,
+                    self._artifacts_root,
+                    p.task.id,
+                    contaminated=contaminated,
+                    active_unsafe=active_unsafe,
+                )
+            except ExchangeSealError as exc:
+                return self._go_terminal(
+                    p, Status.MANUAL_ACTION_REQUIRED, manual_reason=f"exchange restore: {exc}"
+                )
         # WRI-010: freeze (fresh/restart) or load+verify (continue) the control plane before any
         # node runs, then bind every flow/supervisor/tool consumer to the frozen bundle instead of
         # live ``.worc``. A freeze/verify/parked-conflict failure is a fail-closed manual condition.
@@ -2340,7 +2371,15 @@ class Orchestrator:
             )
         except NodeManualRequired as exc:
             self._sync_counters_from_run_state(p, run_state)
-            return self._go_terminal(p, Status.MANUAL_ACTION_REQUIRED, manual_reason=str(exc))
+            # WRI-007: a detected agent-side exchange mutation (WRI-002) flags the tree contaminated
+            # so the terminal seam quarantines it as evidence instead of sealing it, and continue is
+            # refused. The flag is persisted (survives a restart between detection and teardown).
+            mutation = exc if isinstance(exc, ExchangeMutationManual) else None
+            if mutation is not None:
+                self._store.update_task(p.task.id, exchange_contaminated=1)
+            return self._go_terminal(
+                p, Status.MANUAL_ACTION_REQUIRED, manual_reason=str(exc), mutation=mutation
+            )
         except FlowCancelled as exc:
             self._sync_counters_from_run_state(p, run_state)
             return self._park(
@@ -2389,6 +2428,11 @@ class Orchestrator:
                 # conditions, never a quality fail and never an auto-resumable park: surface to an
                 # operator (terminal ``manual_action_required`` blocks continuation and the next
                 # task) to install the dependency, switch host, or knowingly relax isolation.
+                if exc.error_class is ErrorClass.CONTAINMENT_UNVERIFIED:
+                    # WRI-007: the provider tree is not proven quiescent, so the active exchange may
+                    # still be mutated by an unknown descendant. Mark it unsafe so the terminal seam
+                    # does not seal it and every later launch is blocked until an operator resolves.
+                    self._store.update_task(p.task.id, exchange_active_unsafe=1)
                 return self._fail(
                     p,
                     str(exc),
@@ -3476,6 +3520,7 @@ class Orchestrator:
         manual_reason: str | None = None,
         already_moved: bool = False,
         merge_outcome: str | None = None,
+        mutation: ExchangeMutationManual | None = None,
     ) -> PipelineResult:
         """Run terminal cleanup, set the final status, append exactly one ledger record.
 
@@ -3529,13 +3574,84 @@ class Orchestrator:
             "terminal",
             extra={"final_status": final.value, "pr_url": pr_url, "cleanup_safe": cleanup.safe},
         )
-        # Interim exchange teardown (WRI-001): drop this task's active exchange so the next task's
-        # pre-launch "current-task-only" invariant holds under the single-active-slot model. WRI-007
-        # replaces this with a quiescence-gated seal → checksum-verify into private audit → remove
-        # (and contaminated-tree quarantine); until then a `rerun --continue` from a terminal state
-        # rebuilds the exchange from the private artifacts on resume.
-        clear_exchange_task_dir(self._exchange_root, p.task.id)
+        # WRI-007 terminal exchange handling: seal a checksum-verified snapshot into the private
+        # audit and remove the active in-repo exchange (or quarantine a contaminated tree). It runs
+        # after WRI-012 has proven the provider tree quiescent (an unproven tree already set
+        # ``exchange_active_unsafe`` and blocks the seal). Never raises — the terminal status is
+        # already recorded and must stay stable.
+        self._seal_terminal_exchange(p.task.id, final=final, mutation=mutation)
         return PipelineResult(task_id=p.task.id, final_status=final, pr_url=pr_url)
+
+    def _seal_terminal_exchange(
+        self, task_id: str, *, final: Status, mutation: ExchangeMutationManual | None = None
+    ) -> None:
+        """Seal / quarantine the task's active exchange at a terminal transition (WRI-007).
+
+        Never raises: the terminal status is already committed, so any failure is logged and — when
+        it leaves an unsealed/undeleted tree — recorded as ``exchange_active_unsafe`` to block
+        every later provider launch until an operator resolves it. Idempotent: a task whose exchange
+        was already sealed/removed (e.g. an operator ``finalize`` after the pipeline terminal) is a
+        no-op. ``mutation`` carries the WRI-002 before/after manifests for a detected-mutation
+        terminal, so the contaminated tree is quarantined as evidence and never sealed.
+        """
+        log = self._log(task_id)
+        try:
+            contaminated, active_unsafe = self._store.get_exchange_guard(task_id)
+        except KeyError:
+            return
+        if active_unsafe:
+            # Quiescence was unproven (WRI-012 CONTAINMENT_UNVERIFIED): an unknown descendant may
+            # still be writing, so we must not build a manifest or touch the tree. Keep it in place;
+            # the flag already blocks every later launch until an operator resolves it.
+            log.warning(
+                "terminal exchange not sealed: active exchange unsafe (provider tree not proven "
+                "quiescent); later launches blocked until resolved"
+            )
+            return
+        if contaminated or mutation is not None:
+            self._store.update_task(task_id, exchange_contaminated=1)
+            expected = mutation.before if mutation is not None else None
+            observed: tuple[str, ...] = ()
+            if mutation is not None and mutation.before is not None and mutation.after is not None:
+                observed = diff_exchange_manifests(mutation.before, mutation.after)
+            try:
+                evidence = quarantine_contaminated(
+                    self._exchange_root,
+                    self._artifacts_root,
+                    task_id,
+                    expected=expected,
+                    observed_changes=observed,
+                )
+                log.warning(
+                    "contaminated exchange quarantined (never restore-eligible)",
+                    extra={"evidence": evidence.as_posix()},
+                )
+            except ExchangeCleanupBlocked as exc:
+                self._store.update_task(task_id, exchange_active_unsafe=1)
+                log.error("contaminated exchange quarantine blocked", extra={"error": str(exc)})
+            return
+        try:
+            result = seal_exchange(
+                self._exchange_root,
+                self._artifacts_root,
+                task_id,
+                metadata={"final_status": final.value, "sealed_at": self._clock()},
+            )
+            if result is not None:
+                log.info(
+                    "terminal exchange sealed",
+                    extra={"seal": result.seal_dir.as_posix(), "files": result.entry_count},
+                )
+        except ExchangeCleanupBlocked as exc:
+            # The snapshot sealed but the active dir could not be removed (a lock). The seal is
+            # kept (restore stays possible); block later launches until the lock is cleared.
+            self._store.update_task(task_id, exchange_active_unsafe=1)
+            log.error("terminal exchange cleanup blocked", extra={"error": str(exc)})
+        except (ExchangeError, ExchangeSealError) as exc:
+            # A path-safety violation surfaced by the seal walk (a planted symlink/hard-link/special
+            # file): the tree is not a clean snapshot. Block later launches and surface it.
+            self._store.update_task(task_id, exchange_active_unsafe=1)
+            log.error("terminal exchange seal failed (unsafe surface)", extra={"error": str(exc)})
 
     def _move_task_file(self, p: _Pipeline, final: Status) -> Path | None:
         """Move the task file to its lifecycle folder; see _relocate_task_file."""

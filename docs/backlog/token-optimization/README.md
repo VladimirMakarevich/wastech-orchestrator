@@ -4,6 +4,8 @@ Status: **open — measurement + content hygiene shipped; supervisor roadmap pen
 
 This folder groups the backlog items that came out of the 2026-07-16 token investigation into a single campaign with one execution order. The code and the mandatory rules remain authoritative; these documents are the design detail, not an implementation contract, and must not override the hard invariants in [../../../CLAUDE.md](../../../CLAUDE.md) / [../../../AGENTS.md](../../../AGENTS.md) / [../../../.agents/rules/](../../../.agents/rules/).
 
+> **Actualized 2026-07-23.** All five statuses were re-verified against the current code. Items #1–#2 are genuinely shipped (code + tests confirm every acceptance criterion); P0/P1/P2 are still unimplemented proposals (the supervisor code is unchanged since the analysis except for the WRI-011 finalize change). Two premises moved and are reflected in the item docs: **(a)** WRI-011 already made `finalize` read the task from a **frozen exchange packet by path** (context-footer), so P0's `SupervisorPacket` must be authored the same way (a frozen read-only artifact referenced by path in the two-root exchange layout), not as inline JSON; **(b)** the measurement substrate (#1) is merged, so P1's `max_digest_tokens` uses **real tokens from the start** — the char/count interim is dropped. Source line references in the item docs were refreshed (WRI churn shifted `orchestrator.py`/`supervisor.py`); the cited `tests/core/test_supervisor.py` references still hold. Still open and now unblocked: the **A/B** that all the headline numbers are gated on (~60–80k for #2; ~480k→30–60k for the supervisor) has not been run, and there is no read/report surface to observe usage yet — both are the cheapest next moves.
+
 ## Initial context
 
 The trigger was a single content run (`blog-review-happy-in-my-misfortunes-4`) whose token cost was dominated by the supervisor and inflated by broken accounting. Two analyses frame the work: the token analysis (F1–F5) and [../../analysis/2026-07-16-supervisor-token-optimization-options.md](../../analysis/2026-07-16-supervisor-token-optimization-options.md) (variants A–I, target architecture §6, phasing §8).
@@ -24,6 +26,8 @@ Three findings drive everything here:
 | [Supervisor P1 — observation cadence](supervisor-observation-cadence-p1.md) | `observation_mode: all\|selected\|events\|none`, event triggers, split observe/finalize model+reasoning, and `max_calls` / `max_digest_tokens` budgets. The main saver. | proposal |
 | [Supervisor P2 — responsibility split + telemetry](supervisor-responsibility-split-p2.md) | Extract a deterministic `StepRecorder`, make `SubtaskHandoff`/`SkillProposer` separately budgeted, and persist per-function usage/cost with a supervisor report in the task summary. | proposal |
 
+See [happy-path.md](happy-path.md) for a plain-language **before/after** walk-through of the analyzed `blog_article_revise` run — what the supervisor costs today (7 LLM calls, 480k input) versus after the whole roadmap ships (1 fresh finalize, < 60k), with diagrams and the quality guards that stay in place.
+
 ## Execution sequence
 
 The order is not a suggestion — two of the dependencies are correctness constraints, not preferences.
@@ -33,7 +37,7 @@ The order is not a suggestion — two of the dependencies are correctness constr
 | 1 | Normalized usage accounting | — | Foundation. Without a summation-safe per-attempt usage record, every downstream token claim (the A/Bs below, P1 budgets, P2 telemetry) is unmeasurable or wrong. |
 | 2 | Content-flow token hygiene | ships independently; A/B confirmation needs #1 | The default flip and docs ship without waiting; the "~60–80k saved, quality no worse" claim is only honest once #1 exists to measure it. |
 | 3 | Supervisor P0 | measurement from #1 for its A/B | **`finalize` must become packet-first and fresh before any cadence change.** Cutting observations first strands `finalize` with an empty digest — it re-reads the repo or thins the summary and degrades `follow_ups` / `memory_delta`. |
-| 4 | Supervisor P1 | **requires #3**; token budgets use #1 | `observation_mode: none`/`events` is safe only over the deterministic P0 packet; `max_digest_tokens` in real tokens needs #1 (char/count bounds suffice until then). |
+| 4 | Supervisor P1 | **requires #3**; token budgets use #1 | `observation_mode: none`/`events` is safe only over the deterministic P0 packet; `max_digest_tokens` in real tokens uses #1 — which is **shipped**, so real-token budgets are available from the start (a char/count bound is only a fallback, no longer an interim step). |
 | 5 | Supervisor P2 | **requires #4**; per-function telemetry uses #1 | Structural cleanup after the savings land — extracts the deterministic recorder P1 introduced and reports per-function usage on top of #1. Not on the savings critical path. |
 
 Items 1–2 are done. The live critical path is **P0 → P1 → P2**; do not start a later phase before its predecessor is merged, and never change supervisor cadence before the P0 packet exists.

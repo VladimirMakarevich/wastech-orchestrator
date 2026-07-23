@@ -62,6 +62,7 @@ Under `<target>/.worc/`:
   - `<NNNNNN>-<node>.json` — a node's structured result (e.g. the planning plan / subtasks).
   - `prompt-audit/` — present only when `config.prompt_audit: true`: `timeline.jsonl` (chronological per-node prompt + provider/model/attempt/fallback/status) and `<NNNNNN>-<node>.json`. If absent, note it as a **data gap** and recommend enabling it.
   - `publish/terminal-cleanup.json` — branch/cleanup outcome.
+- `exchange-seals/<task-id>/seal-<NNNNNN>/` (WRI-007) — the sealed, checksum-verified snapshot of the agent-readable **exchange** as it was at each terminal, with a `manifest.json` (the in-repo `.worc-io/<task-id>/` is removed at terminal, so this is where a terminal task's curated agent-facing plan/diff/findings live). Read the newest `seal-*` to see exactly what the agent last saw. `exchange-quarantine/<task-id>/<NNNNNN>/` holds a tree quarantined because mutation detection flagged an agent-side change (`evidence.json` = expected vs observed) — a signal the agent tried to write the read-only surface.
 - `state.db` (SQLite) — the **audit gold**. Query it directly (`sqlite3`):
   - `tasks` — full final row (status, `test_fix_cycles`, `review_fix_cycles`, `fix_iterations`, `decomposition_*`, `current_node`, `refinement_ran`).
   - `node_runs` — per node: status, outcome, **stage_attempts**, provider_used, **route_fallback**, error_class, commit_sha_before/after, skipped, skip_reason, timings.

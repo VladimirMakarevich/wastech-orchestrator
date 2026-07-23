@@ -53,6 +53,19 @@ CONTROL_BUNDLE_DIRNAME = "control-bundles"
 # agent-readable *injection* copies go to the exchange, never here.
 INSTRUCTION_BUNDLE_DIRNAME = "instruction-bundles"
 
+# The private-home subdirectory that holds each task's sealed terminal-exchange snapshots (WRI-007).
+# When a task reaches a terminal status the orchestrator seals a verified copy of its active
+# ``.worc-io`` exchange into ``<private_home>/<EXCHANGE_SEAL_DIRNAME>/<task-id>/seal-<NNNNNN>/`` and
+# removes the in-repo exchange; ``rerun --continue`` restores the latest verified snapshot. Like the
+# frozen bundles it lives under ``private_home`` (never agent-readable, transitively deny-covered).
+EXCHANGE_SEAL_DIRNAME = "exchange-seals"
+
+# The private-home subdirectory where a mutation-flagged exchange tree is quarantined as tainted
+# evidence (WRI-007). When WRI-002 detection reports an agent-side exchange mutation, the tree is
+# moved to ``<private_home>/<EXCHANGE_QUARANTINE_DIRNAME>/<task-id>/<NNNNNN>/`` together with the
+# parent-held expected and observed manifests; it is never sealed and never restore-eligible.
+EXCHANGE_QUARANTINE_DIRNAME = "exchange-quarantine"
+
 
 @dataclass(frozen=True)
 class RuntimeLayout:

@@ -4,6 +4,7 @@
 - **Связанный отчёт:** [полный анализ токенов](2026-07-16-blog-review-happy-in-my-misfortunes-4-token-analysis.md)
 - **Зона изменений:** `SupervisorConfig`, constant supervisor layer, post-node hook, summary finalization
 - **Статус:** proposal, код и конфигурация пока не изменены. Этот документ — трекер отдельной задачи «оптимизация supervisor»; P0-срез оформлен как отдельный backlog-документ [supervisor-finalize-packet-and-cadence.md](../backlog/token-optimization/supervisor-finalize-packet-and-cadence.md) (packet → fresh finalize → пропуск tool/checks), а сопутствующая задача по нормализации usage вынесена в [normalized-usage-accounting.md](../backlog/token-optimization/normalized-usage-accounting.md).
+- **Актуализация 2026-07-23:** статусы и строчные ссылки сверены с текущим кодом — актуальные номера строк см. в item-доках P0/P1 и в [README кампании](../backlog/token-optimization/README.md). Блок «Проверено по коду (2026-07-16)» ниже — датированный снимок и намеренно оставлен как есть; учтите дрейф из-за WRI-работы (напр., пост-node observe-hook сейчас `core/orchestrator.py:2902`, а не `:2484`; `_finalize_digest` — `supervisor.py:638`). Ключевое смысловое изменение: WRI-011 уже сделал finalize «пакетным» (задача читается из frozen-exchange пакета по пути), а normalized-usage-accounting смёржен — детали в item-доках.
 
 ---
 

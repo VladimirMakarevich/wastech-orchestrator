@@ -17,6 +17,11 @@ from pathlib import Path
 import pytest
 
 from wastech_orchestrator.check_runner import CheckRunner
+from wastech_orchestrator.core.flow.exchange_seal import (
+    exchange_quarantine_root,
+    exchange_seal_root,
+)
+from wastech_orchestrator.core.flow.nodes.exchange_publish import ExchangeMutationManual
 from wastech_orchestrator.core.orchestrator import Eligibility, Orchestrator, SlotBusyError
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import (
@@ -31,6 +36,7 @@ from wastech_orchestrator.notify import AskHandle, AskKind, AskResult, Notifier
 from wastech_orchestrator.providers.artifacts import (
     create_attempt_dir,
     exchange_node_run_dir,
+    exchange_task_dir,
     node_run_dir,
     task_artifact_dir,
 )
@@ -43,6 +49,7 @@ from wastech_orchestrator.providers.base import (
     ProviderId,
     RunStatus,
 )
+from wastech_orchestrator.providers.exchange import build_exchange_manifest
 from wastech_orchestrator.runtime_layout import RuntimeLayout
 from wastech_orchestrator.state_store import PublishOpRow, StateStore, TaskRow
 from wastech_orchestrator.task.validation_gate import ValidationGate
@@ -3833,3 +3840,76 @@ def test_wri011_midrun_agents_edit_does_not_change_frozen_instructions(
     ).read_text(encoding="utf-8")
     assert "ORIGINAL REPO RULES" in frozen  # the frozen copy the agent reads is unchanged
     assert "TAMPERED" not in frozen
+
+
+# --- WRI-007: terminal-exchange sealing (orchestrator wiring) -------------------------------------
+
+
+def test_terminal_seals_and_removes_active_exchange(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # A DONE task leaves no active exchange dir for the next task and retains a verified private
+    # snapshot; the guard flags stay clean (a clean seal, not an unsafe/contaminated teardown).
+    providers = _both()
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-seal"))
+
+    assert result.final_status is Status.DONE
+    assert not exchange_task_dir(orch._exchange_root, "task-seal").exists()  # no active exchange
+    assert store.get_exchange_guard("task-seal") == (False, False)  # clean seal, launches unblocked
+    # The curated exchange is preserved privately as a verified snapshot (the pipeline published to
+    # the exchange, so at least one seal-<NNNNNN> exists with its manifest).
+    seals = exchange_seal_root(art, "task-seal")
+    latest = sorted(seals.glob("seal-*"))
+    assert latest and (latest[-1] / "manifest.json").is_file()
+
+
+def test_seal_terminal_exchange_quarantines_on_mutation(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The terminal seam quarantines a WRI-002-flagged tree as evidence instead of sealing it.
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    store.insert_task(TaskRow(task_id="task-contam", title="t", status=Status.RUNNING))
+    task_dir = exchange_task_dir(orch._exchange_root, "task-contam")
+    task_dir.mkdir(parents=True)
+    (task_dir / "plan.md").write_text("the plan\n", encoding="utf-8")
+    before = build_exchange_manifest(task_dir, "task-contam")
+    (task_dir / "plan.md").write_text("MUTATED BY AGENT\n", encoding="utf-8")  # agent edit
+    after = build_exchange_manifest(task_dir, "task-contam")
+    mutation = ExchangeMutationManual("mutated", before=before, after=after)
+    store.update_task("task-contam", exchange_contaminated=1)
+
+    orch._seal_terminal_exchange(
+        "task-contam", final=Status.MANUAL_ACTION_REQUIRED, mutation=mutation
+    )
+
+    assert not task_dir.exists()  # removed from the active root
+    qroot = exchange_quarantine_root(art, "task-contam")
+    assert qroot.is_dir() and any(qroot.iterdir())  # relocated as contaminated evidence
+    assert not exchange_seal_root(art, "task-contam").exists()  # never sealed / restore-eligible
+
+
+def test_containment_unverified_marks_exchange_unsafe_and_skips_seal(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # WRI-012 unproven quiescence must not seal (an unknown descendant may still write); the task is
+    # flagged unsafe so every later provider launch is blocked until an operator resolves it.
+    providers = _both(
+        infra_fail={"implementation"}, infra_error_class=ErrorClass.CONTAINMENT_UNVERIFIED
+    )
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-unsafe"))
+
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+    assert store.get_exchange_guard("task-unsafe")[1] is True  # exchange_active_unsafe set
+    assert not exchange_seal_root(art, "task-unsafe").exists()  # no snapshot built over the tree

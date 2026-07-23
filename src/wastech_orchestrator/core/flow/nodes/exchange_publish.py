@@ -30,6 +30,23 @@ from wastech_orchestrator.providers.exchange import (
 )
 
 
+class ExchangeMutationManual(NodeManualRequired):
+    """An agent-side exchange mutation was detected (WRI-002) — routed to manual_action_required.
+
+    Carries the parent-held pre-attempt manifest (``before``) and the post-attempt manifest
+    (``after``) so the terminal seam (WRI-007) can quarantine the contaminated tree as evidence with
+    both manifests recorded, instead of sealing it as a clean snapshot. A plain
+    :class:`NodeManualRequired` (no manifest to record) is used for the pre-run integrity failures.
+    """
+
+    def __init__(
+        self, message: str, *, before: ExchangeManifest | None, after: ExchangeManifest | None
+    ) -> None:
+        super().__init__(message)
+        self.before = before
+        self.after = after
+
+
 def assert_request_contained(request: AgentRunRequest, exchange_root: str) -> None:
     """Fail closed unless every provider-input path in ``request`` is under the exchange (WRI-001).
 
@@ -90,8 +107,10 @@ def assert_exchange_unchanged(
         raise NodeManualRequired(f"exchange integrity (post-run): {exc}") from exc
     changes = diff_exchange_manifests(before, after)
     if changes:
-        raise NodeManualRequired(
-            f"node {node_id!r}: exchange mutated during a provider attempt ({'; '.join(changes)})"
+        raise ExchangeMutationManual(
+            f"node {node_id!r}: exchange mutated during a provider attempt ({'; '.join(changes)})",
+            before=before,
+            after=after,
         )
 
 

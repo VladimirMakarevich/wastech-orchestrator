@@ -1,6 +1,6 @@
 # WRI-007 — Seal terminal exchanges and restore only for continue
 
-**Status:** open **Milestone:** 1 **Source:** [decision record](README.md), [happy-path.md](happy-path.md) **Dependencies:** WRI-001, WRI-012
+**Status:** implemented **Milestone:** 1 **Source:** [decision record](README.md), [happy-path.md](happy-path.md) **Dependencies:** WRI-001, WRI-012
 
 ## Problem
 
@@ -44,15 +44,15 @@ WRI-001 shipped a **minimal interim** terminal teardown that this task replaces 
 
 ## Acceptance criteria
 
-- [ ] `DONE`, `FAILED`, and `MANUAL_ACTION_REQUIRED` all leave no active task directory after successful sealing and retain a verified private snapshot.
-- [ ] Both normal pipeline success and operator finalize/merge/PR-sync terminal paths seal the exchange.
-- [ ] Terminal-state `rerun --continue` and HITL continuation restore only the same task's verified latest snapshot; parked/crashed nonterminal continue reuses the verified active exchange; fresh/restart starts clean.
-- [ ] The snapshot retains every curated exchange artifact and its manifest while existing raw provider/prompt/state audit remains untouched.
-- [ ] An agent-mutated exchange is quarantined as contaminated evidence, removed from the active root, and excluded from restore selection.
-- [ ] A stale/foreign/multiple exchange blocks the next provider before model execution.
-- [ ] A Windows lock/read-only failure is logged with the exact target, does not falsely report cleanup success, and blocks later launches until resolved without changing an already terminal task's status.
-- [ ] No retention setting can keep a terminal exchange agent-readable.
-- [ ] Repeated seal/restore calls are idempotent or fail with a precise state-conflict error; they never merge unrelated task contents.
+- [x] `DONE`, `FAILED`, and `MANUAL_ACTION_REQUIRED` all leave no active task directory after successful sealing and retain a verified private snapshot.
+- [x] Both normal pipeline success and operator finalize/merge/PR-sync terminal paths seal the exchange. (`_go_terminal` covers the pipeline + auto-merge + engine/resume failure exits; `finalize_task` — the flip every operator finalize/merge/PR-sync funnels through — calls the same seam.)
+- [x] Terminal-state `rerun --continue` and HITL continuation restore only the same task's verified latest snapshot; parked/crashed nonterminal continue reuses the verified active exchange; fresh/restart starts clean.
+- [x] The snapshot retains every curated exchange artifact and its manifest while existing raw provider/prompt/state audit remains untouched.
+- [x] An agent-mutated exchange is quarantined as contaminated evidence, removed from the active root, and excluded from restore selection.
+- [x] A stale/foreign/multiple exchange blocks the next provider before model execution. (Existing `assert_exchange_current_task_only` pre-launch gate for stale/foreign/symlink; the store-backed `exchange_active_unsafe`/`exchange_contaminated` guards refuse a continue in `ensure_current_exchange`.)
+- [x] A Windows lock/read-only failure is logged with the exact target, does not falsely report cleanup success, and blocks later launches until resolved without changing an already terminal task's status. (Bounded observable retries + read-only clear; `ExchangeCleanupBlocked` → `exchange_active_unsafe`; no `ignore_errors`.)
+- [x] No retention setting can keep a terminal exchange agent-readable.
+- [x] Repeated seal/restore calls are idempotent or fail with a precise state-conflict error; they never merge unrelated task contents.
 
 ## Verification
 

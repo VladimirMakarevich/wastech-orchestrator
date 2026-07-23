@@ -114,7 +114,7 @@ The matrix describes the default `strict_isolation: true` contract. The reposito
 | 1 | WRI-003 | [Enforce the boundary with Codex permission profiles](wri-003-codex-permission-profile-isolation.md) | WRI-009, WRI-011, WRI-012 |
 | 1 | WRI-007 | [Seal terminal exchanges and restore only for continue](wri-007-seal-terminal-exchange.md) | WRI-001, WRI-012 |
 | 1 | WRI-006 | [Add the cross-platform isolation verification gate](wri-006-cross-platform-isolation-verification.md) | WRI-002, WRI-003, WRI-007 |
-| 2 | WRI-005 | [Relocate private runtime state outside the working tree](wri-005-relocate-private-home-out-of-tree.md) | WRI-002, WRI-003, WRI-004, WRI-007, WRI-010 |
+| 2 | WRI-005 | **Out of scope / not scheduled** — moved to [backlog/archive/relocate-private-home-out-of-tree.md](../archive/relocate-private-home-out-of-tree.md). The typed WRI-004 layout leaves `private_home` a seam; physically relocating it out of tree is deferred defense-in-depth, not planned now. | WRI-002, WRI-003, WRI-004, WRI-007, WRI-010 |
 
 Acceptance criteria inside Milestone-0 tasks that name provider enforcement or a dependent task's behavior (WRI-010's provider deny, WRI-011's adapter-isolated supervisor call, WRI-001's WRI-009 integration) are **cluster exit criteria**: they are verified when the corresponding dependent task lands and do not gate closing the Milestone-0 task itself. Each task marks such criteria inline.
 
