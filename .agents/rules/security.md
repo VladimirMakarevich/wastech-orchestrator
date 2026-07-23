@@ -1,10 +1,12 @@
 # Security rules
 
-MANDATORY: Security mechanisms must not unnecessarily limit the orchestrator’s functionality or degrade the user experience. When choosing between different approaches, priority should be given to preserving existing capabilities, usability, and predictable behavior.
-
- Restrictions should be introduced only when required by significant risks or mandatory requirements. In such cases, the least restrictive solution that provides the necessary level of protection should be preferred.
-
 The source of truth is the code (`src/wastech_orchestrator/security/`). These rules must not be violated; the configuration validator is required to reject unsafe settings.
+
+## MANDATORY for any changes in the orchestrator
+
+Security mechanisms must not unnecessarily limit the orchestrator’s functionality or degrade the user experience. When choosing between different approaches, priority should be given to preserving existing capabilities, usability, and predictable behavior.
+
+Restrictions should be introduced only when required by significant risks or mandatory requirements. In such cases, the least restrictive solution that provides the necessary level of protection should be preferred.
 
 ## Isolation
 
