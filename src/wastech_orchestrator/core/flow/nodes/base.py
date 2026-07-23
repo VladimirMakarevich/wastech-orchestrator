@@ -30,6 +30,7 @@ from wastech_orchestrator.providers.base import AgentRunRequest, ErrorClass, Pro
 from wastech_orchestrator.providers.process import ProcessResult, run_process
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.routing.snapshots import SnapshotHook
+from wastech_orchestrator.runtime_layout import ProviderWriteGuardPolicy
 from wastech_orchestrator.state_store import (
     CheckRunRow,
     EditingLineageRow,
@@ -240,6 +241,12 @@ class GitPort(Protocol):
     def capture_git_control_state(self) -> GitControlState: ...
 
     def compare_git_control_state(self, before: GitControlState) -> GitControlDrift | None: ...
+
+    #: WRI-002/003: absolute Git-control + ``tasks/`` roots a workspace-write attempt must
+    #: Write/Edit-deny; the agent node runner threads it onto ``AgentRunRequest.write_guard``.
+    def resolve_control_paths(
+        self, exchange_root: str | None = None
+    ) -> ProviderWriteGuardPolicy: ...
 
     def push(self, task_id: str, branch: str, *, mode: BranchMode = BranchMode.NEW) -> bool: ...
 

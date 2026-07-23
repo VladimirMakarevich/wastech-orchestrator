@@ -17,8 +17,31 @@ import pytest
 
 from wastech_orchestrator.config.loader import loads_config
 from wastech_orchestrator.config.schema import OrchestratorConfig
+from wastech_orchestrator.providers import claude as _claude
 
 _FAKE_AGENT = Path(__file__).resolve().parent / "fakes" / "fake_agent.py"
+
+
+@pytest.fixture(autouse=True)
+def _assume_bash_sandbox_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the deterministic suite host-independent by assuming a sandbox-capable host (WRI-002).
+
+    The Claude Bash-sandbox capability depends on the real host (macOS Seatbelt / a Linux+WSL2 with
+    bubblewrap+socat), so a bwrap-less CI would otherwise flag every workspace-write
+    ``isolation_reasons``
+    / ``check_isolation`` / provider run. The deterministic suite cannot prove the real host
+    boundary
+    anyway (no real Claude) — the real proof is the WRI-006 native gate — so we pin the default
+    probe
+    to "available"; the WRI-002 platform-branch tests inject a concrete ``SandboxCapability`` to
+    exercise the native-Windows / missing-deps branches.
+    """
+    monkeypatch.setattr(
+        _claude,
+        "default_sandbox_probe",
+        lambda *a, **k: _claude.SandboxCapability.LINUX_AVAILABLE,
+    )
+
 
 # The packaged built-in flows tree (source-tree/wheel path). ``worc install`` copies this into an
 # operator's ``.worc/flows/``; since the registry no longer falls back to the packaged tree at run

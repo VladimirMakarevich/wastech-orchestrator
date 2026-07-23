@@ -2377,13 +2377,18 @@ class Orchestrator:
                 # queue. The checkpoint is already persisted; the next watch tick / process start
                 # resumes from current_node (or fails it past agents.retry.max_blocked_s).
                 return self._park(p, run_state, exc)
-            if exc.error_class is ErrorClass.CONTAINMENT_UNVERIFIED:
-                # WRI-012: the provider process tree could not be proven quiescent — an unknown
-                # background/reparented descendant may still be writing. This is a security /
-                # manual-action condition, never a quality fail and never an auto-resumable park:
-                # surface it to an operator (terminal ``manual_action_required`` blocks continuation
-                # and the next task) with a secret-free failure report. ``run_process`` deliberately
-                # kept the children-file handle so a ``stop``/recovery can still reap the survivor.
+            if exc.error_class in (
+                ErrorClass.CONTAINMENT_UNVERIFIED,
+                ErrorClass.CAPABILITY_UNAVAILABLE,
+            ):
+                # WRI-012 ``CONTAINMENT_UNVERIFIED``: the provider process tree could not be proven
+                # quiescent — an unknown background/reparented descendant may still be writing.
+                # WRI-002 ``CAPABILITY_UNAVAILABLE`` (no qualifying fallback): a required host
+                # isolation capability is missing and no same-or-stricter provider could isolate the
+                # node here (or Claude has no fallback). Both are security / manual-action
+                # conditions, never a quality fail and never an auto-resumable park: surface to an
+                # operator (terminal ``manual_action_required`` blocks continuation and the next
+                # task) to install the dependency, switch host, or knowingly relax isolation.
                 return self._fail(
                     p,
                     str(exc),

@@ -53,6 +53,7 @@ from wastech_orchestrator.providers.base import (
     RunStatus,
 )
 from wastech_orchestrator.routing.router import ResolvedRoute, RouteSource, StageOutcome
+from wastech_orchestrator.runtime_layout import ProviderWriteGuardPolicy
 from wastech_orchestrator.state_store import EditingLineageRow
 
 # -- fakes & builders ---------------------------------------------------------
@@ -778,6 +779,39 @@ def test_agent_workspace_write_writes_diff(tmp_path: Path) -> None:
     AgentNodeRunner(services, inputs).run(node, _ctx(node))
     assert inputs.diff_path == "/art/current.diff"
     assert ("write_current_diff", "task-1") in git.calls
+
+
+def test_agent_exchange_mutation_is_detected_from_parent_state(tmp_path: Path) -> None:
+    # WRI-002 detection-in-depth: a provider that mutates the curated (read-only) exchange during
+    # its
+    # attempt is caught from the parent-held pre/post manifest and routed to non-fallback manual
+    # action, so the changed copy is never consumed downstream.
+    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
+    from wastech_orchestrator.providers.artifacts import exchange_task_dir
+
+    exchange_root = tmp_path / ".worc-io"
+    task_dir = exchange_task_dir(str(exchange_root), "task-1")
+    task_dir.mkdir(parents=True)
+    (task_dir / "plan.md").write_text("original", encoding="utf-8")
+    (tmp_path / "r.md").write_text("go", encoding="utf-8")
+
+    class _MutatingRouter(FakeRouter):
+        def run_stage(self, request: Any, route: Any, *, snapshot: Any = None) -> Any:
+            (task_dir / "plan.md").write_text("MUTATED BY AGENT", encoding="utf-8")
+            return super().run_stage(request, route, snapshot=snapshot)
+
+    services = NodeServices(
+        router=_MutatingRouter(_result()),
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=FakeStore(),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        clock=lambda: "ts",
+        git=FakeGit(),
+        exchange_root=str(exchange_root),
+    )
+    with pytest.raises(NodeManualRequired, match="exchange mutated"):
+        AgentNodeRunner(services, _inputs(tmp_path)).run(_ws_node(), _ctx(_ws_node()))
 
 
 def test_agent_dangerous_diff_goes_manual(tmp_path: Path) -> None:
@@ -2125,6 +2159,17 @@ class FakeGit:
 
     def compare_git_control_state(self, before: object) -> None:
         return None
+
+    def resolve_control_paths(self, exchange_root: str | None = None) -> ProviderWriteGuardPolicy:
+        # WRI-002: the node runner resolves this for every workspace-write attempt; the fake router
+        # never builds an argv, so dummy paths suffice.
+        return ProviderWriteGuardPolicy(
+            exchange_root=None,
+            git_dir=Path("/x/.git"),
+            git_common_dir=Path("/x/.git"),
+            hooks_dir=Path("/x/.git/hooks"),
+            tasks_dir=Path("/x/tasks"),
+        )
 
     def push(self, task_id: str, branch: str, **kw: object) -> bool:
         self.calls.append(("push", task_id, branch, kw.get("mode")))

@@ -286,10 +286,13 @@ agents:
 | Forbidden argument | Provider | Reason |
 | --- | --- | --- |
 | any `--dangerously*` flag (`--dangerously-bypass-approvals-and-sandbox`, `--dangerously-skip-permissions`, `--dangerously-bypass-hook-trust`, …) | both | disables approvals / sandbox / hook-trust |
+| `--allow-dangerously-skip-permissions` | Claude | enables the permission bypass (same class as `--dangerously-skip-permissions`) |
 | `--yolo`, `--ignore-rules` | Codex | disables approvals |
 | `--sandbox` / `-s` with no value | Codex | malformed: would swallow the next token |
 
 These are caught at **config load** — the whole config is rejected before any task runs — re-checked by the provider command builder at launch, and re-checked on a flow node's `extra_args` at flow load. Note `--dangerously-skip-permissions` stays forbidden even though it is functionally the flag form of `bypassPermissions`: keeping the whole `--dangerously*` namespace bright is the parity rule.
+
+**Reserved Claude `extra_args` (WRI-002).** Claude flags that would re-open a surface the adapter deliberately closes are **rejected regardless of `strict_isolation`** (they are not the sanctioned full-access opt-out — an operator who wants that uses the gated `--permission-mode bypassPermissions` below): `--tools`, `--allowedTools`/`--disallowedTools`, `--settings`, `--setting-sources`, `--mcp-config`, `--strict-mcp-config`, `--add-dir`, `--file`, `--agent`/`--agents`, `--plugin-dir`/`--plugin-url`, `--chrome`/`--ide`/`--remote-control`, `--bg`/`--background`/`--worktree`/`--tmux`, `--system-prompt`/`--append-system-prompt[-file]`, `--session-id`/`--fork-session`/`--resume`/`--continue`, `--safe-mode`, `--bare`. The orchestrator owns tools/settings/MCP/session — a task or flow cannot supply them.
 
 **Full access — operator-selectable, gated by `strict_isolation`.** Selecting a provider's full-access mode is _not_ hard-forbidden: the orchestrator does not impose its own refusal, and the operator owns the risk. It is instead gated by [`security.strict_isolation`](#security): with the default `strict_isolation: true` it is rejected at the isolation **preflight** (the run fails before a branch is created); set `strict_isolation: false` to opt in.
 

@@ -44,6 +44,9 @@ _MESSAGES: dict[ErrorClass, str] = {
     ErrorClass.CONTAINMENT_UNVERIFIED: (
         "the provider process tree could not be proven quiescent; a background process may remain"
     ),
+    ErrorClass.CAPABILITY_UNAVAILABLE: (
+        "a required host isolation capability is unavailable; refusing to run without it"
+    ),
 }
 
 

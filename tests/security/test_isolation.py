@@ -101,6 +101,46 @@ def test_codex_bypass_extra_arg_is_flagged(codex_config: ProviderConfig) -> None
     assert reasons
 
 
+# --- WRI-002: host-aware sandbox availability + reserved Claude extra_args
+# -------------------------
+
+
+def test_claude_workspace_write_missing_sandbox_deps_is_flagged(
+    claude_config: ProviderConfig,
+) -> None:
+    # A configured workspace-write Claude on a Linux/WSL2 host missing bubblewrap+socat cannot get
+    # its required Bash sandbox → strict_isolation preflight must flag it (offline, no CLI
+    # launched).
+    reasons = claude_mod.isolation_reasons(
+        replace(claude_config, permission_profile="workspace-write"),
+        capability=claude_mod.SandboxCapability.LINUX_MISSING_DEPS,
+    )
+    assert reasons and any("bubblewrap" in r for r in reasons)
+
+
+def test_claude_read_only_missing_sandbox_deps_is_clean(claude_config: ProviderConfig) -> None:
+    # A read-only node needs no Bash sandbox, so a sandbox-less host is not flagged.
+    reasons = claude_mod.isolation_reasons(
+        replace(claude_config, permission_profile="read-only"),
+        capability=claude_mod.SandboxCapability.LINUX_MISSING_DEPS,
+    )
+    assert reasons == []
+
+
+def test_claude_native_windows_workspace_write_not_flagged(claude_config: ProviderConfig) -> None:
+    # Native Windows degrades to a Bash-less restricted mode — not a preflight failure.
+    reasons = claude_mod.isolation_reasons(
+        replace(claude_config, permission_profile="workspace-write"),
+        capability=claude_mod.SandboxCapability.NATIVE_WINDOWS,
+    )
+    assert reasons == []
+
+
+def test_claude_reserved_extra_arg_is_flagged(claude_config: ProviderConfig) -> None:
+    reasons = claude_mod.isolation_reasons(replace(claude_config, extra_args=("--add-dir", "..")))
+    assert reasons and any("reserved" in r for r in reasons)
+
+
 # --- config-level check_isolation -----------------------------------------------------------------
 
 

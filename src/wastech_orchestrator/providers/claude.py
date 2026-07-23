@@ -21,8 +21,12 @@ from __future__ import annotations
 
 import json
 import os
+import platform
 import re
-from collections.abc import Mapping, Sequence
+import shutil
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +52,7 @@ from wastech_orchestrator.providers.errors import (
     make_signatures,
     message_for,
 )
+from wastech_orchestrator.runtime_layout import InternalDenyPolicy, ProviderWriteGuardPolicy
 from wastech_orchestrator.security.forbidden_args import (
     FORBIDDEN_SANDBOX_VALUE,
     find_forbidden_args,
@@ -55,39 +60,159 @@ from wastech_orchestrator.security.forbidden_args import (
 
 __all__ = [
     "ClaudeCodeProvider",
+    "ClaudeToolPlan",
     "ParsedEvents",
+    "SandboxCapability",
     "build_claude_argv",
     "build_context_footer",
     "build_effective_prompt",
+    "build_sandbox_settings",
+    "default_sandbox_probe",
     "isolation_reasons",
     "map_permission",
     "parse_stream_json",
+    "resolve_claude_tools",
 ]
 
 _DEFAULT_PROFILE = "workspace-write"
 
-# Claude Code permission modes, ordered strict → permissive. The adapter never selects a mode weaker
+# Claude Code permission modes, ordered strict → permissive by auto-execution breadth (the
+# documented
+# 2.1.x choices; the legacy ``default`` alias is dropped). The adapter never selects a mode weaker
 # than the one a profile maps to, and never selects ``bypassPermissions`` (full bypass) at all.
-_MODE_ORDER: tuple[str, ...] = ("plan", "default", "acceptEdits", "bypassPermissions")
+_MODE_ORDER: tuple[str, ...] = (
+    "plan",
+    "dontAsk",
+    "manual",
+    "acceptEdits",
+    "auto",
+    "bypassPermissions",
+)
 _PERMISSION_MODE_FLAG = "--permission-mode"
 _BYPASS_MODE = "bypassPermissions"
 
-# Profile → (permission mode, baseline allowed tools). ``read-only`` executes nothing because Edit
-# and Write are simply absent from its allowlist (a hard tool-level gate, not the CLI's built-in
-# ``plan`` mode): plan mode brings its own interactive UX (``AskUserQuestion``/``ExitPlanMode``,
-# ``~/.claude/plans``) that a headless run cannot answer, so a clarifying question raised there
-# never reaches the orchestrator's own durable ``human_input`` field (F21) — ``default`` mode has
-# no such UX, so a read-only agent that needs to ask surfaces it through the role's structured
-# output instead. ``workspace-write`` may edit files and run safe workspace commands without
-# prompting — the Claude equivalent of the Codex ``workspace-write`` sandbox.
+# Profile → (permission mode, baseline allowed tools). ``read-only`` executes nothing because Edit,
+# Write, and Bash are simply absent from its allowlist (a hard tool-level gate). ``dontAsk`` is the
+# documented headless read-only mode: it auto-denies every non-allowlisted tool with no prompt and
+# no ``plan``-mode interactive UX (``AskUserQuestion``/``ExitPlanMode``, ``~/.claude/plans``) that a
+# headless run cannot answer — a read-only agent that needs to ask surfaces it through the role's
+# structured output instead (F21). ``workspace-write`` maps to ``acceptEdits`` (auto-approve reads +
+# edits + safe workspace commands without prompting) — the Claude equivalent of the Codex
+# ``workspace-write`` sandbox. The ``Bash`` baseline is removed on native Windows (no OS sandbox) by
+# :func:`resolve_claude_tools`.
 _PROFILE_MAP: dict[str, tuple[str, tuple[str, ...]]] = {
-    "read-only": ("default", ("Read", "Glob", "Grep")),
+    "read-only": ("dontAsk", ("Read", "Glob", "Grep")),
     "workspace-write": ("acceptEdits", ("Read", "Glob", "Grep", "Edit", "Write", "Bash")),
 }
 
-# The web tools added to ``--allowedTools`` only when the flow grants network
+# The web tools added to ``--allowedTools``/``--tools`` only when the flow grants network
 # (request.network_access); omitted otherwise so a headless run cannot reach the network (P3.2).
 _NETWORK_TOOLS: tuple[str, ...] = ("WebFetch", "WebSearch")
+
+
+class SandboxCapability(StrEnum):
+    """Whether Claude's OS-enforced Bash sandbox can be used on the host (WRI-002).
+
+    macOS uses Seatbelt (always available). Linux and WSL2 both report ``platform.system()==
+    "Linux"`` and need ``bubblewrap`` (``bwrap``) + ``socat`` on ``PATH``. Native Windows has no
+    supported Bash sandbox. Resolved offline (no CLI launched) by :func:`default_sandbox_probe`.
+    """
+
+    MACOS = "macos-sandbox"
+    LINUX_AVAILABLE = "linux-wsl-sandbox-available"
+    LINUX_MISSING_DEPS = "linux-wsl-sandbox-missing-deps"
+    NATIVE_WINDOWS = "native-windows"
+
+
+#: The host Bash-sandbox classification seam. Injectable (like ``exchange.default_file_inspector``)
+#: so every branch is unit-testable on any host without a real probe.
+SandboxProbe = Callable[[], SandboxCapability]
+
+# The Linux/WSL2 Bash-sandbox runtime dependencies (documented for Claude Code 2.1.x).
+_LINUX_SANDBOX_DEPS: tuple[str, ...] = ("bwrap", "socat")
+
+
+def default_sandbox_probe(
+    system: str | None = None, which: Callable[[str], str | None] | None = None
+) -> SandboxCapability:
+    """Classify the host's Bash-sandbox capability offline (``platform.system`` + ``shutil.which``).
+
+    ``system``/``which`` resolve from the real host at call time and are injectable for tests, so no
+    real probe runs in the deterministic suite. ``shutil.which`` is a ``PATH`` lookup — it launches
+    no CLI, so this stays a pure offline check usable by the ``strict_isolation`` preflight.
+    """
+    name = system if system is not None else platform.system()
+    if name == "Darwin":
+        return SandboxCapability.MACOS
+    if name == "Windows":
+        return SandboxCapability.NATIVE_WINDOWS
+    which_fn = which if which is not None else shutil.which
+    if all(which_fn(dep) for dep in _LINUX_SANDBOX_DEPS):
+        return SandboxCapability.LINUX_AVAILABLE
+    return SandboxCapability.LINUX_MISSING_DEPS
+
+
+def _bash_sandbox_available(capability: SandboxCapability) -> bool:
+    """True when the host can OS-sandbox a Bash tool (macOS or a dependency-complete Linux/WSL2)."""
+    return capability in (SandboxCapability.MACOS, SandboxCapability.LINUX_AVAILABLE)
+
+
+@dataclass(frozen=True)
+class ClaudeToolPlan:
+    """The resolved per-attempt Claude tool posture (WRI-002).
+
+    ``mode`` is the ``--permission-mode`` value; ``tools`` is the exact built-in tool set (both the
+    hard ``--tools`` existence gate and the ``--allowedTools`` auto-approve list); ``needs_sandbox``
+    is True only when a workspace-write attempt keeps ``Bash`` on a host that can OS-sandbox it (so
+    the adapter emits the private ``--settings`` sandbox file).
+    """
+
+    mode: str
+    tools: tuple[str, ...]
+    needs_sandbox: bool
+
+
+def resolve_claude_tools(
+    profile: str,
+    capability: SandboxCapability,
+    network_access: bool,
+    *,
+    strict_isolation: bool = True,
+) -> ClaudeToolPlan:
+    """Resolve the mode + built-in tool set + sandbox need for a profile on a host (WRI-002).
+
+    The single source of the platform decision (used by both :func:`build_claude_argv` and the
+    settings-file write so they never disagree). Raises :class:`ProviderError`
+    (``CAPABILITY_UNAVAILABLE``) — a deterministic *pre-model* infrastructure error — when a strict
+    workspace-write attempt needs the Bash sandbox on a supported host (Linux/WSL2) whose sandbox
+    dependencies are missing: the adapter refuses to run Bash unsandboxed rather than silently
+    weakening isolation. Under ``strict_isolation: false`` the operator has accepted the risk, so
+    Bash stays (unsandboxed) and the run is reported as unisolated by the existing preflight
+    verdict.
+    """
+    mode, tools = map_permission(profile)
+    needs_sandbox = False
+    if profile == "workspace-write":
+        if capability is SandboxCapability.NATIVE_WINDOWS:
+            if strict_isolation:
+                # No supported Bash sandbox on native Windows: drop Bash (restricted mode). Read
+                # isolation rides ``--tools`` + the Read/Write/Edit tool denies; Edit/Write remain.
+                tools = tuple(t for t in tools if t != "Bash")
+            # Under strict_isolation: false the operator keeps unsandboxed Bash (owns the risk).
+        elif capability is SandboxCapability.LINUX_MISSING_DEPS and strict_isolation:
+            raise ProviderError(
+                ErrorClass.CAPABILITY_UNAVAILABLE,
+                "Claude's Bash sandbox for a workspace-write node requires bubblewrap+socat on "
+                "PATH (Linux/WSL2); refusing to run Bash unsandboxed under strict_isolation",
+            )
+        elif _bash_sandbox_available(capability):
+            needs_sandbox = True
+        # else: LINUX_MISSING_DEPS/NATIVE_WINDOWS under strict_isolation:false → keep Bash
+        # unsandboxed.
+    if network_access:
+        tools = (*tools, *_NETWORK_TOOLS)
+    return ClaudeToolPlan(mode=mode, tools=tools, needs_sandbox=needs_sandbox)
+
 
 # Statuses on the terminal ``result`` event that mark the turn as NOT having satisfied the task. Any
 # other outcome is treated as a completed run — task quality is judged later by the orchestrator's
@@ -223,6 +348,143 @@ def _native_memory_deny_tools() -> list[str]:
     return [f"Write({glob})", f"Edit({glob})", f"Read({glob})"]
 
 
+# Claude flags an operator may NOT supply through config/flow ``extra_args`` because they replace or
+# extend the authority the adapter owns (tools, settings/config sources, MCP, plugins, agents,
+# additional directories/files, Chrome/IDE/remote-control/background/worktree, system prompt, and
+# session selection). Distinct from ``forbidden_args`` (the cross-provider absolute sandbox/approval
+# bypass) and from the ``strict_isolation``-gated ``--permission-mode bypassPermissions``: these are
+# hard-rejected regardless of ``strict_isolation`` (an operator who wants full access already has
+# the
+# gated ``bypassPermissions`` path; re-opening a closed surface is never the sanctioned opt-out).
+_RESERVED_CLAUDE_FLAGS: frozenset[str] = frozenset(
+    {
+        "--tools",
+        "--allowedTools",
+        "--allowed-tools",
+        "--disallowedTools",
+        "--disallowed-tools",
+        "--settings",
+        "--setting-sources",
+        "--mcp-config",
+        "--strict-mcp-config",
+        "--add-dir",
+        "--file",
+        "--agent",
+        "--agents",
+        "--plugin-dir",
+        "--plugin-url",
+        "--chrome",
+        "--no-chrome",
+        "--ide",
+        "--remote-control",
+        "--remote-control-session-name-prefix",
+        "--bg",
+        "--background",
+        "--worktree",
+        "-w",
+        "--tmux",
+        "--system-prompt",
+        "--system-prompt-file",
+        "--append-system-prompt",
+        "--append-system-prompt-file",
+        "--session-id",
+        "--fork-session",
+        "--no-session-persistence",
+        "--resume",
+        "-r",
+        "--continue",
+        "-c",
+        "--from-pr",
+        "--safe-mode",
+        "--bare",
+        "--disable-slash-commands",
+    }
+)
+
+
+def _find_reserved_claude_args(args: Sequence[str]) -> list[str]:
+    """Return a reason per ``extra_args`` token that is a reserved authority-bearing Claude flag.
+
+    Handles both split (``--tools X``) and inline (``--tools=X``) forms. An empty list means safe.
+    """
+    reasons: list[str] = []
+    for token in args:
+        flag = token.split("=", 1)[0]
+        if flag in _RESERVED_CLAUDE_FLAGS:
+            reasons.append(
+                f"flag {flag!r} is reserved by the orchestrator's Claude isolation policy"
+            )
+    return reasons
+
+
+def _abs_tool_globs(path: Path) -> tuple[str, str]:
+    """The ``//``-anchored absolute path node and its descendant glob for a Claude tool-rule.
+
+    Emits both ``//<abs>`` (the exact file/dir node) and ``//<abs>/**`` (its subtree) so a single
+    deny covers a secret *file* and a private *directory* without stat'ing the (maybe
+    not-yet-created)
+    path — and so an exact known-secret path is denied regardless of how ``**`` treats dotfiles. The
+    OS sandbox ``denyRead``/``denyWrite`` (a plain absolute path) is the robust dir+dotfile layer;
+    this tool glob is the belt that also holds on native Windows where there is no sandbox.
+    """
+    base = "//" + path.as_posix().lstrip("/")
+    return base, f"{base}/**"
+
+
+def _internal_deny_tools(paths: Sequence[Path], tools: Sequence[str]) -> list[str]:
+    """Build ``Tool(//abs)``/``Tool(//abs/**)`` denies for each absolute internal path."""
+    patterns: list[str] = []
+    for path in paths:
+        for glob in _abs_tool_globs(path):
+            patterns.extend(f"{tool}({glob})" for tool in tools)
+    return patterns
+
+
+def _sandbox_path(path: Path) -> str:
+    """The OS-sandbox filesystem-grammar form of an absolute path (plain, not the ``//`` glob)."""
+    return path.as_posix()
+
+
+def build_sandbox_settings(
+    deny_policy: InternalDenyPolicy,
+    write_guard: ProviderWriteGuardPolicy | None,
+    *,
+    network_access: bool,
+) -> dict[str, Any]:
+    """Build the adapter-owned Claude OS Bash-sandbox settings (WRI-002).
+
+    The private internal read-deny set is sealed for both read AND write; the write-guard roots
+    (exchange, gitdir/common-dir/hooks, ``tasks/``) are write-denied only (they stay readable).
+    Paths
+    use the OS-sandbox grammar (plain absolute), never the ``//`` tool-glob syntax. Network is
+    binary
+    from ``network_access`` (no domain granularity is available). Only the hardened keys are
+    emitted:
+    never ``enableWeakerNestedSandbox``, ``allowUnsandboxedCommands: true``, a non-empty
+    ``excludedCommands``, a credential ``mask``, or ``tlsTerminate``. ``credentials.files`` denies
+    the
+    resolved internal env-file (the purpose-built surface) with ``mode: "deny"`` only.
+    """
+    deny_read = [_sandbox_path(p) for p in deny_policy.denied_paths]
+    deny_write = list(deny_read)
+    if write_guard is not None:
+        deny_write.extend(_sandbox_path(p) for p in write_guard.denied_write_paths)
+    deny_write = list(dict.fromkeys(deny_write))  # order-preserving de-dup
+    sandbox: dict[str, Any] = {
+        "enabled": True,
+        "failIfUnavailable": True,
+        "allowUnsandboxedCommands": False,
+        "excludedCommands": [],
+        "filesystem": {"denyRead": deny_read, "denyWrite": deny_write},
+        "network": {"allowedDomains": ["*"] if network_access else []},
+    }
+    if deny_policy.env_file is not None:
+        sandbox["credentials"] = {
+            "files": [{"path": _sandbox_path(deny_policy.env_file), "mode": "deny"}]
+        }
+    return {"sandbox": sandbox}
+
+
 def map_permission(profile: str) -> tuple[str, tuple[str, ...]]:
     """Map a request permission profile to a Claude ``(permission_mode, allowed_tools)`` pair.
 
@@ -277,36 +539,49 @@ def build_claude_argv(
     *,
     denied_commands: Sequence[str] = (),
     denied_read_paths: Sequence[str] = (),
+    internal_deny_read_paths: Sequence[Path] = (),
+    sandbox_settings_path: str | None = None,
+    sandbox_probe: SandboxProbe | None = None,
+    strict_isolation: bool = True,
 ) -> list[str]:
     """Build the ``claude -p`` argv (a list, never a shell string).
 
     Raises :class:`ProviderError` (``CONFIGURATION_ERROR``) if ``extra_args`` carry an
-    absolutely-forbidden flag (``--dangerously*`` / ``--yolo`` / ``--ignore-rules``) or the
-    requested profile is the forbidden full-access mode — defence in depth over the P1 config
-    validator. A ``--permission-mode`` override in ``extra_args`` (incl. ``bypassPermissions``) is
-    **not** rejected here: it is operator-selectable, gated by ``strict_isolation`` at preflight,
-    and appended after the orchestrator's own ``--permission-mode`` so the CLI's last-wins
-    resolution applies. The prompt is delivered on stdin, never on the command line; context reaches
-    Claude only as file paths. ``denied_commands`` and ``denied_read_paths`` (the ``security.*``
-    lists) are enforced as ``--disallowedTools`` so the agent can never publish or read secrets. The
-    native-memory deny (F37, :func:`_native_memory_deny_tools`) is also appended there, unless
-    ``config.allow_native_memory`` is set — the default-off operator opt-in that lets Claude use its
-    own native auto-memory (see :class:`ProviderConfig`), accepting an unaudited HOME store.
+    absolutely-forbidden flag (``--dangerously*`` / ``--yolo`` / ``--ignore-rules``), a reserved
+    authority-bearing Claude flag (:data:`_RESERVED_CLAUDE_FLAGS` —
+    tools/settings/MCP/plugins/agents/
+    add-dir/file/Chrome/IDE/remote/worktree/system-prompt/session), or the requested profile is the
+    forbidden full-access mode — defence in depth over the P1 config validator. Raises
+    ``CAPABILITY_UNAVAILABLE`` (a pre-model infra error) when a strict workspace-write attempt needs
+    the Bash sandbox on a supported host whose sandbox dependencies are missing (:func:
+    `resolve_claude_tools`). A ``--permission-mode`` override in ``extra_args`` (incl.
+    ``bypassPermissions``) is **not** rejected here: it is operator-selectable, gated by
+    ``strict_isolation`` at preflight, and appended last so the CLI's last-wins resolution applies.
+
+    The prompt is delivered on stdin, never on the command line; context reaches Claude only as file
+    paths. Isolation is one adapter-owned effective policy: ``--tools`` is the hard built-in tool
+    existence gate; ``--allowedTools`` auto-approves them (a headless run cannot prompt);
+    ``--disallowedTools`` carries the ``security.*`` command/read denies, the F37 native-memory
+    deny,
+    and the internal private/exchange/Git ``//``-anchored denies; ``--setting-sources ""`` +
+    ``--strict-mcp-config`` close the user/project/local + MCP surfaces; and (workspace-write,
+    sandbox
+    hosts) ``--settings`` points at the OS Bash-sandbox policy file. ``internal_deny_read_paths`` is
+    the WRI-004 :class:`InternalDenyPolicy` set (private/control homes, secrets, provider homes,
+    frozen bundles); ``request.write_guard`` carries the exchange/Git/``tasks/`` write-deny roots.
     """
     combined_extra = tuple(config.extra_args) + tuple(request.extra_args)
-    reasons = find_forbidden_args(combined_extra)
+    reasons = find_forbidden_args(combined_extra) + _find_reserved_claude_args(combined_extra)
     if reasons:
         raise ProviderError(
             ErrorClass.CONFIGURATION_ERROR, "rejected unsafe extra_args: " + "; ".join(reasons)
         )
 
     profile = request.permission_profile or config.permission_profile or _DEFAULT_PROFILE
-    mode, allowed_tools = map_permission(profile)
-    if request.network_access:
-        # The flow granted network (network_policy): allow the web tools. Absent the grant they are
-        # omitted, so a headless ``acceptEdits``/``plan`` run cannot reach the network through them.
-        # This only adds network tools — it never relaxes the filesystem permission mode.
-        allowed_tools = (*allowed_tools, *_NETWORK_TOOLS)
+    probe = sandbox_probe if sandbox_probe is not None else default_sandbox_probe
+    plan = resolve_claude_tools(
+        profile, probe(), request.network_access, strict_isolation=strict_isolation
+    )
 
     argv = [
         config.command,
@@ -315,24 +590,44 @@ def build_claude_argv(
         "stream-json",
         "--verbose",
         # WRI-011: load NO user/project/local setting sources, so Claude never discovers the live
-        # ``CLAUDE.md`` / project settings / skills / plugins / hooks / MCP. The frozen repository
-        # instructions arrive only through ``--append-system-prompt-file`` below; admin-managed
-        # policy + auth still apply (they are the trusted-computing-base, not a repo-editable file).
+        # ``CLAUDE.md`` / project settings / skills / plugins / hooks / MCP. WRI-002: also refuse
+        # any
+        # MCP server not passed via ``--mcp-config`` (and none is) so zero MCP tools load. The
+        # frozen
+        # repository instructions arrive only through ``--append-system-prompt-file`` below;
+        # admin-managed policy + auth still apply (the trusted-computing-base, not a repo file).
         "--setting-sources",
         "",
+        "--strict-mcp-config",
         _PERMISSION_MODE_FLAG,
-        mode,
+        plan.mode,
     ]
-    if allowed_tools:
-        argv += ["--allowedTools", ",".join(allowed_tools)]
+    if plan.tools:
+        # ``--tools`` is the hard existence gate (tools not listed do not exist for the session);
+        # ``--allowedTools`` marks the same set auto-approved so a headless run never blocks.
+        joined_tools = ",".join(plan.tools)
+        argv += ["--tools", joined_tools, "--allowedTools", joined_tools]
     denied_tools = _deny_tools_for(denied_commands) + _deny_read_tools_for(denied_read_paths)
     # F37: confine native project memory out of the spawn — unless the operator has opted in to the
     # agent's own native memory (agents.providers.claude.allow_native_memory), a deliberate,
-    # default-off risk acceptance (that store is unaudited and outside the redaction net).
+    # default-off risk acceptance (that store is unaudited and outside the redaction net). The
+    # claude config home is left to this F37 rule (gated by the opt-in), so the internal deny below
+    # excludes it to avoid re-denying ``~/.claude`` and breaking the opt-in.
     if not config.allow_native_memory:
         denied_tools += _native_memory_deny_tools()
+    claude_home = claude_config_home()
+    read_deny_paths = [p for p in internal_deny_read_paths if p != claude_home]
+    denied_tools += _internal_deny_tools(read_deny_paths, ("Read", "Write", "Edit"))
+    if request.write_guard is not None:
+        denied_tools += _internal_deny_tools(
+            request.write_guard.denied_write_paths, ("Write", "Edit")
+        )
     if denied_tools:
         argv += ["--disallowedTools", ",".join(denied_tools)]
+    if sandbox_settings_path is not None:
+        # WRI-002: the adapter-owned OS Bash-sandbox policy (workspace-write on a sandbox host). The
+        # CLI parent reads this file directly (outside the sandbox), so a private-home path is fine.
+        argv += ["--settings", sandbox_settings_path]
     model = request.model or config.model
     if model:
         argv += ["--model", model]
@@ -362,13 +657,24 @@ def build_claude_argv(
     return argv
 
 
-def isolation_reasons(config: ProviderConfig) -> list[str]:
+def isolation_reasons(
+    config: ProviderConfig, *, capability: SandboxCapability | None = None
+) -> list[str]:
     """Reasons the configured Claude isolation cannot be enabled — an empty list means OK.
 
-    Pure and offline (no CLI launched), so it can drive the ``strict_isolation`` preflight
-    (:mod:`wastech_orchestrator.security.isolation`). Mirrors what :func:`build_claude_argv`
-    would enforce: the permission profile must resolve to a concrete non-``bypassPermissions`` mode,
-    and ``extra_args`` must not weaken the sandbox/approvals or that mode.
+    Pure and offline (no CLI launched — ``shutil.which`` is only a ``PATH`` lookup), so it drives
+    the
+    ``strict_isolation`` preflight (:mod:`wastech_orchestrator.security.isolation`) and the Router's
+    ``CAPABILITY_UNAVAILABLE`` host-verified fallback gate. Mirrors what :func:`build_claude_argv`
+    would enforce: a concrete non-``bypassPermissions`` mode, no forbidden/reserved/weakening
+    ``extra_args``, and — host-aware — that a *configured* workspace-write profile can actually get
+    its Bash OS sandbox on this host. The last check is conservative: it reads the configured
+    provider profile, so a flow that only ever runs Claude read-only but leaves the provider default
+    at ``workspace-write`` over-flags on a broken-sandbox host. Native Windows is **not** flagged
+    (it
+    degrades to a Bash-less restricted mode, not a preflight failure). ``capability`` defaults to
+    the
+    real host; tests inject it.
     """
     profile = config.permission_profile or _DEFAULT_PROFILE
     try:
@@ -376,10 +682,17 @@ def isolation_reasons(config: ProviderConfig) -> list[str]:
     except ProviderError as exc:
         return [str(exc)]
     reasons = [f"extra_args {r}" for r in find_forbidden_args(config.extra_args)]
+    reasons += [f"extra_args {r}" for r in _find_reserved_claude_args(config.extra_args)]
     try:
         _reject_weaker_permission_override(tuple(config.extra_args), mode)
     except ProviderError as exc:
         reasons.append(str(exc))
+    cap = capability if capability is not None else default_sandbox_probe()
+    if profile == "workspace-write" and cap is SandboxCapability.LINUX_MISSING_DEPS:
+        reasons.append(
+            "Bash sandbox unavailable for a workspace-write node (bubblewrap+socat missing on "
+            "PATH); install them, or set this provider read-only"
+        )
     return reasons
 
 
@@ -494,6 +807,19 @@ class ClaudeCodeProvider(BaseCliProvider):
 
     id: str = ProviderId.CLAUDE.value
 
+    def __init__(
+        self,
+        config: ProviderConfig,
+        *,
+        sandbox_probe: SandboxProbe | None = None,
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(config, **kwargs)
+        # WRI-002: the host Bash-sandbox capability seam. ``None`` resolves the real host at call
+        # time (so a test can monkeypatch ``default_sandbox_probe``); tests inject a concrete probe
+        # to exercise every platform branch deterministically on any CI host.
+        self._sandbox_probe = sandbox_probe
+
     def _executable_label(self) -> str:
         return "claude"
 
@@ -502,13 +828,46 @@ class ClaudeCodeProvider(BaseCliProvider):
 
     def _build_argv(self, request: AgentRunRequest, paths: ArtifactPaths) -> tuple[list[str], None]:
         self._write_output_schema(paths, request)
+        # Resolve the tool plan first — a strict workspace-write attempt on a supported host whose
+        # Bash sandbox is unavailable raises ``CAPABILITY_UNAVAILABLE`` here, PRE-MODEL: the base
+        # ``run`` writes the request artifact and re-raises without launching anything.
+        profile = request.permission_profile or self._config.permission_profile or _DEFAULT_PROFILE
+        probe = self._sandbox_probe if self._sandbox_probe is not None else default_sandbox_probe
+        plan = resolve_claude_tools(
+            profile,
+            probe(),
+            request.network_access,
+            strict_isolation=self._security.strict_isolation,
+        )
+        settings_path: str | None = None
+        if plan.needs_sandbox and self._deny_policy is not None:
+            settings = build_sandbox_settings(
+                self._deny_policy, request.write_guard, network_access=request.network_access
+            )
+            settings_path = self._write_sandbox_settings(paths, settings)
         argv = build_claude_argv(
             self._config,
             request,
             denied_commands=self._security.denied_commands,
             denied_read_paths=self._security.denied_read_paths,
+            internal_deny_read_paths=(
+                self._deny_policy.denied_paths if self._deny_policy is not None else ()
+            ),
+            sandbox_settings_path=settings_path,
+            sandbox_probe=self._sandbox_probe,
+            strict_isolation=self._security.strict_isolation,
         )
         return argv, None
+
+    def _write_sandbox_settings(self, paths: ArtifactPaths, settings: dict[str, Any]) -> str:
+        """Write the private OS Bash-sandbox policy under the attempt dir; return its path.
+
+        Mirrors :meth:`_write_output_schema`. The file lives under ``private_home`` (the CLI parent
+        reads it directly, outside the sandbox, so a private-home path causes no chicken-and-egg).
+        """
+        settings_path = str(Path(paths.attempt_dir) / "claude-sandbox-settings.json")
+        Path(settings_path).write_text(json.dumps(settings, ensure_ascii=False), encoding="utf-8")
+        return settings_path
 
     def _parse(
         self,

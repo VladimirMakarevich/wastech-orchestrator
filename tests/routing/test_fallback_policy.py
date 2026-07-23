@@ -91,6 +91,79 @@ def test_conditional_auth_permission_rule(
     )
 
 
+# --- WRI-002: CAPABILITY_UNAVAILABLE host-verified fallback
+# ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "primary_profile,fallback_profile,can_isolate,expected",
+    [
+        (WORKSPACE, WORKSPACE, True, True),  # same profile + fallback can isolate → allowed
+        (WORKSPACE, WORKSPACE, False, False),  # fallback cannot isolate here → refused
+        (WORKSPACE, READONLY, True, True),  # stricter + can isolate → allowed
+        (READONLY, WORKSPACE, True, False),  # looser profile → refused even if it can isolate
+    ],
+)
+def test_capability_unavailable_needs_same_or_stricter_and_isolable(
+    primary_profile: str, fallback_profile: str, can_isolate: bool, expected: bool
+) -> None:
+    assert (
+        fallback_allowed(
+            ErrorClass.CAPABILITY_UNAVAILABLE,
+            primary_profile=primary_profile,
+            fallback_profile=fallback_profile,
+            fallback_can_isolate=can_isolate,
+        )
+        is expected
+    )
+
+
+def test_capability_unavailable_falls_over_only_to_an_isolable_provider(
+    config: OrchestratorConfig,
+    make_fake_provider: Callable[..., object],
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # End-to-end: a primary that raises CAPABILITY_UNAVAILABLE falls over to the other provider ONLY
+    # when that provider can itself isolate the node on this host (empty isolation reasons).
+    primary = make_fake_provider(ProviderId.CODEX, raises=ErrorClass.CAPABILITY_UNAVAILABLE)
+    fallback = make_fake_provider(ProviderId.CLAUDE)
+    router = AgentRouter(
+        config,
+        {ProviderId.CODEX: primary, ProviderId.CLAUDE: fallback},
+        isolation_checks={ProviderId.CLAUDE: lambda _cfg: [], ProviderId.CODEX: lambda _cfg: []},
+    )
+    outcome = router.run_stage(
+        make_request(node_id="review"), router.resolve_route("review", ProviderId.CODEX)
+    )
+    assert fallback.run_count == 1  # the isolable fallback was used
+    assert outcome.result is not None
+
+
+def test_capability_unavailable_is_terminal_when_fallback_cannot_isolate(
+    config: OrchestratorConfig,
+    make_fake_provider: Callable[..., object],
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    primary = make_fake_provider(ProviderId.CODEX, raises=ErrorClass.CAPABILITY_UNAVAILABLE)
+    fallback = make_fake_provider(ProviderId.CLAUDE)  # would succeed if (wrongly) invoked
+    router = AgentRouter(
+        config,
+        {ProviderId.CODEX: primary, ProviderId.CLAUDE: fallback},
+        # The fallback cannot isolate the node on this host → no cross-provider recovery.
+        isolation_checks={
+            ProviderId.CLAUDE: lambda _cfg: ["Bash sandbox unavailable"],
+            ProviderId.CODEX: lambda _cfg: [],
+        },
+    )
+    outcome = router.run_stage(
+        make_request(node_id="review"), router.resolve_route("review", ProviderId.CODEX)
+    )
+    assert fallback.run_count == 0  # never launched an equally-unisolable provider
+    assert outcome.result is None
+    assert outcome.terminal_error is not None
+    assert outcome.terminal_error.error_class is ErrorClass.CAPABILITY_UNAVAILABLE
+
+
 def test_quality_failure_is_not_a_fallback_trigger(
     config: OrchestratorConfig,
     make_fake_provider: Callable[..., object],

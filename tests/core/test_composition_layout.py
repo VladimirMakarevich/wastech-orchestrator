@@ -36,6 +36,37 @@ def test_providers_are_rooted_at_private_home(git_repo, make_git_config, tmp_pat
         assert provider._artifacts_root == tmp_path / "priv"
 
 
+def test_providers_receive_the_internal_deny_policy(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # WRI-002 wiring guard: build_providers must project the internal deny policy into EVERY
+    # provider
+    # so a wiring bug can never silently disable the read/write-deny projection. The provider's own
+    # ``_build_argv`` reads ``self._deny_policy`` — an absent one would emit no internal denies.
+    config = make_git_config(git_repo.clone, checks=["pytest"])
+    layout = _distinct_layout(git_repo.clone, tmp_path)
+    providers = build_providers(config, layout=layout)
+    assert providers, "expected at least one configured provider"
+    for provider in providers.values():
+        assert provider._deny_policy is not None
+        assert provider._deny_policy.control_home == tmp_path / "ctrl"
+        assert provider._deny_policy.private_home == tmp_path / "priv"
+
+
+def test_router_receives_isolation_checks(git_repo, make_git_config, tmp_path: Path) -> None:
+    # WRI-002 wiring guard: the router's CAPABILITY_UNAVAILABLE host-verified fallback gate needs
+    # the
+    # offline isolation-check table; build_orchestrator must inject it (else _can_isolate fails
+    # closed
+    # for every provider and a legitimate cross-provider recovery would be wrongly refused).
+    config = make_git_config(git_repo.clone, checks=["pytest"])
+    layout = _distinct_layout(git_repo.clone, tmp_path)
+    orch = build_orchestrator(config, layout=layout)
+    assert orch._router._isolation_checks  # non-empty
+    for pid in config.agents.providers:
+        assert pid in orch._router._isolation_checks
+
+
 def test_orchestrator_consumers_receive_the_right_field(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:

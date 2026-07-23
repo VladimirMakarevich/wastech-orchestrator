@@ -25,6 +25,7 @@ from wastech_orchestrator.providers.base import (
     RunStatus,
 )
 from wastech_orchestrator.routing.router import ResolvedRoute, RouteSource, StageOutcome
+from wastech_orchestrator.runtime_layout import ProviderWriteGuardPolicy
 from wastech_orchestrator.state_store import StateStore, TaskRow
 
 _FLOW = """
@@ -105,6 +106,15 @@ class _FakeGit:
 
     def compare_git_control_state(self, before: object) -> None:
         return None
+
+    def resolve_control_paths(self, exchange_root: str | None = None) -> ProviderWriteGuardPolicy:
+        return ProviderWriteGuardPolicy(
+            exchange_root=None,
+            git_dir=Path("/x/.git"),
+            git_common_dir=Path("/x/.git"),
+            hooks_dir=Path("/x/.git/hooks"),
+            tasks_dir=Path("/x/tasks"),
+        )
 
     def push(self, task_id: str, branch: str, **_: object) -> bool:
         return True

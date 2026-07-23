@@ -89,16 +89,21 @@ def build_providers(
     layout: RuntimeLayout,
     heartbeat_seconds: float = 30.0,
     agent_handle_recorder: AgentHandleRecorder | None = None,
+    deny_policy: InternalDenyPolicy | None = None,
 ) -> dict[ProviderId, AgentProvider]:
     """Construct the real provider adapters for the configured providers.
 
     Used by :func:`build_orchestrator` and the CLI ``preflight`` command. Providers own the private
     artifact tree, so they are rooted at ``layout.private_home``. ``agent_handle_recorder`` is set
     only by the ``watch`` daemon so a hard stop can reap a running agent's whole subtree; it is
-    ``None`` for one-shot CLI runs and tests.
+    ``None`` for one-shot CLI runs and tests. ``deny_policy`` (WRI-002/003) is the internal
+    read-deny
+    set each adapter projects into its tool/OS-sandbox policy; when ``None`` it is built from the
+    ``layout`` (the CLI ``preflight`` caller passes nothing — it never launches an agent).
     """
     root = str(layout.private_home)
     artifact_level = config.logging.artifacts
+    policy = deny_policy if deny_policy is not None else build_internal_deny_policy(config, layout)
     providers: dict[ProviderId, AgentProvider] = {}
     for pid, provider_cfg in config.agents.providers.items():
         if pid is ProviderId.CLAUDE:
@@ -109,6 +114,7 @@ def build_providers(
                 heartbeat_seconds=heartbeat_seconds,
                 artifact_level=artifact_level,
                 agent_handle_recorder=agent_handle_recorder,
+                deny_policy=policy,
             )
         elif pid is ProviderId.CODEX:
             providers[pid] = codex.CodexProvider(
@@ -118,6 +124,7 @@ def build_providers(
                 heartbeat_seconds=heartbeat_seconds,
                 artifact_level=artifact_level,
                 agent_handle_recorder=agent_handle_recorder,
+                deny_policy=policy,
             )
     return providers
 
@@ -153,16 +160,25 @@ def build_orchestrator(
     a crash), so it never falls back to a fresh agent.
     """
     private_home = layout.private_home
+    # WRI-002/003: build the internal deny policy once (with the resolved ``env_file``) and thread
+    # it
+    # into the providers (read/write-deny projection), the Orchestrator (audit), and — as the
+    # offline
+    # isolation-check table — the Router's ``CAPABILITY_UNAVAILABLE`` host-verified fallback gate.
+    deny_policy = build_internal_deny_policy(config, layout, env_file=env_file)
     providers = build_providers(
         config,
         layout=layout,
         heartbeat_seconds=heartbeat_seconds,
         agent_handle_recorder=agent_handle_recorder,
+        deny_policy=deny_policy,
     )
 
     store = StateStore.open(private_home / "state.db")
     ledger = Ledger(private_home / "logs")
-    router = AgentRouter(config, providers, is_cancelled=is_cancelled)
+    router = AgentRouter(
+        config, providers, is_cancelled=is_cancelled, isolation_checks=ISOLATION_CHECKS
+    )
     git = GitManager(
         config,
         store=store,
@@ -190,7 +206,7 @@ def build_orchestrator(
         ledger=ledger,
         gate=gate,
         layout=layout,
-        deny_policy=build_internal_deny_policy(config, layout, env_file=env_file),
+        deny_policy=deny_policy,
         notifier=notifier,
         resolver=resolver,
         heartbeat_seconds=heartbeat_seconds,

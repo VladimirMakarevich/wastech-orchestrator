@@ -1944,3 +1944,49 @@ def test_agent_hookspath_target_does_not_run(
     sha = gm.commit_code("task-001", "feat")
     assert sha is not None
     assert not sentinel.exists()
+
+
+# --- WRI-002: resolve_control_paths (provider Write/Edit-deny roots)
+# -------------------------------
+
+
+def test_resolve_control_paths_normal_clone(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    wg = gm.resolve_control_paths("/repo/.worc-io")
+    clone = Path(git_repo.clone)
+    dot_git = (clone / ".git").resolve()
+    # A normal clone collapses the gitdir and common dir onto <clone>/.git.
+    assert wg.git_dir.resolve() == dot_git
+    assert wg.git_common_dir.resolve() == dot_git
+    assert wg.hooks_dir.resolve() == (clone / ".git" / "hooks").resolve()
+    assert wg.tasks_dir == clone / "tasks"
+    assert wg.exchange_root == Path("/repo/.worc-io")
+    # denied_write_paths de-dups git_dir==git_common_dir and includes exchange + tasks.
+    resolved = {p.resolve() for p in wg.denied_write_paths}
+    assert dot_git in resolved
+    assert Path("/repo/.worc-io").resolve() in resolved
+    assert (clone / "tasks").resolve() in resolved
+
+
+def test_resolve_control_paths_linked_worktree_splits_gitdir_and_common(
+    git_repo,
+    store: StateStore,
+    tmp_path: Path,
+    make_git_config: ConfigFactory,
+    git_run: GitRunner,
+) -> None:
+    # A linked worktree has a per-worktree gitdir distinct from the shared common dir; BOTH must be
+    # denied so the sandbox's built-in "shared .git is writable in a linked worktree" allowance is
+    # overridden.
+    wt = tmp_path / "wt"
+    git_run(["worktree", "add", "-b", "wt-branch", str(wt)], git_repo.clone)
+    config = make_git_config(str(wt))
+    gm = GitManager(config, store=store, artifacts_root=str(tmp_path / "art2"))
+    wg = gm.resolve_control_paths()
+    assert wg.git_dir.resolve() != wg.git_common_dir.resolve()
+    assert wg.git_common_dir.resolve() == (Path(git_repo.clone) / ".git").resolve()
+    # Both distinct roots appear in the write-deny set.
+    resolved = {p.resolve() for p in wg.denied_write_paths}
+    assert wg.git_dir.resolve() in resolved and wg.git_common_dir.resolve() in resolved

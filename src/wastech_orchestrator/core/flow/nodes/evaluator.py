@@ -39,7 +39,9 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeServices,
 )
 from wastech_orchestrator.core.flow.nodes.exchange_publish import (
+    assert_exchange_unchanged,
     assert_request_contained,
+    capture_exchange_manifest,
     publish_file,
     publish_node_run_file,
 )
@@ -142,6 +144,10 @@ class EvaluatorNodeRunner:
             node, ctx, route, run_id, session_id, guard_output_baseline(baseline)
         )
         assert_request_contained(request, self._s.exchange_root)
+        # WRI-002 detection-in-depth: fingerprint the curated exchange before the (read-only)
+        # evaluator attempt so a provider mutation of the immutable surface is caught from
+        # parent-held state after quiescence, before its findings are trusted downstream.
+        exchange_before = capture_exchange_manifest(self._s.exchange_root, ctx.task_id)
         outcome = self._s.router.run_stage(request, route, snapshot=self._s.snapshot)
         raw_findings = (
             self._findings_or_none(outcome.result.structured_output)
@@ -172,6 +178,9 @@ class EvaluatorNodeRunner:
                 f"evaluator node {node.id!r}: no provider could run it ({err})",
                 error_class=error_class,
             )
+        assert_exchange_unchanged(
+            exchange_before, self._s.exchange_root, ctx.task_id, node_id=node.id
+        )
         if raw_findings is None:
             # F19 fail-closed: the provider did not honor the mandatory findings schema (missing
             # or malformed ``findings`` array) — never silently accept. There is nothing for

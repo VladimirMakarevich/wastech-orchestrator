@@ -43,35 +43,51 @@ from wastech_orchestrator.providers.base import (
 )
 from wastech_orchestrator.providers.capabilities import map_reasoning_for_provider_switch
 from wastech_orchestrator.routing.snapshots import PartialChange, SnapshotHook
+from wastech_orchestrator.security.isolation import IsolationCheck
 from wastech_orchestrator.security.profiles import is_same_or_stricter
 
 _LOG = logging.getLogger(__name__)
 
-# authorization_failed / permission_denied fall back only when the fallback provider runs in the
-# same or a stricter permission profile — decided here, not in providers.base.
+# Error classes whose fallback is CONDITIONAL, decided here (not in providers.base):
+# * authorization_failed / permission_denied — only when the fallback provider runs in the same or a
+#   stricter permission profile (never relaxing the policy);
+# * capability_unavailable (WRI-002) — only when the fallback is same-or-stricter AND can itself
+#   enforce the required isolation for the node on this host (``fallback_can_isolate``), so the
+#   Router never recovers a missing-sandbox refusal by falling over to an equally-unisolable
+# provider.
 CONDITIONAL_FALLBACK: frozenset[ErrorClass] = frozenset(
     {
         ErrorClass.AUTHORIZATION_FAILED,
         ErrorClass.PERMISSION_DENIED,
+        ErrorClass.CAPABILITY_UNAVAILABLE,
     }
 )
 
 
 def fallback_allowed(
-    error_class: ErrorClass, *, primary_profile: str, fallback_profile: str
+    error_class: ErrorClass,
+    *,
+    primary_profile: str,
+    fallback_profile: str,
+    fallback_can_isolate: bool = True,
 ) -> bool:
     """Decide whether a raised ``ProviderError`` permits fallback.
 
     Unconditional for the infrastructure classes in
     :data:`~wastech_orchestrator.providers.base.FALLBACK_ELIGIBLE`; conditional for
     ``authorization_failed`` / ``permission_denied`` (only when the fallback profile is the same or
-    stricter — never relaxing the policy); never for quality (``task_failure``) or configuration
-    errors. Pure and directly unit-tested as a decision table.
+    stricter — never relaxing the policy) and for ``capability_unavailable`` (same-or-stricter AND
+    ``fallback_can_isolate`` — the fallback must itself be able to isolate the node on this host);
+    never for quality (``task_failure``) or configuration errors. Pure and directly unit-tested as a
+    decision table.
     """
     if error_class in FALLBACK_ELIGIBLE:
         return True
     if error_class in CONDITIONAL_FALLBACK:
-        return is_same_or_stricter(fallback_profile, primary_profile)
+        same_or_stricter = is_same_or_stricter(fallback_profile, primary_profile)
+        if error_class is ErrorClass.CAPABILITY_UNAVAILABLE:
+            return same_or_stricter and fallback_can_isolate
+        return same_or_stricter
     return False
 
 
@@ -150,6 +166,7 @@ class AgentRouter:
         monotonic: Callable[[], float] = time.monotonic,
         sleep: Callable[[float], None] = time.sleep,
         is_cancelled: Callable[[], bool] = lambda: False,
+        isolation_checks: Mapping[ProviderId, IsolationCheck] | None = None,
     ) -> None:
         self._config = config
         self._providers = providers
@@ -158,7 +175,27 @@ class AgentRouter:
         # Set only by the watch daemon: True once an operator stop was requested. Checked before any
         # fallback/retry so a stop-killed agent is never respawned on another provider.
         self._is_cancelled = is_cancelled
+        # WRI-002: the offline ProviderId→isolation-check table (the same one composition binds), so
+        # a ``CAPABILITY_UNAVAILABLE`` fallback is allowed only to a provider that can itself
+        # isolate
+        # the node on this host. The router imports no concrete adapter — the table is injected.
+        self._isolation_checks = isolation_checks or {}
         self._global_primary = _resolve_global_primary(config)
+
+    def _can_isolate(self, pid: ProviderId) -> bool:
+        """Whether ``pid`` can enforce its required isolation on this host (offline; fail-closed).
+
+        Reuses the injected offline isolation check (``isolation_reasons``): an empty reason list
+        means the provider can isolate here. A missing check/config is treated as *cannot* isolate
+        (fail-closed), so a ``CAPABILITY_UNAVAILABLE`` fallback never silently reaches an
+        unverifiable
+        provider.
+        """
+        check = self._isolation_checks.get(pid)
+        cfg = self._config.agents.providers.get(pid)
+        if check is None or cfg is None:
+            return False
+        return not check(cfg)
 
     def resolve_route(
         self,
@@ -391,6 +428,7 @@ class AgentRouter:
                     exc.error_class,
                     primary_profile=self._profile_of(pid),
                     fallback_profile=self._profile_of(next_pid),
+                    fallback_can_isolate=self._can_isolate(next_pid),
                 ):
                     log.info(
                         "fallback denied",

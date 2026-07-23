@@ -61,6 +61,7 @@ from wastech_orchestrator.providers.redaction import (
     redact_text,
     secret_env_values,
 )
+from wastech_orchestrator.runtime_layout import InternalDenyPolicy
 from wastech_orchestrator.security.env import build_child_env
 
 _PREFLIGHT_TIMEOUT_SECONDS = 10
@@ -173,10 +174,15 @@ class BaseCliProvider:
         heartbeat_seconds: float = 30.0,
         artifact_level: str = "full",
         agent_handle_recorder: AgentHandleRecorder | None = None,
+        deny_policy: InternalDenyPolicy | None = None,
     ) -> None:
         self._config = config
         self._security = security
         self._artifacts_root = Path(artifacts_root)
+        # WRI-002/003: the internal read-deny set (private/control homes, secrets, provider auth
+        # homes, frozen bundles) the adapter projects into its tool/OS-sandbox deny policy. On the
+        # base so both adapters project the same set; ``None`` in unit harnesses that don't test it.
+        self._deny_policy = deny_policy
         self._clock = clock
         self._monotonic = monotonic
         self._run_process = run_process

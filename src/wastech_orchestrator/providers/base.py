@@ -5,6 +5,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
+from wastech_orchestrator.runtime_layout import ProviderWriteGuardPolicy
+
 # --- Canonical enumerations (do not duplicate as string literals throughout the code) ---
 
 
@@ -87,6 +89,18 @@ class ErrorClass(StrEnum):
     # be live) nor PARK_ELIGIBLE (an auto-resume must not paper over an uncontained process); the
     # Core routes it to ``manual_action_required`` and the children-file handle is retained.
     CONTAINMENT_UNVERIFIED = "containment_unverified"
+    # A required host isolation capability is unavailable, detected DETERMINISTICALLY BEFORE any
+    # model invocation (WRI-002): e.g. a Claude workspace-write node on Linux/WSL2 whose Bash
+    # sandbox
+    # needs ``bubblewrap``+``socat`` which are absent. The adapter refuses to run Bash unsandboxed
+    # and raises this from the argv builder — nothing is launched, so no paid call is made. NOT a
+    # quality failure and NOT unconditionally fallback-eligible: the Router
+    # (``CONDITIONAL_FALLBACK``)
+    # permits fallback only to a provider whose effective isolation for the node is same-or-stricter
+    # AND can itself isolate on this host; otherwise the Core routes it to
+    # ``manual_action_required``.
+    # A failed policy/sandbox proof on a *supported* host stays a non-fallback security result too.
+    CAPABILITY_UNAVAILABLE = "capability_unavailable"
 
 
 # Error classes that unconditionally allow fallback.
@@ -187,6 +201,14 @@ class AgentRunRequest:
     # access; Claude allows the WebFetch/WebSearch tools. It only toggles the network — never the
     # filesystem sandbox/approvals (the ceiling stays in force).
     network_access: bool = False
+    # WRI-002/003: the absolute Git-control + lifecycle roots a *workspace-write* attempt must
+    # Write/Edit-deny (exchange root, resolved gitdir/common-dir/hooks-dir, ``tasks/`` tree). Set by
+    # the node runner from ``GitManager.resolve_control_paths`` only for a workspace-write attempt
+    # (the gitdir/common-dir are per-worktree and only final after branch prep); ``None`` for
+    # read-only attempts, which carry no write tools. Provider-neutral — each adapter renders it
+    # into
+    # its own tool-deny / OS-sandbox ``denyWrite`` syntax; preserved verbatim across a fallback.
+    write_guard: ProviderWriteGuardPolicy | None = None
 
 
 def build_context_footer(request: AgentRunRequest) -> str:

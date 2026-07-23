@@ -43,7 +43,11 @@ from wastech_orchestrator.providers.artifacts import sha256_file, task_artifact_
 from wastech_orchestrator.providers.process import ProcessResult, run_process
 from wastech_orchestrator.providers.redaction import read_denied_secrets, redact_text
 from wastech_orchestrator.routing.snapshots import PartialChange, WorkingTreeSnapshot
-from wastech_orchestrator.runtime_layout import CONTROL_HOME_DIRNAME, EXCHANGE_HOME_DIRNAME
+from wastech_orchestrator.runtime_layout import (
+    CONTROL_HOME_DIRNAME,
+    EXCHANGE_HOME_DIRNAME,
+    ProviderWriteGuardPolicy,
+)
 from wastech_orchestrator.security.env import build_child_env
 from wastech_orchestrator.state_store import PublishOpRow, StateStore
 from wastech_orchestrator.task.model import BRANCH_NAME_MAX_LEN
@@ -1101,6 +1105,33 @@ class GitManager:
         if not base.is_absolute():
             base = Path(self._clone) / base
         return base / "hooks"
+
+    def resolve_control_paths(
+        self, exchange_root: str | Path | None = None
+    ) -> ProviderWriteGuardPolicy:
+        """Absolute Git-control + lifecycle roots a workspace-write attempt must Write/Edit-deny.
+
+        Provider-neutral (WRI-002/003): the node runner resolves this fresh for each workspace-write
+        attempt — the gitdir/common-dir are only final after branch prep and differ for a linked
+        worktree — and threads it onto ``AgentRunRequest.write_guard``; each adapter renders it into
+        its own tool-deny / OS-sandbox ``denyWrite`` syntax (the Core never learns that syntax).
+        Read-only git plumbing, reusing the same resolution as the WRI-009 control-state fingerprint
+        (``rev-parse`` + :meth:`_hooks_dir`). ``git_dir`` and ``git_common_dir`` are returned
+        separately because a linked worktree's per-worktree gitdir differs from the shared common
+        dir and both must be denied. Fails closed (:class:`GitCommandError`) on a git-resolution
+        failure so an unguarded run is impossible.
+        """
+        git_dir = Path(self._git_checked("rev-parse", "--absolute-git-dir"))
+        git_common_dir = Path(self._git_checked("rev-parse", "--git-common-dir"))
+        if not git_common_dir.is_absolute():
+            git_common_dir = Path(self._clone) / git_common_dir
+        return ProviderWriteGuardPolicy(
+            exchange_root=Path(exchange_root) if exchange_root else None,
+            git_dir=git_dir,
+            git_common_dir=git_common_dir,
+            hooks_dir=self._hooks_dir(),
+            tasks_dir=Path(self._clone) / self._tasks_dir,
+        )
 
     def _capture_hooks(self) -> dict[str, HookFacts]:
         """Identity facts for each entry in the effective hooks dir (empty when absent)."""

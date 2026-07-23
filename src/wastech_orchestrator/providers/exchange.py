@@ -273,6 +273,39 @@ def build_exchange_manifest(
     return ExchangeManifest(task_id=task_id, entries=tuple(entries))
 
 
+#: Cap on the number of drift items surfaced in a mismatch message (secret-free, bounded).
+_DRIFT_EVIDENCE_CAP = 20
+
+
+def diff_exchange_manifests(before: ExchangeManifest, after: ExchangeManifest) -> tuple[str, ...]:
+    """Return bounded, secret-free descriptions of every change between two exchange manifests.
+
+    Empty means the curated exchange is byte-for-byte unchanged. Compares by relative name and
+    content digest (plus regular-file identity), so a content edit, an add/delete/rename, or a
+    hard-link/identity swap is reported — but a timestamp-only touch is **not** (mtime is not in the
+    fingerprint). WRI-002 diffs a pre-attempt manifest against a post-attempt one; any change is a
+    non-fallback policy violation and the changed copy is never consumed downstream.
+    """
+    before_by_name = {entry.relname: entry for entry in before.entries}
+    after_by_name = {entry.relname: entry for entry in after.entries}
+    changes: list[str] = []
+    for name in sorted(set(before_by_name) | set(after_by_name)):
+        old = before_by_name.get(name)
+        new = after_by_name.get(name)
+        if old is None:
+            changes.append(f"added {name!r}")
+        elif new is None:
+            changes.append(f"removed {name!r}")
+        elif old.sha256 != new.sha256 or old.size != new.size:
+            changes.append(f"content changed {name!r}")
+        elif old.link_count != new.link_count:
+            changes.append(f"link identity changed {name!r}")
+    if len(changes) > _DRIFT_EVIDENCE_CAP:
+        extra = len(changes) - _DRIFT_EVIDENCE_CAP
+        changes = [*changes[:_DRIFT_EVIDENCE_CAP], f"(+{extra} more)"]
+    return tuple(changes)
+
+
 def _ensure_existing_real_dir(path: Path, inspector: FileInspector) -> None:
     if not os.path.lexists(path):
         raise ExchangeError(f"exchange dir does not exist: {path.as_posix()}")

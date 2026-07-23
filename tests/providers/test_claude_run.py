@@ -25,7 +25,7 @@ from wastech_orchestrator.providers.base import (
     RunStatus,
     build_effective_prompt,
 )
-from wastech_orchestrator.providers.claude import ClaudeCodeProvider
+from wastech_orchestrator.providers.claude import ClaudeCodeProvider, SandboxCapability
 from wastech_orchestrator.providers.process import ProcessResult, QuiescenceResult
 
 FIXED_TIME = datetime(2026, 6, 11, 12, 0, 0, tzinfo=UTC)
@@ -96,13 +96,18 @@ def _provider(
     security: SecurityConfig,
     artifacts_root: Path,
     fake: FakeRun,
+    *,
+    capability: SandboxCapability = SandboxCapability.MACOS,
 ) -> ClaudeCodeProvider:
+    # Inject a sandbox-available host by default so a workspace-write run builds on any CI host
+    # (a bwrap-less Linux CI would otherwise raise CAPABILITY_UNAVAILABLE pre-model).
     return ClaudeCodeProvider(
         config,
         security=security,
         artifacts_root=artifacts_root,
         clock=lambda: FIXED_TIME,
         run_process=fake,
+        sandbox_probe=lambda: capability,
     )
 
 
@@ -287,6 +292,31 @@ def test_configuration_error_raises_before_launch(
         provider.run(make_request())
     assert exc.value.error_class is ErrorClass.CONFIGURATION_ERROR
     assert fake.calls == 0  # never launched
+    assert (_attempt_dir(tmp_path) / "request.json").exists()
+
+
+def test_capability_unavailable_raises_before_launch(
+    claude_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # WRI-002: a strict workspace-write attempt on a supported host whose Bash sandbox deps are
+    # missing raises CAPABILITY_UNAVAILABLE PRE-MODEL — nothing is launched, the request artifact is
+    # still written, and it is deliberately not an unconditional fallback (the Router gates it).
+    fake = FakeRun(stdout=_success_stream())
+    provider = _provider(
+        claude_config,
+        security_config,
+        tmp_path,
+        fake,
+        capability=SandboxCapability.LINUX_MISSING_DEPS,
+    )
+    with pytest.raises(ProviderError) as exc:
+        provider.run(make_request(permission_profile="workspace-write"))
+    assert exc.value.error_class is ErrorClass.CAPABILITY_UNAVAILABLE
+    assert exc.value.is_fallback_eligible is False
+    assert fake.calls == 0  # never launched — no paid model call
     assert (_attempt_dir(tmp_path) / "request.json").exists()
 
 

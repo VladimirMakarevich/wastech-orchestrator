@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 from wastech_orchestrator.core.dangerous_diff import (
@@ -42,7 +43,9 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeServices,
 )
 from wastech_orchestrator.core.flow.nodes.exchange_publish import (
+    assert_exchange_unchanged,
     assert_request_contained,
+    capture_exchange_manifest,
     publish_artifact,
     publish_file,
 )
@@ -383,13 +386,22 @@ class AgentNodeRunner:
         assert_request_contained(request, self._s.exchange_root)
         # WRI-009: fingerprint the Git control state before a workspace-write attempt; the compare
         # after `run_stage` (below) runs before any orchestrator git touches the possibly-poisoned
-        # clone. A read-only attempt cannot mutate git, so it is not captured.
+        # clone. A read-only attempt cannot mutate git, so it is not captured. WRI-002: a
+        # workspace-write attempt also gets its Write/Edit-deny roots (exchange/gitdir/common/hooks/
+        # tasks) resolved fresh here (they are only final after branch prep) and threaded onto the
+        # request; a read-only attempt carries no write tools, so ``write_guard`` stays ``None``.
         git = self._s.git
-        control_before = (
-            git.capture_git_control_state()
-            if git is not None and self._is_workspace_write(node, ctx)
-            else None
-        )
+        control_before = None
+        if git is not None and self._is_workspace_write(node, ctx):
+            control_before = git.capture_git_control_state()
+            request = replace(request, write_guard=git.resolve_control_paths(self._s.exchange_root))
+        # WRI-002 detection-in-depth: fingerprint the curated exchange before the attempt so a
+        # provider mutation of the read-only surface is caught from parent-held state (below),
+        # before
+        # any downstream node consumes it. Applies to every agent profile — the exchange is
+        # immutable
+        # to the agent regardless of write access.
+        exchange_before = capture_exchange_manifest(self._s.exchange_root, ctx.task_id)
         outcome = self._s.router.run_stage(request, route, snapshot=self._s.snapshot)
         self._record_completion(run_id, outcome)
         record_run_observability(
@@ -414,9 +426,11 @@ class AgentNodeRunner:
                 f"agent node {node.id!r}: no provider could complete it ({err})",
                 error_class=error_class,
             )
-        # WRI-009: the result is trusted (WRI-012 proved provider-tree quiescence inside the
+        # WRI-009/002: the result is trusted (WRI-012 proved provider-tree quiescence inside the
         # adapter), so compare now — before `_apply_post_edit_guard`'s `git diff`/commit touch the
-        # clone. Control-state drift is a non-fallback policy violation → manual action.
+        # clone and before any downstream node reads the exchange. Git control-state drift or an
+        # exchange mutation is a non-fallback policy violation → manual action; the changed copy is
+        # never consumed downstream.
         if control_before is not None and git is not None:
             drift = git.compare_git_control_state(control_before)
             if drift is not None:
@@ -424,6 +438,9 @@ class AgentNodeRunner:
                     f"agent node {node.id!r}: git control state changed during a provider attempt "
                     f"({drift.summary()})"
                 )
+        assert_exchange_unchanged(
+            exchange_before, self._s.exchange_root, ctx.task_id, node_id=node.id
+        )
         self._persist_session(node, ctx, outcome)
         return run_id, outcome
 

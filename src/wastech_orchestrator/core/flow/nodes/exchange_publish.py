@@ -13,6 +13,7 @@ redaction literals (the same set the stored-prompt redaction uses).
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -21,7 +22,10 @@ from wastech_orchestrator.providers.artifacts import exchange_node_run_dir, exch
 from wastech_orchestrator.providers.base import AgentRunRequest
 from wastech_orchestrator.providers.exchange import (
     ExchangeError,
+    ExchangeManifest,
     assert_orchestration_paths_contained,
+    build_exchange_manifest,
+    diff_exchange_manifests,
     publish_to_exchange,
 )
 
@@ -39,6 +43,56 @@ def assert_request_contained(request: AgentRunRequest, exchange_root: str) -> No
         assert_orchestration_paths_contained(request, exchange_root)
     except ExchangeError as exc:
         raise NodeManualRequired(f"exchange containment violation: {exc}") from exc
+
+
+def capture_exchange_manifest(exchange_root: str, task_id: str) -> ExchangeManifest | None:
+    """Fingerprint the current-task exchange before a provider attempt (WRI-002 detection-in-depth).
+
+    Returns ``None`` when no exchange is wired or the task dir does not exist yet (nothing to
+    protect). A pre-existing path-safety violation (a planted symlink/hard-link/ADS surfaced by the
+    walk) is itself a non-fallback ``manual_action_required`` condition — the exchange is
+    compromised
+    before the attempt even runs. Provider-neutral: both the agent and evaluator node runners
+    bracket
+    ``run_stage`` with this + :func:`assert_exchange_unchanged`, so Codex reuses it unchanged.
+    """
+    if not exchange_root:
+        return None
+    task_dir = exchange_task_dir(exchange_root, task_id)
+    if not os.path.lexists(task_dir):
+        return None
+    try:
+        return build_exchange_manifest(task_dir, task_id)
+    except ExchangeError as exc:
+        raise NodeManualRequired(f"exchange integrity (pre-run): {exc}") from exc
+
+
+def assert_exchange_unchanged(
+    before: ExchangeManifest | None, exchange_root: str, task_id: str, *, node_id: str
+) -> None:
+    """Fail closed unless the exchange is byte-identical to ``before`` (WRI-002).
+
+    Called after a provider attempt (once WRI-012 has proven the provider tree quiescent), before
+    any
+    downstream node consumes an exchange artifact. A mutation — content edit, add/delete/rename,
+    identity swap, or a path-safety violation raised by the re-walk — is a non-fallback security
+    policy failure routed to ``manual_action_required``; the changed copy is never trusted
+    downstream.
+    A no-op when ``before`` is ``None`` (nothing was captured). Timestamp-only touches do not trip
+    it.
+    """
+    if before is None:
+        return
+    task_dir = exchange_task_dir(exchange_root, task_id)
+    try:
+        after = build_exchange_manifest(task_dir, task_id)
+    except ExchangeError as exc:
+        raise NodeManualRequired(f"exchange integrity (post-run): {exc}") from exc
+    changes = diff_exchange_manifests(before, after)
+    if changes:
+        raise NodeManualRequired(
+            f"node {node_id!r}: exchange mutated during a provider attempt ({'; '.join(changes)})"
+        )
 
 
 def publish_artifact(

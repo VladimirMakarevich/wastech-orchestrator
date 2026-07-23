@@ -26,6 +26,7 @@ from wastech_orchestrator.providers.exchange import (
     assert_orchestration_paths_contained,
     build_exchange_manifest,
     clear_exchange_task_dir,
+    diff_exchange_manifests,
     posix_file_facts,
     publish_to_exchange,
 )
@@ -338,3 +339,58 @@ def test_clear_exchange_task_dir_removes_the_tree(task_dir: Path) -> None:
     assert not task_dir.exists()
     # Idempotent when already absent.
     clear_exchange_task_dir(task_dir.parent, "add-http-retry")
+
+
+# --- WRI-002: pre/post-attempt manifest diff (parent-held mutation detection) ---------------------
+
+
+def _seed(task_dir: Path, files: dict[str, str]) -> None:
+    task_dir.mkdir(parents=True, exist_ok=True)
+    for name, body in files.items():
+        (task_dir / name).write_text(body, encoding="utf-8")
+
+
+def test_diff_reports_nothing_when_unchanged(task_dir: Path) -> None:
+    _seed(task_dir, {"plan.md": "a", "current.diff": "b"})
+    before = build_exchange_manifest(task_dir, "t")
+    after = build_exchange_manifest(task_dir, "t")
+    assert diff_exchange_manifests(before, after) == ()
+
+
+def test_diff_detects_content_change(task_dir: Path) -> None:
+    _seed(task_dir, {"plan.md": "a"})
+    before = build_exchange_manifest(task_dir, "t")
+    (task_dir / "plan.md").write_text("MUTATED", encoding="utf-8")
+    after = build_exchange_manifest(task_dir, "t")
+    changes = diff_exchange_manifests(before, after)
+    assert changes and "content changed 'plan.md'" in changes
+
+
+def test_diff_detects_add_and_delete(task_dir: Path) -> None:
+    _seed(task_dir, {"plan.md": "a"})
+    before = build_exchange_manifest(task_dir, "t")
+    (task_dir / "plan.md").unlink()
+    (task_dir / "injected.sh").write_text("evil", encoding="utf-8")
+    after = build_exchange_manifest(task_dir, "t")
+    changes = diff_exchange_manifests(before, after)
+    assert "removed 'plan.md'" in changes
+    assert "added 'injected.sh'" in changes
+
+
+def test_diff_ignores_timestamp_only_touch(task_dir: Path) -> None:
+    _seed(task_dir, {"plan.md": "a"})
+    before = build_exchange_manifest(task_dir, "t")
+    os.utime(task_dir / "plan.md", (10_000, 10_000))  # mtime is not in the fingerprint
+    after = build_exchange_manifest(task_dir, "t")
+    assert diff_exchange_manifests(before, after) == ()
+
+
+def test_diff_bounds_the_evidence(task_dir: Path) -> None:
+    _seed(task_dir, {f"f{i}.md": "x" for i in range(30)})
+    before = build_exchange_manifest(task_dir, "t")
+    for i in range(30):
+        (task_dir / f"f{i}.md").write_text("y", encoding="utf-8")
+    after = build_exchange_manifest(task_dir, "t")
+    changes = diff_exchange_manifests(before, after)
+    assert len(changes) == 21  # 20 items + a "(+N more)" summary
+    assert changes[-1].startswith("(+")

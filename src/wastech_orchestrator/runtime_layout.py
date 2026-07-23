@@ -126,10 +126,51 @@ class InternalDenyPolicy:
             ordered.append(self.frozen_control_bundle)
         if self.frozen_instruction_bundle is not None:
             ordered.append(self.frozen_instruction_bundle)
-        seen: set[Path] = set()
-        unique: list[Path] = []
-        for path in ordered:
-            if path not in seen:
-                seen.add(path)
-                unique.append(path)
-        return tuple(unique)
+        return _dedupe(ordered)
+
+
+@dataclass(frozen=True)
+class ProviderWriteGuardPolicy:
+    """Absolute roots a provider Write/Edit-denies during a workspace-write attempt (WRI-002/003).
+
+    Provider-neutral (paths only): the adapter renders these into its own tool-deny / OS-sandbox
+    ``denyWrite`` syntax; the Core never learns that syntax. Resolved *per workspace-write attempt*
+    by :meth:`~wastech_orchestrator.git_manager.GitManager.resolve_control_paths` — the gitdir and
+    common dir are only final after branch preparation and differ for a linked worktree — then
+    carried on :attr:`~wastech_orchestrator.providers.base.AgentRunRequest.write_guard`.
+
+    ``exchange_root`` stays *readable* (it is the curated agent-facing surface) but must be
+    Write/Edit-denied so the agent cannot mutate the curated projection. ``git_dir`` and
+    ``git_common_dir`` are both denied: for a linked worktree they differ, and both the per-worktree
+    gitdir **and** the shared common dir must be denied to override the Bash sandbox's built-in
+    linked-worktree ``.git`` write allowance. ``hooks_dir`` is the effective repository hooks dir
+    (its ``core.hooksPath`` or ``<common-dir>/hooks``). ``tasks_dir`` is the committed ``tasks/``
+    lifecycle tree — readable, never writable, so an agent can neither corrupt lifecycle bookkeeping
+    nor inject a new task file for the daemon to pick up.
+    """
+
+    exchange_root: Path | None
+    git_dir: Path
+    git_common_dir: Path
+    hooks_dir: Path
+    tasks_dir: Path
+
+    @property
+    def denied_write_paths(self) -> tuple[Path, ...]:
+        """The Write/Edit-deny set, ordered + de-duped (a normal clone collapses gitdir==common)."""
+        ordered: list[Path] = []
+        if self.exchange_root is not None:
+            ordered.append(self.exchange_root)
+        ordered.extend((self.git_dir, self.git_common_dir, self.hooks_dir, self.tasks_dir))
+        return _dedupe(ordered)
+
+
+def _dedupe(paths: list[Path]) -> tuple[Path, ...]:
+    """Order-preserving de-duplication for the deny-path properties."""
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for path in paths:
+        if path not in seen:
+            seen.add(path)
+            unique.append(path)
+    return tuple(unique)
