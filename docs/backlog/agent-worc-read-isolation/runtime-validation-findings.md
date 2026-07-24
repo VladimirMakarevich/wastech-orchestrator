@@ -88,44 +88,7 @@ On `rerun --continue --from <node>`: **re-freeze the control plane from the curr
 
 Surfaced while reproducing this: after the operator stops a run mid-flight, the task is left in DB status `running`, and both `rerun` and `finalize` refuse it (they accept only `failed` / `manual_action_required`) and also refuse a dirty working tree. Recovery today is a 3-step manual dance — clean the working tree → `worc finalize <id> --as failed` → `worc rerun <id>`. A stopped/killed task should be directly recoverable (accept a stale `running` lease, or a one-step reset), not require `finalize --as failed` just to re-run it.
 
-## VF-4 — frozen repository instructions are root-only: `@`-import closure (`.agents/rules/*.md`, `RTK.md`) is not injected, only reachable via live on-demand reads (nuance / residual gap)
-
-Severity: **Medium** Status: **open (by-design nuance — decide whether to widen closure or accept)** First seen: 2026-07-24 (task `p9-01-import-positions`, isolation validation)
-
-**Update — reframed by VF-6: the suggested `@`-closure resolver in "Expected / suggested direction" below is superseded.** If VF-6's rollback is adopted (let providers do native discovery over a write-denied instruction closure), no closure resolver is needed — the provider expands `@`-imports natively. VF-4's _observation_ (silent loss of the mandatory `.agents/rules/` tier under the current disable-and-inject design) remains the motivating evidence for VF-6.
-
-### Observed
-
-WRI-011 freezes and injects only the three root instruction files (`AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`). The `@`-import references inside them (`@RTK.md`, `@.agents/rules/architecture.md`, `@.agents/rules/coding-style.md`, `@.agents/rules/testing.md`, `@.agents/rules/security.md`) are injected as **literal, unexpanded text** — their file contents are not in the bundle. Because native discovery is disabled on both providers (Claude `--setting-sources ""`, Codex `project_doc_max_bytes=0`), the eager `@`-import expansion a vanilla Claude Code session performs does **not** happen here. The imported files are still reachable — they are ordinary tracked repo files and repo reads are allowed — so the agent can `Read` them on demand, but nothing guarantees it will.
-
-### Evidence
-
-- `core/flow/instruction_bundle.py:64-66` — `REPO_INSTRUCTION_NAMES = ("AGENTS.md", "AGENTS.override.md", "CLAUDE.md")` with the comment "root-only per the ADR scope decision — no nested discovery, no `@`-reference closure". `freeze_repository_instructions` concatenates each file's raw bytes with `<!-- BEGIN/END name -->` delimiters and performs no import expansion.
-- Injected `repository.md` (`.worc/instruction-bundles/p9-01-import-positions/instructions/repository.md`) contains the full `AGENTS.md` and `CLAUDE.md` bodies but keeps `@RTK.md` / `@.agents/rules/*.md` as literal lines; the manifest freezes only `AGENTS.md` + `CLAUDE.md` (+ task packet), not the imported files.
-- Frozen `src/AGENTS.md` and `src/CLAUDE.md` are byte-identical to `HEAD` (faithful capture of the roots).
-- Empirical on-demand reads across all provider event/stdout streams for the run: `.agents/rules/architecture.md` **302**, `testing.md` **16**, `security.md` **2** — but `.agents/rules/coding-style.md` **0** and `RTK.md` **0**. So a mandatory rule file _can_ be silently skipped for a whole task when eager auto-load is gone.
-
-### CLAUDE.md → AGENTS.md link behavior (the common "empty CLAUDE.md" pattern)
-
-A repo whose `CLAUDE.md` is essentially just `@AGENTS.md` still works, but not via the link: `AGENTS.md` is frozen first-class (it is in `REPO_INSTRUCTION_NAMES`), so its full text is already inlined in its own block. The literal `@AGENTS.md` inside the `CLAUDE.md` block is a redundant, unexpanded no-op. What does **not** survive is any instruction reachable only through a deeper `@`-import (the `.agents/rules/` tier, `RTK.md`, or any non-root file a `CLAUDE.md`/`AGENTS.md` points at).
-
-### Why it matters / risk
-
-The target repo declares the `.agents/rules/*.md` set as **mandatory** ("the mandatory rules in `.agents/rules/` … govern this change and override anything below on conflict" — the implementation role prompt). Under isolation those mandatory rules arrive only if the agent chooses to open them. In this run it opened architecture/testing/security but not coding-style — a concrete instance of a mandatory rule not reaching the model.
-
-### Expected / suggested direction
-
-Decide explicitly between: (a) accept root-only and rely on on-demand reads, but make the residual risk visible — e.g. resolve the `@`-import closure of the frozen roots, freeze those files too, and inject the expanded content (bounded/capped like skill closures); or (b) keep root-only but strengthen the role prompt to make reading the referenced rule files non-optional and record which were read. Either way, document the root-only contract in operator-facing docs so operators know their `@`-imported rule tiers are not eagerly loaded under strict isolation.
-
-### Likely area
-
-`core/flow/instruction_bundle.py` (`REPO_INSTRUCTION_NAMES` / `freeze_repository_instructions` — add an optional bounded `@`-closure resolver) and the provider injection layer (`providers/claude.py`, `providers/codex.py`). Docs: `docs/architecture.md` / configuration + the packaged guide.
-
-### Isolation-worked note
-
-Separately from this gap, the run confirms the isolation core functions: both root files reach the agent faithfully, sandbox denies are applied (`.worc`, `.env`, `~/.claude`, `~/.codex`, bundles), `exchange_contaminated=0`, and both `instruction_manifest_digest` / `control_bundle_digest` are recorded. VF-4 is about the transitive tier only, not the roots.
-
-## VF-5 — `review_fix_*` counters in `state.db` do not reflect the actual number of review/fix rounds in the logs (observation — needs confirmation)
+## VF-4 — `review_fix_*` counters in `state.db` do not reflect the actual number of review/fix rounds in the logs (observation — needs confirmation)
 
 Severity: **Low** Status: **open (needs confirmation — may be expected after multi-attempt rerun + manual finalize)** First seen: 2026-07-24 (task `p9-01-import-positions`)
 
@@ -146,7 +109,7 @@ The task went through 3 rerun attempts and a manual `finalize`/by-hand completio
 
 Counter update/reset logic around rerun and `finalize` in `core/orchestrator.py` (the `review_fix_cycles` / `review_fix_total` fields on the tasks row) and the DB write path on manual completion.
 
-## VF-6 — disabling provider-native instruction discovery and re-injecting a frozen subset does not scale to N providers; roll the requirement back to native discovery + filesystem immutability (architecture)
+## VF-5 — disabling provider-native instruction discovery and re-injecting a frozen subset does not scale to N providers; roll the requirement back to native discovery + filesystem immutability (architecture)
 
 Severity: **High (architectural / maintainability)** Status: **open — proposed rollback, needs decision (reverses a Milestone-1 decision)** First seen: 2026-07-24 Related: supersedes the suggested direction of VF-4; motivated by VF-4's observed silent context loss. Owner-requested.
 
