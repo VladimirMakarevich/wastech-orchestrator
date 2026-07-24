@@ -101,6 +101,7 @@ from wastech_orchestrator.core.flow.recorder import (
 from wastech_orchestrator.core.flow.registry import FlowRegistry, FlowResolutionError
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import AgentNode, EvaluatorNode, FlowNode
+from wastech_orchestrator.core.flow.security_preamble import build_orchestrator_security_preamble
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot, load_flow
 from wastech_orchestrator.core.flow.tools_registry import ToolRegistry
 from wastech_orchestrator.core.flow.validator import (
@@ -2115,6 +2116,9 @@ class Orchestrator:
             # "auto"). protected_paths is global-only (no per-task override).
             trust_level=(p.task.trust_level or self._config.security.trust_level),
             protected_paths=self._config.security.protected_paths,
+            # VF-7 defense-in-depth: the Core-owned advisory security contract, resolved once from
+            # config; the neutral seam prepends it to every agent/evaluator prompt.
+            security_preamble=self._security_preamble(),
             packet_builder=self._packet_builder(),
             # Custom tool nodes (P5): the per-task frozen registry (WRI-010) when given, else the
             # shared live one; plus the flow-wide default timeout.
@@ -2812,6 +2816,9 @@ class Orchestrator:
             # prompt_audit opt-in and redaction.
             prompt_audit=self._prompt_audit_on(p.task),
             prompt_secrets=self._prompt_secrets(),
+            # VF-7 defense-in-depth: the same Core-owned advisory contract the graph-node
+            # NodeServices carries, so the supervisor's own read-only turn gets it too.
+            security_preamble=self._security_preamble(),
         )
 
     def _engine_finalize(self, p: _Pipeline, inputs: NodeInputs) -> str | None:
@@ -3907,6 +3914,18 @@ class Orchestrator:
         """Denied-read file secrets to scrub from the rendered prompt before storage."""
         return read_denied_secrets(
             self._config.repo.local_path, self._config.security.denied_read_paths
+        )
+
+    def _security_preamble(self) -> str:
+        """The Core-owned orchestrator security contract prepended to every provider prompt (VF-7).
+
+        Defense-in-depth / advisory only — never enforcement (the sandbox + deny projection are the
+        enforcement). Resolved once here (config-derived, not per-node) and threaded to the agent/
+        evaluator via ``NodeServices`` and to the supervisor directly: an always-on baseline plus a
+        read-restraint reinforcement when effective read-isolation is off (VF-6).
+        """
+        return build_orchestrator_security_preamble(
+            read_isolation_off=self._config.security.read_isolation_off
         )
 
     def _log(self, task_id: str) -> logging.LoggerAdapter[logging.Logger]:

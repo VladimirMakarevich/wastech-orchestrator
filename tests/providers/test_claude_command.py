@@ -351,6 +351,32 @@ def test_effective_prompt_appends_footer(make_request: Callable[..., AgentRunReq
     assert "/logs/t/task.md" in effective
 
 
+def test_effective_prompt_prepends_security_preamble(
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # VF-7: order at the single neutral seam is preamble → prompt → footer.
+    request = make_request(
+        prompt="Do the thing.",
+        task_path="/logs/t/task.md",
+        security_preamble="[Orchestrator security contract]\nRule.",
+    )
+    effective = build_effective_prompt(request)
+    assert effective.startswith("[Orchestrator security contract]\nRule.\n\nDo the thing.")
+    assert effective.index("Rule.") < effective.index("Do the thing.") < effective.index("task.md")
+
+
+def test_effective_prompt_without_preamble_is_byte_for_byte_today(
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # An unset preamble prepends nothing: prompt-only stays the bare prompt, and the footer path
+    # is exactly ``prompt\n\nfooter`` (today's output).
+    assert build_effective_prompt(make_request(prompt="P")) == "P"
+    with_footer = build_effective_prompt(make_request(prompt="P", task_path="/t/task.md"))
+    assert with_footer.startswith("P\n\n")
+    assert not with_footer.startswith("[")  # no preamble prefix
+    assert "task: /t/task.md" in with_footer
+
+
 def test_reasoning_request_level_adds_effort_flag(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:

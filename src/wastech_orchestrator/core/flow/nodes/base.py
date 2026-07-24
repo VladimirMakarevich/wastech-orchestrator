@@ -327,6 +327,11 @@ class NodeServices:
     #: operator allowlist (repo-relative globs) of paths that ALWAYS require approval on any change,
     #: regardless of ``trust_level`` (``config.security.protected_paths``). Empty = no floor.
     protected_paths: tuple[str, ...] = ()
+    #: VF-7 defense-in-depth: the Core-owned orchestrator security contract prepended to every
+    #: provider prompt (advisory, NOT enforcement). Resolved once by the orchestrator
+    #: (``build_orchestrator_security_preamble``) and set on each request's ``security_preamble``.
+    #: ``None`` in a unit harness → no preamble (today's prompt byte-for-byte).
+    security_preamble: str | None = None
     #: memory read path (phase 03): builds a per-node retrieval packet for any node whose role
     #: prompt references ``{memory_path}``. ``None`` when memory is disabled (the default) — then no
     #: packet is built and ``{memory_path}`` renders empty (today's behavior).

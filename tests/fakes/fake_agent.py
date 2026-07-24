@@ -287,16 +287,26 @@ def _run_codex_sandbox(cli_args: list[str]) -> int:
     """Model ``codex sandbox -P`` for the WRI-003 no-model canary.
 
     Faithfully simulates the orchestrator's generated permission profile: a read of the exchange
-    (``.worc-io``) is allowed; a read of the private home and any write are denied. Deliberately
-    **scenario-independent** — the canary must pass so the real ``exec`` scenario below plays out;
-    genuine OS enforcement is proven by the host smoke, not this stand-in. A probe command follows
-    the ``--`` separator (e.g. ``-- /bin/cat <path>`` or ``-- /bin/sh -c "printf x >> <path>"``).
+    (``.worc-io``) is allowed and any write is denied; a read of the private home (``.worc``) is
+    denied under read-isolation but ALLOWED when the profile downgrades it to ``read`` (VF-6
+    ``read_isolation_off`` — the shipped default), so the canary's private-read positive control
+    succeeds under both postures. Deliberately **scenario-independent** — the canary must pass so
+    the real ``exec`` scenario below plays out; genuine OS enforcement is proven by the host smoke,
+    not this stand-in. A probe command follows the ``--`` separator (e.g. ``-- /bin/cat <path>`` or
+    ``-- /bin/sh -c "printf x >> <path>"``); the effective profile rides in the ``-c`` value.
     """
     probe = cli_args[cli_args.index("--") + 1 :] if "--" in cli_args else []
     probe_str = " ".join(probe)
+    profile = cli_args[cli_args.index("-c") + 1] if "-c" in cli_args else ""
     is_write = ">>" in probe_str
     reads_exchange = ".worc-io" in probe_str  # exchange subtree (not a substring of `.worc/…`)
-    if reads_exchange and not is_write:
+    reads_private = ".worc" in probe_str and not reads_exchange  # private-home subtree
+    # VF-6: with read-isolation OFF the generated profile downgrades the private home from ``deny``
+    # to ``read``, so a private-home read becomes a positive control the canary expects to SUCCEED.
+    # Detect that posture from the profile the canary passed (``.worc" = "read"`` — the quote after
+    # ``.worc`` excludes the ``.worc-io`` exchange entry).
+    private_read_allowed = '.worc" = "read"' in profile
+    if not is_write and (reads_exchange or (reads_private and private_read_allowed)):
         return 0
     sys.stderr.write("sandbox: operation not permitted\n")
     return 1

@@ -425,6 +425,7 @@ class Supervisor:
         prompt_audit: bool = False,
         prompt_secrets: tuple[str, ...] = (),
         default_timeout_seconds: int = 7200,
+        security_preamble: str | None = None,
     ) -> None:
         self._settings = settings
         self._router = router
@@ -449,6 +450,10 @@ class Supervisor:
         self._prompt_audit = prompt_audit
         self._prompt_secrets = prompt_secrets
         self._default_timeout_seconds = default_timeout_seconds
+        # VF-7 defense-in-depth: the Core-owned orchestrator security contract prepended to the
+        # supervisor's own read-only turn (advisory, NOT enforcement). Resolved once by the
+        # orchestrator, like the graph-node NodeServices carrier. ``None`` → no preamble.
+        self._security_preamble = security_preamble
         # The supervisor's own session (resume_own_lineage). Held in-memory within a process run and
         # persisted to / hydrated from ``node_lineage`` so it survives a restart (independent of the
         # editing-lineage authors). ``None`` until the first turn runs or the persisted row is read.
@@ -805,6 +810,8 @@ class Supervisor:
                 # inline title/description). Repository instructions are NOT injected (VF-5) — the
                 # supervisor's read-only turn reads the repo's root files itself, like graph nodes.
                 task_path=task_path,
+                # VF-7 defense-in-depth: the Core-owned orchestrator security contract (advisory).
+                security_preamble=self._security_preamble,
             )
             # Same pre-launch containment invariant as agent/evaluator (WRI-001): the supervisor
             # carries the frozen exchange ``task_path``, so this asserts it resolves under the

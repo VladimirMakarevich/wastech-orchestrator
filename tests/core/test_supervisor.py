@@ -104,6 +104,7 @@ def _supervisor(
     register_artifact: Any = None,
     prompt_audit: bool = False,
     prompt_secrets: tuple[str, ...] = (),
+    security_preamble: str | None = None,
 ) -> Supervisor:
     (tmp_path / "roles").mkdir(exist_ok=True)
     (tmp_path / "roles" / "supervisor.md").write_text("Observe {task_id} in {repo}.", "utf-8")
@@ -120,10 +121,21 @@ def _supervisor(
         register_artifact=register_artifact,
         prompt_audit=prompt_audit,
         prompt_secrets=prompt_secrets,
+        security_preamble=security_preamble,
     )
 
 
 # -- per-step observation -----------------------------------------------------
+
+
+def test_supervisor_request_carries_security_preamble(tmp_path: Path) -> None:
+    # VF-7: the supervisor's own read-only turn carries the Core-owned preamble too.
+    router, store = FakeRouter(), _store(tmp_path)
+    sup = _supervisor(
+        tmp_path, router, store, security_preamble="[Orchestrator security contract] baseline"
+    )
+    sup.observe(task_id=_TASK, node_id="implementation", node_run_id=5, outcome_kind="done")
+    assert router.requests[0].security_preamble == "[Orchestrator security contract] baseline"
 
 
 def test_supervisor_observes_each_completed_step(tmp_path: Path) -> None:

@@ -326,6 +326,9 @@ class EvaluatorNodeRunner:
             network_access=resolve_network_access(
                 node.network_access, ctx.snapshot.doc.network_policy
             ),
+            # VF-7 defense-in-depth: the Core-owned advisory security contract, threaded via
+            # NodeServices; the neutral seam prepends it to the effective prompt.
+            security_preamble=self._s.security_preamble,
         )
 
     def _resume_node_lineage(

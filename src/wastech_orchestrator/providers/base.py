@@ -204,6 +204,13 @@ class AgentRunRequest:
     # adapter renders it into its own tool-deny / OS-sandbox ``denyWrite`` syntax; preserved
     # verbatim across a fallback.
     write_guard: ProviderWriteGuardPolicy | None = None
+    # VF-7: the Core-owned orchestrator security contract prepended to the effective prompt as
+    # defense-in-depth (advisory, NOT enforcement — the sandbox + deny projection enforce). Neutral
+    # text built once in Core (``core/flow/security_preamble``) and carried here; the single neutral
+    # seam ``build_effective_prompt`` prepends it, so every request kind (agent/evaluator/
+    # supervisor) × both providers gets it without any adapter change. ``None`` prepends nothing
+    # (today's prompt byte-for-byte). Secret-free by contract.
+    security_preamble: str | None = None
 
 
 def build_context_footer(request: AgentRunRequest) -> str:
@@ -230,11 +237,20 @@ def build_context_footer(request: AgentRunRequest) -> str:
 
 
 def build_effective_prompt(request: AgentRunRequest) -> str:
-    """Combine the Core-assembled prompt with the context-files footer."""
+    """Combine the orchestrator security preamble, the Core-assembled prompt, and the footer.
+
+    Order in the single stdin channel: ``preamble → prompt → footer`` (VF-7). A ``None``/empty
+    preamble or footer is omitted, so an unset preamble yields today's output byte-for-byte. Pure
+    text concatenation — no CLI syntax; the preamble content is built in Core and carried on the
+    request.
+    """
+    body = request.prompt
+    if request.security_preamble:
+        body = f"{request.security_preamble}\n\n{body}"
     footer = build_context_footer(request)
     if not footer:
-        return request.prompt
-    return f"{request.prompt}\n\n{footer}"
+        return body
+    return f"{body}\n\n{footer}"
 
 
 # The Claude CLI's terminal ``result`` subtype when a run exhausts its ``--max-turns`` cap. A clean

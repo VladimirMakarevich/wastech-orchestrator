@@ -184,6 +184,7 @@ def _services(
     artifacts_root: str = "/art",
     snapshot: Any = None,
     packet_builder: Any = None,
+    security_preamble: str | None = None,
 ) -> Any:
     return NodeServices(
         router=router,
@@ -196,6 +197,7 @@ def _services(
         git=git,
         snapshot=snapshot,
         packet_builder=packet_builder,
+        security_preamble=security_preamble,
     )
 
 
@@ -265,6 +267,28 @@ def test_agent_node_equals_direct_router_call(tmp_path: Path) -> None:
     assert req.plan_path == "/t/plan.md"
     assert req.working_directory == "/repo"
     assert store.completed[-1]["outcome"] == "done"
+
+
+def test_agent_request_carries_security_preamble(tmp_path: Path) -> None:
+    # VF-7: the Core-owned preamble threaded via NodeServices reaches the agent's AgentRunRequest.
+    (tmp_path / "roles").mkdir()
+    (tmp_path / "roles" / "impl.md").write_text("Implement {task_path}", "utf-8")
+    node = AgentNode(
+        id="impl",
+        kind="agent",
+        role_file="roles/impl.md",
+        session_scope=SessionScope.EDITING_LINEAGE,
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
+    router, store = FakeRouter(_result()), FakeStore()
+    services = _services(
+        router,
+        store,
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        security_preamble="[Orchestrator security contract] baseline",
+    )
+    AgentNodeRunner(services, _inputs(tmp_path, task_path="/t/task.md")).run(node, _ctx(node))
+    assert router.requests[0].security_preamble == "[Orchestrator security contract] baseline"
 
 
 def test_node_output_path_variable_resolves_downstream(tmp_path: Path) -> None:
@@ -635,6 +659,22 @@ def test_two_affinity_less_editing_nodes_keep_isolated_lineages(tmp_path: Path) 
     # Two isolated lineages persisted, one per node id.
     assert store.get_editing_lineage("task-1", "code_edit").raw_session_id == "code-session"  # type: ignore[union-attr]
     assert store.get_editing_lineage("task-1", "spec_edit").raw_session_id == "spec-session"  # type: ignore[union-attr]
+
+
+def test_evaluator_request_carries_security_preamble(tmp_path: Path) -> None:
+    # VF-7 parity: the evaluator's read-only request carries the same Core-owned preamble.
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    router, store = FakeRouter(_result({"findings": []})), FakeStore()
+    services = _services(
+        router,
+        store,
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+        security_preamble="[Orchestrator security contract] baseline",
+    )
+    node = _evaluator("review")
+    EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert router.requests[0].security_preamble == "[Orchestrator security contract] baseline"
 
 
 def test_evaluator_fresh_disposable_does_not_touch_lineage(tmp_path: Path) -> None:
@@ -1027,6 +1067,38 @@ def test_agent_node_rendered_prompt_includes_context_footer(tmp_path: Path) -> N
     assert "Context files (read them as needed" in rendered
     assert "/t/task.md" in rendered
     assert "/t/plan.md" in rendered
+
+
+def test_rendered_prompt_includes_security_preamble(tmp_path: Path) -> None:
+    """VF-7: the preamble is written into the redacted rendered-prompt.md — the same effective
+    prompt the provider receives on stdin — in order preamble → role prompt → context footer."""
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(
+        id="implementation",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.READ_ONLY,
+    )
+    registered: list[Any] = []
+    services = NodeServices(
+        router=FakeRouter(_result()),
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=FakeStore(),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        clock=lambda: "ts",
+        prompt_audit=True,
+        register_artifact=lambda t, k, p: registered.append((t, k, p)),
+        security_preamble="[Orchestrator security contract] defense in depth",
+    )
+    inputs = _inputs(tmp_path, task_path="/t/task.md")
+    AgentNodeRunner(services, inputs).run(node, _ctx(node))
+    rendered = (
+        node_run_dir(str(tmp_path), "task-1", "implementation", 1) / "rendered-prompt.md"
+    ).read_text()
+    assert rendered.startswith("[Orchestrator security contract] defense in depth")
+    assert "Context files (read them as needed" in rendered  # footer still present
+    assert rendered.index("[Orchestrator security contract]") < rendered.index("Context files")
 
 
 def test_evaluator_rendered_prompt_includes_context_footer(tmp_path: Path) -> None:
