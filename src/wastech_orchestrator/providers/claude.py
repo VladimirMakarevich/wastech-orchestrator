@@ -34,6 +34,7 @@ from wastech_orchestrator.config.schema import ProviderConfig
 from wastech_orchestrator.providers._adapter_base import (
     BaseCliProvider,
     ParsedEvents,
+    coerce_usage_cost,
     coerce_usage_int,
 )
 from wastech_orchestrator.providers.artifacts import ArtifactPaths
@@ -737,13 +738,17 @@ def isolation_reasons(
     return reasons
 
 
-def _normalize_claude_usage(usage: Mapping[str, Any] | None) -> NormalizedUsage | None:
+def _normalize_claude_usage(
+    usage: Mapping[str, Any] | None, *, total_cost_usd: object = None
+) -> NormalizedUsage | None:
     """Map Claude's raw ``usage`` to the provider-neutral per-invocation record.
 
     Claude splits input across three sibling counts that are never pre-summed — the true input is
     ``input_tokens + cache_creation_input_tokens + cache_read_input_tokens`` — and folds reasoning
     into output, so ``reasoning_output`` stays ``None``. Each invocation is self-contained (not
-    cumulative). Returns ``None`` when no usage was emitted.
+    cumulative). ``total_cost_usd`` is the per-invocation dollar figure the terminal ``result``
+    event carries as a **sibling** of ``usage`` (VF-8); it rides the same per-invocation scope, so
+    no baseline subtraction applies. Returns ``None`` when no usage was emitted.
     """
     if not usage:
         return None
@@ -759,6 +764,7 @@ def _normalize_claude_usage(usage: Mapping[str, Any] | None) -> NormalizedUsage 
         uncached_input=uncached_input,
         output_total=coerce_usage_int(usage.get("output_tokens")),
         reasoning_output=None,
+        cost=coerce_usage_cost(total_cost_usd),
     )
 
 
@@ -771,6 +777,9 @@ def parse_stream_json(stdout_text: str) -> ParsedEvents:
     final_message: str | None = None
     structured_output: dict[str, Any] | None = None
     usage: dict[str, Any] | None = None
+    # VF-8: the per-invocation dollar cost the terminal ``result`` event carries as a sibling of
+    # ``usage`` (not inside it), so it is captured separately and threaded into the normalizer.
+    total_cost_usd: object = None
     session_id: str | None = None
     terminal_seen = False
     succeeded = False
@@ -813,6 +822,8 @@ def parse_stream_json(stdout_text: str) -> ParsedEvents:
             run_usage = event.get("usage")
             if isinstance(run_usage, dict):
                 usage = run_usage
+            if "total_cost_usd" in event:
+                total_cost_usd = event.get("total_cost_usd")
             # A subscription/usage rate-limit terminal: HTTP 429, a rejected ``rate_limit_event``,
             # or a "session limit … resets" banner. Recognized only on an error terminal so a
             # normal run is never misread. The adapter RAISES it as RATE_LIMITED.
@@ -831,7 +842,7 @@ def parse_stream_json(stdout_text: str) -> ParsedEvents:
         final_message=final_message,
         structured_output=structured_output,
         usage=usage,
-        normalized_usage=_normalize_claude_usage(usage),
+        normalized_usage=_normalize_claude_usage(usage, total_cost_usd=total_cost_usd),
         session_id=session_id,
         succeeded=succeeded,
         failure_subtype=failure_subtype,

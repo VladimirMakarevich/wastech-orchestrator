@@ -149,11 +149,25 @@ def test_write_rendered_prompt_redacts_and_registers(tmp_path: Path) -> None:
 
 def test_record_provider_attempts_writes_one_row_per_attempt() -> None:
     store = _FakeStore()
-    record_provider_attempts(_Services(store), run_id=7, outcome=_outcome())
+    record_provider_attempts(
+        store, lambda: "ts", task_id="task-1", node_run_id=7, outcome=_outcome()
+    )
     assert [r.provider for r in store.rows] == ["codex", "claude"]
     assert [r.node_run_id for r in store.rows] == [7, 7]
+    # VF-8: every row carries the owning task so a roll-up needs no ``node_runs`` join.
+    assert [r.task_id for r in store.rows] == ["task-1", "task-1"]
     assert store.rows[0].error_class == "rate_limited"
     assert store.rows[0].exit_code == 1
+
+
+def test_record_provider_attempts_supervisor_layer_has_null_node_run() -> None:
+    # VF-8: the constant supervisor layer records with node_run_id None (it is not a graph node).
+    store = _FakeStore()
+    record_provider_attempts(
+        store, lambda: "ts", task_id="task-1", node_run_id=None, outcome=_outcome()
+    )
+    assert [r.node_run_id for r in store.rows] == [None, None]
+    assert [r.task_id for r in store.rows] == ["task-1", "task-1"]
 
 
 def test_record_provider_attempts_persists_per_run_delta() -> None:
@@ -204,8 +218,10 @@ def test_record_provider_attempts_persists_per_run_delta() -> None:
         reasoning_output=5935,
     )
     record_provider_attempts(
-        _Services(store),
-        run_id=9,
+        store,
+        lambda: "ts",
+        task_id="task-1",
+        node_run_id=9,
         outcome=outcome,
         usage_baseline=baseline,
         baseline_session_id="sess-x",
@@ -217,11 +233,3 @@ def test_record_provider_attempts_persists_per_run_delta() -> None:
     assert row.usage_reasoning_output == 131
     assert row.usage_delta_status == "ok"
     assert row.provider_usage_raw == '{"input_tokens":282699}'
-
-
-class _Services:
-    """Minimal stand-in exposing the two fields record_provider_attempts reads."""
-
-    def __init__(self, store: Any) -> None:
-        self.store = store
-        self.clock = lambda: "ts"

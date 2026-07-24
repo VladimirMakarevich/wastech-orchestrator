@@ -28,8 +28,19 @@ from wastech_orchestrator.core.supervisor import (
     parse_follow_ups,
 )
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
-from wastech_orchestrator.providers.base import AgentRunResult, ProviderId, RunStatus
-from wastech_orchestrator.routing.router import ResolvedRoute, RouteSource, StageOutcome
+from wastech_orchestrator.providers.base import (
+    AgentRunResult,
+    NormalizedUsage,
+    ProviderId,
+    RunStatus,
+    UsageScope,
+)
+from wastech_orchestrator.routing.router import (
+    ProviderAttempt,
+    ResolvedRoute,
+    RouteSource,
+    StageOutcome,
+)
 from wastech_orchestrator.state_store import (
     EditingLineageRow,
     EvaluationRow,
@@ -1002,3 +1013,119 @@ def test_evaluation_immutable_and_counted(tmp_path: Path) -> None:
     # Immutable: there is no update/delete API for evaluations.
     assert not hasattr(store, "update_evaluation")
     assert not hasattr(store, "delete_evaluation")
+
+
+# -- provider-attempt audit for the supervisor layer (VF-8) -------------------
+
+
+class _AttemptsRouter:
+    """Like ``FakeRouter`` but surfaces one provider ATTEMPT per call (the base returns none), so
+    the supervisor's own ``provider_attempts`` recording (VF-8) has attempts to persist. Resolves to
+    the given primary so a resumed cumulative (codex) session can be exercised."""
+
+    def __init__(
+        self, results: list[AgentRunResult], primary: ProviderId = ProviderId.CLAUDE
+    ) -> None:
+        self.requests: list[Any] = []
+        self._results = list(results)
+        self._primary = primary
+
+    def resolve_route(self, node_id: str, provider: Any = None) -> ResolvedRoute:
+        return ResolvedRoute(
+            node_id=node_id, primary=self._primary, fallback=None, source=RouteSource.CONFIG
+        )
+
+    def run_stage(
+        self, request: Any, route: ResolvedRoute, *, snapshot: Any = None
+    ) -> StageOutcome:
+        self.requests.append(request)
+        result = self._results.pop(0)
+        pid = ProviderId(result.provider)
+        attempt = ProviderAttempt(
+            provider=pid, attempt=1, status=RunStatus.SUCCEEDED, error_class=None, result=result
+        )
+        return StageOutcome(
+            route=route,
+            result=result,
+            provider_used=pid,
+            stage_attempts=1,
+            terminal_error=None,
+            attempts=(attempt,),
+        )
+
+
+def _claude_turn(cost: float | None, output_total: int) -> AgentRunResult:
+    return AgentRunResult(
+        status=RunStatus.SUCCEEDED,
+        provider="claude",
+        node_id="supervisor",
+        attempt=1,
+        exit_code=0,
+        started_at="t0",
+        finished_at="t1",
+        final_message="noted",
+        session_id="sess-super",
+        usage={"output_tokens": output_total},
+        normalized_usage=NormalizedUsage(
+            scope=UsageScope.PER_INVOCATION, output_total=output_total, cost=cost
+        ),
+    )
+
+
+def _codex_turn(session_id: str, input_total: int, output_total: int) -> AgentRunResult:
+    return AgentRunResult(
+        status=RunStatus.SUCCEEDED,
+        provider="codex",
+        node_id="supervisor",
+        attempt=1,
+        exit_code=0,
+        started_at="t0",
+        finished_at="t1",
+        final_message="noted",
+        session_id=session_id,
+        usage={"input_tokens": input_total, "output_tokens": output_total},
+        normalized_usage=NormalizedUsage(
+            scope=UsageScope.SESSION_CUMULATIVE, input_total=input_total, output_total=output_total
+        ),
+    )
+
+
+def test_supervisor_records_provider_attempt_with_cost(tmp_path: Path) -> None:
+    # VF-8: a supervisor turn's billable provider call earns a ``provider_attempts`` row with
+    # ``node_run_id`` NULL and its cost, so a whole-task roll-up includes the supervisor spend.
+    router = _AttemptsRouter([_claude_turn(cost=0.05, output_total=42)])
+    store = _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store)
+    sup.observe(task_id=_TASK, node_id="implementation", node_run_id=5, outcome_kind="done")
+
+    rows = store.get_provider_attempts_for_task(_TASK)
+    assert len(rows) == 1
+    assert rows[0].node_run_id is None  # not a graph node
+    assert rows[0].provider == "claude"
+    assert rows[0].usage_cost == 0.05
+    assert rows[0].usage_output_total == 42
+    # The supervisor's synthetic artifact-namespacing id never leaks into the audit table: the
+    # by-node getter for the observed step's id returns nothing.
+    assert store.get_provider_attempts(5) == []
+
+
+def test_supervisor_provider_attempt_usage_is_summation_safe_delta(tmp_path: Path) -> None:
+    # VF-8 (full): the supervisor resumes its OWN session, so a cumulative (codex) provider counts
+    # cumulatively; the recorded per-turn usage is the summation-safe delta, not the raw cumulative.
+    router = _AttemptsRouter(
+        [_codex_turn("s1", 100, 10), _codex_turn("s1", 150, 25)], primary=ProviderId.CODEX
+    )
+    store = _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store, provider=ProviderId.CODEX)
+    sup.observe(task_id=_TASK, node_id="implementation", node_run_id=5, outcome_kind="done")
+    sup.observe(task_id=_TASK, node_id="review", node_run_id=7, outcome_kind="accept")
+
+    rows = store.get_provider_attempts_for_task(_TASK)
+    assert len(rows) == 2
+    assert all(r.node_run_id is None for r in rows)
+    # First turn: fresh session, the cumulative is its own delta.
+    assert rows[0].usage_output_total == 10
+    # Second turn resumes s1, so the previous cumulative is subtracted: 25 - 10 = 15, not raw 25.
+    assert rows[1].usage_output_total == 15
+    assert rows[1].usage_input_total == 50
+    assert rows[1].usage_delta_status == "ok"

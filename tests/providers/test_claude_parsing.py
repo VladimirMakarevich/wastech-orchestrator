@@ -85,6 +85,24 @@ def test_normalized_usage_sums_three_input_fields_per_invocation() -> None:
     assert nu.cache_read == 560305
     assert nu.output_total == 9000
     assert nu.reasoning_output is None  # Claude folds reasoning into output
+    assert nu.cost is None  # no total_cost_usd emitted → cost stays None (never guessed)
+
+
+def test_normalized_usage_captures_total_cost_usd() -> None:
+    # VF-8: the terminal ``result`` event carries ``total_cost_usd`` as a SIBLING of ``usage`` (not
+    # inside it); it maps onto the per-invocation ``cost`` so provider_attempts.usage_cost fills.
+    stream = _stream(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "total_cost_usd": 0.0428,
+            "usage": {"input_tokens": 35, "output_tokens": 9000},
+        }
+    )
+    nu = parse_stream_json(stream).normalized_usage
+    assert nu is not None
+    assert nu.cost == 0.0428
 
 
 def test_non_dict_structured_output_is_ignored() -> None:

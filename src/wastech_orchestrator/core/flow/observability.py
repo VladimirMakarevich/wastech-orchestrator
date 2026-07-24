@@ -14,8 +14,9 @@ rendered-prompt / prompt-audit artifacts are written only when the orchestrator 
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol
 
 from wastech_orchestrator.core.flow.usage_accounting import compute_usage_delta
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
@@ -28,6 +29,14 @@ if TYPE_CHECKING:
     # Type-only: importing nodes.base at runtime would re-enter the nodes package whose __init__
     # imports the runners (which import this module) — a cycle. These are used only in annotations.
     from wastech_orchestrator.core.flow.nodes.base import NodeServices, RegisterArtifact
+
+
+class ProviderAttemptSink(Protocol):
+    """The single state-store method :func:`record_provider_attempts` needs, so the recorder is
+    reusable by both a graph node (its ``NodeServices.store``) and the constant supervisor layer
+    (its own store) without importing the concrete ``StateStore`` (VF-8)."""
+
+    def record_provider_attempt(self, attempt: ProviderAttemptRow) -> None: ...
 
 
 def record_run_observability(
@@ -54,9 +63,11 @@ def record_run_observability(
     delta. ``None`` for a fresh run.
     """
     record_provider_attempts(
-        services,
-        run_id,
-        outcome,
+        services.store,
+        services.clock,
+        task_id=task_id,
+        node_run_id=run_id,
+        outcome=outcome,
         usage_baseline=usage_baseline,
         baseline_session_id=baseline_session_id,
     )
@@ -91,18 +102,23 @@ def record_run_observability(
 
 
 def record_provider_attempts(
-    services: NodeServices,
-    run_id: int,
-    outcome: StageOutcome,
+    store: ProviderAttemptSink,
+    clock: Callable[[], str],
     *,
+    task_id: str,
+    node_run_id: int | None,
+    outcome: StageOutcome,
     usage_baseline: NormalizedUsage | None = None,
     baseline_session_id: str | None = None,
 ) -> None:
     """Persist one ``provider_attempts`` row per attempt (primary + any fallback) — always recorded.
 
-    The row's ``node_run_id`` holds the ``node_runs`` id of the run these attempts belong to. The
-    result-bearing attempt (the router leaves at most one) also carries its normalized token usage
-    as a summation-safe per-run delta against the resumed session's baseline.
+    Every row carries the owning ``task_id`` so a cost/usage roll-up sums by task without a
+    ``node_runs`` join (VF-8). ``node_run_id`` is the ``node_runs`` id for a graph node, or ``None``
+    for the constant supervisor layer (not a graph node). The result-bearing attempt (the router
+    leaves at most one) also carries its normalized token usage as a summation-safe per-run delta
+    against the resumed session's baseline. Takes the store + clock explicitly (not a full
+    ``NodeServices``) so the supervisor, which has no ``NodeServices``, reuses the same recorder.
     """
     for attempt in outcome.attempts:
         result = attempt.result
@@ -110,17 +126,18 @@ def record_provider_attempts(
             str(Path(result.stdout_path).parent) if result and result.stdout_path else None
         )
         scope, delta, status, raw = _usage_fields(result, usage_baseline, baseline_session_id)
-        services.store.record_provider_attempt(
+        store.record_provider_attempt(
             ProviderAttemptRow(
-                node_run_id=run_id,
+                task_id=task_id,
+                node_run_id=node_run_id,
                 provider=attempt.provider.value,
                 attempt=attempt.attempt,
                 status=attempt.status.value if attempt.status else None,
                 error_class=attempt.error_class.value if attempt.error_class else None,
                 exit_code=result.exit_code if result else None,
                 attempt_dir=attempt_dir,
-                started_at=services.clock(),
-                finished_at=services.clock(),
+                started_at=clock(),
+                finished_at=clock(),
                 usage_scope=scope,
                 usage_input_total=delta.input_total if delta else None,
                 usage_cache_read=delta.cache_read if delta else None,

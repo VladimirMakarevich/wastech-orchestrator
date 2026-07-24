@@ -24,30 +24,46 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
 from wastech_orchestrator.config.schema import SupervisorConfig
 from wastech_orchestrator.core.flow.nodes.base import RegisterArtifact, RouterPort
-from wastech_orchestrator.core.flow.observability import write_prompt_audit, write_rendered_prompt
+from wastech_orchestrator.core.flow.observability import (
+    record_provider_attempts,
+    write_prompt_audit,
+    write_rendered_prompt,
+)
 from wastech_orchestrator.core.flow.prompt import RoleFileError, render_role_prompt
 from wastech_orchestrator.core.flow.schema import SupervisorBlock
+from wastech_orchestrator.core.flow.usage_accounting import (
+    deserialize_usage,
+    snapshot_for_lineage,
+)
 from wastech_orchestrator.core.skills import SkillInventory
 from wastech_orchestrator.memory.delta import DELTA_OUTPUT_SCHEMA, CandidateDelta, parse_delta
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.providers.base import (
     AgentRunRequest,
     AgentRunResult,
+    NormalizedUsage,
     ProviderId,
     build_effective_prompt,
 )
 from wastech_orchestrator.providers.exchange import assert_orchestration_paths_contained
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
-from wastech_orchestrator.state_store import EvaluationRow, NodeLineageRow
+from wastech_orchestrator.state_store import EvaluationRow, NodeLineageRow, ProviderAttemptRow
 
 _LOG = logging.getLogger(__name__)
+
+
+def _utc_now_iso() -> str:
+    """Default wall-clock for the supervisor's ``provider_attempts`` timestamps (UTC ISO)."""
+    return datetime.now(UTC).isoformat()
+
 
 # The supervisor's read-only requests carry a dedicated ``supervisor`` node identity (audit dir /
 # route label); it is not a graph node, so it records ``evaluations`` rows, never ``node_runs``.
@@ -393,8 +409,9 @@ def _parse_skill_map(structured: Mapping[str, Any] | None) -> dict[str, tuple[st
 
 
 class SupervisorStorePort(Protocol):
-    """The slice of the state store the supervisor needs: the immutable evaluation row plus the
-    durable own-session lineage (read on first use, written after each turn)."""
+    """The slice of the state store the supervisor needs: the immutable evaluation row, the durable
+    own-session lineage (read on first use, written after each turn), and the per-turn
+    provider-attempt audit row (VF-8 — the supervisor's own billable calls)."""
 
     def record_evaluation(self, row: EvaluationRow) -> int: ...
 
@@ -405,6 +422,8 @@ class SupervisorStorePort(Protocol):
     ) -> NodeLineageRow | None: ...
 
     def upsert_node_lineage(self, row: NodeLineageRow) -> None: ...
+
+    def record_provider_attempt(self, attempt: ProviderAttemptRow) -> None: ...
 
 
 class Supervisor:
@@ -426,10 +445,14 @@ class Supervisor:
         prompt_secrets: tuple[str, ...] = (),
         default_timeout_seconds: int = 7200,
         security_preamble: str | None = None,
+        clock: Callable[[], str] = _utc_now_iso,
     ) -> None:
         self._settings = settings
         self._router = router
         self._store = store
+        # Wall-clock for the per-turn ``provider_attempts`` timestamps (VF-8); the orchestrator
+        # threads its own so a run's audit timestamps share one source.
+        self._clock = clock
         self._repo_dir = repo_dir
         self._artifacts_root = artifacts_root
         # The provider-readable exchange root ``<repo>/.worc-io`` (WRI-001); the supervisor's own
@@ -793,6 +816,13 @@ class Supervisor:
             reasoning = _schema_safe_reasoning(self._settings.reasoning, output_schema)
             if cap_reasoning and reasoning in _MAX_REASONING_TIERS:
                 reasoning = _SCHEMA_REASONING_CAP
+            # The session to resume + its persisted cumulative usage baseline (VF-8): a resumed
+            # Codex session counts cumulatively, so the per-turn ``provider_attempts`` usage is a
+            # summation-safe delta against the previous cumulative — exactly like a graph-node
+            # lineage. ``resume_session=False`` (finalize's revive path) starts fresh, no baseline.
+            resume_id, usage_baseline, baseline_session_id = (
+                self._resume_context(task_id, route) if resume_session else (None, None, None)
+            )
             request = AgentRunRequest(
                 task_id=task_id,
                 node_id=_SUPERVISOR_IDENTITY,
@@ -805,7 +835,7 @@ class Supervisor:
                 model=self._settings.model,
                 reasoning=reasoning,
                 output_schema=output_schema,
-                session_id=self._resume_session(task_id, route) if resume_session else None,
+                session_id=resume_id,
                 # WRI-011: the task reaches the supervisor as the frozen exchange packet path (never
                 # inline title/description). Repository instructions are NOT injected (VF-5) — the
                 # supervisor's read-only turn reads the repo's root files itself, like graph nodes.
@@ -825,13 +855,20 @@ class Supervisor:
                 extra={"task_id": task_id, "error_type": type(exc).__name__},
             )
             return None
+        # VF-8: give the supervisor's own billable provider calls an audit home in
+        # ``provider_attempts`` (``node_run_id`` NULL — it is not a graph node), so a task-level
+        # cost/usage roll-up is complete. Recorded for every outcome (including a failed turn's
+        # attempts) and BEFORE the result-None early return, so no billable call is dropped.
+        self._record_provider_attempts(task_id, outcome, usage_baseline, baseline_session_id)
         result = outcome.result
         if result is None:
             return None
         if result.session_id:
             self._own_session_id = result.session_id  # resume_own_lineage continuity (in-memory)
             self._session_live = True  # a turn succeeded this process — the session is usable
-            self._persist_session(task_id, result.session_id, outcome.provider_used)
+            self._persist_session(
+                task_id, result.session_id, outcome.provider_used, result.normalized_usage
+            )
         self._record_turn_observability(
             task_id=task_id,
             node_run_id=node_run_id,
@@ -856,13 +893,14 @@ class Supervisor:
     ) -> None:
         """Best-effort: persist rendered-prompt + (gated) prompt-audit for one supervisor turn.
 
-        Calls the standalone artifact writers directly — never ``record_run_observability`` /
-        ``record_provider_attempts``: the supervisor's ``node_run_id`` is a synthetic per-call-site
-        namespacing sentinel (``0`` / ``_PROPOSAL_RUN_ID`` / ``_HANDOFF_RUN_ID_BASE + n`` / a reused
-        real step id), not a ``node_runs`` foreign key — writing a ``provider_attempts`` row under
-        it would misattribute that row. Wrapped in its own try/except (distinct from the caller's,
-        which does not cover this code) so an audit-write failure can never surface as a broken
-        turn — this layer is advisory by contract.
+        Calls the standalone artifact writers directly — never ``record_run_observability``: the
+        supervisor's ``node_run_id`` here is a synthetic per-call-site artifact-dir namespacing
+        sentinel (``0`` / ``_PROPOSAL_RUN_ID`` / ``_HANDOFF_RUN_ID_BASE + n`` / a reused real step
+        id), NOT a ``node_runs`` id. Its ``provider_attempts`` rows are written separately by
+        :meth:`_record_provider_attempts` with ``node_run_id`` NULL (VF-8), so that synthetic id
+        never lands in the audit table and misattributes the row. Wrapped in its own try/except
+        (distinct from the caller's, which does not cover this code) so an audit-write failure can
+        never surface as a broken turn — this layer is advisory by contract.
         """
         if self._register_artifact is None or outcome.result is None:
             return
@@ -903,25 +941,74 @@ class Supervisor:
                 },
             )
 
-    def _resume_session(self, task_id: str, route: ResolvedRoute) -> str | None:
-        """The own session to resume: the in-memory id if a turn already ran this process, else the
-        persisted lineage — but only when produced by the provider now resolved (you cannot resume a
-        Claude session on Codex). On the first round there is no lineage yet, so it starts fresh.
+    def _record_provider_attempts(
+        self,
+        task_id: str,
+        outcome: StageOutcome,
+        usage_baseline: NormalizedUsage | None,
+        baseline_session_id: str | None,
+    ) -> None:
+        """Persist the supervisor's own ``provider_attempts`` rows (VF-8) — ``node_run_id`` NULL.
+
+        Reuses the shared node-path recorder, so the supervisor's per-run usage delta is computed
+        exactly like a graph node's (against its own resumed-session baseline). Best-effort like the
+        rest of this advisory layer: any store error is logged and swallowed so an audit-write
+        failure can never surface as a broken turn.
         """
-        if self._own_session_id is not None:
-            return self._own_session_id
+        try:
+            record_provider_attempts(
+                self._store,
+                self._clock,
+                task_id=task_id,
+                node_run_id=None,  # the supervisor is a constant layer, not a graph node
+                outcome=outcome,
+                usage_baseline=usage_baseline,
+                baseline_session_id=baseline_session_id,
+            )
+        except Exception as exc:
+            _LOG.warning(
+                "supervisor provider-attempt record failed (advisory, ignored)",
+                extra={"task_id": task_id, "error_type": type(exc).__name__},
+            )
+
+    def _resume_context(
+        self, task_id: str, route: ResolvedRoute
+    ) -> tuple[str | None, NormalizedUsage | None, str | None]:
+        """``(session to resume, its usage baseline, that session's id)`` for the next turn.
+
+        The own session to resume is the in-memory id if a turn already ran this process, else the
+        persisted lineage — but only when produced by the provider now resolved (you cannot resume
+        a Claude session on Codex). On the first round there is no lineage yet, so it starts fresh.
+        The usage baseline is that session's persisted running cumulative snapshot (VF-8): it is
+        updated after every turn (:meth:`_persist_session`), so turn N reduces against turn N-1's
+        cumulative, making the recorded per-run usage summation-safe on a cumulative provider
+        (Codex). A per-invocation provider (Claude) ignores the baseline in ``compute_usage_delta``.
+        """
         row = self._store.get_node_lineage(task_id, _SUPERVISOR_LINEAGE_NODE_ID, None)
+        baseline = deserialize_usage(row.usage_snapshot) if row else None
+        if self._own_session_id is not None:
+            # A turn already ran this process: continue that live session; its cumulative was
+            # persisted onto the same lineage row, so ``baseline`` is the previous turn's snapshot.
+            return self._own_session_id, baseline, row.raw_session_id if row else None
         if row is None or row.provider != route.primary.value:
-            return None
+            return None, None, None
         self._own_session_id = row.raw_session_id
-        return self._own_session_id
+        return self._own_session_id, baseline, row.raw_session_id
 
     def _persist_session(
-        self, task_id: str, session_id: str, provider_used: ProviderId | None
+        self,
+        task_id: str,
+        session_id: str,
+        provider_used: ProviderId | None,
+        usage: NormalizedUsage | None,
     ) -> None:
         """Persist the supervisor's own session after a successful turn (``state.db`` only — the raw
         id is redacted everywhere else), keyed by the reserved sentinel so a resumed task resumes
         it.
+
+        Also carries the session's running cumulative usage snapshot (VF-8), so the next turn's
+        ``provider_attempts`` usage can be reduced to a summation-safe per-run delta — the same
+        contract a graph node's lineage keeps. ``None`` for a per-invocation provider (Claude).
         """
         if provider_used is None:
             return
@@ -932,6 +1019,7 @@ class Supervisor:
                 provider=provider_used.value,
                 raw_session_id=session_id,
                 subtask_order=None,
+                usage_snapshot=snapshot_for_lineage(usage),
             )
         )
 

@@ -117,6 +117,7 @@ def test_normalized_usage_is_cumulative_with_derived_uncached() -> None:
     assert nu.uncached_input == 141464 - 76288
     assert nu.output_total == 8329
     assert nu.reasoning_output == 5935
+    assert nu.cost is None  # VF-8: Codex emits no dollar figure → cost stays None
 
 
 def test_normalized_usage_absent_when_no_usage_emitted() -> None:

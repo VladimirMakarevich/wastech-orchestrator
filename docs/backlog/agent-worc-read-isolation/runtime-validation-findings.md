@@ -241,3 +241,42 @@ The flag is named `disable_read_isolation`, so it targets the **read side** of t
 ### Next step
 
 Graduate to a task plus a one-line **ADR / AGENTS.md invariant clarification** (operator-config escape hatches are sanctioned; the "absolutely forbidden" wording targets the task / `extra_args` / flow surfaces, per security.md §10), with a [follow_ups.md](../follow_ups.md) entry.
+
+## VF-8 — run cost is unmeasurable: `usage_cost` is never populated and the supervisor's provider calls are absent from `provider_attempts` (observability)
+
+Severity: **Medium (observability)** Status: **shipped 2026-07-25** (both gaps closed — `usage_cost` filled from Claude `total_cost_usd`; `provider_attempts` gains `task_id` + nullable `node_run_id` so the supervisor's own calls are on the ledger and a roll-up is `WHERE task_id=?`; see Resolution) First seen: 2026-07-24 (task `p9-05-custom-heading-target`, second-iteration validation on the dev43 branch build)
+
+### Resolution (shipped 2026-07-25)
+
+Both root causes fixed; see the [follow_ups](../follow_ups.md) entry for the full change list.
+
+- **`usage_cost` filled.** Claude's stream-json terminal `result` event carries `total_cost_usd` as a **sibling** of `usage` (not a member), so `parse_stream_json` captures it and threads it into `_normalize_claude_usage` → `NormalizedUsage.cost` (new shared `coerce_usage_cost`). It rides the per-invocation scope, so the delta math preserves it unchanged. **Codex reports no dollar figure**, so its `usage_cost` stays NULL by design — never a guessed value.
+- **Supervisor calls on-ledger.** `provider_attempts` gains a `task_id` column and its `node_run_id` becomes **nullable** (state.db v18→v19, additive). A whole-task roll-up is now `SELECT … WHERE task_id = ?` (no `node_runs` join) via the new `get_provider_attempts_for_task`, and the constant supervisor layer records its own billable calls with `node_run_id` NULL. Fabricating a `node_runs` row for the supervisor was **rejected** — `recorder.hydrate_run_state` builds the resume trace from **all** `get_node_runs`, so a synthetic `supervisor` row would corrupt resume. `record_provider_attempts` was decoupled from `NodeServices` (now takes `store` + `clock` + `task_id` + `node_run_id`) so the node runners and the supervisor share one recorder; the supervisor's per-turn usage is a **summation-safe delta** against its own resumed-session baseline (`usage_snapshot` persisted on the `__supervisor__` lineage), so token counts are correct on a cumulative provider (Codex) too, not just cost on Claude.
+- **Still deferred:** the read/report surface — there is no `worc` cost/token report or PR-summary line yet; the roll-up is SQL / `get_provider_attempts_for_task` only (a `worc cost <task>` reading `SUM(usage_cost) WHERE task_id=?`, or an `analyze-task-run` cost section, is the natural next step). This is the v16 row's deferred item (b), still open.
+
+### Observed
+
+On a clean, fully successful run the `state.db` audit tables cannot answer "what did this run cost". Two independent gaps compound: (a) `provider_attempts.usage_cost` is `NULL` for every attempt, and (b) the supervisor's provider calls are not recorded in `provider_attempts` at all — only the flow's `agent`/`evaluator` nodes are. The run therefore has no per-attempt dollar figure and undercounts its own billable provider calls.
+
+### Evidence
+
+- The run-log shows **8** `provider attempt started` lines (implementation + review + documentation + **5 supervisor turns**: four observe turns between nodes plus the finalize summary), but `provider_attempts` holds only **3** rows for the task — `SELECT ... FROM provider_attempts pa JOIN node_runs nr ON pa.node_run_id=nr.id WHERE nr.task_id='p9-05-custom-heading-target'` returns implementation / review / documentation only.
+- `SELECT usage_cost FROM provider_attempts WHERE attempt_dir LIKE '%p9-05-custom-heading-target%'` → `NULL` for all three; `SUM(usage_cost)` → `NULL`. Token counters (`usage_input_total`, `usage_output_total`, `usage_cache_read`) _are_ populated, so the usage plumbing runs — only the cost field is unfilled.
+- The supervisor artifacts _do_ exist on disk (`.worc/logs/<task>/stages/supervisor/…`), so this is a persistence-to-`provider_attempts` gap, not a missing-run gap.
+
+### Root cause (two parts)
+
+1. **`usage_cost` unfilled.** The adapter normalizes token usage but does not derive a cost for the attempt (the provider CLI payloads carry a cost figure — e.g. Claude stream-json `total_cost_usd` — that is not mapped into `usage_cost`).
+2. **Supervisor calls off-ledger.** The supervisor is a constant orchestrator layer above the flow, not a graph node, so it is intentionally excluded from `node_runs`. But `provider_attempts` records provider _calls_, and >60% of this run's real, billable calls (5 of 8) are supervisor calls that never get a row — so any cost/usage roll-up built on `provider_attempts` silently omits the entire supervisor spend.
+
+### Net effect
+
+Cost and full call-count are not derivable from the audit — the `analyze-task-run` cost dimension degrades to "unknown", and any future budget/telemetry keyed off `provider_attempts` under-reports. Not a security or correctness defect and not read-isolation-specific (almost certainly pre-existing, surfaced during read-isolation validation); purely an observability limitation.
+
+### Likely area
+
+`providers/_adapter_base.py` (usage extraction — map the provider-reported cost into `usage_cost`; verify both Claude and Codex payload shapes), and the supervisor persistence path (`core/supervisor.py` + the state store that writes `provider_attempts`) — decide whether supervisor provider calls earn their own `provider_attempts` rows (a `node_run_id`/sentinel for the constant layer) or a parallel record, so the roll-up is complete. `prompt_audit` was ON for this run (the per-prompt timeline is available), so that is not the gap.
+
+### Next step
+
+Confirm the Claude/Codex CLI cost fields, then a small task to (1) populate `usage_cost` and (2) give supervisor calls an audit home; add a [follow_ups.md](../follow_ups.md) entry.

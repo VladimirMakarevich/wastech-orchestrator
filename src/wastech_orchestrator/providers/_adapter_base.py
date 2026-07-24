@@ -125,6 +125,18 @@ def coerce_usage_int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
+def coerce_usage_cost(value: object) -> float | None:
+    """A ``float`` USD cost from a raw value, or ``None`` for an absent / non-numeric / bool value.
+
+    Shared by the adapters mapping a provider-reported dollar figure (e.g. Claude's stream-json
+    ``total_cost_usd``) into :class:`NormalizedUsage.cost` (VF-8). Accepts an ``int`` or ``float``;
+    ``bool`` is rejected because ``isinstance(True, int)`` is true.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
 def _produced_no_work(parsed: ParsedEvents, request: AgentRunRequest) -> bool:
     """EXPERIMENTAL(no-work-infra) — trial behavior; grep the tag ``no-work-infra`` to revert as one
 

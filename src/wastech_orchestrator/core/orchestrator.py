@@ -2819,6 +2819,9 @@ class Orchestrator:
             # VF-7 defense-in-depth: the same Core-owned advisory contract the graph-node
             # NodeServices carries, so the supervisor's own read-only turn gets it too.
             security_preamble=self._security_preamble(),
+            # VF-8: share the orchestrator clock so the supervisor's ``provider_attempts``
+            # timestamps come from the same source as the rest of the run's audit.
+            clock=self._clock,
         )
 
     def _engine_finalize(self, p: _Pipeline, inputs: NodeInputs) -> str | None:

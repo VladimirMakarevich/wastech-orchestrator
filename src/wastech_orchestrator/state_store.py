@@ -100,7 +100,14 @@ def _utc_now_iso() -> str:
 # the running-cumulative ``usage_snapshot`` on ``editing_lineage`` and ``node_lineage``. All
 # nullable, so ``_migrate`` adds them on a brand-new (``0``) database; an older versioned DB is
 # refused fail-closed and recreated (greenfield).
-DB_SCHEMA_VERSION = 18
+# v19 (VF-8, provider-attempt task anchor + supervisor spend): ``provider_attempts`` gains a
+# ``task_id`` (so a cost/usage roll-up no longer has to join through ``node_runs.id``) and its
+# ``node_run_id`` becomes NULLABLE — the constant supervisor layer records its own provider calls
+# with ``node_run_id`` NULL (it is not a graph node, so it has no ``node_runs`` row to point at).
+# A task-level roll-up is now ``WHERE task_id = ?`` and includes the supervisor spend; the
+# supervisor's rows are exactly the ``node_run_id IS NULL`` ones. Additive; an older versioned DB is
+# refused fail-closed and recreated (greenfield — no production data to migrate).
+DB_SCHEMA_VERSION = 19
 
 
 class IncompatibleStateError(Exception):
@@ -152,9 +159,23 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE tasks ADD COLUMN exchange_active_unsafe INTEGER NOT NULL DEFAULT 0"
         )
-    # v16: normalized token usage — the per-run delta on ``provider_attempts`` and the running
-    # cumulative snapshot on the two lineage tables. All nullable, so no defaults.
+    _migrate_usage_columns(conn)
+
+
+def _migrate_usage_columns(conn: sqlite3.Connection) -> None:
+    """Additive usage columns (v16 normalized-usage + v19 VF-8 task anchor).
+
+    v16 added the per-run delta on ``provider_attempts`` and the running cumulative snapshot on the
+    two lineage tables — all nullable, so no defaults. v19 (VF-8) added the ``task_id`` anchor to
+    ``provider_attempts`` (NOT NULL with a placeholder default so the additive ALTER is legal; every
+    writer supplies the real id, and this path is only reachable by a pre-versioning ``0`` database
+    that predates the column — none exist in greenfield). The coupled ``node_run_id`` NULLABILITY
+    change is fresh-schema-only (SQLite cannot drop a column's NOT NULL in place) — unreachable here
+    for the same greenfield reason.
+    """
     attempt_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(provider_attempts)")}
+    if "task_id" not in attempt_cols:
+        conn.execute("ALTER TABLE provider_attempts ADD COLUMN task_id TEXT NOT NULL DEFAULT ''")
     for column, decl in (
         ("usage_scope", "TEXT"),
         ("usage_input_total", "INTEGER"),
@@ -276,8 +297,12 @@ CREATE TABLE IF NOT EXISTS node_runs (
 
 CREATE TABLE IF NOT EXISTS provider_attempts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    -- the ``node_runs`` id this attempt belongs to (a plain monotonic id, not an FK).
-    node_run_id INTEGER NOT NULL,
+    -- the task this provider call belongs to (VF-8): a task-level cost/usage roll-up is
+    -- ``WHERE task_id = ?`` and needs no join through ``node_runs``.
+    task_id TEXT NOT NULL,
+    -- the ``node_runs`` id this attempt belongs to (a plain monotonic id, not an FK), or NULL for
+    -- the constant supervisor layer, which is not a graph node and has no ``node_runs`` row (VF-8).
+    node_run_id INTEGER,
     provider TEXT NOT NULL,
     attempt INTEGER NOT NULL,
     status TEXT,
@@ -469,7 +494,11 @@ class NodeRunRow:
 
 @dataclass(frozen=True)
 class ProviderAttemptRow:
-    node_run_id: int
+    # The owning task (VF-8) — always set, so a roll-up need not join through ``node_runs``.
+    task_id: str
+    # The ``node_runs`` id this attempt belongs to, or ``None`` for the constant supervisor layer
+    # (not a graph node, so no ``node_runs`` row — its rows are the ``node_run_id IS NULL`` ones).
+    node_run_id: int | None
     provider: str
     attempt: int
     status: str | None = None
@@ -1136,14 +1165,15 @@ class StateStore:
             c.execute(
                 """
                 INSERT INTO provider_attempts (
-                    node_run_id, provider, attempt, status, error_class, exit_code,
+                    task_id, node_run_id, provider, attempt, status, error_class, exit_code,
                     attempt_dir, started_at, finished_at,
                     usage_scope, usage_input_total, usage_cache_read, usage_cache_write,
                     usage_uncached_input, usage_output_total, usage_reasoning_output, usage_cost,
                     usage_delta_status, provider_usage_raw
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
+                    attempt.task_id,
                     attempt.node_run_id,
                     attempt.provider,
                     attempt.attempt,
@@ -1166,46 +1196,41 @@ class StateStore:
                 ),
             )
 
+    # Shared SELECT columns for provider_attempts (mirrored by _provider_attempt_from_row).
+    _PROVIDER_ATTEMPT_COLUMNS = (
+        "task_id, node_run_id, provider, attempt, status, error_class, exit_code, attempt_dir, "
+        "started_at, finished_at, usage_scope, usage_input_total, usage_cache_read, "
+        "usage_cache_write, usage_uncached_input, usage_output_total, usage_reasoning_output, "
+        "usage_cost, usage_delta_status, provider_usage_raw"
+    )
+
     def get_provider_attempts(self, node_run_id: int) -> list[ProviderAttemptRow]:
         """The provider attempts recorded for one node run, ordered by attempt.
 
-        Exposes the normalized per-run usage delta for inspection. ``provider_attempts`` has no
-        ``task_id`` of its own, so a task-level rollup must join through ``node_runs.id``.
+        Exposes the normalized per-run usage delta for inspection. For a whole-task roll-up (which
+        must also include the constant supervisor layer's ``node_run_id IS NULL`` rows) use
+        :meth:`get_provider_attempts_for_task` — this getter returns only one node run's attempts.
         """
         cur = self._conn.execute(
-            """
-            SELECT node_run_id, provider, attempt, status, error_class, exit_code, attempt_dir,
-                   started_at, finished_at, usage_scope, usage_input_total, usage_cache_read,
-                   usage_cache_write, usage_uncached_input, usage_output_total,
-                   usage_reasoning_output, usage_cost, usage_delta_status, provider_usage_raw
-            FROM provider_attempts WHERE node_run_id = ? ORDER BY attempt
-            """,
+            f"SELECT {self._PROVIDER_ATTEMPT_COLUMNS} FROM provider_attempts "
+            "WHERE node_run_id = ? ORDER BY attempt",
             (node_run_id,),
         )
-        return [
-            ProviderAttemptRow(
-                node_run_id=row["node_run_id"],
-                provider=row["provider"],
-                attempt=row["attempt"],
-                status=row["status"],
-                error_class=row["error_class"],
-                exit_code=row["exit_code"],
-                attempt_dir=row["attempt_dir"],
-                started_at=row["started_at"],
-                finished_at=row["finished_at"],
-                usage_scope=row["usage_scope"],
-                usage_input_total=row["usage_input_total"],
-                usage_cache_read=row["usage_cache_read"],
-                usage_cache_write=row["usage_cache_write"],
-                usage_uncached_input=row["usage_uncached_input"],
-                usage_output_total=row["usage_output_total"],
-                usage_reasoning_output=row["usage_reasoning_output"],
-                usage_cost=row["usage_cost"],
-                usage_delta_status=row["usage_delta_status"],
-                provider_usage_raw=row["provider_usage_raw"],
-            )
-            for row in cur.fetchall()
-        ]
+        return [_provider_attempt_from_row(row) for row in cur.fetchall()]
+
+    def get_provider_attempts_for_task(self, task_id: str) -> list[ProviderAttemptRow]:
+        """Every provider attempt for a task — flow nodes **and** the supervisor layer (VF-8).
+
+        The complete set of billable provider calls a cost/usage roll-up sums, keyed off the
+        ``task_id`` column directly (no ``node_runs`` join), so the supervisor's calls
+        (``node_run_id IS NULL``) are included. Ordered by insertion (``id``) for a stable timeline.
+        """
+        cur = self._conn.execute(
+            f"SELECT {self._PROVIDER_ATTEMPT_COLUMNS} FROM provider_attempts "
+            "WHERE task_id = ? ORDER BY id",
+            (task_id,),
+        )
+        return [_provider_attempt_from_row(row) for row in cur.fetchall()]
 
     # --- check_runs / artifacts -----------------------------------------------------------
 
@@ -1586,6 +1611,31 @@ def _ob(value: object) -> bool | None:
     if value is None:
         return None
     return bool(value)
+
+
+def _provider_attempt_from_row(row: sqlite3.Row) -> ProviderAttemptRow:
+    return ProviderAttemptRow(
+        task_id=row["task_id"],
+        node_run_id=row["node_run_id"],
+        provider=row["provider"],
+        attempt=row["attempt"],
+        status=row["status"],
+        error_class=row["error_class"],
+        exit_code=row["exit_code"],
+        attempt_dir=row["attempt_dir"],
+        started_at=row["started_at"],
+        finished_at=row["finished_at"],
+        usage_scope=row["usage_scope"],
+        usage_input_total=row["usage_input_total"],
+        usage_cache_read=row["usage_cache_read"],
+        usage_cache_write=row["usage_cache_write"],
+        usage_uncached_input=row["usage_uncached_input"],
+        usage_output_total=row["usage_output_total"],
+        usage_reasoning_output=row["usage_reasoning_output"],
+        usage_cost=row["usage_cost"],
+        usage_delta_status=row["usage_delta_status"],
+        provider_usage_raw=row["provider_usage_raw"],
+    )
 
 
 def _node_run_from_row(row: sqlite3.Row) -> NodeRunRow:

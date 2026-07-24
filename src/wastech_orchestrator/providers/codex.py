@@ -516,8 +516,10 @@ def _normalize_codex_usage(usage: Mapping[str, Any] | None) -> NormalizedUsage |
     """Map Codex's raw ``usage`` to the provider-neutral cumulative record.
 
     Codex reports ``input_tokens`` inclusive of the cached subset, so uncached input is derived; it
-    has no cache-creation counter, so ``cache_write`` stays ``None``. Returns ``None`` when no usage
-    was emitted, preserving the no-work guard's "absent usage never fires" contract.
+    has no cache-creation counter, so ``cache_write`` stays ``None``. Its ``token_count`` /
+    ``turn.completed`` events carry token counts but **no dollar figure**, so ``cost`` stays
+    ``None`` (VF-8) — never a guessed value. Returns ``None`` when no usage was emitted, preserving
+    the no-work guard's "absent usage never fires" contract.
     """
     if not usage:
         return None

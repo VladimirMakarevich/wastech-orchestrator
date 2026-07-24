@@ -279,7 +279,9 @@ class NormalizedUsage:
     is nullable so a provider that does not report a category (Codex has no cache-creation count;
     Claude folds reasoning into output) leaves it ``None`` rather than guessing a zero. The field
     invariant that holds for both providers: ``input_total == uncached_input + cache_read +
-    (cache_write or 0)``. ``cost`` is reserved but left ``None`` — cost capture is deferred.
+    (cache_write or 0)``. ``cost`` is the provider-reported spend for the scope, in USD, when the
+    CLI emits one (Claude's stream-json ``total_cost_usd``) — ``None`` when it does not (Codex emits
+    no dollar figure), never a guessed value (VF-8).
     """
 
     scope: UsageScope
