@@ -4,15 +4,15 @@ The source of truth is the code (`src/wastech_orchestrator/security/`).
 
 ## MANDATORY for any changes in the orchestrator
 
-Security mechanisms must not unnecessarily limit the orchestrator’s functionality or degrade the user experience. When choosing between different approaches, priority should be given to preserving existing capabilities, usability, and predictable behavior.
+Security mechanisms must not unnecessarily limit the orchestrator’s functionality or degrade the user experience. When choosing between different approaches, priority is given to preserving existing capabilities, usability, and predictable behavior. Restrictions are introduced only when required by significant risks or mandatory requirements, and then only as the least restrictive solution that provides the necessary level of protection. **This is a first-class requirement, not a soft preference — do not silently trade functionality away for isolation.**
 
-Restrictions should be introduced only when required by significant risks or mandatory requirements. In such cases, the least restrictive solution that provides the necessary level of protection should be preferred.
+**Every isolation, sandbox, or provider-lockdown mechanism MUST ship with an operator-controlled way to relax or fully disable it.** Hard-wiring an always-on restriction with no operator opt-out is not acceptable, even when disabling it reduces security — that is the operator’s decision to make. Such an escape hatch is **operator-config only** (never reachable from a task, `extra_args`, or a flow node — that boundary is the actual hard invariant). Its default is a deployment-posture decision the operator owns: the safer value is the norm, but a specific hatch may deliberately ship defaulting to the relaxed behavior when that is the intended out-of-the-box posture (as `disable_read_isolation` does — see rule #3). Either way, when the escape hatch is in effect the orchestrator must honor it and run with the reduced isolation rather than refuse. This does not extend to the non-negotiable fundamentals that carry no isolation trade-off — argv-not-shell launching, no secrets in logs/DB/artifacts, path-identity validation, and the PR control layer — which stay in force regardless.
 
 ## Isolation
 
 1. The agent works only inside its dedicated workspace clone/worktree.
 2. Agents may never commit, push, merge, or open PRs — only the orchestrator does.
-3. Under `strict_isolation` (the default) a provider may not read or mutate the orchestrator's private runtime or control plane.
+3. Under `strict_isolation` (the default) a provider may not read or mutate the orchestrator's private runtime or control plane. Read-isolation MUST have an operator escape hatch — `disable_read_isolation` (operator-config only; **defaults to `true` — read-isolation is off out of the box**, a deliberate deployment-posture choice that departs from the § MANDATORY default-safe guidance) — that, when in effect, restores the provider's native project-instruction/config discovery (e.g. Claude again loads `CLAUDE.md` + project settings/hooks/MCP/skills) and lifts the private read-deny projection, at the cost of that isolation. Set it `false` to keep read-isolation on. `strict_isolation` is the master switch and always wins toward relaxation: `strict_isolation: false` forces read-isolation off (i.e. `disable_read_isolation` is treated as `true` regardless of its own value), while under `strict_isolation: true` the operator may still set `disable_read_isolation: true` to relax read-isolation on its own. Effective value: `disable_read_isolation OR NOT strict_isolation`. Never settable through a task, `extra_args`, or a flow node.
 
 ## Environment and secrets
 

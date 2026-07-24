@@ -5,12 +5,12 @@ description: Tune an existing wastech-orchestrator flow's per-node execution kno
 
 # worc-flow-tune
 
-Help an operator change *how* a flow's steps execute — the provider, model, reasoning effort, timeout, network access, and loop budgets — while leaving the graph (nodes, edges, routes) and the prompts untouched. These live on the flow node, never on the task: **a task file can never repoint a stage's provider or set its model.** Speak in the user's language (default to the language they wrote in).
+Help an operator change _how_ a flow's steps execute — the provider, model, reasoning effort, timeout, network access, and loop budgets — while leaving the graph (nodes, edges, routes) and the prompts untouched. These live on the flow node, never on the task: **a task file can never repoint a stage's provider or set its model.** Speak in the user's language (default to the language they wrote in).
 
 ## When to use
 
 - The operator wants a step to run on a different `provider` (`codex`/`claude`), a stronger/cheaper `model`, more/less `reasoning` effort, a longer `timeout_seconds`, network on/off, or wants to change a loop's iteration `budget` — and the steps themselves stay the same.
-- For a new step, route, or output kind → **worc-flow**. To change what a step *says* → **worc-flow-role**. This skill only turns the per-node execution dials on an existing `.worc/flows/<task_type>.yaml`.
+- For a new step, route, or output kind → **worc-flow**. To change what a step _says_ → **worc-flow-role**. This skill only turns the per-node execution dials on an existing `.worc/flows/<task_type>.yaml`.
 
 Before editing, read the packaged flow reference `.worc/guide/flows/reference.md` (the node field tables and the validation layers) and the annotated built-in `.worc/flows/implementation.yaml` — its commented-out per-node `provider` / `model` / `reasoning` slots are the worked example of exactly these knobs.
 
@@ -20,7 +20,7 @@ Before editing, read the packaged flow reference `.worc/guide/flows/reference.md
 2. Set the per-node knobs you need (all default to `null` = inherit):
    - `provider` — `codex` \| `claude`; `null` uses the global primary. **Must be listed in `agents.allowed`.**
    - `model` — overrides the provider's default; **passed through unverified**, so a wrong id fails only at run time — do not invent model ids.
-   - `reasoning` — overrides effort; **must be valid for the resolved provider** (Claude and Codex effort sets differ) — this one *is* validated.
+   - `reasoning` — overrides effort; **must be valid for the resolved provider** (Claude and Codex effort sets differ) — this one _is_ validated.
    - `timeout_seconds` — per-attempt CLI wall-clock ceiling.
    - `network_access` — tri-state per-node override of the flow's `network_policy` (`true`/`false`/omit).
    - `extra_args` — raw CLI flags for this node (subject to the forbidden-args scan).
@@ -31,7 +31,7 @@ Before editing, read the packaged flow reference `.worc/guide/flows/reference.md
 
 ## Applying the change to a task already in flight
 
-A brand-new task always picks up the edited flow. To apply your edit to a **specific parked/failed task** without re-paying for completed upstream work, resume it with `worc rerun <id> --continue` (add `--from <node>` to re-enter at a chosen step, e.g. `--from review`): an operator `--continue` **adopts** the current on-disk flow — it re-freezes the control plane from your edited files and resumes from the checkpoint under the new knobs. `--dry-run` prints a `note:` when it detects the change. (Only automatic daemon crash-recovery keeps the task's original frozen flow; an operator `--continue` is trusted to adopt.) Editing `AGENTS.md`/`CLAUDE.md`, a task file, or a `SKILL.md` is **not** adopted this way — those need a fresh run.
+A brand-new task always picks up the edited flow. To apply your edit to a **specific parked/failed task** without re-paying for completed upstream work, resume it with `worc rerun <id> --continue` (add `--from <node>` to re-enter at a chosen step, e.g. `--from review`): an operator `--continue` **adopts** the current on-disk flow — it re-freezes the control plane from your edited files and resumes from the checkpoint under the new knobs. `--dry-run` prints a `note:` when it detects the change. (Only automatic daemon crash-recovery keeps the task's original frozen flow; an operator `--continue` is trusted to adopt.) Editing a task file or a `SKILL.md` is **not** adopted this way — those are frozen per task, so they need a fresh run. (`AGENTS.md`/`CLAUDE.md` are different: the agent reads them live, so an edit between runs is picked up automatically on the next run, and during a run they are write-locked — VF-5.)
 
 ## Heuristics
 

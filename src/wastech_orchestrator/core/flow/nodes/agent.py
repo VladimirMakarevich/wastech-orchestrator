@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import replace
+from pathlib import Path
 from typing import Any
 
 from wastech_orchestrator.core.dangerous_diff import (
@@ -36,6 +37,10 @@ from wastech_orchestrator.core.flow.contracts import (
     resolve_network_access,
 )
 from wastech_orchestrator.core.flow.engine import NodeContext, NodeOutcome, NodeResult
+from wastech_orchestrator.core.flow.instruction_bundle import (
+    REPO_INSTRUCTION_NAMES,
+    discover_repository_instructions,
+)
 from wastech_orchestrator.core.flow.nodes.base import (
     NodeInfraError,
     NodeInputs,
@@ -394,7 +399,20 @@ class AgentNodeRunner:
         control_before = None
         if git is not None and self._is_workspace_write(node, ctx):
             control_before = git.capture_git_control_state()
-            request = replace(request, write_guard=git.resolve_control_paths(self._s.exchange_root))
+            # VF-5: the tracked root instruction files are write-denied for the run so the agent's
+            # own reading of them (native discovery / Read tool) is reproducible. Discovery lives
+            # here in the core layer (reusing ``discover_repository_instructions``) so the git-layer
+            # ``resolve_control_paths`` stays free of any ``core`` import.
+            instruction_files = discover_repository_instructions(
+                Path(self._s.repo_dir),
+                frozenset(git.list_tracked_files(*REPO_INSTRUCTION_NAMES)),
+            )
+            request = replace(
+                request,
+                write_guard=git.resolve_control_paths(
+                    self._s.exchange_root, instruction_files=instruction_files
+                ),
+            )
         # WRI-002 detection-in-depth: fingerprint the curated exchange before the attempt so a
         # provider mutation of the read-only surface is caught from parent-held state (below),
         # before
@@ -626,7 +644,6 @@ class AgentNodeRunner:
             check_artifacts_path=self._in.checks_path,
             review_artifacts_path=self._in.review_path,
             human_input_path=human_input_path,
-            repository_instructions_path=self._in.repository_instructions_path,
             skill_reference_paths=self._in.skills_for(node.id),
             output_schema=output_schema,
             model=node.model,

@@ -255,33 +255,14 @@ def test_implements_agent_provider_protocol(
     assert provider.id == "codex"
 
 
-def test_stdin_prepends_frozen_repository_instruction_block(
+def test_stdin_is_plain_prompt_without_injection(
     codex_config: ProviderConfig,
     security_config: SecurityConfig,
     tmp_path: Path,
     make_request: Callable[..., AgentRunRequest],
 ) -> None:
-    # WRI-011: Codex ``exec`` has no system-prompt flag, so the frozen repository instructions are
-    # prepended to the top of the stdin turn — ABOVE the flow role / task (the ``prompt``).
-    provider = _provider(codex_config, security_config, tmp_path, FakeRun())
-    instr = tmp_path / "instr.md"
-    instr.write_text("REPO RULE: always be careful.\n", encoding="utf-8")
-    request = make_request(
-        prompt="Flow role + task go here.", repository_instructions_path=str(instr)
-    )
-    stdin = provider._stdin_text(request)
-    assert "REPO RULE: always be careful." in stdin
-    assert "<repository-instructions>" in stdin
-    # Precedence: the frozen instruction block comes before the flow role / task in the turn.
-    assert stdin.index("REPO RULE") < stdin.index("Flow role + task go here.")
-
-
-def test_stdin_is_plain_prompt_without_repo_instructions(
-    codex_config: ProviderConfig,
-    security_config: SecurityConfig,
-    tmp_path: Path,
-    make_request: Callable[..., AgentRunRequest],
-) -> None:
+    # VF-5: Codex no longer injects a repository-instruction block — stdin is just the flow prompt
+    # (+ context-file footer); the agent reads the repo's root files itself via native discovery.
     provider = _provider(codex_config, security_config, tmp_path, FakeRun())
     stdin = provider._stdin_text(make_request(prompt="just the task"))
     assert "<repository-instructions>" not in stdin

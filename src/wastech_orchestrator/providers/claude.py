@@ -417,11 +417,10 @@ _REQUIRED_CLAUDE_FLAGS: tuple[str, ...] = (
 )
 
 # Claude flags whose loss degrades — but does not break — a run: ``--resume`` backs every
-# durable-session resume node, and ``--append-system-prompt`` (incl. ``[-file]``) carries
-# the WRI-011 frozen repository instructions. A CLI missing either still runs fresh, non-instruction
-# nodes, so this is fallback-aware (fatal only when claude is the sole allowed provider), mirroring
-# Codex's ``exec resume`` degradation probe.
-_DEGRADABLE_CLAUDE_FLAGS: tuple[str, ...] = ("--resume", "--append-system-prompt")
+# durable-session resume node. A CLI missing it still runs fresh (non-resume) nodes, so this is
+# fallback-aware (fatal only when claude is the sole allowed provider), mirroring Codex's
+# ``exec resume`` degradation probe.
+_DEGRADABLE_CLAUDE_FLAGS: tuple[str, ...] = ("--resume",)
 
 
 def _find_reserved_claude_args(args: Sequence[str]) -> list[str]:
@@ -472,6 +471,7 @@ def build_sandbox_settings(
     write_guard: ProviderWriteGuardPolicy | None,
     *,
     network_access: bool,
+    read_isolation_off: bool = False,
 ) -> dict[str, Any]:
     """Build the adapter-owned Claude OS Bash-sandbox settings (WRI-002).
 
@@ -487,8 +487,12 @@ def build_sandbox_settings(
     the
     resolved internal env-file (the purpose-built surface) with ``mode: "deny"`` only.
     """
-    deny_read = [_sandbox_path(p) for p in deny_policy.denied_paths]
-    deny_write = list(deny_read)
+    internal = [_sandbox_path(p) for p in deny_policy.denied_paths]
+    # VF-6: with read-isolation OFF the private set stays WRITE-denied (control plane immutable) but
+    # is no longer read-denied, so the sandboxed Bash may read it for native discovery. The env-file
+    # ``credentials`` deny below is a targeted secret protection and is kept regardless.
+    deny_read = [] if read_isolation_off else list(internal)
+    deny_write = list(internal)
     if write_guard is not None:
         deny_write.extend(_sandbox_path(p) for p in write_guard.denied_write_paths)
     deny_write = list(dict.fromkeys(deny_write))  # order-preserving de-dup
@@ -565,8 +569,16 @@ def build_claude_argv(
     sandbox_settings_path: str | None = None,
     sandbox_probe: SandboxProbe | None = None,
     strict_isolation: bool = True,
+    read_isolation_off: bool = False,
 ) -> list[str]:
     """Build the ``claude -p`` argv (a list, never a shell string).
+
+    ``read_isolation_off`` (VF-6, the effective ``security.read_isolation_off``) relaxes only the
+    READ side: ``--setting-sources project`` (not ``""``) restores native ``CLAUDE.md`` + project
+    settings/hooks/MCP/skills discovery, ``--strict-mcp-config`` is dropped, the private
+    ``internal_deny_read_paths`` set becomes readable (still Write/Edit-denied), and the F37
+    native-memory deny is lifted. The public ``denied_read_paths`` blacklist and the WRITE side
+    (command denies, Write/Edit denies, write-guard) are unchanged.
 
     Raises :class:`ProviderError` (``CONFIGURATION_ERROR``) if ``extra_args`` carry an
     absolutely-forbidden flag (``--dangerously*`` / ``--yolo`` / ``--ignore-rules``), a reserved
@@ -611,19 +623,27 @@ def build_claude_argv(
         "--output-format",
         "stream-json",
         "--verbose",
-        # WRI-011: load NO user/project/local setting sources, so Claude never discovers the live
-        # ``CLAUDE.md`` / project settings / skills / plugins / hooks / MCP. WRI-002: also refuse
-        # any
-        # MCP server not passed via ``--mcp-config`` (and none is) so zero MCP tools load. The
-        # frozen
-        # repository instructions arrive only through ``--append-system-prompt-file`` below;
-        # admin-managed policy + auth still apply (the trusted-computing-base, not a repo file).
-        "--setting-sources",
-        "",
-        "--strict-mcp-config",
-        _PERMISSION_MODE_FLAG,
-        plan.mode,
     ]
+    if read_isolation_off:
+        # VF-6 operator escape hatch: read-isolation is OFF. Restore Claude's NATIVE project
+        # discovery — ``--setting-sources project`` re-loads the target repo's ``CLAUDE.md`` + its
+        # project settings (hooks, MCP, skills, plugins) that ``--setting-sources ""`` closes
+        # under isolation — and DROP ``--strict-mcp-config`` so project-declared MCP servers load.
+        # ``project`` scope (not the CLI ``user,project,local`` default) restores the *project's*
+        # native surface without importing the operator's user-global ``~/.claude`` settings. The
+        # WRITE side (denyWrite / Write/Edit denies / command denies) below still applies.
+        argv += ["--setting-sources", "project"]
+    else:
+        # Security lockdown (WRI-002): load NO user/project/local setting sources, so Claude never
+        # loads the target repo's / user's settings — no hooks, MCP, skills, or plugins (also refuse
+        # any MCP server not passed via ``--mcp-config``, and none is, so zero MCP tools load). An
+        # accepted consequence is that native ``CLAUDE.md`` memory auto-load is off too — the CLI
+        # gates project memory and project settings on this same switch, with no memory-only path.
+        # The agent instead reads the repo's root instruction files itself (its role prompt directs
+        # it), and those files are write-denied for the run so what it reads stays immutable.
+        # Admin-managed policy + auth still apply (the trusted-computing-base, not a repo file).
+        argv += ["--setting-sources", "", "--strict-mcp-config"]
+    argv += [_PERMISSION_MODE_FLAG, plan.mode]
     if plan.tools:
         # ``--tools`` is the hard existence gate (tools not listed do not exist for the session);
         # ``--allowedTools`` marks the same set auto-approved so a headless run never blocks.
@@ -631,15 +651,20 @@ def build_claude_argv(
         argv += ["--tools", joined_tools, "--allowedTools", joined_tools]
     denied_tools = _deny_tools_for(denied_commands) + _deny_read_tools_for(denied_read_paths)
     # F37: confine native project memory out of the spawn — unless the operator has opted in to the
-    # agent's own native memory (agents.providers.claude.allow_native_memory), a deliberate,
-    # default-off risk acceptance (that store is unaudited and outside the redaction net). The
-    # claude config home is left to this F37 rule (gated by the opt-in), so the internal deny below
-    # excludes it to avoid re-denying ``~/.claude`` and breaking the opt-in.
-    if not config.allow_native_memory:
+    # agent's own native memory (agents.providers.claude.allow_native_memory) OR read-isolation is
+    # OFF (VF-6), both deliberate, operator-owned restorations of Claude's own native memory (that
+    # store is unaudited and outside the redaction net). The claude config home is left to this F37
+    # rule (gated by the opt-in), so the internal deny below excludes it to avoid re-denying
+    # ``~/.claude`` and breaking the opt-in.
+    if not config.allow_native_memory and not read_isolation_off:
         denied_tools += _native_memory_deny_tools()
     claude_home = claude_config_home()
     read_deny_paths = [p for p in internal_deny_read_paths if p != claude_home]
-    denied_tools += _internal_deny_tools(read_deny_paths, ("Read", "Write", "Edit"))
+    # VF-6: with read-isolation OFF the private set stays WRITE-denied (the control plane must stay
+    # immutable) but becomes READABLE so the agent can natively discover it; under isolation it is
+    # Read+Write+Edit-denied. The public ``denied_read_paths`` blacklist (above) is unchanged.
+    internal_deny_kinds = ("Write", "Edit") if read_isolation_off else ("Read", "Write", "Edit")
+    denied_tools += _internal_deny_tools(read_deny_paths, internal_deny_kinds)
     if request.write_guard is not None:
         denied_tools += _internal_deny_tools(
             request.write_guard.denied_write_paths, ("Write", "Edit")
@@ -665,12 +690,6 @@ def build_claude_argv(
             "--json-schema",
             json.dumps(request.output_schema, separators=(",", ":"), sort_keys=True),
         ]
-    # WRI-011: inject the frozen repository instructions through the adapter-owned system-prompt
-    # surface (appended above the flow role / task on the user turn), replacing live ``CLAUDE.md``
-    # discovery (disabled by ``--setting-sources ""`` above). It is the redacted exchange copy the
-    # orchestrator published from the immutable frozen snapshot — never the live repo file.
-    if request.repository_instructions_path:
-        argv += ["--append-system-prompt-file", request.repository_instructions_path]
     # ``None`` (config ``max_turns: none`` / ``max`` / null) means no orchestrator-imposed cap:
     # omit ``--max-turns`` so the CLI runs without a turn limit. A positive int caps the turns.
     if config.max_turns is not None:
@@ -861,7 +880,13 @@ class ClaudeCodeProvider(BaseCliProvider):
         ok, help_text = self._probe([self._config.command, "--help"], env)
         if not ok:
             return None
-        missing = [flag for flag in _REQUIRED_CLAUDE_FLAGS if flag not in help_text]
+        required = _REQUIRED_CLAUDE_FLAGS
+        if self._security.read_isolation_off:
+            # VF-6: with read-isolation OFF the adapter no longer emits ``--strict-mcp-config`` (it
+            # runs native MCP discovery), so the CLI need not expose it. ``--setting-sources`` is
+            # still emitted (``project``) and the permission-mode / hard tool gate stay required.
+            required = tuple(f for f in required if f != "--strict-mcp-config")
+        missing = [flag for flag in required if flag not in help_text]
         if missing:
             return (
                 f"claude --help no longer exposes {', '.join(missing)}, required by the "
@@ -871,12 +896,11 @@ class ClaudeCodeProvider(BaseCliProvider):
         return None
 
     def _preflight_degraded_reasons(self, env: Mapping[str, str]) -> tuple[str, ...]:
-        """Flag Claude CLI drift that breaks resume / frozen-instruction injection nodes (H2).
+        """Flag Claude CLI drift that breaks durable-session resume nodes (H2).
 
-        ``--resume`` backs every durable-session resume node and ``--append-system-prompt[-file]``
-        carries the WRI-011 frozen repository instructions. A CLI missing either still runs fresh,
-        non-instruction nodes, so — like Codex's ``exec resume`` probe — this is advisory: fatal
-        only when claude has no fallback provider, else a warning. Empty ``--help`` output is
+        ``--resume`` backs every durable-session resume node. A CLI missing it still runs fresh
+        (non-resume) nodes, so — like Codex's ``exec resume`` probe — this is advisory: fatal only
+        when claude has no fallback provider, else a warning. Empty ``--help`` output is
         inconclusive (no flag).
         """
         ok, help_text = self._probe([self._config.command, "--help"], env)
@@ -886,9 +910,9 @@ class ClaudeCodeProvider(BaseCliProvider):
         if not missing:
             return ()
         return (
-            f"claude --help no longer exposes {', '.join(missing)}; resume nodes and WRI-011 "
-            "frozen repository-instruction injection will fail on claude — pin a compatible Claude "
-            "CLI or route these nodes to another provider",
+            f"claude --help no longer exposes {', '.join(missing)}; durable-session resume nodes "
+            "will fail on claude — pin a compatible Claude CLI or route these nodes to another "
+            "provider",
         )
 
     def _build_argv(self, request: AgentRunRequest, paths: ArtifactPaths) -> tuple[list[str], None]:
@@ -907,7 +931,10 @@ class ClaudeCodeProvider(BaseCliProvider):
         settings_path: str | None = None
         if plan.needs_sandbox and self._deny_policy is not None:
             settings = build_sandbox_settings(
-                self._deny_policy, request.write_guard, network_access=request.network_access
+                self._deny_policy,
+                request.write_guard,
+                network_access=request.network_access,
+                read_isolation_off=self._security.read_isolation_off,
             )
             settings_path = self._write_sandbox_settings(paths, settings)
         argv = build_claude_argv(
@@ -921,6 +948,7 @@ class ClaudeCodeProvider(BaseCliProvider):
             sandbox_settings_path=settings_path,
             sandbox_probe=self._sandbox_probe,
             strict_isolation=self._security.strict_isolation,
+            read_isolation_off=self._security.read_isolation_off,
         )
         return argv, None
 

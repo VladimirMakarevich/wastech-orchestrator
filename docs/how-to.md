@@ -139,18 +139,9 @@ See also: [flow-authoring.md](flow-authoring.md#where-flows-live) for where flow
 
 ## 5. Fix conflicting Codex installations on Windows
 
-**Problem:** `codex --version` in a terminal reports one version, while `worc preflight` reports
-another. A real task may then fail every shell command with an infrastructure error such as
-`CreateProcessWithLogonW failed: 2`, `windows sandbox failed`, or `helper copy failed for
-command-runner`, even though `codex sandbox ...` works when you run it by hand.
+**Problem:** `codex --version` in a terminal reports one version, while `worc preflight` reports another. A real task may then fail every shell command with an infrastructure error such as `CreateProcessWithLogonW failed: 2`, `windows sandbox failed`, or `helper copy failed for command-runner`, even though `codex sandbox ...` works when you run it by hand.
 
-**Why this happens:** Codex can be installed by more than one independently updated surface: a
-global npm package, a Node version manager, the Windows Codex app, or an IDE integration. On
-Windows, a global npm install normally puts `codex.cmd` on `PATH`, while an app-managed standalone
-package may expose a different `codex.exe`. A terminal can select the `.cmd` launcher through
-`PATHEXT`; the orchestrator deliberately starts providers as an argv list without a shell, so the
-Windows process launcher can instead select the later `.exe`. The CLI version, sandbox setup helper,
-and `codex-command-runner.exe` may then come from different package roots.
+**Why this happens:** Codex can be installed by more than one independently updated surface: a global npm package, a Node version manager, the Windows Codex app, or an IDE integration. On Windows, a global npm install normally puts `codex.cmd` on `PATH`, while an app-managed standalone package may expose a different `codex.exe`. A terminal can select the `.cmd` launcher through `PATHEXT`; the orchestrator deliberately starts providers as an argv list without a shell, so the Windows process launcher can instead select the later `.exe`. The CLI version, sandbox setup helper, and `codex-command-runner.exe` may then come from different package roots.
 
 Multiple installations are not inherently broken. The ambiguous bare command is the problem.
 
@@ -167,9 +158,7 @@ Get-AppxPackage OpenAI.Codex | Select-Object Name, Version, Status
 Get-Content "$env:USERPROFILE\.codex\packages\standalone\current\codex-package.json"
 ```
 
-More than one `where.exe` result, or different versions from `codex --version` and `worc
-preflight`, confirms ambiguous resolution. For a global npm install, locate its physical native
-Windows executable instead of the top-level `codex.cmd` launcher:
+More than one `where.exe` result, or different versions from `codex --version` and `worc preflight`, confirms ambiguous resolution. For a global npm install, locate its physical native Windows executable instead of the top-level `codex.cmd` launcher:
 
 ```powershell
 $npmRoot = npm.cmd root -g
@@ -180,9 +169,7 @@ Test-Path -LiteralPath $codexExe
 & $codexExe --version
 ```
 
-The exact package root may differ under nvm, pnpm, Yarn, or another CPU architecture. If the path
-above is absent, find the manager-owned native executable and verify that its package also contains
-the matching resources:
+The exact package root may differ under nvm, pnpm, Yarn, or another CPU architecture. If the path above is absent, find the manager-owned native executable and verify that its package also contains the matching resources:
 
 ```text
 <package-root>\bin\codex.exe
@@ -190,8 +177,7 @@ the matching resources:
 <package-root>\codex-resources\codex-command-runner.exe
 ```
 
-**Solution:** pin that physical executable in the target repository's `.worc/config.yaml`. Use
-single-quoted YAML on Windows so backslashes remain literal:
+**Solution:** pin that physical executable in the target repository's `.worc/config.yaml`. Use single-quoted YAML on Windows so backslashes remain literal:
 
 ```yaml
 agents:
@@ -200,8 +186,7 @@ agents:
       command: 'C:\absolute\package-root\bin\codex.exe'
 ```
 
-Then restart `worc watch` if it is running and verify both provider discovery and a real sandboxed
-process:
+Then restart `worc watch` if it is running and verify both provider discovery and a real sandboxed process:
 
 ```powershell
 worc preflight
@@ -210,29 +195,17 @@ $pwsh = (Get-Command pwsh.exe -CommandType Application | Select-Object -First 1)
 & $codexExe sandbox $pwsh -NoProfile -Command 'Write-Output OK'
 ```
 
-The preflight version must now match `& $codexExe --version`, its `Windows sandbox helper` path
-must belong to the same installation, and the smoke command must print `OK` with exit code `0`.
+The preflight version must now match `& $codexExe --version`, its `Windows sandbox helper` path must belong to the same installation, and the smoke command must print `OK` with exit code `0`.
 
 **Do not:**
 
-- point `command` at `codex.cmd`; it requires a command shell, which the orchestrator intentionally
-  does not use;
+- point `command` at `codex.cmd`; it requires a command shell, which the orchestrator intentionally does not use;
 - copy sandbox helpers between releases or manually retarget the app-managed `current` junction;
-- delete an old standalone release before pinning and verifying the replacement — the Windows app
-  may own hardlinks or junctions into that release, and deleting it does not make `worc` select npm;
-- weaken `workspace-write`, approvals, or `security.strict_isolation` to hide a packaging/path
-  problem.
+- delete an old standalone release before pinning and verifying the replacement — the Windows app may own hardlinks or junctions into that release, and deleting it does not make `worc` select npm;
+- weaken `workspace-write`, approvals, or `security.strict_isolation` to hide a packaging/path problem.
 
-If you do not use the Windows Codex app, uninstall it through Windows Settings / Microsoft Store
-only after the pinned npm executable passes the checks above. If you keep the app, it is safe to
-leave its standalone CLI installed: the absolute `command` removes the ambiguity, and each updater
-can continue managing its own files.
+If you do not use the Windows Codex app, uninstall it through Windows Settings / Microsoft Store only after the pinned npm executable passes the checks above. If you keep the app, it is safe to leave its standalone CLI installed: the absolute `command` removes the ambiguity, and each updater can continue managing its own files.
 
-The same principle applies on Linux and macOS when Homebrew, npm, a version manager, and an IDE
-expose different Codex installations: compare `type -a codex` / `which -a codex` with `worc
-preflight`, then configure the absolute path to the intended executable. A POSIX launcher with a
-valid shebang can run without a shell; the Windows-specific requirement is to avoid `.cmd` and use
-the native `.exe`.
+The same principle applies on Linux and macOS when Homebrew, npm, a version manager, and an IDE expose different Codex installations: compare `type -a codex` / `which -a codex` with `worc preflight`, then configure the absolute path to the intended executable. A POSIX launcher with a valid shebang can run without a shell; the Windows-specific requirement is to avoid `.cmd` and use the native `.exe`.
 
-For the supported native Windows sandbox modes and upstream troubleshooting guidance, see the
-[Codex Windows sandbox documentation](https://developers.openai.com/codex/windows).
+For the supported native Windows sandbox modes and upstream troubleshooting guidance, see the [Codex Windows sandbox documentation](https://developers.openai.com/codex/windows).

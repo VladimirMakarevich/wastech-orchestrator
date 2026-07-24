@@ -508,7 +508,6 @@ class Supervisor:
         task_id: str,
         task_title: str,
         task_path: str | None = None,
-        repository_instructions_path: str | None = None,
         emit_delta: bool = False,
     ) -> FinalizeResult:
         """Synthesize the whole-task summary (once, at task close) and record ``supervisor_final``.
@@ -546,7 +545,6 @@ class Supervisor:
             digest=digest,
             resume=warm,
             task_path=task_path,
-            repository_instructions_path=repository_instructions_path,
         )
         self._record(
             task_id,
@@ -591,7 +589,6 @@ class Supervisor:
         digest: str | None = None,
         resume: bool = True,
         task_path: str | None = None,
-        repository_instructions_path: str | None = None,
     ) -> tuple[str | None, CandidateDelta | None, tuple[FollowUp, ...]]:
         """Run the single finalize turn. Free-text when neither memory nor follow-ups are enabled
         (today's behavior — AC-S4); otherwise a structured ``{summary, ...}`` turn, so every enabled
@@ -608,7 +605,6 @@ class Supervisor:
                 node_run_id=0,
                 resume_session=resume,
                 task_path=task_path,
-                repository_instructions_path=repository_instructions_path,
             )
             return text, None, ()
         result = self._run_result(
@@ -623,7 +619,6 @@ class Supervisor:
             output_schema=_finalize_schema(with_delta=emit_delta, with_follow_ups=with_follow_ups),
             resume_session=resume,
             task_path=task_path,
-            repository_instructions_path=repository_instructions_path,
         )
         if result is None or result.structured_output is None:
             return None, None, ()
@@ -696,7 +691,6 @@ class Supervisor:
         agent_node_ids: Sequence[str],
         inventory: SkillInventory,
         task_path: str | None = None,
-        repository_instructions_path: str | None = None,
     ) -> dict[str, tuple[str, ...]]:
         """Propose a ``node → skills`` map once per task (read-only, propose-only — Core decides).
 
@@ -720,7 +714,6 @@ class Supervisor:
             node_run_id=_PROPOSAL_RUN_ID,
             output_schema=_SKILL_MAP_SCHEMA,
             task_path=task_path,
-            repository_instructions_path=repository_instructions_path,
         )
         proposal = _parse_skill_map(result.structured_output) if result is not None else {}
         self._record(
@@ -747,7 +740,6 @@ class Supervisor:
         resume_session: bool = True,
         cap_reasoning: bool = False,
         task_path: str | None = None,
-        repository_instructions_path: str | None = None,
     ) -> str | None:
         """Run one read-only supervisor turn and return its final message (``None`` on failure)."""
         result = self._run_result(
@@ -758,7 +750,6 @@ class Supervisor:
             resume_session=resume_session,
             cap_reasoning=cap_reasoning,
             task_path=task_path,
-            repository_instructions_path=repository_instructions_path,
         )
         return result.final_message if result is not None else None
 
@@ -773,7 +764,6 @@ class Supervisor:
         resume_session: bool = True,
         cap_reasoning: bool = False,
         task_path: str | None = None,
-        repository_instructions_path: str | None = None,
     ) -> AgentRunResult | None:
         """Run one read-only supervisor LLM turn on its own session; return the full result.
 
@@ -812,14 +802,13 @@ class Supervisor:
                 output_schema=output_schema,
                 session_id=self._resume_session(task_id, route) if resume_session else None,
                 # WRI-011: the task reaches the supervisor as the frozen exchange packet path (never
-                # inline title/description), and the frozen repository instructions ride the same
-                # controlled layer as for graph nodes — never live project-doc discovery.
+                # inline title/description). Repository instructions are NOT injected (VF-5) — the
+                # supervisor's read-only turn reads the repo's root files itself, like graph nodes.
                 task_path=task_path,
-                repository_instructions_path=repository_instructions_path,
             )
-            # Same pre-launch containment invariant as agent/evaluator (WRI-001/011): the supervisor
-            # now carries the frozen exchange ``task_path`` + ``repository_instructions_path``, so
-            # this asserts both resolve under the current-task exchange before the read-only call.
+            # Same pre-launch containment invariant as agent/evaluator (WRI-001): the supervisor
+            # carries the frozen exchange ``task_path``, so this asserts it resolves under the
+            # current-task exchange before the read-only call.
             if self._exchange_root:
                 assert_orchestration_paths_contained(request, str(self._exchange_root))
             outcome = self._router.run_stage(request, route)

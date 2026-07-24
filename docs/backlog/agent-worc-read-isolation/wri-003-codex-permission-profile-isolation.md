@@ -1,6 +1,8 @@
 # WRI-003 — Enforce the boundary with Codex permission profiles
 
-**Status:** implemented **Milestone:** 1 **Source:** [decision record](README.md) **Dependencies:** WRI-009, WRI-011, WRI-012
+**Status:** implemented; **`AGENTS.md` discovery-disable rolled back by [VF-5](runtime-validation-findings.md) (2026-07-24)** **Milestone:** 1 **Source:** [decision record](README.md) **Dependencies:** WRI-009, WRI-011, WRI-012
+
+> **Amended by VF-5 (2026-07-24).** The separate "disable live `AGENTS.md` discovery (`project_doc_max_bytes=0`) + inject the frozen instruction manifest" control is **rolled back**: Codex's native `AGENTS.md` project-doc discovery is now left **enabled** and nothing is injected — the agent reads the repo's root instructions itself, and the tracked root instruction files are write-denied for the run (immutable). Everything else here — the generated `[permissions.worc]` profile, `.codex` project-trust `untrusted`, `--ignore-user-config`, the `--disable` feature set, and the `codex sandbox -P` canary — is **unchanged**. See [runtime-validation-findings.md](runtime-validation-findings.md) VF-5.
 
 > **Implementation note.** Delivered against codex-cli 0.144.4. Isolation is a generated, attempt-scoped permission profile (`[permissions.worc]`, selected as `default_permissions`; injected as one inline-table `-c` value so the operator's `CODEX_HOME` is never mutated) proven by a no-model `codex sandbox -P` canary before every `codex exec`. Two scoping decisions were taken with the operator:
 >

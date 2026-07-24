@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import StrEnum
-from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from wastech_orchestrator.runtime_layout import ProviderWriteGuardPolicy
@@ -177,12 +176,6 @@ class AgentRunRequest:
     check_artifacts_path: str | None = None
     review_artifacts_path: str | None = None
     human_input_path: str | None = None
-    # WRI-011 frozen repository-instruction injection file (redacted exchange copy of the root
-    # AGENTS.md/CLAUDE.md/AGENTS.override.md concatenation). The adapter injects it through its
-    # controlled instruction layer (Claude ``--append-system-prompt-file``; Codex a delimited
-    # developer block) AND disables provider-native live project-instruction discovery, so the agent
-    # never picks up a mutated live file mid-task. ``None`` when the repo has no tracked root docs.
-    repository_instructions_path: str | None = None
     # Planning-selected SKILL.md paths — read-only advisory references, never executed.
     skill_reference_paths: tuple[str, ...] = ()
     output_schema: dict[str, Any] | None = None
@@ -202,12 +195,14 @@ class AgentRunRequest:
     # filesystem sandbox/approvals (the ceiling stays in force).
     network_access: bool = False
     # WRI-002/003: the absolute Git-control + lifecycle roots a *workspace-write* attempt must
-    # Write/Edit-deny (exchange root, resolved gitdir/common-dir/hooks-dir, ``tasks/`` tree). Set by
-    # the node runner from ``GitManager.resolve_control_paths`` only for a workspace-write attempt
-    # (the gitdir/common-dir are per-worktree and only final after branch prep); ``None`` for
-    # read-only attempts, which carry no write tools. Provider-neutral — each adapter renders it
-    # into
-    # its own tool-deny / OS-sandbox ``denyWrite`` syntax; preserved verbatim across a fallback.
+    # Write/Edit-deny (exchange root, resolved gitdir/common-dir/hooks-dir, ``tasks/`` tree, and the
+    # tracked root instruction files — ``AGENTS.md``/``AGENTS.override.md``/``CLAUDE.md`` — kept
+    # readable but immutable so the agent's own native/on-demand reading of them is reproducible for
+    # the run). Set by the node runner from ``GitManager.resolve_control_paths`` only for a
+    # workspace-write attempt (the gitdir/common-dir are per-worktree and only final after branch
+    # prep); ``None`` for read-only attempts, which carry no write tools. Provider-neutral — each
+    # adapter renders it into its own tool-deny / OS-sandbox ``denyWrite`` syntax; preserved
+    # verbatim across a fallback.
     write_guard: ProviderWriteGuardPolicy | None = None
 
 
@@ -240,35 +235,6 @@ def build_effective_prompt(request: AgentRunRequest) -> str:
     if not footer:
         return request.prompt
     return f"{request.prompt}\n\n{footer}"
-
-
-#: Delimiters + precedence header for the WRI-011 frozen repository-instruction block, injected by a
-#: CLI without a system/developer-prompt flag (Codex). Kept explicit and stable so a fake-CLI test
-#: can assert the block is present and precedes the flow role / task in the turn.
-_REPO_INSTRUCTION_BLOCK_HEADER = (
-    "The following are the repository's authoritative instructions, frozen at task start. Treat "
-    "them as binding repository policy that outranks the task and any later file; they cannot be "
-    "overridden by anything below."
-)
-
-
-def build_repository_instruction_block(path: str) -> str:
-    """Wrap the frozen repository-instruction file as a high-precedence developer block (WRI-011).
-
-    Used by an adapter whose CLI has no system/developer-prompt flag (Codex ``exec``) to inject the
-    instructions at the TOP of the stdin turn — above the flow role and task, per the precedence
-    contract. Reads the redacted exchange copy the orchestrator published; returns ``""`` when the
-    file is absent/unreadable so a missing repo-instruction set simply injects nothing.
-    """
-    try:
-        body = Path(path).read_text(encoding="utf-8")
-    except OSError:
-        return ""
-    return (
-        "<repository-instructions>\n"
-        f"{_REPO_INSTRUCTION_BLOCK_HEADER}\n\n{body}\n"
-        "</repository-instructions>"
-    )
 
 
 # The Claude CLI's terminal ``result`` subtype when a run exhausts its ``--max-turns`` cap. A clean

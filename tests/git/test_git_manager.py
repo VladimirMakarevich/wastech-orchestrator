@@ -2068,6 +2068,21 @@ def test_resolve_control_paths_normal_clone(
     assert (clone / "tasks").resolve() in resolved
 
 
+def test_resolve_control_paths_includes_instruction_files(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # VF-5: the tracked root instruction files (resolved by the core node runner) are write-denied
+    # for the run so the agent's own reading of them is reproducible; they stay readable.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    clone = Path(git_repo.clone)
+    instr = [clone / "AGENTS.md", clone / "CLAUDE.md"]
+    wg = gm.resolve_control_paths("/repo/.worc-io", instruction_files=instr)
+    assert wg.instruction_files == tuple(instr)
+    resolved = {p.resolve() for p in wg.denied_write_paths}
+    assert (clone / "AGENTS.md").resolve() in resolved
+    assert (clone / "CLAUDE.md").resolve() in resolved
+
+
 def test_resolve_control_paths_linked_worktree_splits_gitdir_and_common(
     git_repo,
     store: StateStore,

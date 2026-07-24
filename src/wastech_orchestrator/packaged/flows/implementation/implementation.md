@@ -2,7 +2,7 @@ Implement the assigned task in the working tree by following the plan. Make the 
 
 ## Rules Of Record
 
-If the repository documents its own conventions for AI agents or contributors — a `CLAUDE.md`/`AGENTS.md`, a `CONTRIBUTING` doc, or a rules directory such as `.agents/rules/` — those govern this change and override anything below on conflict. When the task file, its acceptance criteria, and those conventions disagree on load-bearing behavior, follow the more specific source and surface the contradiction explicitly instead of guessing.
+**Read the repository's own instruction files first** if it ships any — a `CLAUDE.md`/`AGENTS.md` (and anything they import, e.g. a rules directory such as `.agents/rules/`), or a `CONTRIBUTING` doc. They document its conventions for AI agents and contributors, they govern this change, and they override anything below on conflict. When the task file, its acceptance criteria, and those conventions disagree on load-bearing behavior, follow the more specific source and surface the contradiction explicitly instead of guessing.
 
 ## Tests
 

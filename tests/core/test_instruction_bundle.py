@@ -1,7 +1,7 @@
 """Unit tests for the WRI-011 frozen instruction bundle (task / skills / repository instructions).
 
 Covers the freeze/manifest/verify primitives and their fail-closed identity, cap, collision, and
-secret gates directly (the orchestrator-level wiring + provider injection are covered separately in
+secret gates directly (the orchestrator-level wiring is covered separately in
 tests/core/test_orchestrator.py and tests/providers/). The identity refusals reuse the WRI-001
 no-follow inspector seam via an injected ``FileInspector`` (same pattern as test_control_bundle).
 """
@@ -13,7 +13,6 @@ from pathlib import Path
 import pytest
 
 from wastech_orchestrator.core.flow.instruction_bundle import (
-    REPO_INSTRUCTIONS_KEY,
     TASK_PACKET_KEY,
     InstructionBundleError,
     assert_no_required_secret,
@@ -69,25 +68,26 @@ def test_discover_repository_instructions_root_only_and_tracked(tmp_path: Path) 
     assert found == [tmp_path / "AGENTS.md"]
 
 
-def test_freeze_repository_instructions_concatenates_in_fixed_order(tmp_path: Path) -> None:
+def test_freeze_repository_instructions_copies_and_digests_each_source(tmp_path: Path) -> None:
     bundle = tmp_path / "bundle"
     bundle.mkdir()
     agents = _write(tmp_path / "AGENTS.md", "AGENTS body\n")
     claude = _write(tmp_path / "CLAUDE.md", "CLAUDE body\n")
-    entries, concat = freeze_repository_instructions(bundle, [agents, claude])
-    assert concat is not None and concat == bundle / REPO_INSTRUCTIONS_KEY
-    text = concat.read_text()
-    assert "BEGIN AGENTS.md" in text and "BEGIN CLAUDE.md" in text
-    assert text.index("AGENTS body") < text.index("CLAUDE body")  # fixed precedence order
+    entries = freeze_repository_instructions(bundle, [agents, claude])
+    # VF-5: each source is frozen under instructions/src/<name> for the manifest digest; NO
+    # concatenated payload is produced (the agent reads the live root files itself).
     keys = {k for k, _ in entries}
-    assert REPO_INSTRUCTIONS_KEY in keys  # the concat itself is an entry (its digest tracks edits)
+    assert keys == {"instructions/src/AGENTS.md", "instructions/src/CLAUDE.md"}
+    assert (bundle / "instructions/src/AGENTS.md").read_text() == "AGENTS body\n"
+    assert (bundle / "instructions/src/CLAUDE.md").read_text() == "CLAUDE body\n"
+    assert not (bundle / "instructions/repository.md").exists()  # no injected concat payload
+    assert all(len(d) == 64 for _, d in entries)  # sha256 hex
 
 
 def test_freeze_repository_instructions_empty_when_none(tmp_path: Path) -> None:
     bundle = tmp_path / "bundle"
     bundle.mkdir()
-    entries, concat = freeze_repository_instructions(bundle, [])
-    assert entries == [] and concat is None
+    assert freeze_repository_instructions(bundle, []) == []
 
 
 # -- skill packages -------------------------------------------------------------------------------
@@ -182,7 +182,7 @@ def _frozen_bundle(tmp_path: Path, *, control: str | None = "ctrl-digest") -> tu
     task = _write(tmp_path / "t.md", "task body\n")
     _, task_entry = freeze_task_packet(bundle, task)
     agents = _write(tmp_path / "AGENTS.md", "agents\n")
-    repo_entries, _ = freeze_repository_instructions(bundle, [agents])
+    repo_entries = freeze_repository_instructions(bundle, [agents])
     digest = write_instruction_manifest(
         bundle, entries=[task_entry, *repo_entries], control_digest=control
     )
@@ -205,7 +205,7 @@ def test_load_returns_file_entries_for_resume(tmp_path: Path) -> None:
     bundle, digest = _frozen_bundle(tmp_path)
     loaded = load_instruction_bundle(bundle, digest)
     keys = {key for key, _ in loaded.entries}
-    assert TASK_PACKET_KEY in keys and REPO_INSTRUCTIONS_KEY in keys
+    assert TASK_PACKET_KEY in keys and "instructions/src/AGENTS.md" in keys
     assert not any(key.startswith("control::") for key, _ in loaded.entries)
     # The task-packet digest recovered from the manifest is the sha256 of the frozen packet file.
     packet_digest = next(d for key, d in loaded.entries if key == TASK_PACKET_KEY)

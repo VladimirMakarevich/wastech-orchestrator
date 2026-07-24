@@ -110,6 +110,7 @@ def build_codex_permission_profile(
     write_guard: ProviderWriteGuardPolicy | None,
     denied_read_paths: Sequence[str],
     strict_isolation: bool = True,
+    read_isolation_off: bool = False,
     to_native: NativePath = str,
 ) -> dict[str, Any]:
     """Build the Codex ``[permissions.<name>]`` profile mapping for one attempt.
@@ -140,8 +141,14 @@ def build_codex_permission_profile(
     # Deny last: private/control/secret roots always win over any read/write grant above.
     needs_glob_scan = False
     if deny_policy is not None:
+        # VF-6: with read-isolation OFF the private set is downgraded from ``deny`` (read+write
+        # blocked) to ``read`` — it stays WRITE-denied (a ``read`` grant more specific than the
+        # workspace ``write`` keeps the control plane immutable) but becomes READABLE so the agent
+        # can run native ``.codex``/config discovery. Under isolation it stays fully ``deny``. The
+        # public ``denied_read_paths`` blacklist below is ``deny`` regardless.
+        internal_grant = "read" if read_isolation_off else "deny"
         for path in deny_policy.denied_paths:
-            filesystem[to_native(path)] = "deny"
+            filesystem[to_native(path)] = internal_grant
     for pattern in denied_read_paths:
         if not pattern.strip():
             continue

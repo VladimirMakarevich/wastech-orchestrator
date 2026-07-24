@@ -532,6 +532,7 @@ def _build_security(raw: Any, issues: list[str]) -> SecurityConfig:
         m,
         {
             "strict_isolation",
+            "disable_read_isolation",
             "allowed_environment",
             "denied_read_paths",
             "denied_commands",
@@ -550,6 +551,7 @@ def _build_security(raw: Any, issues: list[str]) -> SecurityConfig:
         trust_level = "strict"
     return SecurityConfig(
         strict_isolation=_bool(m, "strict_isolation", True, where, issues),
+        disable_read_isolation=_bool(m, "disable_read_isolation", True, where, issues),
         allowed_environment=_str_tuple(
             m, "allowed_environment", default_allowed_environment(), where, issues
         ),

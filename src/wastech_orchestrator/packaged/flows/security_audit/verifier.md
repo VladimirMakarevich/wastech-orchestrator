@@ -3,7 +3,7 @@ Verify the proposed threats against the code at `{repo}` before the report is wr
 Verify **both** sides against `{repo}`:
 
 - The **code** side: open the cited `path:line` and confirm the sink is really there and reachable along the path the threat describes — not already guarded by a validation the threat overlooked.
-- The **model** side: confirm the threat respects this project's declared trust boundary and posture (from the scope step). A claim that an out-of-scope surface **exists** is a real finding only if that code is actually present; a claim that such a thing merely *ought* to be hardened when it does not exist is a false positive.
+- The **model** side: confirm the threat respects this project's declared trust boundary and posture (from the scope step). A claim that an out-of-scope surface **exists** is a real finding only if that code is actually present; a claim that such a thing merely _ought_ to be hardened when it does not exist is a false positive.
 
 Cross-check any dependency-related threat against the dependency-scan advisories: confirm the vulnerable code path is one this product actually calls before treating the advisory as a real finding.
 

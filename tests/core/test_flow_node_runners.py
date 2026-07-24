@@ -2160,7 +2160,12 @@ class FakeGit:
     def compare_git_control_state(self, before: object) -> None:
         return None
 
-    def resolve_control_paths(self, exchange_root: str | None = None) -> ProviderWriteGuardPolicy:
+    def list_tracked_files(self, *pathspecs: str) -> tuple[str, ...]:
+        return ()
+
+    def resolve_control_paths(
+        self, exchange_root: str | None = None, *, instruction_files: tuple[Path, ...] = ()
+    ) -> ProviderWriteGuardPolicy:
         # WRI-002: the node runner resolves this for every workspace-write attempt; the fake router
         # never builds an argv, so dummy paths suffice.
         return ProviderWriteGuardPolicy(

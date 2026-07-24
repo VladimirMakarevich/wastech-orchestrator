@@ -29,6 +29,7 @@ def _argv(
     deny_policy: InternalDenyPolicy | None = None,
     denied_read_paths: Sequence[str] = (),
     strict_isolation: bool = True,
+    read_isolation_off: bool = False,
 ) -> list[str]:
     return build_codex_argv(
         config,
@@ -38,6 +39,7 @@ def _argv(
         deny_policy=deny_policy,
         strict_isolation=strict_isolation,
         denied_read_paths=denied_read_paths,
+        read_isolation_off=read_isolation_off,
     )
 
 
@@ -55,13 +57,13 @@ def _assert_reasoning_config(argv: list[str], value: str) -> None:
     assert f'model_reasoning_effort="{value}"' in _config_values(argv)
 
 
-def test_disables_project_doc_discovery(
+def test_leaves_project_doc_discovery_enabled(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # WRI-011: live AGENTS.md project-doc discovery is disabled (the frozen instructions are
-    # injected on stdin instead). This is distinct from the project *trust* control (WRI-003).
+    # VF-5: Codex's native AGENTS.md project-doc discovery is intentionally left ENABLED — the agent
+    # reads the repo's root instruction files itself; no ``project_doc_max_bytes`` override is set.
     argv = _argv(codex_config, make_request())
-    assert "project_doc_max_bytes=0" in _config_values(argv)
+    assert not any(c.startswith("project_doc_max_bytes") for c in _config_values(argv))
     assert "--reasoning-effort" not in argv
 
 
@@ -276,6 +278,32 @@ def test_danger_full_access_escape_builds_legacy_sandbox_argv(
     assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
     assert not any(v.startswith(f"permissions.{PROFILE_NAME}=") for v in _config_values(argv))
     assert "--ignore-user-config" not in argv
+
+
+def test_default_isolation_argv_unchanged(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # VF-6 regression: default (read-isolation ON) → user config ignored, project untrusted, all
+    # non-shell tool surfaces disabled (incl. hooks).
+    argv = _argv(codex_config, make_request())
+    assert "--ignore-user-config" in argv
+    assert any('trust_level="untrusted"' in c for c in _config_values(argv))
+    disabled = [argv[i + 1] for i, t in enumerate(argv[:-1]) if t == "--disable"]
+    assert "hooks" in disabled and "multi_agent" in disabled and "plugins" in disabled
+
+
+def test_read_isolation_off_restores_native_codex_config(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # VF-6: native config discovery restored — user config loaded (no --ignore-user-config), project
+    # TRUSTED (so .codex config/rules apply), and the `hooks` feature re-enabled. The heavier
+    # autonomous tool surfaces stay disabled (out of read-isolation scope).
+    argv = _argv(codex_config, make_request(), read_isolation_off=True)
+    assert "--ignore-user-config" not in argv
+    assert any('trust_level="trusted"' in c for c in _config_values(argv))
+    disabled = [argv[i + 1] for i, t in enumerate(argv[:-1]) if t == "--disable"]
+    assert "hooks" not in disabled
+    assert "multi_agent" in disabled and "plugins" in disabled
 
 
 def test_read_only_request_extends_read_only_profile(

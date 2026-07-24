@@ -46,6 +46,7 @@ def _argv(config: ProviderConfig, request: AgentRunRequest, **kwargs: object) ->
         internal_deny_read_paths=kwargs.get("internal_deny", ()),  # type: ignore[arg-type]
         sandbox_probe=_probe(capability),
         strict_isolation=bool(kwargs.get("strict_isolation", True)),
+        read_isolation_off=bool(kwargs.get("read_isolation_off", False)),
     )
 
 
@@ -62,27 +63,22 @@ def test_argv_is_claude_print_with_stream_json(
 def test_disables_project_setting_sources(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # WRI-011: no user/project/local setting sources are loaded, so live CLAUDE.md / project
+    # Security lockdown (WRI-002): no user/project/local setting sources are loaded, so project
     # settings / skills / plugins / hooks / MCP are never discovered. The empty value = load none.
+    # (VF-5: this also turns off native CLAUDE.md auto-load — the agent reads root files itself.)
     argv = _argv(claude_config, make_request())
     assert argv[argv.index("--setting-sources") + 1] == ""
 
 
-def test_injects_frozen_repository_instructions_file_when_present(
+def test_no_repository_instruction_injection(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # WRI-011: the frozen repository instructions arrive through --append-system-prompt-file (the
-    # adapter-owned system-prompt surface), never live CLAUDE.md discovery.
-    path = "/x/.worc-io/task-001/instructions/repository.md"
-    argv = _argv(claude_config, make_request(repository_instructions_path=path))
-    assert argv[argv.index("--append-system-prompt-file") + 1] == path
-
-
-def test_no_append_system_prompt_when_no_repo_instructions(
-    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
-) -> None:
-    argv = _argv(claude_config, make_request())  # repository_instructions_path defaults to None
+    # VF-5: Claude no longer injects repository instructions. --setting-sources "" stays (security:
+    # no hooks/MCP/skills), so native CLAUDE.md auto-load is off too — the agent reads the repo's
+    # root instruction files itself (role-prompt-directed), and they are write-denied for the run.
+    argv = _argv(claude_config, make_request())
     assert "--append-system-prompt-file" not in argv
+    assert "--append-system-prompt" not in argv
 
 
 def test_workspace_write_maps_to_accept_edits(
@@ -624,6 +620,94 @@ def test_build_sandbox_settings_network_grant_allows_domains() -> None:
     settings = build_sandbox_settings(deny, None, network_access=True)["sandbox"]
     assert settings["network"]["allowedDomains"] == ["*"]
     assert "credentials" not in settings  # no env-file → no credentials block
+
+
+# --- VF-6: read-isolation escape hatch (security.disable_read_isolation) ---------------
+
+
+def _vf6_deny() -> InternalDenyPolicy:
+    return InternalDenyPolicy(
+        control_home=Path("/repo/.worc"),
+        private_home=Path("/repo/.worc"),
+        env_file=Path("/repo/.worc/.env"),
+        provider_homes=(Path("/home/me/.codex"),),
+        frozen_control_bundle=Path("/repo/.worc/control-bundles"),
+        frozen_instruction_bundle=Path("/repo/.worc/instruction-bundles"),
+    )
+
+
+def test_read_isolation_off_uses_project_setting_sources_and_drops_strict_mcp(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # VF-6: native project discovery restored — --setting-sources project (not "") and no
+    # --strict-mcp-config, so CLAUDE.md + project settings/hooks/MCP/skills load. The VF-5
+    # injection stays retired regardless.
+    argv = _argv(claude_config, make_request(), read_isolation_off=True)
+    assert argv[argv.index("--setting-sources") + 1] == "project"
+    assert "--strict-mcp-config" not in argv
+    assert "--append-system-prompt-file" not in argv
+
+
+def test_read_isolation_off_lifts_internal_reads_keeps_writes_and_blacklist(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # VF-6: the private set becomes READABLE (no Read deny) but stays Write/Edit-denied; the public
+    # denied_read_paths blacklist (.env/secrets) keeps its Read deny; command + write-guard denies
+    # stay (write side).
+    argv = _argv(
+        claude_config,
+        make_request(permission_profile="workspace-write", write_guard=_write_guard()),
+        internal_deny=_INTERNAL_DENY,
+        denied=DENIED,
+        denied_read=(".env", "secrets/**"),
+        read_isolation_off=True,
+    )
+    disallowed = argv[argv.index("--disallowedTools") + 1]
+    assert "Write(//repo/.worc/**)" in disallowed and "Edit(//repo/.worc/**)" in disallowed
+    assert "Read(//repo/.worc)" not in disallowed and "Read(//repo/.worc/**)" not in disallowed
+    # Public blacklist read-deny stays (decision: keep the target-repo secret blacklist enforced).
+    assert "Read(.env)" in disallowed and "Read(secrets/**)" in disallowed
+    # Write side stays: command denies + write-guard Write/Edit.
+    assert "Bash(git commit:*)" in disallowed
+    assert "Write(//repo/.worc-io/**)" in disallowed
+
+
+def test_read_isolation_off_drops_native_memory_deny(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # VF-6: native Claude memory (~/.claude) is restored, so the F37 deny is not emitted.
+    home_glob = "//" + claude_config_home().as_posix().lstrip("/")
+    argv = _argv(claude_config, make_request(), denied=DENIED, read_isolation_off=True)
+    disallowed = argv[argv.index("--disallowedTools") + 1]
+    assert f"Read({home_glob}/**)" not in disallowed
+    assert f"Write({home_glob}/**)" not in disallowed
+
+
+def test_read_isolation_off_sandbox_lifts_denyread_keeps_denywrite() -> None:
+    settings = build_sandbox_settings(
+        _vf6_deny(), _write_guard(), network_access=False, read_isolation_off=True
+    )["sandbox"]
+    assert settings["filesystem"]["denyRead"] == []  # read side lifted
+    # Write side intact: internal set + exchange/git/tasks still write-denied.
+    assert "/repo/.worc" in settings["filesystem"]["denyWrite"]
+    assert "/repo/.worc-io" in settings["filesystem"]["denyWrite"]
+    # The env-file credential deny is a targeted secret protection kept regardless.
+    assert settings["credentials"]["files"] == [{"path": "/repo/.worc/.env", "mode": "deny"}]
+
+
+def test_read_isolation_default_argv_is_byte_identical(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # Regression: at defaults (read_isolation_off unset == False) the argv is unchanged.
+    req = make_request(permission_profile="workspace-write", write_guard=_write_guard())
+    default = _argv(claude_config, req, internal_deny=_INTERNAL_DENY, denied=DENIED)
+    explicit_off = _argv(
+        claude_config, req, internal_deny=_INTERNAL_DENY, denied=DENIED, read_isolation_off=False
+    )
+    assert default == explicit_off
+    assert default[default.index("--setting-sources") + 1] == ""
+    assert "--strict-mcp-config" in default
+    assert "Read(//repo/.worc/**)" in default[default.index("--disallowedTools") + 1]
 
 
 def test_resolve_claude_tools_read_only_is_platform_independent() -> None:

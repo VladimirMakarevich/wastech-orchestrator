@@ -628,6 +628,17 @@ def test_nodes_unknown_subkey_rejected(config: OrchestratorConfig) -> None:
     assert "temperature" in result.detail
 
 
+@pytest.mark.parametrize("key", ["disable_read_isolation", "strict_isolation"])
+def test_nodes_security_isolation_subkey_rejected(config: OrchestratorConfig, key: str) -> None:
+    # VF-6 / security invariant: read-isolation (and strict_isolation) are operator-config ONLY —
+    # a task node override can never set them (only enabled/model/reasoning/provider are accepted).
+    block = f"nodes:\n  planning:\n    {key}: true\n"
+    result = _gate(config).validate(_src(_nodes_task(block)))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_NODE_OVERRIDE
+    assert key in result.detail
+
+
 def test_nodes_non_mapping_value_rejected(config: OrchestratorConfig) -> None:
     result = _gate(config).validate(_src(_nodes_task("nodes:\n  planning: opus\n")))
     assert result.passed is False

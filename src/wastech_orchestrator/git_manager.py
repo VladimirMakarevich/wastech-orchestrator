@@ -1132,7 +1132,10 @@ class GitManager:
         return base / "hooks"
 
     def resolve_control_paths(
-        self, exchange_root: str | Path | None = None
+        self,
+        exchange_root: str | Path | None = None,
+        *,
+        instruction_files: Sequence[Path] = (),
     ) -> ProviderWriteGuardPolicy:
         """Absolute Git-control + lifecycle roots a workspace-write attempt must Write/Edit-deny.
 
@@ -1144,7 +1147,10 @@ class GitManager:
         (``rev-parse`` + :meth:`_hooks_dir`). ``git_dir`` and ``git_common_dir`` are returned
         separately because a linked worktree's per-worktree gitdir differs from the shared common
         dir and both must be denied. Fails closed (:class:`GitCommandError`) on a git-resolution
-        failure so an unguarded run is impossible.
+        failure so an unguarded run is impossible. ``instruction_files`` (the tracked root
+        instruction files) are passed in by the core node runner — resolved there via
+        ``discover_repository_instructions`` so this git-layer helper stays free of any ``core``
+        import — and are kept readable but Write/Edit-denied for the run (VF-5 reproducibility).
         """
         git_dir = Path(self._git_checked("rev-parse", "--absolute-git-dir"))
         git_common_dir = Path(self._git_checked("rev-parse", "--git-common-dir"))
@@ -1156,6 +1162,7 @@ class GitManager:
             git_common_dir=git_common_dir,
             hooks_dir=self._hooks_dir(),
             tasks_dir=Path(self._clone) / self._tasks_dir,
+            instruction_files=tuple(instruction_files),
         )
 
     def _capture_hooks(self) -> dict[str, HookFacts]:

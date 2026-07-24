@@ -162,6 +162,26 @@ def test_windows_probes_use_cmd_type() -> None:
     assert probes[0].command == ["cmd", "/c", "type", "C:\\clone\\.worc"]
 
 
+def test_private_readable_flips_reads_and_adds_write_deny() -> None:
+    # VF-6: read-isolation OFF → private reads become positive controls (allowed) and a private
+    # WRITE-denied probe is added to prove the control plane stays immutable.
+    default = {
+        p.label: p.expect_denied
+        for p in build_canary_probes(private_probe="/p", exchange_probe=None, system="Linux")
+    }
+    assert default["private-read-denied"] is True
+    readable = {
+        p.label: p.expect_denied
+        for p in build_canary_probes(
+            private_probe="/p", exchange_probe=None, system="Linux", private_readable=True
+        )
+    }
+    assert readable["private-read-allowed"] is False
+    assert readable["private-shell-read-allowed"] is False
+    assert readable["private-write-denied"] is True
+    assert "private-read-denied" not in readable
+
+
 # --- H4/H7/WRI-006: the no-model capability smoke (deterministic; scripted sandbox + inventory) ---
 
 

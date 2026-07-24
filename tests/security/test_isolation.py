@@ -165,6 +165,17 @@ def test_default_config_passes(base_config: OrchestratorConfig) -> None:
     assert check_isolation(base_config, ISOLATION_CHECKS) == []
 
 
+def test_disable_read_isolation_not_flagged_under_strict(base_config: OrchestratorConfig) -> None:
+    # VF-6: the sanctioned read-isolation opt-out is never a strict_isolation preflight reason — it
+    # relaxes only the read side; the write/permission/sandbox ceiling this gate validates stays.
+    cfg = replace(
+        base_config,
+        security=replace(base_config.security, strict_isolation=True, disable_read_isolation=True),
+    )
+    assert cfg.security.read_isolation_off is True
+    assert check_isolation(cfg, ISOLATION_CHECKS) == []
+
+
 def test_codex_full_access_fails_with_provider_prefix(base_config: OrchestratorConfig) -> None:
     cfg = _with_provider(base_config, ProviderId.CODEX, sandbox="danger-full-access")
     reasons = check_isolation(cfg, ISOLATION_CHECKS)

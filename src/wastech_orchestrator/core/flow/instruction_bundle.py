@@ -54,10 +54,6 @@ MANIFEST_NAME = "manifest.json"
 #: The bundle-relative key of the frozen (canonical) task packet.
 TASK_PACKET_KEY = f"{_TASK_SUBDIR}/task.md"
 
-#: The bundle-relative key of the frozen concatenated repository-instruction payload (the exact
-#: bytes injected, redacted, through the provider instruction layer).
-REPO_INSTRUCTIONS_KEY = f"{_INSTRUCTIONS_SUBDIR}/repository.md"
-
 #: Bump when the on-disk bundle layout / manifest schema changes.
 _BUNDLE_FORMAT = 1
 
@@ -163,25 +159,24 @@ def discover_repository_instructions(repo_root: Path, tracked_files: frozenset[s
 
 def freeze_repository_instructions(
     bundle_dir: Path, files: list[Path], *, inspect: FileInspector | None = None
-) -> tuple[list[tuple[str, str]], Path | None]:
-    """Freeze the root repository-instruction files + a concatenated canonical payload.
+) -> list[tuple[str, str]]:
+    """Freeze the root repository-instruction files for the manifest digest (audit only).
 
     Each source is inspected no-follow, copied under ``instructions/src/`` for audit and digested;
-    a single delimited concatenation is written to :data:`REPO_INSTRUCTIONS_KEY` — the exact bytes
-    the adapters inject (after redaction). Returns ``([], None)`` when the repo defines no tracked
-    root instruction files. The concatenation is also a manifest entry, so editing any source file
-    changes the composite digest (AC3).
+    the returned ``(bundle-key, sha256)`` entries fold into the composite manifest digest, so
+    editing any source file changes the digest (AC3). Returns ``[]`` when the repo defines no
+    tracked root instruction files.
+
+    VF-5: no concatenated payload is built and nothing is injected — the agent reads the live root
+    files itself (they are write-denied for the run, so what it reads is immutable). The frozen
+    copies here are the private audit/reproducibility record, never an agent-facing surface.
     """
     if not files:
-        return [], None
+        return []
     inspector = inspect or default_file_inspector()
     entries: list[tuple[str, str]] = []
-    sections: list[str] = [
-        "# Repository instructions (frozen at task start — immutable for this task)\n"
-    ]
     for source in files:
-        name = source.name
-        src_key = f"{_INSTRUCTIONS_SUBDIR}/src/{name}"
+        src_key = f"{_INSTRUCTIONS_SUBDIR}/src/{source.name}"
         dest = assert_contained_path(bundle_dir, bundle_dir / src_key)
         inspect_frozen_source(
             source, inspector, label="repository instruction", error_cls=InstructionBundleError
@@ -189,13 +184,7 @@ def freeze_repository_instructions(
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(source, dest)
         entries.append((src_key, sha256_file(dest)))
-        body = dest.read_text(encoding="utf-8", errors="replace")
-        sections.append(f"<!-- BEGIN {name} -->\n{body}\n<!-- END {name} -->\n")
-    concat_path = assert_contained_path(bundle_dir, bundle_dir / REPO_INSTRUCTIONS_KEY)
-    concat_path.parent.mkdir(parents=True, exist_ok=True)
-    concat_path.write_text("\n".join(sections), encoding="utf-8", newline="")
-    entries.append((REPO_INSTRUCTIONS_KEY, sha256_file(concat_path)))
-    return entries, concat_path
+    return entries
 
 
 def freeze_skill_package(

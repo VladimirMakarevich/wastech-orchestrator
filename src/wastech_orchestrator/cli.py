@@ -2578,6 +2578,20 @@ def run_preflight(
         enforced = "enforced" if config.security.strict_isolation else "strict_isolation=false"
         lines.append(f"isolation: OK ({enforced})")
 
+    # VF-6: loudly surface the operator's read-isolation escape hatch — never a silent weakening.
+    if config.security.read_isolation_off:
+        why = (
+            "security.disable_read_isolation=true"
+            if config.security.strict_isolation
+            else "strict_isolation=false"
+        )
+        lines.append(
+            f"read-isolation: OFF ({why}) — providers use native project-instruction/config "
+            "discovery (Claude CLAUDE.md + project settings/hooks/MCP/skills; Codex user + .codex "
+            "config/hooks/rules) and the private read-deny projection is lifted; the write-guard, "
+            "commit/staging gates, PR control, and denied_read_paths blacklist stay in force"
+        )
+
     lines.extend(_summarize_command_sets(config))
 
     # Preflight is a run-surface health gate — it deliberately does not validate flows. Flow

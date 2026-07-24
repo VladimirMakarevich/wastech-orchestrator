@@ -3824,9 +3824,10 @@ def _commit_agents_md(git_repo, git_run, body: str) -> Path:
 def test_wri011_freezes_instruction_inputs_end_to_end(
     git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:
-    # A complete task persists a composite instruction-manifest digest and freezes the task packet
-    # + repository-instruction payload into the private bundle. (The exchange copies are cleared by
-    # the interim terminal teardown, so assert on the persisted private bundle + recorded requests.)
+    # A complete task persists a composite instruction-manifest digest and freezes the task packet +
+    # per-source repository-instruction files into the private bundle for the digest. (VF-5: no
+    # concatenated payload is built or injected; the agent reads the live root files itself, and a
+    # workspace-write attempt write-denies them so what it reads stays immutable for the run.)
     _commit_agents_md(git_repo, git_run, "ORIGINAL REPO RULES\n")
     providers = _both()
     orch, store, _, art = _build(
@@ -3847,11 +3848,19 @@ def test_wri011_freezes_instruction_inputs_end_to_end(
     assert store.get_instruction_manifest_digest("task-frz")  # composite digest persisted
     bundle = art / "instruction-bundles" / "task-frz"
     assert (bundle / "task" / "task.md").is_file()  # frozen (private) task packet
-    repo_instr = bundle / "instructions" / "repository.md"
-    assert repo_instr.is_file() and "ORIGINAL REPO RULES" in repo_instr.read_text(encoding="utf-8")
-    # the implementation node was launched with the frozen repository-instruction (exchange) path
+    # VF-5: the per-source file is frozen for the digest — no concatenated repository.md payload.
+    src = bundle / "instructions" / "src" / "AGENTS.md"
+    assert src.is_file() and "ORIGINAL REPO RULES" in src.read_text(encoding="utf-8")
+    assert not (bundle / "instructions" / "repository.md").exists()
+
+    # a workspace-write implementation attempt write-denies the tracked root instruction files so
+    # what the agent reads from them stays immutable for the run (no injection needed).
+    def _denies_agents_md(r: AgentRunRequest) -> bool:
+        paths = r.write_guard.denied_write_paths if r.write_guard else ()
+        return any(p.name == "AGENTS.md" for p in paths)
+
     impl = [r for r in providers[ProviderId.CLAUDE].requests if r.node_id == "implementation"]
-    assert impl and all(r.repository_instructions_path for r in impl)
+    assert impl and all(_denies_agents_md(r) for r in impl)
 
 
 def test_wri009_resume_repopulates_task_packet_digest(
@@ -3898,12 +3907,13 @@ def test_wri009_resume_repopulates_task_packet_digest(
     assert packet_digest == hashlib.sha256(frozen_packet.read_bytes()).hexdigest()
 
 
-def test_wri011_midrun_agents_edit_does_not_change_frozen_instructions(
+def test_wri011_frozen_instruction_copy_is_task_start_snapshot(
     git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:
-    # AC3: a node that edits AGENTS.md mid-run cannot change the instruction bundle used later in
-    # the same task — the frozen snapshot is immutable (the live edit is just an ordinary proposed
-    # diff on the task branch). Assert on the private frozen canonical, which is never rewritten.
+    # VF-5: the agent reads the LIVE root files (write-denied for a workspace-write attempt, so a
+    # real agent cannot tamper). The private per-source freeze — the digest/audit record — is
+    # captured once at task start, so a later live edit does not change it (a fake provider bypasses
+    # the sandbox to rewrite the file; the frozen copy stays the task-start snapshot).
     agents = _commit_agents_md(git_repo, git_run, "ORIGINAL REPO RULES\n")
     providers = _both()
     orch, _, _, art = _build(
@@ -3923,9 +3933,9 @@ def test_wri011_midrun_agents_edit_does_not_change_frozen_instructions(
     orch.run_task(_complete_task(tmp_path, "task-imm"))
 
     frozen = (
-        art / "instruction-bundles" / "task-imm" / "instructions" / "repository.md"
+        art / "instruction-bundles" / "task-imm" / "instructions" / "src" / "AGENTS.md"
     ).read_text(encoding="utf-8")
-    assert "ORIGINAL REPO RULES" in frozen  # the frozen copy the agent reads is unchanged
+    assert "ORIGINAL REPO RULES" in frozen  # the task-start freeze (digest record) is unchanged
     assert "TAMPERED" not in frozen
 
 

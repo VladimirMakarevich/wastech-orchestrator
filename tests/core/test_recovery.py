@@ -480,7 +480,7 @@ def _seed_control_bundle(
     _, task_entry = freeze_task_packet(ib_dir, src)
     repo_root = Path(orch._config.repo.local_path)
     tracked = frozenset(orch._git.list_tracked_files(*REPO_INSTRUCTION_NAMES))
-    repo_entries, _ = freeze_repository_instructions(
+    repo_entries = freeze_repository_instructions(
         ib_dir, discover_repository_instructions(repo_root, tracked)
     )
     entries = [task_entry, *repo_entries]

@@ -483,14 +483,13 @@ def test_preflight_missing_binary(
 
 # --- H2: Claude capability/degraded preflight (claude --help flag-drift guard) -----------------
 
-# The isolation-critical + resume/injection flags a healthy Claude CLI advertises (2.1.x surface).
+# The isolation-critical + resume flags a healthy Claude CLI advertises (2.1.x surface).
 _FULL_CLAUDE_HELP = (
     "  --permission-mode <mode>       Permission mode to use for the session\n"
     "  --setting-sources <sources>    Comma-separated list of setting sources\n"
     "  --strict-mcp-config            Only use MCP servers from --mcp-config\n"
     "  --tools <tools...>             Specify the list of available tools\n"
     "  -r, --resume [value]           Resume a conversation by session ID\n"
-    "  --append-system-prompt <p>     Append a system prompt\n"
 )
 
 

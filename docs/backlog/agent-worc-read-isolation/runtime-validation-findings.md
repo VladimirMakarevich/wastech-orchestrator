@@ -117,7 +117,19 @@ The real cause: the operator-facing counter columns (`*_fix_total` / `*_fix_cycl
 
 ## VF-5 — disabling provider-native instruction discovery and re-injecting a frozen subset does not scale to N providers; roll the requirement back to native discovery + filesystem immutability (architecture)
 
-Severity: **High (architectural / maintainability)** Status: **open — proposed rollback, needs decision (reverses a Milestone-1 decision)** First seen: 2026-07-24.
+Severity: **High (architectural / maintainability)** Status: **shipped 2026-07-24** (rolled back the discovery-disable + freeze-and-inject; native `AGENTS.md` discovery for Codex, agent-reads-root-files for Claude, write-deny immutability + kept digest — see Resolution) First seen: 2026-07-24.
+
+### Resolution (shipped 2026-07-24)
+
+The rollback landed as proposed. The Claude "memory-only load path" open question (below) was **verified against the Claude Code docs and answered: no** — `--setting-sources` gates `CLAUDE.md` discovery **and** hooks/MCP/skills/plugins on the same switch, with no flag to load memory without re-opening the settings surface. So:
+
+- **Codex → native discovery.** Dropped `-c project_doc_max_bytes=0` and the `_stdin_text` `<repository-instructions>` block; the `.codex` trust / `--ignore-user-config` / `--disable` feature controls stay. The agent discovers `AGENTS.md` natively.
+- **Claude → agent reads it itself.** `--setting-sources ""` stays (security: no hooks/MCP/skills), so native `CLAUDE.md` auto-load is off; the `--append-system-prompt-file` injection is removed. The agent reads the repo's root files with its Read tool, directed by the flow role prompts.
+- **Reproducibility via immutability + digest.** The tracked root instruction files are added to `ProviderWriteGuardPolicy.denied_write_paths` — resolved by the core node runner via `discover_repository_instructions` (so `git_manager` stays free of a `core` import) — making them readable-but-immutable for the run. The per-source freeze + manifest `instruction_manifest_digest` are kept; only the injected concat payload (`instructions/repository.md`) and the `repository_instructions_path` plumbing are removed.
+- **Kept:** the whole read/write filesystem sandbox, the task-packet freeze+publish, and the skill-package freeze — unchanged.
+- **Deferred (own analysis):** the same-smell review of native **skill** discovery-disable and the **task-packet** snapshot (see Scope below); and the optional deeper simplification of computing the digest from the live files instead of keeping the freeze-copy.
+
+Tracked in [follow_ups.md](../follow_ups.md); the ADR §1/§3 in [README.md](README.md) is amended accordingly.
 
 ### The requirement under challenge
 
@@ -171,3 +183,61 @@ The default path for a new provider (Gemini, Kimi, …) becomes **"sandbox write
 ### Next step
 
 This reverses a Milestone-1 decision, so it graduates to an **ADR amendment** in [README.md](README.md) plus a task, with an entry in [follow_ups.md](../follow_ups.md). Confirm the Claude memory-only open question during that task.
+
+## VF-6 — operator escape hatch `disable_read_isolation`: fully disable read-isolation, restoring native `CLAUDE.md` (+ hooks/MCP/skills) discovery (requirement)
+
+Severity: **Medium (flexibility / functionality — operator-mandated)** Status: **shipped 2026-07-24** (operator-config `security.disable_read_isolation`; effective value computed once on `SecurityConfig.read_isolation_off` = `disable_read_isolation OR NOT strict_isolation`; read-side only — write side + `denied_read_paths` blacklist unchanged — see Resolution) First seen: 2026-07-24. Related: VF-5.
+
+### Resolution (shipped 2026-07-24)
+
+Shipped as specified: a global **operator-config** `security.disable_read_isolation` (bool; default later flipped to `true` — see the 2026-07-24 update at the end of this Resolution), sibling of `strict_isolation`. The effective state is computed in **one** place — the `SecurityConfig.read_isolation_off` property (`disable_read_isolation OR NOT strict_isolation`) — and both providers read the property, so the formula is never re-derived per adapter. `strict_isolation` is the master switch and wins toward relaxation (an explicit `disable_read_isolation: false` is overridden when `strict_isolation: false`). This closed the drift where [security.md](../../../.agents/rules/security.md) §MANDATORY + rule #3 already specified the flag but no code existed.
+
+**Placement (open question resolved):** the **global** `security.*` key was chosen (not a per-provider `agents.providers.claude.*` override) for the clean `strict_isolation` coupling and because the flag governs every provider.
+
+**Read-deny scope (decided with the operator):** only the **private** `InternalDenyPolicy` projection is lifted; the public `security.denied_read_paths` blacklist (target-repo `.env`/`secrets/**`) **stays enforced**, symmetric across both providers — matching the rule #3 wording ("lifts the private read-deny projection"). The redaction net is untouched regardless.
+
+When read-isolation is off:
+
+- **Claude** (`build_claude_argv`): `--setting-sources project` instead of `""`, and no `--strict-mcp-config` (native `CLAUDE.md` + project settings/hooks/MCP/skills load); the internal `Read()` denies and the F37 `~/.claude` native-memory deny are dropped (Write/Edit kept); `build_sandbox_settings` drops `denyRead` (keeps `denyWrite` + the env-file credential deny). The `--append-system-prompt-file` injection stays retired (VF-5); `--tools`/`--permission-mode`, the command denies, and the write-guard denies are unchanged. The `_REQUIRED_CLAUDE_FLAGS` preflight no longer requires `--strict-mcp-config` when off.
+- **Codex** (`build_codex_argv` / `codex_profile`): the `deny_policy` carve-outs are downgraded `deny`→`read` in the permission profile (readable, still write-denied — the control plane stays immutable). **Decided:** `--ignore-user-config` and the project-untrusted trust ARE also lifted (project marked `trust_level="trusted"`, user config loaded) and the `hooks` feature is re-enabled — they are semantically part of "read-isolation off" and symmetric with Claude's project settings; the heavier autonomous feature-disables (`multi_agent`/`computer_use`/`browser_use`/`apps`/`plugins`) stay off (execution surfaces, not read discovery — reach them via the full-access escape). The pre-launch canary is kept and adjusted: the private-read probe flips to a positive control and a private-**write**-denied probe is added, so it still proves the write boundary.
+
+Operator-config only: the node-override validator rejects `disable_read_isolation`/`strict_isolation` from a task/flow, and it is not an argv flag so `extra_args` cannot reach it. Loud `read-isolation: OFF` line in `worc preflight` and a run-start log warning — no silent weakening. `security/isolation.py` is functionally unchanged (it validates the write/permission/sandbox ceiling, which stays in force; a doc note records that the opt-out is sanctioned and never itself a preflight reason). Byte-identical argv + deny-sets when read-isolation is explicitly ON (regression-tested).
+
+**Update 2026-07-24 (operator decision — shipped default flipped to `true`):** at the operator's explicit direction the shipped default was flipped so `disable_read_isolation` defaults to **`true`** — read-isolation is **OFF out of the box**. This deliberately departs from the original "off by default" of the requirement below and from the § MANDATORY default-safe guidance; it is a deployment-posture choice the operator owns. Reconciled across [security.md](../../../.agents/rules/security.md) (rule #3 + § MANDATORY now own the departure), the packaged `config.example.yaml` (ships `disable_read_isolation: true`), `docs/configuration.md` + `docs/operations.md` + the packaged config reference, and the regression tests (the "byte-identical at defaults" checks now key off an explicit `disable_read_isolation: false`; the provider-test fixtures pin read-isolation ON so the isolation machinery stays covered). Set `disable_read_isolation: false` to keep read-isolation on. The write side, the public `denied_read_paths` blacklist, and the operator-config-only boundary are unchanged.
+
+### The requirement (operator-stated, mandatory)
+
+Provide an operator-facing flag that **fully disables the Claude read-isolation envelope** so Claude runs "natively" — in particular it **auto-detects `CLAUDE.md`** again (native project memory), which as a coupled consequence re-enables project settings / hooks / MCP / skills / plugins. This is a mandatory flexibility requirement: when the operator turns it on, we deliberately accept the reduced isolation. The driver is that VF-5's `--setting-sources ""` (kept for security) also kills native `CLAUDE.md` auto-load, and some workflows want that native behavior back.
+
+### Why this is in-policy (not a rule violation)
+
+- [security.md](../../.agents/rules/security.md) **§ "MANDATORY"**: "Security mechanisms must not unnecessarily limit the orchestrator's functionality or degrade the user experience … priority should be given to preserving existing capabilities, usability, and predictable behavior … the least restrictive solution that provides the necessary level of protection should be preferred." An always-on lockdown with no operator opt-out is exactly the over-restriction this rule warns against.
+- security.md **§10**: full-access / permission-bypass modes are "**not hard-forbidden** but gated by `strict_isolation`." An operator-gated escape hatch already has precedent — `strict_isolation: false`, Codex `sandbox: danger-full-access`, and the per-provider `agents.providers.claude.allow_native_memory` opt-in.
+- The AGENTS.md hard invariant ("the security envelope cannot be weakened **through a task, `extra_args`, or a flow node**") is about **untrusted surfaces** — it stays intact as long as this flag is **operator-config only**, off by default, and never reachable from a task / `extra_args` / flow. (Its "absolutely forbidden flags" wording deserves a one-line clarification so it reads alongside §10 — see Next step.)
+
+### What to build
+
+- A new **operator-config** switch **`disable_read_isolation`**, off by default, a sibling of `security.strict_isolation` (it governs read-isolation for the provider run; its most visible effect is Claude). Config-only; the validator must still reject the same switch arriving via task / flow / `extra_args`.
+- **Precedence — `strict_isolation` always wins toward relaxation.** Effective value: `disable_read_isolation OR NOT strict_isolation`:
+  - `strict_isolation: true` + `disable_read_isolation: true` → read-isolation **off** (the operator's explicit surgical opt-out is honored under strict — this must work).
+  - `strict_isolation: true` + `disable_read_isolation` unset/false → read-isolation **on** (today's default).
+  - `strict_isolation: false` → read-isolation **off regardless** of `disable_read_isolation` (even an explicit `false` is overridden — `strict_isolation: false` already means "relax everything").
+- When read-isolation is off, `build_claude_argv` drops `--setting-sources ""` (use `--setting-sources project` / the CLI default) so Claude natively loads `CLAUDE.md` + project settings/hooks/MCP/skills/plugins, and the private read-deny projection is lifted for the run. The `--append-system-prompt-file` injection stays retired (VF-5) — native discovery replaces it. (Codex is already native; there the flag mainly lifts the read-denies.)
+- Loud, explicit signalling: a preflight/log warning that read-isolation is off, plus a docs banner. No silent weakening.
+
+### Scope — what "read-isolation" covers
+
+The flag is named `disable_read_isolation`, so it targets the **read side** of the envelope: (a) the provider-native-discovery-disable (Claude `--setting-sources ""` and its consequences), and (b) the private **read-deny** projection (`InternalDenyPolicy`: `.worc`/`.env`/provider homes/bundles). The **write side stays in force** — the write-guard (exchange/`.git`/`tasks/` + the VF-5 instruction write-deny), the WRI-009 commit/staging gates, and the PR control layer are write/publish controls, not read-isolation, and are out of this flag's scope. Note that a re-enabled hook can already run arbitrary commands, so lifting read-isolation is already a large reduction; that is the accepted trade-off. **Placement open:** global `security.disable_read_isolation` as specified here (chosen for the clean `strict_isolation` coupling) vs a per-provider `agents.providers.claude.*` override — confirm during the task.
+
+### Trade-offs accepted (documented, only when enabled)
+
+- A committed project `.claude/settings.json` in a target repo can define hooks that execute during the run; MCP servers / skills / plugins load. That is exactly the surface VF-5's `--setting-sources ""` exists to close — accepted only under this explicit operator opt-in.
+- Instruction reproducibility is no longer guaranteed by the run (native discovery over live files); the VF-5 write-deny of the tracked root files still applies unless the maximum tier also drops it.
+
+### Likely area
+
+`config/schema.py` + the config validator (new operator-only key; reject the task/flow/`extra_args` path), `providers/claude.py` (`build_claude_argv` — conditional `--setting-sources`; `_REQUIRED_CLAUDE_FLAGS` / preflight gated on the flag), `security/isolation.py` (`isolation_reasons` permits it under the opt-in, like `strict_isolation`), `composition.py` (thread the flag), docs (`configuration`, `operations`, the security.md §10 note) + the packaged config guide, and tests (argv with/without the flag; validator rejects the untrusted-surface path).
+
+### Next step
+
+Graduate to a task plus a one-line **ADR / AGENTS.md invariant clarification** (operator-config escape hatches are sanctioned; the "absolutely forbidden" wording targets the task / `extra_args` / flow surfaces, per security.md §10), with a [follow_ups.md](../follow_ups.md) entry.

@@ -11,6 +11,7 @@ Produce a full, implementation-ready plan from the task and its enriched spec. D
 
 Ground the plan in the code as it exists today, not an idealized version of it:
 
+- Read the repository's own root instruction files first if present — `AGENTS.md`/`CLAUDE.md` (and anything they import, e.g. `.agents/rules/`); they carry the conventions and invariants this change must follow and override defaults on conflict.
 - Read the files named in the task and the enriched spec first, then follow them into the modules they touch.
 - Find the conventions and patterns this change must follow, and name a similar existing feature to model the work on rather than inventing a new shape. Reuse existing primitives instead of rewriting them; do not fork a parallel implementation of something the codebase already owns.
 - Trace the relevant code paths end to end — real call sites, types, and module boundaries — so the plan never assumes an interface that isn't there. Verify every path you cite against the current tree.

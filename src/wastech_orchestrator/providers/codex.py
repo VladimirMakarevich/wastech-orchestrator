@@ -44,7 +44,6 @@ from wastech_orchestrator.providers.base import (
     UsageScope,
     build_context_footer,
     build_effective_prompt,
-    build_repository_instruction_block,
 )
 from wastech_orchestrator.providers.capabilities import normalize_codex_reasoning
 from wastech_orchestrator.providers.codex_canary import (
@@ -344,6 +343,7 @@ def _isolation_argv(
     strict_isolation: bool,
     deny_policy: InternalDenyPolicy | None,
     denied_read_paths: Sequence[str],
+    read_isolation_off: bool,
 ) -> list[str]:
     """The exec-level sandbox + config-isolation options for one attempt (WRI-003).
 
@@ -355,6 +355,14 @@ def _isolation_argv(
     (``sandbox: danger-full-access``, reachable only under ``strict_isolation: false`` and never via
     task/flow/``extra_args``) instead emits the legacy ``--sandbox danger-full-access`` and makes no
     read-isolation claim.
+
+    ``read_isolation_off`` (VF-6) restores Codex's NATIVE config discovery — the private profile
+    carve-outs are downgraded to read-only (:func:`build_codex_permission_profile`), the operator's
+    user ``config.toml`` is loaded (no ``--ignore-user-config``), the project is TRUSTED (so its
+    ``.codex`` config/rules/hooks apply), and the ``hooks`` feature is re-enabled — symmetric with
+    Claude's ``--setting-sources project``. The heavier autonomous tool surfaces
+    (multi-agent/computer/browser/apps/plugins) stay disabled (execution surfaces, not read-side
+    discovery), and the profile's write-only carve-outs (and the pre-launch canary) still hold.
     """
     if config.sandbox == FORBIDDEN_SANDBOX_VALUE:
         return ["--sandbox", FORBIDDEN_SANDBOX_VALUE]
@@ -365,17 +373,23 @@ def _isolation_argv(
         write_guard=request.write_guard,
         denied_read_paths=tuple(denied_read_paths),
         strict_isolation=strict_isolation,
+        read_isolation_off=read_isolation_off,
     )
     argv = [
         "-c",
         render_permission_profile_arg(profile),
         "-c",
         f'default_permissions="{PROFILE_NAME}"',
-        "--ignore-user-config",
-        "-c",
-        f'projects.{toml_basic_string(request.working_directory)}.trust_level="untrusted"',
     ]
-    for feature in _DISABLED_FEATURES:
+    trust = toml_basic_string(request.working_directory)
+    if read_isolation_off:
+        # Load the operator's user config and TRUST the project → native ``.codex`` config/rules.
+        argv += ["-c", f'projects.{trust}.trust_level="trusted"']
+        disabled: tuple[str, ...] = tuple(f for f in _DISABLED_FEATURES if f != "hooks")
+    else:
+        argv += ["--ignore-user-config", "-c", f'projects.{trust}.trust_level="untrusted"']
+        disabled = _DISABLED_FEATURES
+    for feature in disabled:
         argv += ["--disable", feature]
     return argv
 
@@ -389,6 +403,7 @@ def build_codex_argv(
     deny_policy: InternalDenyPolicy | None = None,
     strict_isolation: bool = True,
     denied_read_paths: Sequence[str] = (),
+    read_isolation_off: bool = False,
 ) -> list[str]:
     """Build the ``codex exec`` argv (a list, never a shell string).
 
@@ -437,12 +452,13 @@ def build_codex_argv(
         strict_isolation=strict_isolation,
         deny_policy=deny_policy,
         denied_read_paths=denied_read_paths,
+        read_isolation_off=read_isolation_off,
     )
-    # WRI-011: disable Codex's live ``AGENTS.md`` project-doc discovery. The frozen repository
-    # instructions are injected through the developer block on stdin instead (``_stdin_text``), so a
-    # mid-task edit to a live ``AGENTS.md`` can never become a later run's instruction source. This
-    # distinct from the project trust control (``_isolation_argv`` marks the project untrusted).
-    argv += ["-c", "project_doc_max_bytes=0"]
+    # VF-5: Codex's native ``AGENTS.md`` project-doc discovery is intentionally left ENABLED — the
+    # agent assembles its own instruction context from the repo's root files. Those files are
+    # write-denied for the run (immutable via ``write_guard``), so reproducibility comes from
+    # filesystem immutability rather than freezing-and-injecting a snapshot. (The ``.codex`` project
+    # trust control in ``_isolation_argv`` is separate and stays: the project is marked untrusted.)
     if not request.network_access:
         # No network grant → also deny the host-side ``web_search`` tool. It runs on the OpenAI
         # backend, OUTSIDE the profile's sandbox network policy, so without this an "offline" node
@@ -659,6 +675,7 @@ class CodexProvider(BaseCliProvider):
             env=env,
             system=platform.system(),
             runner=self._canary_runner,
+            private_readable=self._security.read_isolation_off,
         )
         Path(paths.attempt_dir, "canary.json").write_text(
             json.dumps(
@@ -692,6 +709,7 @@ class CodexProvider(BaseCliProvider):
             env=env,
             permission_profile=self._config.permission_profile or _DEFAULT_PROFILE,
             runner=self._canary_runner,
+            read_isolation_off=self._security.read_isolation_off,
         )
         return IsolationCapabilityReport(
             ok=report.ok,
@@ -836,23 +854,9 @@ class CodexProvider(BaseCliProvider):
             deny_policy=self._deny_policy,
             strict_isolation=self._security.strict_isolation,
             denied_read_paths=self._security.denied_read_paths,
+            read_isolation_off=self._security.read_isolation_off,
         )
         return argv, (last_message_path, schema_path is not None)
-
-    def _stdin_text(self, request: AgentRunRequest) -> str:
-        """Prepend the frozen repository-instruction block above the turn (WRI-011).
-
-        Codex ``exec`` has no system/developer-prompt flag, so the instructions ride the top of the
-        stdin turn — above the flow role and task — while ``build_codex_argv`` disables live
-        ``AGENTS.md`` discovery (``project_doc_max_bytes=0``). Together, a mid-task edit to a live
-        ``AGENTS.md`` cannot change what a later Codex run is instructed with.
-        """
-        base = build_effective_prompt(request)
-        if request.repository_instructions_path:
-            block = build_repository_instruction_block(request.repository_instructions_path)
-            if block:
-                return f"{block}\n\n{base}"
-        return base
 
     def _parse(
         self,

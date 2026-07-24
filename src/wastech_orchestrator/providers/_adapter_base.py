@@ -251,12 +251,11 @@ class BaseCliProvider:
         return {}
 
     def _stdin_text(self, request: AgentRunRequest) -> str:
-        """The text fed to the CLI on stdin. Default: the Core prompt + context-files footer.
+        """The text fed to the CLI on stdin: the Core prompt + the context-files footer.
 
-        WRI-011: a provider whose CLI has no system/developer instruction flag (Codex ``exec``)
-        overrides this to prepend the frozen repository-instruction block at the top of the turn;
-        a provider that injects instructions through a dedicated flag (Claude
-        ``--append-system-prompt-file``) keeps this default.
+        Both adapters use this as-is — neither injects repository instructions (VF-5): the agent
+        reads the repo's root instruction files itself (Codex via native ``AGENTS.md`` discovery,
+        Claude via its Read tool), so stdin carries only the flow prompt + the context-file paths.
         """
         return build_effective_prompt(request)
 

@@ -12,6 +12,13 @@ syntax; it only dispatches by :class:`~wastech_orchestrator.providers.base.Provi
 the reasons. Only providers that *may* run are checked (those in ``agents.allowed`` — every flow
 node either declares an allowed ``provider`` or defaults to the global primary, also allowed), so a
 configured-but-unused provider block never bricks an otherwise-valid run.
+
+Read-isolation is orthogonal to this gate. The operator escape hatch
+``security.disable_read_isolation`` (VF-6) — like the master ``strict_isolation: false`` — relaxes
+only the READ side (native discovery + the private read-deny projection); this preflight validates
+the WRITE/permission/sandbox ceiling, which stays in force regardless. So ``disable_read_isolation``
+is a sanctioned opt-out, never itself a preflight reason (the per-provider ``isolation_reasons`` do
+not examine it), and the ``strict_isolation`` preflight is unaffected.
 """
 
 from __future__ import annotations

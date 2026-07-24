@@ -7,6 +7,7 @@ merely happen to be equal today.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 from wastech_orchestrator import cli
@@ -51,6 +52,21 @@ def test_providers_receive_the_internal_deny_policy(
         assert provider._deny_policy is not None
         assert provider._deny_policy.control_home == tmp_path / "ctrl"
         assert provider._deny_policy.private_home == tmp_path / "priv"
+
+
+def test_providers_receive_read_isolation_off_flag(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # VF-6 wiring guard: the operator's security config (incl. disable_read_isolation) flows into
+    # EVERY provider, so each adapter's _build_argv reads the effective read_isolation_off (the
+    # formula lives once on SecurityConfig; the adapter never recomputes it).
+    base = make_git_config(git_repo.clone, checks=["pytest"])
+    config = replace(base, security=replace(base.security, disable_read_isolation=True))
+    layout = _distinct_layout(git_repo.clone, tmp_path)
+    providers = build_providers(config, layout=layout)
+    assert providers, "expected at least one configured provider"
+    for provider in providers.values():
+        assert provider._security.read_isolation_off is True
 
 
 def test_router_receives_isolation_checks(git_repo, make_git_config, tmp_path: Path) -> None:

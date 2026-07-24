@@ -104,6 +104,20 @@ security:
                                       #   consciously opt into full access (you then own the risk); the
                                       #   absolutely-forbidden flags (--dangerously-skip-permissions,
                                       #   --yolo, --ignore-rules) stay banned regardless.
+  disable_read_isolation: true        # DEFAULT true — read-isolation is OFF out of the box (set
+                                      #   false to KEEP it on). true disables READ-isolation for
+                                      #   provider runs: Claude reloads native
+                                      #   CLAUDE.md + project settings/hooks/MCP/skills (via
+                                      #   --setting-sources project) and Codex reloads the user +
+                                      #   project .codex config/hooks/rules; the PRIVATE read-deny
+                                      #   projection (.worc/env-file/provider homes/frozen bundles)
+                                      #   is lifted. The WRITE side stays (exchange/.git/tasks write-
+                                      #   deny, commit/staging gates, PR control) and the
+                                      #   denied_read_paths blacklist stays enforced. strict_isolation
+                                      #   is the master switch: strict_isolation: false forces this on
+                                      #   regardless. Operator-config ONLY (never a task/flow/extra_args
+                                      #   key). `worc preflight` prints `read-isolation: OFF` when in
+                                      #   effect — never a silent weakening.
   allowed_environment:                  # REPLACES (does not extend) the default — keep the OS-launch
                                         # essentials for YOUR OS or the spawned CLI may fail to start.
                                         # A name absent from the host OS is simply skipped, so this

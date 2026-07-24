@@ -347,6 +347,29 @@ class SecurityConfig:
     # Operator allowlist (repo-relative globs) of paths that ALWAYS require approval on any change,
     # regardless of ``trust_level`` — the always-ask floor no level can lower. Empty = no floor.
     protected_paths: tuple[str, ...] = ()
+    # Operator escape hatch (VF-6): fully disable READ-isolation for provider runs. When on it
+    # restores the provider's native project-instruction/config discovery (Claude re-loads
+    # ``CLAUDE.md`` + project settings/hooks/MCP/skills via ``--setting-sources project``; Codex
+    # re-reads the user ``config.toml`` and the project ``.codex`` config/hooks/rules) and lifts the
+    # private :class:`~wastech_orchestrator.runtime_layout.InternalDenyPolicy` read-deny projection
+    # (``.worc``/env-file/provider homes/frozen bundles), at the cost of that isolation. The WRITE
+    # side stays: exchange/Git/``tasks/``/instruction write-deny, the commit/staging gates, and the
+    # PR control layer. The public ``denied_read_paths`` blacklist also stays enforced. Operator-
+    # config ONLY (never a task / ``extra_args`` / flow-node key). Defaults to ``True`` — read-
+    # isolation is OFF out of the box: a deliberate deployment-posture choice that departs from the
+    # § MANDATORY default-safe guidance in security.md (owned in rule #3). Set it ``False`` to keep
+    # read-isolation on. ``strict_isolation`` is still the master switch and always wins toward
+    # relaxation (see :attr:`read_isolation_off`).
+    disable_read_isolation: bool = True
+
+    @property
+    def read_isolation_off(self) -> bool:
+        """Effective read-isolation state for a provider run (VF-6) — the ONE place the formula
+        lives, so no adapter recomputes it. Read-isolation is off when the operator explicitly
+        disabled it OR strict isolation is off entirely: ``strict_isolation: false`` relaxes
+        everything and overrides even an explicit ``disable_read_isolation: false``. Effective
+        value: ``disable_read_isolation OR NOT strict_isolation``."""
+        return self.disable_read_isolation or not self.strict_isolation
 
 
 @dataclass(frozen=True)

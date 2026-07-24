@@ -62,7 +62,6 @@ from wastech_orchestrator.core.flow.exchange_seal import (
 )
 from wastech_orchestrator.core.flow.instruction_bundle import (
     REPO_INSTRUCTION_NAMES,
-    REPO_INSTRUCTIONS_KEY,
     TASK_PACKET_KEY,
     InstructionBundleError,
     assert_no_required_secret,
@@ -2163,7 +2162,7 @@ class Orchestrator:
             # task was parked could be committed unchecked (the fresh path always records the digest
             # via ``freeze_task_packet``).
             p.instruction_entries.extend(loaded.entries)
-            self._publish_frozen_task_and_instructions(p, inputs, bundle_dir)
+            self._publish_frozen_task_packet(p, inputs, bundle_dir)
             return
         if bundle_dir.exists():
             shutil.rmtree(bundle_dir)
@@ -2185,23 +2184,22 @@ class Orchestrator:
         repo_root = Path(self._config.repo.local_path)
         tracked = frozenset(self._git.list_tracked_files(*REPO_INSTRUCTION_NAMES))
         files = discover_repository_instructions(repo_root, tracked)
-        entries, concat = freeze_repository_instructions(bundle_dir, files)
-        if concat is not None:
-            assert_no_required_secret(
-                concat.read_text(encoding="utf-8", errors="replace"),
-                extra_secrets=secrets,
-                label="repository instructions",
-            )
-        p.instruction_entries.extend(entries)
-        self._publish_frozen_task_and_instructions(p, inputs, bundle_dir)
+        # VF-5: the per-source files are still frozen + hashed into the manifest digest (audit /
+        # reproducibility), but no payload is built or injected — the agent reads the live
+        # (write-denied, immutable) root files itself. No exchange projection remains, so there is
+        # no repository-instruction secret gate (the agent could read the live file regardless).
+        p.instruction_entries.extend(freeze_repository_instructions(bundle_dir, files))
+        self._publish_frozen_task_packet(p, inputs, bundle_dir)
 
-    def _publish_frozen_task_and_instructions(
+    def _publish_frozen_task_packet(
         self, p: _Pipeline, inputs: NodeInputs, bundle_dir: Path
     ) -> None:
-        """Re-point ``task_path``/``repository_instructions_path`` at redacted exchange copies.
+        """Re-point ``task_path`` at the redacted exchange copy of the frozen task packet.
 
-        Published from the frozen canonical files (verified on resume), so the exchange copy is a
-        redaction of the immutable snapshot — never a re-read of the live file.
+        Published from the frozen canonical file (verified on resume), so the exchange copy is a
+        redaction of the immutable snapshot — never a re-read of the live file. Repository
+        instructions are no longer published or injected (VF-5): the agent reads the repo's root
+        instruction files itself; those files are write-denied for the run (immutable).
         """
         secrets = self._memory_extra_secrets()
         if (bundle_dir / TASK_PACKET_KEY).is_file():
@@ -2210,14 +2208,6 @@ class Orchestrator:
                 p.task.id,
                 "task.md",
                 str(bundle_dir / TASK_PACKET_KEY),
-                extra_secrets=secrets,
-            )
-        if (bundle_dir / REPO_INSTRUCTIONS_KEY).is_file():
-            inputs.repository_instructions_path = publish_file(
-                str(self._exchange_root),
-                p.task.id,
-                REPO_INSTRUCTIONS_KEY,
-                str(bundle_dir / REPO_INSTRUCTIONS_KEY),
                 extra_secrets=secrets,
             )
 
@@ -2273,12 +2263,11 @@ class Orchestrator:
         orchestrator commits the merge and merges the PR afterward. Returns ``False`` when a bounded
         loop is exhausted (markers/checks unresolved) so the caller aborts the merge."""
         assert snapshot.source_path is not None
-        # M2 (deliberate): the merge flow is ephemeral and NOT frozen (WRI-010/011), so it sets no
-        # `repository_instructions_path` — its conflict agent gets neither live nor frozen
-        # `AGENTS.md`/`CLAUDE.md`. That is intentional and acceptable for a mechanical marker
-        # resolution + checks pass (the WRI-011 discovery-disable argv is unconditional, so live
-        # discovery is off here too). If a future merge agent needs repository conventions, freeze +
-        # inject a merge-scoped instruction copy here — tracked in follow_ups.
+        # M2 (deliberate): the merge flow is ephemeral and NOT frozen (WRI-010/011); it publishes no
+        # task packet and injects no repository instructions (VF-5). The conflict agent reads the
+        # repo's live root `AGENTS.md`/`CLAUDE.md` itself (Codex via native discovery, Claude via
+        # its Read tool) — fine for a mechanical marker resolution + checks pass. A future merge
+        # agent needing richer repository conventions would wire them here; see follow_ups.
         inputs = build_node_inputs(
             p,
             flow_dir=snapshot.source_path.parent,
@@ -2316,6 +2305,20 @@ class Orchestrator:
             # branch, so it is in place whether or not the planning ``proposed_by`` node runs (a
             # disabled planning node never fires the post-hook). Validated already at preflight.
             self._persist_decomposition(p, p.operator_decomposition, gate_on=True)
+        if self._config.security.read_isolation_off:
+            # VF-6: never a silent weakening — announce that the operator's escape hatch is in
+            # effect. Fires whether it came from ``disable_read_isolation: true`` or the master
+            # ``strict_isolation: false`` (the strict check below is skipped in the latter case).
+            self._log(p.task.id).warning(
+                "read-isolation OFF — providers run native project-instruction/config discovery "
+                "and the private read-deny projection is lifted (operator-sanctioned; the "
+                "write-guard, commit/staging gates, PR control, and denied_read_paths blacklist "
+                "stay in force)",
+                extra={
+                    "disable_read_isolation": self._config.security.disable_read_isolation,
+                    "strict_isolation": self._config.security.strict_isolation,
+                },
+            )
         if self._config.security.strict_isolation:
             reasons = check_isolation(self._config, self._isolation_checks)
             if reasons:
@@ -2833,7 +2836,6 @@ class Orchestrator:
                 task_id=p.task.id,
                 task_title=p.task.title,
                 task_path=inputs.task_path,
-                repository_instructions_path=inputs.repository_instructions_path,
                 emit_delta=memory_on,
             )
             if memory_on:
@@ -3232,7 +3234,6 @@ class Orchestrator:
             agent_node_ids=[n.id for n in agent_nodes],
             inventory=p.skill_inventory,
             task_path=inputs.task_path,
-            repository_instructions_path=inputs.repository_instructions_path,
         )
 
     def _persist_skill_map(self, p: _Pipeline, map_file: Path) -> None:
