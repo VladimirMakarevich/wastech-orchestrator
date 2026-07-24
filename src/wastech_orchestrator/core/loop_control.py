@@ -45,6 +45,26 @@ class LoopCounters:
     review_fix_total: int = 0
     fix_iterations: int = 0
 
+    @classmethod
+    def from_run_state(cls, run_state: FlowRunState) -> LoopCounters:
+        """Mirror the engine's authoritative ``FlowRunState`` counters into the operator-facing row.
+
+        The engine owns counting in ``FlowRunState.loop_counters``; these columns back the operator
+        surfaces (ledger, CLI ``status``, ``finalize``). The named-loop mirrors are the
+        implementation flow's ``test_fix`` / ``review_fix`` loops. Used both at the terminal
+        transition and when ``finalize`` reconciles a task the orchestrator never terminated itself
+        (killed mid-flow), so the mirror reflects the real churn rather than the last clean sync.
+        """
+        return cls(
+            test_fix_cycles=run_state.counter("test_fix"),
+            review_fix_cycles=run_state.counter("review_fix"),
+            # Cumulative totals for the audit trail — unlike the consecutive counters above, they
+            # are not zeroed on convergence, so a task that succeeded after N reworks records N.
+            test_fix_total=run_state.total("test_fix"),
+            review_fix_total=run_state.total("review_fix"),
+            fix_iterations=run_state.fix_iterations,
+        )
+
 
 def record_rework(run_state: FlowRunState) -> int:
     """The single rework-accounting path: increment the global ``fix_iterations`` once (P2.1).

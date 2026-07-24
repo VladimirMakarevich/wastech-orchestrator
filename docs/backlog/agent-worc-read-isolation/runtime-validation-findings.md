@@ -90,7 +90,7 @@ Surfaced while reproducing this: after the operator stops a run mid-flight, the 
 
 ## VF-4 — `review_fix_*` counters in `state.db` do not reflect the actual number of review/fix rounds in the logs (observation — needs confirmation)
 
-Severity: **Low** Status: **open (needs confirmation — may be expected after multi-attempt rerun + manual finalize)** First seen: 2026-07-24 (task `p9-01-import-positions`)
+Severity: **Low** Status: **shipped 2026-07-24** (confirmed a real defect: `finalize` did not mirror the operator-facing counter columns from the authoritative flow checkpoint, so a task killed mid-flow and finished by hand under-reported its churn; `finalize_task` now re-syncs them via `LoopCounters.from_run_state`) First seen: 2026-07-24 (task `p9-01-import-positions`)
 
 ### Observed
 
@@ -101,13 +101,19 @@ Severity: **Low** Status: **open (needs confirmation — may be expected after m
 - `sqlite3 .worc/state.db` → `review_fix_cycles=1`, `review_fix_total=1`, `test_fix_total=0`, `status=done`, `current_node=testing`, `cleanup_last_error="Completed by operator by hand (commit 0e922dc …); orchestrator run was stopped mid-flow for flow retuning"`.
 - Log run indices: review runs `4,6,9,12,15,18,21,24` (8); fixing runs `5,7,10,13,16,19,22,25` (8 dirs, `history.jsonl` counts 7). The findings above (VF-1/2/3) confirm this spanned attempts 1–3 (multiple reruns).
 
-### Open question
+### Open question (resolved)
 
-The task went through 3 rerun attempts and a manual `finalize`/by-hand completion. It is unclear whether `review_fix_total` is intended to be cumulative across attempts (in which case 1 is wrong and it is under-counting) or is deliberately reset per attempt / on manual completion (in which case the value is expected but the operator loses the true historical churn count from the DB). If the counters gate the review/fix loop budget, an incorrect reset could also let a churn-prone task exceed its intended round cap across reruns. Confirm the intended semantics before treating this as a defect.
+The confirmed semantics: `*_fix_total` are **cumulative within an attempt** — preserved across `rerun --continue` (`revive_task_for_continue` keeps the counters + `flow_run_counters` checkpoint) — and **reset on a fresh rerun** (`reset_task_for_rerun` archives the prior attempt and zeroes them). They are **pure audit/observability (F49); they never gate any budget** — the review/fix loop is bounded by the consecutive per-loop counters and the global `fix_iterations` backstop, both of which live in the authoritative `flow_run_counters` JSON and are checkpointed after every transition. So the "could exceed the round cap across reruns" worry does **not** apply, and the observed `review_fix_total=1` is not the intended value.
 
-### Likely area
+The real cause: the operator-facing counter columns (`*_fix_total` / `*_fix_cycles`) are mirrored **only** at a clean orchestrator terminal transition (`_sync_counters_from_run_state`), whereas `fix_iterations` is mirrored on **every** checkpoint (`save_flow_checkpoint`). When a run is **killed mid-flow** and finished with `finalize`, no terminal transition runs, so the `*_total` columns stay stale at the last clean sync (here `1`) while the authoritative `flow_run_counters` held the true churn — an internally inconsistent row (`fix_iterations` current, `review_fix_total` lagging).
 
-Counter update/reset logic around rerun and `finalize` in `core/orchestrator.py` (the `review_fix_cycles` / `review_fix_total` fields on the tasks row) and the DB write path on manual completion.
+### Fix
+
+`finalize_task` now hydrates the persisted flow checkpoint and re-mirrors the operator-facing columns from it (`LoopCounters.from_run_state`) before recording the terminal state — so a hand-finished task reports the real fix-loop totals. The run-state→mirror mapping is consolidated on `LoopCounters.from_run_state` (used by both the terminal sync and `finalize`).
+
+### Likely area (addressed)
+
+`core/loop_control.py` (`LoopCounters.from_run_state`) and `core/orchestrator.py` (`finalize_task` counter reconciliation; `_sync_counters_from_run_state` delegates to the shared mapping).
 
 ## VF-5 — disabling provider-native instruction discovery and re-injecting a frozen subset does not scale to N providers; roll the requirement back to native discovery + filesystem immutability (architecture)
 

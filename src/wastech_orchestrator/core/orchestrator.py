@@ -1458,6 +1458,14 @@ class Orchestrator:
             cleanup_last_error=note,
             finished_at=self._clock(),
         )
+        # VF-4: finalize reconciles a task the orchestrator never terminated itself (e.g. stopped
+        # mid-flow, finished by hand). The operator-facing counter columns are only mirrored at a
+        # clean terminal transition, so without this they stay stale at the last sync while the
+        # authoritative flow checkpoint holds the real churn. Mirror them from the checkpoint so
+        # ``status`` / the ledger report the true fix-loop totals; ``None`` = the engine never ran.
+        checkpoint = hydrate_run_state(self._store, task_id)
+        if checkpoint is not None:
+            self._store.save_counters(task_id, LoopCounters.from_run_state(checkpoint))
         self._store.set_status(task_id, declared)  # out-of-band operator override (no assert)
         # WRI-007: the operator finalize/merge/PR-sync paths are terminal producers that bypass
         # ``_go_terminal``, so they must seal the exchange too. Idempotent — a no-op when the
@@ -2584,19 +2592,9 @@ class Orchestrator:
         The engine owns counting in ``FlowRunState.loop_counters``; the legacy ``tasks`` counter
         columns back the operator surfaces (the ledger ``_append_ledger``, CLI ``status`` via
         ``get_counters``, ``finalize``). Syncing here before the terminal transition keeps them from
-        reading 0 after the engine ran fix loops. The global ``fix_iterations`` is generic; the
-        named loop mirrors apply to the implementation flow's ``test_fix`` / ``review_fix`` loops.
+        reading 0 after the engine ran fix loops.
         """
-        p.counters = replace(
-            p.counters,
-            fix_iterations=run_state.fix_iterations,
-            test_fix_cycles=run_state.counter("test_fix"),
-            review_fix_cycles=run_state.counter("review_fix"),
-            # Cumulative totals for the audit trail — unlike the consecutive counters above, they
-            # are not zeroed on convergence, so a task that succeeded after N reworks records N.
-            test_fix_total=run_state.total("test_fix"),
-            review_fix_total=run_state.total("review_fix"),
-        )
+        p.counters = LoopCounters.from_run_state(run_state)
 
     def _run_phases(
         self,

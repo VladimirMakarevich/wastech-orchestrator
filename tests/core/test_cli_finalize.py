@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from wastech_orchestrator import cli
+from wastech_orchestrator.core.flow.run_state import FlowRunState
+from wastech_orchestrator.core.loop_control import LoopCounters
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import GitManager
 from wastech_orchestrator.ledger import Ledger, LedgerRecord
@@ -141,6 +143,45 @@ def test_finalize_failed_reconciles(git_repo, git_run, tmp_path: Path) -> None:
     # No commit/push/PR: the branch is kept and not pushed to the remote.
     assert git_run(["ls-remote", "--heads", "origin", "worc/task-1-t"], git_repo.clone) == ""
     assert "worc/task-1-t" in git_run(["branch", "--list", "worc/task-1-t"], git_repo.clone)
+
+
+def test_finalize_syncs_loop_counters_from_checkpoint(git_repo, tmp_path: Path) -> None:
+    # VF-4: a task stopped mid-flow and finished by hand keeps stale operator-facing counter
+    # columns — they mirror only at a clean terminal transition, which a killed run never reaches.
+    # finalize must re-sync them from the authoritative flow checkpoint so status/ledger report the
+    # real fix-loop churn (here: 3 review_fix reworks) rather than the last synced value.
+    project = tmp_path / "p"
+    project.mkdir()
+    config = _seed(project, git_repo.clone, status=Status.MANUAL_ACTION_REQUIRED)
+    db = git_repo.clone / ".worc" / "state.db"
+    store = StateStore.open(db)
+    store.save_flow_checkpoint(
+        "task-1",
+        current_node="testing",
+        counters_json=json.dumps(
+            {
+                "review_fix": 2,
+                FlowRunState.total_key("review_fix"): 3,
+                FlowRunState.GLOBAL_FIX_KEY: 3,
+            }
+        ),
+        flow_fingerprint="fp",
+        fix_iterations=3,
+    )
+    # Stale mirror: the totals lag the checkpoint (fix_iterations stays current — it is mirrored on
+    # every checkpoint, so only the *_total / *_cycles columns drift, exactly as in VF-4).
+    store.save_counters("task-1", LoopCounters(review_fix_total=1, fix_iterations=3))
+    store.close()
+
+    code = cli.main(["--config", str(config), "finalize", "task-1", "--as", "failed", "--yes"])
+    assert code == 1
+
+    store = StateStore.open_readonly(db)
+    counters = store.get_counters("task-1")
+    store.close()
+    assert counters.review_fix_total == 3  # re-synced from the checkpoint, not the stale 1
+    assert counters.review_fix_cycles == 2
+    assert counters.fix_iterations == 3
 
 
 def test_finalize_done_uses_recorded_pr_url(
