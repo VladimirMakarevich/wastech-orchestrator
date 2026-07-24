@@ -1330,12 +1330,13 @@ def test_live_control_plane_edit_during_run_is_manual_not_fallback(
     assert ledger.records()[0]["final_status"] == "manual_action_required"
 
 
-def test_continue_after_parked_live_edit_is_conflict_manual(
+def test_autorecovery_after_parked_live_edit_stays_conflict_manual(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # WRI-010 parked-conflict: a task parks at implementation, then the operator edits the live
-    # flow while it is parked. `continue` must NOT silently ignore the edit nor merge it — it reuses
-    # the frozen bundle and refuses the drift, routing to manual so the operator fresh/restarts.
+    # WRI-010 (preserved): AUTOMATIC crash-recovery — `resume()` WITHOUT an operator `continue_task`
+    # — must NOT adopt a live control-plane edit made while the task was parked. A crash can follow
+    # an agent mutation, so auto-recovery keeps the frozen bundle and refuses the drift, routing to
+    # manual. (An operator `rerun --continue` deliberately DOES adopt — see the next test.)
     providers = _both(
         infra_fail={"implementation"}, infra_error_class=ErrorClass.PROVIDER_UNAVAILABLE
     )
@@ -1354,10 +1355,49 @@ def test_continue_after_parked_live_edit_is_conflict_manual(
         flow_yaml.read_text(encoding="utf-8") + "\n# operator edit while parked\n", encoding="utf-8"
     )
 
-    result = orch.resume()
+    result = orch.resume()  # auto-recovery path (not continue_task) — no adopt marker
 
     assert result is not None and result.final_status is Status.MANUAL_ACTION_REQUIRED
     assert ledger.records()[0]["final_status"] == "manual_action_required"
+
+
+def test_continue_task_after_parked_live_edit_adopts_flow(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # VF-3: an operator `rerun --continue` (continue_task) after editing the live flow while parked
+    # ADOPTS the edit — it re-freezes the control plane from the current on-disk flow, records a new
+    # digest, and resumes to DONE rather than refusing like auto-recovery above. Agent-tamper
+    # detection during the resumed run is unaffected (the post-node hook rebaselines to the new
+    # digest).
+    providers = _both(
+        infra_fail={"implementation"}, infra_error_class=ErrorClass.PROVIDER_UNAVAILABLE
+    )
+    orch, store, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    first = orch.run_task(_complete_task(tmp_path, "task-adopt"))
+    assert first.final_status is Status.RUNNING  # parked, resumable
+    control_before = store.get_control_bundle_digest("task-adopt")
+    inst_before = store.get_instruction_manifest_digest("task-adopt")
+
+    for provider in providers.values():
+        provider.heal()
+    flow_yaml = git_repo.clone / ".worc" / "flows" / "implementation.yaml"
+    flow_yaml.write_text(
+        flow_yaml.read_text(encoding="utf-8") + "\n# operator edit while parked\n", encoding="utf-8"
+    )
+
+    result = orch.continue_task("task-adopt")  # operator --continue → adopt the edited flow
+
+    assert result.final_status is Status.DONE  # adopted the edited flow and resumed, not refused
+    assert store.get_control_bundle_digest("task-adopt") != control_before  # re-frozen on adopt
+    # WRI-011 composite identity stays consistent: the instruction manifest re-binds the new
+    # control digest, so its persisted digest changes too.
+    assert store.get_instruction_manifest_digest("task-adopt") != inst_before
+    assert "publish" in _ran_nodes(store, "task-adopt")  # resumed past implementation
+    assert ledger.records()[0]["final_status"] == "done"
 
 
 def test_stop_cancellation_parks_task_resumable(git_repo, make_git_config, tmp_path: Path) -> None:

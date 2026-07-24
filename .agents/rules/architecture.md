@@ -51,7 +51,7 @@ The source of truth is the code (`src/wastech_orchestrator/`). These invariants 
 - **Symmetric cross-provider fallback**: a node on the global primary falls back to the other allowed provider (Claude↔Codex); with a single allowed provider there is no fallback. The fallback target lives in the Router; core never changes the CLI it speaks.
 - **Bounded same-provider transient retry**: a raised transient infra error (provider/network unavailable — never timeout/rate-limit, never a quality failure) is retried on the same provider with bounded backoff before falling back. A quality verdict is never retried.
 - **Soft, resumable pause**: when both retries and cross-provider fallback are exhausted for a transient class, the task is parked as resumable (not terminal) and resumed on the next watch tick / restart, bounded by a max-blocked timeout after which it goes terminal `failed`.
-- **Frozen control plane**: at task start the orchestrator freezes the exact control inputs the flow references (flow YAML, role/supervisor prompts, tool executables) into a private, immutable per-task bundle and binds every runner to it — no later node reopens live `.worc`. Drift detected on a later attempt is a non-fallback, non-park `manual_action_required`.
+- **Frozen control plane**: at task start the orchestrator freezes the exact control inputs the flow references (flow YAML, role/supervisor prompts, tool executables) into a private, immutable per-task bundle and binds every runner to it — no later node reopens live `.worc`. An **agent** mutating a control file mid-run is a non-fallback, non-park `manual_action_required` (detected on the next attempt), and automatic crash-recovery over a live edit stays fail-closed the same way. The one exception is a deliberate **operator `rerun --continue`**: it **adopts** the current on-disk control plane (re-freeze + new digest) so a between-run flow/role/tool fix takes effect from the resume point onward — the operator invoked the CLI, so the edit is trusted, while agent-side in-run tamper detection is unchanged.
 - **Process-tree quiescence barrier**: every provider attempt runs inside an orchestrator-owned process-containment object; on **every** exit path the tree is proven empty before any result is trusted and before any downstream work (checks, Git, next task) runs. A tree that cannot be proven empty routes the task to `manual_action_required`. The platform-specific containment syntax lives only in the process runner.
 
 ## State machine and idempotency
@@ -62,7 +62,7 @@ The source of truth is the code (`src/wastech_orchestrator/`). These invariants 
 - Publishing happens only when checks succeed and there are no blocking findings.
 - After `implementation`/`fixing`, tracked-file deletions and dependency-manifest/lock changes require approval before tests; ordinary diffs and routine commit/push/PR do not ask.
 - At most one task is active at a time (a single processing slot); more than one active task on restart → `manual_action_required`.
-- After a terminal status, cleanup must safely return the target repo to `base_branch` before any next task starts; ambiguous branch state forbids automatic continuation.
+- After a terminal status, cleanup must safely return the target repo to `base_branch` before any next task starts; ambiguous branch state forbids automatic continuation. Exception: a resumable `manual_action_required` park carrying the task's **own** uncommitted WIP intentionally leaves `HEAD` on the task branch (that WIP is its resume input, and a cleanup error must never mask the node's real stop reason); the next `new`-mode task still checks out base at branch prep, so the slot is freed either way.
 - Auto mode is off by default and controls only whether the next pending task is picked after successful cleanup — it never changes the single-active-task invariant.
 - Every terminal transition appends exactly one record to the append-only completed-tasks ledger; the ledger is never rewritten.
 - The Git Manager uses **scoped staging** — an explicit pathspec that excludes `tasks/`/`logs/`/`workspace/`; **never `git add .`/`-A`** for a code commit. Orchestration/task artifacts never enter a code commit.
@@ -76,7 +76,6 @@ The source of truth is the code (`src/wastech_orchestrator/`). These invariants 
 - Change the provider route for a node that has already begun.
 - Hardcode or special-case a specific flow node **id**, or make any packaged id mandatory — behavior attaches to a node kind or a declared fact.
 - Hardcode anything to a specific flow, topic/domain, or task type, or assume how many flows exist.
-- Continue work when an inconsistent branch state is detected (→ `manual_action_required`).
 - Run the `fixing` loop without a global per-task bound.
 - Process more than one task at a time.
 - Start a next task before cleanup has returned the repo to `base_branch`.

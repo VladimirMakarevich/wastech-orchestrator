@@ -6,7 +6,7 @@ A running log of nuances and defects found while exercising the `feat/agent-worc
 
 ## VF-1 — `rerun --continue --from <node>` aborts on the unaccounted-changes guard when the working tree is dirty (regression)
 
-Severity: **High** Status: **open** First seen: 2026-07-23 (task `p9-01-import-positions`, attempt 2)
+Severity: **High** Status: **shipped 2026-07-24** (terminal cleanup preserves the task's own WIP on a resumable manual park, the true node reason is no longer masked, and the note is reworded — see [follow_ups](../follow_ups.md)) First seen: 2026-07-23 (task `p9-01-import-positions`, attempt 2)
 
 ### Observed
 
@@ -44,7 +44,7 @@ The dirty tree here was produced deliberately: a concurrent operator commit to t
 
 ## VF-2 — `rerun --continue` refuses after a control-plane edit while parked; `--dry-run` still claims it will "resume using the current on-disk flow"
 
-Severity: **Medium** Status: **open** (the guard is intended; the `--dry-run` note is wrong) First seen: 2026-07-23 (task `p9-01-import-positions`, attempt 3)
+Severity: **Medium** Status: **shipped 2026-07-24** (resolved via VF-3; the dry-run note is now truthful and keys off bundle-level drift) First seen: 2026-07-23 (task `p9-01-import-positions`, attempt 3)
 
 ### Observed
 
@@ -66,7 +66,7 @@ After any concurrent edit during/after a run — working-tree changes (VF-1) or 
 
 ## VF-3 — `rerun --continue --from <node>` must adopt an operator-edited flow (fix-then-resume); today it cannot (BUG)
 
-Severity: **High** Status: **open (bug — mandatory operator workflow)** First seen: 2026-07-24 Related: VF-1, VF-2
+Severity: **High** Status: **shipped 2026-07-24** (operator `rerun --continue` adopts the edited control plane by re-freezing from live; automatic crash-recovery still refuses; stale-`running` recovery landed too) First seen: 2026-07-24 Related: VF-1, VF-2
 
 ### The required workflow (operator-stated, mandatory)
 

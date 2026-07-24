@@ -2073,7 +2073,7 @@ class GitManager:
         return mode is BranchMode.NEW if flag is None else flag
 
     def terminal_cleanup(
-        self, task_id: str, *, mode: BranchMode = BranchMode.NEW
+        self, task_id: str, *, mode: BranchMode = BranchMode.NEW, preserve_own_wip: bool = False
     ) -> CleanupOutcome:
         """Free the single processing slot after a terminal outcome, or report why it is unsafe.
 
@@ -2083,6 +2083,11 @@ class GitManager:
         leave HEAD on the working branch as-is and report safe — the operator owns that branch and
         its (possibly dirty) tree, so this must not force-checkout away. A subsequent ``new``-mode
         prep still checks out base, so the slot is freed either way without losing operator state.
+
+        ``preserve_own_wip`` (set by the caller only for a resumable ``manual_action_required``
+        park carrying the task's OWN uncommitted work) treats a dirty ``new``-mode tree like the
+        operator-owned case: that WIP is the task's resume input, so leave HEAD on the branch and
+        report safe rather than fail-closing on it (VF-1).
         """
         if not self.returns_to_base(mode):
             branch = self.current_branch() or self._config.repo.base_branch
@@ -2092,6 +2097,15 @@ class GitManager:
             return outcome
         base = self._config.repo.base_branch
         dirty = self._unaccounted_dirty_paths()
+        if dirty and preserve_own_wip:
+            # The task's own WIP is preserved for the resume; do not check out base over it (that
+            # would destroy it) or fail-close. The next new-mode task still checks out base at
+            # branch prep, so the slot is freed either way.
+            branch = self.current_branch() or base
+            outcome = CleanupOutcome(safe=True, target_branch=branch)
+            self._write_cleanup_artifact(task_id, outcome, completed=True)
+            self._active = None
+            return outcome
         if dirty:
             outcome = CleanupOutcome(
                 safe=False,

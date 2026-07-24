@@ -944,6 +944,23 @@ def test_terminal_cleanup_unsafe_when_dirty(
     assert outcome.error is not None
 
 
+def test_terminal_cleanup_preserve_own_wip_stays_safe_on_dirty_new_branch(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # VF-1: on a resumable manual park carrying the task's OWN uncommitted WIP, terminal cleanup
+    # preserves it (the WIP is the resume input) — it does not fail "unaccounted changes" or check
+    # out base over it. HEAD stays on the task branch and the outcome is safe.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    branch = git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone)
+    (git_repo.clone / "README.md").write_text("wip\n", encoding="utf-8")  # tracked, uncommitted
+    outcome = gm.terminal_cleanup("task-001", preserve_own_wip=True)
+    assert outcome.safe is True
+    assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == branch  # HEAD kept
+    assert (git_repo.clone / "README.md").read_text(encoding="utf-8") == "wip\n"  # WIP preserved
+
+
 def test_write_current_diff(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:

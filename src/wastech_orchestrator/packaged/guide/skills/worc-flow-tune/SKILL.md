@@ -29,6 +29,10 @@ Before editing, read the packaged flow reference `.worc/guide/flows/reference.md
 4. Confirm the model/reasoning you chose is actually configured for that provider in `.worc/config.yaml agents.providers.<id>` — if the provider or its reasoning set needs adjusting, that is a config change (use **worc-config**), not a flow edit.
 5. Validate: run `worc validate-flow <name>`. The config-aware layer checks that every `provider` is in `agents.allowed`, that `reasoning` is valid for the resolved provider, and that no Codex `workspace-write` node also has network. `worc preflight` does **not** validate flows.
 
+## Applying the change to a task already in flight
+
+A brand-new task always picks up the edited flow. To apply your edit to a **specific parked/failed task** without re-paying for completed upstream work, resume it with `worc rerun <id> --continue` (add `--from <node>` to re-enter at a chosen step, e.g. `--from review`): an operator `--continue` **adopts** the current on-disk flow — it re-freezes the control plane from your edited files and resumes from the checkpoint under the new knobs. `--dry-run` prints a `note:` when it detects the change. (Only automatic daemon crash-recovery keeps the task's original frozen flow; an operator `--continue` is trusted to adopt.) Editing `AGENTS.md`/`CLAUDE.md`, a task file, or a `SKILL.md` is **not** adopted this way — those need a fresh run.
+
 ## Heuristics
 
 - Raise `reasoning` (and reach for a heavier `model`) only where the stage's difficulty warrants the extra token cost; leave routine stages at their defaults.

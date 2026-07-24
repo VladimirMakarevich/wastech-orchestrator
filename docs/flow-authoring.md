@@ -119,7 +119,7 @@ A node's prompt is the content of its `role_file`. Role files render only an all
 
 `role_file` paths are contained to the flow directory: a path with `..` or an absolute path is rejected at load. Keep prompts inside your `<task_type>/` folder.
 
-> **Prompts and tools are frozen per task (WRI-010).** When a task starts, the orchestrator snapshots the flow YAML, every role/supervisor prompt it references, and each `tool` executable into a private per-task bundle and runs the whole task against that frozen copy. So **editing a prompt or tool in `.worc/` while a task is running does not affect that task** — the change lands on the **next fresh task** (or a `rerun`). A `rerun --continue` keeps the task's original frozen prompts; use a fresh `rerun`/restart to adopt live edits. This is transparent to authoring — you still edit `.worc/flows/` normally.
+> **Prompts and tools are frozen per task (WRI-010).** When a task starts, the orchestrator snapshots the flow YAML, every role/supervisor prompt it references, and each `tool` executable into a private per-task bundle and runs the whole task against that frozen copy. So **editing a prompt or tool in `.worc/` while a task is running does not affect that task** — the change lands on the **next fresh task** (or a `rerun`). An operator `rerun --continue` **adopts** live prompt/tool/flow edits: it re-freezes from the current on-disk copy and resumes from the checkpoint, so a between-run fix takes effect from there on (only automatic crash-recovery keeps the task's original frozen copy). This is transparent to authoring — you still edit `.worc/flows/` normally.
 
 ## Per-node overrides
 

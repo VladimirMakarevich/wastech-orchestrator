@@ -533,6 +533,11 @@ class Orchestrator:
         self._skill_scanner = skill_scanner or self._default_skill_scanner()
         # Per-id attempt number stamped onto the next ledger record, set by ``rerun``/``continue``.
         self._rerun_attempt: dict[str, int] = {}
+        # Task ids whose next resume is an operator ``rerun --continue`` that ADOPTS the current
+        # on-disk control plane (re-freeze) instead of loading the frozen bundle. Set in
+        # ``continue_task`` for the span of one resume; automatic crash-recovery never sets it, so
+        # an agent-side control mutation before a crash is never silently adopted (WRI-010).
+        self._continue_adopt: set[str] = set()
         # Flow registry: resolves a task's flow snapshot. Operator flows live in ``<repo>/.worc/
         # flows/`` and override packaged built-ins (P4.1); passing the config turns on the
         # config-aware validation layer (P4.2) on every resolve, including resume.
@@ -1006,10 +1011,14 @@ class Orchestrator:
                 refusals=(f"unknown task id '{task_id}'",),
             )
         refusals: list[str] = []
-        if row.status not in (Status.FAILED, Status.MANUAL_ACTION_REQUIRED):
+        # A stale ``running`` row is a killed/crashed task, directly recoverable: ``cmd_rerun``
+        # already refused if a live watch daemon owned the slot, so a ``running`` row reaching here
+        # is daemon-less (the "parked (no daemon)" state) — no ``finalize --as failed`` dance. The
+        # active-slot check below excludes this task's own id, so it never self-blocks.
+        if row.status not in (Status.FAILED, Status.MANUAL_ACTION_REQUIRED, Status.RUNNING):
             refusals.append(
                 f"task '{task_id}' is {row.status.value}; rerun is for failed / "
-                "manual_action_required tasks (use `run` for a new task)"
+                "manual_action_required / stale-running tasks (use `run` for a new task)"
             )
         others = sorted(t.task_id for t in self._store.find_active_tasks() if t.task_id != task_id)
         if others:
@@ -1059,11 +1068,13 @@ class Orchestrator:
                 "resolve them before rerun"
             )
         elif dirty:
-            # Known limitation: commit_code stages ALL non-artifact dirty paths, so any foreign WIP
-            # on the branch is swept into the task's commit (own-vs-foreign discrimination is a
-            # deferred follow-up). Warn the operator rather than silently committing it.
+            # The task's own WIP is preserved across the resume and is committed only when the flow
+            # reaches the publish node — never on a re-park to manual (VF-1). Known limitation:
+            # commit_code then stages ALL non-artifact dirty paths, so any foreign WIP on the branch
+            # is swept into that commit (own-vs-foreign discrimination is a deferred follow-up).
             notes.append(
-                f"uncommitted changes ({', '.join(sorted(dirty))}) will be committed into the task"
+                f"uncommitted changes ({', '.join(sorted(dirty))}) are preserved and will be "
+                "committed into the task when the flow reaches publish"
             )
         # --reset-fix-budget and --from are continue-only controls.
         if reset_fix_budget is not None and not continue_mode:
@@ -1074,32 +1085,29 @@ class Orchestrator:
         backstop_exhausted = False
         if continue_mode and current_node:
             live = self._persisted_flow_snapshot(task_id)
-            if from_node is not None:
-                from_refusals = self._from_node_refusals(task_id, from_node)
-                refusals.extend(from_refusals)
-                resumes_in_place = not from_refusals
-                if (
-                    resumes_in_place
-                    and live is not None
-                    and fingerprint is not None
-                    and fingerprint != live.flow_fingerprint
-                ):
-                    notes.append(
-                        f"the flow changed since the checkpoint; --from '{from_node}' will "
-                        "resume using the current on-disk flow"
-                    )
-            else:
-                resumes_in_place = (
-                    live is not None
-                    and fingerprint is not None
-                    and fingerprint == live.flow_fingerprint
+            resume_node = from_node or current_node
+            # Operator --continue adopts the current on-disk control plane and resumes at
+            # resume_node (the --from override, or the checkpoint node), so that node must still
+            # exist in the edited flow. --from is an explicit override; the checkpoint node is
+            # implicit — a flow edit that removed it is refused with an actionable message.
+            resume_refusals = self._resume_node_refusals(
+                resume_node, live=live, is_from=from_node is not None
+            )
+            refusals.extend(resume_refusals)
+            resumes_in_place = not resume_refusals
+            if (
+                resumes_in_place
+                and live is not None
+                and self._control_plane_drifted(task_id, live, checkpoint_fingerprint=fingerprint)
+            ):
+                notes.append(
+                    "the control plane changed since the checkpoint; --continue will adopt the "
+                    f"current on-disk flow/roles/tools and resume at '{resume_node}'"
                 )
-            # Only meaningful when the resume will actually land in place with its counters
-            # preserved — a plain --continue under drift restarts the whole graph from the top with
-            # a fresh run state, so "exhausted" would be a false alarm there.
+            # The resume adopts and lands at resume_node under the live flow, so evaluate the live
+            # fix-loop budgets there (a vanished resume node was already refused above).
             if resumes_in_place and live is not None:
                 counters = json.loads(counters_json) if counters_json else {}
-                resume_node = from_node or current_node
                 exhausted = tuple(
                     exhausted_fix_loops(
                         live, counters, self._config.agents.max_fix_cycles, resume_node
@@ -1277,7 +1285,14 @@ class Orchestrator:
         self._log(task_id).info(
             "rerun --continue: revived", extra={"node": from_node or current_node}
         )
-        result = self.resume()
+        # Adopt the current on-disk control plane on this operator resume (consumed in
+        # ``_engine_run``). Scoped to this call via ``finally`` so a resume that never reaches the
+        # engine cannot leave the flag set for a later automatic crash-recovery to pick up.
+        self._continue_adopt.add(task_id)
+        try:
+            result = self.resume()
+        finally:
+            self._continue_adopt.discard(task_id)
         if result is None:
             raise PipelineFailed(f"continue '{task_id}' did not resume (no active task found)")
         return result
@@ -1292,8 +1307,8 @@ class Orchestrator:
         reset_fix_budget: bool,
         from_node: str | None,
     ) -> None:
-        """Patch the persisted flow checkpoint with the operator's ``--reset-fix-budget`` /
-        ``--from`` controls before ``resume()`` hydrates it — the one-shot seam.
+        """Rebaseline the persisted flow checkpoint for a ``rerun --continue`` before ``resume()``
+        hydrates it — the one-shot operator seam (also applies ``--reset-fix-budget`` / ``--from``).
 
         Deliberately here and not in ``hydrate``/``_resume_via_engine``: that path is shared by
         ordinary crash-recovery, so applying a budget grant there would re-grant on every restart
@@ -1301,18 +1316,23 @@ class Orchestrator:
         grant preserves the global ``fix_iterations`` / ``total_fix:*`` counters, so the
         ``max_total_fix_iterations`` backstop is never weakened, even across repeated grants.
 
-        On ``--from``, the checkpoint's fingerprint is rebaselined to the *live* flow's: otherwise
-        ``_resume_via_engine``'s own equality gate would still see the checkpoint's old fingerprint
-        mismatch the live one and silently top-restart from the graph's entry node, completely
-        ignoring the ``--from`` override with no error.
+        A ``--continue`` adopts the live control plane (``_prepare_control_bundle`` re-freezes
+        it). When the flow YAML drifted, the checkpoint fingerprint is rebaselined to the live
+        flow's — else ``_resume_via_engine``'s equality gate would mismatch the re-frozen flow and
+        route to manual. A no-drift ``--continue`` with no controls returns early (a rewrite would
+        re-derive the mirrored global fix counter for nothing); a role/tool-only edit leaves the
+        ``flow_fingerprint`` unchanged (what the gate keys off), so it needs no rebaseline either.
         """
-        if not reset_fix_budget and from_node is None:
-            return
         baseline_fingerprint = fingerprint or ""
-        if from_node is not None:
-            live = self._persisted_flow_snapshot(task_id)
-            if live is not None:  # defensive: plan_rerun already required this to resolve
-                baseline_fingerprint = live.flow_fingerprint
+        live = self._persisted_flow_snapshot(task_id)
+        if live is not None:  # defensive: plan_rerun already required a resolvable/valid flow
+            baseline_fingerprint = live.flow_fingerprint
+        if (
+            not reset_fix_budget
+            and from_node is None
+            and baseline_fingerprint == (fingerprint or "")
+        ):
+            return
         run_state = FlowRunState(
             flow_fingerprint=baseline_fingerprint,
             current_node=from_node or current_node,
@@ -1922,10 +1942,36 @@ class Orchestrator:
         """The private per-task frozen-control-bundle dir (a provider deny target, WRI-010)."""
         return self._layout.private_home / CONTROL_BUNDLE_DIRNAME / task_id
 
-    def _prepare_control_bundle(
-        self, p: _Pipeline, *, resume: bool
+    def _freeze_live_control_bundle(
+        self, p: _Pipeline, bundle_dir: Path
     ) -> tuple[FlowSnapshot, FrozenControlBundle, Path]:
-        """Freeze (fresh/restart) or load+verify (continue) this task's control plane (WRI-010).
+        """Snapshot the live control plane into a fresh bundle and record its digest.
+
+        Shared by fresh/restart and by an operator ``rerun --continue`` that adopts the current
+        on-disk control plane. Returns the live snapshot, the bound bundle, and the live flow dir.
+        """
+        from wastech_orchestrator import __version__
+
+        live = self._resolve_flow(p)
+        assert live.source_path is not None
+        live_flow_dir = live.source_path.parent
+        if bundle_dir.exists():
+            shutil.rmtree(bundle_dir)
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        bundle = freeze_control_bundle(
+            bundle_dir,
+            live,
+            live_flow_dir,
+            self._tool_registry,
+            metadata={"orchestrator_version": __version__},
+        )
+        self._store.update_task(p.task.id, control_bundle_digest=bundle.bundle_digest)
+        return live, bundle, live_flow_dir
+
+    def _prepare_control_bundle(
+        self, p: _Pipeline, *, resume: bool, adopt: bool = False
+    ) -> tuple[FlowSnapshot, FrozenControlBundle, Path]:
+        """Freeze (fresh/restart/adopt) or load+verify (crash-recovery continue) the control plane.
 
         Returns the flow snapshot to execute, the bound frozen bundle, and the **live** flow dir
         (the baseline the post-node hook re-hashes to detect an in-run mutation).
@@ -1933,34 +1979,25 @@ class Orchestrator:
         * Fresh/restart snapshots the live flow YAML, every referenced role file, the supervisor
           prompts, and the referenced tool executables into a fresh private bundle and records its
           digest in the state store.
-        * Continue reuses the original frozen bytes, verified against the parent-held digest, and
-          reconstitutes the flow from the frozen YAML. An operator edit to this flow's live control
-          inputs made while the task was parked is a conflict: continue refuses it (fail closed) so
-          the operator fresh/restarts to adopt it, rather than silently ignoring the edit.
+        * ``adopt`` (an operator ``rerun --continue``) re-freezes from the live control plane the
+          same way, so the resume runs the operator's between-run edits and records the new digest.
+          The post-node tamper hook rebaselines to this new digest, so agent-side mutation *during*
+          the resumed run is still caught — WRI-010 is preserved.
+        * A plain crash-recovery resume reuses the original frozen bytes, verified against the
+          parent-held digest, and reconstitutes the flow from the frozen YAML. An edit to this
+          flow's live control inputs while the task was parked is a conflict here: it refuses (fail
+          closed), because a crash could follow an *agent* mutation — only a deliberate operator
+          ``--continue`` (``adopt``) adopts a live edit.
 
         Raises :class:`ControlBundleError` on any identity/integrity/parked-conflict failure; the
         caller routes it to ``manual_action_required``.
         """
-        from wastech_orchestrator import __version__
-
         bundle_dir = self._control_bundle_dir(p.task.id)
-        if not resume:
-            live = self._resolve_flow(p)
-            assert live.source_path is not None
-            live_flow_dir = live.source_path.parent
-            if bundle_dir.exists():
-                shutil.rmtree(bundle_dir)
-            bundle_dir.mkdir(parents=True, exist_ok=True)
-            bundle = freeze_control_bundle(
-                bundle_dir,
-                live,
-                live_flow_dir,
-                self._tool_registry,
-                metadata={"orchestrator_version": __version__},
-            )
-            self._store.update_task(p.task.id, control_bundle_digest=bundle.bundle_digest)
+        if not resume or adopt:
+            live, bundle, live_flow_dir = self._freeze_live_control_bundle(p, bundle_dir)
             self._log(p.task.id).info(
-                "control plane frozen", extra={"bundle_digest": bundle.bundle_digest[:12]}
+                "control plane adopted on --continue" if adopt else "control plane frozen",
+                extra={"bundle_digest": bundle.bundle_digest[:12]},
             )
             return live, bundle, live_flow_dir
 
@@ -2177,15 +2214,19 @@ class Orchestrator:
             )
 
     def _finalize_instruction_bundle(
-        self, p: _Pipeline, *, control_digest: str, resume: bool
+        self, p: _Pipeline, *, control_digest: str, resume: bool, adopt: bool = False
     ) -> None:
         """Write the composite manifest + persist the ``instruction_manifest_digest`` (WRI-011).
 
         Fresh/restart folds the task/instruction/skill entries and the WRI-010 control digest into
         one composite digest and persists it (the parent-held identity a later continue verifies).
-        Continue is a no-op: the digest was already verified in stage 1 against the persisted value.
+        A plain continue is a no-op: the digest was already verified in stage 1 against the
+        persisted value. An operator ``--continue`` that adopted a re-frozen control plane
+        (``adopt``) re-writes the manifest so its embedded control digest re-binds to the NEW one,
+        keeping the composite identity consistent; the already-frozen task/repo/skill entries
+        (restored into ``p.instruction_entries`` on resume) are preserved, not re-frozen from live.
         """
-        if resume:
+        if resume and not adopt:
             return
         from wastech_orchestrator import __version__
 
@@ -2197,7 +2238,8 @@ class Orchestrator:
             metadata={"orchestrator_version": __version__},
         )
         self._store.update_task(p.task.id, instruction_manifest_digest=digest)
-        self._log(p.task.id).info("agent inputs frozen", extra={"instruction_digest": digest[:12]})
+        label = "agent inputs re-bound (adopt)" if adopt else "agent inputs frozen"
+        self._log(p.task.id).info(label, extra={"instruction_digest": digest[:12]})
 
     def _resolve_merge_flow(self) -> FlowSnapshot:
         """Resolve the configured ``git.merge_flow`` to a validated snapshot (operator-editable).
@@ -2323,8 +2365,13 @@ class Orchestrator:
         # WRI-010: freeze (fresh/restart) or load+verify (continue) the control plane before any
         # node runs, then bind every flow/supervisor/tool consumer to the frozen bundle instead of
         # live ``.worc``. A freeze/verify/parked-conflict failure is a fail-closed manual condition.
+        # Operator ``rerun --continue`` (``continue_task``) adopts the live control plane; automatic
+        # crash-recovery never sets the marker, so it keeps the fail-closed parked-conflict refuse.
+        adopt = resume and p.task.id in self._continue_adopt
         try:
-            snapshot, bundle, live_flow_dir = self._prepare_control_bundle(p, resume=resume)
+            snapshot, bundle, live_flow_dir = self._prepare_control_bundle(
+                p, resume=resume, adopt=adopt
+            )
         except ControlBundleError as exc:
             return self._go_terminal(
                 p, Status.MANUAL_ACTION_REQUIRED, manual_reason=f"control plane: {exc}"
@@ -2371,7 +2418,9 @@ class Orchestrator:
             # reproposal). Skill
             # *packages* are frozen here too (fresh) via ``_skill_paths_by_node``.
             self._resolve_skill_layers(p, snapshot, inputs, resume=resume)
-            self._finalize_instruction_bundle(p, control_digest=bundle.bundle_digest, resume=resume)
+            self._finalize_instruction_bundle(
+                p, control_digest=bundle.bundle_digest, resume=resume, adopt=adopt
+            )
         except InstructionBundleError as exc:
             return self._go_terminal(
                 p, Status.MANUAL_ACTION_REQUIRED, manual_reason=f"agent inputs: {exc}"
@@ -3608,10 +3657,18 @@ class Orchestrator:
                 "terminal cleanup withheld: provider tree not proven quiescent; HEAD left as-is"
             )
         else:
+            # A resumable manual park carrying the task's own WIP keeps that WIP (its resume
+            # input): terminal cleanup preserves it and leaves HEAD on the branch rather than
+            # failing "unaccounted changes" (VF-1). DONE/FAILED still fail-close on a dirty tree.
+            preserve_own_wip = (
+                status is Status.MANUAL_ACTION_REQUIRED and self._worktree_is_task_output(p.task.id)
+            )
             cleanup = self._observe(
                 p,
                 "terminal cleanup",
-                lambda: self._git.terminal_cleanup(p.task.id, mode=self._branch_mode(p.task)),
+                lambda: self._git.terminal_cleanup(
+                    p.task.id, mode=self._branch_mode(p.task), preserve_own_wip=preserve_own_wip
+                ),
             )
         if not cleanup.safe and status is Status.DONE:
             # Publishing finished but the working copy could not be safely restored → manual.
@@ -3620,7 +3677,13 @@ class Orchestrator:
             # Deterministic short-term failure episode (no LLM); never long-term (AC-W3).
             self._record_failure_memory(p)
         # Record the terminal-cleanup outcome and the reason this task stopped (when applicable).
-        last_error = cleanup.error or manual_reason
+        # Surface the true stop reason first; a cleanup problem is secondary context, never a
+        # replacement for it — a cleanup error must not mask the node's manual reason (VF-1).
+        last_error: str | None
+        if manual_reason and cleanup.error and not cleanup.safe:
+            last_error = f"{manual_reason}; terminal cleanup: {cleanup.error}"
+        else:
+            last_error = manual_reason or cleanup.error
         self._store.update_task(
             p.task.id,
             cleanup_target_branch=cleanup.target_branch,
@@ -3975,22 +4038,58 @@ class Orchestrator:
         ):
             return None
 
-    def _from_node_refusals(self, task_id: str, from_node: str) -> list[str]:
-        """Validate a ``--from`` target against the flow currently on disk (empty list => valid).
+    def _resume_node_refusals(
+        self, resume_node: str, *, live: FlowSnapshot | None, is_from: bool
+    ) -> list[str]:
+        """Validate the resume target against the flow currently on disk (empty list => valid).
 
-        Only checks that ``from_node`` exists — ``--from`` is an explicit, operator-driven override,
-        trusted to know what it's targeting even if the flow drifted since the checkpoint. The
-        checkpoint's fingerprint is rebaselined to the live flow's by ``_apply_continue_controls``
-        once this passes, so the resume actually lands at ``from_node`` instead of the engine's own
-        resume gate silently top-restarting (see there for why that matters).
+        An operator ``rerun --continue`` adopts the live control plane and resumes at
+        ``resume_node`` — the explicit ``--from`` override, or the checkpoint's current node. Either
+        way the node must still exist in the (possibly edited) live flow; refuse with an actionable
+        message when it does not, or when the on-disk flow no longer resolves at all. The
+        checkpoint's fingerprint is rebaselined to the live flow by ``_apply_continue_controls``
+        once this passes, so the resume lands at ``resume_node`` instead of the engine's resume gate
+        routing to manual.
         """
-        snapshot = self._persisted_flow_snapshot(task_id)
-        if snapshot is None:
-            return ["could not resolve the task's flow to validate --from; use plain --continue"]
-        if from_node not in snapshot.nodes_by_id:
-            known = ", ".join(sorted(snapshot.nodes_by_id))
-            return [f"--from node '{from_node}' is not in the current flow (nodes: {known})"]
+        if live is None:
+            return [
+                "could not resolve the task's flow (the on-disk flow may be invalid); "
+                "fix it or use a fresh rerun"
+            ]
+        if resume_node not in live.nodes_by_id:
+            known = ", ".join(sorted(live.nodes_by_id))
+            if is_from:
+                return [f"--from node '{resume_node}' is not in the current flow (nodes: {known})"]
+            return [
+                f"the checkpoint node '{resume_node}' no longer exists in the edited flow "
+                f"(nodes: {known}); pass --from <node> to pick a resume point, or a fresh rerun"
+            ]
         return []
+
+    def _control_plane_drifted(
+        self, task_id: str, live: FlowSnapshot, *, checkpoint_fingerprint: str | None
+    ) -> bool:
+        """True when the live control plane differs from the digest frozen at the checkpoint.
+
+        Bundle-level (flow YAML + role prompts + tool executables), so a role/tool-only edit counts
+        too — unlike ``flow_fingerprint`` (flow YAML only). Falls back to the flow_fingerprint when
+        no control-bundle digest was persisted (defensive; every current task freezes one). Drives
+        the ``--continue`` adopt/drift note; a broken/unreadable live input reads as drift.
+        """
+        persisted = self._store.get_control_bundle_digest(task_id)
+        if persisted is None:
+            return (
+                checkpoint_fingerprint is not None
+                and checkpoint_fingerprint != live.flow_fingerprint
+            )
+        assert live.source_path is not None
+        try:
+            live_digest = digest_live_control_inputs(
+                live, live.source_path.parent, self._tool_registry
+            )
+        except ControlBundleError:
+            return True
+        return live_digest != persisted
 
     def _transition(self, p: _Pipeline, dst: Status, **fields: object) -> None:
         src = p.status
