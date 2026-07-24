@@ -111,7 +111,7 @@ Counter update/reset logic around rerun and `finalize` in `core/orchestrator.py`
 
 ## VF-5 — disabling provider-native instruction discovery and re-injecting a frozen subset does not scale to N providers; roll the requirement back to native discovery + filesystem immutability (architecture)
 
-Severity: **High (architectural / maintainability)** Status: **open — proposed rollback, needs decision (reverses a Milestone-1 decision)** First seen: 2026-07-24 Related: supersedes the suggested direction of VF-4; motivated by VF-4's observed silent context loss. Owner-requested.
+Severity: **High (architectural / maintainability)** Status: **open — proposed rollback, needs decision (reverses a Milestone-1 decision)** First seen: 2026-07-24.
 
 ### The requirement under challenge
 
