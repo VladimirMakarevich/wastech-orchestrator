@@ -1,6 +1,6 @@
 # P0.1 — make a `medium` evaluator finding actually gate
 
-Priority: **P0** Status: **proposal** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-1 Escalates: [VF-18](../issues/runtime-validation-findings.md)
+Priority: **P0** Status: **accepted** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-1 Escalates: [VF-18](../issues/runtime-validation-findings.md)
 
 ## Problem
 

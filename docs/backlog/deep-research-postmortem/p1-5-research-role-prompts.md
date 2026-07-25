@@ -1,6 +1,6 @@
 # P1.5 — fix the research role prompts: verifier rubric, critic promises, producer sweep discipline
 
-Priority: **P1** Status: **proposal** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-6, DR-1 (prompt half), DR-12 (prompt half)
+Priority: **P1** Status: **accepted** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-6, DR-1 (prompt half), DR-12 (prompt half)
 
 ## Problem
 

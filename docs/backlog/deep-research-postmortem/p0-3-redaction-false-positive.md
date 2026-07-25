@@ -1,6 +1,6 @@
 # P0.3 — the secret redactor corrupts benign identifiers, breaks the audit log, and pollutes the handoff channel
 
-Priority: **P0** Status: **proposal** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-10
+Priority: **P0** Status: **accepted** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-10
 
 ## Problem
 

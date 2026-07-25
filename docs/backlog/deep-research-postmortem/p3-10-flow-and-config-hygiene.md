@@ -1,8 +1,10 @@
 # P3.10 — flow and config hygiene: unreachable nodes, inert gates, dead session scope, cost trim
 
-Priority: **P3** Status: **proposal** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-8, DR-9, DR-12
+Priority: **P3** Status: **accepted (10c dropped)** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-8, DR-9, DR-12
 
 A collection of small, independent items. None is individually worth a task; together they remove three pieces of configuration that cannot do anything and trim ~$0.9 per run.
+
+**10c is dropped from this campaign** (operator decision, 2026-07-25): the supervisor's cost is not addressed here. The structural answer stays where it was already designed — [supervisor-observation-cadence-p1](../token-optimization/supervisor-observation-cadence-p1.md). With 10c out, the supervisor row of the 10e reasoning table goes with it; the remaining trim is ≈ −$0.7 per run.
 
 ## 10a — `refinement` is structurally unreachable
 
@@ -20,7 +22,9 @@ Same resolver, [`core/orchestrator.py:3124`](../../../src/wastech_orchestrator/c
 
 Related and worth recording: the node made **0** `WebSearch` calls despite the tool being granted, 2 real `WebFetch` calls to MDN (both quoted in the deliverable, both surviving into `sources.json`), and touched none of the nine authoritative-source families its role prompt names. The cause is structural — it sits downstream of `repository_analysis` and validates only what that node found, so six upstream findings gave it exactly one external dependency to check. If [P1.4](p1-4-audit-coverage-gate.md)'s node split lands, revisit whether `external_research` should carry its own standing brief ("validate the stack's core contracts regardless of upstream findings") rather than being purely reactive.
 
-## 10c — the per-step supervisor is unread overhead
+## 10c — the per-step supervisor is unread overhead — **DROPPED**
+
+Kept below as evidence only; no change is made under this campaign.
 
 $0.72 (5.6% of task cost) and ~76 s of serialized dead time, for 7 step notes plus the finalize turn. Ten tool calls across all eight runs; runs 000077, 000080, 000081 and 000082 made **zero**. Six of seven notes contain an explicit "no corrections needed".
 
@@ -44,9 +48,10 @@ Per-node fit from the run, holding [VF-16](../issues/runtime-validation-findings
 | --- | --- | --- | --- |
 | `architecture_design` | xhigh | high | An organizing pass over already-gathered evidence; 13/13 of its repository reads were re-reads, 0 new findings. |
 | `fact_verification` | high | medium | Returned `accept` with zero findings after the deterministic checker had already resolved all 41 citations. |
-| supervisor | medium | low | See 10c. |
 
-≈ −$0.9 per run of this shape. Do **not** lower `repository_analysis` — its problem is scope, not depth, and lowering effort would make it worse.
+(The supervisor row — `medium → low` — is dropped with 10c.)
+
+≈ −$0.7 per run of this shape. Do **not** lower `repository_analysis` — its problem is scope, not depth, and lowering effort would make it worse.
 
 ## 10f — target config re-sync
 

@@ -1,6 +1,6 @@
 # P1.7 — give `deep_research` its own finalize lens, and stop the summary fabricating
 
-Priority: **P1** Status: **proposal** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-3
+Priority: **P1** Status: **accepted** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-3
 
 ## Problem
 

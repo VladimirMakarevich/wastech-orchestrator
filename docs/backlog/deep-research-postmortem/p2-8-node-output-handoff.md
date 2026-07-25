@@ -1,6 +1,6 @@
 # P2.8 — let a node's real output cross the edge, not just a pointer to its sign-off
 
-Priority: **P2** Status: **proposal** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-4
+Priority: **P2** Status: **accepted** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-4
 
 ## Problem
 

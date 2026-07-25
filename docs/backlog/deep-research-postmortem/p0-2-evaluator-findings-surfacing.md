@@ -1,6 +1,6 @@
 # P0.2 — an accepting evaluator's findings must reach the operator
 
-Priority: **P0** Status: **proposal** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-2 Escalates: [VF-18](../issues/runtime-validation-findings.md)
+Priority: **P0** Status: **accepted** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-2 Escalates: [VF-18](../issues/runtime-validation-findings.md)
 
 ## Problem
 

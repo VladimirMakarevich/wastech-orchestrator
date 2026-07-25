@@ -1,6 +1,6 @@
 # P1.4 — split the analysis node and add a coverage gate
 
-Priority: **P1** Status: **proposal** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-7
+Priority: **P1** Status: **accepted** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-7
 
 ## Problem
 
@@ -60,9 +60,20 @@ with edges `analysis_docs_tests → coverage_gate`, `coverage_gate → external_
 
 `coverage.md` asserts one thing only: **every declared subsystem must show a traced property** — an invariant checked, a determinism or correctness claim verified — not a bare "no findings" label. A subsystem that cannot show one is reported as a `medium` finding, which then gates (given [P0.1](p0-1-evaluator-gate-severity.md)).
 
-### 3. Give `repository_analysis` a shell, or drop the git clause
+### 3. Grant read-only git to the analysis nodes (decided)
 
-The role prompt says _"the git history is always present and authoritative … **Discrepancies here are prime findings**"_, while the node's tools are `Read, Glob, Grep`. The agent tried, substituted a Markdown grep, and never examined a commit. Either add `Bash(git log:*)` / `Bash(git show:*)` to the read-only profile, or delete the clause. Leaving both is worse than either.
+The role prompt says _"the git history is always present and authoritative … **Discrepancies here are prime findings**"_, while the node's tools are `Read, Glob, Grep`. The agent tried, substituted a Markdown grep, and never examined a commit.
+
+**Decision: grant the capability, do not delete the clause.** History inspection is core audit evidence. The grant is an allowlist of read-only git verbs — `log`, `show`, `diff`, `blame`, `status`, `rev-list`, `rev-parse`, `ls-files`, `shortlog`, `describe`, `cat-file`, `for-each-ref` — and nothing else.
+
+Everything that mutates a repository or publishes stays forbidden, unchanged: `commit`, `push`, `tag`, `merge`, `rebase`, `reset`, `checkout`/`switch`, `restore`, `clean`, `stash`, `apply`/`am`/`cherry-pick`, `remote`, `config`, `gc`, `filter-branch`, and every `gh` write subcommand. This is the existing hard invariant — only the orchestrator commits / pushes / opens PRs — and this change must not create a second path to it. `--dangerously*` / sandbox-disabling flags remain rejected by the config validator.
+
+Implementation notes (both providers must agree):
+
+- Claude: [`providers/claude.py:105`](../../../src/wastech_orchestrator/providers/claude.py) maps `read-only` to `("dontAsk", ("Read", "Glob", "Grep"))` — `Bash` is absent entirely, so the grant means adding scoped `Bash(git log:*)`-style entries to that baseline, not adding bare `Bash`. Note that the sandbox branch in `resolve_claude_tools` is keyed on `profile == "workspace-write"`, so a `read-only` node that now carries Bash bypasses the sandbox-need logic — that branch has to be reconsidered as part of this change, not left implicit.
+- Codex: `read-only` is a sandbox mode ([`providers/codex.py:320-321`](../../../src/wastech_orchestrator/providers/codex.py)) that already permits command execution while blocking writes, so the verb allowlist is what makes the two providers behave the same rather than accidentally-different.
+- Cross-platform: no shell interpolation of any user string — the git invocation is an argument list, as everywhere else.
+- Per [security.md](../../../.agents/rules/security.md) the capability needs an operator escape hatch: the grant is a property of the profile/flow, so an operator can withhold it without editing code.
 
 ## Acceptance
 
