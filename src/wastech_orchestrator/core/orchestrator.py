@@ -142,6 +142,7 @@ from wastech_orchestrator.git_manager import (
     ManualActionRequired,
 )
 from wastech_orchestrator.ledger import (
+    STUCK_FILENAME,
     Ledger,
     LedgerRecord,
     write_failure_report,
@@ -164,6 +165,8 @@ from wastech_orchestrator.notify import (
     TRACE_REWORK_EXHAUSTED,
     Notifier,
     NullNotifier,
+    TerminalDetails,
+    TerminalFinding,
 )
 from wastech_orchestrator.observability.logging import bind
 from wastech_orchestrator.providers.artifacts import (
@@ -370,6 +373,61 @@ def _render_governance_section(paths: tuple[str, ...]) -> str:
         "This run edited repository governance/instruction files (a notice, not a block):\n\n"
         f"{bullets}\n"
     )
+
+
+# --- VF-22 terminal-notification enrichment (read the on-disk diagnosis for the operator) --------
+
+_FINDING_SEVERITY_RANK: dict[str, int] = {"high": 0, "medium": 1, "low": 2}
+
+
+def _read_failure_report(path: str | None) -> dict[str, Any] | None:
+    """Load ``failure_report.json`` for the terminal notification (VF-22); ``None`` when absent.
+
+    Best-effort and total: a missing path, unreadable file, or non-object JSON yields ``None`` so
+    the notification simply degrades to its terse form.
+    """
+    if not path:
+        return None
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _top_blocking_finding(findings: object) -> TerminalFinding | None:
+    """The single most-severe review finding (high → medium → low) for the notification (VF-22).
+
+    ``findings`` is the failure report's ``last_review_findings`` — a list of
+    ``{severity, reason, paths}`` (:mod:`core.flow.nodes.evaluator`). ``None`` when there are none.
+    """
+    if not isinstance(findings, list):
+        return None
+    candidates = [f for f in findings if isinstance(f, dict)]
+    if not candidates:
+        return None
+    best = min(
+        candidates,
+        key=lambda f: _FINDING_SEVERITY_RANK.get(str(f.get("severity", "")).lower(), 3),
+    )
+    paths_raw = best.get("paths")
+    paths = tuple(str(p) for p in paths_raw) if isinstance(paths_raw, list | tuple) else ()
+    return TerminalFinding(
+        severity=str(best.get("severity") or "unknown"),
+        reason=str(best.get("reason") or ""),
+        paths=paths,
+    )
+
+
+def _stuck_report_path(failure_report_path: str | None) -> str | None:
+    """The operator-readable ``stuck.md`` beside ``failure_report.json`` (VF-22), as a POSIX path.
+
+    ``stuck.md`` is the sibling the operator opens; only the JSON path is persisted on the row.
+    Rendered with :meth:`PurePath.as_posix` so the displayed path is stable across platforms.
+    """
+    if not failure_report_path:
+        return None
+    return Path(failure_report_path).with_name(STUCK_FILENAME).as_posix()
 
 
 @dataclass(frozen=True)
@@ -1690,8 +1748,10 @@ class Orchestrator:
     def resume(self) -> PipelineResult | None:
         """Reconcile persisted state on startup and resume the single unfinished task.
 
-        Returns the terminal result of the resumed task, or ``None`` when the slot is free (no
-        active task and no interrupted cleanup) so a caller may pick a pending task.
+        Returns the terminal result of the resumed task, or ``None`` when the slot is free so a
+        caller may pick a pending task — no active task, no interrupted cleanup, or a cleanup that
+        stays blocked (VF-21: a terminal task's stuck cleanup owns no slot and must not freeze the
+        queue; it is recorded + logged and re-tried each tick).
         """
         plan = RecoveryReconciler(self._config, self._store, self._git).reconcile()
         if plan.action is RecoveryAction.NONE:
@@ -1733,13 +1793,25 @@ class Orchestrator:
 
     def _resume_cleanup(self, task_id: str | None) -> PipelineResult | None:
         """Finish an interrupted terminal cleanup once (checkout base or stay per the task's branch
-        mode / ``repo.checkout_base_on_cleanup``), then append the ledger record."""
+        mode / ``repo.checkout_base_on_cleanup``), then append the ledger record.
+
+        The cleanup decision mirrors the primary terminal path (:meth:`_resume_terminal_cleanup`),
+        so it honors the WRI-012 quiescence barrier and preserves a resumable manual-park's own WIP
+        (VF-1) — the retry must not undo what ``_go_terminal`` deliberately did.
+
+        Returns the terminal result when the cleanup completes; returns ``None`` when it stays
+        blocked so the caller treats the slot as free (a terminal task is ``_NON_ACTIVE`` and owns
+        no slot) and scans ``pending/``. A stuck janitorial cleanup on an already-terminal task must
+        not freeze the whole queue (VF-21): the block is recorded (``cleanup_last_error``) and
+        logged, the next task still fail-closes at its own pre-launch guards, and the blocked task
+        is re-elected each tick so cleanup self-heals once the operator clears the tree.
+        """
         if task_id is None:
             return None
         row = self._store.get_task(task_id)
         if row is None:
             return None
-        cleanup = self._git.terminal_cleanup(task_id, mode=self._persisted_branch_mode(task_id))
+        cleanup = self._resume_terminal_cleanup(task_id, row.status)
         self._store.update_task(
             task_id,
             cleanup_target_branch=cleanup.target_branch,
@@ -1765,7 +1837,38 @@ class Orchestrator:
                 pr_url=None,
                 reason=cleanup.error,
             )
+        if not cleanup.safe:
+            # VF-21: the cleanup is stuck, but this task is already terminal and holds no slot, so
+            # the queue is NOT frozen — return None so ``watch_once`` proceeds to scan pending.
+            self._log(task_id).warning(
+                "terminal cleanup still blocked on resume; queue not frozen (task is terminal and "
+                "owns no slot) — pending tasks are still scanned. Clear the working tree, then "
+                "rerun/finalize.",
+                extra={"reason": cleanup.error},
+            )
+            return None
         return PipelineResult(task_id=task_id, final_status=row.status)
+
+    def _resume_terminal_cleanup(self, task_id: str, status: Status) -> CleanupOutcome:
+        """Compute the terminal-cleanup outcome for the resume path, matching ``_go_terminal``.
+
+        Kept in lockstep with the primary path's cleanup decision: the WRI-012 quiescence barrier
+        withholds any Git action over a tree not proven quiescent, and a resumable manual-park
+        carrying the task's own WIP preserves it (VF-1) instead of fail-closing on ``unaccounted
+        changes``. Drift between this and ``_go_terminal`` is exactly the VF-21 regression.
+        """
+        if self._exchange_active_unsafe(task_id):
+            return CleanupOutcome(
+                safe=False,
+                target_branch=self._config.repo.base_branch,
+                error="terminal cleanup withheld: provider tree not proven quiescent (WRI-012)",
+            )
+        preserve_own_wip = (
+            status is Status.MANUAL_ACTION_REQUIRED and self._worktree_is_task_output(task_id)
+        )
+        return self._git.terminal_cleanup(
+            task_id, mode=self._persisted_branch_mode(task_id), preserve_own_wip=preserve_own_wip
+        )
 
     def _resume_task(self, plan: RecoveryPlan) -> PipelineResult:
         """Rebuild the context for the one active task and continue it idempotently."""
@@ -4228,11 +4331,46 @@ class Orchestrator:
                 reason=reason,
                 contacts=contacts,
                 governance_changed=governance_changed,
+                details=self._terminal_details(task_id, final_status),
             )
         except Exception as exc:
             self._log(task_id).warning(
                 "terminal notification failed", extra={"error_type": type(exc).__name__}
             )
+
+    def _terminal_details(self, task_id: str, final_status: Status) -> TerminalDetails | None:
+        """Assemble the VF-22 operator-facing enrichment for a needs-attention terminal.
+
+        Returns ``None`` for a clean ``done`` (kept terse) or when the task has no ``tasks`` row (a
+        validation reject has none) — the notification degrades to the terse one-line message. The
+        stop node, loop, and blocking finding are read from the on-disk ``failure_report.json`` the
+        engine / infra terminal already wrote; the rest from the ``TaskRow``. Best-effort: a
+        missing or unreadable report simply omits those fields. Never raises (the caller swallows).
+        """
+        if final_status not in (Status.MANUAL_ACTION_REQUIRED, Status.FAILED):
+            return None
+        row = self._store.get_task(task_id)
+        if row is None:
+            return None
+        loop: str | None = None
+        finding: TerminalFinding | None = None
+        report = _read_failure_report(row.failure_report_path)
+        if report is not None:
+            raw_loop = report.get("loop")
+            loop = raw_loop if isinstance(raw_loop, str) and raw_loop != "infra" else None
+            finding = _top_blocking_finding(report.get("last_review_findings"))
+        # The stop node is the persisted resume checkpoint (``tasks.current_node``), not a TaskRow
+        # field — read it via the flow-checkpoint accessor (the row is known to exist here).
+        stop_node = self._store.get_flow_checkpoint(task_id)[0]
+        return TerminalDetails(
+            title=row.title or None,
+            branch=row.branch,
+            stop_node=stop_node,
+            loop=loop,
+            fix_rounds=row.fix_iterations,
+            finding=finding,
+            report_path=_stuck_report_path(row.failure_report_path),
+        )
 
     def _append_ledger(
         self,

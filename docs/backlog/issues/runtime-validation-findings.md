@@ -538,7 +538,17 @@ Short form: VF-5's shipped resolution write-denies the tracked root instruction 
 
 ## VF-21 — a terminal task whose cleanup never completed stalls `watch` forever: every tick re-runs cleanup, returns `manual_action_required`, and never scans `pending/` (latent BUG)
 
-Severity: **Medium (latent — reachable, not yet observed)** Status: **open** First seen: 2026-07-25 (found by inspection while answering "does `manual_action_required` block the next task?"; **not** triggered in the 2026-07-23…25 validation window) Related: VF-1 (the `preserve_own_wip` fix this diverges from), VF-13
+Severity: **Medium (latent — reachable, not yet observed)** Status: **shipped 2026-07-25** (`_resume_cleanup` now mirrors `_go_terminal` via a shared `_resume_terminal_cleanup` — WRI-012 quiescence check + `preserve_own_wip` for a resumable MAR park (VF-1) — and returns `None` when the cleanup stays blocked so `watch_once` scans `pending/` instead of freezing; the block is recorded, warned, and re-tried each tick so it self-heals once the tree is cleared — see Resolution) First seen: 2026-07-25 (found by inspection while answering "does `manual_action_required` block the next task?"; **not** triggered in the 2026-07-23…25 validation window) Related: VF-1 (the `preserve_own_wip` fix this diverges from), VF-13
+
+### Resolution (shipped 2026-07-25)
+
+Both halves of the stall are closed and the queue-visibility gap with them:
+
+- **The retry no longer undoes the primary path.** `_resume_cleanup` delegated its cleanup decision to a new `_resume_terminal_cleanup(task_id, status)` that mirrors `_go_terminal`: it withholds under the WRI-012 quiescence barrier (`_exchange_active_unsafe`) instead of checking out over a non-quiescent tree, and it computes `preserve_own_wip = MANUAL_ACTION_REQUIRED and _worktree_is_task_output(...)` so a resumable manual park keeps its own WIP (VF-1) rather than fail-closing on "unaccounted changes". Drift between the two paths — the root cause — is now guarded by tests (`test_resume_cleanup_preserves_own_wip_on_manual_park`).
+- **A blocked cleanup never freezes the whole queue.** The observed stall was MAR-specific: a blocked cleanup returned a `manual_action_required` `PipelineResult`, which `watch_once` treats as an active-task MAR and returns before `scan_pending_sorted`. `_resume_cleanup` now returns `None` when the cleanup stays blocked — the task is `_NON_ACTIVE` and holds no slot — so `resume()` reads as "slot free" and `watch_once` falls through to the pending scan. Downstream per-task guards (the pre-launch `assert_exchange_current_task_only`, branch-prep's clean-tree requirement) still fail-close the next task visibly; the blocked cleanup is re-elected each tick, so it self-heals once the operator clears the tree (`test_resume_blocked_cleanup_returns_none_and_keeps_queue_scanning` runs two ticks and asserts the second still scans pending).
+- **The stall is visible.** A blocked cleanup on resume logs one `WARNING` naming the task and carrying the reason, so the operator sees the held cleanup rather than a silent repeating `terminal cleanup started`.
+
+`find_incomplete_cleanup` re-election is left unbounded (the "proceed to pending" option was chosen over "stop re-electing" — see [follow_ups](../follow_ups.md)), which preserves the self-heal retry with no new state column.
 
 ### Observed
 
@@ -584,7 +594,17 @@ So the same-tick MAR chain break ([`cli.py:1521-1522`](../../../src/wastech_orch
 
 ## VF-22 — the terminal Telegram notification is unactionable: no severity glyph, no title, no stop node, no explanation, no next step — while a full diagnosis already sits on disk (UX / observability)
 
-Severity: **Medium (operator UX — operator-reported)** Status: **open** First seen: 2026-07-25 (`p10-01-governance-docs-2`, operator-reported) Related: VF-10, VF-20
+Severity: **Medium (operator UX — operator-reported)** Status: **shipped 2026-07-25** (terminal notifications now lead with a severity glyph — `✅`/`🛑`/`❌` — and a needs-attention terminal expands into an actionable body: title, stop node + loop + round count, a prose reason mapped from the internal token, the top blocking finding + paths, and the `stuck.md` report path; `done` stays terse; assembled centrally in `_notify_terminal` from the `TaskRow` + `failure_report.json` — see Resolution) First seen: 2026-07-25 (`p10-01-governance-docs-2`, operator-reported) Related: VF-10, VF-20
+
+### Resolution (shipped 2026-07-25)
+
+Shipped as specified, items 1–7, with the "what's required next" line scoped to the report path only (no fabricated `rerun` invocation, given the VF-1/2/3 precedent of plausible-but-refusing suggestions):
+
+- **Shared vocabulary in `notify/interface.py`** (beside `TRACE_REWORK_EXHAUSTED`): a `terminal_reason_prose()` table maps each internal `limit_name` (`no_file_change`, `max_fix_cycles`, `max_total_fix_iterations`, dynamic `budget:*`) to one human sentence and passes an **unmapped token through verbatim** (never dropped, item 4). New `TerminalDetails`/`TerminalFinding` carry the enrichment; `send_notification` gains an optional `details` param (also on `NullNotifier` + the test fakes).
+- **Transport in `notify/telegram.py`**: a `_STATUS_EMOJI` map beside `_TRACE_EMOJI` (`✅ done`, `🛑 manual_action_required`, `❌ failed`); `_format_terminal_message` renders a **terse glyph line for `done`** (id, status, PR) and the **enriched multi-line body for `failed`/`manual_action_required`** (title, `Stopped at: <node> (<loop> loop), after N fix rounds`, `Why:` prose, `Blocking (<severity>): <one line>`, `Paths:`, `Branch:`, `Details: <stuck.md>`). Plain text + emoji (no `parse_mode`), still redacted + 4096-bounded by the existing `_outgoing`.
+- **Producer in `core/orchestrator.py`**: `_notify_terminal` assembles `TerminalDetails` once, centrally, from the `TaskRow` (title, branch, `fix_iterations`) + the flow checkpoint (stop node) + the on-disk `failure_report.json` (loop, most-severe `last_review_findings` entry) — all keyed by `task_id`, so the four call sites are unchanged and every path degrades cleanly to the terse line when the context is absent (a validation reject has no row → `None`; a clean `done` → `None`). The `stuck.md` path is derived as the POSIX sibling of the persisted `failure_report.json`.
+
+No `state.db` version bump (the enrichment is in-memory, read from data the run already persisted). The read/report surface (a `worc cost`/report CLI) is untouched — out of scope here.
 
 ### Observed
 

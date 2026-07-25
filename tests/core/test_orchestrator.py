@@ -180,6 +180,7 @@ class RecordingNotifier:
         reason: str | None,
         contacts: tuple[str, ...] = (),
         governance_changed: tuple[str, ...] = (),
+        details: object = None,
     ) -> None:
         self.calls.append(
             {
@@ -189,6 +190,7 @@ class RecordingNotifier:
                 "reason": reason,
                 "contacts": contacts,
                 "governance_changed": governance_changed,
+                "details": details,
             }
         )
         if self._raise_on_send:
@@ -380,6 +382,92 @@ def _impl_writes_file(provider_id: str) -> FakeProvider:
     return FakeProvider(provider_id, outputs={"implementation": ("implemented", None)})
 
 
+def test_notify_terminal_enriches_manual_from_failure_report(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # VF-22: _notify_terminal assembles TerminalDetails from the TaskRow + on-disk failure report
+    # for a needs-attention terminal — stop node, loop, the most-severe blocking finding, and the
+    # stuck.md report path — all keyed by task_id, so every call site enriches without extra
+    # plumbing. The most-severe finding wins over a low nit in the same report.
+    from wastech_orchestrator.notify import TerminalDetails
+
+    notifier = RecordingNotifier()
+    orch, store, _ledger, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        notifier=notifier,
+    )
+    task_dir = task_artifact_dir(art, "task-mar")
+    task_dir.mkdir(parents=True, exist_ok=True)
+    (task_dir / "failure_report.json").write_text(
+        json.dumps(
+            {
+                "loop": "review_fix",
+                "last_review_findings": [
+                    {"severity": "low", "reason": "a nit", "paths": ["b.py"]},
+                    {
+                        "severity": "high",
+                        "reason": "AGENTS.md was never modified",
+                        "paths": ["AGENTS.md"],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    store.insert_task(
+        TaskRow(
+            task_id="task-mar",
+            title="Fix governance docs",
+            status=Status.MANUAL_ACTION_REQUIRED,
+            branch="feat/x",
+            fix_iterations=2,
+            failure_report_path=str(task_dir / "failure_report.json"),
+        )
+    )
+    store.update_task("task-mar", current_node="review")
+
+    orch._notify_terminal(
+        task_id="task-mar",
+        final_status=Status.MANUAL_ACTION_REQUIRED,
+        pr_url=None,
+        reason="no_file_change",
+    )
+
+    details = notifier.calls[0]["details"]
+    assert isinstance(details, TerminalDetails)
+    assert details.title == "Fix governance docs"
+    assert details.stop_node == "review" and details.loop == "review_fix"
+    assert details.fix_rounds == 2
+    assert details.finding is not None
+    assert details.finding.severity == "high"  # most-severe finding wins over the low nit
+    assert details.finding.paths == ("AGENTS.md",)
+    assert details.report_path is not None and details.report_path.endswith("stuck.md")
+
+
+def test_notify_terminal_done_passes_no_details(git_repo, make_git_config, tmp_path: Path) -> None:
+    # VF-22 item 7: a clean done carries no enrichment (stays terse) — details is None.
+    notifier = RecordingNotifier()
+    orch, store, _ledger, _art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        notifier=notifier,
+    )
+    store.insert_task(TaskRow(task_id="task-done", title="t", status=Status.DONE, branch="feat/x"))
+
+    orch._notify_terminal(
+        task_id="task-done", final_status=Status.DONE, pr_url="https://example/pr/2", reason=None
+    )
+
+    assert notifier.calls[0]["details"] is None
+
+
 def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: Path) -> None:
     providers = _both()
     notifier = RecordingNotifier()
@@ -428,6 +516,7 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
             "reason": None,
             "contacts": (),
             "governance_changed": (),  # ordinary task touched no governance files
+            "details": None,  # VF-22: a clean done stays terse (no enrichment)
         }
     ]
     assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "main"
@@ -2206,6 +2295,7 @@ def test_rejected_task_no_branch(git_repo, make_git_config, git_run, tmp_path: P
             "reason": "frontmatter_missing",
             "contacts": (),
             "governance_changed": (),
+            "details": None,  # VF-22: a validation reject has no tasks row → no enrichment
         }
     ]
 

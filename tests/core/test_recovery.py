@@ -13,7 +13,13 @@ from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult, Notifier
 from wastech_orchestrator.providers.artifacts import exchange_task_dir
 from wastech_orchestrator.providers.base import AgentRunRequest, ProviderId
-from wastech_orchestrator.state_store import CheckRunRow, StateStore, SubtaskRow, TaskRow
+from wastech_orchestrator.state_store import (
+    CheckRunRow,
+    NodeRunRow,
+    StateStore,
+    SubtaskRow,
+    TaskRow,
+)
 
 # Every test here is a slow integration test (real git / subprocess / process tree).
 pytestmark = pytest.mark.slow
@@ -49,6 +55,7 @@ class RecordingNotifier:
         reason: str | None,
         contacts: tuple[str, ...] = (),
         governance_changed: tuple[str, ...] = (),
+        details: object = None,
     ) -> None:
         self.calls.append((task_id, final_status))
 
@@ -428,6 +435,81 @@ def test_resume_interrupted_cleanup_notifies_after_ledger(
     assert result is not None and result.final_status is Status.DONE
     assert ledger.records()[0]["id"] == "task-cleanup"
     assert notifier.calls == [("task-cleanup", "done")]
+
+
+def test_resume_blocked_cleanup_returns_none_and_keeps_queue_scanning(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # VF-21: a terminal manual_action_required task whose cleanup cannot complete (a dirty tree it
+    # does not own) must NOT freeze the queue. resume() returns None — the task is terminal and owns
+    # no slot — so watch_once falls through to scan pending/. The cleanup stays re-elected each tick
+    # (self-heals once the operator clears the tree), so a second tick still returns None rather
+    # than a blocking manual_action_required result. Without the fix the retry returns MAR forever
+    # and watch_once returns before the pending scan — the permanent stall.
+    notifier = RecordingNotifier()
+    orch, store, ledger, *_ = _build_orchestrator(
+        git_repo, make_git_config, tmp_path, _make_providers(git_repo), [0], notifier=notifier
+    )
+    branch = "worc/task-blocked-x"
+    git_run(["checkout", "-b", branch], git_repo.clone)
+    store.insert_task(
+        TaskRow(
+            task_id="task-blocked",
+            title="blocked",
+            status=Status.MANUAL_ACTION_REQUIRED,
+            branch=branch,
+        )
+    )
+    # A dirty, foreign working tree the task never produced (no evaluator/checks/publish node ran →
+    # _worktree_is_task_output is False → preserve_own_wip is False), so new-mode terminal cleanup
+    # fail-closes on "unaccounted changes".
+    (git_repo.clone / "foreign.txt").write_text("dirty\n", encoding="utf-8")
+
+    first = orch.resume()
+    second = orch.resume()
+
+    assert first is None and second is None  # a blocked cleanup never blocks the queue
+    row = store.get_task("task-blocked")
+    assert row is not None and not row.cleanup_completed  # still blocked, re-elected each tick
+    assert row.cleanup_last_error and "unaccounted changes" in row.cleanup_last_error
+    # Ledger + notify fire exactly once (the first tick), marked blocked rather than completed.
+    assert notifier.calls == [("task-blocked", "manual_action_required")]
+    assert ledger.records()[0]["terminal_cleanup"] == "blocked"
+
+
+def test_resume_cleanup_preserves_own_wip_on_manual_park(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # VF-21/VF-1: a resumable manual_action_required park carrying the task's OWN uncommitted work
+    # (a publish node ran, so the dirty tree is the task's output — its --continue resume input) is
+    # preserved on the resume path exactly as the primary terminal path does: cleanup leaves HEAD on
+    # the branch and reports safe instead of fail-closing on "unaccounted changes". Without the fix
+    # the retry drops preserve_own_wip and stalls on the very tree _go_terminal kept.
+    notifier = RecordingNotifier()
+    orch, store, ledger, *_ = _build_orchestrator(
+        git_repo, make_git_config, tmp_path, _make_providers(git_repo), [0], notifier=notifier
+    )
+    branch = "worc/task-wip-x"
+    git_run(["checkout", "-b", branch], git_repo.clone)
+    store.insert_task(
+        TaskRow(
+            task_id="task-wip",
+            title="wip",
+            status=Status.MANUAL_ACTION_REQUIRED,
+            branch=branch,
+        )
+    )
+    store.record_node_run(NodeRunRow(task_id="task-wip", node_id="publish", node_kind="publish"))
+    (git_repo.clone / "own-wip.txt").write_text("task work\n", encoding="utf-8")
+
+    result = orch.resume()
+
+    assert result is not None and result.final_status is Status.MANUAL_ACTION_REQUIRED
+    row = store.get_task("task-wip")
+    assert row is not None and row.cleanup_completed  # preserved WIP → cleanup reports safe
+    assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone).strip() == branch
+    assert (git_repo.clone / "own-wip.txt").exists()  # the task's WIP is untouched
+    assert ledger.records()[0]["terminal_cleanup"] == "completed"
 
 
 def _impl_fingerprint() -> str:
