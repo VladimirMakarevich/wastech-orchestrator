@@ -13,6 +13,9 @@ from wastech_orchestrator import preflight
 from wastech_orchestrator.install import detect
 from wastech_orchestrator.providers.base import ProviderId
 
+# Every test here is a slow integration test (real git / subprocess / process tree).
+pytestmark = pytest.mark.slow
+
 GitRunner = Callable[[list[str], Path], Any]
 
 

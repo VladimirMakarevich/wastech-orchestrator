@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 from wastech_orchestrator.core.dangerous_diff import (
@@ -40,6 +41,13 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeInputs,
     NodeManualRequired,
     NodeServices,
+)
+from wastech_orchestrator.core.flow.nodes.exchange_publish import (
+    assert_exchange_unchanged,
+    assert_request_contained,
+    capture_exchange_manifest,
+    publish_artifact,
+    publish_file,
 )
 from wastech_orchestrator.core.flow.nodes.human_gate import HumanGate
 from wastech_orchestrator.core.flow.observability import record_run_observability
@@ -64,12 +72,14 @@ from wastech_orchestrator.core.hitl import (
     mark_consumed,
     mark_interaction_status,
     parse_typed_output,
+    sanitized_answer_packet,
     turn_gate_interaction_path,
     typed_output_schema,
 )
 from wastech_orchestrator.notify import AskKind, AskResult
 from wastech_orchestrator.providers.artifacts import (
     TOOL_STDOUT_FILENAME,
+    exchange_latest_run_file,
     latest_run_file,
     task_artifact_dir,
 )
@@ -122,7 +132,7 @@ class AgentNodeRunner:
         had_interaction = persisted is not None
         human_input_path: str | None = None
         if persisted is not None:
-            human_input_path = self._resume_interaction(node, path, persisted)
+            human_input_path = self._resume_interaction(node, ctx, path, persisted)
 
         run_id, outcome = self._invoke_with_turn_gate(
             node, ctx, route, human_input_path=human_input_path
@@ -151,7 +161,7 @@ class AgentNodeRunner:
             node,
             ctx,
             route,
-            human_input_path=str(path),
+            human_input_path=self._exchange_human_input(node, ctx, path),
             resume_session_id=_same_provider_session_id(outcome, route),
             # Resuming the first run's session means its usage is the baseline: the second run's
             # cumulative includes the first's turns, so subtracting it recovers only the new work.
@@ -162,7 +172,9 @@ class AgentNodeRunner:
         mark_consumed(path)
         return NodeResult(node_id=node.id, outcome=_agent_outcome(outcome2), node_run_id=run_id2)
 
-    def _resume_interaction(self, node: AgentNode, path: Any, persisted: Mapping[str, Any]) -> str:
+    def _resume_interaction(
+        self, node: AgentNode, ctx: NodeContext, path: Any, persisted: Mapping[str, Any]
+    ) -> str:
         status = str(persisted.get("status", ""))
         if status == "waiting":
             result = self._gate().resume(path, dict(persisted))
@@ -173,7 +185,27 @@ class AgentNodeRunner:
             raise NodeManualRequired(
                 f"agent node {node.id!r}: cannot resume HITL from status {status!r}"
             )
-        return str(path)
+        return self._exchange_human_input(node, ctx, path)
+
+    def _exchange_human_input(self, node: AgentNode, ctx: NodeContext, path: Any) -> str:
+        """Publish the sanitized answer-only HITL packet to the exchange; return its path (WRI-001).
+
+        The full durable interaction record (including the Telegram/durable transport handle) stays
+        private; only the redacted ``{kind, question, answer, approved}`` projection becomes the
+        provider-readable ``human_input_path``. Falls back to the private durable path when no
+        exchange is wired (a unit harness)."""
+        persisted = load_interaction(path)
+        if persisted is None or not self._s.exchange_root:
+            return str(path)
+        suffix = f".sub-{ctx.subtask_order:02d}" if ctx.subtask_order is not None else ""
+        return publish_artifact(
+            self._s.exchange_root,
+            ctx.task_id,
+            f"hitl/{node.id}{suffix}.answer.json",
+            json.dumps(sanitized_answer_packet(persisted), ensure_ascii=False, indent=2) + "\n",
+            extra_secrets=self._s.prompt_secrets,
+            private_path=str(path),
+        )
 
     def _gate(self) -> HumanGate:
         if self._s.notifier is None:
@@ -311,6 +343,16 @@ class AgentNodeRunner:
 
     # -- shared invocation ----------------------------------------------------
 
+    def _is_workspace_write(self, node: AgentNode, ctx: NodeContext) -> bool:
+        """True iff this node's resolved permission profile is workspace-write (WRI-009).
+
+        Only workspace-write attempts can mutate the clone, so only they are bracketed by the Git
+        control-state capture/compare and get the post-edit diff guard; a read-only agent/evaluator
+        attempt cannot mutate git, so it is neither captured nor compared.
+        """
+        resolved = node.permission_profile or ctx.snapshot.doc.permission_ceiling
+        return resolved == PermissionProfile.WORKSPACE_WRITE
+
     def _invoke(
         self,
         node: AgentNode,
@@ -341,6 +383,28 @@ class AgentNodeRunner:
         request = self._build_request(
             node, ctx, route, run_id, human_input_path, session_id, guard_output_baseline(baseline)
         )
+        assert_request_contained(request, self._s.exchange_root)
+        # WRI-009: fingerprint the Git control state before a workspace-write attempt; the compare
+        # after `run_stage` (below) runs before any orchestrator git touches the possibly-poisoned
+        # clone. A read-only attempt cannot mutate git, so it is not captured. WRI-002: a
+        # workspace-write attempt also gets its Write/Edit-deny roots (exchange/gitdir/common/hooks/
+        # tasks) resolved fresh here (they are only final after branch prep) and threaded onto the
+        # request; a read-only attempt carries no write tools, so ``write_guard`` stays ``None``.
+        git = self._s.git
+        control_before = None
+        if git is not None and self._is_workspace_write(node, ctx):
+            control_before = git.capture_git_control_state()
+            request = replace(
+                request,
+                write_guard=git.resolve_control_paths(self._s.exchange_root),
+            )
+        # WRI-002 detection-in-depth: fingerprint the curated exchange before the attempt so a
+        # provider mutation of the read-only surface is caught from parent-held state (below),
+        # before
+        # any downstream node consumes it. Applies to every agent profile — the exchange is
+        # immutable
+        # to the agent regardless of write access.
+        exchange_before = capture_exchange_manifest(self._s.exchange_root, ctx.task_id)
         outcome = self._s.router.run_stage(request, route, snapshot=self._s.snapshot)
         self._record_completion(run_id, outcome)
         record_run_observability(
@@ -365,6 +429,21 @@ class AgentNodeRunner:
                 f"agent node {node.id!r}: no provider could complete it ({err})",
                 error_class=error_class,
             )
+        # WRI-009/002: the result is trusted (WRI-012 proved provider-tree quiescence inside the
+        # adapter), so compare now — before `_apply_post_edit_guard`'s `git diff`/commit touch the
+        # clone and before any downstream node reads the exchange. Git control-state drift or an
+        # exchange mutation is a non-fallback policy violation → manual action; the changed copy is
+        # never consumed downstream.
+        if control_before is not None and git is not None:
+            drift = git.compare_git_control_state(control_before)
+            if drift is not None:
+                raise NodeManualRequired(
+                    f"agent node {node.id!r}: git control state changed during a provider attempt "
+                    f"({drift.summary()})"
+                )
+        assert_exchange_unchanged(
+            exchange_before, self._s.exchange_root, ctx.task_id, node_id=node.id
+        )
         self._persist_session(node, ctx, outcome)
         return run_id, outcome
 
@@ -378,12 +457,20 @@ class AgentNodeRunner:
         pre-approval); on denial the stage reconsiders once with the denial context and, if the diff
         is still dangerous, fails closed to manual review.
         """
-        resolved = node.permission_profile or ctx.snapshot.doc.permission_ceiling
-        if resolved != PermissionProfile.WORKSPACE_WRITE or self._s.git is None:
+        if not self._is_workspace_write(node, ctx) or self._s.git is None:
             return
-        self._in.diff_path = self._s.git.write_current_diff(ctx.task_id)
+        private_diff = self._s.git.write_current_diff(ctx.task_id)
+        # Keep the private authoritative diff as the audit artifact; expose only the redacted
+        # exchange copy as {diff_path} to the provider (WRI-001).
+        self._in.diff_path = publish_file(
+            self._s.exchange_root,
+            ctx.task_id,
+            "current.diff",
+            private_diff,
+            extra_secrets=self._s.prompt_secrets,
+        )
         if self._s.register_artifact is not None:
-            self._s.register_artifact(ctx.task_id, "diff", self._in.diff_path)
+            self._s.register_artifact(ctx.task_id, "diff", private_diff)
         self._apply_output_containment_guard(node, ctx)
         entries = self._s.git.changed_code_entries()
         dangerous = evaluate_diff_gate(entries, self._s.trust_level, self._s.protected_paths)
@@ -464,9 +551,16 @@ class AgentNodeRunner:
     ) -> None:
         """Approval denied: re-run the node with the denial context, then re-classify."""
         mark_interaction_status(path, "reconsidering")
-        self._invoke(node, ctx, route, human_input_path=str(path))
+        self._invoke(node, ctx, route, human_input_path=self._exchange_human_input(node, ctx, path))
         assert self._s.git is not None
-        self._in.diff_path = self._s.git.write_current_diff(ctx.task_id)
+        private_diff = self._s.git.write_current_diff(ctx.task_id)
+        self._in.diff_path = publish_file(
+            self._s.exchange_root,
+            ctx.task_id,
+            "current.diff",
+            private_diff,
+            extra_secrets=self._s.prompt_secrets,
+        )
         # Re-evaluate under the same policy the request used, so the reconsider pass agrees on which
         # changes gate (level + protected floor) and does not spuriously flag a now-allowed change.
         still_dangerous = evaluate_diff_gate(
@@ -550,6 +644,9 @@ class AgentNodeRunner:
             network_access=resolve_network_access(
                 node.network_access, ctx.snapshot.doc.network_policy
             ),
+            # VF-7 defense-in-depth: the Core-owned advisory security contract, threaded via
+            # NodeServices; the neutral seam prepends it to the effective prompt.
+            security_preamble=self._s.security_preamble,
         )
 
     def _prompt_variables(self, ctx: NodeContext, node: AgentNode) -> dict[str, object | None]:
@@ -611,7 +708,15 @@ class AgentNodeRunner:
                 filename = TOOL_STDOUT_FILENAME
             else:
                 continue
-            found = latest_run_file(self._s.artifacts_root, ctx.task_id, other.id, filename)
+            # Fan-in resolves the upstream node's newest published output. With an exchange wired,
+            # outputs are published there (postprocess/tool), so resolve from it; a harness without
+            # one keeps resolving the private tree (today's behavior).
+            if self._s.exchange_root:
+                found = exchange_latest_run_file(
+                    self._s.exchange_root, ctx.task_id, other.id, filename
+                )
+            else:
+                found = latest_run_file(self._s.artifacts_root, ctx.task_id, other.id, filename)
             paths[f"{other.id}_path"] = found.as_posix() if found is not None else None
         return paths
 
@@ -641,7 +746,17 @@ class AgentNodeRunner:
         written = builder.write_packet(
             node_id=node.id, task_type=self._in.task_type, touched_paths=touched, dest=dest
         )
-        return str(written) if written is not None else None
+        if written is None:
+            return None
+        # The memory store + the private packet stay private; only the redacted per-node packet
+        # crosses into the exchange as {memory_path} (WRI-001).
+        return publish_file(
+            self._s.exchange_root,
+            ctx.task_id,
+            f"memory/{node.id}.md",
+            str(written),
+            extra_secrets=self._s.prompt_secrets,
+        )
 
     def _record_completion(self, run_id: int, outcome: StageOutcome) -> None:
         result = outcome.result

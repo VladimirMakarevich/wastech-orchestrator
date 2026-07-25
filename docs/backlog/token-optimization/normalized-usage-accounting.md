@@ -35,12 +35,14 @@ One provider-aware normalized usage record, persisted per attempt in SQLite alon
 
 ## Acceptance criteria
 
-- [ ] A test reproduces the analyzed run: a fresh `turn.completed` (input=141464, cached=76288, output=8329, reasoning=5935) followed by a resume `turn.completed` (input=282699, cached=187904, output=9364, reasoning=6066) yields a resume delta of input=141235, cached=111616, output=1035, reasoning=131, and a whole-session total equal to the latest snapshot only (input=282699), never the naive sum (424163).
-- [ ] Claude usage normalizes to `input_total = input_tokens + cache_creation_input_tokens + cache_read_input_tokens`.
-- [ ] Normalized usage is queryable per attempt from SQLite; the raw payload is still retrievable for audit.
-- [ ] A smaller-than-baseline resume snapshot degrades to raw + `delta unknown` + warning, with no negative values.
-- [ ] `_produced_no_work` fires correctly on a resumed Codex node that did nothing (per-run output delta == 0).
-- [ ] No secrets / raw session ids leak into SQLite usage rows or artifacts (raw session id stays only in the existing lineage tables).
+- [x] A test reproduces the analyzed run: a fresh `turn.completed` (input=141464, cached=76288, output=8329, reasoning=5935) followed by a resume `turn.completed` (input=282699, cached=187904, output=9364, reasoning=6066) yields a resume delta of input=141235, cached=111616, output=1035, reasoning=131, and a whole-session total equal to the latest snapshot only (input=282699), never the naive sum (424163).
+- [x] Claude usage normalizes to `input_total = input_tokens + cache_creation_input_tokens + cache_read_input_tokens`.
+- [x] Normalized usage is queryable per attempt from SQLite; the raw payload is still retrievable for audit.
+- [x] A smaller-than-baseline resume snapshot degrades to raw + `delta unknown` + warning, with no negative values.
+- [x] `_produced_no_work` fires correctly on a resumed Codex node that did nothing (per-run output delta == 0).
+- [x] No secrets / raw session ids leak into SQLite usage rows or artifacts (raw session id stays only in the existing lineage tables).
+
+_Actualized 2026-07-23: every criterion is satisfied in code + tests — the resume-delta reproduction (`tests/core/test_usage_accounting.py::test_fresh_then_resume_delta_matches_analysis`), the Claude three-field sum (`tests/providers/test_claude_parsing.py::test_normalized_usage_sums_three_input_fields_per_invocation`), the smaller-than-baseline degradation (`test_smaller_than_baseline_degrades_to_unknown`), the resumed-Codex no-work guard (`tests/providers/test_no_work_guard.py`), and the state-store round-trip (`tests/state/test_state_store.py`). Still deferred (tracked in [follow_ups.md](../follow_ups.md), 2026-07-16 row): cost capture (Claude `total_cost_usd`), a `worc` read/report surface over `get_provider_attempts`, and validating the Codex resume-id assumption on a live resume._
 
 ## Out of scope
 

@@ -24,29 +24,46 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
 
 from wastech_orchestrator.config.schema import SupervisorConfig
 from wastech_orchestrator.core.flow.nodes.base import RegisterArtifact, RouterPort
-from wastech_orchestrator.core.flow.observability import write_prompt_audit, write_rendered_prompt
+from wastech_orchestrator.core.flow.observability import (
+    record_provider_attempts,
+    write_prompt_audit,
+    write_rendered_prompt,
+)
 from wastech_orchestrator.core.flow.prompt import RoleFileError, render_role_prompt
 from wastech_orchestrator.core.flow.schema import SupervisorBlock
+from wastech_orchestrator.core.flow.usage_accounting import (
+    deserialize_usage,
+    snapshot_for_lineage,
+)
 from wastech_orchestrator.core.skills import SkillInventory
 from wastech_orchestrator.memory.delta import DELTA_OUTPUT_SCHEMA, CandidateDelta, parse_delta
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.providers.base import (
     AgentRunRequest,
     AgentRunResult,
+    NormalizedUsage,
     ProviderId,
     build_effective_prompt,
 )
+from wastech_orchestrator.providers.exchange import assert_orchestration_paths_contained
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
-from wastech_orchestrator.state_store import EvaluationRow, NodeLineageRow
+from wastech_orchestrator.state_store import EvaluationRow, NodeLineageRow, ProviderAttemptRow
 
 _LOG = logging.getLogger(__name__)
+
+
+def _utc_now_iso() -> str:
+    """Default wall-clock for the supervisor's ``provider_attempts`` timestamps (UTC ISO)."""
+    return datetime.now(UTC).isoformat()
+
 
 # The supervisor's read-only requests carry a dedicated ``supervisor`` node identity (audit dir /
 # route label); it is not a graph node, so it records ``evaluations`` rows, never ``node_runs``.
@@ -61,6 +78,20 @@ _SUPERVISOR_LINEAGE_NODE_ID = "__supervisor__"
 # (``stages/supervisor/run-NNNNNN/``). Distinct from finalize's ``0`` and from any real (positive,
 # small, autoincrement) node-run id, so the three turn kinds never collide on the same path.
 _PROPOSAL_RUN_ID = 999_999
+
+# WRI-011: skill descriptions are untrusted ``SKILL.md`` frontmatter, so the inlined proposal
+# metadata is bounded to this many characters (name/path are identifier-sized and pass unbounded);
+# the full skill package is only read from the frozen exchange after the Core accepts the proposal.
+_SKILL_DESCRIPTION_INLINE_CAP = 200
+
+
+def _bounded_description(description: str) -> str:
+    """Truncate an untrusted skill description to the recorded inline cap for the proposal."""
+    text = description.strip()
+    if len(text) <= _SKILL_DESCRIPTION_INLINE_CAP:
+        return text
+    return text[: _SKILL_DESCRIPTION_INLINE_CAP - 1].rstrip() + "…"
+
 
 # Base for the subtask-boundary handoff turns' artifact-dir namespace (subtask-context-handoff ADR).
 # Each handoff uses ``_HANDOFF_RUN_ID_BASE + subtask_order`` so multiple handoffs in one task (a
@@ -282,6 +313,92 @@ def _render_follow_ups_section(follow_ups: tuple[FollowUp, ...]) -> str:
     return "\n".join(lines) + "\n"
 
 
+# Longest a finding's reason may be before it is used verbatim as a follow-up title; longer reasons
+# become a truncated title with the full text carried in the rationale (VF-18).
+_FINDING_TITLE_MAX = 120
+
+
+def _finding_to_follow_up(finding: Any, node_id: str | None) -> FollowUp | None:
+    """Map one persisted evaluator finding (``{severity, reason, paths}``) to a :class:`FollowUp`,
+    or ``None`` when it carries no usable ``reason`` (VF-18)."""
+    if not isinstance(finding, Mapping):
+        return None
+    reason = str(finding.get("reason") or "").strip()
+    if not reason:
+        return None
+    severity = finding.get("severity")
+    paths_raw = finding.get("paths")
+    paths = (
+        tuple(str(p).strip() for p in paths_raw if str(p).strip())
+        if isinstance(paths_raw, list)
+        else ()
+    )
+    if len(reason) <= _FINDING_TITLE_MAX:
+        title, rationale = reason, ""
+    else:  # keep the bold title a label; the full text still reaches the operator via the rationale
+        title, rationale = reason[:_FINDING_TITLE_MAX].rstrip() + "…", reason
+    return FollowUp(
+        title=title,
+        rationale=rationale,
+        severity=severity if severity in ("low", "medium", "high") else "medium",
+        evidence=(f"{node_id or 'review'} evaluator finding (accepted with findings)",),
+        paths=paths,
+    )
+
+
+def _evaluator_finding_follow_ups(evaluations: list[EvaluationRow]) -> tuple[FollowUp, ...]:
+    """Derive follow-ups from the LAST in-flow verdict per evaluator node (VF-18).
+
+    An evaluator that accepts *with* findings persists them to the ``evaluations`` table and they
+    otherwise reach no operator surface. Take each evaluator node's final verdict only (earlier,
+    rework-superseded rounds are ignored) and convert its findings so they land in ``summary.{json,
+    md}`` and the PR body. ``get_evaluations`` is insertion-ordered, so the last row seen per
+    ``node_id`` is that node's final verdict.
+    """
+    last_by_node: dict[str | None, EvaluationRow] = {}
+    for row in evaluations:
+        if row.kind == "in_flow_verdict":
+            last_by_node[row.node_id] = row
+    out: list[FollowUp] = []
+    for node_id, row in last_by_node.items():
+        try:
+            findings = json.loads(row.findings_json)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(findings, list):
+            continue
+        for finding in findings:
+            follow_up = _finding_to_follow_up(finding, node_id)
+            if follow_up is not None:
+                out.append(follow_up)
+    return tuple(out)
+
+
+def _follow_up_key(follow_up: FollowUp) -> tuple[str, tuple[str, ...]]:
+    """Exact-match dedup key for a follow-up: its normalized text plus its paths (VF-18)."""
+    text = " ".join(f"{follow_up.title} {follow_up.rationale}".lower().split())
+    return (text, tuple(sorted(follow_up.paths)))
+
+
+def _merge_follow_ups(
+    primary: tuple[FollowUp, ...], extra: tuple[FollowUp, ...]
+) -> tuple[FollowUp, ...]:
+    """Append *extra* follow-ups whose exact-match key is not already in *primary* (VF-18).
+
+    *primary* (the supervisor's own list) wins on a collision, so an evaluator finding the
+    supervisor already reported is not duplicated; *extra* is also deduped against itself.
+    """
+    seen = {_follow_up_key(fu) for fu in primary}
+    merged = list(primary)
+    for follow_up in extra:
+        key = _follow_up_key(follow_up)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(follow_up)
+    return tuple(merged)
+
+
 # F16: pseudo-tags a model sometimes emits instead of a clean tool call — the whole
 # `<summary>…</summary><follow_ups>[JSON]</follow_ups><memory_delta>[JSON]</memory_delta>
 # <lessons>[JSON]</lessons>` dump. The machine sections (`follow_ups`/`memory_delta`/`lessons`)
@@ -378,8 +495,9 @@ def _parse_skill_map(structured: Mapping[str, Any] | None) -> dict[str, tuple[st
 
 
 class SupervisorStorePort(Protocol):
-    """The slice of the state store the supervisor needs: the immutable evaluation row plus the
-    durable own-session lineage (read on first use, written after each turn)."""
+    """The slice of the state store the supervisor needs: the immutable evaluation row, the durable
+    own-session lineage (read on first use, written after each turn), and the per-turn
+    provider-attempt audit row (VF-8 — the supervisor's own billable calls)."""
 
     def record_evaluation(self, row: EvaluationRow) -> int: ...
 
@@ -390,6 +508,8 @@ class SupervisorStorePort(Protocol):
     ) -> NodeLineageRow | None: ...
 
     def upsert_node_lineage(self, row: NodeLineageRow) -> None: ...
+
+    def record_provider_attempt(self, attempt: ProviderAttemptRow) -> None: ...
 
 
 class Supervisor:
@@ -404,17 +524,26 @@ class Supervisor:
         repo_dir: str,
         artifacts_root: str | Path,
         flow_dir: Path,
+        exchange_root: str | Path = "",
         flow_supervisor: SupervisorBlock | None = None,
         register_artifact: RegisterArtifact | None = None,
         prompt_audit: bool = False,
         prompt_secrets: tuple[str, ...] = (),
         default_timeout_seconds: int = 7200,
+        security_preamble: str | None = None,
+        clock: Callable[[], str] = _utc_now_iso,
     ) -> None:
         self._settings = settings
         self._router = router
         self._store = store
+        # Wall-clock for the per-turn ``provider_attempts`` timestamps (VF-8); the orchestrator
+        # threads its own so a run's audit timestamps share one source.
+        self._clock = clock
         self._repo_dir = repo_dir
         self._artifacts_root = artifacts_root
+        # The provider-readable exchange root ``<repo>/.worc-io`` (WRI-001); the supervisor's own
+        # provider call passes the same pre-launch containment gate as agent/evaluator (Part C).
+        self._exchange_root = exchange_root
         self._flow_dir = flow_dir
         # Flow-local supervisor prompt overrides + the follow-ups opt-in (prompt-and-supervisor
         # ADR). ``None`` → the global config prompt + built-in finalize, free-text finalize (today).
@@ -430,6 +559,10 @@ class Supervisor:
         self._prompt_audit = prompt_audit
         self._prompt_secrets = prompt_secrets
         self._default_timeout_seconds = default_timeout_seconds
+        # VF-7 defense-in-depth: the Core-owned orchestrator security contract prepended to the
+        # supervisor's own read-only turn (advisory, NOT enforcement). Resolved once by the
+        # orchestrator, like the graph-node NodeServices carrier. ``None`` → no preamble.
+        self._security_preamble = security_preamble
         # The supervisor's own session (resume_own_lineage). Held in-memory within a process run and
         # persisted to / hydrated from ``node_lineage`` so it survives a restart (independent of the
         # editing-lineage authors). ``None`` until the first turn runs or the persisted row is read.
@@ -484,7 +617,12 @@ class Supervisor:
     # -- whole-task finalize ---------------------------------------------------
 
     def finalize(
-        self, *, task_id: str, task_title: str, emit_delta: bool = False
+        self,
+        *,
+        task_id: str,
+        task_title: str,
+        task_path: str | None = None,
+        emit_delta: bool = False,
     ) -> FinalizeResult:
         """Synthesize the whole-task summary (once, at task close) and record ``supervisor_final``.
 
@@ -512,8 +650,23 @@ class Supervisor:
                 "finalize re-synthesized from recorded observations (session unavailable)",
                 extra={"task_id": task_id, "have_digest": digest is not None},
             )
+        # ``task_title`` is used only for the orchestrator-side PR-body H1 / summary.json below (not
+        # a provider prompt surface); the finalize *prompt* reads the task from the frozen exchange
+        # packet path (WRI-011 — no inline task body/title reaches the provider).
         summary_text, delta, follow_ups = self._finalize_turn(
-            task_id, task_title, emit_delta, digest=digest, resume=warm
+            task_id,
+            emit_delta,
+            digest=digest,
+            resume=warm,
+            task_path=task_path,
+        )
+        # VF-18: an evaluator that accepts *with* findings (sub-threshold, non-gating) persists them
+        # to the evaluations table and they otherwise reach no operator surface. Merge them into the
+        # follow-ups — deduped against the supervisor's own list — so they land in summary.{json,md}
+        # and the PR body. Runs independent of ``emit_follow_ups`` (a distinct, evidence-bearing
+        # source from the supervisor's LLM-authored follow-ups).
+        follow_ups = _merge_follow_ups(
+            follow_ups, _evaluator_finding_follow_ups(self._store.get_evaluations(task_id))
         )
         self._record(
             task_id,
@@ -553,11 +706,11 @@ class Supervisor:
     def _finalize_turn(
         self,
         task_id: str,
-        task_title: str,
         emit_delta: bool,
         *,
         digest: str | None = None,
         resume: bool = True,
+        task_path: str | None = None,
     ) -> tuple[str | None, CandidateDelta | None, tuple[FollowUp, ...]]:
         """Run the single finalize turn. Free-text when neither memory nor follow-ups are enabled
         (today's behavior — AC-S4); otherwise a structured ``{summary, ...}`` turn, so every enabled
@@ -570,16 +723,16 @@ class Supervisor:
         if not emit_delta and not with_follow_ups:
             text = self._run(
                 task_id,
-                self._finalize_prompt(task_id, task_title, digest=digest),
+                self._finalize_prompt(task_id, digest=digest),
                 node_run_id=0,
                 resume_session=resume,
+                task_path=task_path,
             )
             return text, None, ()
         result = self._run_result(
             task_id,
             self._finalize_prompt(
                 task_id,
-                task_title,
                 with_delta=emit_delta,
                 with_follow_ups=with_follow_ups,
                 digest=digest,
@@ -587,6 +740,7 @@ class Supervisor:
             node_run_id=0,
             output_schema=_finalize_schema(with_delta=emit_delta, with_follow_ups=with_follow_ups),
             resume_session=resume,
+            task_path=task_path,
         )
         if result is None or result.structured_output is None:
             return None, None, ()
@@ -658,7 +812,7 @@ class Supervisor:
         task_id: str,
         agent_node_ids: Sequence[str],
         inventory: SkillInventory,
-        task_spec_text: str,
+        task_path: str | None = None,
     ) -> dict[str, tuple[str, ...]]:
         """Propose a ``node → skills`` map once per task (read-only, propose-only — Core decides).
 
@@ -668,12 +822,20 @@ class Supervisor:
         any failure (no provider, infra error, malformed output) is logged and yields ``{}``, and
         the run continues on operator pins alone. The supervisor only *proposes* tokens; the
         orchestrator resolves them against the inventory and merges them with the static pins.
+
+        WRI-011: the task body is **never** inlined here — the proposal reads it from the frozen
+        exchange packet (``task_path``, rendered in the context footer); only bounded, allowlisted
+        skill metadata (name/path + a length-bounded description) reaches the prompt.
         """
         if not inventory.skills:
             return {}
-        prompt = self._proposal_prompt(task_id, agent_node_ids, inventory, task_spec_text)
+        prompt = self._proposal_prompt(task_id, agent_node_ids, inventory)
         result = self._run_result(
-            task_id, prompt, node_run_id=_PROPOSAL_RUN_ID, output_schema=_SKILL_MAP_SCHEMA
+            task_id,
+            prompt,
+            node_run_id=_PROPOSAL_RUN_ID,
+            output_schema=_SKILL_MAP_SCHEMA,
+            task_path=task_path,
         )
         proposal = _parse_skill_map(result.structured_output) if result is not None else {}
         self._record(
@@ -699,6 +861,7 @@ class Supervisor:
         subtask: int | None = None,
         resume_session: bool = True,
         cap_reasoning: bool = False,
+        task_path: str | None = None,
     ) -> str | None:
         """Run one read-only supervisor turn and return its final message (``None`` on failure)."""
         result = self._run_result(
@@ -708,6 +871,7 @@ class Supervisor:
             subtask=subtask,
             resume_session=resume_session,
             cap_reasoning=cap_reasoning,
+            task_path=task_path,
         )
         return result.final_message if result is not None else None
 
@@ -721,6 +885,7 @@ class Supervisor:
         output_schema: dict[str, Any] | None = None,
         resume_session: bool = True,
         cap_reasoning: bool = False,
+        task_path: str | None = None,
     ) -> AgentRunResult | None:
         """Run one read-only supervisor LLM turn on its own session; return the full result.
 
@@ -745,6 +910,13 @@ class Supervisor:
             reasoning = _schema_safe_reasoning(self._settings.reasoning, output_schema)
             if cap_reasoning and reasoning in _MAX_REASONING_TIERS:
                 reasoning = _SCHEMA_REASONING_CAP
+            # The session to resume + its persisted cumulative usage baseline (VF-8): a resumed
+            # Codex session counts cumulatively, so the per-turn ``provider_attempts`` usage is a
+            # summation-safe delta against the previous cumulative — exactly like a graph-node
+            # lineage. ``resume_session=False`` (finalize's revive path) starts fresh, no baseline.
+            resume_id, usage_baseline, baseline_session_id = (
+                self._resume_context(task_id, route) if resume_session else (None, None, None)
+            )
             request = AgentRunRequest(
                 task_id=task_id,
                 node_id=_SUPERVISOR_IDENTITY,
@@ -757,8 +929,19 @@ class Supervisor:
                 model=self._settings.model,
                 reasoning=reasoning,
                 output_schema=output_schema,
-                session_id=self._resume_session(task_id, route) if resume_session else None,
+                session_id=resume_id,
+                # WRI-011: the task reaches the supervisor as the frozen exchange packet path (never
+                # inline title/description). Repository instructions are NOT injected (VF-5) — the
+                # supervisor's read-only turn reads the repo's root files itself, like graph nodes.
+                task_path=task_path,
+                # VF-7 defense-in-depth: the Core-owned orchestrator security contract (advisory).
+                security_preamble=self._security_preamble,
             )
+            # Same pre-launch containment invariant as agent/evaluator (WRI-001): the supervisor
+            # carries the frozen exchange ``task_path``, so this asserts it resolves under the
+            # current-task exchange before the read-only call.
+            if self._exchange_root:
+                assert_orchestration_paths_contained(request, str(self._exchange_root))
             outcome = self._router.run_stage(request, route)
         except Exception as exc:
             _LOG.warning(
@@ -766,13 +949,20 @@ class Supervisor:
                 extra={"task_id": task_id, "error_type": type(exc).__name__},
             )
             return None
+        # VF-8: give the supervisor's own billable provider calls an audit home in
+        # ``provider_attempts`` (``node_run_id`` NULL — it is not a graph node), so a task-level
+        # cost/usage roll-up is complete. Recorded for every outcome (including a failed turn's
+        # attempts) and BEFORE the result-None early return, so no billable call is dropped.
+        self._record_provider_attempts(task_id, outcome, usage_baseline, baseline_session_id)
         result = outcome.result
         if result is None:
             return None
         if result.session_id:
             self._own_session_id = result.session_id  # resume_own_lineage continuity (in-memory)
             self._session_live = True  # a turn succeeded this process — the session is usable
-            self._persist_session(task_id, result.session_id, outcome.provider_used)
+            self._persist_session(
+                task_id, result.session_id, outcome.provider_used, result.normalized_usage
+            )
         self._record_turn_observability(
             task_id=task_id,
             node_run_id=node_run_id,
@@ -797,13 +987,14 @@ class Supervisor:
     ) -> None:
         """Best-effort: persist rendered-prompt + (gated) prompt-audit for one supervisor turn.
 
-        Calls the standalone artifact writers directly — never ``record_run_observability`` /
-        ``record_provider_attempts``: the supervisor's ``node_run_id`` is a synthetic per-call-site
-        namespacing sentinel (``0`` / ``_PROPOSAL_RUN_ID`` / ``_HANDOFF_RUN_ID_BASE + n`` / a reused
-        real step id), not a ``node_runs`` foreign key — writing a ``provider_attempts`` row under
-        it would misattribute that row. Wrapped in its own try/except (distinct from the caller's,
-        which does not cover this code) so an audit-write failure can never surface as a broken
-        turn — this layer is advisory by contract.
+        Calls the standalone artifact writers directly — never ``record_run_observability``: the
+        supervisor's ``node_run_id`` here is a synthetic per-call-site artifact-dir namespacing
+        sentinel (``0`` / ``_PROPOSAL_RUN_ID`` / ``_HANDOFF_RUN_ID_BASE + n`` / a reused real step
+        id), NOT a ``node_runs`` id. Its ``provider_attempts`` rows are written separately by
+        :meth:`_record_provider_attempts` with ``node_run_id`` NULL (VF-8), so that synthetic id
+        never lands in the audit table and misattributes the row. Wrapped in its own try/except
+        (distinct from the caller's, which does not cover this code) so an audit-write failure can
+        never surface as a broken turn — this layer is advisory by contract.
         """
         if self._register_artifact is None or outcome.result is None:
             return
@@ -844,25 +1035,74 @@ class Supervisor:
                 },
             )
 
-    def _resume_session(self, task_id: str, route: ResolvedRoute) -> str | None:
-        """The own session to resume: the in-memory id if a turn already ran this process, else the
-        persisted lineage — but only when produced by the provider now resolved (you cannot resume a
-        Claude session on Codex). On the first round there is no lineage yet, so it starts fresh.
+    def _record_provider_attempts(
+        self,
+        task_id: str,
+        outcome: StageOutcome,
+        usage_baseline: NormalizedUsage | None,
+        baseline_session_id: str | None,
+    ) -> None:
+        """Persist the supervisor's own ``provider_attempts`` rows (VF-8) — ``node_run_id`` NULL.
+
+        Reuses the shared node-path recorder, so the supervisor's per-run usage delta is computed
+        exactly like a graph node's (against its own resumed-session baseline). Best-effort like the
+        rest of this advisory layer: any store error is logged and swallowed so an audit-write
+        failure can never surface as a broken turn.
         """
-        if self._own_session_id is not None:
-            return self._own_session_id
+        try:
+            record_provider_attempts(
+                self._store,
+                self._clock,
+                task_id=task_id,
+                node_run_id=None,  # the supervisor is a constant layer, not a graph node
+                outcome=outcome,
+                usage_baseline=usage_baseline,
+                baseline_session_id=baseline_session_id,
+            )
+        except Exception as exc:
+            _LOG.warning(
+                "supervisor provider-attempt record failed (advisory, ignored)",
+                extra={"task_id": task_id, "error_type": type(exc).__name__},
+            )
+
+    def _resume_context(
+        self, task_id: str, route: ResolvedRoute
+    ) -> tuple[str | None, NormalizedUsage | None, str | None]:
+        """``(session to resume, its usage baseline, that session's id)`` for the next turn.
+
+        The own session to resume is the in-memory id if a turn already ran this process, else the
+        persisted lineage — but only when produced by the provider now resolved (you cannot resume
+        a Claude session on Codex). On the first round there is no lineage yet, so it starts fresh.
+        The usage baseline is that session's persisted running cumulative snapshot (VF-8): it is
+        updated after every turn (:meth:`_persist_session`), so turn N reduces against turn N-1's
+        cumulative, making the recorded per-run usage summation-safe on a cumulative provider
+        (Codex). A per-invocation provider (Claude) ignores the baseline in ``compute_usage_delta``.
+        """
         row = self._store.get_node_lineage(task_id, _SUPERVISOR_LINEAGE_NODE_ID, None)
+        baseline = deserialize_usage(row.usage_snapshot) if row else None
+        if self._own_session_id is not None:
+            # A turn already ran this process: continue that live session; its cumulative was
+            # persisted onto the same lineage row, so ``baseline`` is the previous turn's snapshot.
+            return self._own_session_id, baseline, row.raw_session_id if row else None
         if row is None or row.provider != route.primary.value:
-            return None
+            return None, None, None
         self._own_session_id = row.raw_session_id
-        return self._own_session_id
+        return self._own_session_id, baseline, row.raw_session_id
 
     def _persist_session(
-        self, task_id: str, session_id: str, provider_used: ProviderId | None
+        self,
+        task_id: str,
+        session_id: str,
+        provider_used: ProviderId | None,
+        usage: NormalizedUsage | None,
     ) -> None:
         """Persist the supervisor's own session after a successful turn (``state.db`` only — the raw
         id is redacted everywhere else), keyed by the reserved sentinel so a resumed task resumes
         it.
+
+        Also carries the session's running cumulative usage snapshot (VF-8), so the next turn's
+        ``provider_attempts`` usage can be reduced to a summation-safe per-run delta — the same
+        contract a graph node's lineage keeps. ``None`` for a per-invocation provider (Claude).
         """
         if provider_used is None:
             return
@@ -873,6 +1113,7 @@ class Supervisor:
                 provider=provider_used.value,
                 raw_session_id=session_id,
                 subtask_order=None,
+                usage_snapshot=snapshot_for_lineage(usage),
             )
         )
 
@@ -910,10 +1151,15 @@ class Supervisor:
         task_id: str,
         agent_node_ids: Sequence[str],
         inventory: SkillInventory,
-        task_spec_text: str,
     ) -> str:
         nodes = "\n".join(f"- {nid}" for nid in agent_node_ids) or "- (none)"
-        skills = "\n".join(f"- {s.name} — {s.description} [{s.path}]" for s in inventory.skills)
+        # Skill descriptions come from untrusted repository ``SKILL.md`` frontmatter, so they are
+        # bounded to a recorded cap here (name/path are identifier-sized); the full skill package is
+        # read from the frozen exchange only after the Core accepts the proposal.
+        skills = "\n".join(
+            f"- {s.name} — {_bounded_description(s.description)} [{s.path}]"
+            for s in inventory.skills
+        )
         return (
             self._base_prompt(task_id)
             + "\n\n## Skill map proposal\n"
@@ -927,13 +1173,13 @@ class Supervisor:
             + "that need skills; omit the rest.\n\n"
             + f"### Flow nodes (agent)\n{nodes}\n\n"
             + f"### Available skills\n{skills}\n\n"
-            + f"### Task\n{task_spec_text}\n"
+            + "### Task\nThe task specification is provided as the task packet referenced in the "
+            + "context below — read it there; it is not inlined here.\n"
         )
 
     def _finalize_prompt(
         self,
         task_id: str,
-        task_title: str,
         *,
         with_delta: bool = False,
         with_follow_ups: bool = False,
@@ -941,8 +1187,13 @@ class Supervisor:
     ) -> str:
         # The finalize lens (flow ``finalize_role_file`` → built-in) carries the summary emphasis;
         # only the machine-contract additions (task context, follow-ups, memory delta) are appended
-        # in code, so a flow author reshapes wording but never the parsed schema.
-        prompt = self._finalize_base(task_id) + f"\n\n## Task under review\n{task_title}\n"
+        # in code, so a flow author reshapes wording but never the parsed schema. WRI-011: the task
+        # reaches the turn as the frozen exchange packet (context footer), never inline title/body.
+        prompt = (
+            self._finalize_base(task_id)
+            + "\n\n## Task under review\nThe task specification is provided as the task packet "
+            + "referenced in the context below — read it there; it is not inlined here.\n"
+        )
         if digest:
             # Revive path: the working session that accumulated per-step context is gone, so seed
             # the synthesis from the recorded observations instead of relying on session memory.

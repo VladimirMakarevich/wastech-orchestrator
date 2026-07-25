@@ -472,6 +472,45 @@ def test_agent_node_id_near_reserved_name_accepted(tmp_path: Path) -> None:
     assert "reviewer" in load_flow(_write(tmp_path, body)).nodes_by_id
 
 
+# -- portable node-id identities (WRI-008) ------------------------------------
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "Bad",  # uppercase
+        "has.dot",  # a dot cannot appear in the {id_path} token or a portable segment
+        "a/b",  # path separator
+        "a\\b",  # backslash
+        "..",  # traversal
+        "node id",  # whitespace
+        "-lead",  # leading separator
+        "con",  # Windows device name
+        "nul",  # Windows device name
+        "com1",  # Windows device name
+        "lpt9",  # Windows device name
+        "x" * 65,  # too long
+    ],
+)
+def test_agent_node_id_non_portable_rejected(tmp_path: Path, bad: str) -> None:
+    # An id that is not a portable single segment / prompt token fails at load, host-independently,
+    # before any lookup map, artifact directory, or DB run row is built. Reject, never sanitize.
+    body = _VALID_BODY.replace("    - id: a\n", f"    - id: {bad}\n")
+    with pytest.raises(FlowLoadError, match=r"portable identifier"):
+        load_flow(_write(tmp_path, body))
+
+
+def test_non_agent_node_id_also_validated(tmp_path: Path) -> None:
+    # Every node kind is validated — not only the agent/tool kinds that expose {<id>_path}. A
+    # device-named publish node id fails flow load exactly like an agent one.
+    body = _VALID_BODY.replace(
+        "  edges: []\n",
+        "    - id: CON\n      kind: publish\n      policy: pull_request\n  edges: []\n",
+    )
+    with pytest.raises(FlowLoadError, match=r"publish node id .* portable identifier"):
+        load_flow(_write(tmp_path, body))
+
+
 def test_supervisor_block_parsed(tmp_path: Path) -> None:
     block = (
         "  supervisor:\n"
@@ -557,6 +596,17 @@ def test_invalid_checker_rejected(tmp_path: Path) -> None:
 def test_invalid_network_policy_rejected(tmp_path: Path) -> None:
     body = _VALID_BODY.replace(_PUB, _PUB + "  network_policy: firehose\n")
     with pytest.raises(FlowLoadError, match=r"invalid NetworkPolicy 'firehose'"):
+        load_flow(_write(tmp_path, body))
+
+
+def test_duplicate_node_id_rejected(tmp_path: Path) -> None:
+    # A second node with the same id would silently collapse (last-wins) into one map entry; fail
+    # closed instead so the shadowed node / its edges can never vanish unnoticed.
+    body = _VALID_BODY.replace(
+        "  edges: []\n",
+        "    - { id: a, kind: agent, role_file: roles/a.md }\n  edges: []\n",
+    )
+    with pytest.raises(FlowLoadError, match=r"duplicate node id 'a'"):
         load_flow(_write(tmp_path, body))
 
 

@@ -305,6 +305,15 @@ def test_invalid_task_id(config: OrchestratorConfig) -> None:
     assert result.reason is ValidationReason.INVALID_TASK_ID
 
 
+@pytest.mark.parametrize("task_id", ["con", "nul.txt", "com1", "lpt9", "task."])
+def test_non_portable_task_id_rejected(config: OrchestratorConfig, task_id: str) -> None:
+    # A Windows device name or a trailing dot is rejected host-independently (the id becomes a
+    # directory/file component and a branch fragment), never sanitized.
+    text = f"---\nid: {task_id!r}\ntitle: T\n---\n\n## Description\n\nx\n"
+    result = _gate(config).validate(_src(text))
+    assert result.reason is ValidationReason.INVALID_TASK_ID
+
+
 def test_duplicate_task_id_in_store(config: OrchestratorConfig) -> None:
     result = _gate(config, store_ids={"task-001"}).validate(_src(_GOOD))
     assert result.reason is ValidationReason.DUPLICATE_TASK_ID
@@ -617,6 +626,17 @@ def test_nodes_unknown_subkey_rejected(config: OrchestratorConfig) -> None:
     assert result.passed is False
     assert result.reason is ValidationReason.INVALID_NODE_OVERRIDE
     assert "temperature" in result.detail
+
+
+@pytest.mark.parametrize("key", ["disable_read_isolation", "strict_isolation"])
+def test_nodes_security_isolation_subkey_rejected(config: OrchestratorConfig, key: str) -> None:
+    # VF-6 / security invariant: read-isolation (and strict_isolation) are operator-config ONLY —
+    # a task node override can never set them (only enabled/model/reasoning/provider are accepted).
+    block = f"nodes:\n  planning:\n    {key}: true\n"
+    result = _gate(config).validate(_src(_nodes_task(block)))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_NODE_OVERRIDE
+    assert key in result.detail
 
 
 def test_nodes_non_mapping_value_rejected(config: OrchestratorConfig) -> None:

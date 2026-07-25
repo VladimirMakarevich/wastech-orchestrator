@@ -24,12 +24,13 @@ from wastech_orchestrator.config.schema import (
     BranchMode,
     PublishScope,
 )
-from wastech_orchestrator.git_manager import ChangedPath
+from wastech_orchestrator.git_manager import ChangedPath, GitControlDrift, GitControlState
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult
 from wastech_orchestrator.providers.base import AgentRunRequest, ErrorClass, ProviderId
 from wastech_orchestrator.providers.process import ProcessResult, run_process
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.routing.snapshots import SnapshotHook
+from wastech_orchestrator.runtime_layout import ProviderWriteGuardPolicy
 from wastech_orchestrator.state_store import (
     CheckRunRow,
     EditingLineageRow,
@@ -117,6 +118,7 @@ class CheckRunnerPort(Protocol):
         task_id: str,
         subtask: int | None = None,
         selected: Sequence[ResolvedCheckSet] | None = None,
+        clock: Callable[[], str] = ...,  # VF-12: wall-clock for the check_runs interval
     ) -> CheckOutcome: ...
 
 
@@ -231,7 +233,27 @@ class GitPort(Protocol):
 
     def commit_subtask(self, task_id: str, order: int, slug: str, message: str) -> str: ...
 
-    def commit_audit(self, task_id: str) -> str | None: ...
+    def commit_audit(
+        self, task_id: str, *, task_packet_digest: str | None = None
+    ) -> str | None: ...
+
+    #: WRI-009: fingerprint the Git control state before a workspace-write attempt and compare it
+    #: after (the agent node runner brackets ``run_stage`` with these); drift is a policy violation.
+    def capture_git_control_state(self) -> GitControlState: ...
+
+    def compare_git_control_state(self, before: GitControlState) -> GitControlDrift | None: ...
+
+    #: The tracked files matching the given pathspecs (used by the orchestrator to resolve the root
+    #: instruction closure it freezes for the per-run audit digest).
+    def list_tracked_files(self, *pathspecs: str) -> tuple[str, ...]: ...
+
+    #: WRI-002/003: absolute Git-control + ``tasks/`` roots a workspace-write attempt must
+    #: Write/Edit-deny; the agent node runner threads it onto ``AgentRunRequest.write_guard``.
+    #: Repository governance/instruction files are intentionally not denied — editing them is
+    #: ordinary repository work, reported to the operator rather than blocked (VF-20).
+    def resolve_control_paths(
+        self, exchange_root: str | None = None
+    ) -> ProviderWriteGuardPolicy: ...
 
     def push(self, task_id: str, branch: str, *, mode: BranchMode = BranchMode.NEW) -> bool: ...
 
@@ -258,6 +280,10 @@ class NodeServices:
     repo_dir: str
     artifacts_root: str
     clock: Callable[[], str]
+    #: the provider-readable exchange root ``<repo>/.worc-io`` (WRI-001). Node runners publish their
+    #: agent-facing artifacts here through :mod:`~wastech_orchestrator.providers.exchange` and
+    #: resolve the exchange fan-in from it. Empty in a unit harness that does no publication.
+    exchange_root: str = ""
     default_timeout_seconds: int = 7200
     snapshot: SnapshotHook | None = None  # git snapshot hook for provider observability
     #: the orchestrator's git manager (it owns git; providers/flows never touch it). Set for any
@@ -285,6 +311,10 @@ class NodeServices:
     #: lifecycle folder + write the committed ``<id>.summary.md`` (so both enter the audit commit),
     #: returning that summary path (used as the PR body). ``None`` → no finalize (e.g. a unit test).
     finalize: Callable[[], str | None] | None = None
+    #: WRI-009: the frozen task-packet sha256 (WRI-011) the publish node passes to ``commit_audit``
+    #: so it verifies the lifecycle ``<id>.md`` was not rewritten under the run. ``None`` in a
+    #: flow with no frozen packet (a unit harness / the ephemeral merge flow).
+    task_packet_digest: str | None = None
     #: the ``dependency_scan`` checker's process runner + its allowlisted child env + per-scanner
     #: timeout. ``process_env`` is the same allowlisted env the Check Runner uses
     #: (``build_child_env(config.security.allowed_environment)``); empty in unit harnesses.
@@ -298,6 +328,11 @@ class NodeServices:
     #: operator allowlist (repo-relative globs) of paths that ALWAYS require approval on any change,
     #: regardless of ``trust_level`` (``config.security.protected_paths``). Empty = no floor.
     protected_paths: tuple[str, ...] = ()
+    #: VF-7 defense-in-depth: the Core-owned orchestrator security contract prepended to every
+    #: provider prompt (advisory, NOT enforcement). Resolved once by the orchestrator
+    #: (``build_orchestrator_security_preamble``) and set on each request's ``security_preamble``.
+    #: ``None`` in a unit harness → no preamble (today's prompt byte-for-byte).
+    security_preamble: str | None = None
     #: memory read path (phase 03): builds a per-node retrieval packet for any node whose role
     #: prompt references ``{memory_path}``. ``None`` when memory is disabled (the default) — then no
     #: packet is built and ``{memory_path}`` renders empty (today's behavior).

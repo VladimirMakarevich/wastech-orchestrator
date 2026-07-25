@@ -76,7 +76,7 @@ These are non-negotiable for this orchestrator; never write a task that tries to
 
 Before handing over a task:
 
-- [ ] `id` is lowercase and matches `^[a-z0-9][a-z0-9._-]{0,63}$`.
+- [ ] `id` is lowercase, matches `^[a-z0-9][a-z0-9._-]{0,63}$`, has no trailing dot, and is not a Windows device name (`con`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`).
 - [ ] `title` is short, specific, and non-empty.
 - [ ] `task_type` is omitted (⇒ `implementation`) or names a flow that exists — a built-in (`deep_research`, `security_audit`) or an operator flow in `.worc/flows/`.
 - [ ] `## Description` is concrete and non-empty.

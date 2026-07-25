@@ -4,7 +4,7 @@ Investigate the repository at `{repo}` for evidence that bears on the research q
 
 - **Plan of record** — if the project maintains one (a roadmap, requirements, design decisions, a glossary), read it: it defines what "correct" and "done" mean for this question.
 - **Shipped code** — the relevant modules, APIs, configuration, and tests for the question at hand.
-- **Delivery evidence** — git history is always present and authoritative: `git log` / `git show` reveal what each change actually did versus what it claims. Discrepancies here are prime findings. If prior orchestrator run logs happen to be present in the working tree (e.g. under `.worc/logs/`), use them as a supplement, but they are typically gitignored, so do not treat their absence as a finding.
+- **Delivery evidence** — git history is always present and authoritative: `git log` / `git show` reveal what each change actually did versus what it claims. Discrepancies here are prime findings.
 
 ## What To Look For
 

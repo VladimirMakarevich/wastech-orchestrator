@@ -9,8 +9,13 @@ import pytest
 
 from wastech_orchestrator.providers.artifacts import (
     ArtifactPaths,
+    PathIdentityError,
     append_node_history,
+    assert_contained_path,
     create_attempt_dir,
+    exchange_latest_run_file,
+    exchange_node_run_dir,
+    exchange_task_dir,
     latest_run_file,
     node_history_path,
     node_run_dir,
@@ -26,6 +31,7 @@ from wastech_orchestrator.providers.base import (
     NormalizedError,
     RunStatus,
 )
+from wastech_orchestrator.runtime_layout import EXCHANGE_HOME_DIRNAME
 
 
 def test_attempt_dir_layout(tmp_path: Path) -> None:
@@ -52,6 +58,40 @@ def test_subtask_dir_is_zero_padded(tmp_path: Path) -> None:
     )
     assert Path(paths.attempt_dir) == expected
     assert expected.is_dir()
+
+
+def test_exchange_task_dir_has_no_logs_segment(tmp_path: Path) -> None:
+    exchange_root = tmp_path / EXCHANGE_HOME_DIRNAME
+    td = exchange_task_dir(exchange_root, "add-http-retry")
+    assert td == exchange_root / "add-http-retry"
+    assert "logs" not in td.parts
+    # The exchange dir must never be the private-artifact layout.
+    assert td != task_artifact_dir(exchange_root, "add-http-retry")
+    # Pure builder: nothing is created on disk.
+    assert not td.exists()
+
+
+def test_exchange_node_run_dir_layout(tmp_path: Path) -> None:
+    exchange_root = tmp_path / EXCHANGE_HOME_DIRNAME
+    run_dir = exchange_node_run_dir(exchange_root, "t", "implementation", 3)
+    assert run_dir == exchange_root / "t" / "stages" / "implementation" / "run-000003"
+    sub = exchange_node_run_dir(exchange_root, "t", "implementation", 3, subtask=2)
+    assert sub == exchange_root / "t" / "stages" / "implementation" / "sub-02" / "run-000003"
+    assert not run_dir.exists()
+
+
+def test_exchange_latest_run_file_picks_newest_with_content(tmp_path: Path) -> None:
+    exchange_root = tmp_path / EXCHANGE_HOME_DIRNAME
+    for run_id, has_file in ((1, True), (2, False)):
+        d = exchange_node_run_dir(exchange_root, "t", "impl", run_id)
+        d.mkdir(parents=True)
+        if has_file:
+            (d / "impl.out.md").write_text("body", encoding="utf-8")
+    # run-000002 exists but is empty → the newest run *containing* the file (run-000001) wins.
+    found = exchange_latest_run_file(exchange_root, "t", "impl", "impl.out.md")
+    assert found == exchange_node_run_dir(exchange_root, "t", "impl", 1) / "impl.out.md"
+    assert exchange_latest_run_file(exchange_root, "t", "impl", "absent.md") is None
+    assert exchange_latest_run_file(exchange_root, "t", "never-ran", "x.md") is None
 
 
 def test_never_overwrites_existing_attempt_dir(tmp_path: Path) -> None:
@@ -209,3 +249,35 @@ def test_task_artifact_relpath_falls_back_to_absolute_when_outside_repo(tmp_path
     artifacts_root = tmp_path / "elsewhere"
     rel = task_artifact_relpath(artifacts_root, "t-1", repo)
     assert rel == task_artifact_dir(artifacts_root, "t-1").resolve().as_posix()
+
+
+# -- containment belt (WRI-008) ----------------------------------------------
+
+
+def test_assert_contained_path_returns_a_child_path(tmp_path: Path) -> None:
+    root = tmp_path / "logs"
+    target = root / "t" / "stages" / "a" / "run-000001"
+    assert assert_contained_path(root, target) == target
+
+
+def test_assert_contained_path_rejects_parent_traversal(tmp_path: Path) -> None:
+    root = tmp_path / "logs"
+    with pytest.raises(PathIdentityError):
+        assert_contained_path(root, root / ".." / ".." / "evil")
+
+
+def test_assert_contained_path_rejects_absolute_outside_root(tmp_path: Path) -> None:
+    # An absolute target outside the root escapes on every OS (POSIX ``/etc`` / Windows ``C:\``).
+    root = tmp_path / "logs"
+    outside = Path(tmp_path.anchor) / "etc" / "evil"
+    with pytest.raises(PathIdentityError):
+        assert_contained_path(root, outside)
+
+
+def test_create_attempt_dir_refuses_a_traversing_node_id(tmp_path: Path) -> None:
+    # Defense in depth: even if node-id validation were bypassed, a traversing id that would escape
+    # the artifact root is refused at the write boundary before any directory is created.
+    escape = "../" * 8 + "evil"
+    with pytest.raises(PathIdentityError):
+        create_attempt_dir(tmp_path, "t", escape, 1, "codex", node_run_id=1)
+    assert not (tmp_path / "evil").exists()

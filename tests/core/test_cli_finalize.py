@@ -8,10 +8,15 @@ from pathlib import Path
 import pytest
 
 from wastech_orchestrator import cli
+from wastech_orchestrator.core.flow.run_state import FlowRunState
+from wastech_orchestrator.core.loop_control import LoopCounters
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import GitManager
 from wastech_orchestrator.ledger import Ledger, LedgerRecord
-from wastech_orchestrator.state_store import PublishOpRow, StateStore, TaskRow
+from wastech_orchestrator.state_store import NodeRunRow, PublishOpRow, StateStore, TaskRow
+
+# Every test here is a slow integration test (real git / subprocess / process tree).
+pytestmark = pytest.mark.slow
 
 _ENV = ["PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA"]
 
@@ -138,6 +143,86 @@ def test_finalize_failed_reconciles(git_repo, git_run, tmp_path: Path) -> None:
     # No commit/push/PR: the branch is kept and not pushed to the remote.
     assert git_run(["ls-remote", "--heads", "origin", "worc/task-1-t"], git_repo.clone) == ""
     assert "worc/task-1-t" in git_run(["branch", "--list", "worc/task-1-t"], git_repo.clone)
+
+
+def test_finalize_syncs_loop_counters_from_checkpoint(git_repo, tmp_path: Path) -> None:
+    # VF-4: a task stopped mid-flow and finished by hand keeps stale operator-facing counter
+    # columns — they mirror only at a clean terminal transition, which a killed run never reaches.
+    # finalize must re-sync them from the authoritative flow checkpoint so status/ledger report the
+    # real fix-loop churn (here: 3 review_fix reworks) rather than the last synced value.
+    project = tmp_path / "p"
+    project.mkdir()
+    config = _seed(project, git_repo.clone, status=Status.MANUAL_ACTION_REQUIRED)
+    db = git_repo.clone / ".worc" / "state.db"
+    store = StateStore.open(db)
+    store.save_flow_checkpoint(
+        "task-1",
+        current_node="testing",
+        counters_json=json.dumps(
+            {
+                "review_fix": 2,
+                FlowRunState.total_key("review_fix"): 3,
+                FlowRunState.GLOBAL_FIX_KEY: 3,
+            }
+        ),
+        flow_fingerprint="fp",
+        fix_iterations=3,
+    )
+    # Stale mirror: the totals lag the checkpoint (fix_iterations stays current — it is mirrored on
+    # every checkpoint, so only the *_total / *_cycles columns drift, exactly as in VF-4).
+    store.save_counters("task-1", LoopCounters(review_fix_total=1, fix_iterations=3))
+    store.close()
+
+    code = cli.main(["--config", str(config), "finalize", "task-1", "--as", "failed", "--yes"])
+    assert code == 1
+
+    store = StateStore.open_readonly(db)
+    counters = store.get_counters("task-1")
+    store.close()
+    assert counters.review_fix_total == 3  # re-synced from the checkpoint, not the stale 1
+    assert counters.review_fix_cycles == 2
+    assert counters.fix_iterations == 3
+
+
+def test_finalize_reconciles_orphan_node_runs(git_repo, tmp_path: Path) -> None:
+    # VF-13: a --force-full stop SIGKILLs the daemon mid-node, leaving a node run stranded 'running'
+    # and its provider attempt unbilled. The hand-finish path must close the orphan to 'aborted' and
+    # record a provider_attempts row (usage 'unknown') so the aborted run is auditable, not free.
+    project = tmp_path / "p"
+    project.mkdir()
+    config = _seed(project, git_repo.clone, status=Status.MANUAL_ACTION_REQUIRED)
+    db = git_repo.clone / ".worc" / "state.db"
+    store = StateStore.open(db)
+    orphan = store.record_node_run(
+        NodeRunRow(
+            task_id="task-1",
+            node_id="implementation",
+            node_kind="agent",
+            route_primary="claude",
+            status="running",
+            started_at="2026-07-25T00:00:00+00:00",
+        )
+    )
+    store.close()
+
+    code = cli.main(["--config", str(config), "finalize", "task-1", "--as", "failed", "--yes"])
+    assert code == 1
+
+    store = StateStore.open_readonly(db)
+    runs = {r.id: r for r in store.get_node_runs("task-1")}
+    attempts = store.get_provider_attempts_for_task("task-1")
+    store.close()
+    # The orphan is closed with a finish time + the operator-action reason.
+    assert runs[orphan].status == "aborted"
+    assert runs[orphan].finished_at is not None
+    assert runs[orphan].error_class == "cancelled"
+    assert runs[orphan].skip_reason  # names the finalize action
+    # The killed attempt is on the ledger — provider from route_primary, usage marked 'unknown'.
+    aborted = [a for a in attempts if a.node_run_id == orphan]
+    assert len(aborted) == 1
+    assert aborted[0].provider == "claude"
+    assert aborted[0].usage_delta_status == "unknown"
+    assert aborted[0].usage_cost is None  # never a guessed dollar figure
 
 
 def test_finalize_done_uses_recorded_pr_url(

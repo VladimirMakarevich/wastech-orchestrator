@@ -61,6 +61,7 @@ from wastech_orchestrator.providers.redaction import (
     redact_text,
     secret_env_values,
 )
+from wastech_orchestrator.runtime_layout import InternalDenyPolicy
 from wastech_orchestrator.security.env import build_child_env
 
 _PREFLIGHT_TIMEOUT_SECONDS = 10
@@ -98,6 +99,23 @@ class ParsedEvents:
     rate_limited: bool = False
 
 
+@dataclass(frozen=True)
+class IsolationCapabilityReport:
+    """A provider's live, no-model isolation capability-probe verdict for ``worc preflight`` (H7).
+
+    ``ok`` is pass/fail; ``status`` a short machine label (e.g. ``passed``/``unsupported``/
+    ``policy-failed``); ``detail`` a secret-free operator line. ``fatal`` marks a result that must
+    fail preflight regardless of a fallback provider — a proven policy leak is a non-fallback
+    security result — versus an advisory host-capability gap that degrades like a missing capability
+    (fatal only when the provider has no fallback).
+    """
+
+    ok: bool
+    status: str
+    detail: str
+    fatal: bool
+
+
 def coerce_usage_int(value: object) -> int | None:
     """A plain ``int`` from a raw usage value, or ``None`` for an absent / non-integer / bool value.
 
@@ -105,6 +123,18 @@ def coerce_usage_int(value: object) -> int | None:
     :class:`NormalizedUsage`; ``bool`` is rejected because ``isinstance(True, int)`` is true.
     """
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def coerce_usage_cost(value: object) -> float | None:
+    """A ``float`` USD cost from a raw value, or ``None`` for an absent / non-numeric / bool value.
+
+    Shared by the adapters mapping a provider-reported dollar figure (e.g. Claude's stream-json
+    ``total_cost_usd``) into :class:`NormalizedUsage.cost` (VF-8). Accepts an ``int`` or ``float``;
+    ``bool`` is rejected because ``isinstance(True, int)`` is true.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
 
 
 def _produced_no_work(parsed: ParsedEvents, request: AgentRunRequest) -> bool:
@@ -170,16 +200,26 @@ class BaseCliProvider:
         clock: Callable[[], datetime] = _utc_now,
         monotonic: Callable[[], float] = time.monotonic,
         run_process: RunProcess = run_process,
+        preflight_timeout_seconds: float = _PREFLIGHT_TIMEOUT_SECONDS,
         heartbeat_seconds: float = 30.0,
         artifact_level: str = "full",
         agent_handle_recorder: AgentHandleRecorder | None = None,
+        deny_policy: InternalDenyPolicy | None = None,
     ) -> None:
         self._config = config
         self._security = security
         self._artifacts_root = Path(artifacts_root)
+        # WRI-002/003: the internal read-deny set (private/control homes, secrets, provider auth
+        # homes, frozen bundles) the adapter projects into its tool/OS-sandbox deny policy. On the
+        # base so both adapters project the same set; ``None`` in unit harnesses that don't test it.
+        self._deny_policy = deny_policy
         self._clock = clock
         self._monotonic = monotonic
         self._run_process = run_process
+        # One-time preflight/probe launch ceiling. Injected so tests running under heavy parallel
+        # load (`pytest -n auto`) can grant a generous budget without touching the production
+        # default — a real cold-start CLI probe finishes in well under this.
+        self._preflight_timeout_seconds = preflight_timeout_seconds
         self._heartbeat_seconds = heartbeat_seconds
         # Set only by the watch daemon: records the launched agent's (pid, pgid) so a hard stop can
         # reap its whole subtree. None everywhere else (one-shot CLI, tests) and never for the
@@ -222,6 +262,15 @@ class BaseCliProvider:
         """Extra provider-specific keys for the request artifact (inserted before ``argv``)."""
         return {}
 
+    def _stdin_text(self, request: AgentRunRequest) -> str:
+        """The text fed to the CLI on stdin: the Core prompt + the context-files footer.
+
+        Both adapters use this as-is — neither injects repository instructions (VF-5): the agent
+        reads the repo's root instruction files itself (Codex via native ``AGENTS.md`` discovery,
+        Claude via its Read tool), so stdin carries only the flow prompt + the context-file paths.
+        """
+        return build_effective_prompt(request)
+
     def _augment_child_env(self, env: dict[str, str]) -> dict[str, str]:
         """Subclass hook: adjust the allowlisted child env just before preflight/probe/run.
 
@@ -244,6 +293,34 @@ class BaseCliProvider:
         """
         return None
 
+    def _pre_launch_check(
+        self,
+        request: AgentRunRequest,
+        argv: list[str],
+        env: Mapping[str, str],
+        paths: ArtifactPaths,
+    ) -> None:
+        """Subclass hook: a deterministic, no-model check run AFTER argv is built and the request
+        artifact written, but BEFORE the model process launches.
+
+        Runs on the same augmented ``env`` the real launch uses. A subclass raises
+        :class:`ProviderError` to fail closed pre-model (e.g. Codex proves its generated permission
+        profile is actually enforced with a ``codex sandbox`` canary — WRI-003). Default: no-op, so
+        no paid model call is a structural guarantee for providers that need no pre-launch proof.
+        """
+        return None
+
+    def isolation_capability_smoke(self, *, home_dir: Path) -> IsolationCapabilityReport | None:
+        """Subclass hook: a live, no-model isolation capability probe for ``worc preflight`` (H7).
+
+        Default ``None`` — no live probe (the offline ``isolation_reasons`` gate already covers the
+        provider). A subclass (Codex) stands up a throwaway fixture under *home_dir* — which MUST be
+        a real, non-``/tmp`` path — and runs its ``codex sandbox`` capability smoke, mapping the
+        outcome. Called ONLY by ``worc preflight`` (behind an explicit opt-in), never during a task
+        run, so a normal run never pays for it. The returned ``detail`` must be secret-free.
+        """
+        return None
+
     # --- shared lifecycle ----------------------------------------------------------------------
 
     def preflight(self) -> ProviderHealth:
@@ -256,7 +333,7 @@ class BaseCliProvider:
                 [self._config.command, "--version"],
                 cwd=scratch,
                 env=env,
-                timeout_seconds=_PREFLIGHT_TIMEOUT_SECONDS,
+                timeout_seconds=self._preflight_timeout_seconds,
                 stdout_path=stdout_path,
                 monotonic=self._monotonic,
             )
@@ -341,7 +418,7 @@ class BaseCliProvider:
                 argv,
                 cwd=scratch,
                 env=env,
-                timeout_seconds=_PREFLIGHT_TIMEOUT_SECONDS,
+                timeout_seconds=self._preflight_timeout_seconds,
                 stdout_path=out,
                 monotonic=self._monotonic,
             )
@@ -370,6 +447,10 @@ class BaseCliProvider:
         self._write_request(paths, request, argv=argv)
 
         env = self._augment_child_env(build_child_env(self._security.allowed_environment))
+        # Deterministic no-model pre-launch check on the real launch env (WRI-003 Codex canary): a
+        # ProviderError here fails closed BEFORE any model call. The request artifact is already
+        # written; a subclass may record its own evidence under ``paths``.
+        self._pre_launch_check(request, argv, env, paths)
         log = bind(
             _LOG,
             task_id=request.task_id,
@@ -384,7 +465,7 @@ class BaseCliProvider:
                 env=env,
                 timeout_seconds=request.timeout_seconds,
                 stdout_path=paths.stdout_path,
-                stdin_text=build_effective_prompt(request),
+                stdin_text=self._stdin_text(request),
                 monotonic=self._monotonic,
                 recorder=self._agent_handle_recorder,
             ),
@@ -405,6 +486,21 @@ class BaseCliProvider:
             redact_text(proc.stderr_text, extra_secrets=extra_secrets), encoding="utf-8"
         )
         Path(paths.events_path).write_text(redacted_stdout, encoding="utf-8")
+
+        # WRI-012 quiescence barrier: before ANY output is parsed or trusted, the provider process
+        # tree must be proven quiescent. If ``run_process`` could not prove the containment empty, a
+        # background/detached descendant may still be writing the repo/exchange — a fail-closed
+        # SECURITY condition, never a quality failure and never a fallback. Finalize the failed
+        # attempt and raise the non-fallback ``CONTAINMENT_UNVERIFIED`` so the Router does not fall
+        # over (the Core routes it to manual-action and the children-file handle is retained). The
+        # ``detail`` is secret-free (platform + a member count + pids only).
+        if proc.quiescence is not None and not proc.quiescence.proven:
+            error = NormalizedError(
+                ErrorClass.CONTAINMENT_UNVERIFIED,
+                f"{message_for(ErrorClass.CONTAINMENT_UNVERIFIED)} ({proc.quiescence.detail})",
+            )
+            self._finalize_failure(paths, request, started_at, finished_at, proc, error)
+            raise ProviderError(error.error_class, error.message)
 
         # True infrastructure failure (launch / timeout) → no usable stream → classify + raise.
         if proc.launch_error is not None or proc.timed_out:

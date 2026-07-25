@@ -37,6 +37,7 @@ from wastech_orchestrator.task.model import (
     ALLOWED_TASK_KEYS,
     BRANCH_NAME_MAX_LEN,
     DEFAULT_QUEUE,
+    TASK_ID_PATTERN,
     NodeOverride,
     NormalizedTask,
     is_valid_branch_name,
@@ -229,10 +230,16 @@ class ValidationGate:
         if type_reject is not None:
             return type_reject, None
 
-        # invalid_task_id.
+        # invalid_task_id — the id becomes a directory/file component and a branch fragment, so it
+        # must be a portable path identity: the lowercase pattern, no trailing dot, and not a
+        # Windows device name (rejected host-independently, never sanitized).
         id_value = frontmatter["id"]
         if not isinstance(id_value, str) or not is_valid_task_id(id_value):
-            return _rej(ValidationReason.INVALID_TASK_ID, repr(id_value))
+            return _rej(
+                ValidationReason.INVALID_TASK_ID,
+                f"{id_value!r} is not a portable task id: expected {TASK_ID_PATTERN.pattern}, "
+                "no trailing dot, and not a Windows device name (con, nul, com1-9, lpt1-9, …)",
+            )
 
         # invalid_depends_on — self-reference (cheap, single-task; cross-task cycles are resolved by
         # the scheduler against the pending graph, which the per-task gate cannot see).

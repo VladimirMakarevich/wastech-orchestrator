@@ -25,6 +25,7 @@ dev = [
     "mypy>=1.10",
     "pytest>=8.0",
     "pytest-cov>=5.0",
+    "pytest-xdist>=3.6",   # parallel test execution (`-n auto`) — see docs/backlog/test-suite-performance.md
     "types-PyYAML",
     # Quality tooling (see docs/analysis/linting-and-code-quality-investigation.md):
     "import-linter>=2.0",  # architectural import-boundary contracts (.importlinter)
@@ -118,7 +119,10 @@ ignore = [
 "src/wastech_orchestrator/core/supervisor.py" = ["PLR0913"]
 "src/wastech_orchestrator/memory/service.py" = ["PLR0913"]
 "src/wastech_orchestrator/process_control.py" = ["PLR0913"]
-"src/wastech_orchestrator/providers/_adapter_base.py" = ["PLR0915"]
+"src/wastech_orchestrator/providers/_adapter_base.py" = ["PLR0913", "PLR0915"]
+# run_process is the single external-launch chokepoint; the WRI-012 barrier + trusted-containment
+# selection (docs/backlog/test-suite-performance.md, P0) put it 1 statement over the 50 ceiling.
+"src/wastech_orchestrator/providers/process.py" = ["PLR0915"]
 "src/wastech_orchestrator/providers/codex.py" = ["C901", "PLR0912"]
 "src/wastech_orchestrator/routing/router.py" = ["PLR0915"]
 "src/wastech_orchestrator/security/injection.py" = ["PLR0911"]
@@ -148,7 +152,17 @@ ignore_missing_imports = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# `-n auto` (pytest-xdist) fans the suite across CPU cores. The suite is process-spawn / I/O bound
+# (hundreds of real git subprocesses per pipeline test), so parallelism is a large win — measured
+# ~44 min -> ~11 min on a 12-core host. CI inherits this via `addopts` (it runs `pytest -q`). Use
+# `-n0` for a serial run when debugging (`--pdb`, `-s` streaming, deterministic ordering).
+# Full rationale + measurements: docs/backlog/test-suite-performance.md.
+# `--strict-markers` makes an unregistered marker an error (catches typos; every mark is declared
+# below). Deselect the slow integration tier for a fast inner loop: `pytest -m "not slow"`.
+addopts = "-q -n auto --strict-markers"
+markers = [
+    "slow: integration test that spawns real git/subprocesses or a real process tree (module-tagged; deselect with -m 'not slow' for a fast inner loop)",
+]
 
 # Docstring-coverage ratchet (run `interrogate src`). Floor set just below the current measured
 # coverage (~70.8% with the ignores below); raise it as under-documented packages (notify, config,

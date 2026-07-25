@@ -53,6 +53,7 @@ from wastech_orchestrator.providers.base import (
     RunStatus,
 )
 from wastech_orchestrator.routing.router import ResolvedRoute, RouteSource, StageOutcome
+from wastech_orchestrator.runtime_layout import ProviderWriteGuardPolicy
 from wastech_orchestrator.state_store import EditingLineageRow
 
 # -- fakes & builders ---------------------------------------------------------
@@ -183,6 +184,7 @@ def _services(
     artifacts_root: str = "/art",
     snapshot: Any = None,
     packet_builder: Any = None,
+    security_preamble: str | None = None,
 ) -> Any:
     return NodeServices(
         router=router,
@@ -195,6 +197,7 @@ def _services(
         git=git,
         snapshot=snapshot,
         packet_builder=packet_builder,
+        security_preamble=security_preamble,
     )
 
 
@@ -264,6 +267,28 @@ def test_agent_node_equals_direct_router_call(tmp_path: Path) -> None:
     assert req.plan_path == "/t/plan.md"
     assert req.working_directory == "/repo"
     assert store.completed[-1]["outcome"] == "done"
+
+
+def test_agent_request_carries_security_preamble(tmp_path: Path) -> None:
+    # VF-7: the Core-owned preamble threaded via NodeServices reaches the agent's AgentRunRequest.
+    (tmp_path / "roles").mkdir()
+    (tmp_path / "roles" / "impl.md").write_text("Implement {task_path}", "utf-8")
+    node = AgentNode(
+        id="impl",
+        kind="agent",
+        role_file="roles/impl.md",
+        session_scope=SessionScope.EDITING_LINEAGE,
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
+    router, store = FakeRouter(_result()), FakeStore()
+    services = _services(
+        router,
+        store,
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        security_preamble="[Orchestrator security contract] baseline",
+    )
+    AgentNodeRunner(services, _inputs(tmp_path, task_path="/t/task.md")).run(node, _ctx(node))
+    assert router.requests[0].security_preamble == "[Orchestrator security contract] baseline"
 
 
 def test_node_output_path_variable_resolves_downstream(tmp_path: Path) -> None:
@@ -636,6 +661,82 @@ def test_two_affinity_less_editing_nodes_keep_isolated_lineages(tmp_path: Path) 
     assert store.get_editing_lineage("task-1", "spec_edit").raw_session_id == "spec-session"  # type: ignore[union-attr]
 
 
+def test_evaluator_request_carries_security_preamble(tmp_path: Path) -> None:
+    # VF-7 parity: the evaluator's read-only request carries the same Core-owned preamble.
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    router, store = FakeRouter(_result({"findings": []})), FakeStore()
+    services = _services(
+        router,
+        store,
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+        security_preamble="[Orchestrator security contract] baseline",
+    )
+    node = _evaluator("review")
+    EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert router.requests[0].security_preamble == "[Orchestrator security contract] baseline"
+
+
+def test_evaluator_carries_prior_rework_report_from_exchange(tmp_path: Path) -> None:
+    # VF-10: on a rework re-entry the reviewer's request carries the rework-target author node's
+    # latest exchange report, so it judges "was the finding addressed" with the implementer's
+    # account (here a stated blocker) in hand, not the diff alone.
+    import dataclasses
+
+    from wastech_orchestrator.core.flow.schema import Edge
+    from wastech_orchestrator.providers.artifacts import exchange_task_dir
+
+    (tmp_path / "r.md").write_text("review {diff_path}", "utf-8")
+    exchange_root = tmp_path / ".worc-io"
+    run_dir = exchange_task_dir(str(exchange_root), "task-1") / "stages" / "fixing" / "run-000005"
+    run_dir.mkdir(parents=True)
+    (run_dir / "fixing.out.md").write_text("blocked: AGENTS.md write-protected", "utf-8")
+
+    review = _evaluator("review")
+    snap = dataclasses.replace(
+        _snapshot(review),
+        adjacency=MappingProxyType(
+            {"review": (Edge(from_node="review", to="fixing", outcome="rework"),)}
+        ),
+    )
+    ctx = NodeContext(
+        snapshot=snap, run_state=FlowRunState(flow_fingerprint="fp"), node=review, task_id="task-1"
+    )
+    router = FakeRouter(_result({"findings": []}))
+    services = NodeServices(
+        router=router,
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=FakeStore(),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        clock=lambda: "ts",
+        exchange_root=str(exchange_root),
+    )
+    EvaluatorNodeRunner(services, _inputs(tmp_path)).run(review, ctx)
+    report = router.requests[0].rework_report_path
+    assert report is not None and report.endswith("fixing.out.md")
+    # ...and it renders into the context footer the reviewer actually reads.
+    from wastech_orchestrator.providers.base import build_context_footer
+
+    assert f"prior_fix: {report}" in build_context_footer(router.requests[0])
+
+
+def test_evaluator_first_pass_has_no_prior_rework_report(tmp_path: Path) -> None:
+    # VF-10: the first review pass (the author has not run yet) carries no prior report — the field
+    # is None and the context footer omits the slot.
+    (tmp_path / "r.md").write_text("review {diff_path}", "utf-8")
+    router = FakeRouter(_result({"findings": []}))
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    node = _evaluator("review")
+    EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert router.requests[0].rework_report_path is None
+
+
 def test_evaluator_fresh_disposable_does_not_touch_lineage(tmp_path: Path) -> None:
     # P2.2: an in-flow evaluator (fresh_disposable) never resumes nor writes the author's editing
     # lineage — it gets a fresh session and the unit's editing session is left untouched.
@@ -778,6 +879,39 @@ def test_agent_workspace_write_writes_diff(tmp_path: Path) -> None:
     AgentNodeRunner(services, inputs).run(node, _ctx(node))
     assert inputs.diff_path == "/art/current.diff"
     assert ("write_current_diff", "task-1") in git.calls
+
+
+def test_agent_exchange_mutation_is_detected_from_parent_state(tmp_path: Path) -> None:
+    # WRI-002 detection-in-depth: a provider that mutates the curated (read-only) exchange during
+    # its
+    # attempt is caught from the parent-held pre/post manifest and routed to non-fallback manual
+    # action, so the changed copy is never consumed downstream.
+    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
+    from wastech_orchestrator.providers.artifacts import exchange_task_dir
+
+    exchange_root = tmp_path / ".worc-io"
+    task_dir = exchange_task_dir(str(exchange_root), "task-1")
+    task_dir.mkdir(parents=True)
+    (task_dir / "plan.md").write_text("original", encoding="utf-8")
+    (tmp_path / "r.md").write_text("go", encoding="utf-8")
+
+    class _MutatingRouter(FakeRouter):
+        def run_stage(self, request: Any, route: Any, *, snapshot: Any = None) -> Any:
+            (task_dir / "plan.md").write_text("MUTATED BY AGENT", encoding="utf-8")
+            return super().run_stage(request, route, snapshot=snapshot)
+
+    services = NodeServices(
+        router=_MutatingRouter(_result()),
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=FakeStore(),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        clock=lambda: "ts",
+        git=FakeGit(),
+        exchange_root=str(exchange_root),
+    )
+    with pytest.raises(NodeManualRequired, match="exchange mutated"):
+        AgentNodeRunner(services, _inputs(tmp_path)).run(_ws_node(), _ctx(_ws_node()))
 
 
 def test_agent_dangerous_diff_goes_manual(tmp_path: Path) -> None:
@@ -993,6 +1127,38 @@ def test_agent_node_rendered_prompt_includes_context_footer(tmp_path: Path) -> N
     assert "Context files (read them as needed" in rendered
     assert "/t/task.md" in rendered
     assert "/t/plan.md" in rendered
+
+
+def test_rendered_prompt_includes_security_preamble(tmp_path: Path) -> None:
+    """VF-7: the preamble is written into the redacted rendered-prompt.md — the same effective
+    prompt the provider receives on stdin — in order preamble → role prompt → context footer."""
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(
+        id="implementation",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.READ_ONLY,
+    )
+    registered: list[Any] = []
+    services = NodeServices(
+        router=FakeRouter(_result()),
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=FakeStore(),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        clock=lambda: "ts",
+        prompt_audit=True,
+        register_artifact=lambda t, k, p: registered.append((t, k, p)),
+        security_preamble="[Orchestrator security contract] defense in depth",
+    )
+    inputs = _inputs(tmp_path, task_path="/t/task.md")
+    AgentNodeRunner(services, inputs).run(node, _ctx(node))
+    rendered = (
+        node_run_dir(str(tmp_path), "task-1", "implementation", 1) / "rendered-prompt.md"
+    ).read_text()
+    assert rendered.startswith("[Orchestrator security contract] defense in depth")
+    assert "Context files (read them as needed" in rendered  # footer still present
+    assert rendered.index("[Orchestrator security contract]") < rendered.index("Context files")
 
 
 def test_evaluator_rendered_prompt_includes_context_footer(tmp_path: Path) -> None:
@@ -1878,6 +2044,8 @@ def _run(passed: bool) -> CheckRunResult:
         timed_out=False,
         passed=passed,
         log_path="/l",
+        started_at="2026-07-25T00:00:00+00:00",
+        finished_at="2026-07-25T00:00:01+00:00",
     )
 
 
@@ -1888,6 +2056,8 @@ def _skipped_run() -> CheckRunResult:
         timed_out=False,
         passed=False,
         log_path="/l",
+        started_at="2026-07-25T00:00:00+00:00",
+        finished_at="2026-07-25T00:00:00+00:00",
         skipped=True,
     )
 
@@ -2116,9 +2286,29 @@ class FakeGit:
         self.calls.append(("commit_code", task_id, message))
         return "sha-code"
 
-    def commit_audit(self, task_id: str) -> str | None:
+    def commit_audit(self, task_id: str, *, task_packet_digest: str | None = None) -> str | None:
         self.calls.append(("commit_audit", task_id))
         return "sha-audit"
+
+    def capture_git_control_state(self) -> object:
+        return object()  # WRI-009 baseline token; compare returns None (no drift) below
+
+    def compare_git_control_state(self, before: object) -> None:
+        return None
+
+    def list_tracked_files(self, *pathspecs: str) -> tuple[str, ...]:
+        return ()
+
+    def resolve_control_paths(self, exchange_root: str | None = None) -> ProviderWriteGuardPolicy:
+        # WRI-002: the node runner resolves this for every workspace-write attempt; the fake router
+        # never builds an argv, so dummy paths suffice.
+        return ProviderWriteGuardPolicy(
+            exchange_root=None,
+            git_dir=Path("/x/.git"),
+            git_common_dir=Path("/x/.git"),
+            hooks_dir=Path("/x/.git/hooks"),
+            tasks_dir=Path("/x/tasks"),
+        )
 
     def push(self, task_id: str, branch: str, **kw: object) -> bool:
         self.calls.append(("push", task_id, branch, kw.get("mode")))
@@ -2580,3 +2770,62 @@ def test_max_turns_gate_restart_deny_goes_manual(tmp_path: Path) -> None:
     with pytest.raises(NodeManualRequired):
         runner.run(node, ctx)
     assert router.calls == 0  # stopped at the gate, never ran the provider
+
+
+# -- WRI-009: git control-state drift around a workspace-write attempt ---------
+
+
+def test_workspace_write_git_control_drift_is_manual(tmp_path: Path) -> None:
+    # WRI-009: control-state drift across a workspace-write attempt is a terminal manual-action
+    # violation (not a fixing route, not fallback), raised before any post-edit git runs.
+    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
+    from wastech_orchestrator.git_manager import GitControlDrift, GitControlDriftItem
+
+    class _DriftGit(FakeGit):
+        def compare_git_control_state(self, before: object) -> GitControlDrift:
+            item = GitControlDriftItem("index", "staged entry changed: .worc-io/x")
+            return GitControlDrift((item,))
+
+    (tmp_path / "roles").mkdir()
+    (tmp_path / "roles" / "impl.md").write_text("Implement {task_path}", "utf-8")
+    node = AgentNode(
+        id="impl",
+        kind="agent",
+        role_file="roles/impl.md",
+        session_scope=SessionScope.EDITING_LINEAGE,
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
+    services = _services(
+        FakeRouter(_result()),
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=_DriftGit(),
+    )
+    with pytest.raises(NodeManualRequired):
+        AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+
+def test_read_only_node_skips_git_control_capture(tmp_path: Path) -> None:
+    # A read-only attempt cannot mutate git, so it is neither captured nor compared — a git whose
+    # capture would explode is never called.
+    class _ExplodingGit(FakeGit):
+        def capture_git_control_state(self) -> object:
+            raise AssertionError("a read-only node must not capture git control state")
+
+    (tmp_path / "roles").mkdir()
+    (tmp_path / "roles" / "review.md").write_text("Review {diff_path}", "utf-8")
+    node = AgentNode(
+        id="review",
+        kind="agent",
+        role_file="roles/review.md",
+        session_scope=SessionScope.EDITING_LINEAGE,
+        permission_profile=PermissionProfile.READ_ONLY,
+    )
+    services = _services(
+        FakeRouter(_result()),
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=_ExplodingGit(),
+    )
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "done"  # completed; the git control capture was skipped

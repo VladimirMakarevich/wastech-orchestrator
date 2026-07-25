@@ -27,7 +27,7 @@ A flow is a validated graph of typed nodes joined by outcome-labelled edges, sto
 | --- | --- | --- | --- | --- |
 | `code_change` | Anywhere in the repo (the deliverable _is_ the diff, guarded by the dangerous-diff gate). | — | Yes (normal diff). | Code/implementation flows. Pairs with `publishing: pull_request`. |
 | `repository_document` | **Only** `docs/research/<task_id>/`. | `report.md` + `sources.json` | Yes (committable document). | Research/analysis flows that ship a document into the repo. Pairs with `publishing: documentation_pull_request`. |
-| `private_control_workspace_report` | **Only** `.worc/security-reports/<task_id>/`. | `report.md` | **No — private, fail-closed.** Any attempt to stage/commit/PR it is refused. | Sensitive reports (e.g. security audits) that must never enter git. Pairs with `publishing: none` (or `private_control_workspace_report`). |
+| `private_control_workspace_report` | Orchestrator-written into `.worc/security-reports/<task_id>/` from the report node's structured output (`output_artifact: report`); the node is read-only. | `report.md` | **No — private, fail-closed.** Any attempt to stage/commit/PR it is refused. | Sensitive reports (e.g. security audits) that must never enter git. Pairs with `publishing: none` (or `private_control_workspace_report`). |
 
 The write confinement is enforced twice: an after-stage write guard on every workspace-write node, and again at publish. Pick `output_policy` to match what the flow actually creates — a mismatch (e.g. a research flow trying to edit `src/`) is blocked at runtime.
 
@@ -93,7 +93,7 @@ Every node has an `id` (unique; see reserved ids below) and a `kind`. The six ki
 | `model` | string \| null | `null` | Passed through unverified. | Override the provider's default model. |
 | `reasoning` | string \| null | `null` | Must be valid for the resolved provider (Claude vs Codex sets differ). | Override reasoning effort. |
 | `timeout_seconds` | int \| null | `null` | — | Per-attempt CLI wall-clock ceiling. |
-| `output_artifact` | `enriched_spec` \| `plan` \| `summary` \| null | `null` | Vocabulary is fixed to these three. | Persist the node's output into a well-known slot (see [roles.md](roles.md)). |
+| `output_artifact` | `enriched_spec` \| `plan` \| `summary` \| `report` \| null | `null` | Vocabulary is fixed to these four. | Persist the node's output into a well-known slot (see [roles.md](roles.md)). `report` (read-only node) has the orchestrator capture the node's structured output into the private report dir. |
 | `output_schema` | JSON-encoded string \| null | `null` | **Every object must set `additionalProperties: false`** (Codex 400s otherwise). | Custom structured-output shape. Prefer the built-in contract. |
 | `best_effort` | bool | `false` | — | Tolerate an infrastructure failure and continue the task (e.g. the summary node). |
 | `hitl` | `{allow_question, allow_approval}` \| null | `null` | — | Allow the agent to ask a question / request approval mid-node. |

@@ -16,6 +16,9 @@ from wastech_orchestrator.security.forbidden_args import (
     [
         ("--dangerously-bypass-approvals-and-sandbox",),
         ("--dangerously-skip-permissions",),
+        (
+            "--allow-dangerously-skip-permissions",
+        ),  # WRI-002: same bypass class, no --dangerously prefix
         ("--dangerously-bypass-hook-trust",),
         ("--yolo",),
         ("--ignore-rules",),

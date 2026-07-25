@@ -24,6 +24,9 @@ from wastech_orchestrator.providers.base import (
 from wastech_orchestrator.providers.claude import ClaudeCodeProvider
 from wastech_orchestrator.providers.codex import CodexProvider
 
+# Every test here is a slow integration test (real git / subprocess / process tree).
+pytestmark = pytest.mark.slow
+
 PROVIDERS = ("codex", "claude")
 
 
@@ -31,6 +34,13 @@ PROVIDERS = ("codex", "claude")
 def _make_clone(tmp_path: Path) -> None:
     # The request's working_directory must exist for the subprocess cwd.
     (tmp_path / "clone").mkdir(exist_ok=True)
+
+
+# The version/capability probes launch a real (fake-CLI) subprocess. Under `pytest -n auto` the
+# machine can be saturated by 12 workers, so the production 10 s probe ceiling is granted a generous
+# budget here to keep these integration tests deterministic (the fake always returns in well under
+# a second — this only guards against pathological scheduling starvation, never real slowness).
+_PROBE_TIMEOUT_UNDER_LOAD = 120.0
 
 
 def _build(
@@ -43,9 +53,13 @@ def _build(
             timeout_seconds=7200,
             permission_profile="workspace-write",
             extra_args=(),
-            sandbox="workspace-write",
         )
-        return CodexProvider(config, security=security, artifacts_root=artifacts_root)
+        return CodexProvider(
+            config,
+            security=security,
+            artifacts_root=artifacts_root,
+            preflight_timeout_seconds=_PROBE_TIMEOUT_UNDER_LOAD,
+        )
     config = ProviderConfig(
         command=command,
         model="",
@@ -53,7 +67,12 @@ def _build(
         permission_profile="workspace-write",
         extra_args=(),
     )
-    return ClaudeCodeProvider(config, security=security, artifacts_root=artifacts_root)
+    return ClaudeCodeProvider(
+        config,
+        security=security,
+        artifacts_root=artifacts_root,
+        preflight_timeout_seconds=_PROBE_TIMEOUT_UNDER_LOAD,
+    )
 
 
 @pytest.mark.parametrize("provider_name", PROVIDERS)

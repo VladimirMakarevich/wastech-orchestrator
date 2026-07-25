@@ -80,6 +80,52 @@ def test_node_runs_ordered_by_execution(tmp_path: Path) -> None:
     assert [r.node_id for r in store.get_node_runs("t1")] == ["a", "b", "c"]
 
 
+def test_reconcile_open_node_runs_closes_orphans(tmp_path: Path) -> None:
+    # VF-13: a hard operator stop strands a node run 'running'/finished_at NULL; a terminal
+    # transition closes it to 'aborted' with the reason and returns the pre-update rows so the
+    # caller can bill the killed provider attempt from ``route_primary``.
+    store = _store(tmp_path)
+    orphan = store.record_node_run(
+        NodeRunRow(
+            task_id="t1",
+            node_id="implementation",
+            node_kind="agent",
+            route_primary="codex",
+            status="running",
+            started_at="2026-01-01T00:00:00+00:00",
+        )
+    )
+    done = store.record_node_run(NodeRunRow(task_id="t1", node_id="planning", node_kind="agent"))
+    store.complete_node_run(
+        done, status="succeeded", outcome="done", finished_at="2026-01-01T00:00:30+00:00"
+    )
+    closed = store.reconcile_open_node_runs(
+        "t1",
+        finished_at="2026-01-01T00:05:00+00:00",
+        error_class="cancelled",
+        skip_reason="killed by operator",
+    )
+    assert [r.id for r in closed] == [orphan]
+    assert closed[0].route_primary == "codex"
+    by_id = {r.id: r for r in store.get_node_runs("t1")}
+    assert by_id[orphan].status == "aborted"
+    assert by_id[orphan].finished_at == "2026-01-01T00:05:00+00:00"
+    assert by_id[orphan].skip_reason == "killed by operator"
+    assert by_id[orphan].error_class == "cancelled"
+    # The already-finalized node is untouched (only 'running'/finished_at NULL rows are closed).
+    assert by_id[done].status == "succeeded"
+    assert by_id[done].finished_at == "2026-01-01T00:00:30+00:00"
+
+
+def test_reconcile_open_node_runs_noop_when_all_finished(tmp_path: Path) -> None:
+    # VF-13: a clean terminal (every node finalized) reconciles nothing — empty list, no writes.
+    store = _store(tmp_path)
+    rid = store.record_node_run(NodeRunRow(task_id="t1", node_id="a", node_kind="agent"))
+    store.complete_node_run(rid, status="succeeded", outcome="done", finished_at="t-end")
+    assert store.reconcile_open_node_runs("t1", finished_at="t-x") == []
+    assert store.get_node_runs("t1")[0].status == "succeeded"
+
+
 def test_flow_checkpoint_roundtrip(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.save_flow_checkpoint(

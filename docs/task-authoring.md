@@ -52,7 +52,7 @@ Allowed fields:
 
 | Field | Required | Type | Meaning |
 | --- | --: | --- | --- |
-| `id` | yes | string | Stable task id. Must match `^[a-z0-9][a-z0-9._-]{0,63}$`. |
+| `id` | yes | string | Stable task id. Must match `^[a-z0-9][a-z0-9._-]{0,63}$`, must not end in `.`, and must not be a Windows device name (`con`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, with or without an extension). It becomes a directory/file name and a branch fragment, so the rule is host-independent (rejected on macOS/Linux too, never sanitized). |
 | `title` | yes | string | Short human-readable title. Used for the default branch slug, PR title, commit messages, and reports. **Plain text only** — like every front-matter value it must not contain argv-shaped tokens (`` ` ``, `;`, `\|`, `$(`, a leading `-`); put code/shell snippets in the body, not the title. See [front-matter values are plain text](#front-matter-values-are-plain-text). |
 | `task_type` | no | string | Selects the flow that runs the task. Omitted ⇒ `implementation` (the default coding pipeline). Built-ins: `implementation`, `deep_research`, `security_audit`; an operator flow in `<repo>/.worc/flows/<task_type>.yaml` may add others. An unknown `task_type` (no matching flow) fails the task before any branch is created. The task only _names_ the flow — it never edits the graph. To author a new flow, see [flow-authoring.md](flow-authoring.md). |
 | `branch_name` | no | string \| null | Full task branch override (only in `new` branch mode). Omitted ⇒ `<repo.branch_prefix>/<id>-<slug(title)>`; set it to match a project's branch naming policy. Ignored (a validation warning) in `existing`/`current` mode. See [`branch_name`](#branch_name). |
@@ -65,7 +65,7 @@ Allowed fields:
 | `decomposition` | no | boolean | `true` permits a split for this task, `false` forbids one, omitted uses the instance default `agents.decomposition.enabled`. The task value wins; it only flips the gate (the flow + planning still decide whether a split happens). See [`decomposition`](#decomposition). |
 | `contacts` | no | list of strings | Plain-text mentions in Telegram notifications/HITL prompts. |
 | `depends_on` | no | list of strings | Other task ids that must be **merged** before this task may start (non-blocking, merge-gated scheduling). See [`depends_on`](#depends_on). |
-| `priority` | no | `low` \| `mid` \| `high` | Scheduling order for the eligibility queue. The scheduler runs eligible tasks `high → mid → low`, ties broken by filename. Omitted/unrecognised ⇒ `mid` (fail-open — a typo never blocks a task). See [`priority`](#priority). |
+| `priority` | no | `low` \| `mid` \| `high` | Scheduling order for the eligibility queue. The scheduler runs eligible tasks `high → mid → low`, ties broken by **natural (numeric-aware)** filename order (`p9` before `p10`, identical on every OS). Omitted/unrecognised ⇒ `mid` (fail-open — a typo never blocks a task). See [`priority`](#priority). |
 | `queue` | no | non-empty string | Routes the task to a worc instance whose `orchestrator.queue` selector equals this value (plain string equality). Lets several instances share one task pool without colliding. Omitted ⇒ `"default"`. **Fail-closed**: a malformed value (non-string, or empty/whitespace) rejects the task. See [`queue`](#queue). |
 | `subtasks` | no | list of strings | Operator-authored decomposition: ordered references to per-subtask spec files. Presence ⇒ the task runs as a split (one branch, one PR). See [`subtasks`](#subtasks-operator-authored-decomposition). |
 | `nodes` | no | mapping | Per-node overrides keyed by flow node id: `enabled: false` disables a node, and `model` / `reasoning` / `provider` overlay that node's executor for this run (best-effort). See [`nodes`](#nodes). |
@@ -106,9 +106,11 @@ id: Task-001 # uppercase
 id: "task 001" # whitespace
 id: "../task-001" # path traversal shape
 id: "-task-001" # leading separator
+id: "task-001." # trailing dot (Windows strips it → a different on-disk name)
+id: con # Windows device name (also con.txt, nul, com1–com9, lpt1–lpt9)
 ```
 
-The orchestrator rejects invalid ids; it does not sanitize them.
+The orchestrator rejects invalid ids; it does not sanitize them. The device-name and trailing-dot rules are host-independent — an id that is not portable to Windows is rejected on macOS and Linux too, so the same task behaves the same on every supported OS.
 
 ## `branch_name`
 
@@ -156,7 +158,7 @@ Rules and safety:
 - **`current` needs a real branch** — a detached `HEAD` is rejected. Because it rides your live checkout, `current` is a poor fit for unattended `watch` (it emits a warning), and sub-tasks from decomposition inherit the parent's one working branch.
 - **The orchestrator never mutates a branch it does not own.** In `existing`/`current` mode it never deletes, resets-to-base, or force-checks-out-away from the branch; terminal cleanup leaves both an `existing`- and a `current`-mode tree exactly where you left it (by default — `new` returns to base, and `repo.checkout_base_on_cleanup` overrides either way; `current` always stays). Consequently a **fresh** `rerun` is refused in these modes — use `rerun --continue` to resume in place, or clean up the branch yourself.
 - **`branch_name` is ignored** outside `new` mode (there is nothing to name); setting it there is a validation warning.
-- **Publishing is orthogonal.** Branch mode only redirects where the `publish` node's commit/push/PR point; whether a `publish` node runs at all is still the flow's decision. When the working branch resolves to the PR base (e.g. `current` on `main`), a PR is impossible — the orchestrator still commits and pushes (directly to the base, subject to branch protection) and **skips the PR** with a logged note; `auto_merge` then no-ops. A chain of tasks on one shared branch converges on a **single** PR: an already-open `head→base` PR is reused rather than re-created, and each reusing task appends its own `## <title>` + summary section to the PR body (keyed by task id, so a rerun does not duplicate it) — the PR reflects the whole chain instead of only its first task.
+- **Publishing is orthogonal.** Branch mode only redirects where the `publish` node's commit/push/PR point; whether a `publish` node runs at all is still the flow's decision. When the working branch resolves to the PR base (e.g. `current` on `main`), a PR is impossible — the orchestrator still commits and pushes (directly to the base, subject to branch protection) and **skips the PR** with a logged note; `auto_merge` then no-ops. A chain of tasks on one shared branch converges on a **single** PR: an already-open `head→base` PR is reused rather than re-created, and each reusing task appends its own `## <title>` + summary section to the PR body (keyed by task id, so a rerun does not duplicate it) **and retitles the PR to `N tasks on <branch>`** — so the PR reflects the whole chain instead of only its first task. The body is kept under GitHub's size limit by compacting the oldest sections to a one-line pointer at their on-disk `logs/<id>/summary.md` (every task's marker + `## <title>` is always kept, so the chain stays fully listed).
 
 ## `publish`
 
@@ -300,7 +302,9 @@ Rules and edge cases:
 priority: high # low | mid | high — default mid
 ```
 
-Under `watch`, after dependency resolution the scheduler ranks the **eligible** tasks `high → mid → low` and breaks ties with the existing filename order, then picks the first. `depends_on` is always stronger: a higher-priority task that is still **waiting** on an unmerged dependency is skipped, so a lower-priority eligible task runs ahead of it. Priority is a re-ordering of the queue, not a concurrency change — the single-active-task invariant is unchanged, and it has no effect on an explicit `worc run <file>` (one task, nothing to order).
+Under `watch`, after dependency resolution the scheduler ranks the **eligible** tasks `high → mid → low` and breaks ties with **natural (numeric-aware)** filename order — `p9-…` sorts before `p10-…`, the same order a file manager shows and identical on every OS — then picks the first. `depends_on` is always stronger: a higher-priority task that is still **waiting** on an unmerged dependency is skipped, so a lower-priority eligible task runs ahead of it. Priority is a re-ordering of the queue, not a concurrency change — the single-active-task invariant is unchanged, and it has no effect on an explicit `worc run <file>` (one task, nothing to order).
+
+Because `priority`, `queue`, and `depends_on` all reorder the queue away from the plain alphabetical listing, read the effective run order from `worc list` / `worc top` (which print the rank, priority, and queue each task sorted on), not from your file manager.
 
 Unlike the other constrained fields, `priority` is **fail-open**: a missing value, an unknown string (`urgent`), or a wrong type all fold to `mid` and the task still runs — a typo in a scheduling hint must never reject an otherwise-valid task.
 

@@ -59,6 +59,23 @@ def test_safe_runner_passes_shell_false_to_subprocess(
         captured["kwargs"] = kwargs
         return _FakeProc()
 
+    class _NoopContainment:
+        # Isolate the launch from the WRI-012 containment's own process bookkeeping (its POSIX
+        # descendant snapshot shells out to `ps` via subprocess, which would otherwise be the last
+        # Popen captured here). That `ps` call is itself argv-list + shell=False in-source and is
+        # covered by test_subprocess_is_only_used_in_the_safe_runner above.
+        def popen_kwargs(self) -> dict[str, object]:
+            return {"start_new_session": True}
+
+        def adopt(self, proc: object) -> None:
+            pass
+
+        def terminate(self) -> None:
+            pass
+
+        def terminate_and_prove(self) -> process_mod.QuiescenceResult:
+            return process_mod.QuiescenceResult(proven=True, detail="noop")
+
     monkeypatch.setattr(process_mod.subprocess, "Popen", fake_popen)
     process_mod.run_process(
         ["echo", "hi"],
@@ -66,6 +83,7 @@ def test_safe_runner_passes_shell_false_to_subprocess(
         env={},
         timeout_seconds=5,
         stdout_path=tmp_path / "stdout.log",
+        make_containment=_NoopContainment,
     )
     assert captured["kwargs"]["shell"] is False
     assert captured["argv"] == ["echo", "hi"]

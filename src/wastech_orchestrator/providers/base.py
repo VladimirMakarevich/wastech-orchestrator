@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
+from wastech_orchestrator.runtime_layout import ProviderWriteGuardPolicy
+
 # --- Canonical enumerations (do not duplicate as string literals throughout the code) ---
 
 
@@ -79,6 +81,25 @@ class ErrorClass(StrEnum):
     # distinguishable from a genuine PROCESS_CRASHED. Deliberately NOT in FALLBACK_ELIGIBLE (never
     # respawn a fresh agent after a stop) nor TRANSIENT_RETRYABLE; the Core parks the task instead.
     CANCELLED = "cancelled"
+    # The provider process-tree quiescence barrier could not prove the containment empty (WRI-012):
+    # a background/detached/reparented descendant may still be running and writing the repo/exchange
+    # after the root exited. This is a SECURITY / manual-action condition, never a quality failure.
+    # Deliberately NOT in FALLBACK_ELIGIBLE (never respawn a fresh agent while an unknown writer may
+    # be live) nor PARK_ELIGIBLE (an auto-resume must not paper over an uncontained process); the
+    # Core routes it to ``manual_action_required`` and the children-file handle is retained.
+    CONTAINMENT_UNVERIFIED = "containment_unverified"
+    # A required host isolation capability is unavailable, detected DETERMINISTICALLY BEFORE any
+    # model invocation (WRI-002): e.g. a Claude workspace-write node on Linux/WSL2 whose Bash
+    # sandbox
+    # needs ``bubblewrap``+``socat`` which are absent. The adapter refuses to run Bash unsandboxed
+    # and raises this from the argv builder — nothing is launched, so no paid call is made. NOT a
+    # quality failure and NOT unconditionally fallback-eligible: the Router
+    # (``CONDITIONAL_FALLBACK``)
+    # permits fallback only to a provider whose effective isolation for the node is same-or-stricter
+    # AND can itself isolate on this host; otherwise the Core routes it to
+    # ``manual_action_required``.
+    # A failed policy/sandbox proof on a *supported* host stays a non-fallback security result too.
+    CAPABILITY_UNAVAILABLE = "capability_unavailable"
 
 
 # Error classes that unconditionally allow fallback.
@@ -155,6 +176,12 @@ class AgentRunRequest:
     check_artifacts_path: str | None = None
     review_artifacts_path: str | None = None
     human_input_path: str | None = None
+    # VF-10: on a rework re-entry, the previous author (e.g. ``fixing``) node's report — its own
+    # account of what it did or why it could not address the last findings. Set by the evaluator
+    # runner from the exchange (``None`` on the first pass / for non-evaluator requests), so the
+    # reviewer judges "was the finding addressed" with the implementer's account in hand instead of
+    # re-diagnosing from the diff alone.
+    rework_report_path: str | None = None
     # Planning-selected SKILL.md paths — read-only advisory references, never executed.
     skill_reference_paths: tuple[str, ...] = ()
     output_schema: dict[str, Any] | None = None
@@ -173,6 +200,22 @@ class AgentRunRequest:
     # access; Claude allows the WebFetch/WebSearch tools. It only toggles the network — never the
     # filesystem sandbox/approvals (the ceiling stays in force).
     network_access: bool = False
+    # WRI-002/003: the absolute Git-control + lifecycle roots a *workspace-write* attempt must
+    # Write/Edit-deny (exchange root, resolved gitdir/common-dir/hooks-dir, ``tasks/`` tree). Set by
+    # the node runner from ``GitManager.resolve_control_paths`` only for a workspace-write attempt
+    # (the gitdir/common-dir are per-worktree and only final after branch prep); ``None`` for
+    # read-only attempts, which carry no write tools. Provider-neutral — each adapter renders it
+    # into its own tool-deny / OS-sandbox ``denyWrite`` syntax; preserved verbatim across a
+    # fallback. Repository governance/instruction files are intentionally not in this set — editing
+    # them is ordinary work, reported to the operator rather than blocked (VF-20).
+    write_guard: ProviderWriteGuardPolicy | None = None
+    # VF-7: the Core-owned orchestrator security contract prepended to the effective prompt as
+    # defense-in-depth (advisory, NOT enforcement — the sandbox + deny projection enforce). Neutral
+    # text built once in Core (``core/flow/security_preamble``) and carried here; the single neutral
+    # seam ``build_effective_prompt`` prepends it, so every request kind (agent/evaluator/
+    # supervisor) × both providers gets it without any adapter change. ``None`` prepends nothing
+    # (today's prompt byte-for-byte). Secret-free by contract.
+    security_preamble: str | None = None
 
 
 def build_context_footer(request: AgentRunRequest) -> str:
@@ -183,6 +226,7 @@ def build_context_footer(request: AgentRunRequest) -> str:
         ("diff", request.diff_path),
         ("checks", request.check_artifacts_path),
         ("review", request.review_artifacts_path),
+        ("prior_fix", request.rework_report_path),
         ("human_input", request.human_input_path),
     )
     present = [(label, path) for label, path in fields if path]
@@ -199,11 +243,20 @@ def build_context_footer(request: AgentRunRequest) -> str:
 
 
 def build_effective_prompt(request: AgentRunRequest) -> str:
-    """Combine the Core-assembled prompt with the context-files footer."""
+    """Combine the orchestrator security preamble, the Core-assembled prompt, and the footer.
+
+    Order in the single stdin channel: ``preamble → prompt → footer`` (VF-7). A ``None``/empty
+    preamble or footer is omitted, so an unset preamble yields today's output byte-for-byte. Pure
+    text concatenation — no CLI syntax; the preamble content is built in Core and carried on the
+    request.
+    """
+    body = request.prompt
+    if request.security_preamble:
+        body = f"{request.security_preamble}\n\n{body}"
     footer = build_context_footer(request)
     if not footer:
-        return request.prompt
-    return f"{request.prompt}\n\n{footer}"
+        return body
+    return f"{body}\n\n{footer}"
 
 
 # The Claude CLI's terminal ``result`` subtype when a run exhausts its ``--max-turns`` cap. A clean
@@ -232,7 +285,9 @@ class NormalizedUsage:
     is nullable so a provider that does not report a category (Codex has no cache-creation count;
     Claude folds reasoning into output) leaves it ``None`` rather than guessing a zero. The field
     invariant that holds for both providers: ``input_total == uncached_input + cache_read +
-    (cache_write or 0)``. ``cost`` is reserved but left ``None`` — cost capture is deferred.
+    (cache_write or 0)``. ``cost`` is the provider-reported spend for the scope, in USD, when the
+    CLI emits one (Claude's stream-json ``total_cost_usd``) — ``None`` when it does not (Codex emits
+    no dollar figure), never a guessed value (VF-8).
     """
 
     scope: UsageScope

@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import logging
 
-from wastech_orchestrator.notify.interface import TRACE_REWORK_EXHAUSTED, NullNotifier
+from wastech_orchestrator.notify.interface import (
+    TRACE_REWORK_EXHAUSTED,
+    NullNotifier,
+    TerminalDetails,
+    TerminalFinding,
+    terminal_reason_prose,
+)
 from wastech_orchestrator.notify.telegram import TelegramNotifier, _Secrets
 
 from .conftest import FakeTelegramClient
@@ -60,6 +66,26 @@ def test_send_includes_contacts_as_plain_text(fake_client: FakeTelegramClient) -
     assert "contacts=@owner @ops" in fake_client.sent[0]["text"]
 
 
+def test_send_includes_governance_changed_as_paths(fake_client: FakeTelegramClient) -> None:
+    # VF-20: a completed run that edited governance files marks which ones on the terminal message.
+    n = _notifier(fake_client)
+    n.send_notification(
+        task_id="task-gov",
+        final_status="done",
+        pr_url=None,
+        reason=None,
+        governance_changed=("AGENTS.md", ".agents/rules/security.md"),
+    )
+    assert "governance=AGENTS.md,.agents/rules/security.md" in fake_client.sent[0]["text"]
+
+
+def test_send_omits_governance_when_empty(fake_client: FakeTelegramClient) -> None:
+    # Ordinary task (no governance edits) → no governance field, no noise.
+    n = _notifier(fake_client)
+    n.send_notification(task_id="task-plain", final_status="done", pr_url=None, reason=None)
+    assert "governance=" not in fake_client.sent[0]["text"]
+
+
 def test_send_manual_action_required(fake_client: FakeTelegramClient) -> None:
     n = _notifier(fake_client)
     n.send_notification(
@@ -69,7 +95,95 @@ def test_send_manual_action_required(fake_client: FakeTelegramClient) -> None:
         reason="stuck: max_fix_cycles",
     )
     assert len(fake_client.sent) == 1
-    assert "manual_action_required" in fake_client.sent[0]["text"]
+    # No details → degrades to the terse one-line message, now carrying the 🛑 glyph.
+    text = fake_client.sent[0]["text"]
+    assert "manual_action_required" in text
+    assert text.startswith("🛑 ")
+    assert "\n" not in text
+
+
+def test_send_manual_action_required_enriched(fake_client: FakeTelegramClient) -> None:
+    # VF-22: a needs-attention terminal carrying details renders the actionable multi-line body —
+    # glyph + id, title, where it stopped, a prose reason, the blocking finding + paths, the report.
+    n = _notifier(fake_client)
+    details = TerminalDetails(
+        title="P10.01 Fix governance docs",
+        branch="feat/p9-remediation",
+        stop_node="review",
+        loop="review_fix",
+        fix_rounds=2,
+        finding=TerminalFinding(
+            severity="high",
+            reason="Deliverable 1 is missing — AGENTS.md was never modified.",
+            paths=("AGENTS.md",),
+        ),
+        report_path=".worc/logs/p10-01/stuck.md",
+    )
+    n.send_notification(
+        task_id="p10-01",
+        final_status="manual_action_required",
+        pr_url=None,
+        reason="no_file_change",
+        details=details,
+    )
+    text = fake_client.sent[0]["text"]
+    assert text.startswith("🛑 manual_action_required — p10-01")
+    assert "P10.01 Fix governance docs" in text
+    assert "Stopped at: review (review_fix loop), after 2 fix rounds" in text
+    assert "Why: the fix loop produced no file changes" in text  # prose, not the raw token
+    assert "no_file_change" not in text  # the raw token is replaced by prose
+    assert "Blocking (high): Deliverable 1 is missing" in text
+    assert "Paths: AGENTS.md" in text
+    assert "Branch: feat/p9-remediation" in text
+    assert "Details: .worc/logs/p10-01/stuck.md" in text
+
+
+def test_send_failed_enriched_echoes_unknown_reason_and_uses_cross_glyph(
+    fake_client: FakeTelegramClient,
+) -> None:
+    # A details-carrying `failed` gets the ❌ glyph + body; an unmapped reason token is echoed
+    # verbatim (never dropped), and a single fix round is not pluralized.
+    n = _notifier(fake_client)
+    details = TerminalDetails(
+        title="build task", stop_node="checks", fix_rounds=1, report_path="x/stuck.md"
+    )
+    n.send_notification(
+        task_id="t-fail",
+        final_status="failed",
+        pr_url=None,
+        reason="some_new_limit",
+        details=details,
+    )
+    text = fake_client.sent[0]["text"]
+    assert text.startswith("❌ failed — t-fail")
+    assert "Why: some_new_limit" in text  # unknown token echoed verbatim
+    assert "Stopped at: checks, after 1 fix round" in text and "1 fix rounds" not in text
+
+
+def test_send_done_stays_terse_with_glyph(fake_client: FakeTelegramClient) -> None:
+    # VF-22 item 7: a clean done stays a single terse line (with a ✅ glyph), never the enriched
+    # body — even if details were somehow supplied, `done` is not a needs-attention status.
+    n = _notifier(fake_client)
+    n.send_notification(
+        task_id="task-ok",
+        final_status="done",
+        pr_url="https://example/pr/1",
+        reason=None,
+        details=TerminalDetails(title="should be ignored for done"),
+    )
+    text = fake_client.sent[0]["text"]
+    assert text.startswith("✅ [task-ok] status=done")
+    assert "pr=https://example/pr/1" in text
+    assert "\n" not in text and "should be ignored" not in text
+
+
+def test_terminal_reason_prose_maps_known_and_passes_unknown() -> None:
+    assert terminal_reason_prose("no_file_change").startswith("the fix loop produced no file")
+    assert "max_fix_cycles" in terminal_reason_prose("max_fix_cycles")
+    assert terminal_reason_prose("budget:review->fixing:rework").startswith("an inline routing")
+    assert terminal_reason_prose("totally_unknown") == "totally_unknown"
+    assert terminal_reason_prose(None) is None
+    assert terminal_reason_prose("") is None
 
 
 def test_send_failure_is_swallowed(fake_client: FakeTelegramClient) -> None:

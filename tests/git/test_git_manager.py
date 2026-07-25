@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
 import subprocess
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -12,15 +14,26 @@ import pytest
 from wastech_orchestrator.config.schema import BranchMode, MergeStrategy
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import (
+    _PR_BODY_MAX_CHARS,
     _PUSH_RETRY_BACKOFF_SECONDS,
+    _SECTION_SEPARATOR,
+    _TASK_MARKER_PREFIX,
     KIND_PR_MERGE,
     RUNTIME_EXCLUDED_DIRS,
     GitCommandError,
     GitManager,
     GitResult,
+    ManualActionRequired,
+    _bound_pr_body,
+    _compact_pr_section,
     append_runtime_excludes,
 )
+from wastech_orchestrator.providers.artifacts import sha256_file
+from wastech_orchestrator.providers.process import ProcessResult
 from wastech_orchestrator.state_store import PublishOpRow, StateStore, TaskRow
+
+# Every test here is a slow integration test (real git / subprocess / process tree).
+pytestmark = pytest.mark.slow
 
 GitRunner = Callable[[Sequence[str], Path], str]
 ConfigFactory = Callable[..., object]
@@ -63,6 +76,35 @@ _EPOCH = 1700000000
 # Dirs kept out of the code commit under the default config: the gitignored runtime home plus the
 # default task lifecycle dir (`paths.tasks_dir` defaults to "tasks").
 _DEFAULT_EXCLUDED_DIRS = (*RUNTIME_EXCLUDED_DIRS, "tasks")
+
+
+def test_git_calls_use_trusted_containment_but_gh_does_not(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    """P0: hardened ``git`` runs under the trusted (no-``ps``-sweep) containment, while ``gh`` —
+    less constrained — keeps the full WRI-012 barrier. Asserts the ``trusted`` flag the runner
+    receives per binary, so the fast path is scoped to git alone."""
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    seen: list[tuple[str, bool]] = []
+
+    def spy_run_process(argv, **kwargs) -> ProcessResult:
+        seen.append((argv[0], bool(kwargs.get("trusted", False))))
+        Path(kwargs["stdout_path"]).write_text("", encoding="utf-8")
+        return ProcessResult(
+            exit_code=0,
+            timed_out=False,
+            launch_error=None,
+            duration_seconds=0.0,
+            stdout_path=str(kwargs["stdout_path"]),
+            stderr_text="",
+        )
+
+    gm._run_process = spy_run_process  # type: ignore[assignment]
+    gm._git("status", "--porcelain")
+    gm._run(["gh", "--version"])
+
+    assert ("git", True) in seen  # hardened git → trusted fast path
+    assert ("gh", False) in seen  # gh → full descendant-tracking barrier
 
 
 def test_prepare_branch_creates_task_branch(
@@ -435,16 +477,23 @@ def test_append_runtime_excludes_respects_operators_flows_tracking_scheme(
 ) -> None:
     # `install --reconfigure` calls append_runtime_excludes() again; it must not append a blanket
     # `.worc/` line after an operator's own `.worc/*` + `!.worc/flows/` scheme (docs/how-to.md) —
-    # that would silently re-exclude `.worc/flows/` from the tracked .gitignore.
+    # that would silently re-exclude `.worc/flows/` from the tracked .gitignore. It still adds the
+    # `.worc-io/` exchange line, which the operator scheme does not cover (WRI-001, per-root).
     gitignore = git_repo.clone / ".gitignore"
     gitignore.write_text(".worc/*\n!.worc/flows/\n", encoding="utf-8")
-    assert append_runtime_excludes(git_repo.clone) == []
-    assert gitignore.read_text(encoding="utf-8") == ".worc/*\n!.worc/flows/\n"
+    appended = append_runtime_excludes(git_repo.clone)
+    assert ".worc/" not in appended  # blanket line NOT re-appended (operator negation preserved)
+    assert ".worc-io/" in appended  # exchange line added
+    text = gitignore.read_text(encoding="utf-8")
+    assert ".worc/*\n!.worc/flows/\n" in text  # operator scheme untouched
+    assert ".worc-io/" in text
     (git_repo.clone / ".worc" / "flows").mkdir(parents=True, exist_ok=True)
     flow_file = git_repo.clone / ".worc" / "flows" / "my_flow.yaml"
     flow_file.write_text("flow: {}\n", encoding="utf-8")
     with pytest.raises(subprocess.CalledProcessError):
         git_run(["check-ignore", "-q", str(flow_file.relative_to(git_repo.clone))], git_repo.clone)
+    # The exchange is now ignored (exit 0 = ignored).
+    git_run(["check-ignore", "-q", ".worc-io/probe"], git_repo.clone)
 
 
 def test_diff_stat_returns_stat_only(
@@ -901,6 +950,23 @@ def test_terminal_cleanup_unsafe_when_dirty(
     assert outcome.error is not None
 
 
+def test_terminal_cleanup_preserve_own_wip_stays_safe_on_dirty_new_branch(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # VF-1: on a resumable manual park carrying the task's OWN uncommitted WIP, terminal cleanup
+    # preserves it (the WIP is the resume input) — it does not fail "unaccounted changes" or check
+    # out base over it. HEAD stays on the task branch and the outcome is safe.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    branch = git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone)
+    (git_repo.clone / "README.md").write_text("wip\n", encoding="utf-8")  # tracked, uncommitted
+    outcome = gm.terminal_cleanup("task-001", preserve_own_wip=True)
+    assert outcome.safe is True
+    assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == branch  # HEAD kept
+    assert (git_repo.clone / "README.md").read_text(encoding="utf-8") == "wip\n"  # WIP preserved
+
+
 def test_write_current_diff(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
@@ -1309,6 +1375,94 @@ def test_create_pr_reuse_picks_most_recent_of_multiple(
     assert url == "https://x/pull/8"  # most recent by updatedAt
 
 
+def test_create_pr_reuse_retitles_to_describe_the_chain(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # VF-15: the reused PR is retitled to describe the whole chain (not left as task 1's scope), and
+    # the count includes the PR-creating task (which carries no marker) plus each appended one.
+    _task(store)
+    calls: list[list[str]] = []
+    body = tmp_path / "summary.md"
+    body.write_text("second task body\n", encoding="utf-8")
+    gh = _reuse_gh(
+        calls,
+        list_stdout='[{"url": "https://x/pull/9", "updatedAt": "2026-01-01"}]',
+        # one earlier appended section already present → this append makes it 3 tasks total
+        body_stdout="Body (task 1).\n\n---\n\n<!-- worc-task:task-000 -->\n\n## First\n\nprior",
+    )
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    gm.create_pr("task-001", "feature/shared", title="Second", body_path=str(body))
+
+    edit = next(c for c in calls if c[:2] == ["pr", "edit"])
+    assert edit[edit.index("--title") + 1] == "3 tasks on feature/shared"
+    # title and body ride one gh edit call (no extra round-trip)
+    assert "--body-file" in edit
+
+
+def test_bound_pr_body_unchanged_within_cap() -> None:
+    body = f"head{_SECTION_SEPARATOR}{_TASK_MARKER_PREFIX}t2 -->\n\n## T\n\nshort summary"
+    assert _bound_pr_body(body) == body
+
+
+def test_bound_pr_body_compacts_oldest_over_cap() -> None:
+    # VF-15: an over-limit chain body is bounded by compacting the OLDEST sections, while every task
+    # marker survives (so the chain count stays exact) and the newest section is kept in full.
+    head = "Task 1 body."
+
+    def section(i: int, filler: int) -> str:
+        return f"{_TASK_MARKER_PREFIX}t{i} -->\n\n## Title {i}\n\n" + ("x" * filler)
+
+    sections = [section(i, 5_000) for i in range(2, 20)]  # 18 sections × ~5 KB ≈ 90 KB
+    body = _SECTION_SEPARATOR.join([head, *sections])
+    assert len(body) > _PR_BODY_MAX_CHARS
+
+    out = _bound_pr_body(body)
+    assert len(out) <= _PR_BODY_MAX_CHARS
+    assert out.startswith(head)  # the PR-creating task's body is never touched
+    assert out.count(_TASK_MARKER_PREFIX) == 18  # no marker dropped → count stays exact
+    assert ("x" * 5_000) in out  # the newest section(s) remain full
+    assert "logs/t2/summary.md" in out  # the oldest was compacted to a stub pointing at its log
+
+
+def test_compact_pr_section_keeps_marker_and_title_and_is_idempotent() -> None:
+    sec = f"{_TASK_MARKER_PREFIX}t5 -->\n\n## Big change\n\n" + ("y" * 9_000)
+    out = _compact_pr_section(sec)
+    assert f"{_TASK_MARKER_PREFIX}t5 -->" in out and "## Big change" in out
+    assert "y" * 9_000 not in out  # the bulky summary is gone
+    assert "logs/t5/summary.md" in out  # replaced by a pointer to the on-disk summary
+    assert _compact_pr_section(out) == out  # re-compacting a stub changes nothing
+
+
+def test_create_pr_reuse_body_edit_failure_is_surfaced_not_fatal(
+    git_repo,
+    store: StateStore,
+    tmp_path: Path,
+    make_git_config: ConfigFactory,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # VF-15: a failing title/body update on a reused PR must not block publish — the reuse already
+    # succeeded — but it is surfaced (a clear warning), not silently swallowed.
+    _task(store)
+
+    def gh(argv: Sequence[str]) -> GitResult:
+        verb = list(argv[:2])
+        if verb == ["pr", "list"]:
+            stdout = '[{"url": "https://x/pull/9", "updatedAt": "2026-01-01"}]'
+        elif verb == ["pr", "view"]:
+            return GitResult(0, "Original body.", "", timed_out=False, launch_error=None)
+        elif verb == ["pr", "edit"]:
+            return GitResult(1, "", "network error", timed_out=False, launch_error=None)
+        else:
+            stdout = "https://x/pull/9\n"
+        return GitResult(0, stdout, "", timed_out=False, launch_error=None)
+
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    with caplog.at_level(logging.WARNING):
+        url = gm.create_pr("task-001", "feature/shared", title="T", body_path="x")
+    assert url == "https://x/pull/9"  # reuse still returns the PR; edit failure is non-fatal
+    assert "reused PR" in caplog.text and "network error" in caplog.text
+
+
 def test_create_pr_creates_new_when_no_open_pr(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
@@ -1647,3 +1801,397 @@ def test_unaccounted_dirty_paths_reports_literal_unicode_path(
     outcome = gm.terminal_cleanup("task-001")
     assert outcome.safe is False
     assert unicode_name in (outcome.error or "")
+
+
+# --- WRI-009: Git control-state fingerprint -------------------------------------------------
+
+
+def _armed(git_repo, store, artifacts, make_git_config) -> GitManager:
+    """A manager with a task branch attached (so control-state capture has a task ref)."""
+    _task(store)
+    gm = _manager(git_repo, store, artifacts, make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    return gm
+
+
+def test_control_state_detects_force_added_exchange_file(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    gm = _armed(git_repo, store, tmp_path / "art", make_git_config)
+    before = gm.capture_git_control_state()
+    (git_repo.clone / ".worc-io").mkdir(exist_ok=True)
+    (git_repo.clone / ".worc-io" / "plan.md").write_text("secret\n", encoding="utf-8")
+    git_run(["add", "-f", ".worc-io/plan.md"], git_repo.clone)  # provider force-stages the exchange
+
+    drift = gm.compare_git_control_state(before)
+    assert drift is not None
+    assert any(item.aspect == "index" for item in drift.items)
+    assert ".worc-io/plan.md" in drift.summary()
+
+
+def test_control_state_detects_config_change_without_leaking_value(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    gm = _armed(git_repo, store, tmp_path / "art", make_git_config)
+    before = gm.capture_git_control_state()
+    git_run(["config", "sneaky.key", "SUPERSECRETVALUE"], git_repo.clone)
+
+    drift = gm.compare_git_control_state(before)
+    assert drift is not None
+    summary = drift.summary()
+    assert "sneaky.key" in summary  # the key name is reported
+    assert (
+        "SUPERSECRETVALUE" not in summary
+    )  # the value never is (redaction / hash-only fingerprint)
+
+
+def test_control_state_detects_head_and_ref_move(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    gm = _armed(git_repo, store, tmp_path / "art", make_git_config)
+    before = gm.capture_git_control_state()
+    git_run(["commit", "--allow-empty", "-m", "provider sneaked a commit"], git_repo.clone)
+
+    drift = gm.compare_git_control_state(before)
+    assert drift is not None
+    assert any(item.aspect in ("head", "task_ref") for item in drift.items)
+
+
+def test_control_state_detects_operation_marker(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    gm = _armed(git_repo, store, tmp_path / "art", make_git_config)
+    before = gm.capture_git_control_state()
+    head = git_run(["rev-parse", "HEAD"], git_repo.clone)
+    (git_repo.clone / ".git" / "MERGE_HEAD").write_text(head + "\n", encoding="utf-8")
+
+    drift = gm.compare_git_control_state(before)
+    assert drift is not None
+    assert any(item.aspect == "markers" for item in drift.items)
+
+
+def test_control_state_detects_intent_to_add(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    gm = _armed(git_repo, store, tmp_path / "art", make_git_config)
+    before = gm.capture_git_control_state()
+    (git_repo.clone / "sneaky.py").write_text("x\n", encoding="utf-8")
+    git_run(["add", "-N", "sneaky.py"], git_repo.clone)  # intent-to-add: zero-sha index entry
+
+    drift = gm.compare_git_control_state(before)
+    assert drift is not None
+    assert any(item.aspect == "index" for item in drift.items)
+
+
+def test_control_state_clean_working_tree_edit_is_not_drift(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    gm = _armed(git_repo, store, tmp_path / "art", make_git_config)
+    before = gm.capture_git_control_state()
+    # An ordinary working-tree edit is the *point* of the run — it must not be flagged as drift.
+    (git_repo.clone / "app.py").write_text("print('edited by the agent')\n", encoding="utf-8")
+
+    assert gm.compare_git_control_state(before) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell hook + chmod; Windows covered by WRI-006")
+def test_control_state_detects_installed_hook(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    gm = _armed(git_repo, store, tmp_path / "art", make_git_config)
+    before = gm.capture_git_control_state()
+    hook = git_repo.clone / ".git" / "hooks" / "pre-commit"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    hook.chmod(0o755)
+
+    drift = gm.compare_git_control_state(before)
+    assert drift is not None
+    assert any(item.aspect == "hooks" and "pre-commit" in item.detail for item in drift.items)
+
+
+# --- WRI-009: full staged-set gate at commit time -------------------------------------------
+
+
+def test_code_commit_rejects_force_added_exchange_file(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    gm = _armed(git_repo, store, tmp_path / "art", make_git_config)
+    (git_repo.clone / "src.py").write_text("x\n", encoding="utf-8")  # a legitimate change
+    (git_repo.clone / ".worc-io").mkdir(exist_ok=True)
+    (git_repo.clone / ".worc-io" / "plan.md").write_text("secret\n", encoding="utf-8")
+    git_run(["add", "-f", ".worc-io/plan.md"], git_repo.clone)
+
+    with pytest.raises(ManualActionRequired):
+        gm.commit_code("task-001", "feat")
+    # The gate fired before `git commit`, so no commit was made and the exchange file (still staged)
+    # never reached the committed tree.
+    assert ".worc-io/plan.md" not in _show_paths(git_run, git_repo.clone)
+
+
+def test_code_commit_rejects_foreign_tasks_file(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    gm = _armed(git_repo, store, tmp_path / "art", make_git_config)
+    (git_repo.clone / "src.py").write_text("x\n", encoding="utf-8")
+    (git_repo.clone / "tasks" / "pending").mkdir(parents=True, exist_ok=True)
+    (git_repo.clone / "tasks" / "pending" / "task-999.md").write_text(
+        "injected\n", encoding="utf-8"
+    )
+    git_run(["add", "tasks/pending/task-999.md"], git_repo.clone)  # a self-injected task file
+
+    with pytest.raises(ManualActionRequired):
+        gm.commit_code("task-001", "feat")
+
+
+def test_audit_commit_rejects_foreign_task_lifecycle_file(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    gm = _armed(git_repo, store, tmp_path / "art", make_git_config)
+    done = git_repo.clone / "tasks" / "done"
+    done.mkdir(parents=True, exist_ok=True)
+    (done / "task-001.md").write_text("t\n", encoding="utf-8")  # this task's lifecycle file
+    (done / "task-001.summary.md").write_text("s\n", encoding="utf-8")
+    (done / "task-999.md").write_text("another task\n", encoding="utf-8")
+    git_run(
+        ["add", "tasks/done/task-999.md"], git_repo.clone
+    )  # a foreign task swept into the index
+
+    with pytest.raises(ManualActionRequired):
+        gm.commit_audit("task-001")
+
+
+# --- WRI-009: audit-commit lifecycle digest check -------------------------------------------
+
+
+def test_audit_commit_accepts_matching_task_packet_digest(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    gm = _armed(git_repo, store, tmp_path / "art", make_git_config)
+    done = git_repo.clone / "tasks" / "done"
+    done.mkdir(parents=True, exist_ok=True)
+    lifecycle = done / "task-001.md"
+    lifecycle.write_text("the authorized task body\n", encoding="utf-8")
+    (done / "task-001.summary.md").write_text("s\n", encoding="utf-8")
+    digest = sha256_file(lifecycle)
+
+    sha = gm.commit_audit("task-001", task_packet_digest=digest)
+    assert sha is not None
+
+
+def test_audit_commit_refuses_rewritten_task_file(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    gm = _armed(git_repo, store, tmp_path / "art", make_git_config)
+    done = git_repo.clone / "tasks" / "done"
+    done.mkdir(parents=True, exist_ok=True)
+    (done / "task-001.md").write_text("REWRITTEN by the agent\n", encoding="utf-8")
+    (done / "task-001.summary.md").write_text("s\n", encoding="utf-8")
+
+    # The frozen packet digest is of the *original* task body, so the rewritten file mismatches.
+    with pytest.raises(ManualActionRequired):
+        gm.commit_audit("task-001", task_packet_digest="0" * 64)
+
+
+# --- WRI-009: clean-index preflight (branch-mode baseline contract) -------------------------
+
+
+def test_prepare_branch_refuses_pre_staged_baseline(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    _task(store)
+    (git_repo.clone / "operator.py").write_text("pre-staged\n", encoding="utf-8")
+    git_run(["add", "operator.py"], git_repo.clone)  # an operator/agent staged baseline
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+
+    with pytest.raises(ManualActionRequired):
+        gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+
+
+def test_prepare_branch_allows_unstaged_dirty_tree(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    _task(store)
+    (git_repo.clone / "wip.py").write_text("unstaged wip\n", encoding="utf-8")  # not staged
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+
+    branch = gm.prepare_branch("task-001", "x", epoch=_EPOCH)  # must not refuse
+    assert branch
+
+
+# --- WRI-009: git-subprocess neutralization -------------------------------------------------
+
+
+def test_commit_refuses_untrusted_repo_local_filter_driver(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    gm = _armed(git_repo, store, tmp_path / "art", make_git_config)
+    # An agent-editable repo-local clean filter pointing at a program: refuse before any git that
+    # would run it (the operator-authorized-filter allowlist is a deferred follow-up).
+    git_run(["config", "filter.evil.clean", "/bin/false"], git_repo.clone)
+    (git_repo.clone / "src.py").write_text("x\n", encoding="utf-8")
+
+    with pytest.raises(ManualActionRequired):
+        gm.commit_code("task-001", "feat")
+
+
+def test_reset_branch_to_base_refuses_untrusted_filter_driver(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # M5: reset-to-base (fresh rerun) checks out base + pulls → runs smudge filters. A repo-local
+    # program-launching driver must refuse before that git runs, exactly like commit/checkout.
+    gm = _armed(git_repo, store, tmp_path / "art", make_git_config)
+    git_run(["config", "filter.evil.smudge", "/bin/false"], git_repo.clone)
+    with pytest.raises(ManualActionRequired):
+        gm.reset_branch_to_base("task-001", "x", branch_name="worc/x")
+
+
+def test_terminal_cleanup_refuses_untrusted_filter_driver(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # M5: terminal cleanup checks out base → runs smudge filters. This method reports outcomes
+    # (never raises), so a poisoned driver leaves the slot fail-closed rather than crashing.
+    gm = _armed(git_repo, store, tmp_path / "art", make_git_config)
+    git_run(["config", "filter.evil.smudge", "/bin/false"], git_repo.clone)
+    outcome = gm.terminal_cleanup("task-001", mode=BranchMode.NEW)
+    assert outcome.safe is False
+    assert "untrusted" in (outcome.error or "")
+
+
+def test_refresh_base_skips_pull_on_untrusted_filter_driver(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # M5: refresh_base runs in the watch loop and must NOT raise (that would crash the loop); a
+    # poisoned repo-local driver skips the fetch/pull (leaving the working copy untouched) so the
+    # smudge filter never runs. Prove the pull was skipped: advance the remote, then assert the
+    # clone's base did not move.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    git_run(["checkout", "main"], git_repo.clone)
+    before = git_run(["rev-parse", "HEAD"], git_repo.clone)
+    # A second clone advances origin/main so an unfiltered refresh WOULD fast-forward.
+    other = tmp_path / "other"
+    git_run(["clone", str(git_repo.remote), str(other)], tmp_path)
+    git_run(["config", "user.email", "t@e.com"], other)
+    git_run(["config", "user.name", "T"], other)
+    (other / "new.txt").write_text("x\n", encoding="utf-8")
+    git_run(["add", "new.txt"], other)
+    git_run(["commit", "-m", "advance"], other)
+    git_run(["push", "origin", "main"], other)
+
+    git_run(["config", "filter.evil.smudge", "/bin/false"], git_repo.clone)
+    gm.refresh_base()  # must not raise
+    assert git_run(["rev-parse", "HEAD"], git_repo.clone) == before  # pull was skipped
+
+
+def test_commit_succeeds_despite_agent_signing_config(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    gm = _armed(git_repo, store, tmp_path / "art", make_git_config)
+    # An agent-set repo signing config with a bogus program: without the `-c commit.gpgsign=false`
+    # override the commit would try to launch it and fail. Signing is force-disabled, so it doesn't.
+    git_run(["config", "commit.gpgsign", "true"], git_repo.clone)
+    git_run(["config", "gpg.program", "/nonexistent/gpg-bin"], git_repo.clone)
+    (git_repo.clone / "src.py").write_text("x\n", encoding="utf-8")
+
+    sha = gm.commit_code("task-001", "feat")
+    assert sha is not None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell hook + chmod; Windows covered by WRI-006")
+def test_repo_pre_commit_hook_does_not_run_during_orchestrator_commit(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    gm = _armed(git_repo, store, tmp_path / "art", make_git_config)
+    # A repo hook that, if it ran, would fail the commit (and leave a sentinel). The `-c
+    # core.hooksPath=<empty>` neutralization points git at an empty dir, so it never runs.
+    sentinel = tmp_path / "hook-ran"
+    hook = git_repo.clone / ".git" / "hooks" / "pre-commit"
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text(f"#!/bin/sh\ntouch '{sentinel.as_posix()}'\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    (git_repo.clone / "src.py").write_text("x\n", encoding="utf-8")
+
+    sha = gm.commit_code("task-001", "feat")
+    assert sha is not None  # the failing hook did not run, so the commit succeeded
+    assert not sentinel.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell hook + chmod; Windows covered by WRI-006")
+def test_agent_hookspath_target_does_not_run(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    gm = _armed(git_repo, store, tmp_path / "art", make_git_config)
+    # An agent that redirects core.hooksPath at its own hook dir is defeated: the command-line
+    # `-c core.hooksPath` overrides the repo-set value. The hook dir lives outside the clone so it
+    # is not itself part of the staged change.
+    evil_hooks = tmp_path / "evil-hooks"
+    evil_hooks.mkdir()
+    sentinel = tmp_path / "evil-hook-ran"
+    hook = evil_hooks / "pre-commit"
+    hook.write_text(f"#!/bin/sh\ntouch '{sentinel.as_posix()}'\nexit 1\n", encoding="utf-8")
+    hook.chmod(0o755)
+    git_run(["config", "core.hooksPath", str(evil_hooks)], git_repo.clone)
+    (git_repo.clone / "src.py").write_text("x\n", encoding="utf-8")
+
+    sha = gm.commit_code("task-001", "feat")
+    assert sha is not None
+    assert not sentinel.exists()
+
+
+# --- WRI-002: resolve_control_paths (provider Write/Edit-deny roots)
+# -------------------------------
+
+
+def test_resolve_control_paths_normal_clone(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    wg = gm.resolve_control_paths("/repo/.worc-io")
+    clone = Path(git_repo.clone)
+    dot_git = (clone / ".git").resolve()
+    # A normal clone collapses the gitdir and common dir onto <clone>/.git.
+    assert wg.git_dir.resolve() == dot_git
+    assert wg.git_common_dir.resolve() == dot_git
+    assert wg.hooks_dir.resolve() == (clone / ".git" / "hooks").resolve()
+    assert wg.tasks_dir == clone / "tasks"
+    assert wg.exchange_root == Path("/repo/.worc-io")
+    # denied_write_paths de-dups git_dir==git_common_dir and includes exchange + tasks.
+    resolved = {p.resolve() for p in wg.denied_write_paths}
+    assert dot_git in resolved
+    assert Path("/repo/.worc-io").resolve() in resolved
+    assert (clone / "tasks").resolve() in resolved
+
+
+def test_resolve_control_paths_excludes_instruction_files(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # VF-20: repository governance/instruction files (AGENTS.md/CLAUDE.md/…) are ordinary, editable
+    # content — never write-denied. A run that edits them is reported to the operator, not blocked.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    wg = gm.resolve_control_paths("/repo/.worc-io")
+    denied_names = {p.name for p in wg.denied_write_paths}
+    assert not denied_names & {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md"}
+    # The write-guard no longer carries an instruction-files field at all (gone, not gated).
+    assert not hasattr(wg, "instruction_files")
+
+
+def test_resolve_control_paths_linked_worktree_splits_gitdir_and_common(
+    git_repo,
+    store: StateStore,
+    tmp_path: Path,
+    make_git_config: ConfigFactory,
+    git_run: GitRunner,
+) -> None:
+    # A linked worktree has a per-worktree gitdir distinct from the shared common dir; BOTH must be
+    # denied so the sandbox's built-in "shared .git is writable in a linked worktree" allowance is
+    # overridden.
+    wt = tmp_path / "wt"
+    git_run(["worktree", "add", "-b", "wt-branch", str(wt)], git_repo.clone)
+    config = make_git_config(str(wt))
+    gm = GitManager(config, store=store, artifacts_root=str(tmp_path / "art2"))
+    wg = gm.resolve_control_paths()
+    assert wg.git_dir.resolve() != wg.git_common_dir.resolve()
+    assert wg.git_common_dir.resolve() == (Path(git_repo.clone) / ".git").resolve()
+    # Both distinct roots appear in the write-deny set.
+    resolved = {p.resolve() for p in wg.denied_write_paths}
+    assert wg.git_dir.resolve() in resolved and wg.git_common_dir.resolve() in resolved

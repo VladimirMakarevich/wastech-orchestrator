@@ -9,7 +9,7 @@ Organize the evidence into the shape the deliverable needs, and capture the reas
 For a **plan-vs-implementation audit**, organize the findings so each one is directly actionable:
 
 - Group findings by whatever unit the project's own plan uses (phase, milestone, epic) and, within a unit, order by **severity** (high → medium → low), where severity reflects how far the shipped state diverges from the plan of record and the blast radius of the gap.
-- For each finding capture: the exact `path:line` evidence; the plan clause it violates or falls short of; *why* it matters (correctness, robustness, test-coverage, or architectural-drift consequence); and a concrete remediation with a pointer to where it should be closed.
+- For each finding capture: the exact `path:line` evidence; the plan clause it violates or falls short of; _why_ it matters (correctness, robustness, test-coverage, or architectural-drift consequence); and a concrete remediation with a pointer to where it should be closed.
 - Call out **cross-unit dependency gaps** as their own group: an earlier unit left partial because it needed a later one, and never revisited. State the chain and what remains open.
 - Separate confirmed defects from suspected-but-unverified ones so the synthesis can mark the latter honestly under Open questions.
 

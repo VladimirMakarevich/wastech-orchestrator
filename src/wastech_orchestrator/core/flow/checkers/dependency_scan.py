@@ -16,11 +16,18 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 
 from wastech_orchestrator.providers.process import ProcessResult, run_process
 
 RunProcess = Callable[..., ProcessResult]
+
+
+def _utc_now_iso() -> str:
+    """Wall-clock UTC ISO timestamp for a scanner's ``check_runs`` interval (VF-12)."""
+    return datetime.now(UTC).isoformat()
+
 
 #: The core-owned scanner set: ``(name, argv)`` pairs. Each argv is a list (never a shell string).
 #: JSON output is requested where supported so the captured report is machine-readable evidence.
@@ -40,6 +47,9 @@ class ScannerRun:
     timed_out: bool
     launched: bool  # False → the scanner binary is not installed (no findings, not a failure)
     report_path: str
+    # VF-12: the scanner's real wall-clock interval, bracketing its process launch.
+    started_at: str
+    finished_at: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,6 +68,7 @@ def run_dependency_scan(
     timeout_seconds: int,
     run_process: RunProcess = run_process,
     scanners: tuple[tuple[str, tuple[str, ...]], ...] = DEFAULT_DEPENDENCY_SCANNERS,
+    clock: Callable[[], str] = _utc_now_iso,
 ) -> DependencyScanReport:
     """Run each core-owned scanner argv against *repo_dir*, capturing its output as evidence.
 
@@ -70,6 +81,7 @@ def run_dependency_scan(
     runs: list[ScannerRun] = []
     for name, argv in scanners:
         report_path = out / f"{name}.json"
+        started_at = clock()  # VF-12: wall-clock bracket for the scanner's check_runs interval
         result = run_process(
             list(argv),
             cwd=repo_dir,
@@ -85,6 +97,8 @@ def run_dependency_scan(
                 timed_out=result.timed_out,
                 launched=result.launch_error is None,
                 report_path=str(report_path),
+                started_at=started_at,
+                finished_at=clock(),
             )
         )
     return DependencyScanReport(runs=tuple(runs))

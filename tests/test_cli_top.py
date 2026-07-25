@@ -5,9 +5,10 @@ from __future__ import annotations
 
 import io
 import json
+import random
 import threading
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
@@ -30,19 +31,71 @@ def _write_task(
     (folder / f"{stem}.md").write_text(f"{front}\n## Description\n\nx\n", encoding="utf-8")
 
 
+# --- natural_sort_key -------------------------------------------------------------------
+
+# The phase-numbered naming this repo's task files use, deliberately shuffled. Natural order groups
+# p9 before p10, casefolds P9 next to p9, and puts p9-9 before p9-10 — the order a file manager and
+# the operator expect. Bytewise ``sorted`` would put p10 second (``'1' < '9'``).
+_NATURAL_NAMES = ["p10-01-x.md", "P9-08-x.md", "p9-9-x.md", "p9-07-x.md", "p9-10-01-x.md"]
+_NATURAL_ORDER = ["p9-07-x.md", "P9-08-x.md", "p9-9-x.md", "p9-10-01-x.md", "p10-01-x.md"]
+
+
+def test_natural_sort_key_orders_numerically() -> None:
+    assert sorted(_NATURAL_NAMES, key=cli.natural_sort_key) == _NATURAL_ORDER
+
+
+def test_natural_sort_key_is_platform_stable() -> None:
+    # The key operates on the plain filename and casefolds explicitly, so it never leans on
+    # ``Path.__lt__`` (case-sensitive on POSIX, case-folded on Windows). Reading the same names as
+    # POSIX *or* Windows paths must therefore yield the identical order...
+    posix = sorted(
+        (PurePosixPath(n) for n in _NATURAL_NAMES), key=lambda p: cli.natural_sort_key(p.name)
+    )
+    windows = sorted(
+        (PureWindowsPath(n) for n in _NATURAL_NAMES), key=lambda p: cli.natural_sort_key(p.name)
+    )
+    assert [p.name for p in posix] == _NATURAL_ORDER
+    assert [p.name for p in windows] == _NATURAL_ORDER
+    # ...whereas the old ``sorted(Path)`` scheduling key really does disagree across the two
+    # flavours (the cross-platform bug the natural key removes).
+    assert [p.name for p in sorted(PurePosixPath(n) for n in _NATURAL_NAMES)] != [
+        p.name for p in sorted(PureWindowsPath(n) for n in _NATURAL_NAMES)
+    ]
+
+
+def test_natural_sort_key_is_strict_total_order_independent_of_input_order() -> None:
+    # Independent of ``iterdir()`` yield order: any shuffle collapses to the same sequence.
+    for seed in range(8):
+        shuffled = _NATURAL_NAMES[:]
+        random.Random(seed).shuffle(shuffled)
+        assert sorted(shuffled, key=cli.natural_sort_key) == _NATURAL_ORDER
+    # Distinct names never compare equal — not on case, not on leading zeros.
+    assert cli.natural_sort_key("Foo.md") != cli.natural_sort_key("foo.md")
+    assert cli.natural_sort_key("p9-07.md") != cli.natural_sort_key("p9-7.md")
+
+
+def test_natural_sort_key_leading_zeros_are_magnitude_equal_and_adjacent() -> None:
+    # 07 and 7 are the same magnitude, so they land next to each other with a deterministic
+    # tie-break — neither creates a distinct numeric rank.
+    assert sorted(["p9-7.md", "p9-07.md"], key=cli.natural_sort_key) == ["p9-07.md", "p9-7.md"]
+    # An all-zero run is magnitude 0 (same natural tokens as "0"), only the raw name distinguishes.
+    assert cli.natural_sort_key("a000.md")[0] == cli.natural_sort_key("a0.md")[0]
+
+
 # --- scan_pending_sorted ----------------------------------------------------------------
 
 
-def test_scan_pending_sorted_orders_by_priority_then_filename(tmp_path: Path) -> None:
+def test_scan_pending_sorted_orders_by_priority_then_natural_filename(tmp_path: Path) -> None:
     folder = tmp_path / "pending"
     folder.mkdir()
-    # Filenames deliberately not in priority order; an absent priority folds to mid (fail-open).
-    _write_task(folder, "z-high", priority="high")
-    _write_task(folder, "a-high", priority="high")
+    # Equal-priority ties use the natural filename key: p9-07 before p10-01 (a file manager's
+    # order), not the bytewise ``'1' < '9'`` that ranks p10 first. Priority still dominates.
+    _write_task(folder, "p10-01", priority="high")
+    _write_task(folder, "p9-07", priority="high")
     _write_task(folder, "m-default")
     _write_task(folder, "b-low", priority="low")
     scans = cli.scan_pending_sorted(folder, DEFAULT_QUEUE)
-    assert [p.stem for p, _ in scans] == ["a-high", "z-high", "m-default", "b-low"]
+    assert [p.stem for p, _ in scans] == ["p9-07", "p10-01", "m-default", "b-low"]
 
 
 def test_scan_pending_sorted_filters_by_queue(tmp_path: Path) -> None:

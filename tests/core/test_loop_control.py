@@ -16,6 +16,7 @@ from wastech_orchestrator.core.flow.schema import AgentNode, Edge, EvaluatorNode
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.core.loop_control import (
     ExhaustedLoop,
+    LoopCounters,
     exhausted_fix_loops,
     global_backstop_exhausted,
     global_cap,
@@ -163,3 +164,32 @@ def test_engine_loop_cap_delegates_to_loop_control() -> None:
         snapshot.doc.budgets, agents.max_fix_cycles, "review_fix"
     )
     assert engine._global_cap() == global_cap(snapshot.doc.budgets, agents.max_total_fix_iterations)
+
+
+# -- operator-facing mirror (VF-4) ----------------------------------------------------------
+
+
+def test_loop_counters_from_run_state_mirrors_authoritative_counters() -> None:
+    # The operator-facing columns mirror the engine's authoritative FlowRunState: consecutive
+    # per-loop counters, the never-reset cumulative totals, and the global fix counter.
+    run_state = FlowRunState(
+        flow_fingerprint="fp",
+        loop_counters={
+            "test_fix": 0,
+            "review_fix": 2,
+            FlowRunState.total_key("test_fix"): 3,
+            FlowRunState.total_key("review_fix"): 7,
+            FlowRunState.GLOBAL_FIX_KEY: 10,
+        },
+    )
+    assert LoopCounters.from_run_state(run_state) == LoopCounters(
+        test_fix_cycles=0,
+        review_fix_cycles=2,
+        test_fix_total=3,
+        review_fix_total=7,
+        fix_iterations=10,
+    )
+
+
+def test_loop_counters_from_empty_run_state_is_all_zero() -> None:
+    assert LoopCounters.from_run_state(FlowRunState(flow_fingerprint="fp")) == LoopCounters()

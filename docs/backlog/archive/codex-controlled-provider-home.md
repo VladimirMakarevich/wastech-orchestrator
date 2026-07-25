@@ -10,7 +10,7 @@ The layer-isolation approach has a structural residual: the operator home remain
 
 ## Deferred task
 
-Run autonomous Codex attempts from a dedicated, orchestrator-controlled `CODEX_HOME` under the private runtime state (WRI-005 location), so that personal/user configuration cannot influence an autonomous run **by construction** rather than by enumeration:
+Run autonomous Codex attempts from a dedicated, orchestrator-controlled `CODEX_HOME` under the private runtime state (the [out-of-tree relocation](relocate-private-home-out-of-tree.md) location, itself deferred), so that personal/user configuration cannot influence an autonomous run **by construction** rather than by enumeration:
 
 - The controlled home holds auth/session state and the orchestrator-generated config/rules only; nothing else exists to inventory.
 - No silent credential copying: install/preflight checks the controlled home's auth and, when missing, prints the exact one-time operator command (`CODEX_HOME=<path> codex login`) — the orchestrator itself never performs login and never copies credential material. File credentials stay owner-only on POSIX and ACL-restricted on Windows.
@@ -20,7 +20,7 @@ Run autonomous Codex attempts from a dedicated, orchestrator-controlled `CODEX_H
 
 ## Preconditions
 
-- WRI-003 (permission profiles, layer isolation, capability canaries) and WRI-005 (out-of-tree private state) landed.
+- WRI-003 (permission profiles, layer isolation, capability canaries) landed, and the [out-of-tree private-state relocation](relocate-private-home-out-of-tree.md) (deferred — see that record) is in place.
 - A decision on multi-repo ergonomics: one controlled home per repository versus one per operator, and how `codex login` friction is presented in `install`/`preflight`.
 
 ## Why deferred

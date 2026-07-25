@@ -360,3 +360,36 @@ def test_stderr_redacted_in_log(tmp_path: Path) -> None:
     )
     log_text = Path(outcome.first_failure_log).read_text(encoding="utf-8")  # type: ignore[arg-type]
     assert "ghp_abcdefghijklmnopqrstuvwxyz0123456789" not in log_text
+
+
+def test_check_run_records_real_wall_clock_interval(tmp_path: Path) -> None:
+    # VF-12: each check carries the wall-clock bracket around its subprocess, not two identical
+    # row-write stamps — so a downstream check_runs row has a measurable duration.
+    runner = CheckRunner(_config(), run_process=_FakeProc([_ok()]))
+    ticks = iter([f"2026-07-25T00:00:{s:02d}+00:00" for s in range(60)])
+    outcome = runner.run(
+        clone_dir=tmp_path,
+        artifacts_root=tmp_path,
+        task_id="t1",
+        selected=(_set("a", _check("pytest", ("pytest",))),),
+        clock=lambda: next(ticks),
+    )
+    (run,) = outcome.runs
+    assert run.started_at == "2026-07-25T00:00:00+00:00"
+    assert run.finished_at == "2026-07-25T00:00:01+00:00"
+    assert run.started_at < run.finished_at  # a real interval, never a zero-width stamp
+
+
+def test_skipped_check_has_instant_interval(tmp_path: Path) -> None:
+    # VF-12: a skipped check ran no subprocess, so its interval is a single honest instant.
+    runner = CheckRunner(_config(), run_process=_FakeProc([]), which=_absent)
+    outcome = runner.run(
+        clone_dir=tmp_path,
+        artifacts_root=tmp_path,
+        task_id="t1",
+        selected=(_set("a", _check("pytest", ("pytest",)), skip=True),),
+        clock=lambda: "2026-07-25T00:00:00+00:00",
+    )
+    (run,) = outcome.runs
+    assert run.skipped is True
+    assert run.started_at == run.finished_at == "2026-07-25T00:00:00+00:00"

@@ -36,6 +36,7 @@ from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.git_manager import ChangedPath
 from wastech_orchestrator.providers.base import AgentRunResult, ProviderId, RunStatus
 from wastech_orchestrator.routing.router import ResolvedRoute, RouteSource, StageOutcome
+from wastech_orchestrator.runtime_layout import ProviderWriteGuardPolicy
 
 # -- fakes / helpers ----------------------------------------------------------
 
@@ -111,9 +112,27 @@ class _Git:
         self.calls.append("commit_code")
         return "sha"
 
-    def commit_audit(self, task_id: str) -> str | None:
+    def commit_audit(self, task_id: str, *, task_packet_digest: str | None = None) -> str | None:
         self.calls.append("commit_audit")
         return "sha"
+
+    def capture_git_control_state(self) -> object:
+        return object()
+
+    def compare_git_control_state(self, before: object) -> None:
+        return None
+
+    def list_tracked_files(self, *pathspecs: str) -> tuple[str, ...]:
+        return ()
+
+    def resolve_control_paths(self, exchange_root: str | None = None) -> ProviderWriteGuardPolicy:
+        return ProviderWriteGuardPolicy(
+            exchange_root=None,
+            git_dir=Path("/x/.git"),
+            git_common_dir=Path("/x/.git"),
+            hooks_dir=Path("/x/.git/hooks"),
+            tasks_dir=Path("/x/tasks"),
+        )
 
     def push(self, task_id: str, branch: str, **_: object) -> bool:
         self.calls.append("push")

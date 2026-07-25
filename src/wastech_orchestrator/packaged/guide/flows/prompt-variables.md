@@ -29,6 +29,18 @@ Each variable names **which runner populates it** and **when it may be empty**. 
 
 ("agent / evaluator / supervisor" is the node kind whose prompt receives the value. The supervisor is the constant oversight layer above the flow, not a node.)
 
+**Put an optional section's heading inside its own block.** A heading that sits _outside_ the `{?name}…{/name}` block it introduces cannot know whether the section is empty, so it renders with nothing under it. Give each optional item its own heading within its own block, and fold the leading blank line in as well:
+
+```text
+{?memory_path}
+
+## Repository Memory
+
+A brief of repository memory for this task is at {memory_path}.{/memory_path}
+```
+
+The heading then appears exactly when its content does — never orphaned, never empty. The packaged `implementation` / `planning` / `fixing` / `review` roles follow this for their memory / subtask / predecessor items. Resist the inverse shape — one shared heading for several optional items, guarded by some separate flag — because blocks do not nest and there is no "any-of-these-variables" form, so nothing can tell that heading which of your variables the section actually holds.
+
 ## Optional variables: the `{?name}…{/name}` conditional block
 
 The renderer supports a conditional block that keeps its body **only when the variable is present and non-empty**, and drops the whole block (markers included) otherwise. Use it to wrap any clause that mentions a may-be-empty variable, so a missing value never leaves a dangling fragment:

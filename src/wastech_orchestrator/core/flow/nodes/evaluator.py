@@ -38,6 +38,13 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeInputs,
     NodeServices,
 )
+from wastech_orchestrator.core.flow.nodes.exchange_publish import (
+    assert_exchange_unchanged,
+    assert_request_contained,
+    capture_exchange_manifest,
+    publish_file,
+    publish_node_run_file,
+)
 from wastech_orchestrator.core.flow.observability import record_run_observability
 from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file, render_role_prompt
 from wastech_orchestrator.core.flow.schema import SEVERITY_ORDER, EvaluatorNode, FlowNode
@@ -46,7 +53,11 @@ from wastech_orchestrator.core.flow.usage_accounting import (
     guard_output_baseline,
     snapshot_for_lineage,
 )
-from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
+from wastech_orchestrator.providers.artifacts import (
+    exchange_latest_run_file,
+    node_run_dir,
+    task_artifact_dir,
+)
 from wastech_orchestrator.providers.base import AgentRunRequest, build_effective_prompt
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import EvaluationRow, NodeLineageRow, NodeRunRow
@@ -136,6 +147,11 @@ class EvaluatorNodeRunner:
         request = self._build_request(
             node, ctx, route, run_id, session_id, guard_output_baseline(baseline)
         )
+        assert_request_contained(request, self._s.exchange_root)
+        # WRI-002 detection-in-depth: fingerprint the curated exchange before the (read-only)
+        # evaluator attempt so a provider mutation of the immutable surface is caught from
+        # parent-held state after quiescence, before its findings are trusted downstream.
+        exchange_before = capture_exchange_manifest(self._s.exchange_root, ctx.task_id)
         outcome = self._s.router.run_stage(request, route, snapshot=self._s.snapshot)
         raw_findings = (
             self._findings_or_none(outcome.result.structured_output)
@@ -166,6 +182,9 @@ class EvaluatorNodeRunner:
                 f"evaluator node {node.id!r}: no provider could run it ({err})",
                 error_class=error_class,
             )
+        assert_exchange_unchanged(
+            exchange_before, self._s.exchange_root, ctx.task_id, node_id=node.id
+        )
         if raw_findings is None:
             # F19 fail-closed: the provider did not honor the mandatory findings schema (missing
             # or malformed ``findings`` array) — never silently accept. There is nothing for
@@ -211,14 +230,22 @@ class EvaluatorNodeRunner:
         run_dir = node_run_dir(self._s.artifacts_root, ctx.task_id, node.id, run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
         findings_path = run_dir / "findings.json"
-        findings_path.write_text(
-            json.dumps({"findings": findings}, indent=2, ensure_ascii=False) + "\n",
-            encoding="utf-8",
-        )
+        findings_json = json.dumps({"findings": findings}, indent=2, ensure_ascii=False) + "\n"
+        findings_path.write_text(findings_json, encoding="utf-8")
         (run_dir / "summary.md").write_text(
             (summary or "(no review summary)") + "\n", encoding="utf-8"
         )
-        self._in.review_path = str(findings_path)
+        # Private findings.json stays the audit record; the redacted exchange copy is {review_path}.
+        self._in.review_path = publish_node_run_file(
+            self._s.exchange_root,
+            ctx.task_id,
+            node.id,
+            run_id,
+            "findings.json",
+            findings_json,
+            extra_secrets=self._s.prompt_secrets,
+            private_path=str(findings_path),
+        )
 
     def _verdict(
         self,
@@ -286,6 +313,10 @@ class EvaluatorNodeRunner:
             diff_path=self._in.diff_path,
             check_artifacts_path=self._in.checks_path,
             review_artifacts_path=self._in.review_path,
+            # VF-10: on a rework re-entry, hand the reviewer the previous author node's report so it
+            # judges "was the finding addressed" with the implementer's account (including a stated
+            # blocker) in hand, not the diff alone. ``None`` on the first pass (no prior report).
+            rework_report_path=self._prior_rework_report_path(node, ctx),
             output_schema=_FINDINGS_SCHEMA,  # F19: mandatory; fail-closed if not honored (run())
             model=node.model,
             reasoning=node.reasoning,
@@ -303,7 +334,32 @@ class EvaluatorNodeRunner:
             network_access=resolve_network_access(
                 node.network_access, ctx.snapshot.doc.network_policy
             ),
+            # VF-7 defense-in-depth: the Core-owned advisory security contract, threaded via
+            # NodeServices; the neutral seam prepends it to the effective prompt.
+            security_preamble=self._s.security_preamble,
         )
+
+    def _prior_rework_report_path(self, node: EvaluatorNode, ctx: NodeContext) -> str | None:
+        """The latest exchange report of this evaluator's rework-target author node, or ``None``.
+
+        The evaluator's own ``rework`` edge names the author it sends work back to (``review →
+        fixing`` in the implementation flow). On a re-entry that author has already published its
+        ``<node>.out.md`` to the exchange; surface the newest one so the reviewer reads the
+        implementer's account (VF-10). ``None`` when there is no rework edge, no exchange is wired,
+        or the author has not run yet (the first review pass) — the footer then omits the slot.
+        """
+        if not self._s.exchange_root:
+            return None
+        target = next(
+            (e.to for e in ctx.snapshot.adjacency.get(node.id, ()) if e.outcome == "rework"),
+            None,
+        )
+        if target is None:
+            return None
+        path = exchange_latest_run_file(
+            self._s.exchange_root, ctx.task_id, target, f"{target}.out.md"
+        )
+        return str(path) if path is not None else None
 
     def _resume_node_lineage(
         self, node: EvaluatorNode, ctx: NodeContext, route: ResolvedRoute
@@ -386,7 +442,16 @@ class EvaluatorNodeRunner:
         written = builder.write_packet(
             node_id=node.id, task_type=self._in.task_type, touched_paths=touched, dest=dest
         )
-        return str(written) if written is not None else None
+        if written is None:
+            return None
+        # The store + private packet stay private; only the redacted packet crosses (WRI-001).
+        return publish_file(
+            self._s.exchange_root,
+            ctx.task_id,
+            f"memory/{node.id}.md",
+            str(written),
+            extra_secrets=self._s.prompt_secrets,
+        )
 
     def _record_completion(self, run_id: int, outcome: StageOutcome, kind: str) -> None:
         result = outcome.result

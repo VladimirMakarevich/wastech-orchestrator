@@ -158,7 +158,7 @@ class PublishNodeRunner:
             )
         message = self._in.commit_message or f"feat({ctx.task_id}): publish"
         git.commit_code(ctx.task_id, message)
-        git.commit_audit(ctx.task_id)
+        git.commit_audit(ctx.task_id, task_packet_digest=self._s.task_packet_digest)
         if scope is PublishScope.COMMIT:
             return None
         git.push(ctx.task_id, self._in.branch, mode=self._in.branch_mode)

@@ -160,7 +160,11 @@ from wastech_orchestrator.providers.base import ProviderId
 # stay); false never returns (global off); true forces new + existing to return; current always
 # stays. Old (absent) configs take null => today's `new`-mode behavior is preserved. `config_writer`
 # does NOT write it on a fresh install; documented in `config.example.yaml` only.
-CONFIG_SCHEMA_VERSION = 30
+# v31 (WRI-003): a Codex node's isolation is now a generated permission profile driven by
+# `permission_profile`; the legacy `agents.providers.codex.sandbox: read-only|workspace-write` is
+# rejected by the validator and folded into `permission_profile` by `upgrade-config`. `sandbox`
+# survives only as the `danger-full-access` escape (gated by `strict_isolation: false`).
+CONFIG_SCHEMA_VERSION = 31
 
 
 class AuditBranch(StrEnum):
@@ -285,7 +289,11 @@ class ProviderConfig:
     timeout_seconds: int
     permission_profile: str
     extra_args: tuple[str, ...] = ()
-    # Provider-specific (optional): Codex sandbox; Claude max_turns.
+    # Codex escape: the sole remaining value is ``danger-full-access`` — the operator's explicit,
+    # loudly-unisolated opt-out, gated by ``strict_isolation: false`` (WRI-003). The access level
+    # (``read-only`` | ``workspace-write``) now lives in the provider-neutral ``permission_profile``
+    # above; a legacy ``sandbox: read-only|workspace-write`` is rejected (migrate via
+    # ``upgrade-config``). Inert on Claude.
     sandbox: str | None = None
     # Claude turn cap: positive int, or ``None`` = no cap. The loader maps ``"none"``/``"max"``/
     # ``null`` to ``None`` (adapter omits ``--max-turns``); config default 400.
@@ -339,6 +347,29 @@ class SecurityConfig:
     # Operator allowlist (repo-relative globs) of paths that ALWAYS require approval on any change,
     # regardless of ``trust_level`` — the always-ask floor no level can lower. Empty = no floor.
     protected_paths: tuple[str, ...] = ()
+    # Operator escape hatch (VF-6): fully disable READ-isolation for provider runs. When on it
+    # restores the provider's native project-instruction/config discovery (Claude re-loads
+    # ``CLAUDE.md`` + project settings/hooks/MCP/skills via ``--setting-sources project``; Codex
+    # re-reads the user ``config.toml`` and the project ``.codex`` config/hooks/rules) and lifts the
+    # private :class:`~wastech_orchestrator.runtime_layout.InternalDenyPolicy` read-deny projection
+    # (``.worc``/env-file/provider homes/frozen bundles), at the cost of that isolation. The WRITE
+    # side stays: exchange/Git/``tasks/``/instruction write-deny, the commit/staging gates, and the
+    # PR control layer. The public ``denied_read_paths`` blacklist also stays enforced. Operator-
+    # config ONLY (never a task / ``extra_args`` / flow-node key). Defaults to ``True`` — read-
+    # isolation is OFF out of the box: a deliberate deployment-posture choice that departs from the
+    # § MANDATORY default-safe guidance in security.md (owned in rule #3). Set it ``False`` to keep
+    # read-isolation on. ``strict_isolation`` is still the master switch and always wins toward
+    # relaxation (see :attr:`read_isolation_off`).
+    disable_read_isolation: bool = True
+
+    @property
+    def read_isolation_off(self) -> bool:
+        """Effective read-isolation state for a provider run (VF-6) — the ONE place the formula
+        lives, so no adapter recomputes it. Read-isolation is off when the operator explicitly
+        disabled it OR strict isolation is off entirely: ``strict_isolation: false`` relaxes
+        everything and overrides even an explicit ``disable_read_isolation: false``. Effective
+        value: ``disable_read_isolation OR NOT strict_isolation``."""
+        return self.disable_read_isolation or not self.strict_isolation
 
 
 @dataclass(frozen=True)

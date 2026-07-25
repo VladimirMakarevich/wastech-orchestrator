@@ -100,12 +100,14 @@ Implement the task at {task_path} in the repository {repo_path}. Follow the plan
 ## Node kinds
 
 - **`agent`** — launches a coding-agent CLI (Codex or Claude Code) with the node's `role_file` as its prompt. Fields: `role_file` (required), `session_scope` (`fresh_disposable` | `editing_lineage` | `resume_own_lineage`), `permission_profile` (≤ the flow ceiling), optional `output_artifact`, `hitl`, `when`, `lineage_affinity`, and the per-node overrides below.
-- **`evaluator`** — a read-only judge that returns `accept` / `rework`. Fields: `role` (e.g. `review`), `role_file`, `blocking` (a failing verdict blocks vs is advisory), `max_rework_per_stage`, `gate_severity` (minimum finding severity that gates; default `high`, lower it to make a critic block on any finding). Evaluators are forced `read-only`. An evaluator returns a structured **findings** verdict and is **fail-closed** — see [What a node returns](#what-a-node-returns-output-contracts-schemas-and-slots). A **non-blocking** evaluator (`blocking: false`) never parks the task: once its `max_rework_per_stage` budget is spent with a finding still open it accepts and the flow continues — and the orchestrator emits a console warning + a ⚠️ Telegram trace (`accept (rework budget exhausted)`) so an operator knows the stage moved on and may need follow-up.
+- **`evaluator`** — a read-only judge that returns `accept` / `rework`. Fields: `role` (e.g. `review`), `role_file`, `blocking` (a failing verdict blocks vs is advisory), `max_rework_per_stage`, `gate_severity` (minimum finding severity that gates; default `high`, lower it to make a critic block on any finding). Evaluators are forced `read-only`. An evaluator returns a structured **findings** verdict and is **fail-closed** — see [What a node returns](#what-a-node-returns-output-contracts-schemas-and-slots). A **non-blocking** evaluator (`blocking: false`) never parks the task: once its `max_rework_per_stage` budget is spent with a finding still open it accepts and the flow continues — and the orchestrator emits a console warning + a ⚠️ Telegram trace (`accept (rework budget exhausted)`) so an operator knows the stage moved on and may need follow-up. Any findings an evaluator **accepts with** (sub-`gate_severity`, non-gating) are not discarded: at task close each evaluator node's final verdict is mirrored into the task's `summary.json` / `summary.md` follow-ups (and thus the PR body), deduped against the supervisor's own list, so a legitimately non-blocking finding still reaches the operator instead of vanishing. This runs regardless of `supervisor.emit_follow_ups`.
 - **`checks`** — runs deterministic repository commands, no agent. `checker: command_profile` runs the configured check command sets; other checkers exist (`citation`, `dependency_scan`). Outcomes: `pass` / `fail`.
 - **`tool`** — runs **your own** executable from `.worc/tools/` out-of-process (any language), under the same launch ceiling as an agent. Fields: `tool` (the registered executable name), optional flat-scalar `args`, optional `timeout_seconds`, `when`. Outcomes: `pass` / `fail` / `route:*` (by exit code or an optional JSON object on stdout). Use it for deterministic logic that is neither an LLM step (`agent`) nor a built-in gate (`checks`). See [Custom tool nodes](#custom-tool-nodes).
 - **`publish`** — the terminal. `policy: pull_request` / `documentation_pull_request` opens a PR; `policy: none` is a graph terminal that performs no Git action (the orchestrator still owns any real commit/push/PR).
 
 Nodes never pick the next node or commit anything — the engine routes on edge outcomes, and only the orchestrator does Git.
+
+Every node `id` must be a **portable single-segment token**: `^[a-z0-9][a-z0-9_-]{0,63}$` and not a Windows device name (`con`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`). The id becomes an artifact directory name and, for `agent`/`tool` nodes, the `{<node-id>_path}` prompt variable — so a dot, an uppercase letter, a path separator, or a device name is rejected at flow load, host-independently (never sanitized). Agent/tool ids additionally may not shadow a reserved core variable (`plan`, `diff`, `review`, …, or a `subtask`-prefixed name).
 
 ## Edges, outcomes, and loops
 
@@ -116,6 +118,8 @@ Each edge is `{ from, to, outcome? }`. A `checks` or `tool` node emits `pass`/`f
 A node's prompt is the content of its `role_file`. Role files render only an allowlisted set of path/metadata variables — `{task_path}`, `{repo_path}`, `{plan_path}`, `{diff_path}`, `{review_path}`, `{skills_path}`, `{memory_path}`, `{subtask_order}`/`{subtask_count}`/`{subtask_spec_path}`, and a few more — never task bodies, diffs, env, or secrets. A variable that is empty for a given node renders as the empty string; wrap optional references in a conditional block `{?name}…{/name}` so they drop cleanly when empty. For the full variable contract and which runner populates each, see [configuration.md → Prompt templates](configuration.md#prompt-templates-no-longer-a-config-block).
 
 `role_file` paths are contained to the flow directory: a path with `..` or an absolute path is rejected at load. Keep prompts inside your `<task_type>/` folder.
+
+> **Prompts and tools are frozen per task (WRI-010).** When a task starts, the orchestrator snapshots the flow YAML, every role/supervisor prompt it references, and each `tool` executable into a private per-task bundle and runs the whole task against that frozen copy. So **editing a prompt or tool in `.worc/` while a task is running does not affect that task** — the change lands on the **next fresh task** (or a `rerun`). An operator `rerun --continue` **adopts** live prompt/tool/flow edits: it re-freezes from the current on-disk copy and resumes from the checkpoint, so a between-run fix takes effect from there on (only automatic crash-recovery keeps the task's original frozen copy). This is transparent to authoring — you still edit `.worc/flows/` normally.
 
 ## Per-node overrides
 
@@ -186,7 +190,7 @@ Codex enforces `--output-schema` through OpenAI Structured Outputs, which reject
 - If your schema omits the `content` key, the named slots have nothing to persist — keep a string `content` field when the node also fills `plan` / `summary` / `enriched_spec`.
 - No extra flow or config is needed for Codex to hand the JSON back — the adapter reads it from the run's last-message file for you. Your only job is a strict schema.
 
-The **supervisor** summary/follow-ups and the **memory** delta are produced by the constant orchestrator layer _above_ the flow, not by nodes you author — you never define their schemas (you only toggle them via `supervisor.emit_follow_ups` and the `memory` config block).
+The **supervisor** summary/follow-ups and the **memory** delta are produced by the constant orchestrator layer _above_ the flow, not by nodes you author — you never define their schemas (you only toggle them via `supervisor.emit_follow_ups` and the `memory` config block). The follow-ups list also absorbs any findings your **evaluator** nodes accepted with (see [Node kinds → `evaluator`](#node-kinds)), merged in at task close independent of `emit_follow_ups`.
 
 ## Custom tool nodes
 
@@ -292,7 +296,7 @@ An unknown `task_type` (no matching flow file) fails the task at flow resolution
 
 Every flow file — packaged and operator — is loaded and validated at `install` and at `preflight`; any failure makes `preflight` report `NOT ready` and blocks the run. Three layers run:
 
-- **Graph integrity** — edges resolve, outcomes are valid per node kind, every `fail`/`rework` edge is bounded, exactly one entry node, every node reaches a terminal, and every `lineage_affinity` target is an `editing_lineage` owner with no affinity of its own (no chains).
+- **Graph integrity** — every node `id` is a portable single-segment token (not a dot/separator/uppercase/Windows device name), edges resolve, outcomes are valid per node kind, every `fail`/`rework` edge is bounded, exactly one entry node, every node reaches a terminal, and every `lineage_affinity` target is an `editing_lineage` owner with no affinity of its own (no chains).
 - **Security ceiling** — no node's `permission_profile` exceeds the flow `permission_ceiling`; evaluators are forced read-only; `role_file` paths contain no traversal; unknown fields fail closed.
 - **Config consistency** — a pinned `provider` is in `agents.allowed`, its `reasoning` is supported by that provider, and (under `security.strict_isolation`) no `extra_args` selects a full-access sandbox mode.
 

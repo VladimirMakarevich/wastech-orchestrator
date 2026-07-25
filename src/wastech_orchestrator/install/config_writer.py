@@ -23,6 +23,7 @@ from wastech_orchestrator.config.schema import (
 )
 from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.providers.base import ProviderId
+from wastech_orchestrator.runtime_layout import RuntimeLayout
 from wastech_orchestrator.security.env import default_allowed_environment
 
 _HEADER = (
@@ -71,8 +72,6 @@ def _provider_block(pid: ProviderId, *, primary: bool) -> dict[str, Any]:
         "reasoning": reasoning,
         "timeout_seconds": 7200,
     }
-    if pid is ProviderId.CODEX:
-        block["sandbox"] = "workspace-write"
     if pid is ProviderId.CLAUDE:
         block["max_turns"] = 400
         # Off by default; when on, a run that hits ``max_turns`` pauses for a Telegram continue/stop
@@ -94,7 +93,10 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
     """Assemble the config as a primitive dict (str/int/bool/None only) ready for YAML."""
     providers = _ordered_providers(spec.providers)
     primary_pid = _global_primary(providers)
-    quarantine = str(spec.repo_local_path / ".worc" / "tasks" / "rejected")
+    # Rejected runtime tasks live under the private home (WRI-004); routed through the layout so no
+    # bare ``.worc`` literal is reconstructed here.
+    private_home = RuntimeLayout.default(spec.repo_local_path).private_home
+    quarantine = str(private_home / "tasks" / "rejected")
     return {
         "schema_version": CONFIG_SCHEMA_VERSION,
         "orchestrator": {

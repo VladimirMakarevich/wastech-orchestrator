@@ -147,6 +147,52 @@ def test_enriched_slot_is_audit_only_no_inputs_field(tmp_path: Path) -> None:
     assert calls == [("task-1", "enriched", path)]
 
 
+def test_report_slot_writes_redacted_into_private_report_dir(tmp_path: Path) -> None:
+    # WRI-001: the security_audit report node is read-only — the agent returns the report as its
+    # structured output and the orchestrator captures it (redacted) into the flow's PRIVATE
+    # output_policy report dir. It is never written to the task artifact dir and never published to
+    # the agent-readable exchange (the slot is inputs_field=None, exchange=False).
+    node = _agent("report", output_artifact="report")
+    secret = "ghp_" + "a" * 36
+    outcome = NodeOutcome("done", structured_output={"content": f"# Audit\n\nleaked {secret}\n"})
+    inputs = NodeInputs(flow_dir=tmp_path)
+    calls, register = _recorder()
+    report_dir = tmp_path / ".worc" / "security-reports" / "task-1"
+
+    path = apply_output_artifact(
+        node,
+        outcome,
+        artifacts_root=tmp_path,
+        task_id="task-1",
+        inputs=inputs,
+        register=register,
+        report_dir=report_dir,
+    )
+
+    assert path is not None and Path(path) == report_dir / "report.md"
+    body = Path(path).read_text("utf-8")
+    assert secret not in body and "[REDACTED]" in body  # captured report content is redacted
+    assert calls == [("task-1", "report", path)]
+    # Audit-only downstream: no prompt variable is threaded (so nothing is routed to the exchange).
+    assert inputs.plan_path is None and inputs.summary_body_path is None
+
+
+def test_report_slot_noop_without_report_dir(tmp_path: Path) -> None:
+    # Defensive: a report slot with no report output_policy resolves to nothing — it never falls
+    # back to writing into the (agent-readable) task artifact dir.
+    node = _agent("report", output_artifact="report")
+    outcome = NodeOutcome("done", structured_output={"content": "BODY"})
+    inputs = NodeInputs(flow_dir=tmp_path)
+    calls, register = _recorder()
+    assert (
+        apply_output_artifact(
+            node, outcome, artifacts_root=tmp_path, task_id="t", inputs=inputs, register=register
+        )
+        is None
+    )
+    assert calls == []
+
+
 def test_no_slot_is_noop(tmp_path: Path) -> None:
     node = _agent("implementation")  # no output_artifact
     outcome = NodeOutcome("done", final_message="ignored")

@@ -18,7 +18,11 @@ from wastech_orchestrator.config.schema import MergeStrategy
 from wastech_orchestrator.core.orchestrator import PipelineFailed
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import KIND_PR, KIND_PR_MERGE, GitResult
+from wastech_orchestrator.runtime_layout import RuntimeLayout
 from wastech_orchestrator.state_store import PublishOpRow, StateStore, TaskRow
+
+# Every test here is a slow integration test (real git / subprocess / process tree).
+pytestmark = pytest.mark.slow
 
 GitRunner = Callable[[Sequence[str], Path], str]
 _ENV = [
@@ -126,7 +130,13 @@ def _build(git_repo, fake_cli, tmp_path: Path, *, scenario: str, gh: FakeGh):
     seed_builtin_flows(
         git_repo.clone
     )  # deliver the built-in flows (incl. `merge`) as install would
-    return build_orchestrator(config, artifacts_root=tmp_path / "art", gh_runner=gh)
+    layout = RuntimeLayout(
+        repo_root=Path(config.repo.local_path),
+        control_home=Path(config.repo.local_path) / ".worc",
+        private_home=tmp_path / "art",
+        exchange_root=Path(config.repo.local_path) / ".worc-io",
+    )
+    return build_orchestrator(config, layout=layout, gh_runner=gh)
 
 
 def test_clean_base_merge_merges(git_repo, fake_cli, git_run, tmp_path: Path) -> None:

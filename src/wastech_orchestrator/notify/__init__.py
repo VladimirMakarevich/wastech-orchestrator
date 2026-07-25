@@ -16,6 +16,9 @@ from wastech_orchestrator.notify.interface import (
     AskResult,
     Notifier,
     NullNotifier,
+    TerminalDetails,
+    TerminalFinding,
+    terminal_reason_prose,
 )
 from wastech_orchestrator.notify.telegram import TelegramNotifier, build_notifier
 
@@ -28,5 +31,8 @@ __all__ = [
     "Notifier",
     "NullNotifier",
     "TelegramNotifier",
+    "TerminalDetails",
+    "TerminalFinding",
     "build_notifier",
+    "terminal_reason_prose",
 ]

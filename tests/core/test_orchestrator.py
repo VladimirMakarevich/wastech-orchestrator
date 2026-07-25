@@ -17,6 +17,11 @@ from pathlib import Path
 import pytest
 
 from wastech_orchestrator.check_runner import CheckRunner
+from wastech_orchestrator.core.flow.exchange_seal import (
+    exchange_quarantine_root,
+    exchange_seal_root,
+)
+from wastech_orchestrator.core.flow.nodes.exchange_publish import ExchangeMutationManual
 from wastech_orchestrator.core.orchestrator import Eligibility, Orchestrator, SlotBusyError
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import (
@@ -30,6 +35,8 @@ from wastech_orchestrator.ledger import Ledger, LedgerRecord
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult, Notifier
 from wastech_orchestrator.providers.artifacts import (
     create_attempt_dir,
+    exchange_node_run_dir,
+    exchange_task_dir,
     node_run_dir,
     task_artifact_dir,
 )
@@ -42,8 +49,13 @@ from wastech_orchestrator.providers.base import (
     ProviderId,
     RunStatus,
 )
+from wastech_orchestrator.providers.exchange import build_exchange_manifest
+from wastech_orchestrator.runtime_layout import RuntimeLayout
 from wastech_orchestrator.state_store import PublishOpRow, StateStore, TaskRow
 from wastech_orchestrator.task.validation_gate import ValidationGate
+
+# Every test here is a slow integration test (real git / subprocess / process tree).
+pytestmark = pytest.mark.slow
 
 
 class FakeProvider:
@@ -167,6 +179,8 @@ class RecordingNotifier:
         pr_url: str | None,
         reason: str | None,
         contacts: tuple[str, ...] = (),
+        governance_changed: tuple[str, ...] = (),
+        details: object = None,
     ) -> None:
         self.calls.append(
             {
@@ -175,6 +189,8 @@ class RecordingNotifier:
                 "pr_url": pr_url,
                 "reason": reason,
                 "contacts": contacts,
+                "governance_changed": governance_changed,
+                "details": details,
             }
         )
         if self._raise_on_send:
@@ -331,7 +347,12 @@ def _build(
         store=store,
         ledger=ledger,
         gate=gate,
-        artifacts_root=str(art),
+        layout=RuntimeLayout(
+            repo_root=Path(config.repo.local_path),
+            control_home=Path(config.repo.local_path) / ".worc",
+            private_home=art,
+            exchange_root=Path(config.repo.local_path) / ".worc-io",
+        ),
         notifier=notifier,
         resolver=CheckResolver(config),  # normalize checks.command_sets (production wires this)
         **extra,
@@ -359,6 +380,92 @@ def _both(**kwargs) -> dict[ProviderId, FakeProvider]:
 def _impl_writes_file(provider_id: str) -> FakeProvider:
     # Implementation must actually change the working tree so there is something to commit.
     return FakeProvider(provider_id, outputs={"implementation": ("implemented", None)})
+
+
+def test_notify_terminal_enriches_manual_from_failure_report(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # VF-22: _notify_terminal assembles TerminalDetails from the TaskRow + on-disk failure report
+    # for a needs-attention terminal — stop node, loop, the most-severe blocking finding, and the
+    # stuck.md report path — all keyed by task_id, so every call site enriches without extra
+    # plumbing. The most-severe finding wins over a low nit in the same report.
+    from wastech_orchestrator.notify import TerminalDetails
+
+    notifier = RecordingNotifier()
+    orch, store, _ledger, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        notifier=notifier,
+    )
+    task_dir = task_artifact_dir(art, "task-mar")
+    task_dir.mkdir(parents=True, exist_ok=True)
+    (task_dir / "failure_report.json").write_text(
+        json.dumps(
+            {
+                "loop": "review_fix",
+                "last_review_findings": [
+                    {"severity": "low", "reason": "a nit", "paths": ["b.py"]},
+                    {
+                        "severity": "high",
+                        "reason": "AGENTS.md was never modified",
+                        "paths": ["AGENTS.md"],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    store.insert_task(
+        TaskRow(
+            task_id="task-mar",
+            title="Fix governance docs",
+            status=Status.MANUAL_ACTION_REQUIRED,
+            branch="feat/x",
+            fix_iterations=2,
+            failure_report_path=str(task_dir / "failure_report.json"),
+        )
+    )
+    store.update_task("task-mar", current_node="review")
+
+    orch._notify_terminal(
+        task_id="task-mar",
+        final_status=Status.MANUAL_ACTION_REQUIRED,
+        pr_url=None,
+        reason="no_file_change",
+    )
+
+    details = notifier.calls[0]["details"]
+    assert isinstance(details, TerminalDetails)
+    assert details.title == "Fix governance docs"
+    assert details.stop_node == "review" and details.loop == "review_fix"
+    assert details.fix_rounds == 2
+    assert details.finding is not None
+    assert details.finding.severity == "high"  # most-severe finding wins over the low nit
+    assert details.finding.paths == ("AGENTS.md",)
+    assert details.report_path is not None and details.report_path.endswith("stuck.md")
+
+
+def test_notify_terminal_done_passes_no_details(git_repo, make_git_config, tmp_path: Path) -> None:
+    # VF-22 item 7: a clean done carries no enrichment (stays terse) — details is None.
+    notifier = RecordingNotifier()
+    orch, store, _ledger, _art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        notifier=notifier,
+    )
+    store.insert_task(TaskRow(task_id="task-done", title="t", status=Status.DONE, branch="feat/x"))
+
+    orch._notify_terminal(
+        task_id="task-done", final_status=Status.DONE, pr_url="https://example/pr/2", reason=None
+    )
+
+    assert notifier.calls[0]["details"] is None
 
 
 def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: Path) -> None:
@@ -408,6 +515,8 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
             "pr_url": "https://example/pr/1",
             "reason": None,
             "contacts": (),
+            "governance_changed": (),  # ordinary task touched no governance files
+            "details": None,  # VF-22: a clean done stays terse (no enrichment)
         }
     ]
     assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "main"
@@ -572,9 +681,13 @@ def test_rework_budget_exhausted_warns_operator_and_marks_trace(
 def _run_complete_task_store_dir(
     git_repo, make_git_config, tmp_path: Path, *, memory_enabled: bool
 ) -> Path:
-    """Drive one complete happy-path task; return the ``.worc/memory`` store dir (may not exist)."""
+    """Drive one complete happy-path task; return the private-home ``memory`` store dir.
+
+    The memory store lives under ``layout.private_home`` (WRI-004) — here the injected ``art`` dir,
+    which coincides with ``<repo>/.worc`` in production. The dir may not exist (memory disabled).
+    """
     providers = _both()
-    orch, _store, _ledger, _ = _build(
+    orch, _store, _ledger, art = _build(
         git_repo,
         make_git_config,
         tmp_path,
@@ -592,7 +705,7 @@ def _run_complete_task_store_dir(
 
     providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
     assert orch.run_task(task_file).final_status is Status.DONE
-    return git_repo.clone / ".worc" / "memory"
+    return art / "memory"
 
 
 def test_memory_disabled_run_writes_no_store(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -1061,7 +1174,13 @@ def test_resume_restores_review_path_from_latest_verdict_run(
 
     inputs = NodeInputs(flow_dir=str(tmp_path))
     orch._restore_engine_inputs(SimpleNamespace(task=SimpleNamespace(id=tid)), inputs)
-    assert inputs.review_path == str(findings)
+    # Recovery re-publishes the latest verdict's findings into the exchange and points {review_path}
+    # there (WRI-001); the private findings.json stays the audit record.
+    expected = (
+        exchange_node_run_dir(orch._exchange_root, tid, "review", 9) / "findings.json"
+    ).as_posix()
+    assert inputs.review_path == expected
+    assert findings.exists()
 
 
 def test_fix_budget_exhausted_is_manual(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -1242,6 +1361,135 @@ def test_rate_limited_exhaustion_parks_task_resumable(
     assert task.blocked_since is not None
     assert ledger.records() == []
     assert not (art / "logs" / "task-limit" / "failure_report.json").exists()
+
+
+def test_containment_unverified_goes_manual_action_required(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # WRI-012: an unproven provider process tree on implementation is a security / manual-action
+    # condition. Unlike a transient infra class it must NOT park (an auto-resume must not paper over
+    # an uncontained writer), and unlike a quality failure it must NOT fall back — the task goes
+    # terminal MANUAL_ACTION_REQUIRED so an operator intervenes, and publish never runs.
+    providers = _both(
+        infra_fail={"implementation"}, infra_error_class=ErrorClass.CONTAINMENT_UNVERIFIED
+    )
+    orch, store, ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-contain"))
+
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+    task = store.get_task("task-contain")
+    assert task is not None and task.status is Status.MANUAL_ACTION_REQUIRED
+    assert "publish" not in _ran_nodes(store, "task-contain")  # nothing downstream ran
+    assert ledger.records()[0]["final_status"] == "manual_action_required"
+
+
+def test_live_control_plane_edit_during_run_is_manual_not_fallback(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # WRI-010: an agent that rewrites a live control file (here the flow YAML) during a provider
+    # attempt is caught by the post-node verify — the provider tree is already proven quiescent
+    # (WRI-012), so a live diff means a control file was mutated under the run. It is a non-fallback
+    # manual-action security violation, and no downstream node runs on the provider-selected bytes.
+    providers = _both()
+    orch, store, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    flow_yaml = git_repo.clone / ".worc" / "flows" / "implementation.yaml"
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_mutate(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "planning":  # mutate a live control input mid-attempt
+            flow_yaml.write_text(
+                flow_yaml.read_text(encoding="utf-8") + "\n# tampered by agent\n", encoding="utf-8"
+            )
+        if request.node_id == "implementation":
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_mutate  # type: ignore[method-assign]
+
+    result = orch.run_task(_complete_task(tmp_path, "task-mut"))
+
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+    ran = _ran_nodes(store, "task-mut")
+    assert "planning" in ran  # the mutating node completed
+    assert "implementation" not in ran  # ...but nothing downstream ran on the mutated control
+    assert "publish" not in ran
+    assert ledger.records()[0]["final_status"] == "manual_action_required"
+
+
+def test_autorecovery_after_parked_live_edit_stays_conflict_manual(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # WRI-010 (preserved): AUTOMATIC crash-recovery — `resume()` WITHOUT an operator `continue_task`
+    # — must NOT adopt a live control-plane edit made while the task was parked. A crash can follow
+    # an agent mutation, so auto-recovery keeps the frozen bundle and refuses the drift, routing to
+    # manual. (An operator `rerun --continue` deliberately DOES adopt — see the next test.)
+    providers = _both(
+        infra_fail={"implementation"}, infra_error_class=ErrorClass.PROVIDER_UNAVAILABLE
+    )
+    orch, store, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    first = orch.run_task(_complete_task(tmp_path, "task-parkconf"))
+    assert first.final_status is Status.RUNNING  # parked, resumable
+
+    for provider in providers.values():
+        provider.heal()
+    flow_yaml = git_repo.clone / ".worc" / "flows" / "implementation.yaml"
+    flow_yaml.write_text(
+        flow_yaml.read_text(encoding="utf-8") + "\n# operator edit while parked\n", encoding="utf-8"
+    )
+
+    result = orch.resume()  # auto-recovery path (not continue_task) — no adopt marker
+
+    assert result is not None and result.final_status is Status.MANUAL_ACTION_REQUIRED
+    assert ledger.records()[0]["final_status"] == "manual_action_required"
+
+
+def test_continue_task_after_parked_live_edit_adopts_flow(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # VF-3: an operator `rerun --continue` (continue_task) after editing the live flow while parked
+    # ADOPTS the edit — it re-freezes the control plane from the current on-disk flow, records a new
+    # digest, and resumes to DONE rather than refusing like auto-recovery above. Agent-tamper
+    # detection during the resumed run is unaffected (the post-node hook rebaselines to the new
+    # digest).
+    providers = _both(
+        infra_fail={"implementation"}, infra_error_class=ErrorClass.PROVIDER_UNAVAILABLE
+    )
+    orch, store, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    first = orch.run_task(_complete_task(tmp_path, "task-adopt"))
+    assert first.final_status is Status.RUNNING  # parked, resumable
+    control_before = store.get_control_bundle_digest("task-adopt")
+    inst_before = store.get_instruction_manifest_digest("task-adopt")
+
+    for provider in providers.values():
+        provider.heal()
+    flow_yaml = git_repo.clone / ".worc" / "flows" / "implementation.yaml"
+    flow_yaml.write_text(
+        flow_yaml.read_text(encoding="utf-8") + "\n# operator edit while parked\n", encoding="utf-8"
+    )
+
+    result = orch.continue_task("task-adopt")  # operator --continue → adopt the edited flow
+
+    assert result.final_status is Status.DONE  # adopted the edited flow and resumed, not refused
+    assert store.get_control_bundle_digest("task-adopt") != control_before  # re-frozen on adopt
+    # WRI-011 composite identity stays consistent: the instruction manifest re-binds the new
+    # control digest, so its persisted digest changes too.
+    assert store.get_instruction_manifest_digest("task-adopt") != inst_before
+    assert "publish" in _ran_nodes(store, "task-adopt")  # resumed past implementation
+    assert ledger.records()[0]["final_status"] == "done"
 
 
 def test_stop_cancellation_parks_task_resumable(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -2046,6 +2294,8 @@ def test_rejected_task_no_branch(git_repo, make_git_config, git_run, tmp_path: P
             "pr_url": None,
             "reason": "frontmatter_missing",
             "contacts": (),
+            "governance_changed": (),
+            "details": None,  # VF-22: a validation reject has no tasks row → no enrichment
         }
     ]
 
@@ -3651,3 +3901,454 @@ def test_reject_dependency_quarantines_and_records_failed(
     record = ledger.records()[-1]
     assert record["id"] == "task-001"
     assert record["validation_reason"] == "invalid_depends_on"
+
+
+# -- WRI-011: frozen agent instruction inputs --------------------------------------------------
+
+
+def _commit_agents_md(git_repo, git_run, body: str) -> Path:
+    """Add + commit a tracked root ``AGENTS.md`` so WRI-011 discovers/freezes it."""
+    agents = git_repo.clone / "AGENTS.md"
+    agents.write_text(body, encoding="utf-8")
+    git_run(["add", "AGENTS.md"], git_repo.clone)
+    git_run(["commit", "-m", "add agents"], git_repo.clone)
+    return agents
+
+
+def test_wri011_freezes_instruction_inputs_end_to_end(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # A complete task persists a composite instruction-manifest digest and freezes the task packet +
+    # per-source repository-instruction files into the private bundle for the digest. (VF-5: no
+    # concatenated payload is built or injected; the agent reads the live root files itself, and a
+    # workspace-write attempt write-denies them so what it reads stays immutable for the run.)
+    _commit_agents_md(git_repo, git_run, "ORIGINAL REPO RULES\n")
+    providers = _both()
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    result = orch.run_task(_complete_task(tmp_path, "task-frz"))
+    assert result.final_status is Status.DONE
+
+    assert store.get_instruction_manifest_digest("task-frz")  # composite digest persisted
+    bundle = art / "instruction-bundles" / "task-frz"
+    assert (bundle / "task" / "task.md").is_file()  # frozen (private) task packet
+    # VF-5: the per-source file is frozen for the digest — no concatenated repository.md payload.
+    src = bundle / "instructions" / "src" / "AGENTS.md"
+    assert src.is_file() and "ORIGINAL REPO RULES" in src.read_text(encoding="utf-8")
+    assert not (bundle / "instructions" / "repository.md").exists()
+
+    # VF-20: a workspace-write implementation attempt does NOT deny the tracked root instruction
+    # files — editing them is ordinary repository work, reported to the operator not blocked.
+    # (The per-source freeze above still records what the agent read, for the audit digest.)
+    def _denies_agents_md(r: AgentRunRequest) -> bool:
+        paths = r.write_guard.denied_write_paths if r.write_guard else ()
+        return any(p.name == "AGENTS.md" for p in paths)
+
+    impl = [r for r in providers[ProviderId.CLAUDE].requests if r.node_id == "implementation"]
+    assert impl and not any(_denies_agents_md(r) for r in impl)
+
+
+def test_wri009_resume_repopulates_task_packet_digest(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # H3 (WRI-009 ↔ WRI-011): on ``rerun --continue`` the frozen (key, digest) entries must be
+    # repopulated from the verified manifest so ``_task_packet_digest`` is NOT None — otherwise
+    # ``commit_audit`` silently skips the lifecycle-vs-packet check on resume and a task file
+    # rewritten while the task was parked could be committed unchecked. The fresh path always
+    # records the digest; this asserts the resume freeze path recovers the SAME one.
+    from types import SimpleNamespace
+
+    from wastech_orchestrator.core.flow.nodes import NodeInputs
+
+    _commit_agents_md(git_repo, git_run, "REPO RULES\n")
+    providers = _both()
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    tid = "task-h3-resume"
+    result = orch.run_task(_complete_task(tmp_path, tid))
+    assert result.final_status is Status.DONE
+    fresh_digest = store.get_instruction_manifest_digest(tid)
+    assert fresh_digest  # fresh run persisted the composite manifest digest
+
+    # The resume freeze path loads + verifies the persisted bundle and repopulates the entries.
+    p = SimpleNamespace(task=SimpleNamespace(id=tid), instruction_entries=[])
+    orch._freeze_task_and_repo_instructions(p, NodeInputs(flow_dir=str(tmp_path)), resume=True)  # type: ignore[arg-type]
+    packet_digest = orch._task_packet_digest(p)  # type: ignore[arg-type]
+    assert packet_digest is not None  # regression: was None on resume (check silently skipped)
+    # And it is the sha256 of the frozen private task packet, so commit_audit verifies against it.
+    import hashlib
+
+    frozen_packet = art / "instruction-bundles" / tid / "task" / "task.md"
+    assert packet_digest == hashlib.sha256(frozen_packet.read_bytes()).hexdigest()
+
+
+def test_resume_after_live_governance_edit_does_not_fail_closed(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # VF-20 §1: editing a governance file mid-task must never fail-close a continue/resume. The
+    # resume freeze path re-hashes the FROZEN copies under the bundle dir (the task-start snapshot),
+    # not the live files — so a live AGENTS.md edit after the run does not raise or block resume.
+    from types import SimpleNamespace
+
+    from wastech_orchestrator.core.flow.nodes import NodeInputs
+
+    agents = _commit_agents_md(git_repo, git_run, "ORIGINAL REPO RULES\n")
+    providers = _both()
+    orch, store, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    tid = "task-gov-resume"
+    assert orch.run_task(_complete_task(tmp_path, tid)).final_status is Status.DONE
+
+    # A governance file is now edited in the live repo (the change VF-20 allows).
+    agents.write_text("EDITED AFTER THE RUN\n", encoding="utf-8")
+
+    # The resume freeze path must still load + verify the persisted bundle without fail-closing:
+    # if it re-hashed the LIVE file, the changed AGENTS.md would raise InstructionBundleError.
+    p = SimpleNamespace(task=SimpleNamespace(id=tid), instruction_entries=[])
+    orch._freeze_task_and_repo_instructions(p, NodeInputs(flow_dir=str(tmp_path)), resume=True)  # type: ignore[arg-type]
+    assert orch._task_packet_digest(p) is not None  # no InstructionBundleError, no manual gate
+
+
+def test_wri011_frozen_instruction_copy_is_task_start_snapshot(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # VF-20: the agent reads the LIVE root files and may edit them (ordinary work, reported not
+    # blocked). The private per-source freeze — the digest/audit record — is still captured once at
+    # task start, so a later live edit does not change it: "record drift, don't prevent it" (the
+    # frozen copy stays the task-start snapshot even though the live file changed).
+    agents = _commit_agents_md(git_repo, git_run, "ORIGINAL REPO RULES\n")
+    providers = _both()
+    orch, _, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_mutate(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "planning":
+            agents.write_text("TAMPERED RULES\n", encoding="utf-8")  # rewrite the live repo file
+        if request.node_id == "implementation":
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_mutate  # type: ignore[method-assign]
+
+    orch.run_task(_complete_task(tmp_path, "task-imm"))
+
+    frozen = (
+        art / "instruction-bundles" / "task-imm" / "instructions" / "src" / "AGENTS.md"
+    ).read_text(encoding="utf-8")
+    assert "ORIGINAL REPO RULES" in frozen  # the task-start freeze (digest record) is unchanged
+    assert "TAMPERED" not in frozen
+
+
+# --- VF-20: governance-change notice (never block; report on every surface) ----------------------
+
+
+def _pending_task_in_repo(git_repo, task_id: str) -> str:
+    """Write a complete task into the repo's ``tasks/pending`` tree, so its committed summary is
+    reachable via ``git show <branch>:tasks/done/<id>.summary.md``. Returns the task-file path."""
+    pending = git_repo.clone / "tasks" / "pending"
+    pending.mkdir(parents=True, exist_ok=True)
+    task_file = pending / f"{task_id}.md"
+    task_file.write_text(
+        f'---\nid: {task_id}\ntitle: "Do the thing"\n---\n\n'
+        "## Description\n\nDo it.\n\n## Acceptance criteria\n\n- works\n",
+        encoding="utf-8",
+    )
+    return str(task_file)
+
+
+def test_governance_edit_reports_notice_on_all_surfaces(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # VF-20: a run that edits governance/instruction files is NOT blocked — it completes, the edit
+    # lands, and the operator is notified on every surface: a console/log WARNING, a section in the
+    # committed PR/commit summary, the completed-ledger record, and the Telegram terminal message.
+    _commit_agents_md(git_repo, git_run, "ORIGINAL REPO RULES\n")
+    rules = git_repo.clone / ".agents" / "rules" / "security.md"
+    rules.parent.mkdir(parents=True, exist_ok=True)
+    rules.write_text("original rule\n", encoding="utf-8")
+    git_run(["add", ".agents/rules/security.md"], git_repo.clone)
+    git_run(["commit", "-m", "add rules"], git_repo.clone)
+
+    providers = _both()
+    notifier = RecordingNotifier()
+    orch, store, ledger, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+    )
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "AGENTS.md").write_text("EDITED BY TASK\n", encoding="utf-8")
+            rules.write_text("edited rule\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    warnings: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            warnings.append(record.getMessage())
+
+    logger = logging.getLogger("wastech_orchestrator")
+    handler = _Collect(level=logging.WARNING)
+    logger.addHandler(handler)
+    prior_level = logger.level
+    logger.setLevel(logging.WARNING)
+    try:
+        result = orch.run_task(_pending_task_in_repo(git_repo, "task-gov"))
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(prior_level)
+
+    assert result.final_status is Status.DONE
+    expected = (".agents/rules/security.md", "AGENTS.md")  # sorted: "." < "A"
+    # (1) console/log WARNING naming the changed governance files
+    assert any("governance" in m and "AGENTS.md" in m for m in warnings)
+    # (2) a section in the committed PR/commit summary (on the task branch)
+    branch = store.get_task("task-gov").branch
+    summary = git_run(["show", f"{branch}:tasks/done/task-gov.summary.md"], git_repo.clone)
+    assert "## Governance files changed" in summary
+    assert "`AGENTS.md`" in summary and "`.agents/rules/security.md`" in summary
+    # (3) the completed-ledger record
+    assert ledger.records()[-1]["governance_changed"] == list(expected)
+    # (4) the Telegram terminal notification
+    assert notifier.calls[-1]["governance_changed"] == expected
+
+
+def test_ordinary_task_emits_no_governance_notice(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # VF-20 no-noise AC: a run that touches no governance file emits no notice on any surface.
+    providers = _both()
+    notifier = RecordingNotifier()
+    orch, store, ledger, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+    )
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "s.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    warnings: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            warnings.append(record.getMessage())
+
+    logger = logging.getLogger("wastech_orchestrator")
+    handler = _Collect(level=logging.WARNING)
+    logger.addHandler(handler)
+    prior_level = logger.level
+    logger.setLevel(logging.WARNING)
+    try:
+        result = orch.run_task(_pending_task_in_repo(git_repo, "task-plain"))
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(prior_level)
+
+    assert result.final_status is Status.DONE
+    assert not any("governance" in m for m in warnings)
+    branch = store.get_task("task-plain").branch
+    summary = git_run(["show", f"{branch}:tasks/done/task-plain.summary.md"], git_repo.clone)
+    assert "Governance files changed" not in summary
+    assert ledger.records()[-1]["governance_changed"] == []
+    assert notifier.calls[-1]["governance_changed"] == ()
+
+
+# --- WRI-007: terminal-exchange sealing (orchestrator wiring) -------------------------------------
+
+
+def test_terminal_seals_and_removes_active_exchange(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # A DONE task leaves no active exchange dir for the next task and retains a verified private
+    # snapshot; the guard flags stay clean (a clean seal, not an unsafe/contaminated teardown).
+    providers = _both()
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-seal"))
+
+    assert result.final_status is Status.DONE
+    assert not exchange_task_dir(orch._exchange_root, "task-seal").exists()  # no active exchange
+    assert store.get_exchange_guard("task-seal") == (False, False)  # clean seal, launches unblocked
+    # The curated exchange is preserved privately as a verified snapshot (the pipeline published to
+    # the exchange, so at least one seal-<NNNNNN> exists with its manifest).
+    seals = exchange_seal_root(art, "task-seal")
+    latest = sorted(seals.glob("seal-*"))
+    assert latest and (latest[-1] / "manifest.json").is_file()
+
+
+def test_seal_terminal_exchange_quarantines_on_mutation(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The terminal seam quarantines a WRI-002-flagged tree as evidence instead of sealing it.
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    store.insert_task(TaskRow(task_id="task-contam", title="t", status=Status.RUNNING))
+    task_dir = exchange_task_dir(orch._exchange_root, "task-contam")
+    task_dir.mkdir(parents=True)
+    (task_dir / "plan.md").write_text("the plan\n", encoding="utf-8")
+    before = build_exchange_manifest(task_dir, "task-contam")
+    (task_dir / "plan.md").write_text("MUTATED BY AGENT\n", encoding="utf-8")  # agent edit
+    after = build_exchange_manifest(task_dir, "task-contam")
+    mutation = ExchangeMutationManual("mutated", before=before, after=after)
+    store.update_task("task-contam", exchange_contaminated=1)
+
+    orch._seal_terminal_exchange(
+        "task-contam", final=Status.MANUAL_ACTION_REQUIRED, mutation=mutation
+    )
+
+    assert not task_dir.exists()  # removed from the active root
+    qroot = exchange_quarantine_root(art, "task-contam")
+    assert qroot.is_dir() and any(qroot.iterdir())  # relocated as contaminated evidence
+    assert not exchange_seal_root(art, "task-contam").exists()  # never sealed / restore-eligible
+
+
+def test_seal_terminal_exchange_survives_bare_oserror(
+    git_repo, make_git_config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # M7: seal_exchange can raise a bare OSError (ENOSPC on a full disk / EACCES) AFTER the terminal
+    # status + ledger are committed. `_seal_terminal_exchange` promises "Never raises" — it must
+    # flag the tree unsafe (blocking later launches) instead of crashing into the H1 daemon-crash
+    # path with no signal.
+    orch, store, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    store.insert_task(TaskRow(task_id="task-enospc", title="t", status=Status.RUNNING))
+    task_dir = exchange_task_dir(orch._exchange_root, "task-enospc")
+    task_dir.mkdir(parents=True)
+    (task_dir / "plan.md").write_text("the plan\n", encoding="utf-8")
+
+    def _boom(*_a: object, **_k: object) -> object:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr("wastech_orchestrator.core.orchestrator.seal_exchange", _boom)
+    orch._seal_terminal_exchange("task-enospc", final=Status.DONE)  # must not raise
+
+    assert store.get_exchange_guard("task-enospc")[1] is True  # exchange_active_unsafe set
+
+
+def test_containment_unverified_marks_exchange_unsafe_and_skips_seal(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # WRI-012 unproven quiescence must not seal (an unknown descendant may still write); the task is
+    # flagged unsafe so every later provider launch is blocked until an operator resolves it.
+    providers = _both(
+        infra_fail={"implementation"}, infra_error_class=ErrorClass.CONTAINMENT_UNVERIFIED
+    )
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-unsafe"))
+
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+    assert store.get_exchange_guard("task-unsafe")[1] is True  # exchange_active_unsafe set
+    assert not exchange_seal_root(art, "task-unsafe").exists()  # no snapshot built over the tree
+    # C1 part 2: the terminal Git/cleanup is withheld while the tree is not proven quiescent — the
+    # cleanup checkout did not run (no Git action against a possibly-live working tree).
+    task = store.get_task("task-unsafe")
+    assert task is not None and task.cleanup_completed is False
+    assert task.cleanup_last_error is not None and "not proven quiescent" in task.cleanup_last_error
+
+
+def test_containment_unverified_on_evaluator_marks_unsafe_and_skips_seal(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # C1 (WRI-012 ↔ WRI-007 seam): an EVALUATOR node (review) whose provider tree cannot be proven
+    # quiescent must fail closed exactly like an agent node — even though its (green) diff would
+    # otherwise be shippable. Before the fix the evaluator branch degraded straight to manual
+    # WITHOUT flagging the exchange unsafe, so the seal ran and the leftover tree leaked to the next
+    # task. Now the error-class dispatch precedes the evaluator/agent split.
+    providers = _both(infra_fail={"review"}, infra_error_class=ErrorClass.CONTAINMENT_UNVERIFIED)
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-eval-unsafe"))
+
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+    assert "review" in _ran_nodes(store, "task-eval-unsafe")  # the evaluator did run
+    assert "publish" not in _ran_nodes(store, "task-eval-unsafe")  # nothing downstream
+    assert store.get_exchange_guard("task-eval-unsafe")[1] is True  # exchange_active_unsafe set
+    assert not exchange_seal_root(art, "task-eval-unsafe").exists()  # not sealed over the tree
+    task = store.get_task("task-eval-unsafe")
+    assert task is not None and task.cleanup_completed is False  # Git/cleanup withheld
+
+
+def test_stale_foreign_exchange_goes_manual_not_crash(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # H1: a stale/foreign entry left in the exchange root (e.g. a prior task whose seal was
+    # interrupted) must fail closed to manual_action_required — never let a bare ExchangeError
+    # escape uncaught and crash-loop the daemon. The border still holds (no provider launches over a
+    # dirty exchange), so nothing downstream runs.
+    providers = _both()
+    orch, store, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    exchange_root = Path(git_repo.clone) / ".worc-io"
+    (exchange_root / "task-OTHER").mkdir(parents=True)  # foreign leftover from a prior task
+
+    # Must NOT raise — returns a clean terminal instead of crashing.
+    result = orch.run_task(_complete_task(tmp_path, "task-h1"))
+
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+    task = store.get_task("task-h1")
+    assert task is not None and task.status is Status.MANUAL_ACTION_REQUIRED
+    assert not _ran_nodes(store, "task-h1")  # no node launched over the dirty exchange
+    assert task.cleanup_last_error is not None and "task-OTHER" in task.cleanup_last_error
+    assert ledger.records()[0]["final_status"] == "manual_action_required"

@@ -78,7 +78,7 @@ def _planted_delta() -> CandidateDelta:
 
 
 def test_planted_secrets_never_reach_any_memory_file(tmp_path: Path) -> None:
-    layout = MemoryLayout.for_repo(tmp_path)
+    layout = MemoryLayout(tmp_path / ".worc")
     service = MemoryService(layout, extra_secrets=[LITERAL], config=MemoryConfig(enabled=True))
     episode = EpisodeRecord(
         id="ep_t1",
@@ -101,7 +101,7 @@ def test_planted_secrets_never_reach_any_memory_file(tmp_path: Path) -> None:
 
 
 def test_planted_secret_never_reaches_a_rendered_packet(tmp_path: Path) -> None:
-    layout = MemoryLayout.for_repo(tmp_path)
+    layout = MemoryLayout(tmp_path / ".worc")
     config = MemoryConfig(enabled=True)
     service = MemoryService(layout, extra_secrets=[LITERAL], config=config)
     episode = EpisodeRecord(
@@ -132,7 +132,7 @@ def _episode_naming(secret: str) -> EpisodeRecord:
 def test_env_secret_leaks_without_harvesting(tmp_path: Path) -> None:
     # F3 baseline: a repo-specific secret that matches no token shape is NOT caught by the
     # structural patterns alone — proving the gap the orchestrator's extra_secrets wiring closes.
-    layout = MemoryLayout.for_repo(tmp_path)
+    layout = MemoryLayout(tmp_path / ".worc")
     service = MemoryService(layout, config=MemoryConfig(enabled=True))  # extra_secrets=() (old)
     service.apply_delta(
         None, episode=_episode_naming(ENV_SECRET_VALUE), source=WriteSource.FAILURE, audit=_AUDIT
@@ -147,7 +147,7 @@ def test_orchestrator_style_env_secret_is_scrubbed(
     # F3 fix: built the way the orchestrator now does — extra_secrets harvested from secret-named
     # env vars — the same non-pattern value is scrubbed from every memory file.
     monkeypatch.setenv("REPO_DB_SECRET", ENV_SECRET_VALUE)  # secret name, not allowlisted
-    layout = MemoryLayout.for_repo(tmp_path)
+    layout = MemoryLayout(tmp_path / ".worc")
     service = MemoryService(
         layout,
         config=MemoryConfig(enabled=True),

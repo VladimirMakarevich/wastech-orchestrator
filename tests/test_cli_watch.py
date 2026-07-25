@@ -15,6 +15,9 @@ from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.install.config_writer import InstallSpec, build_and_validate
 from wastech_orchestrator.providers.base import ProviderId
 
+# Slow integration tests: real watch-daemon lifecycle (pid files, process control).
+pytestmark = pytest.mark.slow
+
 
 def test_pending_dir_is_under_the_bound_repo(tmp_path: Path) -> None:
     repo = tmp_path / "my-repo"

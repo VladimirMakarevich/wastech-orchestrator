@@ -2,7 +2,7 @@
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 # This is the packaged copy used by `wastech-orchestrator init` (the only example config; nothing else to sync).
 
-schema_version: 30                  # config format version; the orchestrator refuses newer configs
+schema_version: 31                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -86,8 +86,13 @@ agents:
       model: "gpt-5.4"         # "" = use the Codex CLI/account default
       reasoning: high          # minimal | low | medium | high | xhigh | max->xhigh
       timeout_seconds: 7200    # per-attempt CLI wall-clock ceiling (seconds)
-      sandbox: "workspace-write"   # workspace-write | read-only | danger-full-access (needs strict_isolation: false)
-      permission_profile: "workspace-write"   # access level; codex's real isolation knob is `sandbox` above
+      permission_profile: "workspace-write"   # read-only | workspace-write — codex's isolation knob:
+                               # a generated permission profile grants only this level, denies the
+                               # private/control homes + secrets + CODEX_HOME, and keeps the exchange
+                               # read-only, proven by a no-model `codex sandbox` canary before each run
+      # sandbox: "danger-full-access"   # OPT-OUT: removes codex isolation; loads only under
+                               # `strict_isolation: false` (you own the risk). read-only/workspace-write
+                               # are NOT valid here anymore — use permission_profile above.
       extra_args: []           # raw CLI flags appended verbatim; forbidden ones fail preflight
 
 security:
@@ -99,6 +104,20 @@ security:
                                       #   consciously opt into full access (you then own the risk); the
                                       #   absolutely-forbidden flags (--dangerously-skip-permissions,
                                       #   --yolo, --ignore-rules) stay banned regardless.
+  disable_read_isolation: true        # DEFAULT true — read-isolation is OFF out of the box (set
+                                      #   false to KEEP it on). true disables READ-isolation for
+                                      #   provider runs: Claude reloads native
+                                      #   CLAUDE.md + project settings/hooks/MCP/skills (via
+                                      #   --setting-sources project) and Codex reloads the user +
+                                      #   project .codex config/hooks/rules; the PRIVATE read-deny
+                                      #   projection (.worc/env-file/provider homes/frozen bundles)
+                                      #   is lifted. The WRITE side stays (exchange/.git/tasks write-
+                                      #   deny, commit/staging gates, PR control) and the
+                                      #   denied_read_paths blacklist stays enforced. strict_isolation
+                                      #   is the master switch: strict_isolation: false forces this on
+                                      #   regardless. Operator-config ONLY (never a task/flow/extra_args
+                                      #   key). `worc preflight` prints `read-isolation: OFF` when in
+                                      #   effect — never a silent weakening.
   allowed_environment:                  # REPLACES (does not extend) the default — keep the OS-launch
                                         # essentials for YOUR OS or the spawned CLI may fail to start.
                                         # A name absent from the host OS is simply skipped, so this

@@ -25,13 +25,73 @@ def _with_security(config: OrchestratorConfig, **changes: object) -> Orchestrato
     return replace(config, security=replace(config.security, **changes))
 
 
+def _with_codex(config: OrchestratorConfig, **changes: object) -> OrchestratorConfig:
+    providers = dict(config.agents.providers)
+    providers[ProviderId.CODEX] = replace(providers[ProviderId.CODEX], **changes)
+    return _with_agents(config, providers=providers)
+
+
 def test_packaged_config_validates_clean(base_config: OrchestratorConfig) -> None:
     assert validate_config(base_config) == []
+
+
+@pytest.mark.parametrize("value", ["read-only", "workspace-write"])
+def test_legacy_codex_sandbox_value_is_rejected(
+    base_config: OrchestratorConfig, value: str
+) -> None:
+    # WRI-003: the access level lives in permission_profile; a safe legacy `sandbox` is rejected.
+    cfg = _with_codex(base_config, sandbox=value)
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any(".sandbox" in issue and "permission_profile" in issue for issue in exc.value.issues)
+
+
+def test_danger_full_access_sandbox_passes_config_validation(
+    base_config: OrchestratorConfig,
+) -> None:
+    # The full-access escape still loads at config time — strict_isolation gates it at preflight.
+    cfg = _with_codex(base_config, sandbox="danger-full-access")
+    assert validate_config(cfg) == []
 
 
 def test_protected_paths_globs_validate_clean(base_config: OrchestratorConfig) -> None:
     cfg = _with_security(base_config, protected_paths=("**/*.md", "docs/**"))
     assert validate_config(cfg) == []
+
+
+@pytest.mark.parametrize(
+    ("strict", "disable", "expected_off"),
+    [(True, False, False), (True, True, True), (False, False, True), (False, True, True)],
+)
+def test_read_isolation_off_formula(
+    base_config: OrchestratorConfig, strict: bool, disable: bool, expected_off: bool
+) -> None:
+    # VF-6: effective read-isolation = disable_read_isolation OR NOT strict_isolation, defined once
+    # on SecurityConfig.read_isolation_off (strict_isolation always wins toward relaxation).
+    cfg = _with_security(base_config, strict_isolation=strict, disable_read_isolation=disable)
+    assert cfg.security.read_isolation_off is expected_off
+
+
+def test_disable_read_isolation_default_and_validates(
+    base_config: OrchestratorConfig,
+) -> None:
+    # VF-6: the packaged/shipped default is now True (read-isolation OFF out of the box); both the
+    # default and an explicit False validate cleanly.
+    assert base_config.security.disable_read_isolation is True
+    assert validate_config(_with_security(base_config, disable_read_isolation=False)) == []
+
+
+def test_loader_parses_disable_read_isolation(packaged_config_text: str) -> None:
+    # Operator-config key parsed from the security block: the packaged config ships `true`
+    # (read-isolation OFF), and an explicit `false` is honored (keeps read-isolation ON).
+    assert loads_config(packaged_config_text).config.security.disable_read_isolation is True
+    text = packaged_config_text.replace(
+        "disable_read_isolation: true", "disable_read_isolation: false"
+    )
+    assert "disable_read_isolation: false" in text  # guard: the packaged key still exists
+    cfg = loads_config(text).config
+    assert cfg.security.disable_read_isolation is False
+    assert cfg.security.read_isolation_off is False
 
 
 def test_protected_paths_path_traversal_is_rejected(base_config: OrchestratorConfig) -> None:

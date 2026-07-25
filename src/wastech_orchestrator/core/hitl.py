@@ -392,6 +392,25 @@ def write_answer(path: Path, result: AskResult) -> None:
     _atomic_json(path, payload)
 
 
+def sanitized_answer_packet(persisted: Mapping[str, Any]) -> dict[str, Any]:
+    """The answer-only projection of a durable HITL record, for the exchange (WRI-001).
+
+    Contains only what a rerun needs — the request ``kind``/``question`` and the operator's
+    ``answer``/``approved``, all already redacted upstream — and never the durable transport
+    ``handle``, ``interaction_id``, ``telegram_message_id``, ``deadline``, or failure bookkeeping.
+    Those stay in the private durable record; only this packet crosses into the provider-readable
+    exchange as ``AgentRunRequest.human_input_path``.
+    """
+    request = persisted.get("request", {})
+    request = request if isinstance(request, Mapping) else {}
+    return {
+        "kind": request.get("kind"),
+        "question": request.get("question"),
+        "answer": persisted.get("answer"),
+        "approved": persisted.get("approved"),
+    }
+
+
 def mark_consumed(path: Path) -> None:
     payload = load_interaction(path)
     if payload is None:

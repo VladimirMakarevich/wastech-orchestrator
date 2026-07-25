@@ -28,6 +28,8 @@ from wastech_orchestrator.notify.interface import (
     AskResult,
     Notifier,
     NullNotifier,
+    TerminalDetails,
+    terminal_reason_prose,
 )
 from wastech_orchestrator.providers.redaction import REDACTED, redact_text
 
@@ -134,6 +136,8 @@ class TelegramNotifier:
         pr_url: str | None,
         reason: str | None,
         contacts: tuple[str, ...] = (),
+        governance_changed: tuple[str, ...] = (),
+        details: TerminalDetails | None = None,
     ) -> None:
         body = _format_terminal_message(
             task_id=task_id,
@@ -141,6 +145,8 @@ class TelegramNotifier:
             pr_url=pr_url,
             reason=reason,
             contacts=contacts,
+            governance_changed=governance_changed,
+            details=details,
         )
         self._safe_send(body, op="send_notification", task_id=task_id)
 
@@ -397,6 +403,25 @@ def check_telegram_preflight(
         return False, f"telegram: FAIL — API error ({safe})"
 
 
+# Maps a terminal status to a glanceable severity glyph for the operator-facing notification
+# (VF-22). 🛑 (a human is required; the branch is preserved) is deliberately distinct from a clean
+# ✅ finish, per the operator's request for a strong needs-attention marker, and from the trace
+# vocabulary's ⚠️. Mirrors the _TRACE_EMOJI pattern used for the live per-node trace.
+_STATUS_EMOJI: dict[str, str] = {
+    "done": "✅",
+    "manual_action_required": "🛑",
+    "failed": "❌",
+}
+
+# Statuses whose terminal notification expands into the enriched body when details are available; a
+# clean `done` stays terse (VF-22 item 7 — a successful task must not become noisy).
+_ATTENTION_STATUSES = frozenset({"manual_action_required", "failed"})
+
+# One-line cap for the agent-authored blocking-finding reason echoed into the chat. Redaction still
+# runs on the whole message (via `_outgoing`); this only keeps a single finding readable.
+_FINDING_REASON_LIMIT = 200
+
+
 def _format_terminal_message(
     *,
     task_id: str,
@@ -404,15 +429,101 @@ def _format_terminal_message(
     pr_url: str | None,
     reason: str | None,
     contacts: tuple[str, ...] = (),
+    governance_changed: tuple[str, ...] = (),
+    details: TerminalDetails | None = None,
 ) -> str:
-    parts = [f"[{task_id}] status={final_status}"]
+    glyph = _STATUS_EMOJI.get(final_status, "")
+    prefix = f"{glyph} " if glyph else ""
+    if details is not None and final_status in _ATTENTION_STATUSES:
+        return _format_attention_message(
+            prefix=prefix,
+            task_id=task_id,
+            final_status=final_status,
+            pr_url=pr_url,
+            reason=reason,
+            contacts=contacts,
+            governance_changed=governance_changed,
+            details=details,
+        )
+    parts = [f"{prefix}[{task_id}] status={final_status}"]
     if pr_url:
         parts.append(f"pr={pr_url}")
     if reason:
         parts.append(f"reason={reason}")
     if contacts:
         parts.append(f"contacts={' '.join(contacts)}")
+    if governance_changed:
+        # VF-20: a non-blocking notice — this run edited its own governance/instruction files.
+        parts.append(f"governance={','.join(governance_changed)}")
     return " ".join(parts)
+
+
+def _format_attention_message(
+    *,
+    prefix: str,
+    task_id: str,
+    final_status: str,
+    pr_url: str | None,
+    reason: str | None,
+    contacts: tuple[str, ...],
+    governance_changed: tuple[str, ...],
+    details: TerminalDetails,
+) -> str:
+    """The enriched multi-line body for a needs-attention terminal (VF-22).
+
+    Plain text + emoji (no parse_mode): id + severity glyph, then title, where it stopped, a prose
+    reason, the top blocking finding + its paths, and the on-disk report to open next. Every section
+    is emitted only when its datum is present, so a call site with thin context degrades gracefully.
+    """
+    lines = [f"{prefix}{final_status} — {task_id}"]
+    if details.title:
+        lines.append(details.title)
+    body: list[str] = []
+    stopped = _stopped_line(details)
+    if stopped:
+        body.append(stopped)
+    why = terminal_reason_prose(reason)
+    if why:
+        body.append(f"Why: {why}")
+    if details.finding is not None:
+        body.append(f"Blocking ({details.finding.severity}): {_one_line(details.finding.reason)}")
+        if details.finding.paths:
+            body.append(f"Paths: {', '.join(details.finding.paths)}")
+    if details.branch:
+        body.append(f"Branch: {details.branch}")
+    if pr_url:
+        body.append(f"PR: {pr_url}")
+    if contacts:
+        body.append(f"Contacts: {' '.join(contacts)}")
+    if governance_changed:
+        body.append(f"Governance files changed: {', '.join(governance_changed)}")
+    if details.report_path:
+        body.append(f"Details: {details.report_path}")
+    if body:
+        lines.append("")  # blank line separates the header/title from the body
+        lines.extend(body)
+    return "\n".join(lines)
+
+
+def _stopped_line(details: TerminalDetails) -> str | None:
+    """The 'Stopped at: <node> (<loop> loop), after N fix rounds' line; None with no stop node."""
+    if not details.stop_node:
+        return None
+    text = f"Stopped at: {details.stop_node}"
+    if details.loop:
+        text += f" ({details.loop} loop)"
+    if details.fix_rounds is not None:
+        plural = "" if details.fix_rounds == 1 else "s"
+        text += f", after {details.fix_rounds} fix round{plural}"
+    return text
+
+
+def _one_line(text: str, *, limit: int = _FINDING_REASON_LIMIT) -> str:
+    """Collapse to a single bounded line for an agent-authored finding reason (VF-22)."""
+    collapsed = " ".join(text.split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return collapsed[: limit - 1].rstrip() + "…"
 
 
 # Maps a node's edge-selecting outcome (NodeOutcome.kind) to a glanceable emoji. The distinct

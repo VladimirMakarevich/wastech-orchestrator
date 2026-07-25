@@ -135,17 +135,24 @@ class _Git:
 
 
 class _FakeAgent:
-    def __init__(self, repo_dir: Path, task_id: str) -> None:
-        self._repo = repo_dir
-        self._task_id = task_id
+    def __init__(self) -> None:
         self.calls: list[str] = []
 
     def run(self, node: FlowNode, ctx: NodeContext) -> NodeResult:
         self.calls.append(node.id)
         if node.id == "report":
-            out = self._repo / ".worc" / "security-reports" / self._task_id
-            out.mkdir(parents=True, exist_ok=True)
-            (out / "report.md").write_text("# Audit\n\nNo critical findings.\n", encoding="utf-8")
+            # WRI-001: the report node is read-only — it returns the report as structured output
+            # and the orchestrator captures it privately (the report-slot capture is guarded by
+            # tests/core/test_flow_postprocess.py). This FlowEngine harness wires no post-node hook,
+            # so the node writes nothing itself; the old agent-written .worc/security-reports/
+            # contract is gone.
+            return NodeResult(
+                node_id=node.id,
+                outcome=NodeOutcome(
+                    "done", structured_output={"content": "# Audit\n\nNo critical findings.\n"}
+                ),
+                node_run_id=0,
+            )
         return NodeResult(node_id=node.id, outcome=NodeOutcome("done"), node_run_id=0)
 
 
@@ -192,7 +199,7 @@ def _drive_audit(
         scan_timeout_s=60,
     )
     inputs = NodeInputs(flow_dir=SECURITY_AUDIT.source_path.parent)  # type: ignore[union-attr]
-    agent = _FakeAgent(tmp_path, "t")
+    agent = _FakeAgent()
     runners = {
         "agent": agent,
         "evaluator": EvaluatorNodeRunner(services, inputs),
@@ -215,12 +222,15 @@ def _drive_audit(
 # -- tests --------------------------------------------------------------------
 
 
-def test_audit_happy_path_writes_private_report(tmp_path: Path) -> None:
-    result, _, _, _ = _drive_audit(tmp_path, findings=[])
+def test_audit_happy_path_reaches_private_storage(tmp_path: Path) -> None:
+    # WRI-001: the read-only report node returns its report as structured output; the orchestrator
+    # captures it into the private report dir (that capture is guarded by test_flow_postprocess).
+    # This flow-level test proves the graph routes to the private_storage terminal and that the
+    # read-only report node ran — it drives no post-node capture hook, so it asserts no file.
+    result, _, agent, _ = _drive_audit(tmp_path, findings=[])
     assert result.status is Status.DONE
     assert result.final_node == "private_storage"
-    report = tmp_path / ".worc" / "security-reports" / "t" / "report.md"
-    assert report.is_file()
+    assert "report" in agent.calls
 
 
 def test_audit_repo_unchanged(tmp_path: Path) -> None:

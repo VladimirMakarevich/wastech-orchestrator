@@ -140,6 +140,23 @@ def test_promote_all_moves_toplevel_and_subtasks(
     assert cli.select_pending(cli.preparing_dir(config)) == []
 
 
+def test_promote_all_processes_subtasks_in_natural_order(
+    make_git_config: _ConfigFactory, tmp_path: Path
+) -> None:
+    # ``NN-<slug>.md`` subtask specs promote in natural (numeric-aware) order: 2, then 9, then 10 —
+    # not the bytewise ``10, 2, 9`` (``'1' < '2' < '9'``). ``moved`` is the promotion sequence.
+    config = make_git_config(tmp_path / "clone")
+    subs = cli.preparing_dir(config) / "subtasks"
+    subs.mkdir(parents=True, exist_ok=True)
+    for name in ("10-j.md", "9-i.md", "2-b.md"):
+        (subs / name).write_text(
+            "---\ntitle: T\n---\n## Acceptance criteria\n\n- [ ] x\n", encoding="utf-8"
+        )
+    moved, errors = cli.promote_tasks(config, all_files=True)
+    assert errors == []
+    assert moved == ["2-b.md", "9-i.md", "10-j.md"]
+
+
 def test_promote_all_empty_reports_nothing_staged(
     make_git_config: _ConfigFactory, tmp_path: Path
 ) -> None:

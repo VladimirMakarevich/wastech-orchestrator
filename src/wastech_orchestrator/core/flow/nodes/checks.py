@@ -42,6 +42,7 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeManualRequired,
     NodeServices,
 )
+from wastech_orchestrator.core.flow.nodes.exchange_publish import publish_file
 from wastech_orchestrator.core.flow.output_policy import resolve_output_policy
 from wastech_orchestrator.core.flow.schema import ChecksNode, FlowNode
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
@@ -101,6 +102,7 @@ class ChecksNodeRunner:
                 "code must not be handed on unchecked"
             )
         if outcome.any_quality_failed:
+            self._publish_first_failure_log(ctx, outcome)
             return self._complete(run_id, node, passed=False)
         if self._mutated_working_tree(before):
             # Green-but-dirtying guard: a passing check that rewrote commit-candidate files must not
@@ -115,6 +117,25 @@ class ChecksNodeRunner:
             )
         return self._complete(run_id, node, passed=True)
 
+    def _publish_first_failure_log(self, ctx: NodeContext, outcome: CheckOutcome) -> None:
+        """Publish the redacted first-failure log and set ``{checks_path}`` before the fail edge.
+
+        The authoritative full log is already written privately by the CheckRunner; this copies the
+        first failing command's log (redacted) into the exchange and points ``checks_path`` at it,
+        so the live ``fixing`` node receives ``{checks_path}`` with no restart (WRI-001). With no
+        exchange wired (a unit harness) it points at the private log (previously it stayed unset).
+        """
+        log = outcome.first_failure_log
+        if log is None:
+            return
+        self._in.checks_path = publish_file(
+            self._s.exchange_root,
+            ctx.task_id,
+            f"checks/{Path(log).name}",
+            str(log),
+            extra_secrets=self._s.prompt_secrets,
+        )
+
     # -- citation (P3.1) ------------------------------------------------------
 
     def _run_citation(self, node: ChecksNode, ctx: NodeContext, run_id: int) -> NodeResult:
@@ -124,7 +145,9 @@ class ChecksNodeRunner:
         report_dir = resolved.report_dir(self._s.repo_dir)
         # A missing manifest (no report dir, or sources.json absent) → uncheckable, never a crash.
         manifest = (report_dir or checks_dir) / "sources.json"
+        started_at = self._s.clock()  # VF-12: bracket the (in-process) validation work
         report = validate_citations(self._s.repo_dir, manifest)
+        finished_at = self._s.clock()
         run_dir = self._run_dir(ctx.task_id, node.id, run_id)
         artifact = run_dir / "citation.json"
         artifact.write_text(_citation_json(report), encoding="utf-8")
@@ -135,6 +158,8 @@ class ChecksNodeRunner:
             timed_out=False,
             passed=report.passed,
             log_path=str(artifact),
+            started_at=started_at,
+            finished_at=finished_at,
         )
         self._register(ctx.task_id, "citation", str(artifact))
         return self._complete(run_id, node, passed=report.passed)
@@ -150,6 +175,7 @@ class ChecksNodeRunner:
             env=self._s.process_env,
             timeout_seconds=self._s.scan_timeout_s,
             run_process=self._s.run_process,
+            clock=self._s.clock,
         )
         artifact = run_dir / "dependency_scan.json"
         artifact.write_text(_dependency_scan_json(report), encoding="utf-8")
@@ -163,6 +189,8 @@ class ChecksNodeRunner:
                 # the node outcome is unconditionally ``pass`` (gating is the flow's edges' call).
                 passed=scan.launched and not scan.timed_out,
                 log_path=scan.report_path,
+                started_at=scan.started_at,
+                finished_at=scan.finished_at,
             )
         self._register(ctx.task_id, "dependency_scan", str(artifact))
         return self._complete(run_id, node, passed=report.passed)
@@ -199,8 +227,13 @@ class ChecksNodeRunner:
         timed_out: bool,
         passed: bool,
         log_path: str,
+        started_at: str,
+        finished_at: str,
         skipped: bool = False,
     ) -> None:
+        # VF-12: the caller supplies the check's measured interval (bracketed around the actual
+        # work) rather than reading the clock twice at row-write time, so ``check_runs`` carries a
+        # real duration the operator can query ("which check was slow").
         self._s.store.record_check_run(
             CheckRunRow(
                 task_id=ctx.task_id,
@@ -211,8 +244,8 @@ class ChecksNodeRunner:
                 passed=passed,
                 log_path=log_path,
                 skipped=skipped,
-                started_at=self._s.clock(),
-                finished_at=self._s.clock(),
+                started_at=started_at,
+                finished_at=finished_at,
             )
         )
 
@@ -243,6 +276,7 @@ class ChecksNodeRunner:
             task_id=ctx.task_id,
             subtask=ctx.subtask_order,
             selected=selected,
+            clock=self._s.clock,
         )
         for run in outcome.runs:
             self._record_check_run(
@@ -252,6 +286,8 @@ class ChecksNodeRunner:
                 timed_out=run.timed_out,
                 passed=run.passed,
                 log_path=run.log_path,
+                started_at=run.started_at,
+                finished_at=run.finished_at,
                 skipped=run.skipped,
             )
         return outcome

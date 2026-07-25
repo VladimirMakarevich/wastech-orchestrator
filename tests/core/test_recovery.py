@@ -11,8 +11,18 @@ import pytest
 from wastech_orchestrator.core.recovery import RecoveryAction, RecoveryReconciler
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult, Notifier
+from wastech_orchestrator.providers.artifacts import exchange_task_dir
 from wastech_orchestrator.providers.base import AgentRunRequest, ProviderId
-from wastech_orchestrator.state_store import CheckRunRow, StateStore, SubtaskRow, TaskRow
+from wastech_orchestrator.state_store import (
+    CheckRunRow,
+    NodeRunRow,
+    StateStore,
+    SubtaskRow,
+    TaskRow,
+)
+
+# Every test here is a slow integration test (real git / subprocess / process tree).
+pytestmark = pytest.mark.slow
 
 
 class FakeGit:
@@ -44,6 +54,8 @@ class RecordingNotifier:
         pr_url: str | None,
         reason: str | None,
         contacts: tuple[str, ...] = (),
+        governance_changed: tuple[str, ...] = (),
+        details: object = None,
     ) -> None:
         self.calls.append((task_id, final_status))
 
@@ -285,6 +297,7 @@ def _build_orchestrator(
     from wastech_orchestrator.ledger import Ledger
     from wastech_orchestrator.providers.process import ProcessResult
     from wastech_orchestrator.routing.router import AgentRouter
+    from wastech_orchestrator.runtime_layout import RuntimeLayout
     from wastech_orchestrator.task.validation_gate import ValidationGate
 
     art = tmp_path / "art"
@@ -326,7 +339,12 @@ def _build_orchestrator(
         gate=ValidationGate(
             config, store_has_task_id=store.task_id_exists, ledger_has_task_id=ledger.has_task_id
         ),
-        artifacts_root=str(art),
+        layout=RuntimeLayout(
+            repo_root=Path(config.repo.local_path),
+            control_home=Path(config.repo.local_path) / ".worc",
+            private_home=art,
+            exchange_root=Path(config.repo.local_path) / ".worc-io",
+        ),
         notifier=notifier,
     )
     return orch, store, ledger, art, git
@@ -419,6 +437,81 @@ def test_resume_interrupted_cleanup_notifies_after_ledger(
     assert notifier.calls == [("task-cleanup", "done")]
 
 
+def test_resume_blocked_cleanup_returns_none_and_keeps_queue_scanning(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # VF-21: a terminal manual_action_required task whose cleanup cannot complete (a dirty tree it
+    # does not own) must NOT freeze the queue. resume() returns None — the task is terminal and owns
+    # no slot — so watch_once falls through to scan pending/. The cleanup stays re-elected each tick
+    # (self-heals once the operator clears the tree), so a second tick still returns None rather
+    # than a blocking manual_action_required result. Without the fix the retry returns MAR forever
+    # and watch_once returns before the pending scan — the permanent stall.
+    notifier = RecordingNotifier()
+    orch, store, ledger, *_ = _build_orchestrator(
+        git_repo, make_git_config, tmp_path, _make_providers(git_repo), [0], notifier=notifier
+    )
+    branch = "worc/task-blocked-x"
+    git_run(["checkout", "-b", branch], git_repo.clone)
+    store.insert_task(
+        TaskRow(
+            task_id="task-blocked",
+            title="blocked",
+            status=Status.MANUAL_ACTION_REQUIRED,
+            branch=branch,
+        )
+    )
+    # A dirty, foreign working tree the task never produced (no evaluator/checks/publish node ran →
+    # _worktree_is_task_output is False → preserve_own_wip is False), so new-mode terminal cleanup
+    # fail-closes on "unaccounted changes".
+    (git_repo.clone / "foreign.txt").write_text("dirty\n", encoding="utf-8")
+
+    first = orch.resume()
+    second = orch.resume()
+
+    assert first is None and second is None  # a blocked cleanup never blocks the queue
+    row = store.get_task("task-blocked")
+    assert row is not None and not row.cleanup_completed  # still blocked, re-elected each tick
+    assert row.cleanup_last_error and "unaccounted changes" in row.cleanup_last_error
+    # Ledger + notify fire exactly once (the first tick), marked blocked rather than completed.
+    assert notifier.calls == [("task-blocked", "manual_action_required")]
+    assert ledger.records()[0]["terminal_cleanup"] == "blocked"
+
+
+def test_resume_cleanup_preserves_own_wip_on_manual_park(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # VF-21/VF-1: a resumable manual_action_required park carrying the task's OWN uncommitted work
+    # (a publish node ran, so the dirty tree is the task's output — its --continue resume input) is
+    # preserved on the resume path exactly as the primary terminal path does: cleanup leaves HEAD on
+    # the branch and reports safe instead of fail-closing on "unaccounted changes". Without the fix
+    # the retry drops preserve_own_wip and stalls on the very tree _go_terminal kept.
+    notifier = RecordingNotifier()
+    orch, store, ledger, *_ = _build_orchestrator(
+        git_repo, make_git_config, tmp_path, _make_providers(git_repo), [0], notifier=notifier
+    )
+    branch = "worc/task-wip-x"
+    git_run(["checkout", "-b", branch], git_repo.clone)
+    store.insert_task(
+        TaskRow(
+            task_id="task-wip",
+            title="wip",
+            status=Status.MANUAL_ACTION_REQUIRED,
+            branch=branch,
+        )
+    )
+    store.record_node_run(NodeRunRow(task_id="task-wip", node_id="publish", node_kind="publish"))
+    (git_repo.clone / "own-wip.txt").write_text("task work\n", encoding="utf-8")
+
+    result = orch.resume()
+
+    assert result is not None and result.final_status is Status.MANUAL_ACTION_REQUIRED
+    row = store.get_task("task-wip")
+    assert row is not None and row.cleanup_completed  # preserved WIP → cleanup reports safe
+    assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone).strip() == branch
+    assert (git_repo.clone / "own-wip.txt").exists()  # the task's WIP is untouched
+    assert ledger.records()[0]["terminal_cleanup"] == "completed"
+
+
 def _impl_fingerprint() -> str:
     from tests.conftest import BUILTIN_FLOWS_DIR
 
@@ -426,6 +519,61 @@ def _impl_fingerprint() -> str:
 
     registry = FlowRegistry(operator_flows_dir=BUILTIN_FLOWS_DIR)
     return registry.resolve("implementation").flow_fingerprint
+
+
+def _seed_control_bundle(
+    orch,
+    store: StateStore,
+    task_id: str,
+    *,
+    skill_packages: tuple[tuple[str, str, list[str]], ...] = (),
+) -> None:
+    """Seed the WRI-010 control + WRI-011 instruction bundle an interrupted task left on disk.
+
+    A resume verifies both frozen bundles against their persisted digests before reusing them; these
+    recovery tests seed the checkpoint directly (bypassing the fresh run that freezes), so they must
+    also freeze the implementation-flow control bundle the checkpoint fingerprints AND a minimal
+    instruction bundle (task packet + any tracked root repo instructions + any selected skill
+    packages), recording both digests. ``skill_packages`` is ``(folder, skill_md_rel, files_rel)``
+    per selected skill (matching what a fresh run would freeze for a resumed skill map).
+    """
+    from wastech_orchestrator.core.flow.control_bundle import freeze_control_bundle
+    from wastech_orchestrator.core.flow.instruction_bundle import (
+        REPO_INSTRUCTION_NAMES,
+        discover_repository_instructions,
+        freeze_repository_instructions,
+        freeze_skill_package,
+        freeze_task_packet,
+        write_instruction_manifest,
+    )
+
+    snapshot = orch._flow_registry.resolve("implementation")
+    assert snapshot.source_path is not None
+    bundle_dir = orch._control_bundle_dir(task_id)
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    bundle = freeze_control_bundle(
+        bundle_dir, snapshot, snapshot.source_path.parent, orch._tool_registry
+    )
+    store.update_task(task_id, control_bundle_digest=bundle.bundle_digest)
+
+    ib_dir = orch._instruction_bundle_dir(task_id)
+    ib_dir.mkdir(parents=True, exist_ok=True)
+    src = ib_dir.parent / f"{task_id}.seed-task.md"
+    src.write_text("# seeded task\n", encoding="utf-8")
+    _, task_entry = freeze_task_packet(ib_dir, src)
+    repo_root = Path(orch._config.repo.local_path)
+    tracked = frozenset(orch._git.list_tracked_files(*REPO_INSTRUCTION_NAMES))
+    repo_entries = freeze_repository_instructions(
+        ib_dir, discover_repository_instructions(repo_root, tracked)
+    )
+    entries = [task_entry, *repo_entries]
+    for folder, skill_md_rel, files_rel in skill_packages:
+        package = freeze_skill_package(ib_dir, folder, skill_md_rel, files_rel, repo_root)
+        entries.extend(package.entries)
+    digest = write_instruction_manifest(
+        ib_dir, entries=entries, control_digest=bundle.bundle_digest
+    )
+    store.update_task(task_id, instruction_manifest_digest=digest)
 
 
 @pytest.mark.parametrize(
@@ -493,6 +641,7 @@ def test_resume_continues_persisted_checkpoint(
             flow_fingerprint=_impl_fingerprint(),
             fix_iterations=0,
         )
+        _seed_control_bundle(orch, store, task_id)
     failed_check = art / "logs" / task_id / "checks" / "001.log"
     if current_node == "fixing":
         failed_check.parent.mkdir(parents=True, exist_ok=True)
@@ -524,7 +673,13 @@ def test_resume_continues_persisted_checkpoint(
     if current_node in {"testing", "review", "fixing"}:
         assert all(request.node_id != "implementation" for request in all_requests)
     if current_node == "fixing":
-        assert node_requests[0].check_artifacts_path == str(failed_check)
+        # Recovery re-publishes the failed check log into the exchange and points {checks_path}
+        # there (WRI-001); the private log stays the audit record.
+        expected_checks = (
+            exchange_task_dir(orch._exchange_root, task_id) / "checks" / "001.log"
+        ).as_posix()
+        assert node_requests[0].check_artifacts_path == expected_checks
+        assert failed_check.exists()
 
 
 def test_resume_restores_skill_map_without_re_proposing(
@@ -572,7 +727,21 @@ def test_resume_restores_skill_map_without_re_proposing(
     # Identity is the repo-relative POSIX path (joined onto the clone when surfaced to a provider).
     skill_md = git_repo.clone / ".claude" / "skills" / "safe-change" / "SKILL.md"
     skill_md.parent.mkdir(parents=True, exist_ok=True)
-    skill_md.write_text("---\nname: safe-change\ndescription: d\n---\n# Body\n", encoding="utf-8")
+    skill_md.write_text("---\nname: safe-change\ndescription: d\n---\n# Body\n", "utf-8")
+    # A fresh run would have frozen the selected skill's package into the instruction bundle; seed
+    # it so resume reconstructs the same frozen exchange path (not a re-read of the live SKILL.md).
+    _seed_control_bundle(
+        orch,
+        store,
+        task_id,
+        skill_packages=(
+            (
+                "safe-change",
+                ".claude/skills/safe-change/SKILL.md",
+                [".claude/skills/safe-change/SKILL.md"],
+            ),
+        ),
+    )
     skill_map = art / "logs" / task_id / "skill_map.json"
     skill_map.parent.mkdir(parents=True, exist_ok=True)
     skill_map.write_text(
@@ -645,6 +814,7 @@ def test_resume_waits_on_persisted_planning_prompt_without_resending(
         flow_fingerprint=_impl_fingerprint(),
         fix_iterations=0,
     )
+    _seed_control_bundle(orch, store, task_id)
 
     path = interaction_path(art, task_id, "planning")
     handle = AskHandle(
@@ -676,7 +846,16 @@ def test_resume_waits_on_persisted_planning_prompt_without_resending(
     assert notifier.waited == [handle]
     planning_requests = providers[ProviderId.CLAUDE].requests
     assert planning_requests[0].node_id == "planning"
-    assert planning_requests[0].human_input_path == str(path)
+    # The provider receives only the sanitized answer-only exchange packet, never the durable record
+    # (WRI-001): human_input_path points under the exchange, not at the durable interaction file.
+    # (The active exchange is torn down at the terminal outcome; the packet's answer-only shape is
+    # unit-tested in test_hitl.py::test_sanitized_answer_packet_is_answer_only.)
+    exchange_hitl = (
+        exchange_task_dir(orch._exchange_root, task_id) / "hitl" / "planning.answer.json"
+    ).as_posix()
+    assert planning_requests[0].human_input_path == exchange_hitl
+    assert planning_requests[0].human_input_path != str(path)
+    # The full durable interaction record stays private and unchanged.
     persisted = load_interaction(path)
     assert persisted is not None
     assert persisted["status"] == "consumed"
@@ -745,6 +924,7 @@ def test_resume_decomposed_at_subtask_without_duplicate_commit(
         flow_fingerprint=_impl_fingerprint(),
         fix_iterations=0,
     )
+    _seed_control_bundle(orch, store, task_id)
     store.insert_subtasks(
         [
             SubtaskRow(task_id, 1, "s1", "First", "committed", (), commit_sha=sha1),

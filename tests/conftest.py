@@ -17,8 +17,31 @@ import pytest
 
 from wastech_orchestrator.config.loader import loads_config
 from wastech_orchestrator.config.schema import OrchestratorConfig
+from wastech_orchestrator.providers import claude as _claude
 
 _FAKE_AGENT = Path(__file__).resolve().parent / "fakes" / "fake_agent.py"
+
+
+@pytest.fixture(autouse=True)
+def _assume_bash_sandbox_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Make the deterministic suite host-independent by assuming a sandbox-capable host (WRI-002).
+
+    The Claude Bash-sandbox capability depends on the real host (macOS Seatbelt / a Linux+WSL2 with
+    bubblewrap+socat), so a bwrap-less CI would otherwise flag every workspace-write
+    ``isolation_reasons``
+    / ``check_isolation`` / provider run. The deterministic suite cannot prove the real host
+    boundary
+    anyway (no real Claude) — the real proof is the WRI-006 native gate — so we pin the default
+    probe
+    to "available"; the WRI-002 platform-branch tests inject a concrete ``SandboxCapability`` to
+    exercise the native-Windows / missing-deps branches.
+    """
+    monkeypatch.setattr(
+        _claude,
+        "default_sandbox_probe",
+        lambda *a, **k: _claude.SandboxCapability.LINUX_AVAILABLE,
+    )
+
 
 # The packaged built-in flows tree (source-tree/wheel path). ``worc install`` copies this into an
 # operator's ``.worc/flows/``; since the registry no longer falls back to the packaged tree at run
@@ -34,12 +57,22 @@ def seed_builtin_flows(clone: Path) -> None:
     that runs the orchestrator against a clone needs them physically present — call this in the
     harness that builds a task-running orchestrator (not in the pure config builder, so
     flow-content tests like
-    ``validate-flow`` keep full control of ``.worc/flows/``). ``.worc/`` is excluded from the
-    dirty-tree gate and from staging, so seeding never dirties git. Idempotent.
+    ``validate-flow`` keep full control of ``.worc/flows/``). ``.worc/``/``.worc-io/`` are excluded
+    via the clone-local ``.git/info/exclude`` (as ``worc install`` does), so seeding never dirties
+    git and even a merge's ``git add -A`` skips them (WRI-009's commit gate refuses a staged
+    ``.worc``). Idempotent.
     """
     worc_flows = clone / ".worc" / "flows"
     if not worc_flows.exists():
         shutil.copytree(BUILTIN_FLOWS_DIR, worc_flows)
+    # Mirror install's runtime-exclude so `git add -A` (the merge path) never stages the seeded
+    # `.worc/`. `.git/info/exclude` is clone-local (not a working-tree file), so it dirties nothing.
+    exclude = clone / ".git" / "info" / "exclude"
+    exclude.parent.mkdir(parents=True, exist_ok=True)
+    present = exclude.read_text(encoding="utf-8").splitlines() if exclude.exists() else []
+    missing = [ln for ln in (".worc/", ".worc-io/") if ln not in present]
+    if missing:
+        exclude.write_text("\n".join([*present, *missing]) + "\n", encoding="utf-8")
 
 
 # A broad-but-explicit env allowlist so git runs under the orchestrator's allowlisted environment on

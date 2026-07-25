@@ -101,11 +101,79 @@ def test_codex_bypass_extra_arg_is_flagged(codex_config: ProviderConfig) -> None
     assert reasons
 
 
+def test_codex_reserved_extra_arg_is_flagged(codex_config: ProviderConfig) -> None:
+    # WRI-003: an authority-bearing flag that would select/replace the owned profile/config surface
+    # (here ``-c``, which could inject a competing permissions override) is flagged at preflight.
+    reasons = codex_mod.isolation_reasons(replace(codex_config, extra_args=("-c", "x=1")))
+    assert reasons and any("reserved" in r for r in reasons)
+
+
+@pytest.mark.parametrize("flag", ["--full-auto", "-a", "--ask-for-approval"])
+def test_codex_reserved_approval_extra_arg_is_flagged(
+    codex_config: ProviderConfig, flag: str
+) -> None:
+    # C2 (WRI-003 AC6): the approval/sandbox-mode selectors are reserved, so the OFFLINE preflight
+    # (strict_isolation gate) reports them before any launch — not only the run-time argv builder.
+    reasons = codex_mod.isolation_reasons(replace(codex_config, extra_args=(flag, "on-failure")))
+    assert reasons and any("reserved" in r for r in reasons)
+
+
+# --- WRI-002: host-aware sandbox availability + reserved Claude extra_args
+# -------------------------
+
+
+def test_claude_workspace_write_missing_sandbox_deps_is_flagged(
+    claude_config: ProviderConfig,
+) -> None:
+    # A configured workspace-write Claude on a Linux/WSL2 host missing bubblewrap+socat cannot get
+    # its required Bash sandbox → strict_isolation preflight must flag it (offline, no CLI
+    # launched).
+    reasons = claude_mod.isolation_reasons(
+        replace(claude_config, permission_profile="workspace-write"),
+        capability=claude_mod.SandboxCapability.LINUX_MISSING_DEPS,
+    )
+    assert reasons and any("bubblewrap" in r for r in reasons)
+
+
+def test_claude_read_only_missing_sandbox_deps_is_clean(claude_config: ProviderConfig) -> None:
+    # A read-only node needs no Bash sandbox, so a sandbox-less host is not flagged.
+    reasons = claude_mod.isolation_reasons(
+        replace(claude_config, permission_profile="read-only"),
+        capability=claude_mod.SandboxCapability.LINUX_MISSING_DEPS,
+    )
+    assert reasons == []
+
+
+def test_claude_native_windows_workspace_write_not_flagged(claude_config: ProviderConfig) -> None:
+    # Native Windows degrades to a Bash-less restricted mode — not a preflight failure.
+    reasons = claude_mod.isolation_reasons(
+        replace(claude_config, permission_profile="workspace-write"),
+        capability=claude_mod.SandboxCapability.NATIVE_WINDOWS,
+    )
+    assert reasons == []
+
+
+def test_claude_reserved_extra_arg_is_flagged(claude_config: ProviderConfig) -> None:
+    reasons = claude_mod.isolation_reasons(replace(claude_config, extra_args=("--add-dir", "..")))
+    assert reasons and any("reserved" in r for r in reasons)
+
+
 # --- config-level check_isolation -----------------------------------------------------------------
 
 
 def test_default_config_passes(base_config: OrchestratorConfig) -> None:
     assert check_isolation(base_config, ISOLATION_CHECKS) == []
+
+
+def test_disable_read_isolation_not_flagged_under_strict(base_config: OrchestratorConfig) -> None:
+    # VF-6: the sanctioned read-isolation opt-out is never a strict_isolation preflight reason — it
+    # relaxes only the read side; the write/permission/sandbox ceiling this gate validates stays.
+    cfg = replace(
+        base_config,
+        security=replace(base_config.security, strict_isolation=True, disable_read_isolation=True),
+    )
+    assert cfg.security.read_isolation_off is True
+    assert check_isolation(cfg, ISOLATION_CHECKS) == []
 
 
 def test_codex_full_access_fails_with_provider_prefix(base_config: OrchestratorConfig) -> None:

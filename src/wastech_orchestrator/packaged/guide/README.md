@@ -56,7 +56,7 @@ Only the fields below are allowed. **Any other key makes the task rejected** (`u
 
 | Field | Required | Type | Meaning |
 | --- | --: | --- | --- |
-| `id` | **yes** | string | Stable id. Must match `^[a-z0-9][a-z0-9._-]{0,63}$` (lowercase; no spaces, uppercase, or leading separator). |
+| `id` | **yes** | string | Stable id. Must match `^[a-z0-9][a-z0-9._-]{0,63}$` (lowercase; no spaces, uppercase, or leading separator), have no trailing dot, and not be a Windows device name (`con`/`nul`/`com1`–`com9`/`lpt1`–`lpt9`). It becomes a directory/branch name, so the rule is host-independent. |
 | `title` | **yes** | string | Short, non-empty human title. Used for the default branch slug, PR title, and reports. |
 | `task_type` | no | string | Flow selector — which pipeline runs the task. Omit ⇒ `implementation` (the default coding pipeline). Built-ins: `implementation`, `deep_research`, `security_audit`; an operator may add others as `<repo>/.worc/flows/<task_type>.yaml`. An unknown `task_type` (no matching flow) fails the task before any branch is created. The task only _names_ the flow — it never edits the graph. See the decision guide. |
 | `branch_name` | no | string \| null | Full branch-name override. Omit for `<repo.branch_prefix>/<id>-<slug(title)>`; set to match a project's branch convention. Ignored in `existing`/`current` branch mode. |
@@ -68,7 +68,7 @@ Only the fields below are allowed. **Any other key makes the task rejected** (`u
 | `prompt_audit` | no | boolean | `true`/`false` forces prompt-audit recording for this task; omit = config default. |
 | `decomposition` | no | boolean | `true`/`false` permits/forbids decomposition for this task (task-wins over `agents.decomposition.enabled`); omit = config default. Only flips the gate — the flow + planning still decide whether a split happens. See the decision guide. |
 | `contacts` | no | list of strings | Plain-text mentions in Telegram notifications. No access control. |
-| `priority` | no | `low` \| `mid` \| `high` | Scheduling order under `watch`: eligible tasks run `high → mid → low`, ties by filename. `depends_on` is always stronger. Omit/unrecognised ⇒ `mid` (fail-open — never rejects). |
+| `priority` | no | `low` \| `mid` \| `high` | Scheduling order under `watch`: eligible tasks run `high → mid → low`, ties by **natural (numeric-aware)** filename order (`p9` before `p10`, same on every OS). `depends_on` is always stronger. Read the effective order from `worc list` / `worc top`, not your file manager. Omit/unrecognised ⇒ `mid` (fail-open — never rejects). |
 | `queue` | no | non-empty string | Routes the task to a worc instance whose `orchestrator.queue` selector matches (string equality) when several instances share one task pool. Omit ⇒ `"default"`. **Fail-closed**: a non-string or empty value rejects the task. Usually an operator concern — leave it off unless told otherwise. |
 | `nodes` | no | mapping | Per-node `enabled: false` disable toggle, keyed by flow node id (the only per-node knob). See the decision guide. |
 

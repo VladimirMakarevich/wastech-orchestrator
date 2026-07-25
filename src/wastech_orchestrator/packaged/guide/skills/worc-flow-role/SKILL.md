@@ -5,11 +5,11 @@ description: Write or revise a single flow node's role prompt (`role_file`) for 
 
 # worc-flow-role
 
-Help an operator write or revise one node's role prompt. A `role_file` is a plain Markdown file — no front matter, no schema — that becomes a node's instructions. Changing what a step *says* never needs a new flow: you edit that node's `role_file` in the delivered copy under `.worc/flows/<task_type>/<name>.md`. Speak in the user's language (default to the language they wrote in).
+Help an operator write or revise one node's role prompt. A `role_file` is a plain Markdown file — no front matter, no schema — that becomes a node's instructions. Changing what a step _says_ never needs a new flow: you edit that node's `role_file` in the delivered copy under `.worc/flows/<task_type>/<name>.md`. Speak in the user's language (default to the language they wrote in).
 
 ## When to use
 
-- The operator wants a step to behave differently in *wording/emphasis* — a sharper review lens, a more specific implementation brief, a different research angle — but the graph (nodes, edges, output kind, route) stays the same.
+- The operator wants a step to behave differently in _wording/emphasis_ — a sharper review lens, a more specific implementation brief, a different research angle — but the graph (nodes, edges, output kind, route) stays the same.
 - For a new step, a new route, or a different output kind → **worc-flow**. To change which provider/model/reasoning a step uses → **worc-flow-tune**. Neither of those is a prompt edit.
 
 Before editing, read the packaged role guide `.worc/guide/flows/roles.md` (what a role file is, the built-in evaluator roles, and the per-node output contract) and `.worc/guide/flows/prompt-variables.md` (the `{name}` allowlist and the `{?name}…{/name}` syntax). Do not invent variables or output shapes.
@@ -22,7 +22,7 @@ Before editing, read the packaged role guide `.worc/guide/flows/roles.md` (what 
    - **`agent` with `hitl:`** — returns `content` plus an optional question/approval object; ask a question only for a material ambiguity repository evidence cannot resolve.
    - **planning agent** (`decomposition.proposed_by`) — `content` + optional `human_input` + `decompose` + `subtasks`.
    - **`evaluator`** — must emit `{ findings: [ { severity, path, what, fix } ] }`. It is **fail-closed**: a prose-only "looks good" routes the task to `manual_action_required`. Return an **empty `findings` array** when clean, not prose. For an evaluator, also mind its `role` lens (`review` / `critic` / `verifier` / `test_quality`, or the default) and spell the findings fields out explicitly.
-3. Reference artifacts only by **allowlisted `{name}` path variables** (e.g. `{task_path}`, `{plan_path}`, `{diff_path}`, `{repo_path}`, and node-chaining `{<node_id>_path}`) — never inline task bodies, diffs, env, or secrets. Wrap every *optional* variable in a `{?name}…{/name}` block so a missing value never leaves a dangling fragment.
+3. Reference artifacts only by **allowlisted `{name}` path variables** (e.g. `{task_path}`, `{plan_path}`, `{diff_path}`, `{repo_path}`, and node-chaining `{<node_id>_path}`) — never inline task bodies, diffs, env, or secrets. Wrap every _optional_ variable in a `{?name}…{/name}` block so a missing value never leaves a dangling fragment.
 4. Keep the prompt short, imperative, and focused on the node's single job.
 5. Validate: run `worc validate-flow <name>`. Its anti-drift lint **warns** about any `{name}` no node populates (a typo like `{plna_path}` would otherwise ship as literal text — it renders verbatim, which is the safe fallback, so it is a warning not a failure). Set `prompt_audit: true` to inspect the exact rendered prompt per node under `logs/<task-id>/prompt-audit/`.
 

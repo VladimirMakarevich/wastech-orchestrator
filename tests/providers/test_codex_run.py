@@ -7,8 +7,8 @@ writes a canned stdout/last-message and returns a chosen :class:`ProcessResult`.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -27,6 +27,7 @@ from wastech_orchestrator.providers.base import (
 )
 from wastech_orchestrator.providers.codex import CodexProvider
 from wastech_orchestrator.providers.process import ProcessResult
+from wastech_orchestrator.runtime_layout import InternalDenyPolicy
 
 FIXED_TIME = datetime(2026, 6, 11, 12, 0, 0, tzinfo=UTC)
 FAKE_GH_TOKEN = "ghp_" + "abcdef0123456789abcdef0123"
@@ -102,12 +103,170 @@ def _attempt_dir(root: Path) -> Path:
     return root / "logs" / "task-001" / "stages" / "planning" / "run-000001" / "1-codex"
 
 
+@dataclass
+class FakeCanary:
+    """A scripted ``codex sandbox`` probe runner: returns ``results`` in call order."""
+
+    results: list[tuple[int, str]]
+    calls: int = 0
+
+    def __call__(self, argv: list[str], cwd: str, env: Mapping[str, str]) -> tuple[int, str]:
+        idx = min(self.calls, len(self.results) - 1)
+        self.calls += 1
+        return self.results[idx]
+
+
+def _deny_for(request: AgentRunRequest) -> InternalDenyPolicy:
+    wd = Path(request.working_directory)
+    return InternalDenyPolicy(
+        control_home=wd / ".worc", private_home=wd / ".worc", env_file=None, provider_homes=()
+    )
+
+
+def _isolated_provider(
+    config: ProviderConfig,
+    security: SecurityConfig,
+    root: Path,
+    fake: FakeRun,
+    *,
+    canary: FakeCanary,
+    deny: InternalDenyPolicy | None,
+) -> CodexProvider:
+    return CodexProvider(
+        config,
+        security=security,
+        artifacts_root=root,
+        clock=lambda: FIXED_TIME,
+        run_process=fake,
+        deny_policy=deny,
+        canary_runner=canary,
+    )
+
+
+def test_canary_passes_then_run_proceeds_and_writes_evidence(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # WRI-003 + H4: with a deny set present, the pre-launch canary runs; the frozen exchange task
+    # packet is the mandatory positive control. Probe order: private-read, private-shell-read,
+    # exchange-read (allowed), exchange-write (denied). When they hold, the real launch proceeds.
+    fake = FakeRun(stdout=_success_stream(), last_message='{"summary":"ok"}')
+    canary = FakeCanary(results=[(1, "denied"), (1, "denied"), (0, "task"), (1, "denied")])
+    exchange = tmp_path / "task.md"
+    exchange.write_text("EXCHANGE_TASK", encoding="utf-8")
+    request = make_request(task_path=str(exchange))
+    provider = _isolated_provider(
+        codex_config, security_config, tmp_path, fake, canary=canary, deny=_deny_for(request)
+    )
+    result = provider.run(request)
+    assert result.status is RunStatus.SUCCEEDED
+    assert fake.calls == 1  # launched only AFTER the canary passed
+    assert canary.calls == 4  # 2 private-deny + exchange-read (positive control) + exchange-write
+    canary_json = _attempt_dir(tmp_path) / "canary.json"
+    assert json.loads(canary_json.read_text())["ok"] is True
+
+
+def test_canary_leak_fails_closed_before_any_model_launch(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # A denied path that reads successfully is a security violation — non-fallback, pre-model.
+    fake = FakeRun(stdout=_success_stream())
+    canary = FakeCanary(results=[(0, "SECRET LEAKED")])
+    request = make_request()
+    provider = _isolated_provider(
+        codex_config, security_config, tmp_path, fake, canary=canary, deny=_deny_for(request)
+    )
+    with pytest.raises(ProviderError) as exc:
+        provider.run(request)
+    assert exc.value.error_class is ErrorClass.CONFIGURATION_ERROR
+    assert exc.value.error_class not in FALLBACK_ELIGIBLE
+    assert fake.calls == 0  # the model was NEVER launched
+
+
+def test_canary_capability_failure_is_pre_model(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    fake = FakeRun(stdout=_success_stream())
+    canary = FakeCanary(results=[(1, "windows: refusing to run unsandboxed")])
+    request = make_request()
+    provider = _isolated_provider(
+        codex_config, security_config, tmp_path, fake, canary=canary, deny=_deny_for(request)
+    )
+    with pytest.raises(ProviderError) as exc:
+        provider.run(request)
+    assert exc.value.error_class is ErrorClass.CAPABILITY_UNAVAILABLE
+    assert fake.calls == 0
+
+
+def test_full_access_escape_skips_canary(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # danger-full-access emits no permission profile, so there is nothing (and no claim) to prove.
+    fake = FakeRun(stdout=_success_stream(), last_message='{"summary":"ok"}')
+    canary = FakeCanary(results=[(0, "should never be called")])
+    request = make_request()
+    provider = _isolated_provider(
+        replace(codex_config, sandbox="danger-full-access"),
+        security_config,
+        tmp_path,
+        fake,
+        canary=canary,
+        deny=_deny_for(request),
+    )
+    result = provider.run(request)
+    assert result.status is RunStatus.SUCCEEDED
+    assert canary.calls == 0  # skipped
+    assert fake.calls == 1
+
+
+def test_canary_skipped_without_deny_policy(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # No internal deny set to prove (a bare harness) → the canary is not run at all.
+    fake = FakeRun(stdout=_success_stream(), last_message='{"summary":"ok"}')
+    canary = FakeCanary(results=[(0, "should never be called")])
+    provider = _isolated_provider(
+        codex_config, security_config, tmp_path, fake, canary=canary, deny=None
+    )
+    provider.run(make_request())
+    assert canary.calls == 0
+    assert fake.calls == 1
+
+
 def test_implements_agent_provider_protocol(
     codex_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
 ) -> None:
     provider = _provider(codex_config, security_config, tmp_path, FakeRun())
     assert isinstance(provider, AgentProvider)
     assert provider.id == "codex"
+
+
+def test_stdin_is_plain_prompt_without_injection(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # VF-5: Codex no longer injects a repository-instruction block — stdin is just the flow prompt
+    # (+ context-file footer); the agent reads the repo's root files itself via native discovery.
+    provider = _provider(codex_config, security_config, tmp_path, FakeRun())
+    stdin = provider._stdin_text(make_request(prompt="just the task"))
+    assert "<repository-instructions>" not in stdin
+    assert stdin.startswith("just the task")
 
 
 def test_successful_run(
@@ -593,7 +752,6 @@ def _codex_config_with_reasoning() -> ProviderConfig:
         timeout_seconds=7200,
         permission_profile="workspace-write",
         extra_args=(),
-        sandbox="workspace-write",
     )
 
 

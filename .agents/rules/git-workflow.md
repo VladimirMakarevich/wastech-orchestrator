@@ -4,29 +4,25 @@ There are two levels of git here: (A) how the orchestrator **itself** is develop
 
 ## A. Developing the orchestrator itself
 
-- Branches off `main`: `feat/<short-description>`, `fix/<…>`, `docs/<…>`, `chore/<…>`.
-- Atomic commits, imperative mood in the subject: `Add provider health preflight`.
-- Before committing — `ruff check .`, `ruff format --check .`, `mypy src`, `lint-imports`, `pytest` (see [testing.md](testing.md)); `interrogate src` / `vulture` / `deptry src` are the further CI gates. Install the local mirror once with `pre-commit install && pre-commit install --hook-type pre-push` (per-commit: ruff/format/mypy/import-linter; per-push: interrogate/vulture/deptry/pytest). CI runs `ruff format --check .`; run `ruff format .` to fix.
-- Keep docs in sync **in the same change** as the code: when behavior, the CLI, config, or architecture changes, update the affected docs (README, operations, configuration, cookbook, architecture) — use `/sync-docs`. **This includes the shipped, operator-facing docs under `src/wastech_orchestrator/packaged/`** (the `guide/` quickstarts, `config.example.yaml`, the built-in flows / role prompts) — the copy the operator reads after `install`, and the half most often forgotten because it lives under `src/`. Record deferred work in [../../docs/backlog/follow_ups.md](../../docs/backlog/follow_ups.md). The Stop docs-sync gate (`.claude/hooks/docs_sync_gate.py`) blocks once when `src/` changed without any `docs/`/`.agents/` change.
-- Do not commit: `config.yaml`, `.venv/`, `workspace/`, `logs/`, `*.db`, secrets, the transient task folders `tasks/processing|done|failed|rejected/` (see `.gitignore`).
-- **Gitignored `.md` files are not project documentation.** Anything under a gitignored path (e.g. `.archive/`, `.worc/` in a target repo) may still be physically present and readable on disk, but is not tracked, not shared, and not the current source of truth — do not read it as if it were live docs, cite it as an authority, or link to it from a tracked doc. Check `git ls-files` / `git check-ignore -v` before treating any `.md` as current. This applies the same way when the orchestrator works inside a target repository's own `.worc/` tree.
-- PR into `main`; merge only after checks pass.
-- Do not push to `main` directly.
+- Branch off `main`: `feat/…`, `fix/…`, `docs/…`, `chore/…`. Never push to `main` directly — land changes through a PR, merged only after checks pass.
+- Atomic commits with an imperative subject (`Add provider health preflight`).
+- Before committing, run the gate: `ruff check .`, `ruff format --check .`, `mypy src`, `lint-imports`, `pytest` (CI also runs `interrogate` / `vulture` / `deptry`). Install the local mirror once with `pre-commit install && pre-commit install --hook-type pre-push`.
+- Keep docs in sync **in the same change** as the code — including the shipped operator-facing docs under `src/wastech_orchestrator/packaged/` — and record deferred work in [../../docs/backlog/follow_ups.md](../../docs/backlog/follow_ups.md).
+- Do not commit: `config.yaml`, `.venv/`, `workspace/`, `logs/`, `*.db`, secrets, or the transient task folders (see `.gitignore`).
+- Gitignored `.md` files (e.g. under `.archive/`, or a target repo's `.worc/`) are not project documentation — do not treat them as current, cite them, or link to them. Check `git ls-files` / `git check-ignore -v` first.
 
-## B. How the orchestrator manages a target repository (implementation contract)
+## B. How the orchestrator manages a target repository
 
-This is a product invariant (see [architecture.md](architecture.md):
+This is a product invariant (see [architecture.md](architecture.md)).
 
-- Default task branch: **`repo.branch_prefix/<task-id>-<slug>`** (`worc/...` by default). A validated task `branch_name` may override the full branch name for project/customer conventions.
-- Sequence: `git fetch` → checkout `base_branch` → `pull` → create the task branch.
-- **Only the orchestrator (Git Manager) performs commit / push / PR**, not the agent provider.
-- Publishing (`publishing`) happens only from the `ready_to_publish` status, when checks succeed and there are no blocking findings.
-- Idempotency: a re-run does not create a second commit/push/PR; a stored operation fingerprint and a reconciliation of remote state are used.
-- A direct push to `base_branch` is forbidden; the result goes through a PR (`gh pr create`).
-- After terminal task handling, the Git Manager safely checks out `base_branch` before the Core can pick another pending task, then runs `git fetch` + `pull --ff-only` on it to refresh; the `watch` loop repeats that refresh every `orchestrator.poll_interval_seconds` (default 300) so git-pushed tasks are discovered. If the checkout cannot be proven safe, automatic continuation stops in `manual_action_required`.
-- **Scoped staging and trusted Git control state:** stage only the agent's intended code paths via an explicit pathspec; `tasks/`/`logs/`/`workspace/`/`.worc/`/`.worc-io/` are always excluded from code commits (spec §21.1). A merge-resolution path may need `git add -A`, but before **every** commit the complete existing index must still be proven to contain only that operation's exact allowlist. Provider changes to index, HEAD/refs, config, operation markers, or hooks are forbidden, and target-repository hooks must not execute in orchestrator-owned Git subprocesses. The current commit paths do not yet perform that full control-state/index proof; the open [Git control-state task](../../docs/backlog/agent-worc-read-isolation/wri-009-protect-git-index-from-exchange.md) owns the gap. An ignored path is not safe if an agent force-staged it.
-- **Footprint mode** (spec §21) is configurable: `in_repo` + audit-commit (**default** — the task + its `summary.md` in the repo, stored via a separate orchestrator-made `tasks/` commit; `logs/` stays local, never committed), `in_repo` + local-exclude (`.git/info/exclude`, never committed), or `external` (zero footprint). The tracked-`.gitignore` mode is not supported. In audit mode the **orchestrator** makes the `tasks/` commit; agents still never commit/push/PR.
-- When the task was decomposed (spec §5.1): one local commit per subtask on the single branch, but still a **single PR** per parent task; subtask commits are idempotent (recorded `commit_sha`).
-- The Pull Request body is the task summary (`summary.md`, spec §5.2) — the plain-language what / how / integration / why handoff.
-- Auto mode is opt-in (`orchestrator.auto_mode.enabled`) and only starts the next task after a successful checkout back to `base_branch` and the post-cleanup refresh.
-- On an ambiguous branch state — `manual_action_required`, with no automatic actions.
+- **Only the orchestrator (Git Manager) commits, pushes, and opens PRs** — never the agent provider.
+- Default task branch: `repo.branch_prefix/<task-id>-<slug>` (`worc/…` by default); a validated task `branch_name` may override it.
+- Branch setup: `git fetch` → checkout `base_branch` → `pull` → create the task branch.
+- A direct push to `base_branch` is forbidden; the result always goes through a PR, whose body is the task summary.
+- Publishing happens only from the `ready_to_publish` status, when checks succeed and there are no blocking findings.
+- Idempotent: a re-run never creates a second commit / push / PR.
+- Stage only the agent's intended code paths; `tasks/`/`logs/`/`workspace/`/`.worc/`/`.worc-io/` are always excluded from code commits, and never `git add .` / `git add -A` for a code commit. Target-repo hooks/filters must not run inside an orchestrator git command, and any provider tampering with git control state stops the run in `manual_action_required`.
+- The git footprint mode is configurable (in-repo audit-commit by default, local-exclude, or external/zero-footprint); orchestration and task artifacts never enter a code commit.
+- A decomposed task makes one local commit per subtask on a single branch, but still one PR per parent task.
+- After a task reaches a terminal status, the Git Manager checks out and refreshes `base_branch` before the next task can start; any ambiguous branch state stops in `manual_action_required` with no automatic actions.
+- Auto mode (`orchestrator.auto_mode.enabled`) is opt-in and only starts the next task after a clean return to `base_branch`.

@@ -16,6 +16,9 @@ from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.ledger import Ledger, LedgerRecord
 from wastech_orchestrator.state_store import StateStore, TaskRow
 
+# Every test here is a slow integration test (real git / subprocess / process tree).
+pytestmark = pytest.mark.slow
+
 _ENV = ["PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA"]
 
 
@@ -251,15 +254,42 @@ def test_rerun_refuses_unknown_id(
     assert "unknown task id" in capsys.readouterr().out
 
 
-def test_rerun_refuses_non_terminal_task(
+def test_rerun_refuses_non_recoverable_status(
     git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    # Only failed / manual_action_required / stale-running are recoverable; a task still in
+    # preparation is not (a stale ``running`` row IS — see the next test).
     project = tmp_path / "project"
     project.mkdir()
-    config = _seed(project, git_repo.clone, TaskRow("task-1", "T", Status.RUNNING))
+    config = _seed(project, git_repo.clone, TaskRow("task-1", "T", Status.PREPARING))
     code = cli.main(["--config", str(config), "rerun", "task-1"])
     assert code == 1
-    assert "is running" in capsys.readouterr().out
+    assert "is preparing" in capsys.readouterr().out
+
+
+def test_rerun_recovers_stale_running_task(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Killed-task recovery (VF-3): an operator stop leaves the row at ``running``. With no live
+    # daemon holding the slot (cmd_rerun's daemon pre-check already passed to reach plan_rerun),
+    # rerun accepts it directly — no ``finalize --as failed`` dance.
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "failed" / "task-1.md"
+    _complete_task_file(source, "task-1")
+    config = _seed(
+        project,
+        git_repo.clone,
+        TaskRow("task-1", "T", Status.RUNNING, source_path=str(source), branch="worc/task-1-t"),
+        checkpoint_node="review",
+        node_run=("review", "evaluator"),
+    )
+    _seed_manifest(git_repo.clone, "task-1")
+    code = cli.main(["--config", str(config), "rerun", "task-1", "--continue", "--dry-run"])
+    out = capsys.readouterr().out
+    assert code == 0  # accepted for recovery, not refused as "is running"
+    assert "would re-attempt task-1" in out
+    assert "is running" not in out
 
 
 def test_rerun_refuses_when_daemon_running(
@@ -629,6 +659,7 @@ def test_rerun_continue_in_publish_allows_uncommitted_code(
         checkpoint_node="publish",
         node_run=("publish", "publish"),
     )
+    _seed_manifest(git_repo.clone, "task-1")  # --continue resolves the live flow to adopt it
     # Leave uncommitted code in the working tree (the failed publish's staged-but-uncommitted work).
     (git_repo.clone / "feature.py").write_text("print('shipped')\n", encoding="utf-8")
 
@@ -665,6 +696,7 @@ def test_rerun_continue_at_review_tolerates_task_wip(
         checkpoint_node="review",
         node_run=("review", "evaluator"),
     )
+    _seed_manifest(git_repo.clone, "task-1")  # --continue resolves the live flow to adopt it
     (git_repo.clone / "feature.py").write_text("print('wip')\n", encoding="utf-8")
 
     def fake_resume(self: Orchestrator) -> PipelineResult:
@@ -750,6 +782,7 @@ def test_rerun_continue_confirm_names_the_branch_not_base(
         checkpoint_node="review",
         node_run=("review", "evaluator"),
     )
+    _seed_manifest(git_repo.clone, "task-1")  # --continue resolves the live flow to adopt it
     prompts: list[str] = []
     monkeypatch.setattr(sys, "stdin", _TTY())
 
@@ -844,6 +877,7 @@ def test_rerun_continue_revives_then_delegates_to_resume(
         ),
         checkpoint_node="review",  # the engine checkpoint --continue re-enters at
     )
+    _seed_manifest(git_repo.clone, "task-1")  # --continue resolves the live flow to adopt it
 
     calls = {"resume": 0}
 
@@ -917,6 +951,7 @@ def test_reset_fix_budget_resets_consecutive_keeps_global(
         node_run=("review", "evaluator"),
         counters_json=counters,
     )
+    _seed_manifest(git_repo.clone, "task-1")  # --continue resolves the live flow to adopt it
 
     def fake_resume(self: Orchestrator) -> PipelineResult:  # isolate the checkpoint transformation
         return PipelineResult(task_id="task-1", final_status=Status.DONE)
@@ -1070,8 +1105,8 @@ def test_rerun_from_drift_note_surfaced_in_dry_run(
     )
     assert code == 0  # no refusal — the node exists; drift alone never blocks --from
     out = capsys.readouterr().out
-    assert "the flow changed since the checkpoint" in out
-    assert "will resume using the current on-disk flow" in out
+    assert "the control plane changed since the checkpoint" in out
+    assert "adopt the current on-disk flow/roles/tools and resume at 'implementation'" in out
 
 
 def test_rerun_from_drift_actually_resumes_at_node_and_rebaselines_fingerprint(

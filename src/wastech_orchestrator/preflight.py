@@ -10,9 +10,14 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
-from wastech_orchestrator.install.detect import gh_auth_ok, has_gh
+from wastech_orchestrator.install.detect import gh_auth_ok, git_version, has_gh
 
 _LOG = logging.getLogger(__name__)
+
+#: The minimum git ``(major, minor)`` for the WRI-009 hook-neutralization: ``core.hooksPath`` (git
+#: 2.9, 2016) is the override every orchestrator git command relies on to keep a target-repo hook
+#: from executing. Older git silently ignores it, so the control would be ineffective.
+_MIN_GIT_VERSION = (2, 9)
 
 #: Generic, output-free advisory text. We never surface raw ``gh auth status`` output (it carries
 #: the account login / token scopes); this fixed message is all the operator gets.
@@ -23,6 +28,28 @@ _GH_LOGGED_OUT_MESSAGE = (
 
 class GhNotAvailableError(OSError):
     """The GitHub CLI (``gh``) is required for PR creation but is not on ``PATH``."""
+
+
+class GitControlUnavailableError(OSError):
+    """Git is too old to enforce the WRI-009 git-control neutralization (needs >= 2.9)."""
+
+
+def require_git_control() -> None:
+    """Fail fast unless git honors the WRI-009 hook-neutralization (``core.hooksPath``, git 2.9+).
+
+    Every orchestrator git command runs with ``-c core.hooksPath=<private empty dir>`` so a
+    target-repo hook can never execute in an orchestrator git process. Git older than 2.9 silently
+    ignores that key — leaving repo hooks live — so a git below the floor fails closed here instead
+    of running unprotected. An undetectable version (git absent/unusual ``--version``) is left to
+    surface at first git use rather than blocked on an unparseable string.
+    """
+    version = git_version()
+    if version is not None and version < _MIN_GIT_VERSION:
+        raise GitControlUnavailableError(
+            f"git {version[0]}.{version[1]} is too old for orchestrator isolation: the WRI-009 "
+            f"`core.hooksPath` hook-neutralization needs git >= {_MIN_GIT_VERSION[0]}."
+            f"{_MIN_GIT_VERSION[1]} (2016). Upgrade git."
+        )
 
 
 def require_gh() -> None:

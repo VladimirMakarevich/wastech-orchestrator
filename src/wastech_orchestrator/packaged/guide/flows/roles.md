@@ -43,15 +43,16 @@ A non-blocking evaluator (`blocking: false`) never parks the task: once its `max
 
 ## Named output slots (`output_artifact`)
 
-Besides the generic `{<id>_path}` channel, an `agent` node can fill **one** of three fixed slots with `output_artifact:`, landing its `content` in a well-known file that later nodes read by a stable variable:
+Besides the generic `{<id>_path}` channel, an `agent` node can fill **one** of four fixed slots with `output_artifact:`, landing its `content` in a well-known file that later nodes read by a stable variable (the node returns the content as its structured output; the orchestrator writes the file):
 
 | `output_artifact` | Writes | Read downstream as |
 | --- | --- | --- |
 | `enriched_spec` | `task.enriched.md` | (audit only — no downstream variable) |
 | `plan` | `plan.md` | `{plan_path}` |
 | `summary` | `summary.md` | `{summary_body_path}` (normally the supervisor fills this, not a flow node) |
+| `report` | `report.md` (into the flow's private report dir) | (private — the `private_control_workspace_report` shape, e.g. `security_audit`; read-only node, no agent write) |
 
-The vocabulary is fixed to these three; a flow only chooses which node fills each, and one node fills at most one slot.
+The vocabulary is fixed to these four; a flow only chooses which node fills each, and one node fills at most one slot.
 
 ## Custom output schema (the one real foot-gun)
 

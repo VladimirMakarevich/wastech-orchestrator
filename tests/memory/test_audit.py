@@ -32,7 +32,7 @@ def _semantic(statement: str, memory_id: str = "ltm1") -> LongTermRecord:
 
 def test_each_append_writes_one_audit_row_with_hashes(tmp_path: Path) -> None:
     # AC-SF3: every mutation writes exactly one audit row with pre/post hashes + rationale.
-    service = MemoryService(MemoryLayout.for_repo(tmp_path))
+    service = MemoryService(MemoryLayout(tmp_path / ".worc"))
     service.append(_semantic("first"), audit=_AUDIT)
     rows = service.audit.rows()
     assert len(rows) == 1
@@ -48,7 +48,7 @@ def test_each_append_writes_one_audit_row_with_hashes(tmp_path: Path) -> None:
 
 
 def test_audit_chain_verifies_and_detects_tampering(tmp_path: Path) -> None:
-    service = MemoryService(MemoryLayout.for_repo(tmp_path))
+    service = MemoryService(MemoryLayout(tmp_path / ".worc"))
     service.append(_semantic("a"), audit=_AUDIT)
     service.append(_semantic("b", memory_id="ltm2"), audit=_AUDIT)
     assert service.audit.verify_chain() is True
@@ -60,7 +60,7 @@ def test_audit_chain_verifies_and_detects_tampering(tmp_path: Path) -> None:
 
 
 def test_audit_log_is_append_only(tmp_path: Path) -> None:
-    service = MemoryService(MemoryLayout.for_repo(tmp_path))
+    service = MemoryService(MemoryLayout(tmp_path / ".worc"))
     service.append(_semantic("a"), audit=_AUDIT)
     first = service.audit.path.read_text(encoding="utf-8")
     service.append(_semantic("b", memory_id="ltm2"), audit=_AUDIT)
@@ -71,7 +71,7 @@ def test_audit_log_is_append_only(tmp_path: Path) -> None:
 
 def test_snapshot_mutate_restore_is_byte_identical(tmp_path: Path) -> None:
     # AC-SF4: snapshot → mutate → restore returns byte-identical pre-state.
-    service = MemoryService(MemoryLayout.for_repo(tmp_path))
+    service = MemoryService(MemoryLayout(tmp_path / ".worc"))
     service.append(_semantic("original"), audit=_AUDIT)
     semantic_file = tmp_path / ".worc" / "memory" / "long_term" / "semantic.jsonl"
     before = semantic_file.read_bytes()
@@ -83,7 +83,7 @@ def test_snapshot_mutate_restore_is_byte_identical(tmp_path: Path) -> None:
 
 
 def test_restore_logs_a_rollback_row(tmp_path: Path) -> None:
-    service = MemoryService(MemoryLayout.for_repo(tmp_path))
+    service = MemoryService(MemoryLayout(tmp_path / ".worc"))
     service.append(_semantic("x"), audit=_AUDIT)
     snapshot = service.snapshot(service.tier_files(), label="snap1")
     service.restore(snapshot, audit=_AUDIT)
@@ -92,7 +92,7 @@ def test_restore_logs_a_rollback_row(tmp_path: Path) -> None:
 
 def test_snapshot_label_is_filesystem_safe(tmp_path: Path) -> None:
     # A colon-bearing timestamp must not break on Windows; the label is sanitized to a safe name.
-    service = MemoryService(MemoryLayout.for_repo(tmp_path))
+    service = MemoryService(MemoryLayout(tmp_path / ".worc"))
     service.append(_semantic("x"), audit=_AUDIT)
     snapshot = service.snapshot(service.tier_files(), label="2026-06-30T12:00:00Z")
     assert ":" not in snapshot.name
@@ -107,7 +107,7 @@ def test_content_hash_is_deterministic() -> None:
 def test_marker_is_emitted_per_mutation_with_task_id(tmp_path: Path) -> None:
     # 02.6 (AC-SF3): every memory mutation mirrors into a best-effort secondary marker.
     markers: list[dict[str, Any]] = []
-    service = MemoryService(MemoryLayout.for_repo(tmp_path), marker=markers.append)
+    service = MemoryService(MemoryLayout(tmp_path / ".worc"), marker=markers.append)
     audit = AuditContext(timestamp="2026-06-30T00:00:00Z", task_id="task-7")
     service.append(_semantic("a"), audit=audit)
     assert len(markers) == 1
@@ -121,7 +121,7 @@ def test_marker_failure_does_not_break_the_write(tmp_path: Path) -> None:
     def boom(_row: Any) -> None:
         raise RuntimeError("marker sink down")
 
-    service = MemoryService(MemoryLayout.for_repo(tmp_path), marker=boom)
+    service = MemoryService(MemoryLayout(tmp_path / ".worc"), marker=boom)
     audit = AuditContext(timestamp="2026-06-30T00:00:00Z", task_id="task-7")
     service.append(_semantic("a"), audit=audit)  # must not raise
     assert len(service.read_long_term(LongTermKind.SEMANTIC)) == 1  # the primary write still landed

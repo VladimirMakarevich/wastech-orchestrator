@@ -250,6 +250,6 @@ def test_preflight_skips_helper_check_for_readonly_sandbox(
     # A read-only sandbox never launches the Windows helper, so a missing helper must not block it.
     exe, _ = _make_pkg(tmp_path, with_helper=False)
     _patch_windows(monkeypatch, exe)
-    read_only = replace(codex_config, sandbox="read-only", permission_profile="read-only")
+    read_only = replace(codex_config, permission_profile="read-only")
     provider = _provider(read_only, security_config, tmp_path, _VersionAndHelpFake())
     assert provider.preflight().supports_required_features is True

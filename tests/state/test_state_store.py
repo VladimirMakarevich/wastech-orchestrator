@@ -241,7 +241,9 @@ def test_provider_attempts_round_trip(store: StateStore) -> None:
     )
     assert run_id > 0
     store.record_provider_attempt(
-        ProviderAttemptRow(node_run_id=run_id, provider="claude", attempt=1, status="succeeded")
+        ProviderAttemptRow(
+            task_id="task-001", node_run_id=run_id, provider="claude", attempt=1, status="succeeded"
+        )
     )
     cur = store._conn.execute(
         "SELECT provider FROM provider_attempts WHERE node_run_id = ?", (run_id,)
@@ -263,6 +265,7 @@ def test_provider_attempt_usage_columns_round_trip(store: StateStore) -> None:
     )
     store.record_provider_attempt(
         ProviderAttemptRow(
+            task_id="task-001",
             node_run_id=run_id,
             provider="codex",
             attempt=1,
@@ -272,6 +275,7 @@ def test_provider_attempt_usage_columns_round_trip(store: StateStore) -> None:
             usage_cache_read=111616,
             usage_output_total=1035,
             usage_reasoning_output=131,
+            usage_cost=0.4213,
             usage_delta_status="ok",
             provider_usage_raw='{"input_tokens":282699}',
         )
@@ -280,6 +284,7 @@ def test_provider_attempt_usage_columns_round_trip(store: StateStore) -> None:
     assert len(rows) == 1
     row = rows[0]
     assert row.usage_scope == "session_cumulative"
+    assert row.usage_cost == 0.4213
     assert row.usage_input_total == 141235
     assert row.usage_cache_read == 111616
     assert row.usage_output_total == 1035
@@ -295,12 +300,43 @@ def test_provider_attempt_usage_columns_default_null(store: StateStore) -> None:
         NodeRunRow(task_id="task-001", node_id="revise", node_kind="agent", status="running")
     )
     store.record_provider_attempt(
-        ProviderAttemptRow(node_run_id=run_id, provider="codex", attempt=1, status="failed")
+        ProviderAttemptRow(
+            task_id="task-001", node_run_id=run_id, provider="codex", attempt=1, status="failed"
+        )
     )
     row = store.get_provider_attempts(run_id)[0]
     assert row.usage_scope is None
     assert row.usage_input_total is None
+    assert row.usage_cost is None
     assert row.provider_usage_raw is None
+
+
+def test_provider_attempts_for_task_includes_supervisor_layer(store: StateStore) -> None:
+    # VF-8: a whole-task roll-up keyed off ``task_id`` sees both a flow node's attempt AND the
+    # constant supervisor layer's (``node_run_id`` NULL), so the summed cost/usage is complete.
+    store.insert_task(_new_task())
+    run_id = store.record_node_run(
+        NodeRunRow(task_id="task-001", node_id="implement", node_kind="agent", status="running")
+    )
+    store.record_provider_attempt(
+        ProviderAttemptRow(
+            task_id="task-001", node_run_id=run_id, provider="claude", attempt=1, usage_cost=0.10
+        )
+    )
+    store.record_provider_attempt(
+        ProviderAttemptRow(
+            task_id="task-001", node_run_id=None, provider="claude", attempt=1, usage_cost=0.02
+        )
+    )
+    rows = store.get_provider_attempts_for_task("task-001")
+    assert len(rows) == 2
+    assert sum(r.usage_cost or 0 for r in rows) == pytest.approx(0.12)
+    # The supervisor's rows are exactly the ``node_run_id IS NULL`` ones.
+    supervisor = [r for r in rows if r.node_run_id is None]
+    assert len(supervisor) == 1
+    assert supervisor[0].usage_cost == 0.02
+    # The by-node getter still returns only that node's attempt (not the supervisor row).
+    assert [r.node_run_id for r in store.get_provider_attempts(run_id)] == [run_id]
 
 
 def test_check_run_and_artifact(store: StateStore) -> None:

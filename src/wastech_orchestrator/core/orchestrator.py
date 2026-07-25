@@ -11,12 +11,13 @@ from __future__ import annotations
 
 import json
 import logging
+import shutil
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any
 
@@ -34,6 +35,13 @@ from wastech_orchestrator.core.decomposition import (
     update_subtask_index,
     write_subtask_artifacts,
 )
+from wastech_orchestrator.core.flow.control_bundle import (
+    ControlBundleError,
+    FrozenControlBundle,
+    digest_live_control_inputs,
+    freeze_control_bundle,
+    load_control_bundle,
+)
 from wastech_orchestrator.core.flow.engine import (
     FlowCancelled,
     FlowRunResult,
@@ -45,6 +53,27 @@ from wastech_orchestrator.core.flow.engine_driver import (
     drive_flow,
     partition_decomposition,
 )
+from wastech_orchestrator.core.flow.exchange_seal import (
+    ExchangeCleanupBlocked,
+    ExchangeSealError,
+    ensure_current_exchange,
+    quarantine_contaminated,
+    seal_exchange,
+)
+from wastech_orchestrator.core.flow.instruction_bundle import (
+    REPO_INSTRUCTION_NAMES,
+    TASK_PACKET_KEY,
+    InstructionBundleError,
+    assert_no_required_secret,
+    discover_repository_instructions,
+    freeze_repository_instructions,
+    freeze_skill_package,
+    freeze_task_packet,
+    governance_changed_paths,
+    instruction_bundle_dir,
+    load_instruction_bundle,
+    write_instruction_manifest,
+)
 from wastech_orchestrator.core.flow.nodes.base import (
     EvaluatorInfraError,
     NodeInfraError,
@@ -52,7 +81,13 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeManualRequired,
     NodeServices,
 )
-from wastech_orchestrator.core.flow.output_policy import is_within
+from wastech_orchestrator.core.flow.nodes.exchange_publish import (
+    ExchangeMutationManual,
+    publish_artifact,
+    publish_file,
+    publish_node_run_file,
+)
+from wastech_orchestrator.core.flow.output_policy import is_within, resolve_output_policy
 from wastech_orchestrator.core.flow.postprocess import (
     apply_output_artifact,
     read_decomposition,
@@ -67,7 +102,8 @@ from wastech_orchestrator.core.flow.recorder import (
 from wastech_orchestrator.core.flow.registry import FlowRegistry, FlowResolutionError
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import AgentNode, EvaluatorNode, FlowNode
-from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
+from wastech_orchestrator.core.flow.security_preamble import build_orchestrator_security_preamble
+from wastech_orchestrator.core.flow.snapshot import FlowSnapshot, load_flow
 from wastech_orchestrator.core.flow.tools_registry import ToolRegistry
 from wastech_orchestrator.core.flow.validator import (
     FlowValidationError,
@@ -100,11 +136,13 @@ from wastech_orchestrator.core.skills import (
 from wastech_orchestrator.core.state_machine import Status, assert_transition
 from wastech_orchestrator.core.supervisor import Supervisor
 from wastech_orchestrator.git_manager import (
+    CleanupOutcome,
     GitCommandError,
     GitManager,
     ManualActionRequired,
 )
 from wastech_orchestrator.ledger import (
+    STUCK_FILENAME,
     Ledger,
     LedgerRecord,
     write_failure_report,
@@ -127,6 +165,8 @@ from wastech_orchestrator.notify import (
     TRACE_REWORK_EXHAUSTED,
     Notifier,
     NullNotifier,
+    TerminalDetails,
+    TerminalFinding,
 )
 from wastech_orchestrator.observability.logging import bind
 from wastech_orchestrator.providers.artifacts import (
@@ -141,17 +181,29 @@ from wastech_orchestrator.providers.base import (
     ErrorClass,
     ProviderId,
 )
+from wastech_orchestrator.providers.exchange import (
+    ExchangeError,
+    assert_exchange_current_task_only,
+    clear_exchange_task_dir,
+    diff_exchange_manifests,
+)
 from wastech_orchestrator.providers.redaction import (
     read_denied_secrets,
     redact_text,
     secret_env_values,
 )
 from wastech_orchestrator.routing.router import AgentRouter
+from wastech_orchestrator.runtime_layout import (
+    CONTROL_BUNDLE_DIRNAME,
+    InternalDenyPolicy,
+    RuntimeLayout,
+)
 from wastech_orchestrator.security.env import build_child_env
 from wastech_orchestrator.security.isolation import IsolationCheck, check_isolation
 from wastech_orchestrator.state_store import (
     ArtifactRow,
     EvaluationRow,
+    ProviderAttemptRow,
     StateStore,
     SubtaskRow,
     TaskRow,
@@ -175,13 +227,18 @@ from wastech_orchestrator.task.validation_gate import (
 
 _LOG = logging.getLogger(__name__)
 
-# The gitignored runtime home holding operator flows under ``<repo>/.worc/flows/`` (P4.1). Mirrors
-# ``cli.WORC_HOME``; duplicated here because the core must not import the CLI (would be circular).
-_WORC_HOME = ".worc"
-
 # The lifecycle folders a task file moves between under ``tasks/`` (registration → done/failed).
 # "Currently running" is tracked by the task's ``state.db`` status, not a physical folder.
 _LIFECYCLE_FOLDERS = ("pending", "done", "failed")
+
+# Infra error classes that are a fail-closed SECURITY / manual-action condition for ANY node kind
+# (agent or evaluator): a provider tree that could not be proven quiescent (WRI-012
+# ``CONTAINMENT_UNVERIFIED``) or a missing host isolation capability with no qualifying fallback
+# (WRI-002 ``CAPABILITY_UNAVAILABLE``). Never a quality fail, never a park, never a shippable green
+# diff — the error-class dispatch checks this before the evaluator-vs-node split (C1).
+_CONTAINMENT_MANUAL_CLASSES = frozenset(
+    {ErrorClass.CONTAINMENT_UNVERIFIED, ErrorClass.CAPABILITY_UNAVAILABLE}
+)
 
 
 def _utc_now_iso() -> str:
@@ -305,6 +362,75 @@ def effective_skip(task: NormalizedTask) -> frozenset[str]:
     return task.disabled_nodes()
 
 
+def _render_governance_section(paths: tuple[str, ...]) -> str:
+    """Markdown callout for the summary / PR body: this run edited governance files (VF-20).
+
+    A reviewer-facing notice, not a report of wrongdoing — editing governance/instruction files is
+    ordinary work. Appended only when ``paths`` is non-empty (no section on ordinary runs).
+    """
+    bullets = "\n".join(f"- `{path}`" for path in paths)
+    return (
+        "\n\n## Governance files changed\n\n"
+        "This run edited repository governance/instruction files (a notice, not a block):\n\n"
+        f"{bullets}\n"
+    )
+
+
+# --- VF-22 terminal-notification enrichment (read the on-disk diagnosis for the operator) --------
+
+_FINDING_SEVERITY_RANK: dict[str, int] = {"high": 0, "medium": 1, "low": 2}
+
+
+def _read_failure_report(path: str | None) -> dict[str, Any] | None:
+    """Load ``failure_report.json`` for the terminal notification (VF-22); ``None`` when absent.
+
+    Best-effort and total: a missing path, unreadable file, or non-object JSON yields ``None`` so
+    the notification simply degrades to its terse form.
+    """
+    if not path:
+        return None
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _top_blocking_finding(findings: object) -> TerminalFinding | None:
+    """The single most-severe review finding (high → medium → low) for the notification (VF-22).
+
+    ``findings`` is the failure report's ``last_review_findings`` — a list of
+    ``{severity, reason, paths}`` (:mod:`core.flow.nodes.evaluator`). ``None`` when there are none.
+    """
+    if not isinstance(findings, list):
+        return None
+    candidates = [f for f in findings if isinstance(f, dict)]
+    if not candidates:
+        return None
+    best = min(
+        candidates,
+        key=lambda f: _FINDING_SEVERITY_RANK.get(str(f.get("severity", "")).lower(), 3),
+    )
+    paths_raw = best.get("paths")
+    paths = tuple(str(p) for p in paths_raw) if isinstance(paths_raw, list | tuple) else ()
+    return TerminalFinding(
+        severity=str(best.get("severity") or "unknown"),
+        reason=str(best.get("reason") or ""),
+        paths=paths,
+    )
+
+
+def _stuck_report_path(failure_report_path: str | None) -> str | None:
+    """The operator-readable ``stuck.md`` beside ``failure_report.json`` (VF-22), as a POSIX path.
+
+    ``stuck.md`` is the sibling the operator opens; only the JSON path is persisted on the row.
+    Rendered with :meth:`PurePath.as_posix` so the displayed path is stable across platforms.
+    """
+    if not failure_report_path:
+        return None
+    return Path(failure_report_path).with_name(STUCK_FILENAME).as_posix()
+
+
 @dataclass(frozen=True)
 class PipelineResult:
     """The terminal outcome of running one task."""
@@ -355,6 +481,11 @@ class _Pipeline:
     # `_resolve_skill_layers`). Both are populated in `_engine_run`, not at construction.
     skill_inventory: SkillInventory = field(default_factory=SkillInventory)
     skill_map: dict[str, tuple[SkillRef, ...]] = field(default_factory=dict)
+    # WRI-011 instruction-bundle staging: the frozen ``(bundle-key, sha256)`` entries accumulated
+    # while the agent inputs are frozen (task packet first, then repository instructions, then the
+    # per-node skill packages after the supervisor proposal). Combined with the WRI-010 control
+    # digest into the composite ``instruction_manifest_digest`` by ``_finalize_instruction_bundle``.
+    instruction_entries: list[tuple[str, str]] = field(default_factory=list)
     # Per-task disabled flow node ids (``nodes.<id>.enabled: false``). Re-derived every run/resume
     # from front-matter, so a restart recovers it without persistence (node-disable control).
     skip: frozenset[str] = frozenset()
@@ -363,6 +494,11 @@ class _Pipeline:
     # planning ``proposed_by`` post-hook does not re-read the agent's proposal. ``None`` on resume —
     # the decision is rebuilt from the persisted ``subtasks`` rows (source-agnostic).
     operator_decomposition: DecompositionDecision | None = None
+    # VF-20: repo-relative governance/instruction paths (`AGENTS.md`, `.agents/rules/**`, …) this
+    # run's net-task diff changed, captured at finalize (before terminal cleanup restores the tree).
+    # Empty on ordinary runs; drives the non-blocking operator notice (console/log WARNING, PR
+    # summary, ledger record, Telegram) — editing governance files is ordinary work, never a block.
+    governance_changed: tuple[str, ...] = ()
 
 
 class Eligibility(StrEnum):
@@ -425,7 +561,8 @@ class Orchestrator:
         store: StateStore,
         ledger: Ledger,
         gate: ValidationGate,
-        artifacts_root: str | Path,
+        layout: RuntimeLayout,
+        deny_policy: InternalDenyPolicy | None = None,
         clock: Callable[[], str] = _utc_now_iso,
         monotonic: Callable[[], float] = time.monotonic,
         notifier: Notifier | None = None,
@@ -442,7 +579,19 @@ class Orchestrator:
         self._store = store
         self._ledger = ledger
         self._gate = gate
-        self._artifacts_root = artifacts_root
+        # The one provider-neutral runtime layout (WRI-004). Each consumer reads the surface it
+        # owns: private runtime state (DB/logs/memory/HITL/process-control) from ``private_home``,
+        # the operator control plane (flows/tools) from ``control_home``, and the agent-facing
+        # exchange from ``exchange_root``. ``control_home`` and ``private_home`` are the same today.
+        self._layout = layout
+        self._artifacts_root: Path = layout.private_home
+        # Internal provider deny policy (WRI-004 groundwork): the control/private homes, resolved
+        # env-file, and provider auth homes to deny. Stored here for WRI-002/003 to project into
+        # provider enforcement; not consumed yet.
+        self._deny_policy = deny_policy
+        # The provider-readable exchange root ``<repo>/.worc-io`` (WRI-001), a sibling of the
+        # private ``.worc`` home; every exchange builder/publisher still takes it as an argument.
+        self._exchange_root = layout.exchange_root
         self._clock = clock
         self._monotonic = monotonic
         # The orchestrator-wide ``--heartbeat-seconds`` interval (shared with providers/git/checks),
@@ -463,17 +612,22 @@ class Orchestrator:
         self._skill_scanner = skill_scanner or self._default_skill_scanner()
         # Per-id attempt number stamped onto the next ledger record, set by ``rerun``/``continue``.
         self._rerun_attempt: dict[str, int] = {}
+        # Task ids whose next resume is an operator ``rerun --continue`` that ADOPTS the current
+        # on-disk control plane (re-freeze) instead of loading the frozen bundle. Set in
+        # ``continue_task`` for the span of one resume; automatic crash-recovery never sets it, so
+        # an agent-side control mutation before a crash is never silently adopted (WRI-010).
+        self._continue_adopt: set[str] = set()
         # Flow registry: resolves a task's flow snapshot. Operator flows live in ``<repo>/.worc/
         # flows/`` and override packaged built-ins (P4.1); passing the config turns on the
         # config-aware validation layer (P4.2) on every resolve, including resume.
         self._flow_registry = FlowRegistry(
-            operator_flows_dir=Path(config.repo.local_path) / _WORC_HOME / "flows",
+            operator_flows_dir=layout.control_home / "flows",
             config=config,
         )
         # Operator tool registry (P5): resolves a ``tool`` node's name → its executable under
         # ``<repo>/.worc/tools/`` at run time. Stateless (just the dir), built once and shared by
         # every unit's NodeServices; the FlowRegistry above validates the same tools at resolve.
-        self._tool_registry = ToolRegistry(Path(config.repo.local_path) / _WORC_HOME / "tools")
+        self._tool_registry = ToolRegistry(layout.control_home / "tools")
         # The constant supervisor layer (P2.1) — rebuilt per task in ``_engine_run`` (it carries the
         # task's own resume_own_lineage session). Single-slot, so one live instance at a time.
         self._supervisor: Supervisor | None = None
@@ -936,10 +1090,14 @@ class Orchestrator:
                 refusals=(f"unknown task id '{task_id}'",),
             )
         refusals: list[str] = []
-        if row.status not in (Status.FAILED, Status.MANUAL_ACTION_REQUIRED):
+        # A stale ``running`` row is a killed/crashed task, directly recoverable: ``cmd_rerun``
+        # already refused if a live watch daemon owned the slot, so a ``running`` row reaching here
+        # is daemon-less (the "parked (no daemon)" state) — no ``finalize --as failed`` dance. The
+        # active-slot check below excludes this task's own id, so it never self-blocks.
+        if row.status not in (Status.FAILED, Status.MANUAL_ACTION_REQUIRED, Status.RUNNING):
             refusals.append(
                 f"task '{task_id}' is {row.status.value}; rerun is for failed / "
-                "manual_action_required tasks (use `run` for a new task)"
+                "manual_action_required / stale-running tasks (use `run` for a new task)"
             )
         others = sorted(t.task_id for t in self._store.find_active_tasks() if t.task_id != task_id)
         if others:
@@ -989,11 +1147,13 @@ class Orchestrator:
                 "resolve them before rerun"
             )
         elif dirty:
-            # Known limitation: commit_code stages ALL non-artifact dirty paths, so any foreign WIP
-            # on the branch is swept into the task's commit (own-vs-foreign discrimination is a
-            # deferred follow-up). Warn the operator rather than silently committing it.
+            # The task's own WIP is preserved across the resume and is committed only when the flow
+            # reaches the publish node — never on a re-park to manual (VF-1). Known limitation:
+            # commit_code then stages ALL non-artifact dirty paths, so any foreign WIP on the branch
+            # is swept into that commit (own-vs-foreign discrimination is a deferred follow-up).
             notes.append(
-                f"uncommitted changes ({', '.join(sorted(dirty))}) will be committed into the task"
+                f"uncommitted changes ({', '.join(sorted(dirty))}) are preserved and will be "
+                "committed into the task when the flow reaches publish"
             )
         # --reset-fix-budget and --from are continue-only controls.
         if reset_fix_budget is not None and not continue_mode:
@@ -1004,32 +1164,29 @@ class Orchestrator:
         backstop_exhausted = False
         if continue_mode and current_node:
             live = self._persisted_flow_snapshot(task_id)
-            if from_node is not None:
-                from_refusals = self._from_node_refusals(task_id, from_node)
-                refusals.extend(from_refusals)
-                resumes_in_place = not from_refusals
-                if (
-                    resumes_in_place
-                    and live is not None
-                    and fingerprint is not None
-                    and fingerprint != live.flow_fingerprint
-                ):
-                    notes.append(
-                        f"the flow changed since the checkpoint; --from '{from_node}' will "
-                        "resume using the current on-disk flow"
-                    )
-            else:
-                resumes_in_place = (
-                    live is not None
-                    and fingerprint is not None
-                    and fingerprint == live.flow_fingerprint
+            resume_node = from_node or current_node
+            # Operator --continue adopts the current on-disk control plane and resumes at
+            # resume_node (the --from override, or the checkpoint node), so that node must still
+            # exist in the edited flow. --from is an explicit override; the checkpoint node is
+            # implicit — a flow edit that removed it is refused with an actionable message.
+            resume_refusals = self._resume_node_refusals(
+                resume_node, live=live, is_from=from_node is not None
+            )
+            refusals.extend(resume_refusals)
+            resumes_in_place = not resume_refusals
+            if (
+                resumes_in_place
+                and live is not None
+                and self._control_plane_drifted(task_id, live, checkpoint_fingerprint=fingerprint)
+            ):
+                notes.append(
+                    "the control plane changed since the checkpoint; --continue will adopt the "
+                    f"current on-disk flow/roles/tools and resume at '{resume_node}'"
                 )
-            # Only meaningful when the resume will actually land in place with its counters
-            # preserved — a plain --continue under drift restarts the whole graph from the top with
-            # a fresh run state, so "exhausted" would be a false alarm there.
+            # The resume adopts and lands at resume_node under the live flow, so evaluate the live
+            # fix-loop budgets there (a vanished resume node was already refused above).
             if resumes_in_place and live is not None:
                 counters = json.loads(counters_json) if counters_json else {}
-                resume_node = from_node or current_node
                 exhausted = tuple(
                     exhausted_fix_loops(
                         live, counters, self._config.agents.max_fix_cycles, resume_node
@@ -1116,6 +1273,8 @@ class Orchestrator:
         slug = row.slug or slugify(row.title)
         prior = _ledger_attempt_count(self._ledger, task_id)
         archive_task_artifacts(self._artifacts_root, task_id, prior)
+        # Fresh rerun starts with a clean exchange; the run re-publishes into it (WRI-001).
+        clear_exchange_task_dir(self._exchange_root, task_id)
         self._git.reset_branch_to_base(
             task_id,
             slug,
@@ -1153,6 +1312,8 @@ class Orchestrator:
             )
         prior = _ledger_attempt_count(self._ledger, task_id)
         archive_task_artifacts(self._artifacts_root, task_id, prior)
+        # Restart-in-place also starts clean; the run re-publishes into the exchange (WRI-001).
+        clear_exchange_task_dir(self._exchange_root, task_id)
         self._store.reset_task_for_rerun(task_id)  # DB-only reset; the branch is left untouched
         self._rerun_attempt[task_id] = prior + 1
         self._log(task_id).info("rerun: restart in place", extra={"attempt": prior + 1})
@@ -1203,7 +1364,14 @@ class Orchestrator:
         self._log(task_id).info(
             "rerun --continue: revived", extra={"node": from_node or current_node}
         )
-        result = self.resume()
+        # Adopt the current on-disk control plane on this operator resume (consumed in
+        # ``_engine_run``). Scoped to this call via ``finally`` so a resume that never reaches the
+        # engine cannot leave the flag set for a later automatic crash-recovery to pick up.
+        self._continue_adopt.add(task_id)
+        try:
+            result = self.resume()
+        finally:
+            self._continue_adopt.discard(task_id)
         if result is None:
             raise PipelineFailed(f"continue '{task_id}' did not resume (no active task found)")
         return result
@@ -1218,8 +1386,8 @@ class Orchestrator:
         reset_fix_budget: bool,
         from_node: str | None,
     ) -> None:
-        """Patch the persisted flow checkpoint with the operator's ``--reset-fix-budget`` /
-        ``--from`` controls before ``resume()`` hydrates it — the one-shot seam.
+        """Rebaseline the persisted flow checkpoint for a ``rerun --continue`` before ``resume()``
+        hydrates it — the one-shot operator seam (also applies ``--reset-fix-budget`` / ``--from``).
 
         Deliberately here and not in ``hydrate``/``_resume_via_engine``: that path is shared by
         ordinary crash-recovery, so applying a budget grant there would re-grant on every restart
@@ -1227,18 +1395,23 @@ class Orchestrator:
         grant preserves the global ``fix_iterations`` / ``total_fix:*`` counters, so the
         ``max_total_fix_iterations`` backstop is never weakened, even across repeated grants.
 
-        On ``--from``, the checkpoint's fingerprint is rebaselined to the *live* flow's: otherwise
-        ``_resume_via_engine``'s own equality gate would still see the checkpoint's old fingerprint
-        mismatch the live one and silently top-restart from the graph's entry node, completely
-        ignoring the ``--from`` override with no error.
+        A ``--continue`` adopts the live control plane (``_prepare_control_bundle`` re-freezes
+        it). When the flow YAML drifted, the checkpoint fingerprint is rebaselined to the live
+        flow's — else ``_resume_via_engine``'s equality gate would mismatch the re-frozen flow and
+        route to manual. A no-drift ``--continue`` with no controls returns early (a rewrite would
+        re-derive the mirrored global fix counter for nothing); a role/tool-only edit leaves the
+        ``flow_fingerprint`` unchanged (what the gate keys off), so it needs no rebaseline either.
         """
-        if not reset_fix_budget and from_node is None:
-            return
         baseline_fingerprint = fingerprint or ""
-        if from_node is not None:
-            live = self._persisted_flow_snapshot(task_id)
-            if live is not None:  # defensive: plan_rerun already required this to resolve
-                baseline_fingerprint = live.flow_fingerprint
+        live = self._persisted_flow_snapshot(task_id)
+        if live is not None:  # defensive: plan_rerun already required a resolvable/valid flow
+            baseline_fingerprint = live.flow_fingerprint
+        if (
+            not reset_fix_budget
+            and from_node is None
+            and baseline_fingerprint == (fingerprint or "")
+        ):
+            return
         run_state = FlowRunState(
             flow_fingerprint=baseline_fingerprint,
             current_node=from_node or current_node,
@@ -1364,7 +1537,26 @@ class Orchestrator:
             cleanup_last_error=note,
             finished_at=self._clock(),
         )
+        # VF-4: finalize reconciles a task the orchestrator never terminated itself (e.g. stopped
+        # mid-flow, finished by hand). The operator-facing counter columns are only mirrored at a
+        # clean terminal transition, so without this they stay stale at the last sync while the
+        # authoritative flow checkpoint holds the real churn. Mirror them from the checkpoint so
+        # ``status`` / the ledger report the true fix-loop totals; ``None`` = the engine never ran.
+        checkpoint = hydrate_run_state(self._store, task_id)
+        if checkpoint is not None:
+            self._store.save_counters(task_id, LoopCounters.from_run_state(checkpoint))
         self._store.set_status(task_id, declared)  # out-of-band operator override (no assert)
+        # VF-13: the hand-finish path is the common landing spot after a ``--force-full`` stop,
+        # which SIGKILLs the daemon mid-node and leaves orphan ``running`` node runs + an unbilled
+        # killed attempt. Reconcile them here so the aborted run is auditable (closed nodes + an
+        # ``unknown`` attempt row) and logged, rather than silently stranded.
+        self._reconcile_open_node_runs(
+            task_id, reason=note or f"finalized as {declared.value} by operator"
+        )
+        # WRI-007: the operator finalize/merge/PR-sync paths are terminal producers that bypass
+        # ``_go_terminal``, so they must seal the exchange too. Idempotent — a no-op when the
+        # pipeline terminal already sealed and removed the active exchange for this task.
+        self._seal_terminal_exchange(task_id, final=declared)
         self._relocate_task_file(row.source_path, task_id, declared)
         consume_pending_interactions(self._artifacts_root, task_id)
         if delete_branch and row.branch:
@@ -1486,11 +1678,14 @@ class Orchestrator:
                     raise PipelineFailed(
                         f"the merge flow produced no clean, passing tree; PR left open: {pr_url}"
                     )
-                self._git.commit_merge_resolution(
-                    task_id, f"merge({task_id}): resolve base-merge conflicts"
-                )
             else:
                 log.info("[MERGE-TASK] clean base merge", extra={"branch": branch})
+            # WRI-009: finalize the merge — the clean ``--no-commit`` staged tree OR the resolved
+            # conflict — through the gated commit path. A no-op when nothing is in flight (a
+            # fast-forward / already-current branch), so those still make no commit.
+            self._git.commit_merge_resolution(
+                task_id, f"merge({task_id}): integrate base '{self._config.repo.base_branch}'"
+            )
             self._git.push_branch_update(branch)
             outcome = self._git.merge_pr(
                 task_id, pr_url, strategy=strategy, wait_for_checks=wait_for_checks
@@ -1561,8 +1756,10 @@ class Orchestrator:
     def resume(self) -> PipelineResult | None:
         """Reconcile persisted state on startup and resume the single unfinished task.
 
-        Returns the terminal result of the resumed task, or ``None`` when the slot is free (no
-        active task and no interrupted cleanup) so a caller may pick a pending task.
+        Returns the terminal result of the resumed task, or ``None`` when the slot is free so a
+        caller may pick a pending task — no active task, no interrupted cleanup, or a cleanup that
+        stays blocked (VF-21: a terminal task's stuck cleanup owns no slot and must not freeze the
+        queue; it is recorded + logged and re-tried each tick).
         """
         plan = RecoveryReconciler(self._config, self._store, self._git).reconcile()
         if plan.action is RecoveryAction.NONE:
@@ -1604,13 +1801,25 @@ class Orchestrator:
 
     def _resume_cleanup(self, task_id: str | None) -> PipelineResult | None:
         """Finish an interrupted terminal cleanup once (checkout base or stay per the task's branch
-        mode / ``repo.checkout_base_on_cleanup``), then append the ledger record."""
+        mode / ``repo.checkout_base_on_cleanup``), then append the ledger record.
+
+        The cleanup decision mirrors the primary terminal path (:meth:`_resume_terminal_cleanup`),
+        so it honors the WRI-012 quiescence barrier and preserves a resumable manual-park's own WIP
+        (VF-1) — the retry must not undo what ``_go_terminal`` deliberately did.
+
+        Returns the terminal result when the cleanup completes; returns ``None`` when it stays
+        blocked so the caller treats the slot as free (a terminal task is ``_NON_ACTIVE`` and owns
+        no slot) and scans ``pending/``. A stuck janitorial cleanup on an already-terminal task must
+        not freeze the whole queue (VF-21): the block is recorded (``cleanup_last_error``) and
+        logged, the next task still fail-closes at its own pre-launch guards, and the blocked task
+        is re-elected each tick so cleanup self-heals once the operator clears the tree.
+        """
         if task_id is None:
             return None
         row = self._store.get_task(task_id)
         if row is None:
             return None
-        cleanup = self._git.terminal_cleanup(task_id, mode=self._persisted_branch_mode(task_id))
+        cleanup = self._resume_terminal_cleanup(task_id, row.status)
         self._store.update_task(
             task_id,
             cleanup_target_branch=cleanup.target_branch,
@@ -1636,7 +1845,38 @@ class Orchestrator:
                 pr_url=None,
                 reason=cleanup.error,
             )
+        if not cleanup.safe:
+            # VF-21: the cleanup is stuck, but this task is already terminal and holds no slot, so
+            # the queue is NOT frozen — return None so ``watch_once`` proceeds to scan pending.
+            self._log(task_id).warning(
+                "terminal cleanup still blocked on resume; queue not frozen (task is terminal and "
+                "owns no slot) — pending tasks are still scanned. Clear the working tree, then "
+                "rerun/finalize.",
+                extra={"reason": cleanup.error},
+            )
+            return None
         return PipelineResult(task_id=task_id, final_status=row.status)
+
+    def _resume_terminal_cleanup(self, task_id: str, status: Status) -> CleanupOutcome:
+        """Compute the terminal-cleanup outcome for the resume path, matching ``_go_terminal``.
+
+        Kept in lockstep with the primary path's cleanup decision: the WRI-012 quiescence barrier
+        withholds any Git action over a tree not proven quiescent, and a resumable manual-park
+        carrying the task's own WIP preserves it (VF-1) instead of fail-closing on ``unaccounted
+        changes``. Drift between this and ``_go_terminal`` is exactly the VF-21 regression.
+        """
+        if self._exchange_active_unsafe(task_id):
+            return CleanupOutcome(
+                safe=False,
+                target_branch=self._config.repo.base_branch,
+                error="terminal cleanup withheld: provider tree not proven quiescent (WRI-012)",
+            )
+        preserve_own_wip = (
+            status is Status.MANUAL_ACTION_REQUIRED and self._worktree_is_task_output(task_id)
+        )
+        return self._git.terminal_cleanup(
+            task_id, mode=self._persisted_branch_mode(task_id), preserve_own_wip=preserve_own_wip
+        )
 
     def _resume_task(self, plan: RecoveryPlan) -> PipelineResult:
         """Rebuild the context for the one active task and continue it idempotently."""
@@ -1663,7 +1903,10 @@ class Orchestrator:
             decomposition=decomposition,
             branch=row.branch or "",
             slug=row.slug or slugify(task.title),
-            plan_path=str(task_artifact_dir(self._artifacts_root, plan.task_id) / "plan.md"),
+            # _restore_engine_inputs owns the plan path on resume: it republishes plan.md into the
+            # exchange when it exists (WRI-001). No private pre-seed here (it would leak a private
+            # path when planning has not produced plan.md yet).
+            plan_path=None,
             skip=effective_skip(task),
         )
 
@@ -1693,10 +1936,11 @@ class Orchestrator:
 
         Hydrates the :class:`FlowRunState` from ``node_runs`` + the ``tasks`` checkpoint and
         continues from ``current_node`` (the decomposed re-entry is handled in :meth:`_run_phases`).
-        A task with no flow checkpoint (interrupted before the engine started, or a flow whose
-        fingerprint no longer matches) restarts from the top. Side-effect idempotency (commit/push/
-        PR) lives in ``publish_operations``, so a resumed run never duplicates them."""
-        snapshot = self._resolve_flow(p)
+        A task with no flow checkpoint (interrupted before the engine started) restarts from the
+        top. Under WRI-010 a checkpointed continue reuses the **frozen** control bundle (verified in
+        :meth:`_engine_run`), so a live-flow edit no longer silently restarts the run — it is a
+        parked-conflict the operator resolves with a fresh rerun/restart. Side-effect idempotency
+        (commit/push/PR) lives in ``publish_operations``, so a resumed run never duplicates them."""
         run_state = hydrate_run_state(self._store, p.task.id)
         # B-lite ceiling: a task parked because every provider was transiently unavailable resumes
         # here. If it has stayed parked longer than ``agents.retry.max_blocked_s`` (total parked
@@ -1709,9 +1953,9 @@ class Orchestrator:
                 node_id=run_state.current_node if run_state is not None else None,
                 run_state=run_state,
             )
-        if run_state is None or run_state.flow_fingerprint != snapshot.flow_fingerprint:
-            # No usable checkpoint (interrupted before the engine wrote one, or the flow changed) →
-            # restart from the top via the full driver (re-does preflight + branch prep + engine).
+        if run_state is None:
+            # No usable checkpoint (interrupted before the engine wrote one) → restart from the top
+            # via the full driver (re-does preflight + branch prep + a fresh freeze + engine).
             if p.status not in (Status.NEW, Status.PENDING, Status.VALIDATED):
                 self._store.set_status(p.task.id, Status.VALIDATED)  # reset to re-enter the driver
                 p.status = Status.VALIDATED
@@ -1730,13 +1974,25 @@ class Orchestrator:
         """Repopulate the artifact paths a resumed fixing/review node reads: the diff, the latest
         failed check log, the review findings, and the plan — from disk + the store, scoped to the
         active subtask when decomposed."""
+        # Recovery parity (WRI-001): a resumed node must read the SAME exchange paths a fresh run
+        # produced, never the private originals. Re-publish each restored artifact into the current
+        # task's exchange and point NodeInputs at the exchange copy.
+        secrets = self._memory_extra_secrets()
         task_dir = task_artifact_dir(self._artifacts_root, p.task.id)
         diff = task_dir / "current.diff"
         if diff.exists():
-            inputs.diff_path = str(diff)
+            inputs.diff_path = publish_file(
+                str(self._exchange_root),
+                p.task.id,
+                "current.diff",
+                str(diff),
+                extra_secrets=secrets,
+            )
         plan = task_dir / "plan.md"
         if plan.exists():
-            inputs.plan_path = str(plan)
+            inputs.plan_path = publish_file(
+                str(self._exchange_root), p.task.id, "plan.md", str(plan), extra_secrets=secrets
+            )
         # Review findings are now per-run under stages/<node>/run-<id>/findings.json (history
         # preserved across fix→review cycles). The store's evaluations table is the source of truth
         # for which run produced the latest verdict: take the last in_flow_verdict row (skip the
@@ -1754,14 +2010,29 @@ class Orchestrator:
                     / "findings.json"
                 )
                 if review.exists():
-                    inputs.review_path = str(review)
+                    inputs.review_path = publish_node_run_file(
+                        str(self._exchange_root),
+                        p.task.id,
+                        last.node_id,
+                        last.source_node_run_id,
+                        "findings.json",
+                        review.read_bytes(),
+                        extra_secrets=secrets,
+                        private_path=str(review),
+                    )
         # The per-node skill map is restored separately by ``_resolve_skill_layers`` (from
         # ``skill_map.json``), since it must be in place for a fresh run too — not only on resume.
         # P1: the fixing-resume check log is task-scoped — a decomposed subtask re-runs its region
         # from the top (region entry), regenerating its own check log.
         latest_check = self._store.latest_failed_check_log(p.task.id, None)
         if latest_check and Path(latest_check).exists():
-            inputs.checks_path = latest_check
+            inputs.checks_path = publish_file(
+                str(self._exchange_root),
+                p.task.id,
+                f"checks/{Path(latest_check).name}",
+                latest_check,
+                extra_secrets=secrets,
+            )
 
     def _rebuild_decomposition(self, task_id: str, row: TaskRow) -> DecompositionDecision:
         if not row.decomposition_accepted:
@@ -1806,6 +2077,115 @@ class Orchestrator:
         except (FlowResolutionError, FlowValidationError) as exc:
             raise PipelineFailed(str(exc)) from exc
 
+    def _control_bundle_dir(self, task_id: str) -> Path:
+        """The private per-task frozen-control-bundle dir (a provider deny target, WRI-010)."""
+        return self._layout.private_home / CONTROL_BUNDLE_DIRNAME / task_id
+
+    def _freeze_live_control_bundle(
+        self, p: _Pipeline, bundle_dir: Path
+    ) -> tuple[FlowSnapshot, FrozenControlBundle, Path]:
+        """Snapshot the live control plane into a fresh bundle and record its digest.
+
+        Shared by fresh/restart and by an operator ``rerun --continue`` that adopts the current
+        on-disk control plane. Returns the live snapshot, the bound bundle, and the live flow dir.
+        """
+        from wastech_orchestrator import __version__
+
+        live = self._resolve_flow(p)
+        assert live.source_path is not None
+        live_flow_dir = live.source_path.parent
+        if bundle_dir.exists():
+            shutil.rmtree(bundle_dir)
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        bundle = freeze_control_bundle(
+            bundle_dir,
+            live,
+            live_flow_dir,
+            self._tool_registry,
+            metadata={"orchestrator_version": __version__},
+        )
+        self._store.update_task(p.task.id, control_bundle_digest=bundle.bundle_digest)
+        return live, bundle, live_flow_dir
+
+    def _prepare_control_bundle(
+        self, p: _Pipeline, *, resume: bool, adopt: bool = False
+    ) -> tuple[FlowSnapshot, FrozenControlBundle, Path]:
+        """Freeze (fresh/restart/adopt) or load+verify (crash-recovery continue) the control plane.
+
+        Returns the flow snapshot to execute, the bound frozen bundle, and the **live** flow dir
+        (the baseline the post-node hook re-hashes to detect an in-run mutation).
+
+        * Fresh/restart snapshots the live flow YAML, every referenced role file, the supervisor
+          prompts, and the referenced tool executables into a fresh private bundle and records its
+          digest in the state store.
+        * ``adopt`` (an operator ``rerun --continue``) re-freezes from the live control plane the
+          same way, so the resume runs the operator's between-run edits and records the new digest.
+          The post-node tamper hook rebaselines to this new digest, so agent-side mutation *during*
+          the resumed run is still caught — WRI-010 is preserved.
+        * A plain crash-recovery resume reuses the original frozen bytes, verified against the
+          parent-held digest, and reconstitutes the flow from the frozen YAML. An edit to this
+          flow's live control inputs while the task was parked is a conflict here: it refuses (fail
+          closed), because a crash could follow an *agent* mutation — only a deliberate operator
+          ``--continue`` (``adopt``) adopts a live edit.
+
+        Raises :class:`ControlBundleError` on any identity/integrity/parked-conflict failure; the
+        caller routes it to ``manual_action_required``.
+        """
+        bundle_dir = self._control_bundle_dir(p.task.id)
+        if not resume or adopt:
+            live, bundle, live_flow_dir = self._freeze_live_control_bundle(p, bundle_dir)
+            self._log(p.task.id).info(
+                "control plane adopted on --continue" if adopt else "control plane frozen",
+                extra={"bundle_digest": bundle.bundle_digest[:12]},
+            )
+            return live, bundle, live_flow_dir
+
+        expected = self._store.get_control_bundle_digest(p.task.id)
+        if expected is None:
+            raise ControlBundleError(
+                "no persisted control-bundle digest to resume against; use a fresh rerun"
+            )
+        bundle = load_control_bundle(bundle_dir, expected)
+        frozen = load_flow(bundle.flow_source_path)
+        # Parked-conflict guard: an edit to THIS flow's live control inputs while the task was
+        # parked is a conflict — continue keeps the frozen bytes and refuses to ignore the edit.
+        try:
+            live = self._resolve_flow(p)
+            assert live.source_path is not None
+            live_flow_dir = live.source_path.parent
+            live_digest = digest_live_control_inputs(frozen, live_flow_dir, self._tool_registry)
+        except (PipelineFailed, ControlBundleError) as exc:
+            raise ControlBundleError(
+                f"live control plane changed since the task was frozen ({exc}); "
+                "use a fresh rerun/restart"
+            ) from exc
+        if live_digest != bundle.bundle_digest:
+            raise ControlBundleError(
+                "live control plane was edited while the task was parked; "
+                "use a fresh rerun/restart to adopt it"
+            )
+        return frozen, bundle, live_flow_dir
+
+    def _verify_control_plane_unchanged(
+        self, snapshot: FlowSnapshot, live_flow_dir: Path, expected_digest: str
+    ) -> None:
+        """Fail closed (manual) unless the live control plane still matches the frozen digest.
+
+        Re-hashes the live flow/role/tool inputs the bundle was frozen from and compares to the
+        parent-held digest. A planted symlink/hard-link (surfaced by the no-follow identity checks)
+        or any content change is a non-fallback security violation — the provider tree is already
+        proven quiescent (WRI-012), so a change means a control file was mutated under the run.
+        """
+        try:
+            live_digest = digest_live_control_inputs(snapshot, live_flow_dir, self._tool_registry)
+        except ControlBundleError as exc:
+            raise NodeManualRequired(f"control plane changed during the run: {exc}") from exc
+        if live_digest != expected_digest:
+            raise NodeManualRequired(
+                "control plane (flow / role prompt / tool) was modified during a provider attempt; "
+                "refusing to run downstream nodes on provider-selected control bytes"
+            )
+
     def _resolve_node_overrides(
         self, p: _Pipeline, snapshot: FlowSnapshot
     ) -> Mapping[str, Mapping[str, object]]:
@@ -1821,13 +2201,19 @@ class Orchestrator:
         return resolution.overlay
 
     def _build_engine_services(
-        self, p: _Pipeline, *, finalize: Callable[[], str | None] | None
+        self,
+        p: _Pipeline,
+        *,
+        finalize: Callable[[], str | None] | None,
+        tool_registry: ToolRegistry | None = None,
     ) -> NodeServices:
         """Assemble the per-unit :class:`NodeServices` for an engine run.
 
         Shared by the task driver (:meth:`_engine_run`) and the operator merge routine
         (:meth:`_run_merge_flow`). ``finalize`` is the publish node's hook; ``None`` for a flow with
         no PR-publishing node (the merge flow's ``policy: none`` terminal never calls it).
+        ``tool_registry`` is the WRI-010 frozen-bundle registry on the task path; ``None`` falls
+        back to the shared live-``.worc/tools`` registry (the ephemeral merge flow, not frozen).
         """
         return build_node_services(
             router=self._router,
@@ -1835,6 +2221,7 @@ class Orchestrator:
             store=self._store,
             repo_dir=self._config.repo.local_path,
             artifacts_root=str(self._artifacts_root),
+            exchange_root=str(self._exchange_root),
             clock=self._clock,
             git=self._git,
             notifier=self._notifier,
@@ -1848,6 +2235,9 @@ class Orchestrator:
             prompt_secrets=self._prompt_secrets(),
             register_artifact=self._register_artifact,
             finalize=finalize,
+            # WRI-009: the frozen task-packet digest the publish node's audit commit verifies the
+            # staged lifecycle ``<id>.md`` against (``None`` for the not-frozen merge flow).
+            task_packet_digest=self._task_packet_digest(p),
             # The dependency_scan checker launches its argv scanners through the same safe runner
             # and allowlisted env the Check Runner uses (a test's fake runner drives both).
             run_process=self._checks.run_process,
@@ -1857,11 +2247,132 @@ class Orchestrator:
             # "auto"). protected_paths is global-only (no per-task override).
             trust_level=(p.task.trust_level or self._config.security.trust_level),
             protected_paths=self._config.security.protected_paths,
+            # VF-7 defense-in-depth: the Core-owned advisory security contract, resolved once from
+            # config; the neutral seam prepends it to every agent/evaluator prompt.
+            security_preamble=self._security_preamble(),
             packet_builder=self._packet_builder(),
-            # Custom tool nodes (P5): the operator tool registry + the flow-wide default timeout.
-            tool_registry=self._tool_registry,
+            # Custom tool nodes (P5): the per-task frozen registry (WRI-010) when given, else the
+            # shared live one; plus the flow-wide default timeout.
+            tool_registry=tool_registry if tool_registry is not None else self._tool_registry,
             tools_default_timeout_seconds=self._config.tools.default_timeout_seconds,
         )
+
+    def _instruction_bundle_dir(self, task_id: str) -> Path:
+        """The private per-task frozen-instruction-bundle dir (a provider deny target, WRI-011)."""
+        return instruction_bundle_dir(self._layout.private_home, task_id)
+
+    def _task_packet_digest(self, p: _Pipeline) -> str | None:
+        """The frozen task-packet sha256 (WRI-011) the audit commit verifies its lifecycle file
+        against (WRI-009); ``None`` before the packet is frozen or when the run has none."""
+        return next(
+            (digest for key, digest in p.instruction_entries if key == TASK_PACKET_KEY), None
+        )
+
+    def _freeze_task_and_repo_instructions(
+        self, p: _Pipeline, inputs: NodeInputs, *, resume: bool
+    ) -> None:
+        """Freeze the task packet + root repository instructions into the bundle (WRI-011 stage 1).
+
+        The source task file and ``AGENTS.md``/``CLAUDE.md`` stay ordinary repository content; the
+        provider only ever reads the redacted exchange copies published here from the immutable
+        frozen canonical (never live) — immutability comes from the canonical digest, not from the
+        exchange copy (which is the redacted projection). Skill packages are frozen later, after the
+        supervisor proposal (``_skill_paths_by_node``), because the proposal reads the frozen task.
+
+        Fresh/restart re-freezes from live and gates each required input against a known secret
+        (fail-closed, AC7). Continue verifies the persisted composite digest first (AC9), then
+        republishes the verified frozen copies to the restored exchange.
+        """
+        bundle_dir = self._instruction_bundle_dir(p.task.id)
+        if resume:
+            expected = self._store.get_instruction_manifest_digest(p.task.id)
+            if expected is None:
+                raise InstructionBundleError(
+                    "no persisted instruction-manifest digest to resume against; rerun fresh"
+                )
+            loaded = load_instruction_bundle(bundle_dir, expected)  # fail-closed verify
+            # WRI-009/H3: repopulate the frozen (key, digest) entries from the verified manifest so
+            # ``_task_packet_digest`` is not ``None`` on resume — otherwise the audit commit would
+            # silently skip ``_assert_lifecycle_matches_packet`` and a task file rewritten while the
+            # task was parked could be committed unchecked (the fresh path always records the digest
+            # via ``freeze_task_packet``).
+            p.instruction_entries.extend(loaded.entries)
+            self._publish_frozen_task_packet(p, inputs, bundle_dir)
+            return
+        if bundle_dir.exists():
+            shutil.rmtree(bundle_dir)
+        bundle_dir.mkdir(parents=True, exist_ok=True)
+        secrets = self._memory_extra_secrets()
+        # Freeze the task packet only when there is a real source file. A flow with no task packet
+        # (merge flow) has ``task_path is None``; a restart with no source file on disk leaves it
+        # absent — both skip gracefully (mirroring the pre-WRI-011 publish no-op), so the frozen
+        # bundle simply carries no task entry rather than failing on a phantom file. A real task
+        # always has its lifecycle file, so its packet is always frozen.
+        if inputs.task_path and Path(inputs.task_path).is_file():
+            canonical, entry = freeze_task_packet(bundle_dir, Path(inputs.task_path))
+            assert_no_required_secret(
+                canonical.read_text(encoding="utf-8", errors="replace"),
+                extra_secrets=secrets,
+                label="task packet",
+            )
+            p.instruction_entries.append(entry)
+        repo_root = Path(self._config.repo.local_path)
+        tracked = frozenset(self._git.list_tracked_files(*REPO_INSTRUCTION_NAMES))
+        files = discover_repository_instructions(repo_root, tracked)
+        # VF-5: the per-source files are still frozen + hashed into the manifest digest (audit /
+        # reproducibility), but no payload is built or injected — the agent reads the live
+        # (write-denied, immutable) root files itself. No exchange projection remains, so there is
+        # no repository-instruction secret gate (the agent could read the live file regardless).
+        p.instruction_entries.extend(freeze_repository_instructions(bundle_dir, files))
+        self._publish_frozen_task_packet(p, inputs, bundle_dir)
+
+    def _publish_frozen_task_packet(
+        self, p: _Pipeline, inputs: NodeInputs, bundle_dir: Path
+    ) -> None:
+        """Re-point ``task_path`` at the redacted exchange copy of the frozen task packet.
+
+        Published from the frozen canonical file (verified on resume), so the exchange copy is a
+        redaction of the immutable snapshot — never a re-read of the live file. Repository
+        instructions are no longer published or injected (VF-5): the agent reads the repo's root
+        instruction files itself; those files are write-denied for the run (immutable).
+        """
+        secrets = self._memory_extra_secrets()
+        if (bundle_dir / TASK_PACKET_KEY).is_file():
+            inputs.task_path = publish_file(
+                str(self._exchange_root),
+                p.task.id,
+                "task.md",
+                str(bundle_dir / TASK_PACKET_KEY),
+                extra_secrets=secrets,
+            )
+
+    def _finalize_instruction_bundle(
+        self, p: _Pipeline, *, control_digest: str, resume: bool, adopt: bool = False
+    ) -> None:
+        """Write the composite manifest + persist the ``instruction_manifest_digest`` (WRI-011).
+
+        Fresh/restart folds the task/instruction/skill entries and the WRI-010 control digest into
+        one composite digest and persists it (the parent-held identity a later continue verifies).
+        A plain continue is a no-op: the digest was already verified in stage 1 against the
+        persisted value. An operator ``--continue`` that adopted a re-frozen control plane
+        (``adopt``) re-writes the manifest so its embedded control digest re-binds to the NEW one,
+        keeping the composite identity consistent; the already-frozen task/repo/skill entries
+        (restored into ``p.instruction_entries`` on resume) are preserved, not re-frozen from live.
+        """
+        if resume and not adopt:
+            return
+        from wastech_orchestrator import __version__
+
+        bundle_dir = self._instruction_bundle_dir(p.task.id)
+        digest = write_instruction_manifest(
+            bundle_dir,
+            entries=p.instruction_entries,
+            control_digest=control_digest,
+            metadata={"orchestrator_version": __version__},
+        )
+        self._store.update_task(p.task.id, instruction_manifest_digest=digest)
+        label = "agent inputs re-bound (adopt)" if adopt else "agent inputs frozen"
+        self._log(p.task.id).info(label, extra={"instruction_digest": digest[:12]})
 
     def _resolve_merge_flow(self) -> FlowSnapshot:
         """Resolve the configured ``git.merge_flow`` to a validated snapshot (operator-editable).
@@ -1887,6 +2398,11 @@ class Orchestrator:
         orchestrator commits the merge and merges the PR afterward. Returns ``False`` when a bounded
         loop is exhausted (markers/checks unresolved) so the caller aborts the merge."""
         assert snapshot.source_path is not None
+        # M2 (deliberate): the merge flow is ephemeral and NOT frozen (WRI-010/011); it publishes no
+        # task packet and injects no repository instructions (VF-5). The conflict agent reads the
+        # repo's live root `AGENTS.md`/`CLAUDE.md` itself (Codex via native discovery, Claude via
+        # its Read tool) — fine for a mechanical marker resolution + checks pass. A future merge
+        # agent needing richer repository conventions would wire them here; see follow_ups.
         inputs = build_node_inputs(
             p,
             flow_dir=snapshot.source_path.parent,
@@ -1924,6 +2440,20 @@ class Orchestrator:
             # branch, so it is in place whether or not the planning ``proposed_by`` node runs (a
             # disabled planning node never fires the post-hook). Validated already at preflight.
             self._persist_decomposition(p, p.operator_decomposition, gate_on=True)
+        if self._config.security.read_isolation_off:
+            # VF-6: never a silent weakening — announce that the operator's escape hatch is in
+            # effect. Fires whether it came from ``disable_read_isolation: true`` or the master
+            # ``strict_isolation: false`` (the strict check below is skipped in the latter case).
+            self._log(p.task.id).warning(
+                "read-isolation OFF — providers run native project-instruction/config discovery "
+                "and the private read-deny projection is lifted (operator-sanctioned; the "
+                "write-guard, commit/staging gates, PR control, and denied_read_paths blacklist "
+                "stay in force)",
+                extra={
+                    "disable_read_isolation": self._config.security.disable_read_isolation,
+                    "strict_isolation": self._config.security.strict_isolation,
+                },
+            )
         if self._config.security.strict_isolation:
             reasons = check_isolation(self._config, self._isolation_checks)
             if reasons:
@@ -1948,17 +2478,69 @@ class Orchestrator:
     ) -> PipelineResult:
         """Build the node services/inputs and drive the flow (fresh or resumed). The preamble
         (preflight, branch) + terminal handling live in the callers; this is the engine core."""
-        snapshot = self._resolve_flow(p)  # task_type → flow (P0.4 dispatch)
+        # WRI-001 pre-launch invariant (fresh + resume): the exchange root may hold at most this
+        # task's directory. Fails closed on a stale/foreign exchange before any provider launches.
+        # H1: a stale/foreign/locked entry is an operator-remediable condition — route it to a clean
+        # ``manual_action_required`` (naming the offending entry) instead of letting the bare
+        # ``ExchangeError`` escape uncaught and crash-loop the daemon (the border already holds — no
+        # provider has launched). Mirrors the adjacent ``ExchangeSealError`` handling below.
+        try:
+            assert_exchange_current_task_only(self._exchange_root, p.task.id)
+        except ExchangeError as exc:
+            return self._go_terminal(
+                p, Status.MANUAL_ACTION_REQUIRED, manual_reason=f"exchange not clean: {exc}"
+            )
+        # WRI-007: on a continue, establish the verified current-task exchange before any node runs:
+        # restore + verify the latest sealed snapshot (terminal continue), verify-and-reuse the
+        # still-active exchange (parked/crashed continue), or refuse a contaminated/unsafe task. A
+        # fresh run starts from the clean exchange the rerun/restart path already cleared.
+        if resume:
+            try:
+                contaminated, active_unsafe = self._store.get_exchange_guard(p.task.id)
+                ensure_current_exchange(
+                    self._exchange_root,
+                    self._artifacts_root,
+                    p.task.id,
+                    contaminated=contaminated,
+                    active_unsafe=active_unsafe,
+                )
+            except ExchangeSealError as exc:
+                return self._go_terminal(
+                    p, Status.MANUAL_ACTION_REQUIRED, manual_reason=f"exchange restore: {exc}"
+                )
+        # WRI-010: freeze (fresh/restart) or load+verify (continue) the control plane before any
+        # node runs, then bind every flow/supervisor/tool consumer to the frozen bundle instead of
+        # live ``.worc``. A freeze/verify/parked-conflict failure is a fail-closed manual condition.
+        # Operator ``rerun --continue`` (``continue_task``) adopts the live control plane; automatic
+        # crash-recovery never sets the marker, so it keeps the fail-closed parked-conflict refuse.
+        adopt = resume and p.task.id in self._continue_adopt
+        try:
+            snapshot, bundle, live_flow_dir = self._prepare_control_bundle(
+                p, resume=resume, adopt=adopt
+            )
+        except ControlBundleError as exc:
+            return self._go_terminal(
+                p, Status.MANUAL_ACTION_REQUIRED, manual_reason=f"control plane: {exc}"
+            )
         assert snapshot.source_path is not None
         node_overrides = self._resolve_node_overrides(p, snapshot)
         if run_state is None:
             run_state = FlowRunState(flow_fingerprint=snapshot.flow_fingerprint)
+        elif snapshot.flow_fingerprint != run_state.flow_fingerprint:
+            # The frozen graph must match the checkpoint it is resumed against (defense in depth on
+            # top of the load-time digest verify) — otherwise the bundle and checkpoint are from
+            # different freezes.
+            return self._go_terminal(
+                p,
+                Status.MANUAL_ACTION_REQUIRED,
+                manual_reason="control plane: frozen flow does not match checkpoint; rerun fresh",
+            )
         # The constant supervisor layer starts at task start and lives the whole cycle (P2.1); it
-        # carries this task's own resume_own_lineage session.
-        self._supervisor = self._build_supervisor(p, snapshot)
+        # carries this task's own resume_own_lineage session. It reads the frozen prompts.
+        self._supervisor = self._build_supervisor(p, snapshot, flow_dir=bundle.flow_dir)
         inputs = build_node_inputs(
             p,
-            flow_dir=snapshot.source_path.parent,
+            flow_dir=bundle.flow_dir,
             check_sets=self._check_sets(p),  # normalized command_sets; () = no gate
             pull_request_title=p.task.title,
             commit_message=f"feat({p.task.id}): {p.task.title}",
@@ -1966,13 +2548,36 @@ class Orchestrator:
             branch_mode=self._branch_mode(p.task),
             publish_scope=p.task.publish,
         )
-        if resume:
-            self._restore_engine_inputs(p, inputs)  # diff/checks/review/plan paths from disk
-        # Resolve the per-node skill selection before any node runs: discover the inventory, apply
-        # operator pins (strict/warn) + the supervisor's once-per-task proposal, and thread the
-        # effective map into ``inputs``. On resume the persisted map is restored (no re-proposal).
-        self._resolve_skill_layers(p, snapshot, inputs, resume=resume)
-        services = self._build_engine_services(p, finalize=lambda: self._engine_finalize(p))
+        # WRI-011: freeze the agent inputs into a private, immutable bundle and expose only redacted
+        # exchange copies. Staged because the skill packages can only be frozen after the supervisor
+        # proposal (which itself reads the frozen task packet). Fresh/restart freezes + records the
+        # composite ``instruction_manifest_digest``; continue loads+verifies it and refuses to
+        # resume a session whose digest differs. A freeze/verify/secret-gate failure is a
+        # fail-closed manual condition (Core-detected, never fallback).
+        try:
+            self._freeze_task_and_repo_instructions(p, inputs, resume=resume)
+            if resume:
+                self._restore_engine_inputs(p, inputs)  # diff/checks/review/plan paths from disk
+            # Resolve the per-node skill selection before any node runs: discover the inventory,
+            # apply operator pins (strict/warn) + the supervisor's proposal, and thread the
+            # effective map into ``inputs``. On resume the persisted map is restored (no
+            # reproposal). Skill
+            # *packages* are frozen here too (fresh) via ``_skill_paths_by_node``.
+            self._resolve_skill_layers(p, snapshot, inputs, resume=resume)
+            self._finalize_instruction_bundle(
+                p, control_digest=bundle.bundle_digest, resume=resume, adopt=adopt
+            )
+        except InstructionBundleError as exc:
+            return self._go_terminal(
+                p, Status.MANUAL_ACTION_REQUIRED, manual_reason=f"agent inputs: {exc}"
+            )
+        # Tool nodes launch the FROZEN executables (WRI-010): a per-task registry rooted at the
+        # bundle, not the shared live ``.worc/tools`` one.
+        services = self._build_engine_services(
+            p,
+            finalize=lambda: self._engine_finalize(p, inputs),
+            tool_registry=ToolRegistry(bundle.tools_dir),
+        )
         recorder = StateStoreRunRecorder(
             self._store, p.task.id, artifacts_root=self._artifacts_root
         )
@@ -1987,10 +2592,20 @@ class Orchestrator:
                 completeness,
                 node_overrides=node_overrides,
                 resume=resume,
+                live_flow_dir=live_flow_dir,
+                control_digest=bundle.bundle_digest,
             )
         except NodeManualRequired as exc:
             self._sync_counters_from_run_state(p, run_state)
-            return self._go_terminal(p, Status.MANUAL_ACTION_REQUIRED, manual_reason=str(exc))
+            # WRI-007: a detected agent-side exchange mutation (WRI-002) flags the tree contaminated
+            # so the terminal seam quarantines it as evidence instead of sealing it, and continue is
+            # refused. The flag is persisted (survives a restart between detection and teardown).
+            mutation = exc if isinstance(exc, ExchangeMutationManual) else None
+            if mutation is not None:
+                self._store.update_task(p.task.id, exchange_contaminated=1)
+            return self._go_terminal(
+                p, Status.MANUAL_ACTION_REQUIRED, manual_reason=str(exc), mutation=mutation
+            )
         except FlowCancelled as exc:
             self._sync_counters_from_run_state(p, run_state)
             return self._park(
@@ -1999,12 +2614,20 @@ class Orchestrator:
                 NodeInfraError(str(exc), error_class=ErrorClass.CANCELLED),
             )
         except EvaluatorInfraError as exc:
+            self._sync_counters_from_run_state(p, run_state)
+            # C1: the error-class dispatch comes BEFORE the evaluator degrade-to-manual. A
+            # containment/capability failure is a security condition for every node kind — an
+            # evaluator's (green) diff does not make an unproven process tree or a missing isolation
+            # capability shippable — so it must take the same fail-closed path as an agent node
+            # (flag the exchange unsafe, skip the seal, withhold Git), never the honest-terminal
+            # degrade below.
+            if exc.error_class in _CONTAINMENT_MANUAL_CLASSES:
+                return self._terminal_infra_manual(p, exc, run_state)
             # An evaluator that could not *run* (infra/misconfig) must not discard an already-green
             # diff: degrade to manual (branch preserved, operator reviews/publishes), not failed.
             # ``str(exc)`` already carries the real cause (e.g. ``agent_no_progress``); when the
             # branch has no diff, say so plainly so the manual terminal never implies a change to
             # review that does not exist (F7 — honest terminal).
-            self._sync_counters_from_run_state(p, run_state)
             reason = str(exc)
             # EXPERIMENTAL(no-work-infra): empty-diff annotation on the degrade-to-manual reason.
             if not read_final_diff(self._artifacts_root, p.task.id).strip():
@@ -2027,9 +2650,34 @@ class Orchestrator:
                 # queue. The checkpoint is already persisted; the next watch tick / process start
                 # resumes from current_node (or fails it past agents.retry.max_blocked_s).
                 return self._park(p, run_state, exc)
+            if exc.error_class in _CONTAINMENT_MANUAL_CLASSES:
+                return self._terminal_infra_manual(p, exc, run_state)
             return self._fail(p, str(exc), node_id=run_state.current_node, run_state=run_state)
         self._sync_counters_from_run_state(p, run_state)
         return self._finish_engine_run(p, result)
+
+    def _terminal_infra_manual(
+        self, p: _Pipeline, exc: NodeInfraError, run_state: FlowRunState
+    ) -> PipelineResult:
+        """Route a containment/capability infra error to a fail-closed manual terminal (C1).
+
+        Shared by the evaluator and non-evaluator infra handlers so the security dispatch is
+        identical regardless of node kind. ``CONTAINMENT_UNVERIFIED`` flags the active exchange
+        unsafe FIRST (WRI-007): the provider tree is not proven quiescent, so an unknown descendant
+        may still be writing — the terminal seam must not seal it, and the terminal Git/cleanup is
+        withheld (``_fail`` / ``_go_terminal`` honor the flag), holding the tree until an operator
+        resolves. ``CAPABILITY_UNAVAILABLE`` (WRI-002) has no live writer, so only the manual
+        terminal applies.
+        """
+        if exc.error_class is ErrorClass.CONTAINMENT_UNVERIFIED:
+            self._store.update_task(p.task.id, exchange_active_unsafe=1)
+        return self._fail(
+            p,
+            str(exc),
+            status=Status.MANUAL_ACTION_REQUIRED,
+            node_id=run_state.current_node,
+            run_state=run_state,
+        )
 
     def _park(self, p: _Pipeline, run_state: FlowRunState, exc: NodeInfraError) -> PipelineResult:
         """Soft, resumable pause on transient infra exhaustion or an operator stop (B-lite). NOT a
@@ -2082,19 +2730,9 @@ class Orchestrator:
         The engine owns counting in ``FlowRunState.loop_counters``; the legacy ``tasks`` counter
         columns back the operator surfaces (the ledger ``_append_ledger``, CLI ``status`` via
         ``get_counters``, ``finalize``). Syncing here before the terminal transition keeps them from
-        reading 0 after the engine ran fix loops. The global ``fix_iterations`` is generic; the
-        named loop mirrors apply to the implementation flow's ``test_fix`` / ``review_fix`` loops.
+        reading 0 after the engine ran fix loops.
         """
-        p.counters = replace(
-            p.counters,
-            fix_iterations=run_state.fix_iterations,
-            test_fix_cycles=run_state.counter("test_fix"),
-            review_fix_cycles=run_state.counter("review_fix"),
-            # Cumulative totals for the audit trail — unlike the consecutive counters above, they
-            # are not zeroed on convergence, so a task that succeeded after N reworks records N.
-            test_fix_total=run_state.total("test_fix"),
-            review_fix_total=run_state.total("review_fix"),
-        )
+        p.counters = LoopCounters.from_run_state(run_state)
 
     def _run_phases(
         self,
@@ -2108,6 +2746,8 @@ class Orchestrator:
         *,
         node_overrides: Mapping[str, Mapping[str, object]] = MappingProxyType({}),
         resume: bool = False,
+        live_flow_dir: Path | None = None,
+        control_digest: str | None = None,
     ) -> FlowRunResult:
         """Drive the flow in phases. Fresh: a flow with no decomposition runs in one pass; a
         decomposed one runs pre (entry…proposed_by) once, the sub_flow region once per subtask
@@ -2115,7 +2755,9 @@ class Orchestrator:
         run still in ``pre`` re-runs pre (planning re-decides), a single-unit run continues from
         ``current_node``, and a decomposed run re-enters the active uncommitted subtask at the
         region entry (committed subtasks are skipped, never re-committed)."""
-        post_node = self._engine_post_node(p, inputs, snapshot)
+        post_node = self._engine_post_node(
+            p, inputs, snapshot, live_flow_dir=live_flow_dir, control_digest=control_digest
+        )
         facts = self._engine_facts(completeness, snapshot)
         if resume and run_state.current_node is None:
             resume = False  # no checkpoint position to resume from → start fresh
@@ -2192,8 +2834,15 @@ class Orchestrator:
         for index, unit in enumerate(units):
             if unit.order in committed:
                 continue
-            inputs.subtask_spec_path = str(
-                subtask_spec_path(self._artifacts_root, p.task.id, unit.order, unit.slug)
+            # Private spec stays the audit/immutable record; the redacted exchange copy is the
+            # {subtask_spec_path} the edit nodes read (WRI-001).
+            private_spec = subtask_spec_path(self._artifacts_root, p.task.id, unit.order, unit.slug)
+            inputs.subtask_spec_path = publish_file(
+                str(self._exchange_root),
+                p.task.id,
+                f"subtasks/{private_spec.name}",
+                str(private_spec),
+                extra_secrets=self._memory_extra_secrets(),
             )
             # Two-layer handoff brief for this subtask's committed ``depends_on`` predecessors
             # (subtask-context-handoff ADR); ``None`` when the subtask has no predecessors.
@@ -2250,7 +2899,15 @@ class Orchestrator:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         self._register_artifact(p.task.id, "subtask_handoff", str(path))
-        return path.as_posix()
+        # Private brief stays the audit record; the redacted exchange copy is {predecessor_context}.
+        return publish_artifact(
+            str(self._exchange_root),
+            p.task.id,
+            f"subtasks/{path.name}",
+            content,
+            extra_secrets=self._memory_extra_secrets(),
+            private_path=path.as_posix(),
+        )
 
     def _commit_subtask(self, p: _Pipeline, unit: SubtaskSpec) -> None:
         """Commit one completed subtask + persist its SHA."""
@@ -2262,12 +2919,15 @@ class Orchestrator:
         self._store.set_subtask_commit(p.task.id, unit.order, sha, "committed")
         self._store.update_task(p.task.id, subtasks_completed=unit.order)
 
-    def _build_supervisor(self, p: _Pipeline, snapshot: FlowSnapshot) -> Supervisor:
+    def _build_supervisor(
+        self, p: _Pipeline, snapshot: FlowSnapshot, *, flow_dir: Path
+    ) -> Supervisor:
         """Construct the per-task supervisor layer from ``config.yaml: supervisor`` (P2.1).
 
-        It runs read-only on the global primary; ``role_file`` is resolved inside the packaged flow
-        dir (same containment as a node ``role_file``). Built fresh per task so its own session does
-        not leak across tasks.
+        It runs read-only on the global primary; ``role_file`` is resolved inside ``flow_dir`` (same
+        containment as a node ``role_file``). ``flow_dir`` is the WRI-010 frozen control bundle's
+        flow dir, so supervisor prompts are read from the frozen bytes, not live ``.worc``. Built
+        fresh per task so its own session does not leak across tasks.
         """
         assert snapshot.source_path is not None
         return Supervisor(
@@ -2276,7 +2936,8 @@ class Orchestrator:
             store=self._store,
             repo_dir=self._config.repo.local_path,
             artifacts_root=str(self._artifacts_root),
-            flow_dir=snapshot.source_path.parent,
+            exchange_root=str(self._exchange_root),
+            flow_dir=flow_dir,
             # Flow-local supervisor prompts + the follow-ups opt-in (prompt-and-supervisor ADR);
             # ``None`` when the flow declares no ``supervisor:`` block (global config + built-ins).
             flow_supervisor=snapshot.doc.supervisor,
@@ -2286,9 +2947,15 @@ class Orchestrator:
             # prompt_audit opt-in and redaction.
             prompt_audit=self._prompt_audit_on(p.task),
             prompt_secrets=self._prompt_secrets(),
+            # VF-7 defense-in-depth: the same Core-owned advisory contract the graph-node
+            # NodeServices carries, so the supervisor's own read-only turn gets it too.
+            security_preamble=self._security_preamble(),
+            # VF-8: share the orchestrator clock so the supervisor's ``provider_attempts``
+            # timestamps come from the same source as the rest of the run's audit.
+            clock=self._clock,
         )
 
-    def _engine_finalize(self, p: _Pipeline) -> str | None:
+    def _engine_finalize(self, p: _Pipeline, inputs: NodeInputs) -> str | None:
         """The publish node's finalize hook: write the supervisor summary, move the task file, and
         write the committed summary (P2.1).
 
@@ -2307,7 +2974,10 @@ class Orchestrator:
             started = time.monotonic()
             memory_on = self._config.memory.enabled
             finalized = self._supervisor.finalize(
-                task_id=p.task.id, task_title=p.task.title, emit_delta=memory_on
+                task_id=p.task.id,
+                task_title=p.task.title,
+                task_path=inputs.task_path,
+                emit_delta=memory_on,
             )
             if memory_on:
                 self._write_memory(p, finalized.candidate_delta, WriteSource.SUCCESS)
@@ -2343,11 +3013,11 @@ class Orchestrator:
         """
         if not self._config.memory.enabled:
             return None
-        layout = MemoryLayout.for_repo(self._config.repo.local_path)
-        ensure_store(layout, created_at=self._clock())
-        index = DerivedIndex(self._config.repo.local_path, derived_dir=layout.derived)
+        mem_layout = MemoryLayout(self._layout.private_home)
+        ensure_store(mem_layout, created_at=self._clock())
+        index = DerivedIndex(self._config.repo.local_path, derived_dir=mem_layout.derived)
         return MemoryService(
-            layout,
+            mem_layout,
             config=self._config.memory,
             marker=self._memory_marker,
             index=index,
@@ -2377,8 +3047,10 @@ class Orchestrator:
         ``{memory_path}`` (node-driven), so a disabled config touches nothing (Q10)."""
         if not self._config.memory.enabled:
             return None
-        layout = MemoryLayout.for_repo(self._config.repo.local_path)
-        return PacketBuilder(MemoryService(layout, config=self._config.memory), self._config.memory)
+        mem_layout = MemoryLayout(self._layout.private_home)
+        return PacketBuilder(
+            MemoryService(mem_layout, config=self._config.memory), self._config.memory
+        )
 
     def _memory_marker(self, row: Mapping[str, Any]) -> None:
         """Mirror one memory audit row into the existing ``evaluations`` decision trail (Q6)."""
@@ -2469,17 +3141,36 @@ class Orchestrator:
         return facts
 
     def _engine_post_node(
-        self, p: _Pipeline, inputs: NodeInputs, snapshot: FlowSnapshot
+        self,
+        p: _Pipeline,
+        inputs: NodeInputs,
+        snapshot: FlowSnapshot,
+        *,
+        live_flow_dir: Path | None = None,
+        control_digest: str | None = None,
     ) -> Callable[[FlowNode, NodeOutcome, int], None]:
-        """Engine post-node hook: let the supervisor layer observe the completed step, persist a
-        node's output_artifact slot + its generic ``<node_id>.out.md``, resolve plan skills, and —
-        for the decomposition ``proposed_by`` node — decide + materialize the decomposition."""
+        """Engine post-node hook: verify the live control plane is unchanged (WRI-010), let the
+        supervisor layer observe the completed step, persist a node's output_artifact slot + its
+        generic ``<node_id>.out.md``, resolve plan skills, and — for the decomposition
+        ``proposed_by`` node — decide + materialize the decomposition."""
         decomp = snapshot.doc.decomposition
         # Redaction literals for the node-output writer, harvested once per run (same set the memory
         # write path uses): raw structured output is not adapter-redacted, so scrub it at write.
         node_output_secrets = self._memory_extra_secrets()
+        # The flow's private report dir (or None) for a `report` output_artifact slot: the migrated
+        # security_audit report node returns the report as structured output, which the orchestrator
+        # writes here privately (WRI-001) instead of the agent writing into .worc/ itself.
+        report_dir = resolve_output_policy(snapshot.doc.output_policy, p.task.id).report_dir(
+            self._config.repo.local_path
+        )
 
         def post_node(node: FlowNode, outcome: NodeOutcome, node_run_id: int) -> None:
+            # WRI-010: before any downstream consumer runs, prove the live control plane (flow /
+            # role / tool) has not changed since freeze. WRI-012 has already proven the provider
+            # tree quiescent for this node's attempt(s), so a diff here means a control file was
+            # mutated under the running task — a non-fallback manual-action security violation.
+            if live_flow_dir is not None and control_digest is not None:
+                self._verify_control_plane_unchanged(snapshot, live_flow_dir, control_digest)
             # The constant supervisor layer observes every completed step read-only (advisory) —
             # except the terminal publish node, whose finalize hook already wrote the summary.
             if self._supervisor is not None and node.kind != "publish":
@@ -2544,6 +3235,9 @@ class Orchestrator:
                 task_id=p.task.id,
                 inputs=inputs,
                 register=self._register_artifact,
+                exchange_root=str(self._exchange_root),
+                extra_secrets=node_output_secrets,
+                report_dir=report_dir,
             )
             # Generic node-output channel: persist every agent node's output as {<node_id>_path}
             # (redaction-scrubbed, local/uncommitted). A node filling a special slot above writes no
@@ -2556,6 +3250,7 @@ class Orchestrator:
                 node_run_id=node_run_id,
                 register=self._register_artifact,
                 extra_secrets=node_output_secrets,
+                exchange_root=str(self._exchange_root),
             )
             # Operator-authored splits are materialized at preflight (the decision comes from the
             # ``subtasks:`` manifest, not this node), so this post-hook is a no-op for them.
@@ -2629,13 +3324,13 @@ class Orchestrator:
         map_file = task_artifact_dir(self._artifacts_root, p.task.id) / "skill_map.json"
         if resume and map_file.exists():
             p.skill_map = self._load_skill_map(map_file)
-            inputs.skill_paths_by_node = self._skill_paths_by_node(p.skill_map)
+            inputs.skill_paths_by_node = self._skill_paths_by_node(p, p.skill_map, resume=True)
             return
         p.skill_inventory = self._skill_scanner.collect()
         agent_nodes = [n for n in snapshot.doc.nodes if isinstance(n, AgentNode)]
         pins = {n.id: resolve_skills(n.skills, p.skill_inventory) for n in agent_nodes}
         self._enforce_pin_strictness(p, pins)
-        proposed = self._propose_skill_map(p, agent_nodes)
+        proposed = self._propose_skill_map(p, agent_nodes, inputs)
         # Effective set per node = Core_filter(pins ∪ accepted proposal). Dynamic tokens that do
         # not resolve are dropped here (only ``.refs`` kept); pins already passed strict/warn.
         skill_map = {
@@ -2644,7 +3339,7 @@ class Orchestrator:
         }
         p.skill_map = {nid: refs for nid, refs in skill_map.items() if refs}
         self._persist_skill_map(p, map_file)
-        inputs.skill_paths_by_node = self._skill_paths_by_node(p.skill_map)
+        inputs.skill_paths_by_node = self._skill_paths_by_node(p, p.skill_map, resume=False)
 
     def _enforce_pin_strictness(self, p: _Pipeline, pins: dict[str, SkillSelection]) -> None:
         """Strict/warn handling for unresolved operator pins (a dynamic proposal is never an error).
@@ -2663,9 +3358,14 @@ class Orchestrator:
         )
 
     def _propose_skill_map(
-        self, p: _Pipeline, agent_nodes: list[AgentNode]
+        self, p: _Pipeline, agent_nodes: list[AgentNode], inputs: NodeInputs
     ) -> dict[str, tuple[str, ...]]:
-        """The supervisor's once-per-task proposal (when ``dynamic`` and skills exist), else {}."""
+        """The supervisor's once-per-task proposal (when ``dynamic`` and skills exist), else {}.
+
+        WRI-011: the proposal reads the task from the frozen exchange packet (``inputs.task_path``,
+        already set by stage-1 freezing) — the task title/description is never inlined into the
+        supervisor prompt.
+        """
         if not self._config.skills.dynamic or not p.skill_inventory.skills:
             return {}
         if self._supervisor is None:  # defensive — the layer is built before this runs
@@ -2674,13 +3374,8 @@ class Orchestrator:
             task_id=p.task.id,
             agent_node_ids=[n.id for n in agent_nodes],
             inventory=p.skill_inventory,
-            task_spec_text=self._skill_task_spec_text(p),
+            task_path=inputs.task_path,
         )
-
-    def _skill_task_spec_text(self, p: _Pipeline) -> str:
-        """A bounded task spec (title + description) the proposal uses to judge skill relevance."""
-        text = f"{p.task.title}\n\n{(p.task.description or '').strip()}".strip()
-        return text[:8000]
 
     def _persist_skill_map(self, p: _Pipeline, map_file: Path) -> None:
         """Persist the effective per-node skill map so a resume restores it without re-proposing."""
@@ -2703,13 +3398,113 @@ class Orchestrator:
         }
 
     def _skill_paths_by_node(
-        self, skill_map: dict[str, tuple[SkillRef, ...]]
+        self, p: _Pipeline, skill_map: dict[str, tuple[SkillRef, ...]], *, resume: bool
     ) -> dict[str, tuple[str, ...]]:
-        """Node id → absolute POSIX reference paths (repo-relative identity joined to the clone)."""
-        repo = Path(self._config.repo.local_path)
+        """Node id → the selected skills' frozen-exchange ``SKILL.md`` reference paths (WRI-011).
+
+        Each selected skill is frozen as a *package closure* (every tracked regular file inside its
+        ``SKILL.md`` directory, caps + link/special/ADS/collision refused) into the private bundle,
+        then the whole package is published redacted (read-only under WRI-002/003) to the exchange
+        under ``skills/<folder>/...`` so the agent reads the immutable copy (with sibling resources
+        intact) and never the live repository file. There is no live-path fallback — a missing or
+        unrepresentable package fails strict resolution (AC7). Continue re-points to the packages
+        already frozen (and verified in stage 1) without re-freezing.
+
+        The folder name is the ``SKILL.md`` parent-directory basename; two selected skills whose
+        packages share a basename collide and fail strict (rather than silently clobbering).
+        """
+        bundle_dir = self._instruction_bundle_dir(p.task.id)
+        repo_root = Path(self._config.repo.local_path)
+        secrets = self._memory_extra_secrets()
+        # Freeze/publish each unique selected skill package once; map ref.path -> exchange SKILL.md.
+        unique_refs = {ref.path: ref for refs in skill_map.values() for ref in refs}
+        folders: dict[str, str] = {}  # folder -> ref.path (cross-package collision guard)
+        skill_md_by_path: dict[str, str] = {}
+        for rel, ref in sorted(unique_refs.items()):
+            folder = PurePosixPath(rel).parent.name
+            if folders.setdefault(folder, rel) != rel:
+                raise InstructionBundleError(
+                    f"selected skills collide on package folder {folder!r}: "
+                    f"{folders[folder]!r} vs {rel!r}"
+                )
+            skill_md_by_path[rel] = self._freeze_and_publish_skill(
+                p, bundle_dir, repo_root, ref, folder, secrets, resume=resume
+            )
         return {
-            nid: tuple((repo / r.path).as_posix() for r in refs) for nid, refs in skill_map.items()
+            nid: tuple(skill_md_by_path[ref.path] for ref in refs)
+            for nid, refs in skill_map.items()
         }
+
+    def _freeze_and_publish_skill(
+        self,
+        p: _Pipeline,
+        bundle_dir: Path,
+        repo_root: Path,
+        ref: SkillRef,
+        folder: str,
+        secrets: tuple[str, ...],
+        *,
+        resume: bool,
+    ) -> str:
+        """Freeze (fresh) then publish one skill package to the exchange; return its SKILL.md path.
+
+        Fresh/restart freezes the package closure into the bundle and records its entries; continue
+        reuses the already-verified frozen files. Either way every package file is gated against a
+        known secret and published (redacted) to the exchange from the frozen canonical, so a
+        mid-task edit to a ``SKILL.md`` or resource cannot change what the agent reads.
+        """
+        skill_md_key = f"skills/{folder}/SKILL.md"
+        if not resume:
+            package_files = list(self._git.list_tracked_files(str(PurePosixPath(ref.path).parent)))
+            package = freeze_skill_package(bundle_dir, folder, ref.path, package_files, repo_root)
+            p.instruction_entries.extend(package.entries)
+            keys = [key for key, _ in package.entries]
+            skill_md_key = package.skill_md_key
+        else:
+            skill_root = bundle_dir / "skills" / folder
+            keys = sorted(
+                f"skills/{folder}/{path.relative_to(skill_root).as_posix()}"
+                for path in skill_root.rglob("*")
+                if path.is_file()
+            )
+        skill_md_path = ""
+        for key in keys:
+            published = self._gate_and_publish_instruction_file(
+                p, bundle_dir / key, key, secrets, label=f"skill {folder!r}"
+            )
+            if key == skill_md_key:
+                skill_md_path = published
+        return skill_md_path
+
+    def _gate_and_publish_instruction_file(
+        self,
+        p: _Pipeline,
+        canonical: Path,
+        exchange_relpath: str,
+        secrets: tuple[str, ...],
+        *,
+        label: str,
+    ) -> str:
+        """Gate a frozen instruction file against a secret, then publish it redacted to exchange.
+
+        A non-UTF-8 file cannot be faithfully projected to the (text) exchange, so it is an
+        unrepresentable resource that fails closed (AC7) rather than being shipped as mojibake.
+        """
+        try:
+            text = canonical.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            raise InstructionBundleError(
+                f"{label} file {exchange_relpath!r} is not readable UTF-8 text and cannot be "
+                f"safely projected to the agent-readable exchange: {exc}"
+            ) from exc
+        assert_no_required_secret(text, extra_secrets=secrets, label=f"{label}:{exchange_relpath}")
+        return publish_file(
+            str(self._exchange_root),
+            p.task.id,
+            exchange_relpath,
+            str(canonical),
+            extra_secrets=secrets,
+        )
 
     def _finish_engine_run(self, p: _Pipeline, result: FlowRunResult) -> PipelineResult:
         """Map a terminal :class:`FlowRunResult` to a :class:`PipelineResult` (+ auto-merge)."""
@@ -2849,6 +3644,25 @@ class Orchestrator:
         """
         return Path(p.task_file).name if p.task_file else None
 
+    def _capture_governance_changed(self, p: _Pipeline) -> None:
+        """Record which governance/instruction files this run changed and warn the operator (VF-20).
+
+        Called at finalize, before terminal cleanup restores the working tree, so the base-anchored
+        diff still reflects the task's net change (including files earlier decomposed subtasks
+        committed). Governance/instruction files are ordinary, editable content — a change is a
+        non-blocking notice (this console/log WARNING, plus the PR summary, ledger, and Telegram),
+        never a block. Empty on ordinary tasks, so there is no noise there.
+        """
+        p.governance_changed = governance_changed_paths(
+            self._git.changed_code_paths_since_task_base()
+        )
+        if p.governance_changed:
+            self._log(p.task.id).warning(
+                "governance/instruction files changed by this task (notice, not a block): %s",
+                ", ".join(p.governance_changed),
+                extra={"governance_changed": list(p.governance_changed)},
+            )
+
     def _finalize_task_artifacts(
         self, p: _Pipeline, final: Status, *, degraded: bool = False
     ) -> Path | None:
@@ -2861,8 +3675,11 @@ class Orchestrator:
         ``degraded`` (DONE path only) flows into the deterministic fallback body as a visible
         "fallback summary" callout when the supervisor synthesis was expected but failed.
         """
+        self._capture_governance_changed(p)
         dest = self._move_task_file(p, final)
         body = self._summary_md_body(p, degraded=degraded)
+        if p.governance_changed:
+            body += _render_governance_section(p.governance_changed)
         if dest is None:
             return None
         summary_path = dest.with_name(f"{p.task.id}.summary.md")
@@ -2874,6 +3691,19 @@ class Orchestrator:
         return summary_path
 
     # --- terminal handling ----------------------------------------------------------------
+
+    def _exchange_active_unsafe(self, task_id: str) -> bool:
+        """True when the task's active exchange is flagged unsafe (WRI-012 quiescence barrier).
+
+        The provider tree could not be proven quiescent, so no Git action, cleanup checkout, or
+        exchange seal may run against a tree an unknown descendant might still be writing
+        (architecture.md: no manifest, check, Git action, seal, or next task before quiescence is
+        proven). A task with no row yet (never registered) reads as safe."""
+        try:
+            _contaminated, active_unsafe = self._store.get_exchange_guard(task_id)
+        except KeyError:
+            return False
+        return active_unsafe
 
     def _fail(
         self,
@@ -2902,12 +3732,23 @@ class Orchestrator:
         self._write_infra_failure_report(p, node_id=node_id, error=error, run_state=run_state)
         if not p.branch:
             return self._go_terminal(p, status, manual_reason=error)
+        if self._exchange_active_unsafe(p.task.id):
+            # WRI-012 quiescence barrier: the provider tree is not proven quiescent, so no Git
+            # action may run against a tree an unknown descendant might still be writing. Withhold
+            # the terminal commit/push (the failure report is already written); ``_go_terminal``
+            # likewise withholds the cleanup checkout and the seal, and the flag blocks the next
+            # launch until an operator resolves.
+            self._log(p.task.id).warning(
+                "infra-terminal publish withheld: provider tree not proven quiescent "
+                "(exchange unsafe); no commit/push"
+            )
+            return self._go_terminal(p, status, manual_reason=error)
         moved = False
         try:
             moved = self._finalize_task_artifacts(p, status) is not None
             verb = "failed attempt" if status is Status.FAILED else "manual action required"
             self._git.commit_code(p.task.id, f"chore({p.task.id}): {verb} — {p.task.title}")
-            self._git.commit_audit(p.task.id)
+            self._git.commit_audit(p.task.id, task_packet_digest=self._task_packet_digest(p))
             self._git.push(p.task.id, p.branch)
         except (GitCommandError, OSError) as exc:
             self._log(p.task.id).warning(
@@ -2945,6 +3786,54 @@ class Orchestrator:
         except OSError as exc:
             self._log(p.task.id).warning("failure report not written", extra={"error": str(exc)})
 
+    def _reconcile_open_node_runs(self, task_id: str, *, reason: str) -> None:
+        """Close node runs left ``running`` by a hard stop, at a terminal transition (VF-13).
+
+        A ``--force-full`` SIGKILL kills the daemon mid-node, so the node's own
+        ``complete_node_run`` and ``record_provider_attempts`` never run: the ``node_runs`` row is
+        stranded ``running`` and the killed provider attempt is unbilled. Every terminal producer
+        (``_go_terminal`` and the hand-finish ``finalize_task``) runs this so the orphan is closed
+        to ``aborted`` and each
+        killed provider node earns a ``provider_attempts`` row — ``usage_delta_status='unknown'``,
+        because the partial run's real token usage is not recoverable — so an aborted run is not
+        free in the cost roll-up. A no-op on a clean terminal (no orphan rows exist), and it emits
+        ``WARNING`` naming the reconciled nodes, since an operator abort is exactly the event a
+        post-mortem needs and the SIGKILLed daemon logged nothing itself.
+        """
+        finished_at = self._clock()
+        closed = self._store.reconcile_open_node_runs(
+            task_id,
+            finished_at=finished_at,
+            error_class=ErrorClass.CANCELLED.value,
+            skip_reason=reason,
+        )
+        if not closed:
+            return
+        for row in closed:
+            if row.id is None or row.route_primary is None:
+                continue  # a non-provider node (checks/publish) has no billable attempt to record
+            self._store.record_provider_attempt(
+                ProviderAttemptRow(
+                    task_id=task_id,
+                    node_run_id=row.id,
+                    provider=row.route_primary,
+                    attempt=1,
+                    status="aborted",
+                    error_class=ErrorClass.CANCELLED.value,
+                    started_at=row.started_at,
+                    finished_at=finished_at,
+                    usage_delta_status="unknown",
+                )
+            )
+        self._log(task_id).warning(
+            "reconciled orphan node runs after termination",
+            extra={
+                "reconciled": len(closed),
+                "nodes": ",".join(r.node_id for r in closed),
+                "reason": reason,
+            },
+        )
+
     def _go_terminal(
         self,
         p: _Pipeline,
@@ -2954,6 +3843,7 @@ class Orchestrator:
         manual_reason: str | None = None,
         already_moved: bool = False,
         merge_outcome: str | None = None,
+        mutation: ExchangeMutationManual | None = None,
     ) -> PipelineResult:
         """Run terminal cleanup, set the final status, append exactly one ledger record.
 
@@ -2962,11 +3852,34 @@ class Orchestrator:
         after the cleanup checkout.
         """
         final = status
-        cleanup = self._observe(
-            p,
-            "terminal cleanup",
-            lambda: self._git.terminal_cleanup(p.task.id, mode=self._branch_mode(p.task)),
-        )
+        if self._exchange_active_unsafe(p.task.id):
+            # WRI-012 quiescence barrier: do not run a checkout/cleanup Git action while an unknown
+            # descendant may still be writing the working tree. Leave HEAD as-is and report unsafe;
+            # the seal is withheld downstream and the flag holds the next task (the pre-launch
+            # ``assert_exchange_current_task_only`` refuses to start over an un-cleared exchange)
+            # until an operator resolves.
+            cleanup = CleanupOutcome(
+                safe=False,
+                target_branch=self._config.repo.base_branch,
+                error="terminal cleanup withheld: provider tree not proven quiescent (WRI-012)",
+            )
+            self._log(p.task.id).warning(
+                "terminal cleanup withheld: provider tree not proven quiescent; HEAD left as-is"
+            )
+        else:
+            # A resumable manual park carrying the task's own WIP keeps that WIP (its resume
+            # input): terminal cleanup preserves it and leaves HEAD on the branch rather than
+            # failing "unaccounted changes" (VF-1). DONE/FAILED still fail-close on a dirty tree.
+            preserve_own_wip = (
+                status is Status.MANUAL_ACTION_REQUIRED and self._worktree_is_task_output(p.task.id)
+            )
+            cleanup = self._observe(
+                p,
+                "terminal cleanup",
+                lambda: self._git.terminal_cleanup(
+                    p.task.id, mode=self._branch_mode(p.task), preserve_own_wip=preserve_own_wip
+                ),
+            )
         if not cleanup.safe and status is Status.DONE:
             # Publishing finished but the working copy could not be safely restored → manual.
             final = Status.MANUAL_ACTION_REQUIRED
@@ -2974,7 +3887,13 @@ class Orchestrator:
             # Deterministic short-term failure episode (no LLM); never long-term (AC-W3).
             self._record_failure_memory(p)
         # Record the terminal-cleanup outcome and the reason this task stopped (when applicable).
-        last_error = cleanup.error or manual_reason
+        # Surface the true stop reason first; a cleanup problem is secondary context, never a
+        # replacement for it — a cleanup error must not mask the node's manual reason (VF-1).
+        last_error: str | None
+        if manual_reason and cleanup.error and not cleanup.safe:
+            last_error = f"{manual_reason}; terminal cleanup: {cleanup.error}"
+        else:
+            last_error = manual_reason or cleanup.error
         self._store.update_task(
             p.task.id,
             cleanup_target_branch=cleanup.target_branch,
@@ -2982,6 +3901,12 @@ class Orchestrator:
             cleanup_completed_at=self._clock() if cleanup.safe else None,
             cleanup_last_error=last_error,
             blocked_since=None,  # B-lite: a terminal task is no longer parked
+        )
+        # VF-13: close any node run left ``running`` by a hard stop before recording the terminal
+        # state. A no-op on the normal path (the engine finalizes every node it runs); it catches a
+        # node stranded by an interrupt that still reached ``_go_terminal``.
+        self._reconcile_open_node_runs(
+            p.task.id, reason=manual_reason or f"terminal transition to {final.value}"
         )
         # The flow checkpoint marks where ``rerun --continue`` re-enters — meaningful only for a
         # non-success terminal. A ``done`` task has no resume position, so clear it (``node_runs``
@@ -3002,12 +3927,109 @@ class Orchestrator:
             pr_url=pr_url,
             reason=manual_reason,
             contacts=tuple(p.task.contacts),
+            governance_changed=p.governance_changed,
         )
         self._log(p.task.id).info(
             "terminal",
             extra={"final_status": final.value, "pr_url": pr_url, "cleanup_safe": cleanup.safe},
         )
+        # WRI-007 terminal exchange handling: seal a checksum-verified snapshot into the private
+        # audit and remove the active in-repo exchange (or quarantine a contaminated tree). It runs
+        # after WRI-012 has proven the provider tree quiescent (an unproven tree already set
+        # ``exchange_active_unsafe`` and blocks the seal). Never raises — the terminal status is
+        # already recorded and must stay stable.
+        self._seal_terminal_exchange(p.task.id, final=final, mutation=mutation)
         return PipelineResult(task_id=p.task.id, final_status=final, pr_url=pr_url)
+
+    def _seal_terminal_exchange(
+        self, task_id: str, *, final: Status, mutation: ExchangeMutationManual | None = None
+    ) -> None:
+        """Seal / quarantine the task's active exchange at a terminal transition (WRI-007).
+
+        Never raises: the terminal status is already committed, so any failure is logged and — when
+        it leaves an unsealed/undeleted tree — recorded as ``exchange_active_unsafe`` to block
+        every later provider launch until an operator resolves it. Idempotent: a task whose exchange
+        was already sealed/removed (e.g. an operator ``finalize`` after the pipeline terminal) is a
+        no-op. ``mutation`` carries the WRI-002 before/after manifests for a detected-mutation
+        terminal, so the contaminated tree is quarantined as evidence and never sealed.
+        """
+        log = self._log(task_id)
+        try:
+            contaminated, active_unsafe = self._store.get_exchange_guard(task_id)
+        except KeyError:
+            return
+        if active_unsafe:
+            # Quiescence was unproven (WRI-012 CONTAINMENT_UNVERIFIED): an unknown descendant may
+            # still be writing, so we must not build a manifest or touch the tree. Keep it in place;
+            # the flag already blocks every later launch until an operator resolves it.
+            log.warning(
+                "terminal exchange not sealed: active exchange unsafe (provider tree not proven "
+                "quiescent); later launches blocked until resolved"
+            )
+            return
+        if contaminated or mutation is not None:
+            self._store.update_task(task_id, exchange_contaminated=1)
+            expected = mutation.before if mutation is not None else None
+            observed: tuple[str, ...] = ()
+            if mutation is not None and mutation.before is not None and mutation.after is not None:
+                observed = diff_exchange_manifests(mutation.before, mutation.after)
+            try:
+                evidence = quarantine_contaminated(
+                    self._exchange_root,
+                    self._artifacts_root,
+                    task_id,
+                    expected=expected,
+                    observed_changes=observed,
+                )
+                log.warning(
+                    "contaminated exchange quarantined (never restore-eligible)",
+                    extra={"evidence": evidence.as_posix()},
+                )
+            except ExchangeCleanupBlocked as exc:
+                self._store.update_task(task_id, exchange_active_unsafe=1)
+                log.error("contaminated exchange quarantine blocked", extra={"error": str(exc)})
+            except OSError as exc:
+                # M7: the quarantine move (mkdir/copy2/rename) can raise a bare OSError (ENOSPC /
+                # EACCES) that is not an ExchangeCleanupBlocked. Honor "Never raises": flag the tree
+                # unsafe (blocks later launches) instead of crashing into H1's path with no signal.
+                self._store.update_task(task_id, exchange_active_unsafe=1)
+                log.error(
+                    "contaminated exchange quarantine failed (unexpected OS error)",
+                    extra={"error": str(exc)},
+                )
+            return
+        try:
+            result = seal_exchange(
+                self._exchange_root,
+                self._artifacts_root,
+                task_id,
+                metadata={"final_status": final.value, "sealed_at": self._clock()},
+            )
+            if result is not None:
+                log.info(
+                    "terminal exchange sealed",
+                    extra={"seal": result.seal_dir.as_posix(), "files": result.entry_count},
+                )
+        except ExchangeCleanupBlocked as exc:
+            # The snapshot sealed but the active dir could not be removed (a lock). The seal is
+            # kept (restore stays possible); block later launches until the lock is cleared.
+            self._store.update_task(task_id, exchange_active_unsafe=1)
+            log.error("terminal exchange cleanup blocked", extra={"error": str(exc)})
+        except (ExchangeError, ExchangeSealError) as exc:
+            # A path-safety violation surfaced by the seal walk (a planted symlink/hard-link/special
+            # file): the tree is not a clean snapshot. Block later launches and surface it.
+            self._store.update_task(task_id, exchange_active_unsafe=1)
+            log.error("terminal exchange seal failed (unsafe surface)", extra={"error": str(exc)})
+        except OSError as exc:
+            # M7: mkdir/copy2/write_text can raise a bare OSError (ENOSPC on a full disk, EACCES)
+            # after the terminal status + ledger were already written — not an ExchangeError/
+            # ExchangeSealError. Honor the "Never raises" contract: flag the tree unsafe (blocks
+            # every later launch) and log the precise target, instead of silently crashing into the
+            # H1 daemon-crash path with no signal and no unsafe flag.
+            self._store.update_task(task_id, exchange_active_unsafe=1)
+            log.error(
+                "terminal exchange seal failed (unexpected OS error)", extra={"error": str(exc)}
+            )
 
     def _move_task_file(self, p: _Pipeline, final: Status) -> Path | None:
         """Move the task file to its lifecycle folder; see _relocate_task_file."""
@@ -3103,6 +4125,18 @@ class Orchestrator:
         """Denied-read file secrets to scrub from the rendered prompt before storage."""
         return read_denied_secrets(
             self._config.repo.local_path, self._config.security.denied_read_paths
+        )
+
+    def _security_preamble(self) -> str:
+        """The Core-owned orchestrator security contract prepended to every provider prompt (VF-7).
+
+        Defense-in-depth / advisory only — never enforcement (the sandbox + deny projection are the
+        enforcement). Resolved once here (config-derived, not per-node) and threaded to the agent/
+        evaluator via ``NodeServices`` and to the supervisor directly: an always-on baseline plus a
+        read-restraint reinforcement when effective read-isolation is off (VF-6).
+        """
+        return build_orchestrator_security_preamble(
+            read_isolation_off=self._config.security.read_isolation_off
         )
 
     def _log(self, task_id: str) -> logging.LoggerAdapter[logging.Logger]:
@@ -3233,22 +4267,58 @@ class Orchestrator:
         ):
             return None
 
-    def _from_node_refusals(self, task_id: str, from_node: str) -> list[str]:
-        """Validate a ``--from`` target against the flow currently on disk (empty list => valid).
+    def _resume_node_refusals(
+        self, resume_node: str, *, live: FlowSnapshot | None, is_from: bool
+    ) -> list[str]:
+        """Validate the resume target against the flow currently on disk (empty list => valid).
 
-        Only checks that ``from_node`` exists — ``--from`` is an explicit, operator-driven override,
-        trusted to know what it's targeting even if the flow drifted since the checkpoint. The
-        checkpoint's fingerprint is rebaselined to the live flow's by ``_apply_continue_controls``
-        once this passes, so the resume actually lands at ``from_node`` instead of the engine's own
-        resume gate silently top-restarting (see there for why that matters).
+        An operator ``rerun --continue`` adopts the live control plane and resumes at
+        ``resume_node`` — the explicit ``--from`` override, or the checkpoint's current node. Either
+        way the node must still exist in the (possibly edited) live flow; refuse with an actionable
+        message when it does not, or when the on-disk flow no longer resolves at all. The
+        checkpoint's fingerprint is rebaselined to the live flow by ``_apply_continue_controls``
+        once this passes, so the resume lands at ``resume_node`` instead of the engine's resume gate
+        routing to manual.
         """
-        snapshot = self._persisted_flow_snapshot(task_id)
-        if snapshot is None:
-            return ["could not resolve the task's flow to validate --from; use plain --continue"]
-        if from_node not in snapshot.nodes_by_id:
-            known = ", ".join(sorted(snapshot.nodes_by_id))
-            return [f"--from node '{from_node}' is not in the current flow (nodes: {known})"]
+        if live is None:
+            return [
+                "could not resolve the task's flow (the on-disk flow may be invalid); "
+                "fix it or use a fresh rerun"
+            ]
+        if resume_node not in live.nodes_by_id:
+            known = ", ".join(sorted(live.nodes_by_id))
+            if is_from:
+                return [f"--from node '{resume_node}' is not in the current flow (nodes: {known})"]
+            return [
+                f"the checkpoint node '{resume_node}' no longer exists in the edited flow "
+                f"(nodes: {known}); pass --from <node> to pick a resume point, or a fresh rerun"
+            ]
         return []
+
+    def _control_plane_drifted(
+        self, task_id: str, live: FlowSnapshot, *, checkpoint_fingerprint: str | None
+    ) -> bool:
+        """True when the live control plane differs from the digest frozen at the checkpoint.
+
+        Bundle-level (flow YAML + role prompts + tool executables), so a role/tool-only edit counts
+        too — unlike ``flow_fingerprint`` (flow YAML only). Falls back to the flow_fingerprint when
+        no control-bundle digest was persisted (defensive; every current task freezes one). Drives
+        the ``--continue`` adopt/drift note; a broken/unreadable live input reads as drift.
+        """
+        persisted = self._store.get_control_bundle_digest(task_id)
+        if persisted is None:
+            return (
+                checkpoint_fingerprint is not None
+                and checkpoint_fingerprint != live.flow_fingerprint
+            )
+        assert live.source_path is not None
+        try:
+            live_digest = digest_live_control_inputs(
+                live, live.source_path.parent, self._tool_registry
+            )
+        except ControlBundleError:
+            return True
+        return live_digest != persisted
 
     def _transition(self, p: _Pipeline, dst: Status, **fields: object) -> None:
         src = p.status
@@ -3312,6 +4382,7 @@ class Orchestrator:
         pr_url: str | None,
         reason: str | None,
         contacts: tuple[str, ...] = (),
+        governance_changed: tuple[str, ...] = (),
     ) -> None:
         """Best-effort terminal notification. Never raises and never alters the outcome."""
         try:
@@ -3321,11 +4392,47 @@ class Orchestrator:
                 pr_url=pr_url,
                 reason=reason,
                 contacts=contacts,
+                governance_changed=governance_changed,
+                details=self._terminal_details(task_id, final_status),
             )
         except Exception as exc:
             self._log(task_id).warning(
                 "terminal notification failed", extra={"error_type": type(exc).__name__}
             )
+
+    def _terminal_details(self, task_id: str, final_status: Status) -> TerminalDetails | None:
+        """Assemble the VF-22 operator-facing enrichment for a needs-attention terminal.
+
+        Returns ``None`` for a clean ``done`` (kept terse) or when the task has no ``tasks`` row (a
+        validation reject has none) — the notification degrades to the terse one-line message. The
+        stop node, loop, and blocking finding are read from the on-disk ``failure_report.json`` the
+        engine / infra terminal already wrote; the rest from the ``TaskRow``. Best-effort: a
+        missing or unreadable report simply omits those fields. Never raises (the caller swallows).
+        """
+        if final_status not in (Status.MANUAL_ACTION_REQUIRED, Status.FAILED):
+            return None
+        row = self._store.get_task(task_id)
+        if row is None:
+            return None
+        loop: str | None = None
+        finding: TerminalFinding | None = None
+        report = _read_failure_report(row.failure_report_path)
+        if report is not None:
+            raw_loop = report.get("loop")
+            loop = raw_loop if isinstance(raw_loop, str) and raw_loop != "infra" else None
+            finding = _top_blocking_finding(report.get("last_review_findings"))
+        # The stop node is the persisted resume checkpoint (``tasks.current_node``), not a TaskRow
+        # field — read it via the flow-checkpoint accessor (the row is known to exist here).
+        stop_node = self._store.get_flow_checkpoint(task_id)[0]
+        return TerminalDetails(
+            title=row.title or None,
+            branch=row.branch,
+            stop_node=stop_node,
+            loop=loop,
+            fix_rounds=row.fix_iterations,
+            finding=finding,
+            report_path=_stuck_report_path(row.failure_report_path),
+        )
 
     def _append_ledger(
         self,
@@ -3356,5 +4463,6 @@ class Orchestrator:
                 subtasks_completed=task_row.subtasks_completed if task_row else None,
                 attempt=attempt,
                 rerun_of=p.task.id if attempt > 1 else None,
+                governance_changed=p.governance_changed,
             )
         )

@@ -6,9 +6,7 @@ Windows and POSIX with no real Codex/Claude binary.
 
 from __future__ import annotations
 
-import contextlib
 import os
-import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -18,9 +16,47 @@ import pytest
 import wastech_orchestrator.providers.process as process_mod
 from wastech_orchestrator.providers.process import AgentHandleRecorder, run_process
 
+# Every test here is a slow integration test (real git / subprocess / process tree).
+pytestmark = pytest.mark.slow
+
 
 def _py(code: str) -> list[str]:
     return [sys.executable, "-c", code]
+
+
+class _FakeContainment:
+    """A no-op :class:`ProcessContainment` for tests that fake ``Popen``.
+
+    Records the lifecycle calls and issues **no real signal**, so a fabricated pid is never
+    ``killpg``'d. ``proven``/``detail`` drive the quiescence result the barrier acts on.
+    """
+
+    def __init__(
+        self,
+        *,
+        popen_kwargs: dict[str, object] | None = None,
+        proven: bool = True,
+        detail: str = "fake",
+    ) -> None:
+        self._kwargs = popen_kwargs or {}
+        self._proven = proven
+        self._detail = detail
+        self.adopted: object = None
+        self.terminate_calls = 0
+        self.prove_calls = 0
+
+    def popen_kwargs(self) -> dict[str, object]:
+        return dict(self._kwargs)
+
+    def adopt(self, proc: object) -> None:
+        self.adopted = proc
+
+    def terminate(self) -> None:
+        self.terminate_calls += 1
+
+    def terminate_and_prove(self) -> process_mod.QuiescenceResult:
+        self.prove_calls += 1
+        return process_mod.QuiescenceResult(proven=self._proven, detail=self._detail)
 
 
 def test_stdout_is_streamed_to_file(tmp_path: Path) -> None:
@@ -161,10 +197,12 @@ def test_duration_uses_injected_monotonic(tmp_path: Path) -> None:
     assert result.duration_seconds == 42.5
 
 
-def test_agent_leads_its_own_session_group(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The agent leads its OWN session/group (``start_new_session`` on POSIX), reversing the R1
-    shared-group topology: its whole subtree is now reaped via the recorded handle on every stop
-    route rather than by shared group membership a descendant can break away from."""
+def test_run_process_merges_containment_popen_kwargs_and_shell_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """run_process places the child into the injected containment — the containment's
+    ``popen_kwargs`` are merged into ``Popen`` — and always launches shell-free. A fake containment
+    keeps the fabricated pid from being signalled."""
     captured: dict[str, object] = {}
 
     class _FakeProc:
@@ -180,10 +218,58 @@ def test_agent_leads_its_own_session_group(tmp_path: Path, monkeypatch: pytest.M
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
     run_process(
-        _py("pass"), cwd=tmp_path, env={}, timeout_seconds=30, stdout_path=tmp_path / "o.log"
+        _py("pass"),
+        cwd=tmp_path,
+        env={},
+        timeout_seconds=30,
+        stdout_path=tmp_path / "o.log",
+        make_containment=lambda: _FakeContainment(popen_kwargs={"sentinel_kw": True}),
     )
-    assert captured.get("start_new_session") == (os.name != "nt")  # leads its own group on POSIX
+    assert captured.get("sentinel_kw") is True  # the containment's launch kwargs reached Popen
     assert captured.get("shell") is False
+
+
+def test_posix_containment_leads_its_own_session_group() -> None:
+    """The POSIX containment launches the child as its own session/group leader
+    (``start_new_session``), so its whole subtree is reachable by one ``killpg``; the Windows Job
+    Object leaves ``start_new_session`` off (a no-op there — the job does the owning)."""
+    assert process_mod.PosixProcessContainment().popen_kwargs() == {"start_new_session": True}
+    assert process_mod.WindowsJobObjectContainment(win32=object()).popen_kwargs() == {  # type: ignore[arg-type]
+        "start_new_session": False
+    }
+
+
+def test_trusted_run_contains_and_still_proves_quiescence(tmp_path: Path) -> None:
+    """``trusted=True`` (the orchestrator-git fast path) still launches inside a real containment
+    and proves quiescence on return — it only skips the POSIX ``ps`` descendant sweep, not the
+    group isolation or the emptiness proof."""
+    result = run_process(
+        _py("pass"),
+        cwd=tmp_path,
+        env={},
+        timeout_seconds=30,
+        stdout_path=tmp_path / "o.log",
+        trusted=True,
+    )
+    assert result.exit_code == 0
+    assert result.timed_out is False
+    assert result.quiescence is not None and result.quiescence.proven is True
+
+
+def test_explicit_make_containment_overrides_trusted(tmp_path: Path) -> None:
+    """An explicitly injected ``make_containment`` wins over ``trusted`` — the test seam is
+    preserved, so ``trusted`` only chooses the default factory when none is injected."""
+    fake = _FakeContainment()
+    run_process(
+        _py("pass"),
+        cwd=tmp_path,
+        env={},
+        timeout_seconds=30,
+        stdout_path=tmp_path / "o.log",
+        trusted=True,
+        make_containment=lambda: fake,
+    )
+    assert fake.prove_calls == 1  # the injected fake ran, not the trusted factory
 
 
 def test_recorder_records_the_child_then_clears_on_reap(tmp_path: Path) -> None:
@@ -228,18 +314,10 @@ def test_recorder_untouched_when_launch_fails(tmp_path: Path) -> None:
     assert events == []  # no child launched → neither spawn nor reap fired
 
 
-def test_timeout_kills_the_whole_subtree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """On timeout the runner reaps the child's subtree via ``kill_agent_subtree`` (pid == pgid),
-    not just the direct child, and still reports ``timed_out``."""
-    killed: list[tuple[int, int]] = []
-
-    def fake_kill(pid: int, pgid: int) -> None:
-        killed.append((pid, pgid))
-        # Actually reap the real child so the post-timeout drain returns instead of blocking.
-        with contextlib.suppress(OSError):
-            os.killpg(pgid, signal.SIGKILL) if os.name != "nt" else os.kill(pid, signal.SIGTERM)
-
-    monkeypatch.setattr(process_mod, "kill_agent_subtree", fake_kill)
+def test_timeout_reaps_the_subtree_and_proves_quiescence(tmp_path: Path) -> None:
+    """On timeout the real containment kills the child's subtree (so the drain returns) and proves
+    the group empty; classification stays ``timed_out``. Uses the real containment against a real
+    child, so the sleeping process is genuinely reaped."""
     result = run_process(
         _py("import time; time.sleep(10)"),
         cwd=tmp_path,
@@ -249,19 +327,16 @@ def test_timeout_kills_the_whole_subtree(tmp_path: Path, monkeypatch: pytest.Mon
     )
     assert result.timed_out is True
     assert result.exit_code is None
-    assert len(killed) == 1
-    assert killed[0][0] == killed[0][1]  # pid == pgid (its own group)
+    assert result.quiescence is not None
+    assert result.quiescence.proven is True  # the reaped subtree was proven gone before returning
 
 
-def test_keyboard_interrupt_kills_the_subtree_and_reraises(
+def test_keyboard_interrupt_terminates_containment_and_reraises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A propagating interrupt reaps the subtree before re-raising, so a foreground ``worc run``
-    (no daemon finally) never orphans the agent."""
-    killed: list[tuple[int, int]] = []
-    monkeypatch.setattr(
-        process_mod, "kill_agent_subtree", lambda pid, pgid: killed.append((pid, pgid))
-    )
+    """A propagating interrupt terminates the containment before re-raising (so a foreground
+    ``worc run`` never orphans the agent), and the quiescence proof still runs in ``finally``."""
+    fake = _FakeContainment()
 
     class _FakeProc:
         pid = 5555
@@ -279,9 +354,15 @@ def test_keyboard_interrupt_kills_the_subtree_and_reraises(
     monkeypatch.setattr(subprocess, "Popen", lambda argv, **kw: _FakeProc())
     with pytest.raises(KeyboardInterrupt):
         run_process(
-            _py("pass"), cwd=tmp_path, env={}, timeout_seconds=30, stdout_path=tmp_path / "o.log"
+            _py("pass"),
+            cwd=tmp_path,
+            env={},
+            timeout_seconds=30,
+            stdout_path=tmp_path / "o.log",
+            make_containment=lambda: fake,
         )
-    assert killed == [(5555, 5555)]
+    assert fake.terminate_calls >= 1  # subtree killed before re-raising
+    assert fake.prove_calls == 1  # `finally` still ran the bounded quiescence proof
 
 
 def test_spawn_detached_uses_argv_list_shell_false_and_devnull_stdin(

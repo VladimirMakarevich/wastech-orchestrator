@@ -12,6 +12,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -57,6 +58,7 @@ from wastech_orchestrator.git_manager import (
     KIND_PR,
     GitCommandError,
     GitManager,
+    ManualActionRequired,
     append_runtime_excludes,
 )
 from wastech_orchestrator.install import config_writer, detect, wizard
@@ -77,6 +79,7 @@ from wastech_orchestrator.observability.logging import configure_logging, set_lo
 from wastech_orchestrator.preflight import preflight_gh
 from wastech_orchestrator.providers import process as agent_process
 from wastech_orchestrator.providers.base import ProviderId
+from wastech_orchestrator.runtime_layout import CONTROL_HOME_DIRNAME, RuntimeLayout
 from wastech_orchestrator.security.isolation import check_isolation
 from wastech_orchestrator.state_store import IncompatibleStateError, StateStore, TaskRow
 from wastech_orchestrator.task.model import DEFAULT_QUEUE, priority_rank
@@ -105,10 +108,11 @@ _EXIT_BY_STATUS: dict[Status, int] = {
 # Default count for `list --recent` (and the "recent" section of the default overview).
 _LIST_RECENT_DEFAULT = 10
 
-# The orchestrator's runtime home inside the target repo. Everything the orchestrator
+# The orchestrator's runtime home inside the target repo is named by `runtime_layout`
+# (`CONTROL_HOME_DIRNAME` / `PRIVATE_HOME_DIRNAME`, both `.worc` today). Everything the orchestrator
 # generates or installs lives under `<repo>/.worc/` — gitignored as a whole — except the audit
-# trail: the task lifecycle dirs below sit at the repo root and are audit-committed.
-WORC_HOME = ".worc"
+# trail: the task lifecycle dirs below sit at the repo root and are audit-committed. Consumers reach
+# the home via `layout_for(config)` (private) / `.control_home`, never a rebuilt `.worc` literal.
 
 # Task lifecycle dirs created at the repo root by `install` (tracked; the audit commit captures the
 # task file + its `<id>.summary.md` in done/failed). `tasks/rejected` is the quarantine and
@@ -891,7 +895,7 @@ def resolve_config_path(args: argparse.Namespace) -> str | None:
         return str(explicit)
     info = detect.git_info(Path.cwd())
     if info is not None:
-        candidate = info.root / WORC_HOME / "config.yaml"
+        candidate = RuntimeLayout.default(info.root).control_home / "config.yaml"
         if candidate.is_file():
             return str(candidate)
     return None
@@ -914,7 +918,7 @@ def resolve_env_file_path(args: argparse.Namespace) -> tuple[Path | None, bool]:
         return Path(config_path).parent / ".env", False
     info = detect.git_info(Path.cwd())
     if info is not None:
-        return info.root / WORC_HOME / ".env", False
+        return RuntimeLayout.default(info.root).private_home / ".env", False
     return None, False
 
 
@@ -1085,14 +1089,25 @@ def load_config_for(args: argparse.Namespace) -> OrchestratorConfig | None:
     return config
 
 
-def worc_home_for(config: OrchestratorConfig) -> Path:
-    """The orchestrator's gitignored runtime home: ``<repo>/.worc/``.
+def layout_for(config: OrchestratorConfig) -> RuntimeLayout:
+    """The one provider-neutral :class:`RuntimeLayout` for the configured repo (WRI-004).
 
-    Everything the orchestrator generates — ``state.db``, ``logs/``, ``orchestrator.pid``,
-    ``workspace/``, ``checks/``, the resolved check profile, validation reports — lives here, plus
-    the installed ``config.yaml``, ``templates/``, and ``guide/``. The whole dir is gitignored.
+    Built here at the CLI composition boundary and injected into consumers so each declares which
+    surface it owns. ``control_home`` and ``private_home`` both resolve to ``<repo>/.worc`` today.
     """
-    return Path(config.repo.local_path) / WORC_HOME
+    return RuntimeLayout.default(config.repo.local_path)
+
+
+def worc_home_for(config: OrchestratorConfig) -> Path:
+    """The gitignored **private** runtime home — ``layout.private_home`` (``<repo>/.worc/`` today).
+
+    Everything the orchestrator generates privately — ``state.db``, ``logs/``, ``orchestrator.pid``,
+    ``workspace/``, ``checks/``, the resolved check profile, validation reports, the memory store —
+    lives here. It is the private-surface accessor; control-plane consumers
+    (config/flows/tools/guide) use ``layout_for(config).control_home`` instead. The two coincide
+    until WRI-005 relocates the private home.
+    """
+    return layout_for(config).private_home
 
 
 def tasks_root_for(config: OrchestratorConfig) -> Path:
@@ -1197,11 +1212,61 @@ def _configure_runtime_logging(args: argparse.Namespace) -> None:
     )
 
 
+# Split a filename into runs of ASCII digits vs everything else (capturing group → the digit runs
+# land on odd indices of the result). ASCII-only so ``lstrip("0")`` and the magnitude comparison
+# below stay well-defined; any non-ASCII digit falls into a text run and is compared as folded text.
+_DIGIT_RUN = re.compile(r"([0-9]+)")
+
+# One token per run: ``(0, 0, text)`` for a text run, ``(1, magnitude, digits)`` for a digit run
+# (text sorts before digits at the same position). Uniform 3-tuple shape so the key type is flat.
+_NaturalToken = tuple[int, int, str]
+# The operator-visible ordering key: the natural tokens, then the raw name as the final tie-break.
+_NaturalKey = tuple[tuple[_NaturalToken, ...], str]
+
+
+def natural_sort_key(name: str) -> _NaturalKey:
+    """Ordering key for a pending task filename — the tie-break the whole scheduler sorts on.
+
+    This is the order the operator reads in ``worc list`` / ``worc top`` *and* the order the daemon
+    actually claims files in, so it must match a file manager's numeric-aware listing and be
+    identical on every OS:
+
+    - **Natural**: digit runs compare by magnitude, not bytewise, so ``p9`` sorts before ``p10``. A
+      digit run compares as ``(len(no_leading_zeros), no_leading_zeros)`` — a string compare, so a
+      pathological all-digits name never triggers an unbounded ``int()``, while ``007`` still equals
+      ``7`` in magnitude.
+    - **Platform-stable**: the name is casefolded *here* rather than left to ``Path.__lt__`` (whose
+      case handling is case-sensitive on POSIX but case-folded on Windows), so the scheduler's
+      decision never depends on the host OS. Never sort ``Path`` objects for a scheduling decision.
+    - **Strict total order**: the original (non-folded) name is the final element, so distinct names
+      — ``p9-07`` vs ``p9-7``, or two names differing only in case — never compare equal and the
+      result cannot depend on ``iterdir()`` yield order.
+    """
+    tokens: list[_NaturalToken] = []
+    for index, part in enumerate(_DIGIT_RUN.split(name.casefold())):
+        if index % 2:  # capturing split → odd indices are the (always non-empty) digit runs
+            stripped = part.lstrip("0")
+            tokens.append((1, len(stripped), stripped))
+        elif part:  # even indices are text; skip the empties re.split emits between adjacent runs
+            tokens.append(
+                (0, 0, part)
+            )  # middle 0 keeps the 3-tuple shape uniform (unused for text)
+    return (tuple(tokens), name)
+
+
 def select_pending(folder: Path) -> list[Path]:
-    """Pending task files (``.md`` / ``.json``), in a deterministic order."""
+    """Pending task files (``.md`` / ``.json``) in :func:`natural_sort_key` order.
+
+    Natural, platform-stable, and a strict total order — the same tie-break every ordering consumer
+    (the scheduler, ``worc list``, ``promote --all``) uses, so the order never depends on the host
+    OS or on ``iterdir()`` yield order.
+    """
     if not folder.is_dir():
         return []
-    return sorted(p for p in folder.iterdir() if p.suffix.lower() in (".md", ".json"))
+    return sorted(
+        (p for p in folder.iterdir() if p.suffix.lower() in (".md", ".json")),
+        key=lambda p: natural_sort_key(p.name),
+    )
 
 
 class _PendingScan(NamedTuple):
@@ -1253,17 +1318,18 @@ def scan_pending_sorted(folder: Path, selector: str) -> list[tuple[Path, _Pendin
     """Pending files for ``selector``'s queue, ranked exactly as :func:`watch_once` runs them.
 
     Keep only files whose ``queue`` equals ``selector`` (static partitioning across instances), then
-    sort by ``(priority_rank, path)`` — :func:`select_pending` is already filename-sorted, so the
-    path tie-break preserves the deterministic order within a priority. This is the single source of
-    truth for "what order will the daemon actually run", shared by ``watch_once`` and the read-only
-    monitor (``worc top`` / the console ``ps`` view) so the displayed order can never drift.
+    sort by ``(priority_rank, natural_sort_key(name))`` — ``priority`` is the only intentional lever
+    and the filename is the natural, platform-stable tie-break within a priority. This is the single
+    source of truth for "what order will the daemon actually run", shared by ``watch_once`` and the
+    read-only monitor (``worc list`` / ``worc top`` / the console ``ps`` view) so the shown order
+    never drifts from the claim order.
     """
     scans = [
         (p, s)
         for p, s in ((p, _scan_pending_meta(p)) for p in select_pending(folder))
         if s.queue == selector
     ]
-    scans.sort(key=lambda item: (item[1].priority_rank, item[0]))
+    scans.sort(key=lambda item: (item[1].priority_rank, natural_sort_key(item[0].name)))
     return scans
 
 
@@ -1458,9 +1524,9 @@ def watch_once(
     ``pending/`` for the operator, and re-running it would only reject it as ``duplicate_task_id``
     and quarantine the file. Resolving it (``rerun``/``finalize``) is the operator's call.
 
-    Eligible tasks are ranked by ``priority`` (high → mid → low), ties broken by the filename order
-    from :func:`select_pending`. ``depends_on`` is always stronger: a higher-priority but WAITING
-    task is skipped, so a lower-priority eligible task still runs ahead of it.
+    Eligible tasks are ranked by ``priority`` (high → mid → low), ties broken by the natural,
+    platform-stable filename order from :func:`natural_sort_key`. ``depends_on`` is always stronger:
+    a higher-priority but WAITING task is skipped, so a lower-priority eligible task runs first.
     """
     results: list[PipelineResult] = []
     resumed = orchestrator.resume()
@@ -1477,7 +1543,7 @@ def watch_once(
     auto = config.orchestrator.auto_mode.enabled
     selector = queue if queue is not None else config.orchestrator.queue
     # Partition + rank in one place (shared with the read-only monitor): drop other-queue tasks,
-    # then order by (priority_rank, filename). pending_map is order-independent.
+    # then order by (priority_rank, natural filename key). pending_map is order-independent.
     scans = scan_pending_sorted(folder, selector)
     pending_map = {s.task_id: s.depends_on for _p, s in scans if s.task_id is not None}
     for task_file, scan in scans:
@@ -1531,7 +1597,7 @@ def _build_cleanup_hook(config: OrchestratorConfig) -> Callable[[], None] | None
             return  # rate-limited: too soon since the last pass
         state["last"] = now
         try:
-            layout = MemoryLayout.for_repo(config.repo.local_path)
+            layout = MemoryLayout(layout_for(config).private_home)
             if not layout.root.exists():
                 return  # nothing written yet — no work
             service = MemoryService(layout, config=config.memory)
@@ -1636,12 +1702,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     config = load_config_for(args)
     if config is None:
         return 2
+    preflight.require_git_control()  # WRI-009: git must honor `core.hooksPath` (>= 2.9)
     if config.git.create_pull_request:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
         preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
     orchestrator = build_orchestrator(
         config,
-        artifacts_root=worc_home_for(config),
+        layout=layout_for(config),
+        env_file=resolve_env_file_path(args)[0],
         heartbeat_seconds=args.heartbeat_seconds,
     )
     # Refuse an explicit run of a dependent whose dependencies are not merged — never build it on a
@@ -1813,7 +1881,8 @@ def cmd_rerun(args: argparse.Namespace) -> int:
     target_id: str = args.task_id
     orchestrator = build_orchestrator(
         config,
-        artifacts_root=root,
+        layout=layout_for(config),
+        env_file=resolve_env_file_path(args)[0],
         heartbeat_seconds=args.heartbeat_seconds,
         is_recovery_rerun=lambda i: i == target_id,
     )
@@ -1833,6 +1902,7 @@ def cmd_rerun(args: argparse.Namespace) -> int:
         _report_rerun_plan(plan)
         return 0
 
+    preflight.require_git_control()  # WRI-009: git must honor `core.hooksPath` (>= 2.9)
     if config.git.create_pull_request:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
         preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
@@ -1943,7 +2013,10 @@ def cmd_finalize(args: argparse.Namespace) -> int:
 
     declared = _FINALIZE_STATUS[args.as_]
     orchestrator = build_orchestrator(
-        config, artifacts_root=root, heartbeat_seconds=args.heartbeat_seconds
+        config,
+        layout=layout_for(config),
+        env_file=resolve_env_file_path(args)[0],
+        heartbeat_seconds=args.heartbeat_seconds,
     )
     plan = orchestrator.plan_finalize(
         args.task_id, declared=declared, pr_url=args.pr_url, verify=not args.no_verify_pr
@@ -2044,7 +2117,10 @@ def _cmd_prs_sync(args: argparse.Namespace, config: OrchestratorConfig, root: Pa
             print(f"prs --sync: the watch daemon is running (pid {pid}); stop it first")
             return 1
     orchestrator = build_orchestrator(
-        config, artifacts_root=root, heartbeat_seconds=args.heartbeat_seconds
+        config,
+        layout=layout_for(config),
+        env_file=resolve_env_file_path(args)[0],
+        heartbeat_seconds=args.heartbeat_seconds,
     )
     entries = orchestrator.sync_external_merges(write=args.yes)
     if not entries:
@@ -2109,7 +2185,10 @@ def cmd_merge_task(args: argparse.Namespace) -> int:
         return 2
 
     orchestrator = build_orchestrator(
-        config, artifacts_root=root, heartbeat_seconds=args.heartbeat_seconds
+        config,
+        layout=layout_for(config),
+        env_file=resolve_env_file_path(args)[0],
+        heartbeat_seconds=args.heartbeat_seconds,
     )
     plan = orchestrator.plan_merge(args.task_id, verify=True)
     if plan.refusals:
@@ -2266,7 +2345,7 @@ def cmd_memory(args: argparse.Namespace) -> int:
     if not config.memory.enabled:
         print("memory: disabled in config (memory.enabled: false) — nothing to do")
         return 0
-    layout = MemoryLayout.for_repo(config.repo.local_path)
+    layout = MemoryLayout(layout_for(config).private_home)
     action = args.memory_action
     if action == "show":
         return _cmd_memory_show(layout)
@@ -2479,7 +2558,7 @@ def _snapshot_labels(layout: MemoryLayout) -> list[str]:
 
 
 def run_preflight(
-    config: OrchestratorConfig, *, env_file: Path | None = None
+    config: OrchestratorConfig, *, env_file: Path | None = None, capability_smoke: bool = False
 ) -> tuple[bool, list[str]]:
     """Compute the read-only preflight verdict + report lines; no task is processed.
 
@@ -2489,9 +2568,16 @@ def run_preflight(
     contract. Shared by ``cmd_preflight`` and the installer's post-write auto-preflight.
     ``env_file`` is the resolved ``.env`` path (already loaded at startup); its status is reported
     as a health line here — the only place the ``.env`` notice appears.
+
+    ``capability_smoke`` (set only by ``worc preflight``, never the installer's auto-run) opts into
+    each healthy provider's live no-model isolation capability probe (H7): Codex runs a real
+    ``codex sandbox`` smoke of the generated profile so an old CLI / missing sandbox helper /
+    mis-generated policy surfaces here rather than mid-run. A proven policy leak fails preflight
+    unconditionally; an undemonstrable sandbox degrades like a capability gap (fatal only with no
+    fallback provider).
     """
     lines: list[str] = [_env_preflight_line(env_file)]
-    providers = build_providers(config, artifacts_root=worc_home_for(config))
+    providers = build_providers(config, layout=layout_for(config))
     ok = True
     for pid in config.agents.allowed:
         provider = providers.get(pid)
@@ -2516,6 +2602,25 @@ def run_preflight(
                 ok = False
                 lines.append(f"{pid.value}: FAIL — {reason} (no fallback provider)")
 
+        # H7: live no-model isolation capability smoke (Codex ``codex sandbox``), opt-in via
+        # ``worc preflight`` and only for a healthy provider under strict isolation. A proven leak
+        # is unconditionally fatal (non-fallback security result); an undemonstrable sandbox
+        # degrades like a capability gap (fatal only with no fallback provider).
+        if capability_smoke and healthy and config.security.strict_isolation:
+            smoke = getattr(provider, "isolation_capability_smoke", None)
+            report = smoke(home_dir=Path.home()) if callable(smoke) else None
+            if report is not None:
+                if report.ok:
+                    lines.append(f"{pid.value}: isolation smoke OK — {report.detail}")
+                elif report.fatal or not has_fallback:
+                    ok = False
+                    lines.append(f"{pid.value}: FAIL — isolation smoke: {report.detail}")
+                else:
+                    lines.append(
+                        f"{pid.value}: WARN — isolation smoke: {report.detail} "
+                        "(a fallback provider will cover)"
+                    )
+
     reasons = check_isolation(config, ISOLATION_CHECKS)
     if reasons:
         ok = False
@@ -2524,6 +2629,20 @@ def run_preflight(
     else:
         enforced = "enforced" if config.security.strict_isolation else "strict_isolation=false"
         lines.append(f"isolation: OK ({enforced})")
+
+    # VF-6: loudly surface the operator's read-isolation escape hatch — never a silent weakening.
+    if config.security.read_isolation_off:
+        why = (
+            "security.disable_read_isolation=true"
+            if config.security.strict_isolation
+            else "strict_isolation=false"
+        )
+        lines.append(
+            f"read-isolation: OFF ({why}) — providers use native project-instruction/config "
+            "discovery (Claude CLAUDE.md + project settings/hooks/MCP/skills; Codex user + .codex "
+            "config/hooks/rules) and the private read-deny projection is lifted; the write-guard, "
+            "commit/staging gates, PR control, and denied_read_paths blacklist stay in force"
+        )
 
     lines.extend(_summarize_command_sets(config))
 
@@ -2554,7 +2673,9 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     if config is None:
         return 2
     env_file, _ = resolve_env_file_path(args)
-    ok, lines = run_preflight(config, env_file=env_file)
+    # ``worc preflight`` opts into the live no-model capability smoke (H7); the installer's
+    # auto-preflight (``_install_run_preflight``) keeps the default (offline) to stay fast.
+    ok, lines = run_preflight(config, env_file=env_file, capability_smoke=True)
     for line in lines:
         print(line)
     return 0 if ok else 1
@@ -2574,7 +2695,9 @@ def cmd_validate_flow(args: argparse.Namespace) -> int:
     config = load_config_for(args)
     if config is None:
         return 2
-    registry = FlowRegistry(operator_flows_dir=worc_home_for(config) / "flows", config=config)
+    registry = FlowRegistry(
+        operator_flows_dir=layout_for(config).control_home / "flows", config=config
+    )
     available = registry.operator_flow_names()
     if args.all_flows and args.name is not None:
         print("validate-flow: pass a flow NAME or --all, not both")
@@ -2673,6 +2796,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     config = load_config_for(args)
     if config is None:
         return 2
+    preflight.require_git_control()  # WRI-009: git must honor `core.hooksPath` (>= 2.9)
     if config.git.create_pull_request:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
         preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
@@ -2693,7 +2817,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
     if poll <= 0:
         orchestrator = build_orchestrator(
             config,
-            artifacts_root=worc_home_for(config),
+            layout=layout_for(config),
+            env_file=resolve_env_file_path(args)[0],
             heartbeat_seconds=args.heartbeat_seconds,
         )
         return _summarize_watch(
@@ -2728,7 +2853,8 @@ def cmd_watch(args: argparse.Namespace) -> int:
     )
     orchestrator = build_orchestrator(
         config,
-        artifacts_root=worc_home_for(config),
+        layout=layout_for(config),
+        env_file=resolve_env_file_path(args)[0],
         heartbeat_seconds=args.heartbeat_seconds,
         agent_handle_recorder=recorder,
         is_cancelled=lambda: (
@@ -3093,21 +3219,34 @@ def _task_entry(row: TaskRow, *, daemon_alive: bool = True) -> dict[str, str | N
     }
 
 
-def _pending_entry(path: Path, task_id: str | None) -> dict[str, str | None]:
-    # A queued file has no DB row yet, so this view is file-derived; the id (if any) comes from the
-    # cheap front-matter scan and an unparseable file is shown by filename instead.
+def _pending_entry(path: Path, scan: _PendingScan, rank: int) -> dict[str, str | None]:
+    # A queued file has no DB row yet, so this view is file-derived. It carries the scheduler's own
+    # ranking — the 1-based rank position plus the priority/queue it sorted on — so the operator
+    # reads the *run* order here, not the file manager's alphabetical listing. An unparseable file
+    # has no id and is shown by filename instead.
     return {
-        "task_id": task_id,
+        "task_id": scan.task_id,
         "status": "pending",
         "title": None,
         "branch": None,
         "file": path.name,
+        "rank": str(rank),
+        "priority": _PRIORITY_LABEL.get(scan.priority_rank, "mid"),
+        "queue": scan.queue,
     }
 
 
 def _entry_line(entry: dict[str, str | None]) -> str:
     status = entry["status"] or ""
     label = entry["task_id"] or entry.get("file") or "(unknown)"
+    rank = entry.get("rank")
+    if rank is not None:
+        # A ranked (pending) row leads with its run position and the priority/queue it sorted on;
+        # the "pending" status is implied by the section header, so it is dropped to keep the line
+        # about the ordering.
+        line = f"{rank + '.':<4} {entry.get('priority') or 'mid':<4}  {label}"
+        line += f"  (queue={entry.get('queue') or DEFAULT_QUEUE})"
+        return line
     line = f"{status:<22} {label}"
     title = entry.get("title")
     if title:
@@ -3458,9 +3597,14 @@ def _list_sections(
     args: argparse.Namespace, config: OrchestratorConfig, store: StateStore | None
 ) -> list[tuple[str, list[dict[str, str | None]]]]:
     """The (section name, entries) groups for the table/json views, per the focus flags."""
+    # Pending goes through the scheduler's own ranking (queue-filtered to this instance's selector,
+    # then priority-ordered), so ``worc list`` shows the same sequence and membership as ``watch``
+    # claims and ``top``/``ps`` display — never the raw, unfiltered file-manager order.
     pending = [
-        _pending_entry(path, _scan_pending_meta(path).task_id)
-        for path in select_pending(pending_dir(config))
+        _pending_entry(path, scan, rank)
+        for rank, (path, scan) in enumerate(
+            scan_pending_sorted(pending_dir(config), config.orchestrator.queue), start=1
+        )
     ]
     # Only RUNNING rows are relabelled by daemon liveness; probe once and pass it to the sections
     # that can contain a RUNNING row (active/all). recent/pending are terminal/file-only.
@@ -3719,7 +3863,7 @@ def _install_create_dirs(repo_local_path: Path) -> None:
     Idempotent. The repo task dirs are created empty, so they do not appear in ``git status`` until
     a task writes into them; everything under ``.worc/`` is gitignored as a whole.
     """
-    worc_home = repo_local_path / WORC_HOME
+    worc_home = RuntimeLayout.default(repo_local_path).control_home
     for rel in REPO_TASK_DIRS:
         (repo_local_path / rel).mkdir(parents=True, exist_ok=True)
     for rel in WORC_RUNTIME_DIRS:
@@ -3758,7 +3902,7 @@ def _install_print_plan(
     print(f"  would create {worc_home / 'guide'}/ (agent task-authoring docs)")
     print(f"  would create {worc_home / 'flows'}/ (built-in flows + node prompt templates)")
     print(f"  would create {worc_home / ENV_EXAMPLE_FILENAME} (secrets template)")
-    print(f"  would ignore {WORC_HOME}/ via .gitignore")
+    print(f"  would ignore {CONTROL_HOME_DIRNAME}/ via .gitignore")
     if missing:
         print(f"  note: provider(s) not on PATH: {', '.join(p.value for p in missing)}")
 
@@ -3803,7 +3947,7 @@ def cmd_install(args: argparse.Namespace) -> int:
         return 1
 
     spec = outcome.spec
-    worc_home = (spec.repo_local_path / WORC_HOME).resolve()
+    worc_home = RuntimeLayout.default(spec.repo_local_path).control_home.resolve()
     config_path = worc_home / "config.yaml"
 
     if args.dry_run:
@@ -3853,7 +3997,7 @@ def cmd_install(args: argparse.Namespace) -> int:
         print(f"install: wrote {worc_home / ENV_EXAMPLE_FILENAME} (copy to .worc/.env, fill in)")
     # Gitignore the whole .worc/ runtime home so the operator's `git status` stays clean.
     if append_runtime_excludes(spec.repo_local_path):
-        print(f"install: ignored {WORC_HOME}/ via .gitignore")
+        print(f"install: ignored {CONTROL_HOME_DIRNAME}/ via .gitignore")
     if outcome.missing_providers:
         names = ", ".join(p.value for p in outcome.missing_providers)
         print(f"install: note — selected provider(s) not on PATH yet: {names}")
@@ -3925,6 +4069,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_memory(args)
     except (ConfigError, IncompatibleStateError, preflight.GhNotAvailableError) as exc:
         print(f"error: {exc}")
+        return 2
+    except ManualActionRequired as exc:
+        # A foreground command (e.g. `rerun`'s reset-to-base filter refuse-gate, M5) hit a condition
+        # that needs an operator to act. Surface it as a clean message + exit 2, not a traceback. In
+        # the daemon/run paths catch ManualActionRequired internally and map it to a status,
+        # so it never reaches here.
+        print(f"manual action required: {exc}")
         return 2
     raise SystemExit(f"Unknown command '{args.command}'.")
 

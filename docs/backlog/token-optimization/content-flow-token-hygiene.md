@@ -32,10 +32,12 @@ The session-scope docs describe `session_scope` / `lineage_affinity` / `resume` 
 
 ## Acceptance criteria
 
-- [ ] Session-scope docs (`flow-authoring.md` + packaged guide) explicitly state that resume/`editing_lineage`/`lineage_affinity` inherit session history and grow per-turn input tokens.
-- [ ] Packaged `blog_article_revise.yaml` `polish` node is `fresh_disposable` (no `lineage_affinity`), and this is reflected in any flow reference docs.
-- [ ] Packaged `blog_article_revise` `revise`/`polish` role prompts carry the read-once / one-patch / one-diff operational budget.
-- [ ] Docs and packaged copies stay in sync (`/sync-docs`); prose is prettier-formatted (`proseWrap: never`).
+- [x] Session-scope docs (`flow-authoring.md` + packaged guide) explicitly state that resume/`editing_lineage`/`lineage_affinity` inherit session history and grow per-turn input tokens.
+- [x] Packaged `blog_article_revise.yaml` `polish` node is `fresh_disposable` (no `lineage_affinity`), and this is reflected in any flow reference docs.
+- [x] Packaged `blog_article_revise` `revise`/`polish` role prompts carry the read-once / one-patch / one-diff operational budget.
+- [x] Docs and packaged copies stay in sync (`/sync-docs`); prose is prettier-formatted (`proseWrap: never`).
+
+_Actualized 2026-07-23: all four criteria shipped (`polish` is `fresh_disposable` with the independence comment, `revise.md`/`polish.md` carry the read-once/one-patch/one-diff budget, and the token-cost warning lives in `docs/flow-authoring.md` with cross-references from the packaged guide). Still open — and now unblocked, because its measurement substrate ([normalized-usage-accounting.md](normalized-usage-accounting.md)) is merged: the **A/B confirmation** of the ~60–80k saving and "quality no worse" (see Cross-task dependency below). Existing installed `.worc/` copies still need a manual re-seed — there is no `upgrade-flows` mechanism yet._
 
 ## Out of scope
 

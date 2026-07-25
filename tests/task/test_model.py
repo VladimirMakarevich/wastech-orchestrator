@@ -16,7 +16,7 @@ from wastech_orchestrator.task.model import (
 
 @pytest.mark.parametrize(
     "task_id",
-    ["task-001", "a", "0", "task.1_2-3", "a" * 64],
+    ["task-001", "a", "0", "task.1_2-3", "a" * 64, "com", "con2"],
 )
 def test_valid_task_ids(task_id: str) -> None:
     assert is_valid_task_id(task_id)
@@ -34,6 +34,11 @@ def test_valid_task_ids(task_id: str) -> None:
         "task/01",  # illegal char
         "tÉst",  # non-ascii
         "a" * 65,  # too long
+        "task.",  # trailing dot (Windows strips it → a different on-disk name)
+        "con",  # Windows device name
+        "nul.txt",  # device stem + extension
+        "com1",  # serial-port device
+        "lpt9",  # printer device
     ],
 )
 def test_invalid_task_ids(task_id: str) -> None:

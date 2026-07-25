@@ -28,7 +28,7 @@ _TS = "2026-06-30T00:00:00Z"
 
 @pytest.fixture
 def service(tmp_path: Path) -> MemoryService:
-    return MemoryService(MemoryLayout.for_repo(tmp_path))
+    return MemoryService(MemoryLayout(tmp_path / ".worc"))
 
 
 def _episode(task_id: str = "t1") -> EpisodeRecord:
@@ -175,7 +175,7 @@ def test_failure_with_remedy_promotes_via_explained_failure(service: MemoryServi
 def _indexed_service(tmp_path: Path, tracked: set[str]) -> MemoryService:
     """A service whose write funnel validates entity paths against an injected tracked-path set."""
     index = DerivedIndex(tmp_path, tracked_paths_provider=lambda _r: frozenset(tracked))
-    return MemoryService(MemoryLayout.for_repo(tmp_path), index=index)
+    return MemoryService(MemoryLayout(tmp_path / ".worc"), index=index)
 
 
 def test_entity_verified_path_stored_missing_or_pathless_quarantined(tmp_path: Path) -> None:

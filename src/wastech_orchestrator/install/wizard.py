@@ -18,6 +18,7 @@ from typing import Protocol
 from wastech_orchestrator.install import detect
 from wastech_orchestrator.install.config_writer import InstallSpec
 from wastech_orchestrator.providers.base import ProviderId
+from wastech_orchestrator.runtime_layout import RuntimeLayout
 
 
 class InstallError(Exception):
@@ -178,7 +179,7 @@ def _summary(spec: InstallSpec, missing: tuple[ProviderId, ...]) -> str:
         "",
         "configuration to write:",
         f"  repo:        {spec.repo_local_path}",
-        f"  .worc home:  {spec.repo_local_path / '.worc'}",
+        f"  .worc home:  {RuntimeLayout.default(spec.repo_local_path).control_home}",
         f"  base branch: {spec.base_branch}",
         f"  providers:   {providers}",
         "  checks:      command_sets (author in config.yaml)",

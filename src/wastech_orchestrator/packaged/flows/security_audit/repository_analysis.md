@@ -6,7 +6,7 @@ Trace, for each component the scope names: entry points and how input reaches th
 
 ## Delivery Evidence
 
-Git history is always present and authoritative: `git log` / `git show` reveal what each change actually did and can surface a risky pattern introduced in a specific commit. If prior orchestrator run logs happen to be present in the working tree (e.g. under `.worc/logs/`), treat them as a supplement only — they are typically gitignored, so their absence is normal, never a finding.
+Git history is always present and authoritative: `git log` / `git show` reveal what each change actually did and can surface a risky pattern introduced in a specific commit.
 
 ## What To Record
 

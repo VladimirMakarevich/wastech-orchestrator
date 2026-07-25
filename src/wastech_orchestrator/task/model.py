@@ -8,16 +8,24 @@ the one source of truth they all share.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field
 from typing import Literal
 
 from wastech_orchestrator.config.schema import BranchMode, PublishScope
 
-# A task id is strict and normalized: a lowercase alphanumeric first char, then up to
-# 63 of [a-z0-9._-]; no whitespace, no leading dot/separator, 1..64 chars. Invalid ids are rejected,
-# never sanitized (.agents/rules/security.md). Shared source of truth for the model and the parser.
-TASK_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
+# The task-id grammar + validator are the single source of truth for every layer that turns the id
+# into an artifact path component. They live in the ``security`` leaf (not here) because
+# ``providers`` — which must validate the same id in its exchange/artifact path builders — may not
+# import ``task`` (import-linter ``providers-are-leaf``). Re-exported here so the long-standing
+# ``task.model`` import site keeps working; the redundant ``as`` alias marks the intentional
+# re-export.
+from wastech_orchestrator.security.identifiers import (
+    TASK_ID_PATTERN as TASK_ID_PATTERN,
+)
+from wastech_orchestrator.security.identifiers import (
+    is_valid_task_id as is_valid_task_id,
+)
+
 BRANCH_NAME_MAX_BYTES = 255
 # Soft cap for auto-generated branch names (and operator branch_name overrides): keeps the full
 # {prefix}/{epoch}-{task_id}-{slug} within GitHub/CI/`git log` column width. BRANCH_NAME_MAX_BYTES
@@ -88,11 +96,6 @@ def normalize_priority(value: object) -> TaskPriority:
 def priority_rank(value: object) -> int:
     """Sort rank (lower runs first) for a raw front-matter priority value."""
     return _PRIORITY_RANK[normalize_priority(value)]
-
-
-def is_valid_task_id(task_id: str) -> bool:
-    """Return True iff ``task_id`` matches the normalized id format."""
-    return TASK_ID_PATTERN.fullmatch(task_id) is not None
 
 
 def is_valid_branch_name(branch_name: str) -> bool:

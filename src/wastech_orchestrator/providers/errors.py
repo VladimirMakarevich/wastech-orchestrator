@@ -41,6 +41,12 @@ _MESSAGES: dict[ErrorClass, str] = {
     # EXPERIMENTAL(no-work-infra) — remove with the ErrorClass member.
     ErrorClass.AGENT_NO_PROGRESS: "the provider returned a terminal result with no work",
     ErrorClass.CANCELLED: "the agent was cancelled by an operator stop",
+    ErrorClass.CONTAINMENT_UNVERIFIED: (
+        "the provider process tree could not be proven quiescent; a background process may remain"
+    ),
+    ErrorClass.CAPABILITY_UNAVAILABLE: (
+        "a required host isolation capability is unavailable; refusing to run without it"
+    ),
 }
 
 

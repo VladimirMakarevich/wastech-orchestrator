@@ -20,12 +20,12 @@ Cover pure logic without external processes:
 - the `refinement` skip decision (already-complete task vs. needs enrichment);
 - the single-active-task slot (a new task does not start while another is active);
 - terminal cleanup and auto mode: config default/rejects, checkout to `base_branch` before next pickup, auto off leaves the next task pending, unsafe cleanup blocks continuation;
-- the `watch` poll loop (§8.3): `poll_interval_seconds` default/`>=0` validation, the loop refreshes (`refresh_base`) before each tick, `0` is a single pass, and a bounded loop sleeps between ticks but not after the last;
-- the decomposition accept/reject decision and per-subtask vs. global counter semantics (§5.1);
-- the §19 validation gate: each Phase-A reason code, required/optional fields, duplicate-id, the injection-token scan, and Phase-B classification;
+- the `watch` poll loop: `poll_interval_seconds` default/`>=0` validation, the loop refreshes (`refresh_base`) before each tick, `0` is a single pass, and a bounded loop sleeps between ticks but not after the last;
+- the decomposition accept/reject decision and per-subtask vs. global counter semantics;
+- the validation gate: each Phase-A reason code, required/optional fields, duplicate-id, the injection-token scan, and Phase-B classification;
 - `init` idempotency (a second run is all-skipped; never overwrites `config.yaml`; `--dry-run` is a no-op);
-- the git footprint (§21): scoped staging excludes `tasks/`/`logs/`/`workspace/` (and, under in-repo, the root runtime files `state.db`/`config.yaml`), the `.git/info/exclude` append is idempotent, the audit commit is orchestrator-only, the preflight rejects tracked artifacts under `external`/`exclude_local` but is **skipped** under `commit`, and the validator rejects illegal mode pairings;
-- the `summary` stage (§5.2): the handoff artifact is produced, and a provider failure falls back to a deterministic minimal summary without blocking publishing.
+- the git footprint: scoped staging excludes `tasks/`/`logs/`/`workspace/` (and, under in-repo, the root runtime files `state.db`/`config.yaml`), the `.git/info/exclude` append is idempotent, the audit commit is orchestrator-only, the preflight rejects tracked artifacts under `external`/`exclude_local` but is **skipped** under `commit`, and the validator rejects illegal mode pairings;
+- the `summary` stage: the handoff artifact is produced, and a provider failure falls back to a deterministic minimal summary without blocking publishing.
 
 ### Integration
 
@@ -50,11 +50,11 @@ On a temporary Git repository:
 - a restart does not duplicate publishing;
 - recovery continues each persisted checkpoint from `validated` through `fixing`; resuming `testing`, `reviewing`, or `fixing` must not invoke implementation again, and fixing context and counters must survive the restart;
 - the completed-tasks ledger gains exactly one record per terminal transition;
-- a large task with decomposition enabled → `n` subtasks, `n` sequential commits on one branch, one PR; a restart resumes at `k` without a duplicate commit (§5.1);
-- a broken task → quarantined to `tasks/rejected/` as `failed`, writes `validation_report.json`, with no branch/provider (§19);
+- a large task with decomposition enabled → `n` subtasks, `n` sequential commits on one branch, one PR; a restart resumes at `k` without a duplicate commit;
+- a broken task → quarantined to `tasks/rejected/` as `failed`, writes `validation_report.json`, with no branch/provider;
 - test configuration paths with side effects, including `validation.quarantine_folder`, are isolated under the test's temporary directory and never write into the repository checkout;
-- in every git footprint mode the code commit excludes `tasks/`/`logs/`/`workspace/` (§21);
-- a successful task produces `summary.md` (what / how / integration / why) which becomes the PR body (§5.2);
+- in every git footprint mode the code commit excludes `tasks/`/`logs/`/`workspace/`;
+- a successful task produces `summary.md` (what / how / integration / why) which becomes the PR body;
 - exhausting a fix loop or the global fix-iteration budget → `manual_action_required` + failure report; an unrecoverable error → `failed`.
 
 ## Principles
@@ -65,3 +65,5 @@ On a temporary Git repository:
 - Every behavior change is accompanied by a test.
 - The goal is high coverage of critical paths (router, fallback, state machine, security/redaction), not a percentage for its own sake.
 - A green `pytest` is a mandatory precondition for committing and for transitioning between implementation stages.
+- The suite runs in parallel by default (`pytest-xdist`, `addopts = "-n auto"`) — it is process-spawn/I/O bound, so this is a large speedup (see [docs/backlog/test-suite-performance.md](../../docs/backlog/test-suite-performance.md)). Run `pytest -n0` for a serial run when debugging (`--pdb`, `-s` streaming, deterministic ordering).
+- Heavy integration files (real git/subprocess/daemon/process-tree) are tagged `pytestmark = pytest.mark.slow`. For a fast inner loop while developing, run `pytest -m "not slow"` (~12 s vs a few minutes); CI still runs the whole suite. Markers are registered in `pyproject.toml` and `--strict-markers` is on, so a typo'd marker is an error.

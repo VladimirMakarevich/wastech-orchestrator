@@ -10,7 +10,8 @@ two places so the security invariant is enforced in depth:
 
 Covers Codex ``--dangerously-bypass-approvals-and-sandbox`` / ``--yolo`` /
 ``--dangerously-bypass-hook-trust`` / ``--ignore-rules`` and Claude
-``--dangerously-skip-permissions`` — plus any future ``--dangerously*`` flag, defensively. The
+``--dangerously-skip-permissions`` / ``--allow-dangerously-skip-permissions`` — plus any future
+``--dangerously*`` flag, defensively. The
 **structured** full-access selectors
 (Codex ``--sandbox danger-full-access``, Claude ``--permission-mode bypassPermissions``) are *not*
 absolutely forbidden — an operator may opt in under ``security.strict_isolation: false`` — so they
@@ -25,11 +26,15 @@ from collections.abc import Sequence
 FORBIDDEN_SANDBOX_VALUE = "danger-full-access"
 
 # Standalone flags that disable the sandbox/approvals (those not caught by the ``--dangerously*``
-# prefix rule).
+# prefix rule). ``--allow-dangerously-skip-permissions`` (Claude) enables the bypass as an option
+# without the ``--dangerously`` prefix, so it must be listed explicitly — it is the same bypass
+# class
+# as ``--dangerously-skip-permissions`` and stays absolutely forbidden (never operator-selectable).
 _FORBIDDEN_FLAGS: frozenset[str] = frozenset(
     {
         "--yolo",
         "--ignore-rules",
+        "--allow-dangerously-skip-permissions",
     }
 )
 

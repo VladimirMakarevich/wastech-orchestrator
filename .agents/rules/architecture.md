@@ -1,89 +1,86 @@
 # Architecture rules (invariants)
 
-The source of truth is the code (`src/wastech_orchestrator/`). These invariants must not be violated.
+The source of truth is the code (`src/wastech_orchestrator/`). These invariants must not be violated. The design rationale lives in [../../docs/worc_architecture.md](../../docs/worc_architecture.md).
 
 ## Domain-agnostic and data-driven (no hardcoding)
 
-- The orchestrator hosts an **unbounded number of operator-authored flows across arbitrary domains** — not only software tasks, but content authoring, book writing, research, audits, and subject matter not yet imagined. The core is **domain-agnostic**: it knows flow _shape_ and node _kind_, never the topic. Adding a new flow on a new topic must require **zero** core/engine code changes.
-- Because the set of flows and their topics is open-ended, **nothing may be hardcoded or nailed down to a specific flow, topic, task type, node id, or count**. No magic strings, no `if node.id == "…"`, no per-topic branches, no fixed "flows we support" list, no assumption about how many flows exist, baked into core/engine logic. Every such decision is driven by flow/config **data**. (This generalizes the node-id rule below to topics and task types, not just ids.)
+- The orchestrator hosts an unbounded number of operator-authored flows across arbitrary domains (software, content, research, audits, and topics not yet imagined). The core is **domain-agnostic**: it knows flow _shape_ and node _kind_, never the topic. Adding a new flow on a new topic must require **zero** core/engine code changes.
+- Nothing may be hardcoded to a specific flow, topic, task type, node id, or count — no magic strings, no `if node.id == "…"`, no per-topic branches, no fixed "flows we support" list. Every such decision is driven by flow/config **data**.
 
 ## Design values
 
-- **Flexibility and ease of use come first — in both implementation and documentation.** Operators must _want_ to use the orchestrator: prefer the simplest, most flexible design that keeps these invariants, expose configuration and flow authoring as data (not code changes), and write docs that make the common path obvious and the powerful path discoverable. A feature is not done until it is both flexible to configure and pleasant to operate. This never overrides the security envelope or the invariants above — flexibility means arbitrary safe flows, not an escape hatch.
+- **Flexibility and ease of use come first**, in both code and docs: prefer the simplest, most flexible design that keeps these invariants, expose configuration and flow authoring as data (not code changes), and make the common path obvious. This never overrides the security envelope — flexibility means arbitrary _safe_ flows, not an escape hatch.
 
 ## Layers and dependencies
 
-- **Orchestrator Core** is a thin wrapper around the FlowEngine: it owns the validation gate, the single processing slot, the isolation/check preamble, node wiring, state-machine transitions, and terminal handling — the pipeline **body** is a data-driven flow graph driven by the engine, **not** a hardcoded stage loop. Core calls **only** the Router (agent nodes), the Check Runner (checks nodes), and the Git Manager (publish); it **does not build** provider-specific commands.
-- **FlowEngine** traverses the validated flow graph, owns the transitions between nodes, charges the fix loops, and drives the node runners; the runners are its only executors.
-- **Provider adapters** (`CodexProvider`, `ClaudeCodeProvider`) are the only place where the syntax of a specific CLI lives. They **do not perform fallback** and **do not change the state machine**.
-- **Agent Router** resolves the `(primary, fallback)` for a node — the node's declared `provider` or, if unspecified, the single global primary — from the config, and checks availability against the allowlist. Routing is **node-based**; there is no per-stage route table.
+- **Core** is a thin wrapper around the FlowEngine: it owns the validation gate, the single processing slot, the isolation/check preamble, node wiring, state-machine transitions, and terminal handling. It calls **only** the Router, the Check Runner, and the Git Manager, and **never builds provider-specific commands**.
+- **FlowEngine** traverses the validated flow graph, owns the transitions between nodes, charges the fix loops, and drives the node runners.
+- **Provider adapters** are the only place a specific CLI's syntax lives. They **perform no fallback** and **do not change the state machine**.
+- **Router** resolves a node's `(primary, fallback)` from config and checks availability against the allowlist. Routing is node-based.
 - **Supervisor** is a constant per-task oversight layer **above** any flow (not a node): it observes each completed step read-only and writes the whole-task summary at close.
 - **Git Manager / Check Runner / State Store / Artifact Store** are separate components with narrow responsibilities.
-- **Memory** (optional, off by default) is a cross-cutting layer with its own hard invariants: redacted atomic writes, an append-only hash-chained audit, and never passing unredacted content into a prompt.
+- **Memory** (optional, off by default) has its own invariants: redacted atomic writes, an append-only audit, and never passing unredacted content into a prompt.
+- **Dependency direction is `core → router → provider(interface)`** — providers never depend on core, and core imports only the provider _interface_, never a concrete adapter. This is machine-enforced by `import-linter` (`lint-imports`). The factories that bind the concrete adapters live in the composition root, not in core.
 
-Dependency direction: `core → router → provider(interface)`. Providers do not depend on core. This is **machine-enforced** by `import-linter` (`.importlinter`, run as `lint-imports` in CI): `core` may import only the provider **interface** cluster (`providers.base/artifacts/capabilities/process/redaction/errors`), never a concrete adapter (`providers.claude`/`codex`/`_adapter_base`). The factories that bind the concrete adapters — `build_providers`, `build_orchestrator`, and the `strict_isolation` `ISOLATION_CHECKS` table — live in the composition root [`composition.py`](../../src/wastech_orchestrator/composition.py), not in `core`.
+## Contracts
 
-## Contracts (see spec §4.3)
-
-- `AgentProvider`: `id`, `preflight() -> ProviderHealth`, `run(AgentRunRequest) -> AgentRunResult`.
-- `Notifier`: two-phase `start_ask` / `wait_for_answer` with a durable secret-free handle, plus the `ask_human` facade and best-effort terminal notifications.
-- Each node run receives its context through files/artifacts and the prompt. Read-only/disposable nodes get a `fresh_disposable` session; editing nodes resume a durable vendor session (`editing_lineage` — `fixing` resumes `implementation`) as an affinity optimization, not as an authoritative context channel.
-- The Core persists the `node_runs` row before invoking a provider and passes its ID (`AgentRunRequest.node_run_id`) through; providers use it only to namespace artifacts. Provider fallback attempts share that node-run ID and have distinct attempt numbers.
-- The `AgentRunRequest` / `AgentRunResult` / `ProviderHealth` structures are as defined in §4.3. Do not add hidden state channels beyond them.
+- `AgentProvider`: `id`, `preflight()`, `run(AgentRunRequest) -> AgentRunResult`.
+- `Notifier`: two-phase `start_ask` / `wait_for_answer` with a durable, secret-free handle.
+- Each node receives its context through files/artifacts and the prompt, not through hidden channels.
+- `AgentRunRequest` / `AgentRunResult` / `ProviderHealth` are the only data channels between core and a provider. Do not add hidden state channels beyond them.
 
 ## Flow nodes and routing
 
-- The pipeline is **data, not a fixed stage loop**: each `task_type` resolves to a validated flow — a YAML graph of typed nodes — driven by the FlowEngine. These are flow **node ids**, not a `Stage` type (**there is no `Stage` enum**).
-- **Flows are fully operator-authorable — no node is privileged (mandatory invariant).** The architecture must preserve **maximum flow flexibility**: an operator can define an arbitrary custom flow under `.worc/flows/` — any nodes, any edges, any loops, any per-node tuning — and the whole system must keep working from the flow **data** alone. The engine is **generic over node _kind_** (`agent`, `checks`, `evaluator`, `publish`): it dispatches a runner by `node.kind` and **never** branches on a specific node **id**. Node ids (`implementation`, `review`, …) are labels and config keys, **not** behavioral switches — no core/engine code may special-case, require, or hardcode a particular id, and **none of the packaged ids is mandatory** in a custom flow (an operator may rename, drop, reorder, or duplicate them freely). Any behavior that must attach to a role attaches to the node **kind** or to a declared **fact/field**, never to an id: e.g. the commit-candidate mutation guard keys off a `checks` node being present, and refinement-skipping keys off `when: derived.needs_refinement`.
-- Flow **shape** is unrestricted; flow **safety is not**. Every flow — packaged or custom — is fatally validated before use: graph well-formedness plus the non-weakening security envelope (`permission_ceiling` / `output_policy` / `network_policy`, `provider` ∈ `agents.allowed`, budgets ≤ config caps). Maximum flexibility means arbitrary graphs, **not** an escape hatch from those gates.
-- The packaged default `implementation` flow is `refinement → planning → implementation → testing → review → documentation → publish`, with the two fix loops (`test_fix`, `review_fix`) through `fixing` and optional decomposition. `summary` is **not** a node — the constant supervisor layer writes it. Other task types (`deep_research`, `security_audit`) resolve to their own packaged graphs; operators can override a built-in or add flows in `.worc/flows/` (all flows are fatally validated at preflight).
-- `testing`/checks nodes are executed by the Check Runner; `review` is a read-only **evaluator**; `publish` is executed by the Git Manager. The rest (`refinement`, `planning`, `implementation`, `fixing`, `documentation`) are agent-driven.
-- Check commands are **operator-authored** in `checks.command_sets` (no discovery, no resolution, no agent). The `CheckResolver` only **normalizes** that config into `ResolvedCheckSet`s and a deterministic diff-based selector picks which sets run; the Core passes those argv lists to the Check Runner and never builds CLI argv itself, preserving "the core does not know the CLI syntax" and "the flow never supplies commands" (§1.2).
-- Routing is **node-based**: a node runs on its declared `provider` or, if unspecified, the single global primary (`agents.providers.<id>.primary`, `claude` by default); the fallback target is the **other** allowed provider (with a single allowed provider there is no fallback). No node in the packaged flow pins a provider, so all inherit the global primary.
-- `refinement` runs first to enrich an incomplete task (no code edits) and is **skipped** by the Core for tasks that need no enrichment (deterministic `when: derived.needs_refinement`, audited). Refinement/planning may request one typed human round-trip; the answer returns only through a redacted artifact path.
-- A task may override a flow node's executor per run via `nodes.<node-id>.{model,reasoning,provider}` (alongside the `enabled` disable toggle). These overrides are **best-effort**: they never change security/command/credentials (a `provider` must be in `agents.allowed`), and an override invalid for the resolved flow/config (unknown/disallowed provider, a reasoning level the provider rejects) is **warned and skipped at run time** — the flow's declared value stands and the task is never aborted (preserving autonomous `watch` admission). `model` is passed through unchecked (model names have no reliable tier ordering). The override chain is `task node override → flow node declaration → provider config default`; the resolution lives in the orchestrator (`core.node_overrides`) and the engine applies the validated overlay mechanically at its single node-fetch seam — Core still never builds provider-specific CLI.
-- **Decomposition** (spec §5.1) is a flag-gated sub-phase of `planning`, **off by default**. The split is proposed by the agent but accepted deterministically by the Core (gate on; `2 <= n <= max_subtasks`; linear `depends_on` only); otherwise the task runs as a single unit. Subtasks run **strictly sequentially on the single task branch** (one local commit each) into a **single PR**; the global `fix_iterations` budget spans all subtasks.
-- **Validation gate** (spec §19): every task passes a structural gate on `new -> validated` before any branch or provider run. A broken task is terminal `failed`, quarantined to `tasks/rejected/`, and never branched.
-- **`documentation`** is a workspace-write agent node after `review` accepts the code: it updates the target project's docs to match the shipped change, resuming the `implementation` editing lineage, and its edits join the same diff the orchestrator commits. It is deliberately kept **out** of `decomposition.sub_flow` so it runs once per task, not per subtask.
-- **Constant supervisor layer** (not a node, spec §5.2): a per-task oversight layer above any flow that observes every completed step read-only (advisory — it can flag but **cannot** rework) and writes the whole-task plain-language handoff (what / how / integration / why) at close, before publish; that summary becomes the PR body. It is **best-effort, not a quality gate**: a provider failure falls back, and ultimately the Core writes a deterministic minimal summary — a reviewed, passing change is never blocked by it.
+- The pipeline is **data, not a fixed stage loop**: each `task_type` resolves to a validated flow (a YAML graph of typed nodes) driven by the FlowEngine. There is **no `Stage` enum**.
+- **Flows are fully operator-authorable — no node is privileged.** The engine dispatches a runner by `node.kind` (`agent`, `checks`, `evaluator`, `publish`) and **never** branches on a specific node **id**. No packaged id is mandatory — an operator may rename, drop, reorder, or duplicate nodes freely. Behavior attaches to a node **kind** or a declared fact, never to an id.
+- Flow **shape** is unrestricted; flow **safety is not**. Every flow — packaged or custom — is fatally validated before use: graph well-formedness plus the non-weakening security envelope (permission ceiling, output/network policy, provider ∈ allowed, budgets ≤ caps). Maximum flexibility means arbitrary graphs, not an escape hatch from those gates.
+- **Check commands are operator-authored** in config (no discovery, no agent proposal, no flow-supplied command); a deterministic diff-based selector picks which sets run, and core passes those argv lists through — it never builds CLI argv itself.
+- Routing is **node-based**: a node runs on its declared provider or the single global primary; the fallback target is the other allowed provider (none when only one is allowed).
+- `refinement` runs first to enrich an incomplete task (no code edits) and is deterministically **skipped** when no enrichment is needed. A refinement/planning human round-trip returns its answer only through a redacted artifact path.
+- A task may override a node's `{model, reasoning, provider}` per run. Overrides are **best-effort**: they never change security, commands, or credentials, and an invalid override is warned and skipped — the flow's declared value stands and the task is never aborted.
+- **Decomposition** is flag-gated and **off by default**. The split is proposed by the agent but accepted deterministically by the core; subtasks then run strictly sequentially on the single task branch (one commit each) into a single PR.
+- **Validation gate**: every task passes a structural gate before any branch or provider run. A broken task is terminal `failed`, quarantined, and never branched.
+- **`documentation`** is a workspace-write node after `review` accepts the code: it updates the target project's docs to match the shipped change, and its edits join the same diff the orchestrator commits.
+- **Constant supervisor layer** (not a node): it observes every completed step read-only (advisory — it can flag but cannot rework) and writes the plain-language handoff at close, which becomes the PR body. It is best-effort, not a quality gate: a reviewed, passing change is never blocked by it.
 
 ## Fallback and transient-failure recovery
 
-- Allowed **only** for infrastructure error classes (see spec §7.2).
-- **Forbidden** for: failed tests/linters, review findings, incomplete fulfillment of requirements despite a successful CLI run, Git errors, an invalid task/config, exhaustion of fix cycles, or a security violation. These cases → `fixing` / `failed` / `manual_action_required`.
-- Partial changes made after an infrastructure error are not rolled back automatically: a snapshot+diff is preserved, the fallback receives the current diff, and it goes through the full set of checks.
-- **Symmetric cross-provider fallback** (extends PRE.1's single-target rule): a node running on the global primary falls back to the **other** allowed provider (Claude↔Codex), not just nodes pinned away from the primary. With a single allowed provider there is no fallback target. The fallback target lives in the Router (`resolve_route`); the Core never changes the CLI it speaks.
-- **Bounded same-provider transient retry** (`agents.retry`, Router-owned): a _raised_ infra `ProviderError` of a **transient** class (`provider_unavailable` / `network_unavailable` — never `timeout`/`rate_limited`, never a quality `status=failed`) is retried on the same provider with deterministic exponential backoff before falling back. The retry budget is **per provider** and counted **separately** from `max_stage_attempts`; every attempt is recorded in `provider_attempts` (bounded and audited). A quality verdict is never retried.
-- **Soft, resumable pause (B-lite)**: when retries **and** the cross-provider fallback are exhausted for a transient class (both providers down), the orchestrator does **not** go terminal `failed`; it parks the task as **resumable** (still active, `tasks.blocked_since` stamped, checkpoint preserved) and resumes it on the next watch tick / restart via the existing reconcile path. A non-transient infra exhaustion stays terminal; an evaluator that cannot run stays `manual_action_required`. The pause is bounded by `agents.retry.max_blocked_s`, after which the task goes terminal `failed` — nothing hangs forever.
+- Allowed **only** for infrastructure error classes.
+- **Forbidden** for: failed tests/linters, review findings, incomplete fulfillment, Git errors, an invalid task/config, exhausted fix cycles, or a security violation — these route to `fixing` / `failed` / `manual_action_required`.
+- Partial changes after an infrastructure error are not rolled back: a snapshot+diff is preserved, the fallback receives the current diff, and it goes through the full set of checks.
+- **Symmetric cross-provider fallback**: a node on the global primary falls back to the other allowed provider (Claude↔Codex); with a single allowed provider there is no fallback. The fallback target lives in the Router; core never changes the CLI it speaks.
+- **Bounded same-provider transient retry**: a raised transient infra error (provider/network unavailable — never timeout/rate-limit, never a quality failure) is retried on the same provider with bounded backoff before falling back. A quality verdict is never retried.
+- **Soft, resumable pause**: when both retries and cross-provider fallback are exhausted for a transient class, the task is parked as resumable (not terminal) and resumed on the next watch tick / restart, bounded by a max-blocked timeout after which it goes terminal `failed`.
+- **Frozen control plane**: at task start the orchestrator freezes the exact control inputs the flow references (flow YAML, role/supervisor prompts, tool executables) into a private, immutable per-task bundle and binds every runner to it — no later node reopens live `.worc`. An **agent** mutating a control file mid-run is a non-fallback, non-park `manual_action_required` (detected on the next attempt), and automatic crash-recovery over a live edit stays fail-closed the same way. The one exception is a deliberate **operator `rerun --continue`**: it **adopts** the current on-disk control plane (re-freeze + new digest) so a between-run flow/role/tool fix takes effect from the resume point onward — the operator invoked the CLI, so the edit is trusted, while agent-side in-run tamper detection is unchanged.
+- **Process-tree quiescence barrier**: every provider attempt runs inside an orchestrator-owned process-containment object; on **every** exit path the tree is proven empty before any result is trusted and before any downstream work (checks, Git, next task) runs. A tree that cannot be proven empty routes the task to `manual_action_required`. The platform-specific containment syntax lives only in the process runner.
 
 ## State machine and idempotency
 
 - Transitions are transactional; a re-run **does not** create a second commit/push/PR.
 - After a restart, the unfinished step is resumed or its result is safely reconciled.
-- Human waiting does not add a task status. The registered `logs/<task-id>/hitl/*.json` artifact is the recovery source of truth; timeout, transport error, ambiguous approval, or a repeated signal fails closed to `manual_action_required`.
+- Human waiting does not add a task status; the registered HITL artifact is the recovery source of truth, and a timeout, transport error, or ambiguous approval fails closed to `manual_action_required`.
 - Publishing happens only when checks succeed and there are no blocking findings.
-- After `implementation`/`fixing`, tracked-file deletion and dependency manifest/lock changes require approval before tests. Exact approved planning scope may be reused; expanded scope requires a new approval. Ordinary diffs and routine commit/push/PR do not ask.
-- At most one task is active at a time (a single processing slot); the rest wait in `pending`. More than one active task on restart → `manual_action_required`.
-- After a task reaches a terminal status, terminal cleanup must safely return the target repo to `repo.base_branch` before any next task can start. If cleanup or branch state is ambiguous, automatic continuation is forbidden and the task/state requires `manual_action_required`.
-- Auto mode (`orchestrator.auto_mode.enabled`) controls only whether the next pending task is picked after successful terminal cleanup. It is off by default and does not change the single-active-task invariant.
-- Every terminal transition appends one record to the append-only completed-tasks ledger (`logs/completed.jsonl`) after the terminal cleanup outcome is known; the ledger is never rewritten.
-- The Git Manager uses **scoped staging** in the target repo — an explicit pathspec that excludes `tasks/`/`logs/`/`workspace/`; **never `git add .`/`-A`**. The git footprint mode (spec §21) is configurable: `in_repo` + `commit` (**default** — the task + its `summary.md` in the repo, stored via a separate orchestrator-made `tasks/` commit; `logs/` stays local), `in_repo` + `exclude_local` (`.git/info/exclude`, never committed), or `external` + `none` (zero footprint). Orchestration/task artifacts never enter a _code_ commit.
-- Every per-task automatic loop (stage attempts, fix cycles) has a configurable limit, and the total number of fix iterations per task is bounded by a single global cap (`agents.max_total_fix_iterations`). When a fix loop or the global cap is exhausted, the task stops in `manual_action_required` with a recorded failure report — it must never loop unbounded. `failed` is reserved for unrecoverable errors, not an exhausted fix budget.
+- After `implementation`/`fixing`, tracked-file deletions and dependency-manifest/lock changes require approval before tests; ordinary diffs and routine commit/push/PR do not ask.
+- At most one task is active at a time (a single processing slot); more than one active task on restart → `manual_action_required`.
+- After a terminal status, cleanup must safely return the target repo to `base_branch` before any next task starts; ambiguous branch state forbids automatic continuation. Exception: a resumable `manual_action_required` park carrying the task's **own** uncommitted WIP intentionally leaves `HEAD` on the task branch (that WIP is its resume input, and a cleanup error must never mask the node's real stop reason); the next `new`-mode task still checks out base at branch prep, so the slot is freed either way.
+- Auto mode is off by default and controls only whether the next pending task is picked after successful cleanup — it never changes the single-active-task invariant.
+- Every terminal transition appends exactly one record to the append-only completed-tasks ledger; the ledger is never rewritten.
+- The Git Manager uses **scoped staging** — an explicit pathspec that excludes `tasks/`/`logs/`/`workspace/`; **never `git add .`/`-A`** for a code commit. Orchestration/task artifacts never enter a code commit.
+- Every automatic loop (stage attempts, fix cycles) has a configurable limit, and total fix iterations per task are bounded by a single global cap. When a loop or the cap is exhausted, the task stops in `manual_action_required` with a failure report — never an unbounded loop. `failed` is reserved for unrecoverable errors, not an exhausted fix budget.
 
 ## What must not be done
 
-- Coupling core to a specific CLI.
-- Granting a provider the right to commit/push/PR.
-- Performing fallback on a quality error.
-- Changing the provider route retroactively for a node that has already begun.
-- Hardcoding or special-casing a specific flow node **id** in the core/engine, or making any packaged node id mandatory — behavior attaches to a node **kind** or a declared fact, never to an id. A custom operator flow must remain fully supported no matter which nodes it uses, renames, drops, or adds.
-- Hardcoding or nailing anything to a specific flow, **topic/domain**, or task type — a fixed list of supported flows/topics, a per-topic code branch, or any assumption about how many flows exist. The domain is open-ended and driven by flow/config data (see "Domain-agnostic and data-driven").
-- Continuing work when an inconsistent branch state is detected (→ `manual_action_required`).
-- Running the `fixing` loop without a global per-task bound (→ must stop in `manual_action_required` with a failure report).
-- Processing more than one task at a time in v1 (concurrency and worktrees are v2).
-- Starting a next task before successful terminal cleanup has returned the repo to `repo.base_branch`.
-- Overwriting the original task file or rewriting the completed-tasks ledger.
-- Letting a task that has not passed the §19 validation gate reach branch creation or any provider run.
-- Accepting a decomposition split without the deterministic rule, or running subtasks in parallel / on separate branches in v1.
-- Staging with `git add .` / `git add -A` in the target repo, or letting orchestration/task artifacts enter a code commit.
-- Accepting a Telegram reply from a different chat/message/callback, passing an answer through CLI argv, or treating `contacts` as access control.
+- Couple core to a specific CLI, or let it build provider-specific commands.
+- Grant a provider the right to commit/push/PR.
+- Perform fallback on a quality error.
+- Change the provider route for a node that has already begun.
+- Hardcode or special-case a specific flow node **id**, or make any packaged id mandatory — behavior attaches to a node kind or a declared fact.
+- Hardcode anything to a specific flow, topic/domain, or task type, or assume how many flows exist.
+- Run the `fixing` loop without a global per-task bound.
+- Process more than one task at a time.
+- Start a next task before cleanup has returned the repo to `base_branch`.
+- Overwrite the original task file or rewrite the completed-tasks ledger.
+- Let a task that has not passed the validation gate reach branch creation or a provider run.
+- Accept a decomposition split without the deterministic rule, or run subtasks in parallel / on separate branches.
+- Stage with `git add .` / `git add -A` in the target repo, or let orchestration/task artifacts enter a code commit.
+- Accept a Telegram reply from a different chat/message/callback, pass an answer through CLI argv, or treat `contacts` as access control.
