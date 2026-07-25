@@ -1,6 +1,6 @@
 # Architecture rules (invariants)
 
-The source of truth is the code (`src/wastech_orchestrator/`). These invariants must not be violated. The design rationale lives in [../../docs/worc_architecture.md](../../docs/worc_architecture.md).
+The source of truth is the code (`src/wastech_orchestrator/`). These invariants must not be violated. The design rationale lives in [worc_architecture.md](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/worc_architecture.md) — on `main` only, so the link is absolute (see [git-workflow.md](git-workflow.md) §A).
 
 ## Domain-agnostic and data-driven (no hardcoding)
 

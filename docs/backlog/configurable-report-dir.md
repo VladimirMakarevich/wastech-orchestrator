@@ -18,7 +18,7 @@ report_subdir = f"{_RESEARCH_DIR}/{task_id}"
 required_files = ("report.md", "sources.json")
 ```
 
-This is deliberate and documented — [flow-authoring.md → Output policy](../flow-authoring.md#output-policy) states "You cannot specify anything else, and you cannot point a flow at an arbitrary directory". The item below proposes relaxing _where_, not _what_.
+This is deliberate and documented — [flow-authoring.md → Output policy](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/flow-authoring.md#output-policy) states "You cannot specify anything else, and you cannot point a flow at an arbitrary directory". The item below proposes relaxing _where_, not _what_.
 
 The second, less obvious half: the packaged `deep_research` role prompts hardcode the path as **literal text** (`{repo}/docs/research/{task_id}/` in `synthesis.md`, `architecture_design.md`, `verifier.md`, `critic.md`), and there is no `{report_dir}` prompt variable in [`ALLOWED_PROMPT_VARS`](../../src/wastech_orchestrator/core/prompts.py) / [`build_path_context`](../../src/wastech_orchestrator/core/flow/context_paths.py). An engine-only change would therefore "work" while the agent still writes to the old path — and the after-stage containment guard would hard-stop the task at `manual_action_required` on the first write. The prompt-variable seam is part of the feature, not an optional extra. (`security_audit` needs no prompt change: its report comes back as structured output and the orchestrator writes it — WRI-001.)
 

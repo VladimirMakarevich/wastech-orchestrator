@@ -20,3 +20,12 @@ build/
 
 # Lifecycle task files (operator content; the §19 gate enforces max_line_bytes)
 /tasks/
+
+# Generated agent run logs
+/logs/
+
+# Shipped package data, not docs: everything under src/ (the packaged/ flows, role prompts, config
+# templates, and the operator guide/) is a runtime asset read by the engine or copied into .worc/ on
+# install. Edit those by hand in the same one-paragraph-per-line style; a reflow here changes shipped
+# behaviour, not formatting. See AGENTS.md and .claude/skills/sync-docs/SKILL.md.
+/src/
