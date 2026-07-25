@@ -32,7 +32,7 @@ So the report is accurate but the three cases have different root causes:
 2. **`daemon-startup.log` — cosmetic but confusing.** Self-truncating, so it is not a disk problem; it is a stale file that `clean` visibly refuses to remove. Path: [cli_shell.py:133](../../src/wastech_orchestrator/cli_shell.py#L133).
 3. **`completed.jsonl` — partly a UX problem, partly a missing cap.** `worc logs clean --all` does delete it, and preserving the audit trail by default is a deliberate choice. But bare `clean` reports `(ledger kept)` without saying which flag would take it, and the ledger has no rotation or size cap of its own — "keep the audit trail forever" is a policy that works only until the file is large.
 
-Worth noting what already works correctly: `.worc/logs/<task-id>/` per-task dirs are handled well, including `--keep N`, and [docs/operations.md](../operations.md#cleaning-up-logs-logs-clean) documents that surface accurately. This item is strictly about what sits _beside_ those dirs.
+Worth noting what already works correctly: `.worc/logs/<task-id>/` per-task dirs are handled well, including `--keep N`, and [docs/operations.md](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/operations.md#cleaning-up-logs-logs-clean) documents that surface accurately. This item is strictly about what sits _beside_ those dirs.
 
 ### Proposed direction
 
@@ -80,7 +80,7 @@ Open questions worth resolving before it does: are the frozen bundles audit evid
 
 ## Out of scope
 
-- The `logging.artifacts` level (`minimal`/`standard`/`full`) — that governs which per-attempt files are written inside a task dir, and it already works as documented in [docs/configuration.md](../configuration.md). It is not a retention mechanism for whole task trees and is not being changed here.
+- The `logging.artifacts` level (`minimal`/`standard`/`full`) — that governs which per-attempt files are written inside a task dir, and it already works as documented in [docs/configuration.md](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/configuration.md). It is not a retention mechanism for whole task trees and is not being changed here.
 - `.worc-io/` itself — verified empty in `wastech-mdlint`; the exchange is sealed and removed at terminal as designed. The accumulation is in the _seals_, covered above.
 - `.worc/memory/` — the memory store has its own `worc memory compact` curation surface.
 
@@ -90,4 +90,4 @@ Open questions worth resolving before it does: are the frozen bundles audit evid
 - No file under `.worc/logs/` grows without bound, the ledger included.
 - Cleaning behaves correctly on Windows, Linux, and macOS with the watch daemon both running and stopped, and is tested for all of them.
 - A decision is recorded (here or in an ADR) on retention for `tasks/done/` and for each of the four per-task private-home roots — even if the decision is "keep forever, documented" — before the WRI branch lands.
-- The docs updated in the same change: [docs/operations.md](../operations.md#cleaning-up-logs-logs-clean), [docs/configuration.md](../configuration.md) if a config key appears, and the shipped `packaged/guide/` copy.
+- The docs updated in the same change: [docs/operations.md](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/operations.md#cleaning-up-logs-logs-clean), [docs/configuration.md](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/configuration.md) if a config key appears, and the shipped `packaged/guide/` copy.
