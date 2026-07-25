@@ -19,10 +19,24 @@ permissions:
 jobs:
   release:
     runs-on: ubuntu-latest
+    # The tag is resolved once here and reaches every step as an environment variable. It must NEVER
+    # be interpolated as `${{ … }}` inside a `run:` block: on workflow_dispatch it is caller-supplied
+    # text, and `${{ }}` is substituted into the script before the shell sees it, so a crafted value
+    # would execute as shell code.
+    env:
+      TAG: ${{ inputs.tag || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0   # full history + tags so hatch-vcs can resolve the version
+
+      # Releases are cut from `release` only (see .agents/rules/git-workflow.md §A). A tag pushed
+      # from `dev` or a feature branch would ship a tree whose docs were never reconstructed, so
+      # refuse it rather than publish it. `fetch-depth: 0` above makes the ref data available.
+      - name: Assert the tag is on the release branch
+        run: |
+          git branch -r --contains "$TAG" | grep -qE '^\s*origin/release$' \
+            || { echo "::error::$TAG does not point at a commit on origin/release"; exit 1; }
 
       - uses: actions/setup-python@v5
         with:
@@ -50,7 +64,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          TAG="${{ inputs.tag || github.ref_name }}"
           VERSION="${TAG#v}"
           PRE=""
           # aN / bN / rcN suffix (PEP 440 pre-release) -> mark as a GitHub pre-release.

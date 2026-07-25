@@ -1,0 +1,61 @@
+name: dev-guard
+
+# Machine checks for the two invariants that keep the three-branch model intact
+# (see .agents/rules/git-workflow.md §A). Both are cheap and deserve enforcement rather than trust:
+#
+#  1. `main`/`release` must never be merged into `dev` — that copies the derived docs back onto `dev`
+#     and the whole arrangement has to be rebuilt. Port such fixes with `git cherry-pick` instead.
+#  2. Under `docs/`, `dev` keeps only `backlog/` (the task queue) and `research/` (produced by a
+#     `deep_research` run). Without this, the derived docs creep back one file at a time.
+#
+# Runs only on pull requests targeting `dev`, so it is inert on `main` / `release` work.
+on:
+  pull_request:
+    branches: ["dev"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dev-guard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    name: dev branch invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need the merge base to diff the PR
+
+      # Branch names are attacker-influenced strings: they reach the shell through `env`, never
+      # through `${{ }}` interpolation inside `run`.
+      - name: Reject a back-merge from main or release
+        env:
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          case "$HEAD_REF" in
+            main|release)
+              echo "::error::merging '$HEAD_REF' into dev is forbidden — it restores the derived docs on dev. Port the commits with 'git cherry-pick' instead (see .agents/rules/git-workflow.md §A)."
+              exit 1
+              ;;
+          esac
+          echo "PR source '$HEAD_REF' is fine."
+
+      - name: Reject derived docs added to dev
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          offenders=$(
+            git diff --name-only --diff-filter=ACMR "$BASE_SHA...$HEAD_SHA" \
+              | { grep '^docs/' || true; } \
+              | { grep -v -E '^docs/(backlog|research)/' || true; }
+          )
+          if [ -n "$offenders" ]; then
+            echo "::error::dev keeps only docs/backlog/ and docs/research/ under docs/; the derived documentation lives on main. Offending paths:"
+            echo "$offenders"
+            exit 1
+          fi
+          echo "No derived docs added under docs/."

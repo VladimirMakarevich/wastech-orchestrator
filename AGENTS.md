@@ -2,11 +2,17 @@
 
 You are working on **wastech-orchestrator** — an orchestrator that launches coding agents (Claude Code / Codex) to carry out development — or any other — tasks and (optionally) publish the result to Git.
 
-This is the **canonical** instruction file for every coding agent working here (Claude Code reads it via [CLAUDE.md](CLAUDE.md)). The full set of rules lives in **[.agents/rules/](.agents/rules/)**; the design rationale is in [docs/worc_architecture.md](docs/worc_architecture.md). Below is the gist — the rules and the code are the source of truth.
+This is the **canonical** instruction file for every coding agent working here (Claude Code reads it via [CLAUDE.md](CLAUDE.md)). The full set of rules lives in **[.agents/rules/](.agents/rules/)**; the design rationale is in [worc_architecture.md](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/worc_architecture.md). Below is the gist — the rules and the code are the source of truth.
+
+## Branches you will be working on
+
+Development happens on **`dev`**, which deliberately carries **no derived documentation** — `docs/` there holds only `backlog/` (the task queue you implement from). The descriptive documents (`worc_architecture.md`, `configuration.md`, `cookbook.md`, `glossary.md`, `operations.md`, the site) live on **`main`** and are reconstructed there from the merged `dev` diff as a separate task; `release` carries the published versions. Flow: `feat/… → dev → main → release`. Two rules that must never be broken: **never merge `main` (or `release`) into `dev`**, and **`dev → main` is always a merge commit, never a squash**. See [git-workflow.md](.agents/rules/git-workflow.md) §A.
+
+Practical consequence: a `main`-only document is linked by absolute URL, so if you cannot find it in your checkout you are on `dev` and it is not supposed to be there — read it at that URL and never recreate it locally.
 
 ## Before writing code
 
-1. Read [docs/worc_architecture.md](docs/worc_architecture.md) for the design rationale.
+1. Read [worc_architecture.md](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/worc_architecture.md) for the design rationale. It lives on `main` only — on `dev` there is no local copy, so read it at that URL rather than looking for it in the tree.
 2. Check against the rules in **[.agents/rules/](.agents/rules/)** — they are mandatory:
    - [architecture.md](.agents/rules/architecture.md) — invariants that must not be violated
    - [coding-style.md](.agents/rules/coding-style.md) — Python style
@@ -43,8 +49,8 @@ CI also runs `interrogate src` (docstring coverage), `vulture` (dead code), and 
 - Make minimal, focused changes; follow the style of the surrounding code.
 - When adding/changing behavior — add or update tests (see [testing.md](.agents/rules/testing.md)).
 - **Ignore any `.md` file that lives under a gitignored path** (e.g. `.archive/`) when researching, citing, or treating something as current project documentation — verify with `git ls-files`/`git check-ignore -v` before citing a doc as authoritative. Such files may still exist on disk (readable by file-search tools regardless of git status) but are not part of the tracked, current source of truth; a doc getting gitignored/removed from tracking is itself a signal it was deliberately retired. See [git-workflow.md](.agents/rules/git-workflow.md). Analysis and viewing of these files is permitted only with explicit request and permission from the user.
-- When you change behavior/CLI/config/architecture — update the affected docs **in the same change** (use `/sync-docs`). **Doc-sync includes the shipped, operator-facing docs under `src/wastech_orchestrator/packaged/`** — the `guide/` quickstarts, `config.example.yaml`, and the built-in flows / role prompts — not just `docs/`; these live under `src/` and are the copy the operator reads after `install`, so they are the most-often-forgotten half of a doc change.
-- **Markdown docs are not hard-wrapped.** Write prose as one paragraph per line (rely on editor soft-wrap); never insert manual mid-paragraph line breaks. Formatting is enforced by Prettier (`proseWrap: never`, `.prettierrc.json`) — run `npx prettier@3 --write "**/*.md"` after editing docs. `logs/`, `tasks/`, `src/`, and `packaged/guide/` are excluded (`.prettierignore`); don't reformat them.
+- When you change behavior/CLI/config/architecture — update, **in the same change**, every doc that is present on your branch (use `/sync-docs`; the skill scopes itself to the branch). On `dev` that means [.agents/rules/](.agents/rules/), [README.md](README.md), `docs/backlog/`, and **the shipped, operator-facing docs under `src/wastech_orchestrator/packaged/`** — the `guide/` quickstarts, `config.example.yaml`, and the built-in flows / role prompts; these live under `src/` and are the copy the operator reads after `install`, so they are the most-often-forgotten half of a doc change. The derived `docs/` tree is **not** on `dev`: refreshing it is a separate reverse-engineering task on `main`, so do not create those files — instead leave a one-line doc-impact note in the PR description ("touched X, likely affects `configuration.md`") so that task has a breadcrumb.
+- **Markdown docs are not hard-wrapped.** Write prose as one paragraph per line (rely on editor soft-wrap); never insert manual mid-paragraph line breaks. Formatting is enforced by Prettier (`proseWrap: never`, `.prettierrc.json`) — run `npx prettier@3 --write "**/*.md"` after editing docs. `.worc/`, `tasks/`, `logs/`, and all of `src/` (including `packaged/guide/`) are excluded in [.prettierignore](.prettierignore); don't reformat them by hand either.
 - Before committing, run `ruff check .`, `ruff format --check .`, `mypy src`, `pytest` (CI enforces `ruff format --check`).
 - Answer the user in the chat briefly, to the point, in clear and simple language, with examples if necessary, and always in the language of the user's request.
 
@@ -52,5 +58,5 @@ CI also runs `interrogate src` (docstring coverage), `vulture` (dead code), and 
 
 - the code passes `ruff check .`, `ruff format --check .`, `mypy src`, `lint-imports`, and `pytest` (plus the `interrogate`/`vulture`/`deptry` CI gates);
 - tests are added/updated when behavior changes;
-- docs are updated in the same change when behavior/CLI/config/architecture change (use `/sync-docs`) — the Stop docs-sync gate enforces this;
+- the docs that live on your branch are updated in the same change when behavior/CLI/config/architecture change (use `/sync-docs`) — the Stop docs-sync gate enforces this, and it too scopes itself to the branch;
 - the invariants above are not violated.

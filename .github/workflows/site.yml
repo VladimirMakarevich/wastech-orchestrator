@@ -1,11 +1,23 @@
 name: site
 
-# Build the Markdown documentation site on normal development refs, but publish it only when a
-# release/pre-release tag is pushed. The output is plain static files and can move off Pages later.
+# Build the Markdown documentation site on the branches that carry documentation, but publish it only
+# when a release/pre-release tag is pushed. The output is plain static files and can move off Pages
+# later.
+#
+# Restricted to `main` / `release` on purpose: `dev` carries no derived docs/ tree (see
+# .agents/rules/git-workflow.md §A), while `tools/stage_site_docs.py` copies a fixed list of
+# docs/*.md and mkdocs.yml sets `strict: true` — so a run against a `dev` ref, or a `feat/… -> dev`
+# pull request, would fail on missing files.
+#
+# `tags: ["v*"]` is required, not decorative: a `push` trigger that specifies `branches` does not fire
+# on tag pushes at all, so without it the tag-gated deploy job below is unreachable and only
+# workflow_dispatch can publish. Release tags are cut on `release`.
 on:
   pull_request:
+    branches: ["main", "release"]
   push:
-    branches: ["main"]
+    branches: ["main", "release"]
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       deploy:
