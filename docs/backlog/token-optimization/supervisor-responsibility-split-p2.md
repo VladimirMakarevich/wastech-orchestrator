@@ -1,6 +1,6 @@
 # Supervisor P2: разделение обязанностей + telemetry
 
-**Статус:** proposal **Приоритет:** P2 (структурная чистота и наблюдаемость; не блокирует экономию, которую уже дают P0+P1) **Источник:** [2026-07-16 варианты оптимизации supervisor](../../analysis/2026-07-16-supervisor-token-optimization-options.md) (§6 целевая архитектура, §8 P2).
+**Статус:** proposal **Приоритет:** P2 (структурная чистота и наблюдаемость; не блокирует экономию, которую уже дают P0+P1) **Источник:** [2026-07-16 варианты оптимизации supervisor](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/analysis/2026-07-16-supervisor-token-optimization-options.md) (§6 целевая архитектура, §8 P2).
 
 **Дорожная карта:** [P0 — packet + fresh finalize](supervisor-finalize-packet-and-cadence.md) → [P1 — управляемый cadence](supervisor-observation-cadence-p1.md) → **P2 (этот документ)**.
 

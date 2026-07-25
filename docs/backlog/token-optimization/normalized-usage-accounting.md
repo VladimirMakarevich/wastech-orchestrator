@@ -51,7 +51,7 @@ _Actualized 2026-07-23: every criterion is satisfied in code + tests — the res
 - **Read/report surface** (a `worc` token report or summary section) — separate follow-up; this task only persists.
 - Cross-provider dollar normalization by billing rate (Codex ran on subscription and records no cost) — raw totals are a within-provider rate-limit/relative signal only.
 - Deterministic artifact reduction (sink B) and RTK (sink A) — those are Phase 1/2 of [archive/token_optimization.md](../archive/token_optimization.md), separate work.
-- Supervisor cadence — tracked separately (see [../analysis/2026-07-16-supervisor-token-optimization-options.md](../../analysis/2026-07-16-supervisor-token-optimization-options.md)).
+- Supervisor cadence — tracked separately (see [../analysis/2026-07-16-supervisor-token-optimization-options.md](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/analysis/2026-07-16-supervisor-token-optimization-options.md)).
 
 ## Likely implementation areas
 

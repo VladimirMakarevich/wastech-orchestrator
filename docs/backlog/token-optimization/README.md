@@ -8,7 +8,7 @@ This folder groups the backlog items that came out of the 2026-07-16 token inves
 
 ## Initial context
 
-The trigger was a single content run (`blog-review-happy-in-my-misfortunes-4`) whose token cost was dominated by the supervisor and inflated by broken accounting. Two analyses frame the work: the token analysis (F1–F5) and [../../analysis/2026-07-16-supervisor-token-optimization-options.md](../../analysis/2026-07-16-supervisor-token-optimization-options.md) (variants A–I, target architecture §6, phasing §8).
+The trigger was a single content run (`blog-review-happy-in-my-misfortunes-4`) whose token cost was dominated by the supervisor and inflated by broken accounting. Two analyses frame the work: the token analysis (F1–F5) and [../../analysis/2026-07-16-supervisor-token-optimization-options.md](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/analysis/2026-07-16-supervisor-token-optimization-options.md) (variants A–I, target architecture §6, phasing §8).
 
 Three findings drive everything here:
 

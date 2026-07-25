@@ -1,6 +1,6 @@
 # Supervisor P1: управляемый cadence (observe/finalize split, observation_mode + events, бюджеты)
 
-**Статус:** proposal **Приоритет:** P1 (даёт основную экономию — снимает промежуточные наблюдения; безопасно только поверх P0-пакета) **Источник:** [2026-07-16 варианты оптимизации supervisor](../../analysis/2026-07-16-supervisor-token-optimization-options.md) (§8 P1, Варианты B/C/D/H/I).
+**Статус:** proposal **Приоритет:** P1 (даёт основную экономию — снимает промежуточные наблюдения; безопасно только поверх P0-пакета) **Источник:** [2026-07-16 варианты оптимизации supervisor](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/analysis/2026-07-16-supervisor-token-optimization-options.md) (§8 P1, Варианты B/C/D/H/I).
 
 **Дорожная карта:** [P0 — packet + fresh finalize](supervisor-finalize-packet-and-cadence.md) → **P1 (этот документ)** → [P2 — разделение обязанностей и telemetry](supervisor-responsibility-split-p2.md).
 

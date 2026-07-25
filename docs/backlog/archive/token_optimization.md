@@ -2,7 +2,7 @@
 
 Status: **backlog / not scheduled** Date: 2026-06-11 Owner: Vladimir Makarevich
 
-This document captures the idea of reducing token consumption in the orchestrator and the analysis behind it. It is a backlog item, not part of the v1 scope (see [worc_architecture.md](../../worc_architecture.md) §2). Nothing here overrides the canonical reference or the hard invariants in [CLAUDE.md](../../../CLAUDE.md) and [.agents/rules/](../../../.agents/rules).
+This document captures the idea of reducing token consumption in the orchestrator and the analysis behind it. It is a backlog item, not part of the v1 scope (see [worc_architecture.md](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/worc_architecture.md) §2). Nothing here overrides the canonical reference or the hard invariants in [CLAUDE.md](../../../CLAUDE.md) and [.agents/rules/](../../../.agents/rules).
 
 ## 1. Goal
 
@@ -44,7 +44,7 @@ A new optional context-preparation step in the Core/artifact layer (e.g. `contex
 - cap diff size (head/tail + `... N lines elided ...` marker);
 - write a summary file next to the full log.
 
-Rationale: safest, fully auditable, reversible (the original under `logs/<task-id>/...` is untouched; only the prompt-injected copy is reduced), and aligned with the "deterministic Core" philosophy ([worc_architecture.md](../../worc_architecture.md) §2). Likely captures most of the sink-B win **without** any library.
+Rationale: safest, fully auditable, reversible (the original under `logs/<task-id>/...` is untouched; only the prompt-injected copy is reduced), and aligned with the "deterministic Core" philosophy ([worc_architecture.md](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/worc_architecture.md) §2). Likely captures most of the sink-B win **without** any library.
 
 ### Phase 2 — RTK for sink A (agent tool output), flagged, **in the provider adapters**
 
