@@ -216,7 +216,7 @@ def test_drive_flow_forwards_node_overrides_to_request(tmp_path: Path) -> None:
         tmp_path,
         node_overrides={
             "implementation": {
-                "model": "claude-opus-4-8",
+                "model": "claude-opus-5",
                 "reasoning": "high",
                 "provider": ProviderId.CODEX,
             }
@@ -224,7 +224,7 @@ def test_drive_flow_forwards_node_overrides_to_request(tmp_path: Path) -> None:
     )
     assert result.status is Status.DONE
     impl_request = router.requests["implementation"]
-    assert impl_request.model == "claude-opus-4-8"
+    assert impl_request.model == "claude-opus-5"
     assert impl_request.reasoning == "high"
     # The route was resolved from the overridden provider, not the flow default (None).
     assert router.route_overrides["implementation"] is ProviderId.CODEX

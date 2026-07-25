@@ -180,10 +180,14 @@ def render_baseline_markdown(baseline: Baseline) -> str:
             f"- first-pass improvement (hotspots): {comp.hotspot_first_pass_improvement_pp:+.0%}",
             f"- AC-O1 (≥10% tokens or wall-clock): {'PASS' if comp.meets_ac_o1 else 'FAIL'}",
             f"- AC-O2 (≥10pp first-pass on hotspots): {'PASS' if comp.meets_ac_o2 else 'FAIL'}",
-            f"- AC-O3 (stale<5%, 0 leaks, 0 external promotions): "
-            f"{'PASS' if comp.meets_ac_o3 else 'FAIL'}",
-            f"- AC-O4 measured-lift gate (V2/V3/V4 unlocked): "
-            f"{'YES' if comp.measured_lift else 'NO'}",
+            (
+                f"- AC-O3 (stale<5%, 0 leaks, 0 external promotions): "
+                f"{'PASS' if comp.meets_ac_o3 else 'FAIL'}"
+            ),
+            (
+                f"- AC-O4 measured-lift gate (V2/V3/V4 unlocked): "
+                f"{'YES' if comp.measured_lift else 'NO'}"
+            ),
         ]
     )
     return "\n".join(lines) + "\n"

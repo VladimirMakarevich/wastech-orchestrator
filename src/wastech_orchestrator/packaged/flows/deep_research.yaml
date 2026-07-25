@@ -38,7 +38,7 @@ flow:
       when: { fact: derived.needs_refinement }
       # optional overrides (uncomment to pin this node):
       # provider: claude
-      # model: claude-opus-4-8
+      # model: claude-opus-5
       # reasoning: high
       # timeout_seconds: 7200
       # network_access: false
@@ -51,7 +51,7 @@ flow:
       network_access: false
       # optional overrides (uncomment to pin this node):
       # provider: claude
-      # model: claude-opus-4-8
+      # model: claude-opus-5
       # reasoning: high
       # timeout_seconds: 7200
       # network_access: false
@@ -65,7 +65,7 @@ flow:
       when: { fact: config.external_research }
       # optional overrides (uncomment to pin this node):
       # provider: claude
-      # model: claude-opus-4-8
+      # model: claude-opus-5
       # reasoning: high
       # timeout_seconds: 7200
       # network_access: true
@@ -78,7 +78,7 @@ flow:
       network_access: false
       # optional overrides (uncomment to pin this node):
       # provider: claude
-      # model: claude-opus-4-8
+      # model: claude-opus-5
       # reasoning: xhigh
       # timeout_seconds: 7200
       # network_access: false
@@ -91,7 +91,7 @@ flow:
       network_access: false
       # optional overrides (uncomment to pin this node):
       # provider: claude
-      # model: claude-opus-4-8
+      # model: claude-opus-5
       # reasoning: high
       # timeout_seconds: 7200
       # network_access: false
@@ -110,7 +110,7 @@ flow:
       max_rework_per_stage: 1
       # optional overrides (uncomment to pin this evaluator):
       # provider: claude
-      # model: claude-opus-4-8
+      # model: claude-opus-5
       # reasoning: high
       # network_access: true
     - id: critical_review
@@ -124,7 +124,7 @@ flow:
       max_rework_per_stage: 3
       # optional overrides (uncomment to pin this evaluator):
       # provider: claude
-      # model: claude-opus-4-8
+      # model: claude-opus-5
       # reasoning: xhigh
       # network_access: true
     - id: publish

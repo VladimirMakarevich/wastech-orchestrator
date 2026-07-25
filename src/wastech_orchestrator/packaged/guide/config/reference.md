@@ -178,7 +178,7 @@ A read-only layer above every flow that observes each step and writes the final 
 | --- | --- | --- | --- | --- |
 | `supervisor.role_file` | string | `"roles/supervisor.md"` | No path traversal (`..`/absolute). | The observe-lens prompt. |
 | `supervisor.provider` | `codex` \| `claude` \| null | `null` / install: pinned to the primary | Must be in `agents.allowed` when set. | `null` inherits the global primary; pin it so `model` reaches a provider that accepts it. |
-| `supervisor.model` | string \| null | `null` / install: the primary's model (e.g. `claude-opus-4-8`) | Passed through unverified; a vendor/primary mismatch warns. | `null` = the resolved provider's default. Set a stronger model for oversight if needed. |
+| `supervisor.model` | string \| null | `null` / install: the primary's model (e.g. `claude-opus-5`) | Passed through unverified; a vendor/primary mismatch warns. | `null` = the resolved provider's default. Set a stronger model for oversight if needed. |
 | `supervisor.reasoning` | string \| null | `null` / install: `high` | Per-provider set (as providers, above). | `null` = the resolved provider's default. |
 
 ## `logging` — operator verbosity and artifact retention

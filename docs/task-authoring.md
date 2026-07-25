@@ -388,7 +388,7 @@ nodes:
   testing:
     enabled: false # bypass the Check Runner (e.g. a repo with no test suite)
   implementation:
-    model: claude-opus-4-8 # run the author node on a stronger model for this task
+    model: claude-opus-5 # run the author node on a stronger model for this task
     reasoning: high
   review:
     provider: codex # review this task with codex instead of the flow's default

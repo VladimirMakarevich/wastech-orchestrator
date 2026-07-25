@@ -152,8 +152,8 @@ def test_node_override_fields_default_to_none() -> None:
 
 
 def test_node_override_carries_model_reasoning_provider() -> None:
-    ov = NodeOverride(model="claude-opus-4-8", reasoning="high", provider="claude")
-    assert (ov.model, ov.reasoning, ov.provider) == ("claude-opus-4-8", "high", "claude")
+    ov = NodeOverride(model="claude-opus-5", reasoning="high", provider="claude")
+    assert (ov.model, ov.reasoning, ov.provider) == ("claude-opus-5", "high", "claude")
     # An override that only sets model/reasoning/provider never disables the node.
     assert ov.enabled is None
 

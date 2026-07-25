@@ -188,7 +188,7 @@ def test_inherited_supervisor_model_vendor_mismatch_warns(base_config: Orchestra
     cfg = replace(
         _codex_primary(base_config),
         supervisor=replace(
-            base_config.supervisor, provider=None, model="claude-opus-4-8", reasoning=None
+            base_config.supervisor, provider=None, model="claude-opus-5", reasoning=None
         ),
     )
     warnings = validate_config(cfg)

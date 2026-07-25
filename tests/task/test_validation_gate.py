@@ -657,14 +657,14 @@ def test_nodes_non_mapping_top_level_rejected(config: OrchestratorConfig) -> Non
 def test_nodes_model_reasoning_provider_accepted_and_stored(config: OrchestratorConfig) -> None:
     # The gate validates shape only — provider/reasoning support is resolved at run time.
     block = (
-        "nodes:\n  implementation:\n    model: claude-opus-4-8\n"
+        "nodes:\n  implementation:\n    model: claude-opus-5\n"
         "    reasoning: high\n    provider: claude\n"
     )
     result = _gate(config).validate(_src(_nodes_task(block)))
     assert result.passed is True
     assert result.normalized is not None
     assert result.normalized.node_overrides == {
-        "implementation": NodeOverride(model="claude-opus-4-8", reasoning="high", provider="claude")
+        "implementation": NodeOverride(model="claude-opus-5", reasoning="high", provider="claude")
     }
 
 

@@ -31,7 +31,7 @@ flow:
       permission_profile: workspace-write
       # optional overrides (uncomment to pin this node):
       # provider: claude
-      # model: claude-opus-4-8
+      # model: claude-opus-5
       # reasoning: high
       # timeout_seconds: 7200
       # network_access: false

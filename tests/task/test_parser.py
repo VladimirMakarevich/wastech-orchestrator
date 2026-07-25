@@ -236,7 +236,7 @@ def test_node_overrides_round_trip(tmp_path: Path) -> None:
         description="Do it",
         node_overrides={
             "planning": NodeOverride(enabled=False),
-            "implementation": NodeOverride(model="claude-opus-4-8", reasoning="high"),
+            "implementation": NodeOverride(model="claude-opus-5", reasoning="high"),
             "testing": NodeOverride(enabled=False),
             "review": NodeOverride(provider="codex"),
         },

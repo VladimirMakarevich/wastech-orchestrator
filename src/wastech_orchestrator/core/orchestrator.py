@@ -4282,16 +4282,20 @@ class Orchestrator:
         """
         if live is None:
             return [
-                "could not resolve the task's flow (the on-disk flow may be invalid); "
-                "fix it or use a fresh rerun"
+                (
+                    "could not resolve the task's flow (the on-disk flow may be invalid); "
+                    "fix it or use a fresh rerun"
+                )
             ]
         if resume_node not in live.nodes_by_id:
             known = ", ".join(sorted(live.nodes_by_id))
             if is_from:
                 return [f"--from node '{resume_node}' is not in the current flow (nodes: {known})"]
             return [
-                f"the checkpoint node '{resume_node}' no longer exists in the edited flow "
-                f"(nodes: {known}); pass --from <node> to pick a resume point, or a fresh rerun"
+                (
+                    f"the checkpoint node '{resume_node}' no longer exists in the edited flow "
+                    f"(nodes: {known}); pass --from <node> to pick a resume point, or a fresh rerun"
+                )
             ]
         return []
 

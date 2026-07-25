@@ -518,14 +518,14 @@ def test_engine_applies_node_field_overlay() -> None:
         agents=_agents(),
         task_id="task-1",
         node_overrides={
-            "impl": {"model": "claude-opus-4-8", "reasoning": "high", "provider": ProviderId.CODEX}
+            "impl": {"model": "claude-opus-5", "reasoning": "high", "provider": ProviderId.CODEX}
         },
     )
     assert engine.run().status is Status.DONE
     patched = runner.nodes["impl"]
     assert isinstance(patched, AgentNode)
     assert (patched.model, patched.reasoning, patched.provider) == (
-        "claude-opus-4-8",
+        "claude-opus-5",
         "high",
         ProviderId.CODEX,
     )

@@ -14,8 +14,8 @@ A `deep_research` flow always writes its deliverable to `{repo}/docs/research/<t
 _RESEARCH_DIR = "docs/research"
 _PRIVATE_REPORT_DIR = f"{PRIVATE_HOME_DIRNAME}/security-reports"
 ...
-report_subdir=f"{_RESEARCH_DIR}/{task_id}"
-required_files=("report.md", "sources.json")
+report_subdir = f"{_RESEARCH_DIR}/{task_id}"
+required_files = ("report.md", "sources.json")
 ```
 
 This is deliberate and documented — [flow-authoring.md → Output policy](../flow-authoring.md#output-policy) states "You cannot specify anything else, and you cannot point a flow at an arbitrary directory". The item below proposes relaxing _where_, not _what_.

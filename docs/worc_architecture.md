@@ -93,6 +93,7 @@ When a fix loop cannot make progress — a real environmental blocker (a sandbox
 ```python
 class AgentProvider(Protocol):
     name: str
+
     def preflight(self) -> PreflightResult: ...
     def run(self, request: AgentRunRequest) -> AgentRunResult: ...
 ```

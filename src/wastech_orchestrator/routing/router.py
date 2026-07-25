@@ -101,8 +101,10 @@ def _resolve_global_primary(config: OrchestratorConfig) -> ProviderId:
     if len(primaries) != 1:
         raise ConfigError(
             [
-                "agents.providers: exactly one provider must set primary: true "
-                f"(found {len(primaries)}: {sorted(p.value for p in primaries)})"
+                (
+                    "agents.providers: exactly one provider must set primary: true "
+                    f"(found {len(primaries)}: {sorted(p.value for p in primaries)})"
+                )
             ]
         )
     return primaries[0]

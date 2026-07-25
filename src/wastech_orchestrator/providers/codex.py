@@ -186,13 +186,17 @@ _CODEX_SIGNATURES = make_signatures(
     [
         (
             ErrorClass.SESSION_UNAVAILABLE,
-            r"session not found|no such session|unknown session|conversation not found"
-            r"|no conversation with|thread not found|cannot resume",
+            (
+                r"session not found|no such session|unknown session|conversation not found"
+                r"|no conversation with|thread not found|cannot resume"
+            ),
         ),
         (
             ErrorClass.RATE_LIMITED,
-            r"rate limit|\b429\b|too many requests|quota exceeded"
-            r"|session limit|usage limit|hit your (session|usage) limit|limit .* resets",
+            (
+                r"rate limit|\b429\b|too many requests|quota exceeded"
+                r"|session limit|usage limit|hit your (session|usage) limit|limit .* resets"
+            ),
         ),
         (
             ErrorClass.AUTHENTICATION_FAILED,
@@ -834,10 +838,12 @@ class CodexProvider(BaseCliProvider):
         if ok and has_model and has_config:
             return ()
         return (
-            "codex exec resume no longer accepts the -m/--model and -c/--config options this "
-            "adapter places after `resume <SESSION_ID>` (Codex CLI grammar drift); resume nodes "
-            "(supervisor, documentation, rework, fixing) will fail on codex — pin a compatible "
-            "Codex CLI or route these nodes to another provider",
+            (
+                "codex exec resume no longer accepts the -m/--model and -c/--config options "
+                "this adapter places after `resume <SESSION_ID>` (Codex CLI grammar drift); "
+                "resume nodes (supervisor, documentation, rework, fixing) will fail on codex — "
+                "pin a compatible Codex CLI or route these nodes to another provider"
+            ),
         )
 
     def _signatures(self) -> Sequence[StderrSignature]:

@@ -584,7 +584,7 @@ The same `nodes:` block can overlay a node's executor for one run — useful for
 
 ```yaml
 nodes:
-  implementation: { model: claude-opus-4-8, reasoning: high }
+  implementation: { model: claude-opus-5, reasoning: high }
   review: { provider: codex }
 ```
 

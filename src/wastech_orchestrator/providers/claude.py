@@ -243,13 +243,17 @@ _CLAUDE_SIGNATURES = make_signatures(
     [
         (
             ErrorClass.SESSION_UNAVAILABLE,
-            r"session not found|no such session|unknown session|no conversation"
-            r"|could not resume|resume failed|invalid session",
+            (
+                r"session not found|no such session|unknown session|no conversation"
+                r"|could not resume|resume failed|invalid session"
+            ),
         ),
         (
             ErrorClass.RATE_LIMITED,
-            r"rate limit|\b429\b|too many requests|quota exceeded|overloaded"
-            r"|session limit|usage limit|hit your (session|usage) limit|limit .* resets",
+            (
+                r"rate limit|\b429\b|too many requests|quota exceeded|overloaded"
+                r"|session limit|usage limit|hit your (session|usage) limit|limit .* resets"
+            ),
         ),
         (
             ErrorClass.AUTHENTICATION_FAILED,
@@ -921,9 +925,11 @@ class ClaudeCodeProvider(BaseCliProvider):
         if not missing:
             return ()
         return (
-            f"claude --help no longer exposes {', '.join(missing)}; durable-session resume nodes "
-            "will fail on claude — pin a compatible Claude CLI or route these nodes to another "
-            "provider",
+            (
+                f"claude --help no longer exposes {', '.join(missing)}; durable-session resume "
+                "nodes will fail on claude — pin a compatible Claude CLI or route these nodes "
+                "to another provider"
+            ),
         )
 
     def _build_argv(self, request: AgentRunRequest, paths: ArtifactPaths) -> tuple[list[str], None]:

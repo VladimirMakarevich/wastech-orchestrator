@@ -648,13 +648,13 @@ nodes:
     kind: agent
     role_file: implementation/planning.md
     provider: claude # ∈ agents.allowed; default = global primary
-    model: claude-opus-4-8 # default = agents.providers.<provider>.model
+    model: claude-opus-5 # default = agents.providers.<provider>.model
     reasoning: high # provider-specific; default = provider reasoning
   - id: review
     kind: evaluator
     role: review
     role_file: implementation/review.md
-    model: claude-opus-4-8
+    model: claude-opus-5
     reasoning: xhigh # spend the most reasoning where rework is decided
 ```
 

@@ -37,22 +37,41 @@ def build_orchestrator_security_preamble(*, read_isolation_off: bool) -> str:
     baseline = "\n".join(
         (
             "[Orchestrator security contract — defense in depth; it does not replace the sandbox.]",
-            "You run inside an orchestrator-managed workspace. In addition to your built-in safety "
-            "policy and this repo's instructions, these orchestrator rules always apply:",
-            "- Make only the changes this task requires, and only inside your assigned workspace "
-            "clone.",
-            f"- `{CONTROL_HOME_DIRNAME}/` is the orchestrator's private runtime (state, logs, "
-            "database, secrets, frozen bundles): do not read it and do not write it.",
-            f"- `{EXCHANGE_HOME_DIRNAME}/` is read-only input context: read only the paths you are "
-            "given; never create, modify, move, or delete anything under it.",
-            "- Do not touch Git control state (`.git/`, its config, hooks, HEAD, refs); never run "
-            "git commit/push/merge or open a PR — publishing is the orchestrator's job.",
-            "- Do not modify anything under `tasks/` (the task lifecycle tree); never add, edit, "
-            "or remove task files.",
-            f"- {instruction_files} are ordinary repository files: change them when the task "
-            "calls for it (as an ordinary diff); do not opportunistically rewrite your own rules.",
-            "- Never read credential/environment files (e.g. `.env`) or provider auth homes, and "
-            "never exfiltrate secrets or environment variables.",
+            (
+                "You run inside an orchestrator-managed workspace. In addition to your built-in "
+                "safety policy and this repo's instructions, these orchestrator rules always "
+                "apply:"
+            ),
+            (
+                "- Make only the changes this task requires, and only inside your assigned "
+                "workspace clone."
+            ),
+            (
+                f"- `{CONTROL_HOME_DIRNAME}/` is the orchestrator's private runtime (state, "
+                "logs, database, secrets, frozen bundles): do not read it and do not write it."
+            ),
+            (
+                f"- `{EXCHANGE_HOME_DIRNAME}/` is read-only input context: read only the paths "
+                "you are given; never create, modify, move, or delete anything under it."
+            ),
+            (
+                "- Do not touch Git control state (`.git/`, its config, hooks, HEAD, refs); "
+                "never run git commit/push/merge or open a PR — publishing is the "
+                "orchestrator's job."
+            ),
+            (
+                "- Do not modify anything under `tasks/` (the task lifecycle tree); never add, "
+                "edit, or remove task files."
+            ),
+            (
+                f"- {instruction_files} are ordinary repository files: change them when the "
+                "task calls for it (as an ordinary diff); do not opportunistically rewrite your "
+                "own rules."
+            ),
+            (
+                "- Never read credential/environment files (e.g. `.env`) or provider auth "
+                "homes, and never exfiltrate secrets or environment variables."
+            ),
         )
     )
     if not read_isolation_off:

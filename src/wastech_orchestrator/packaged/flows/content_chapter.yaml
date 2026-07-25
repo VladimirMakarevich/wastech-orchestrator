@@ -78,7 +78,7 @@ flow:
       # The editor is the workhorse: the strongest available model at high reasoning (uncomment to
       # pin). xhigh buys little on prose and costs wall-time — high is the sweet spot for creative
       # editing.
-      # model: claude-opus-4-8
+      # model: claude-opus-5
       # reasoning: high
     - id: constraints
       kind: tool
@@ -95,7 +95,7 @@ flow:
       # gate_severity: low  # block on ANY finding (default high); raise `critic_fix` to match
       # Narrative taste, voice, and emotional resonance are subjective — judgment quality matters
       # most here (uncomment to pin):
-      # model: claude-opus-4-8
+      # model: claude-opus-5
       # reasoning: max
     - id: style
       kind: agent
@@ -108,7 +108,7 @@ flow:
       reasoning: medium
       # It resumes revise's editing lineage, so it MUST carry the same model if you pin one on
       # revise above (uncomment to match):
-      # model: claude-opus-4-8
+      # model: claude-opus-5
     - id: fixing
       kind: agent
       role_file: content_chapter/fixing.md
@@ -117,7 +117,7 @@ flow:
       permission_profile: workspace-write
       # A fix must satisfy the same critic as revise, so it needs the same calibre (uncomment to
       # pin):
-      # model: claude-opus-4-8
+      # model: claude-opus-5
       # reasoning: high
     - id: publish
       kind: publish

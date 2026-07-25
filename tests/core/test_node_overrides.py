@@ -103,14 +103,14 @@ def test_disable_only_override_is_not_an_overlay(tmp_path: Path) -> None:
 
 
 def test_valid_model_reasoning_provider_overlay(tmp_path: Path) -> None:
-    override = NodeOverride(model="claude-opus-4-8", reasoning="high", provider="codex")
+    override = NodeOverride(model="claude-opus-5", reasoning="high", provider="codex")
     res = resolve_node_overrides(_snap(tmp_path), {"implementation": override}, _config(tmp_path))
     assert res.warnings == ()
     assert res.overlay == {
         "implementation": {
             "provider": ProviderId.CODEX,
             "reasoning": "high",
-            "model": "claude-opus-4-8",
+            "model": "claude-opus-5",
         }
     }
 

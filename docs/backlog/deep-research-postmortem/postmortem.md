@@ -285,7 +285,9 @@ Severity: **Medium** Status: **open** Scope: orchestrator
 
 ```python
 _SENSITIVE_WORD = r"(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY|AUTHORIZATION|CREDENTIALS?|PRIVATE[_-]?KEY)"
-_ASSIGNMENT = re.compile(rf"(?i)([A-Za-z0-9_]*{_SENSITIVE_WORD}[A-Za-z0-9_]*)(\s*[:=]\s*\"?)([^\s\"]+)")
+_ASSIGNMENT = re.compile(
+    rf"(?i)([A-Za-z0-9_]*{_SENSITIVE_WORD}[A-Za-z0-9_]*)(\s*[:=]\s*\"?)([^\s\"]+)"
+)
 ```
 
 `[A-Za-z0-9_]*TOKEN[A-Za-z0-9_]*` matches the ordinary identifier `tokens`. Reproduced directly against the real function:
