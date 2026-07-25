@@ -1,11 +1,11 @@
 ---
 name: sync-docs
-description: After a behavior/CLI/config/architecture change in wastech-orchestrator, bring the docs and the follow-ups tracker in sync with the code. Use after implementing a change (the Stop docs-sync gate reminds you), before a commit, or whenever the docs no longer match the code.
+description: After a behavior/CLI/config/architecture change in wastech-orchestrator, bring the docs in sync with the code. Use after implementing a change (the Stop docs-sync gate reminds you), before a commit, or whenever the docs no longer match the code.
 ---
 
 # sync-docs
 
-Keep the documentation in lockstep with the code. Run this after changing behavior so the same change set updates the affected docs and records any deferred work — never leave docs trailing the code.
+Keep the documentation in lockstep with the code. Run this after changing behavior so the same change set updates the affected docs — never leave docs trailing the code.
 
 ## Steps
 
@@ -25,9 +25,8 @@ Keep the documentation in lockstep with the code. Run this after changing behavi
    - **Task status machine or task language fields** (statuses, front-matter keys, lifecycle folders) → [docs/glossary.md](../../../docs/glossary.md) **Task language** section.
    - **Renamed or removed terms** (config keys, CLI flags, stage names) → [docs/glossary.md](../../../docs/glossary.md) **Legacy and renamed terms** section — add or update the entry there.
    - **Persisted state / schema versions** (config `schema_version`, `state.db` `user_version`, registry `version`) → [docs/operations.md](../../../docs/operations.md#upgrading-the-orchestrator) (the current schema versions are documented there).
-   - **Any behavior change** → append to [docs/backlog/follow_ups.md](../../../docs/backlog/follow_ups.md) when the change defers work.
 
-3. **Record deferred work.** Append anything you intentionally left for later (tech-debt, a next implementation step, a known gap) to [docs/backlog/follow_ups.md](../../../docs/backlog/follow_ups.md) with the date, context, and where it's referenced. If it's a product feature, cross-link it to `docs/backlog/product_backlog.md` instead of duplicating.
+3. **Report deferred work.** State anything you intentionally left for later (tech-debt, a next implementation step, a known gap) in your answer to the user, with the context and where it's referenced — it is the user's call whether it becomes a backlog item under [docs/backlog/](../../../docs/backlog/).
 4. **Verify.** Run `/run-checks` (ruff, mypy, pytest) — the two `config.example.yaml` copies must still parse equal, and any doc-embedded examples must still load.
 
 ## Rules

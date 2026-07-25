@@ -7,7 +7,7 @@ There are two levels of git here: (A) how the orchestrator **itself** is develop
 - Branch off `main`: `feat/…`, `fix/…`, `docs/…`, `chore/…`. Never push to `main` directly — land changes through a PR, merged only after checks pass.
 - Atomic commits with an imperative subject (`Add provider health preflight`).
 - Before committing, run the gate: `ruff check .`, `ruff format --check .`, `mypy src`, `lint-imports`, `pytest` (CI also runs `interrogate` / `vulture` / `deptry`). Install the local mirror once with `pre-commit install && pre-commit install --hook-type pre-push`.
-- Keep docs in sync **in the same change** as the code — including the shipped operator-facing docs under `src/wastech_orchestrator/packaged/` — and record deferred work in [../../docs/backlog/follow_ups.md](../../docs/backlog/follow_ups.md).
+- Keep docs in sync **in the same change** as the code — including the shipped operator-facing docs under `src/wastech_orchestrator/packaged/`.
 - Do not commit: `config.yaml`, `.venv/`, `workspace/`, `logs/`, `*.db`, secrets, or the transient task folders (see `.gitignore`).
 - Gitignored `.md` files (e.g. under `.archive/`, or a target repo's `.worc/`) are not project documentation — do not treat them as current, cite them, or link to them. Check `git ls-files` / `git check-ignore -v` first.
 

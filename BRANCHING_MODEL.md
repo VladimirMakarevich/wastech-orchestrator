@@ -115,10 +115,9 @@ docs/flow-authoring.md
 
 **`docs/backlog/` stays on `dev` — decided** (owner, 2026-07-25: "это dev-задачи"). This is the one place where "no documents on `dev`" is deliberately relaxed, because the directory is not derived description — it is the dev work queue:
 
-- [docs/backlog/follow_ups.md](docs/backlog/follow_ups.md) is required by the Definition of Done in [AGENTS.md](AGENTS.md) and enforced by the Stop docs-sync gate. Work happening on `dev` is exactly the work that must append to it.
 - The ADRs, `issues/`, and post-mortems under it are **task inputs** — the specs that `dev` work is implemented from.
 
-Removing it would make agents on `dev` unable to satisfy the repository's own DoD.
+Removing it would leave `dev` work without the specs it is implemented from.
 
 The whole directory stays, `archive/` (six retired ADRs) included. Those six are the one part that is arguably neither a live task nor derived description, but splitting a directory across the two branches would buy nothing and would cost a special case in both the Phase 2 removal filter and the CI guard. Keep the rule simple and mechanically checkable: **under `docs/`, `dev` keeps `backlog/` and nothing else.**
 
@@ -146,14 +145,14 @@ Use `https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/<
 
 The skill currently targets `docs/configuration.md`, `docs/cookbook.md`, `docs/glossary.md`, `docs/operations.md`, and `docs/worc_architecture.md` — none of which exist on `dev`. Its scope must split:
 
-- **on `dev`** — sync only what is present: `.agents/rules/`, `README.md`, the shipped `src/wastech_orchestrator/packaged/` guide and `config.example.yaml`, and `docs/backlog/follow_ups.md`. Additionally, record a short doc-impact note (see below).
+- **on `dev`** — sync only what is present: `.agents/rules/`, `README.md`, and the shipped `src/wastech_orchestrator/packaged/` guide and `config.example.yaml`. Additionally, record a short doc-impact note (see below).
 - **on `main`** — the full `docs/` refresh, driven by the merged `dev` diff.
 
 Detect the branch by the presence of the derived docs tree, not by branch name — that keeps it correct in worktrees and in detached HEAD.
 
 ### Optional but recommended: a doc-impact note
 
-The reverse-engineering task on `main` reads the merged `dev` diff as its input, which is sufficient. It gets considerably cheaper if `dev` work leaves a one-line breadcrumb per change — "touched X, likely affects `configuration.md` / `worc_architecture.md`". `docs/backlog/follow_ups.md` already exists on `dev` and merges cleanly, so it is the natural place; no new mechanism is needed.
+The reverse-engineering task on `main` reads the merged `dev` diff as its input, which is sufficient. It gets considerably cheaper if `dev` work leaves a one-line breadcrumb per change — "touched X, likely affects `configuration.md` / `worc_architecture.md`". The PR description on `dev` is the natural place; no new mechanism is needed.
 
 ## Migration
 
@@ -164,7 +163,7 @@ Phase order matters: Phase 1 must land on `main` before `dev` is cut, and the se
 Land, on `main`, through a normal pull request, before creating any branch:
 
 1. The three link/scope fixes from the table above.
-2. The `AGENTS.md` working-style rule — it currently says to update the affected docs "in the same change (use `/sync-docs`)". Reword for the two-branch reality: on `dev`, sync the rules/`README`/packaged guide/follow-ups; the `docs/` refresh is a separate task on `main`.
+2. The `AGENTS.md` working-style rule — it currently says to update the affected docs "in the same change (use `/sync-docs`)". Reword for the two-branch reality: on `dev`, sync the rules/`README`/packaged guide; the `docs/` refresh is a separate task on `main`.
 3. [.agents/rules/git-workflow.md](.agents/rules/git-workflow.md) §A — replace "Branch off `main`" with the three-branch model, and state both hard rules explicitly (no `main → dev` merge; `dev → main` is always a merge commit). §B (how the orchestrator drives _target_ repositories) is unrelated and must not change.
 4. The [.claude/hooks/docs_sync_gate.py](.claude/hooks/docs_sync_gate.py) change below.
 5. The CI changes below.
@@ -332,7 +331,7 @@ and have `_should_block` use `_doc_prefixes()` in place of the literal `("docs/"
 
 | Decision | Date | Rationale |
 | --- | --- | --- |
-| `docs/backlog/` (all of it, `archive/` included) stays on `dev` | 2026-07-25 | It is the dev work queue — task inputs plus the `follow_ups.md` the DoD requires — not derived description |
+| `docs/backlog/` (all of it, `archive/` included) stays on `dev` | 2026-07-25 | It is the dev work queue — the task inputs `dev` work is implemented from — not derived description |
 | Only `docs/backlog/` survives under `docs/` on `dev`; everything else goes | 2026-07-25 | One mechanically checkable rule, enforceable by the CI guard, with no directory split across branches |
 | Default branch stays `main` | 2026-07-25 | It is the branch GitHub renders; misaddressed `feat/… → main` PRs are harmless (verified) and CI-catchable |
 

@@ -50,7 +50,7 @@ Roughly half a day to a day including tests and docs.
 
 ## Non-goals
 
-- **`required_files` stays fixed** (`report.md` + `sources.json`). Making the deliverable filenames configurable is the separate, larger "declared target document" idea already tracked in [follow_ups.md](follow_ups.md) (2026-07-14 row).
+- **`required_files` stays fixed** (`report.md` + `sources.json`). Making the deliverable filenames configurable is the separate, larger "declared target document" idea (raised 2026-07-14), not part of this change.
 - No per-task override. Flow level only; per-task flow overrides today are limited to `nodes.<id>.enabled`.
 
 ## Workaround today

@@ -67,8 +67,8 @@ def main() -> int:
         reason = (
             "You changed code under src/ this session but touched no docs/ files. "
             "If this affects behavior, the CLI, config, or contracts, update the relevant docs "
-            "in the same change (run /sync-docs), and record any deferred work in "
-            "docs/backlog/follow_ups.md. Also check the shipped operator-facing docs under "
+            "in the same change (run /sync-docs). Also check the shipped operator-facing docs "
+            "under "
             "src/wastech_orchestrator/packaged/ (the guide/ quickstarts, config.example.yaml, the "
             "built-in flows / role prompts) — they live under src/ and are routinely forgotten. "
             "Note: docs/likec4/ is updated separately via weekly reverse "

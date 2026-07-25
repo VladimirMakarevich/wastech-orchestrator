@@ -7,7 +7,7 @@ description: Implement a task in wastech-orchestrator end to end — a backlog A
 
 This skill carries one task in **wastech-orchestrator** from a starting point to a committed, checked, doc-synced change. It is the spine that connects the other skills in the right order and enforces the repo's hard invariants at each step. It writes code — but only after the task is understood, shaped, and planned.
 
-Take `args` as the task pointer: a backlog file (`docs/backlog/<slug>.md`), a `follow_ups.md` entry, a spec section, or a free-form description. If nothing is given, ask what to implement before starting.
+Take `args` as the task pointer: a backlog file (`docs/backlog/<slug>.md`), a spec section, or a free-form description. If nothing is given, ask what to implement before starting.
 
 Speak in the **user's language** (default to the language they wrote in). Keep the running commentary tight; this is execution, not a report.
 
@@ -60,7 +60,7 @@ Turn the understanding and the design judgments into an explicit, written delive
 
 ### 6. Sync docs (same change as the code)
 
-- When behavior, the CLI, config, or architecture changes, run **`/sync-docs`** to bring the affected docs (README, operations, configuration, cookbook, architecture) in line, and record any deferred work in [follow_ups.md](../../../docs/backlog/follow_ups.md). The Stop docs-sync gate enforces this. **Do not forget the shipped, operator-facing docs under `src/wastech_orchestrator/packaged/`** (the `guide/` quickstarts, `config.example.yaml`, the built-in flows / role prompts) — they live under `src/` and are routinely skipped, but they are the copy the operator reads after `install`.
+- When behavior, the CLI, config, or architecture changes, run **`/sync-docs`** to bring the affected docs (README, operations, configuration, cookbook, architecture) in line. The Stop docs-sync gate enforces this. **Do not forget the shipped, operator-facing docs under `src/wastech_orchestrator/packaged/`** (the `guide/` quickstarts, `config.example.yaml`, the built-in flows / role prompts) — they live under `src/` and are routinely skipped, but they are the copy the operator reads after `install`.
 - Markdown is not hard-wrapped (one paragraph per line); run `npx prettier@3 --write "**/*.md"` after editing docs.
 - If you implemented a backlog ADR, update its status and move/link it per [docs/backlog/README.md](../../../docs/backlog/README.md) (open item → archived when done).
 
@@ -80,7 +80,7 @@ Turn the understanding and the design judgments into an explicit, written delive
 
 ## Output
 
-As you finish, report concisely in the user's language: what was built, the files/tests touched, docs synced, check results (state them honestly — if something failed or was skipped, say so with the output), and any deferred work recorded in `follow_ups.md`. If a decision genuinely belongs to the user (a scope cut, a risk trade-off, an open sub-decision), surface it with options rather than deciding silently.
+As you finish, report concisely in the user's language: what was built, the files/tests touched, docs synced, check results (state them honestly — if something failed or was skipped, say so with the output), and any work you deliberately deferred. If a decision genuinely belongs to the user (a scope cut, a risk trade-off, an open sub-decision), surface it with options rather than deciding silently.
 
 ## What not to do
 

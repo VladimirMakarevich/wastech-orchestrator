@@ -338,7 +338,7 @@ Snapshots подтверждают не просто повторную запи
 9. Добавить entity rename/alias/referential integrity test на старом/new calculator path.
 10. Сохранить существующие audit-chain, redaction, atomic IO и snapshot restore tests как regression guards.
 
-`tests/eval/test_replay_baseline.py` использует synthetic baseline. Это полезно для детерминизма, но не измеряет деградацию на накопленной WastimeApp history. `docs/backlog/follow_ups.md` уже признаёт отсутствие real baseline, отключённый contradiction path, planning без target paths и неподключённые symbols; эти пункты следует превратить в acceptance tests, а не оставлять только backlog notes.
+`tests/eval/test_replay_baseline.py` использует synthetic baseline. Это полезно для детерминизма, но не измеряет деградацию на накопленной WastimeApp history. Отсутствие real baseline, отключённый contradiction path, planning без target paths и неподключённые symbols уже известны; эти пункты следует превратить в acceptance tests, а не оставлять только заметками.
 
 ## 9. Post-fix validation plan
 

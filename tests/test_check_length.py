@@ -3,8 +3,8 @@
 Runs the shipped script out-of-process through ``sys.executable`` (so the test is deterministic and
 OS-independent — it never relies on the ``+x`` bit or the shebang) with a crafted stdin payload, and
 asserts the char/paragraph floors, the heading-exclusion, and the diff-only scope resolution
-(deliberately no task-text fallback — see the script's module docstring and
-docs/backlog/follow_ups.md finding F3) incl. the vacuous pass. The script is located via
+(deliberately no task-text fallback — see the script's module docstring, finding F3) incl. the
+vacuous pass. The script is located via
 ``importlib.resources`` so it works from a source tree or a wheel, exactly as the runtime resolves
 it.
 """

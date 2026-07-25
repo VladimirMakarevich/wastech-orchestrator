@@ -113,7 +113,7 @@ Report concisely, in the user's language. Lead with a 2–3 line verdict (did th
 - **Data gaps** — what you couldn't assess and why (e.g. `prompt_audit: false` → no per-prompt audit; recommend enabling it before the next run).
 - **What's already good** — patterns worth keeping, so the user knows you checked.
 
-Offer to persist the actionable items to `docs/backlog/follow_ups.md` (the repo's deferred-work tracker), and to apply any single finding on request. Then **stop**.
+Offer to persist the actionable items as a backlog item under `docs/backlog/`, and to apply any single finding on request. Then **stop**.
 
 ## What not to do
 

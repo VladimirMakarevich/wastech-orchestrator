@@ -65,5 +65,5 @@ On a temporary Git repository:
 - Every behavior change is accompanied by a test.
 - The goal is high coverage of critical paths (router, fallback, state machine, security/redaction), not a percentage for its own sake.
 - A green `pytest` is a mandatory precondition for committing and for transitioning between implementation stages.
-- The suite runs in parallel by default (`pytest-xdist`, `addopts = "-n auto"`) — it is process-spawn/I/O bound, so this is a large speedup (see [docs/backlog/test-suite-performance.md](../../docs/backlog/test-suite-performance.md)). Run `pytest -n0` for a serial run when debugging (`--pdb`, `-s` streaming, deterministic ordering).
+- The suite runs in parallel by default (`pytest-xdist`, `addopts = "-n auto"`). Run `pytest -n0` for a serial run when debugging (`--pdb`, `-s` streaming, deterministic ordering).
 - Heavy integration files (real git/subprocess/daemon/process-tree) are tagged `pytestmark = pytest.mark.slow`. For a fast inner loop while developing, run `pytest -m "not slow"` (~12 s vs a few minutes); CI still runs the whole suite. Markers are registered in `pyproject.toml` and `--strict-markers` is on, so a typo'd marker is an error.

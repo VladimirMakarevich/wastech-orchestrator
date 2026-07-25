@@ -18,8 +18,8 @@ Scope = only changed documents, from the run's diff artifact (`paths.diff_path`)
 task-text fallback like `check_chapter` has. A blog/article task body routinely names reference docs
 (a tone-of-voice guide, an idea doc) that are not the deliverable; falling back to "any `.md` named
 in the task text" on an empty diff would measure THOSE instead and report a misleading pass/fail on
-files the run never touched (this happened in the field — see docs/backlog/follow_ups.md, the
-2026-07-14 codex-Windows-sandbox post-mortem, finding F3). So an absent/empty diff is always a
+files the run never touched (this happened in the field — the 2026-07-14 codex-Windows-sandbox
+post-mortem, finding F3). So an absent/empty diff is always a
 vacuous pass here: nothing to validate, never a guess.
 
 Args (`args.min_chars`, `args.min_paragraphs`) are both OPTIONAL minimum-size floors — never a
