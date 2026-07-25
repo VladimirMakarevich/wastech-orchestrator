@@ -29,7 +29,8 @@ TRACE_REWORK_EXHAUSTED = "accept (rework budget exhausted)"
 _TERMINAL_REASON_PROSE: dict[str, str] = {
     "no_file_change": (
         "the fix loop produced no file changes for consecutive rounds — the agent kept emitting "
-        "output without editing the tree, so the loop was cut short of max_fix_cycles"
+        "output without editing the tree, so the loop was cut short of max_fix_cycles; check the "
+        "latest fixing output and the review findings for what blocked progress"
     ),
     "max_fix_cycles": (
         "the review/fix loop hit its per-loop cap (max_fix_cycles) without the reviewer accepting"

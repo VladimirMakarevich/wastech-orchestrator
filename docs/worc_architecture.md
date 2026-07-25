@@ -86,6 +86,8 @@ Node kinds:
 
 An evaluator's verdict is schema-enforced: the router requests a structured `findings` array (`severity`/`path`/`what`/`fix`) from the provider, and a run whose result does not carry a parseable one never accepts — it fails closed to `manual_action_required` (preserving the branch) instead of being read as "no findings". A well-formed empty `findings` array is a genuinely clean, accepting verdict.
 
+When a fix loop cannot make progress — a real environmental blocker (a sandbox/permission wall, a missing host toolchain) leaves the author unable to change the tree — the engine's **no-file-change stall guard** cuts the loop short to `manual_action_required` after a couple of unchanged rework rounds (rather than burning the whole `max_fix_cycles` budget), and the operator-facing terminal reason explains the no-progress stall. This is a deterministic, flow-agnostic backstop that needs nothing in the operator's role prompts. To keep that decision informed, on a rework re-entry the reviewer's context carries the rework-target author node's own last report (`prior_fix`), so it judges "was the finding addressed" with the implementer's account — including any stated blocker described in prose — in hand, not the diff alone.
+
 ### 4.3 CodingAgent — provider abstraction + node-based routing
 
 ```python

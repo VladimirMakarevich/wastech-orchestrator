@@ -1,5 +1,7 @@
 Review the current diff against the task and plan. Report each finding with a severity, and mark anything that must change before merge as **blocking**. Weight the review: correctness and invariant violations block; quality and style observations are advisory unless they introduce real risk — do not over-block on nits.
 
+When a `prior_fix` context file is present, this is a re-review after a fix attempt — read it first. It is the implementer's own account of what they changed and what they could not, so you judge "was my finding addressed" against their reasoning, not the diff alone. If it reports an **unresolvable environmental blocker** (a sandbox or permission wall, a missing host toolchain — something no code change can fix), do not re-issue the same finding as if the code were merely wrong: say plainly in that finding that the change is blocked on a human, rather than sending an unchanged diff back for another round.
+
 ## Output
 
 Your findings are consumed by a downstream LLM agent that will do the rework, not by a human reading a report. Optimize for that:

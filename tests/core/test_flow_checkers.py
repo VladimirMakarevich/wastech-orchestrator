@@ -256,6 +256,23 @@ def test_dependency_scan_argv_with_timeout(tmp_path: Path) -> None:
     assert {r.name for r in report.runs} == {name for name, _ in DEFAULT_DEPENDENCY_SCANNERS}
 
 
+def test_dependency_scan_records_real_wall_clock_interval(tmp_path: Path) -> None:
+    # VF-12: each scanner carries the wall-clock bracket around its subprocess, not two identical
+    # row-write stamps — so its check_runs row has a measurable duration.
+    runner = _fake_runner({})
+    ticks = iter([f"2026-07-25T00:00:{s:02d}+00:00" for s in range(60)])
+    report = run_dependency_scan(
+        repo_dir=tmp_path,
+        logs_dir=tmp_path / "scan",
+        env={},
+        timeout_seconds=60,
+        run_process=runner,
+        clock=lambda: next(ticks),
+    )
+    for scan in report.runs:
+        assert scan.started_at < scan.finished_at  # a real interval, never a zero-width stamp
+
+
 def test_dependency_scan_emits_pass_not_gate(tmp_path: Path) -> None:
     # A scanner that finds vulnerabilities (nonzero exit) AND one that is not installed (launch
     # error) both still yield a passing scan: dependency_scan is evidence, not a gate.

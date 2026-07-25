@@ -118,6 +118,7 @@ class CheckRunnerPort(Protocol):
         task_id: str,
         subtask: int | None = None,
         selected: Sequence[ResolvedCheckSet] | None = None,
+        clock: Callable[[], str] = ...,  # VF-12: wall-clock for the check_runs interval
     ) -> CheckOutcome: ...
 
 

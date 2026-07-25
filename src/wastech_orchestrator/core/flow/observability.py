@@ -136,8 +136,11 @@ def record_provider_attempts(
                 error_class=attempt.error_class.value if attempt.error_class else None,
                 exit_code=result.exit_code if result else None,
                 attempt_dir=attempt_dir,
-                started_at=clock(),
-                finished_at=clock(),
+                # VF-12: stamp the attempt's real measured interval from the result (already the
+                # values the prompt-audit artifact uses below); fall back to the clock only for a
+                # result-less attempt (an infra fallback that never produced a result).
+                started_at=result.started_at if result else clock(),
+                finished_at=result.finished_at if result else clock(),
                 usage_scope=scope,
                 usage_input_total=delta.input_total if delta else None,
                 usage_cache_read=delta.cache_read if delta else None,

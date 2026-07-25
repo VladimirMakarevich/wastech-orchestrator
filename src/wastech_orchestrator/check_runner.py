@@ -22,6 +22,7 @@ import shutil
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 
@@ -43,6 +44,15 @@ Which = Callable[[str], str | None]
 _LOG = logging.getLogger(__name__)
 
 
+def _utc_now_iso() -> str:
+    """Wall-clock UTC ISO timestamp for a check's ``check_runs`` interval (VF-12).
+
+    A per-check wall-clock read bracketing the launched check, distinct from the monotonic clock
+    used for the duration log line — mirrors how the provider adapter stamps its attempt timestamps.
+    """
+    return datetime.now(UTC).isoformat()
+
+
 @dataclass(frozen=True)
 class CheckRunResult:
     """The outcome of one check command."""
@@ -52,6 +62,10 @@ class CheckRunResult:
     timed_out: bool
     passed: bool
     log_path: str
+    # VF-12: the check's real wall-clock interval, captured around the launched check, so the
+    # ``check_runs`` row carries a measured duration instead of two identical row-write stamps.
+    started_at: str
+    finished_at: str
     name: str = ""
     # A launch failure (binary/module not found) is an infrastructure event, not a quality failure.
     launch_failed: bool = False
@@ -107,6 +121,7 @@ class CheckRunner:
         task_id: str,
         subtask: int | None = None,
         selected: Sequence[ResolvedCheckSet] | None = None,
+        clock: Callable[[], str] = _utc_now_iso,
     ) -> CheckOutcome:
         """Run every check in the ``selected`` sets and aggregate the results.
 
@@ -146,10 +161,11 @@ class CheckRunner:
                 if cset.skip_if_unavailable and self._which(argv[0]) is None:
                     # Opted-in set, toolchain binary absent on host → skip (loud), never "passed".
                     log.warning("check skipped: toolchain absent", extra=fields)
-                    runs.append(self._skipped_result(argv, check, log_path))
+                    runs.append(self._skipped_result(argv, check, log_path, clock()))
                     continue
                 cwd = Path(clone_dir) / check.cwd if check.cwd else Path(clone_dir)
                 started = self._monotonic()
+                started_at = clock()  # VF-12: wall-clock bracket for the check_runs interval
                 log.info("check started", extra=fields)
                 result = run_with_heartbeat(
                     partial(
@@ -166,6 +182,7 @@ class CheckRunner:
                     fields=fields,
                     monotonic=self._monotonic,
                 )
+                finished_at = clock()  # VF-12: end of the wall-clock bracket
                 self._append_stderr(log_path, result.stderr_text, result)
                 launch_failed = result.launch_error is not None
                 passed = result.exit_code == 0 and not result.timed_out and not launch_failed
@@ -188,6 +205,8 @@ class CheckRunner:
                         timed_out=result.timed_out,
                         passed=passed,
                         log_path=str(log_path),
+                        started_at=started_at,
+                        finished_at=finished_at,
                         launch_failed=launch_failed,
                         launch_error=result.launch_error,
                     )
@@ -217,9 +236,13 @@ class CheckRunner:
         )
 
     def _skipped_result(
-        self, argv: list[str], check: ResolvedCheck, log_path: Path
+        self, argv: list[str], check: ResolvedCheck, log_path: Path, now: str
     ) -> CheckRunResult:
-        """Record a skipped check with a loud, distinct log line (never overwritten)."""
+        """Record a skipped check with a loud, distinct log line (never overwritten).
+
+        A skip launches nothing, so ``started_at`` == ``finished_at`` (VF-12): an honest zero-length
+        interval, distinct from the old row-write double-stamp of a check that really ran.
+        """
         log_path.write_text(
             f"skipped (toolchain absent): {argv[0]!r} not found on host\n", encoding="utf-8"
         )
@@ -230,6 +253,8 @@ class CheckRunner:
             timed_out=False,
             passed=False,
             log_path=str(log_path),
+            started_at=now,
+            finished_at=now,
             skipped=True,
         )
 

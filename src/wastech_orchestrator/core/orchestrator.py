@@ -203,6 +203,7 @@ from wastech_orchestrator.security.isolation import IsolationCheck, check_isolat
 from wastech_orchestrator.state_store import (
     ArtifactRow,
     EvaluationRow,
+    ProviderAttemptRow,
     StateStore,
     SubtaskRow,
     TaskRow,
@@ -1545,6 +1546,13 @@ class Orchestrator:
         if checkpoint is not None:
             self._store.save_counters(task_id, LoopCounters.from_run_state(checkpoint))
         self._store.set_status(task_id, declared)  # out-of-band operator override (no assert)
+        # VF-13: the hand-finish path is the common landing spot after a ``--force-full`` stop,
+        # which SIGKILLs the daemon mid-node and leaves orphan ``running`` node runs + an unbilled
+        # killed attempt. Reconcile them here so the aborted run is auditable (closed nodes + an
+        # ``unknown`` attempt row) and logged, rather than silently stranded.
+        self._reconcile_open_node_runs(
+            task_id, reason=note or f"finalized as {declared.value} by operator"
+        )
         # WRI-007: the operator finalize/merge/PR-sync paths are terminal producers that bypass
         # ``_go_terminal``, so they must seal the exchange too. Idempotent — a no-op when the
         # pipeline terminal already sealed and removed the active exchange for this task.
@@ -3778,6 +3786,54 @@ class Orchestrator:
         except OSError as exc:
             self._log(p.task.id).warning("failure report not written", extra={"error": str(exc)})
 
+    def _reconcile_open_node_runs(self, task_id: str, *, reason: str) -> None:
+        """Close node runs left ``running`` by a hard stop, at a terminal transition (VF-13).
+
+        A ``--force-full`` SIGKILL kills the daemon mid-node, so the node's own
+        ``complete_node_run`` and ``record_provider_attempts`` never run: the ``node_runs`` row is
+        stranded ``running`` and the killed provider attempt is unbilled. Every terminal producer
+        (``_go_terminal`` and the hand-finish ``finalize_task``) runs this so the orphan is closed
+        to ``aborted`` and each
+        killed provider node earns a ``provider_attempts`` row — ``usage_delta_status='unknown'``,
+        because the partial run's real token usage is not recoverable — so an aborted run is not
+        free in the cost roll-up. A no-op on a clean terminal (no orphan rows exist), and it emits
+        ``WARNING`` naming the reconciled nodes, since an operator abort is exactly the event a
+        post-mortem needs and the SIGKILLed daemon logged nothing itself.
+        """
+        finished_at = self._clock()
+        closed = self._store.reconcile_open_node_runs(
+            task_id,
+            finished_at=finished_at,
+            error_class=ErrorClass.CANCELLED.value,
+            skip_reason=reason,
+        )
+        if not closed:
+            return
+        for row in closed:
+            if row.id is None or row.route_primary is None:
+                continue  # a non-provider node (checks/publish) has no billable attempt to record
+            self._store.record_provider_attempt(
+                ProviderAttemptRow(
+                    task_id=task_id,
+                    node_run_id=row.id,
+                    provider=row.route_primary,
+                    attempt=1,
+                    status="aborted",
+                    error_class=ErrorClass.CANCELLED.value,
+                    started_at=row.started_at,
+                    finished_at=finished_at,
+                    usage_delta_status="unknown",
+                )
+            )
+        self._log(task_id).warning(
+            "reconciled orphan node runs after termination",
+            extra={
+                "reconciled": len(closed),
+                "nodes": ",".join(r.node_id for r in closed),
+                "reason": reason,
+            },
+        )
+
     def _go_terminal(
         self,
         p: _Pipeline,
@@ -3845,6 +3901,12 @@ class Orchestrator:
             cleanup_completed_at=self._clock() if cleanup.safe else None,
             cleanup_last_error=last_error,
             blocked_since=None,  # B-lite: a terminal task is no longer parked
+        )
+        # VF-13: close any node run left ``running`` by a hard stop before recording the terminal
+        # state. A no-op on the normal path (the engine finalizes every node it runs); it catches a
+        # node stranded by an interrupt that still reached ``_go_terminal``.
+        self._reconcile_open_node_runs(
+            p.task.id, reason=manual_reason or f"terminal transition to {final.value}"
         )
         # The flow checkpoint marks where ``rerun --continue`` re-enters — meaningful only for a
         # non-success terminal. A ``done`` task has no resume position, so clear it (``node_runs``

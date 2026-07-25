@@ -1068,6 +1068,47 @@ class StateStore:
         )
         return [_node_run_from_row(row) for row in cur.fetchall()]
 
+    def reconcile_open_node_runs(
+        self,
+        task_id: str,
+        *,
+        finished_at: str,
+        status: str = "aborted",
+        error_class: str | None = None,
+        skip_reason: str | None = None,
+        conn: sqlite3.Connection | None = None,
+    ) -> list[NodeRunRow]:
+        """Close any still-``running`` node runs for a task at a terminal transition (VF-13).
+
+        A node run has one write path: reserved ``running`` (:meth:`record_node_run`) then finalized
+        by :meth:`complete_node_run`. A hard operator stop (``--force-full`` SIGKILL) kills the
+        daemon mid-node, so that finalize never runs and the row is stranded ``status='running'`` /
+        ``finished_at IS NULL`` forever. On any terminal transition (clean ``_go_terminal`` or the
+        hand-finish ``finalize_task``) this closes such orphans to ``status`` (default ``aborted``),
+        stamping ``finished_at`` and the operator-action reason, so an interrupted node is no longer
+        indistinguishable from one still executing. Returns the **pre-update** rows (so the caller
+        can record the killed provider attempt from ``route_primary``), or ``[]`` — the no-orphan
+        common case, where a clean run already finalized every node and nothing is reconciled.
+        """
+        open_rows = [
+            _node_run_from_row(row)
+            for row in self._conn.execute(
+                "SELECT * FROM node_runs WHERE task_id = ? AND status = 'running' "
+                "AND finished_at IS NULL ORDER BY id ASC",
+                (task_id,),
+            ).fetchall()
+        ]
+        if not open_rows:
+            return []
+        with self._writer(conn) as c:
+            c.execute(
+                "UPDATE node_runs SET status = ?, finished_at = ?, error_class = ?, "
+                "skip_reason = ? WHERE task_id = ? AND status = 'running' "
+                "AND finished_at IS NULL",
+                (status, finished_at, error_class, skip_reason, task_id),
+            )
+        return open_rows
+
     def save_flow_checkpoint(
         self,
         task_id: str,

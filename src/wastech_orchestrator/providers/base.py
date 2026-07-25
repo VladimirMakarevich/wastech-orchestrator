@@ -176,6 +176,12 @@ class AgentRunRequest:
     check_artifacts_path: str | None = None
     review_artifacts_path: str | None = None
     human_input_path: str | None = None
+    # VF-10: on a rework re-entry, the previous author (e.g. ``fixing``) node's report — its own
+    # account of what it did or why it could not address the last findings. Set by the evaluator
+    # runner from the exchange (``None`` on the first pass / for non-evaluator requests), so the
+    # reviewer judges "was the finding addressed" with the implementer's account in hand instead of
+    # re-diagnosing from the diff alone.
+    rework_report_path: str | None = None
     # Planning-selected SKILL.md paths — read-only advisory references, never executed.
     skill_reference_paths: tuple[str, ...] = ()
     output_schema: dict[str, Any] | None = None
@@ -220,6 +226,7 @@ def build_context_footer(request: AgentRunRequest) -> str:
         ("diff", request.diff_path),
         ("checks", request.check_artifacts_path),
         ("review", request.review_artifacts_path),
+        ("prior_fix", request.rework_report_path),
         ("human_input", request.human_input_path),
     )
     present = [(label, path) for label, path in fields if path]

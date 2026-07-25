@@ -677,6 +677,66 @@ def test_evaluator_request_carries_security_preamble(tmp_path: Path) -> None:
     assert router.requests[0].security_preamble == "[Orchestrator security contract] baseline"
 
 
+def test_evaluator_carries_prior_rework_report_from_exchange(tmp_path: Path) -> None:
+    # VF-10: on a rework re-entry the reviewer's request carries the rework-target author node's
+    # latest exchange report, so it judges "was the finding addressed" with the implementer's
+    # account (here a stated blocker) in hand, not the diff alone.
+    import dataclasses
+
+    from wastech_orchestrator.core.flow.schema import Edge
+    from wastech_orchestrator.providers.artifacts import exchange_task_dir
+
+    (tmp_path / "r.md").write_text("review {diff_path}", "utf-8")
+    exchange_root = tmp_path / ".worc-io"
+    run_dir = exchange_task_dir(str(exchange_root), "task-1") / "stages" / "fixing" / "run-000005"
+    run_dir.mkdir(parents=True)
+    (run_dir / "fixing.out.md").write_text("blocked: AGENTS.md write-protected", "utf-8")
+
+    review = _evaluator("review")
+    snap = dataclasses.replace(
+        _snapshot(review),
+        adjacency=MappingProxyType(
+            {"review": (Edge(from_node="review", to="fixing", outcome="rework"),)}
+        ),
+    )
+    ctx = NodeContext(
+        snapshot=snap, run_state=FlowRunState(flow_fingerprint="fp"), node=review, task_id="task-1"
+    )
+    router = FakeRouter(_result({"findings": []}))
+    services = NodeServices(
+        router=router,
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=FakeStore(),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        clock=lambda: "ts",
+        exchange_root=str(exchange_root),
+    )
+    EvaluatorNodeRunner(services, _inputs(tmp_path)).run(review, ctx)
+    report = router.requests[0].rework_report_path
+    assert report is not None and report.endswith("fixing.out.md")
+    # ...and it renders into the context footer the reviewer actually reads.
+    from wastech_orchestrator.providers.base import build_context_footer
+
+    assert f"prior_fix: {report}" in build_context_footer(router.requests[0])
+
+
+def test_evaluator_first_pass_has_no_prior_rework_report(tmp_path: Path) -> None:
+    # VF-10: the first review pass (the author has not run yet) carries no prior report — the field
+    # is None and the context footer omits the slot.
+    (tmp_path / "r.md").write_text("review {diff_path}", "utf-8")
+    router = FakeRouter(_result({"findings": []}))
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    node = _evaluator("review")
+    EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert router.requests[0].rework_report_path is None
+
+
 def test_evaluator_fresh_disposable_does_not_touch_lineage(tmp_path: Path) -> None:
     # P2.2: an in-flow evaluator (fresh_disposable) never resumes nor writes the author's editing
     # lineage — it gets a fresh session and the unit's editing session is left untouched.
@@ -1984,6 +2044,8 @@ def _run(passed: bool) -> CheckRunResult:
         timed_out=False,
         passed=passed,
         log_path="/l",
+        started_at="2026-07-25T00:00:00+00:00",
+        finished_at="2026-07-25T00:00:01+00:00",
     )
 
 
@@ -1994,6 +2056,8 @@ def _skipped_run() -> CheckRunResult:
         timed_out=False,
         passed=False,
         log_path="/l",
+        started_at="2026-07-25T00:00:00+00:00",
+        finished_at="2026-07-25T00:00:00+00:00",
         skipped=True,
     )
 

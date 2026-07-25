@@ -306,7 +306,16 @@ Cost concentration: `implementation` dominates (up to $3.81 on a single node), `
 
 ## VF-10 — an agent that reports a hard blocker still returns `outcome=done`, and the fix→review edge drops the fixer's report (flow)
 
-Severity: **High** Status: **open** First seen: 2026-07-25 (`p10-01-governance-docs-2`) Related: VF-9
+Severity: **High** Status: **shipped 2026-07-25** (operator chose **Variant B**: no explicit blocked signal in operator prompts — lean on the deterministic no-file-change backstop + carry the fixer's report into review as `prior_fix`) First seen: 2026-07-25 (`p10-01-governance-docs-2`) Related: VF-9
+
+### Resolution (shipped 2026-07-25)
+
+An explicit per-node "blocked" signal was first built (a `{"blocked": true, "reason": …}` object parsed by the runner → `manual_action_required`) but **withdrawn**: its instruction lived in each author role prompt, so an operator authoring a custom flow had to remember to copy it — an onboarding/maintenance burden and the same "operator must replicate boilerplate" smell as VF-5. The shipped approach (**Variant B**) needs nothing in the operator's prompts:
+
+- **Deterministic backstop is the primary path.** A real environmental blocker leaves the author unable to change the tree; the engine's `no_file_change` stall guard already cuts a no-progress fix loop short to `manual_action_required` after a couple of unchanged rework rounds (well before `max_fix_cycles`). It is flow-agnostic (works in any flow with a fix loop, by construction) and prompt-free. The operator-facing terminal reason for `no_file_change` now points at the fixer's latest output + the review findings (`notify/interface.py`) so the post-mortem is informative, not a cryptic token.
+- **Carry the fixer's report into review** (kept). On a rework re-entry the evaluator resolves its own `rework`-edge target node (via `ctx.snapshot.adjacency`) and pulls that node's latest `<node>.out.md` from the exchange (`exchange_latest_run_file`) into a new `AgentRunRequest.rework_report_path`, rendered as the `prior_fix` context-footer slot. `implementation/review.md` tells the reviewer to read it (the fixer already describes an environmental blocker in prose per its unchanged scope-discipline bullet) and, if it reports an unresolvable blocker, not to re-issue the same finding. `None` on the first pass, so the footer omits the slot then. This is Core-injected into the evaluator context — no operator-prompt burden.
+
+The explicit-signal approach is not lost — it is recorded as a future option in [follow_ups.md](../follow_ups.md) (**"VF-10 Variant A"**): if the crisper behavior is ever wanted (a clean `reason` field, first-cycle + first-node coverage, a distinguishable `node_runs.outcome`), inject the protocol from Core for agent nodes (mirroring the VF-7 `security_preamble` seam) so the operator still never writes it.
 
 ### Observed
 
@@ -360,7 +369,14 @@ Severity: **High** Status: **open** First seen: 2026-07-25 (tasks `p9-06` … `p
 
 ## VF-12 — `provider_attempts` and `check_runs` record zero duration: every attempt and check has `started_at == finished_at` (observability)
 
-Severity: **Medium** Status: **open** First seen: 2026-07-25 (all 15 runs) Related: VF-8
+Severity: **Medium** Status: **shipped 2026-07-25** (both tables now record the real measured interval instead of two row-write clock reads) First seen: 2026-07-25 (all 15 runs) Related: VF-8
+
+### Resolution (shipped 2026-07-25)
+
+Both write sites take the real interval; no schema change (the columns already existed).
+
+- **`provider_attempts`** (`core/flow/observability.py`): the row's `started_at`/`finished_at` come from `attempt.result.started_at`/`finished_at` (the same values the prompt-audit artifact already used), falling back to the clock only for a result-less fallback attempt.
+- **`check_runs`** (`core/flow/nodes/checks.py`): `_record_check_run` now takes the measured interval from the caller. `CheckRunner` and `run_dependency_scan` capture a wall-clock bracket around each launched check/scanner (carried on `CheckRunResult`/`ScannerRun`, threaded via the node's `clock`); the citation checker brackets its in-process validation. A skip is one honest instant. Regression tests assert `finished_at > started_at` for a check/attempt with a real duration.
 
 ### Observed
 
@@ -380,7 +396,14 @@ Both audit tables stamp the clock **twice at row-write time**, so no row carries
 
 ## VF-13 — an operator-forced termination leaves orphan `running` `node_runs`, no `provider_attempts` row, and no terminal log line (observability)
 
-Severity: **Medium** Status: **open** First seen: 2026-07-25 (`p10-01-governance-docs`, `p10-02-glossary-status`)
+Severity: **Medium** Status: **shipped 2026-07-25** (any terminal transition reconciles orphan `running` node runs → `aborted`, records the killed attempt with `usage_delta_status='unknown'`, and logs a `WARNING`) First seen: 2026-07-25 (`p10-01-governance-docs`, `p10-02-glossary-status`)
+
+### Resolution (shipped 2026-07-25)
+
+A shared reconcile step runs on **any** terminal transition, so a hard-stopped task is no longer silently stranded:
+
+- **State store.** New `StateStore.reconcile_open_node_runs(task_id, …)` closes any `status='running'` / `finished_at IS NULL` node run to `aborted` (stamping `finished_at`, `error_class='cancelled'`, and the operator-action reason in `skip_reason`) and returns the pre-update rows. `[]` and no writes on a clean terminal.
+- **Orchestrator.** `_reconcile_open_node_runs` (called from `finalize_task` — the common landing spot after a `--force-full` kill — and from `_go_terminal`) closes the orphans and, for each closed **provider** node (agent/evaluator, which carry `route_primary` reserved at start), records a `provider_attempts` row: `provider=route_primary`, `attempt=1`, `status='aborted'`, `usage_delta_status='unknown'` (the partial run's real token usage is not recoverable, and a dollar figure is never guessed — `usage_cost` stays `NULL`). It then logs one `WARNING` naming the reconciled nodes — the one event the SIGKILLed daemon could not log itself.
 
 ### Observed
 
@@ -488,7 +511,7 @@ Two prompt-hygiene defects visible in every rendered prompt in the window.
 
 ## VF-18 — review findings below the rework threshold are recorded and then dropped (flow)
 
-Severity: **Low** Status: **open** First seen: 2026-07-25 (`p9-06-format-gate`)
+Severity: **Low** — but see below Status: **open** First seen: 2026-07-25 (`p9-06-format-gate`) Related: **[deep-research-postmortem](../deep-research-postmortem/README.md) DR-1/DR-2 escalate this** (tasks [P0.1](../deep-research-postmortem/p0-1-evaluator-gate-severity.md) / [P0.2](../deep-research-postmortem/p0-2-evaluator-findings-surfacing.md)) — the mechanism is not a "threshold" but `gate_severity`, which defaults to `high` ([`core/flow/schema.py:31`](../../../src/wastech_orchestrator/core/flow/schema.py)), and on `p9-09` it dropped a **medium** critic finding while the PR body told the operator all gates "passed"
 
 ### Observed
 

@@ -53,7 +53,11 @@ from wastech_orchestrator.core.flow.usage_accounting import (
     guard_output_baseline,
     snapshot_for_lineage,
 )
-from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
+from wastech_orchestrator.providers.artifacts import (
+    exchange_latest_run_file,
+    node_run_dir,
+    task_artifact_dir,
+)
 from wastech_orchestrator.providers.base import AgentRunRequest, build_effective_prompt
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import EvaluationRow, NodeLineageRow, NodeRunRow
@@ -309,6 +313,10 @@ class EvaluatorNodeRunner:
             diff_path=self._in.diff_path,
             check_artifacts_path=self._in.checks_path,
             review_artifacts_path=self._in.review_path,
+            # VF-10: on a rework re-entry, hand the reviewer the previous author node's report so it
+            # judges "was the finding addressed" with the implementer's account (including a stated
+            # blocker) in hand, not the diff alone. ``None`` on the first pass (no prior report).
+            rework_report_path=self._prior_rework_report_path(node, ctx),
             output_schema=_FINDINGS_SCHEMA,  # F19: mandatory; fail-closed if not honored (run())
             model=node.model,
             reasoning=node.reasoning,
@@ -330,6 +338,28 @@ class EvaluatorNodeRunner:
             # NodeServices; the neutral seam prepends it to the effective prompt.
             security_preamble=self._s.security_preamble,
         )
+
+    def _prior_rework_report_path(self, node: EvaluatorNode, ctx: NodeContext) -> str | None:
+        """The latest exchange report of this evaluator's rework-target author node, or ``None``.
+
+        The evaluator's own ``rework`` edge names the author it sends work back to (``review →
+        fixing`` in the implementation flow). On a re-entry that author has already published its
+        ``<node>.out.md`` to the exchange; surface the newest one so the reviewer reads the
+        implementer's account (VF-10). ``None`` when there is no rework edge, no exchange is wired,
+        or the author has not run yet (the first review pass) — the footer then omits the slot.
+        """
+        if not self._s.exchange_root:
+            return None
+        target = next(
+            (e.to for e in ctx.snapshot.adjacency.get(node.id, ()) if e.outcome == "rework"),
+            None,
+        )
+        if target is None:
+            return None
+        path = exchange_latest_run_file(
+            self._s.exchange_root, ctx.task_id, target, f"{target}.out.md"
+        )
+        return str(path) if path is not None else None
 
     def _resume_node_lineage(
         self, node: EvaluatorNode, ctx: NodeContext, route: ResolvedRoute
