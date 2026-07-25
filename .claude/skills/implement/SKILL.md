@@ -49,7 +49,7 @@ Turn the understanding and the design judgments into an explicit, written delive
 
 ### 4. Branch (see [git-workflow.md](../../../.agents/rules/git-workflow.md))
 
-- Develop the orchestrator itself on a branch off `main`: `feat/<slug>`, `fix/<slug>`, `docs/<slug>`, or `chore/<slug>`. **Never commit to `main` directly** unless the user explicitly asks and it's already the working branch.
+- Develop the orchestrator itself on a branch off **`dev`**: `feat/<slug>`, `fix/<slug>`, or `chore/<slug>`. **Never commit to `dev` or `main` directly** unless the user explicitly asks and it's already the working branch. (`docs/<slug>` is different — the derived `docs/` tree lives on `main`, so a docs-refresh branch is cut off `main`; see [git-workflow.md](../../../.agents/rules/git-workflow.md) §A.)
 - If the task is a phase of an existing epic branch (check memory / the user), land the phase there instead — one squashed commit per phase.
 
 ### 5. Build
@@ -76,7 +76,7 @@ Turn the understanding and the design judgments into an explicit, written delive
 
 - Atomic commit, imperative subject (`Add provider health preflight`). One squashed commit per phase for epic work.
 - **Scoped staging only** — stage the intended paths explicitly; **never `git add .` / `-A`**. Never commit `config.yaml`, `*.db`, `logs/`, `workspace/`, `tasks/…`, `.venv/`, or secrets.
-- Push / open a PR only when the user asks. PR into `main`, never push to `main` directly.
+- Push / open a PR only when the user asks. PR into **`dev`** (squash-merge), never push to `dev` or `main` directly. Integrating `dev → main` is a separate, maintainer-driven step and **must** be a merge commit — see [git-workflow.md](../../../.agents/rules/git-workflow.md) §A.
 
 ## Output
 

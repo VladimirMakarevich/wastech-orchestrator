@@ -17,7 +17,111 @@ There are two levels of git here: (A) how the orchestrator **itself** is develop
 1. **Never merge `main → dev`** (nor `release → dev`). It puts the derived documentation back on `dev` and the whole arrangement has to be rebuilt. If a fix ever lands on `main` or `release` first, port it to `dev` with `git cherry-pick`, never with a merge. A CI guard rejects any PR into `dev` whose source is `main` or `release`.
 2. **`dev → main` must be a real merge commit.** A squash merge creates no merge commit, so the merge base never advances and every later merge re-proposes deleting the documentation; rebase-merge is likewise wrong for a long-lived branch pair. On GitHub choose "Create a merge commit" (squash is disabled on `main` in branch protection).
 
-Both rules exist because the two branches diverge by one recorded seal commit (`git merge -s ours dev` on `main`); anything that resets the merge base or copies docs back into `dev` destroys it.
+Both rules exist because the two branches diverge by one recorded seal commit (`git merge -s ours dev` on `main`); anything that resets the merge base or copies docs back into `dev` destroys it. The seal is already in history — `dev` is an ancestor of `main`, so an ordinary `dev → main` merge proposes no deletions. Do not create a second seal.
+
+### Where the branches touch
+
+Every legal transition, and the one illegal one. The mechanism column is the part that matters: picking the wrong one is how the model breaks.
+
+| From → To | Mechanism | Why this one |
+| --- | --- | --- |
+| `feat/…` → `dev` | **squash** merge (PR) | Keeps `dev` history one commit per change; the merge base of `dev`/`main` is unaffected. |
+| `dev` → `main` | **merge commit**, never squash/rebase | Advances the merge base. A squash leaves it behind and every later merge re-proposes deleting `docs/`. |
+| `docs/…` → `main` | squash or merge (PR) | The docs refresh is ordinary work on `main`; it never touches `dev`. |
+| `main` → `release` | merge commit | Both branches carry docs, so this is an ordinary merge with no special handling. |
+| `hotfix/…` → `release` | squash or merge (PR) | Published-version fix; tag afterwards. |
+| `release` → `main` | merge commit | Safe — both have docs. This is how a hotfix gets back into integration. |
+| `main`/`release` → `dev` | **FORBIDDEN** — use `git cherry-pick` | A merge restores the derived docs on `dev`. The CI guard rejects it on PRs; a local push would not be caught, so do not do it. |
+
+Three more contact surfaces that are not merges:
+
+- **Shared files** — `AGENTS.md`, `CLAUDE.md`, `README.md`, `.agents/rules/`, `.claude/`, everything under `src/`, and `docs/backlog/` exist on **both** branches. Edit them **only on `dev`**. Editing one on `main` makes the content diverge, and a divergent shared file conflicts on every subsequent merge — the seal only makes _deletions_ conflict-free, never divergent content.
+- **Links to `main`-only documents** — from any shared file, link them by absolute URL (`https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/<file>`), never by a relative path: the relative path is dangling on `dev`.
+- **New paths under `docs/` on `dev`** — only `backlog/` and `research/` (the latter produced by a `deep_research` run). A CI guard rejects anything else, so the partition cannot erode one file at a time.
+
+### Command recipes
+
+Copy-pasteable. `gh pr merge` flags are spelled out because the merge _method_ is load-bearing.
+
+**Everyday change (the 95% case).**
+
+```bash
+git checkout dev && git pull
+git checkout -b feat/<slug>
+# … work …
+ruff check . && ruff format --check . && mypy src && lint-imports && pytest
+git push -u origin feat/<slug>
+gh pr create --base dev --title "<subject>" --body "<what and why>"
+gh pr merge --squash --delete-branch      # squash is correct here
+```
+
+**Integrate `dev` into `main`.** The merge method is the one thing you cannot get wrong.
+
+```bash
+git checkout dev && git pull
+gh pr create --base main --head dev --title "Integrate dev" --body "<what dev brings in>"
+gh pr merge --merge                        # --merge = merge commit. NEVER --squash / --rebase
+```
+
+Locally, if direct pushes to `main` are allowed:
+
+```bash
+git checkout main && git pull
+git merge --no-ff --no-edit dev
+git diff --name-status --diff-filter=D HEAD^1 HEAD   # MUST be empty — no doc deletions
+git push origin main
+```
+
+**Refresh the derived docs on `main`** (its own task, after an integration merge).
+
+```bash
+git checkout main && git pull
+git log --merges --oneline -5                  # find the integration merge commit
+git show --stat <merge-sha>                    # what dev brought in
+git diff <merge-sha>^1 <merge-sha>             # the diff to reverse-engineer the docs from
+git checkout -b docs/<slug>
+# … regenerate the affected docs (see the /sync-docs skill, main scope) …
+git push -u origin docs/<slug> && gh pr create --base main
+```
+
+**Cut a release.** Push the branch **before** the tag — `release.yml` refuses a tag that `origin/release` does not contain.
+
+```bash
+git checkout release && git pull
+git merge --no-ff --no-edit main
+git push origin release                    # first: the branch
+git tag vX.Y.Z                             # aN / bN / rcN suffix ⇒ GitHub pre-release
+git push origin vX.Y.Z                     # then: the tag
+```
+
+The tag push runs `release.yml` (full quality gate → sdist + wheel → GitHub release, version derived by `hatch-vcs`) and the Pages deploy in `site.yml`.
+
+**Hotfix a published version.**
+
+```bash
+git checkout release && git pull
+git checkout -b hotfix/<slug>
+# … fix + the gate … then PR into release and tag:
+gh pr create --base release && gh pr merge --squash --delete-branch
+git checkout release && git pull && git tag vX.Y.Z+1 && git push origin vX.Y.Z+1
+git checkout main && git pull && git merge --no-ff --no-edit release && git push origin main
+```
+
+**Port a fix from `main`/`release` into `dev`** — cherry-pick, never a merge.
+
+```bash
+git checkout dev && git pull
+git cherry-pick <sha>
+```
+
+A **code-only** commit cherry-picks cleanly. A commit that also touched a `main`-only document conflicts on that path as `DU` (deleted by us / modified by them) — the doc half does not belong on `dev`, so drop it and continue:
+
+```bash
+git rm <docs/path>          # resolves the DU by keeping the deletion
+git cherry-pick --continue
+```
+
+**If `main` or `release` was merged into `dev` anyway.** The derived docs are back on `dev` and no ordinary revert repairs the merge base. Stop, tell the maintainer: the fix is to re-cut `dev` from `main`, redo the removal commit, and record a fresh seal — i.e. redo the migration. This is why rule 1 is absolute.
 
 ### Everyday hygiene
 
