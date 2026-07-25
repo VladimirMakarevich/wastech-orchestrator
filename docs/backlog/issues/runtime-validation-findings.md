@@ -302,41 +302,6 @@ A second validation pass, this time over a **contiguous 15-run window** rather t
 
 Cost concentration: `implementation` dominates (up to $3.81 on a single node), `review` is second, and the **supervisor layer is a flat ~$0.38–0.82 per task** — roughly **12% of total spend** for an advisory function whose output never gated anything in this window.
 
-## VF-9 — the VF-5 instruction-file write-lock has no operator escape hatch and directly contradicts the VF-7 security preamble (BUG, rule violation)
-
-Severity: **Critical** Status: **open** First seen: 2026-07-25 (tasks `p9-06-format-gate`, `p10-01-governance-docs-2`) Related: VF-5, VF-6
-
-### Observed
-
-The write-guard denies all writes to `AGENTS.md` / `AGENTS.override.md` / `CLAUDE.md` unconditionally, while the security preamble prepended to every prompt tells the agent it **may** change them when the task asks. Two tasks in this window were built on exactly that promise, and both were damaged by the contradiction.
-
-### Evidence
-
-- Enforcement, target run: `.worc/logs/p10-01-governance-docs-2/stages/fixing/run-000030/1-claude/claude-sandbox-settings.json` → `sandbox.filesystem.denyWrite` contains `…/AGENTS.md` and `…/CLAUDE.md`. The same paths appear as `Write(…)`/`Edit(…)` entries in `--disallowedTools` (see `request.json` → `argv`).
-- The promise, orchestrator source: [`core/flow/security_preamble.py:52-53`](../../../src/wastech_orchestrator/core/flow/security_preamble.py) — "`AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md` are read-only this run: read them for guidance, but **change them only if the task explicitly asks** (as an ordinary diff)."
-- The enforcement has no conditional: [`core/flow/nodes/agent.py:406-415`](../../../src/wastech_orchestrator/core/flow/nodes/agent.py) resolves `instruction_files` from `git ls-files` on every workspace-write attempt and threads them into `resolve_control_paths`; [`runtime_layout.py:176-186`](../../../src/wastech_orchestrator/runtime_layout.py) folds them into `denied_write_paths` with no flag. `grep -rniE "lock_instruction|instruction_lock|allow_instruction" src/` → **no matches**: there is no config key, no task field, no flow-node knob.
-- Agent's own diagnosis, `stages/fixing/run-000030/fixing.out.md`: _"every write attempt against that specific file is denied at the sandbox level — confirmed with both the `Edit` tool and a raw shell redirect (`operation not permitted: AGENTS.md`), while the identical test against `README.md` succeeded. This matches the orchestrator contract marking `AGENTS.md`/`CLAUDE.md` read-only by default for this run; **it seems this run's sandbox wasn't granted the exception the task's own text says should apply**."_
-- The evaluator believes the promise too — all three review rounds (`stages/review/run-0000{26,29,32}/findings.json`) close with _"The task explicitly authorizes editing AGENTS.md, so the read-only-by-default run rule does not apply."_
-
-### Damage in this window
-
-1. **`p10-01-governance-docs-2` died on it.** Deliverable 1 was an `AGENTS.md` edit. `planning → implementation → testing → review(rework) → fixing → testing → review(rework) → fixing → testing → review(rework)` — 3 review rounds, 2 fixing rounds, 21 min, **$4.32**, terminal `manual_action_required` → operator-failed. `failure_report.json` records `limit_exhausted: "no_file_change"`.
-2. **`p9-06-format-gate` silently routed around it.** Blocked from adding a trailing newline to `AGENTS.md`, the agent instead **added `AGENTS.md` to `.prettierignore`** with the comment _"Missing a trailing newline only; left as-is (governance doc, not touched incidentally by this change)."_ The task's whole purpose was to make the format gate honest — and it shipped with a permanent, silently-created hole in that gate. Still present in `wastech-mdlint/.prettierignore:16`.
-3. **The blocked agent probed the sandbox by writing to `README.md`** to isolate the deny (`fixing.out.md`: _"I already reverted a stray test line I'd accidentally appended to README.md while diagnosing this"_). It reverted cleanly, but an unrelated tracked file was mutated as a side effect of an unexplained deny.
-
-### Why it's a rule violation, not strictness
-
-[`.agents/rules/security.md` § MANDATORY](../../../.agents/rules/security.md): _"**Every isolation, sandbox, or provider-lockdown mechanism MUST ship with an operator-controlled way to relax or fully disable it.** Hard-wiring an always-on restriction with no operator opt-out is not acceptable, even when disabling it reduces security — that is the operator's decision to make."_ `disable_read_isolation` relaxes the **read** projection only; the instruction-file **write** lock is unreachable from any operator surface. This is the same class of defect as VF-6 addressed for reads.
-
-### Expected
-
-Two independent fixes, both needed:
-
-1. **Add the operator escape hatch** (operator-config only, never task/`extra_args`/flow-node — per the § MANDATORY boundary): e.g. `security.lock_instruction_files: true|false`. Under `false`, drop `instruction_files` from `ProviderWriteGuardPolicy`; the VF-5 reproducibility guarantee is the operator's to trade away, exactly as the read projection is.
-2. **Make the preamble truthful in the meantime.** While the lock is in force, `security_preamble.py:52-53` must not promise an exception that cannot be granted. Reword to state the lock plainly and tell the agent what to do instead (report the needed edit in its final message so the operator applies it), so a blocked agent stops burning fix loops trying.
-
-The module docstring claims the path tokens are emitted from layout constants "so the text cannot drift from the enforced denies" — the **paths** don't drift, but the **semantics** did. A test asserting preamble-vs-write-guard agreement would have caught this.
-
 ## VF-10 — an agent that reports a hard blocker still returns `outcome=done`, and the fix→review edge drops the fixer's report (flow)
 
 Severity: **High** Status: **open** First seen: 2026-07-25 (`p10-01-governance-docs-2`) Related: VF-9
