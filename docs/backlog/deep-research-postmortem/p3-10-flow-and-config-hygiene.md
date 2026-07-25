@@ -57,10 +57,23 @@ Not orchestrator defects; hygiene on the validation target:
 - `agents.providers.codex.model: gpt-5.4` against packaged `gpt-5.5`. Inert for this flow (Codex is never used), but stale.
 - The packaged `config.example.yaml:266-270` suggests Opus for the _supervisor_ and Sonnet as the _primary provider_ — the inverse of what this operator configured, and the operator's arrangement is the better one. Correct the packaged example.
 
+## 10g — `deep_research` runs no repository command before committing
+
+Source: [postmortem.md](postmortem.md) DR-13. Related: [VF-11](../issues/runtime-validation-findings.md).
+
+The flow's only `checks` node is `checker: citation`. There is no `command_profile` node anywhere in the graph, unlike `implementation.yaml:72-73`. So the flow writes Markdown into the target repository, commits it, and opens a PR without running anything the repository defines.
+
+On `p9-09` that turned the target's CI red: `npm run format` now fails on 4 files, two of them (`report.md`, `report-structure.md`) committed by the `p9-09` deliverable itself. Everything else on the branch is green — typecheck, lint, build, and 614/614 tests.
+
+**Change:** add a `command_profile` checks node after `synthesis` (or after `citation_check`), with a fail edge back to `synthesis`. A research flow does not need `typecheck`/`test`, but it does need whatever validates the files it is about to commit — here `npm run format`. Reference a **named** command set (e.g. `docs`) rather than hardcoding commands, and skip cleanly when the target defines no such set. Check first whether `command_profile` already supports a named-set selector before proposing schema changes.
+
+The other half — the target's `checks.command_sets.default` listing `typecheck`/`lint`/`test`/`build` and omitting `format`, which is why two `implementation`-flow tasks also slipped through — is already VF-11 and is fixed in the target's `config.yaml`, not here.
+
 ## Acceptance
 
 - No `deep_research` node carries a `when:` predicate that cannot change the outcome, or an unreachable-by-construction gate, without a comment saying so.
 - No role prompt asserts session continuity, network use, or a mechanism the node does not have.
+- A `deep_research` run cannot commit files that fail the target's own documentation gate.
 - The target's `config.example.yaml` matches the packaged schema version.
 
 ## Depends on
