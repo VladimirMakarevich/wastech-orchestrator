@@ -534,6 +534,125 @@ Graduated in full to **[vf20-governance-writes-notify-not-block.md](vf20-governa
 
 Short form: VF-5's shipped resolution write-denies the tracked root instruction files (`AGENTS.md`/`AGENTS.override.md`/`CLAUDE.md`) for every workspace-write attempt, and the VF-7 preamble reinforces it in prose. `p10-01-governance-docs-2` — a documentation task whose deliverable _is_ an `AGENTS.md` edit — therefore reported _"Blocker: `AGENTS.md` is write-protected by the sandbox for this run, and I can't lift that"_ and burned $4.32 producing nothing (the same run that exposed VF-10). The operator's decision: **never block** governance/instruction files or the rules they reference (`.agents/rules/**`) — they are ordinary repository content, reviewed in the diff like anything else; `.worc/` is the only hard-denied location; and a change to them is **reported** to the operator, not refused. VF-5's accepted trade-off ("editing repository guidance under strict isolation is an unsupported edge case") is withdrawn, and its proposal to extend the deny to the `@`-import closure (`.agents/rules/*`, …) is ruled out. The `.git/`, `tasks/`, and `.worc-io/` write-denies are unaffected.
 
+## VF-21 — a terminal task whose cleanup never completed stalls `watch` forever: every tick re-runs cleanup, returns `manual_action_required`, and never scans `pending/` (latent BUG)
+
+Severity: **Medium (latent — reachable, not yet observed)** Status: **open** First seen: 2026-07-25 (found by inspection while answering "does `manual_action_required` block the next task?"; **not** triggered in the 2026-07-23…25 validation window) Related: VF-1 (the `preserve_own_wip` fix this diverges from), VF-13
+
+### Observed
+
+Not observed at runtime — this is a code-path defect found while verifying the operator's report that a `manual_action_required` task appeared to stop the queue. The queue behavior they saw was benign (see "Not the cause" below), but the audit found a genuine permanent stall next to it.
+
+### The stall loop
+
+A terminal task with `branch IS NOT NULL` and `cleanup_completed = 0` makes every subsequent `watch` tick identical, forever:
+
+1. [`state_store.find_incomplete_cleanup`](../../../src/wastech_orchestrator/state_store.py#L790-L799) selects it (`status IN (done, failed, manual_action_required) AND branch IS NOT NULL AND cleanup_completed = 0`).
+2. [`RecoveryReconciler.reconcile`](../../../src/wastech_orchestrator/core/recovery.py#L71-L73) returns `RecoveryAction.CLEANUP` — the MAR task itself is `_NON_ACTIVE`, so it never shows up as an active slot holder ([`state_store.py:1588-1590`](../../../src/wastech_orchestrator/state_store.py#L1588-L1590)).
+3. [`_resume_cleanup`](../../../src/wastech_orchestrator/core/orchestrator.py#L1714-L1748) retries `terminal_cleanup`; on failure `cleanup_completed` stays `0` and it returns `PipelineResult(final_status=row.status)` — i.e. `manual_action_required` again.
+4. [`watch_once`](../../../src/wastech_orchestrator/cli.py#L1483-L1484) sees a MAR from `resume()` and does `return results` **before** `scan_pending_sorted` — so `pending/` is never scanned.
+5. Nothing advanced the state, so the next tick repeats it. No pending task is ever claimed until an operator intervenes.
+
+Step 4 alone is correct and tested (`test_watch_resume_manual_blocks`) — the defect is that step 3 can never make progress, turning a one-tick guard into a permanent one.
+
+### Two concrete reasons the retry cannot succeed
+
+- **`preserve_own_wip` is not passed on the resume path.** `_go_terminal` passes `preserve_own_wip=True` for a resumable MAR park carrying the task's own WIP — the VF-1 fix ([`orchestrator.py:3672-3680`](../../../src/wastech_orchestrator/core/orchestrator.py#L3672-L3680)) — so `terminal_cleanup` leaves HEAD on the branch and reports safe ([`git_manager.py:2107-2115`](../../../src/wastech_orchestrator/git_manager.py#L2107-L2115)). `_resume_cleanup` calls `terminal_cleanup(task_id, mode=...)` **without** the flag ([`orchestrator.py:1722`](../../../src/wastech_orchestrator/core/orchestrator.py#L1722)), so the same tree that the primary path deliberately preserved fail-closes on `working tree has unaccounted changes`. VF-1's fix is therefore undone the moment cleanup has to be retried.
+- **The WRI-012 quiescence barrier is skipped.** `_go_terminal` withholds cleanup (`safe=False`, `cleanup_completed=0`) when `_exchange_active_unsafe` ([`orchestrator.py:3654-3667`](../../../src/wastech_orchestrator/core/orchestrator.py#L3654-L3667)); `_resume_cleanup` has no such check and calls `terminal_cleanup` directly. So the retry either runs a checkout the barrier was protecting against, or fails on the still-dirty tree and stalls.
+
+Other reachable entries to `cleanup_completed = 0` (all `new`/`checkout_base_on_cleanup` mode, i.e. `returns_to_base` true): a dirty tree not recognized as the task's own output (`_worktree_is_task_output` false — no `evaluator`/`checks`/`publish` node ran yet), a failed `checkout base`, or an untrusted repo-local git filter ([`git_manager.py:2116-2142`](../../../src/wastech_orchestrator/git_manager.py#L2116-L2142)).
+
+### Not the cause of the reported symptom
+
+Verified against the operator's own target repo, so the report stays honest about what was and was not seen:
+
+- `state.db` has **no** row matching the stall condition — 11 `done` + 3 `failed`, every one `cleanup_completed = 1`, no active slot holder. `p10-01-governance-docs-2` did reach MAR at 03:12:41 with `cleanup_safe=true` (`daemon.log`) and was later reconciled to `failed` by the operator.
+- The apparent "queue stopped" was `auto_mode.enabled: false` + `poll_interval_seconds: 300`: `watch_once` claims exactly one task per tick ([`cli.py:1523-1524`](../../../src/wastech_orchestrator/cli.py#L1523-L1524)), so **every** task in the window is separated by ~303 s regardless of outcome (03:27:30→03:32:32, 03:37:28→03:42:31, 03:50:05→03:55:07, 04:19:58→04:25:01, 04:32:47→04:37:50, 04:45:26→04:50:29, 04:58:26→05:03:29). The gap after the MAR was the **shortest** of the window (213 s) because the daemon was restarted at 03:16:14 (`daemon-startup.log` is truncated per launch and begins exactly there).
+
+So the same-tick MAR chain break ([`cli.py:1521-1522`](../../../src/wastech_orchestrator/cli.py#L1521-L1522), documented at [operations.md:267](../../operations.md), tested by `test_watch_manual_blocks_continuation`) is invisible under `auto_mode: false` — it only becomes observable once auto-mode is on.
+
+### Expected
+
+1. **Pass `preserve_own_wip` on the resume path** so the retry matches the primary path's VF-1 semantics for a resumable MAR park, and **apply the WRI-012 quiescence check** in `_resume_cleanup` as `_go_terminal` does (withhold rather than checkout over a non-quiescent tree).
+2. **A blocked cleanup must not suppress the pending scan indefinitely.** A `CLEANUP` plan that cannot complete should not read as "an active task returned MAR": either let `watch_once` continue to `scan_pending_sorted` when the slot is provably free (the task is `_NON_ACTIVE`, so nothing owns the slot), or mark the cleanup as permanently blocked after the first failed retry so `find_incomplete_cleanup` stops re-electing it every tick. Fail-closed on the _cleanup_ is right; fail-closed on the _whole queue_, silently and forever, is not.
+3. **Make the stall visible.** Today the only signal is `cleanup_last_error` in `worc status` plus a `terminal cleanup started` line repeating each tick for the same `task_id`. Emit one explicit warning naming the task and the reason the queue is held.
+
+### Likely area
+
+[`core/orchestrator.py`](../../../src/wastech_orchestrator/core/orchestrator.py) `_resume_cleanup` (flag + quiescence check + blocked-cleanup bookkeeping), [`cli.py`](../../../src/wastech_orchestrator/cli.py) `watch_once` (distinguish "a resumed active task went MAR" from "a terminal task's cleanup is blocked"), and [`core/recovery.py`](../../../src/wastech_orchestrator/core/recovery.py) / `find_incomplete_cleanup` if the re-election needs bounding. No test covers the repeated-`CLEANUP` tick today — add one that runs two ticks with a cleanup that stays unsafe and asserts the second tick still scans `pending/`.
+
+## VF-22 — the terminal Telegram notification is unactionable: no severity glyph, no title, no stop node, no explanation, no next step — while a full diagnosis already sits on disk (UX / observability)
+
+Severity: **Medium (operator UX — operator-reported)** Status: **open** First seen: 2026-07-25 (`p10-01-governance-docs-2`, operator-reported) Related: VF-10, VF-20
+
+### Observed
+
+The whole terminal notification the operator received for a `manual_action_required` task was:
+
+```
+[p10-01-governance-docs-2] status=manual_action_required reason=no_file_change
+```
+
+From that line it is impossible to tell what went wrong, how critical it is, or what is required next. It also carries **no glyph**, so it does not stand out in the chat — while a routine per-node trace line in the _same_ chat does (`✅`/`❌`/`🔁`/`⚠️`/`▶️`). The most important message in the transport is the only one with no visual weight.
+
+### Cause
+
+[`_format_terminal_message`](../../../src/wastech_orchestrator/notify/telegram.py#L400-L415) is a flat key/value join — `[{task_id}] status=… [pr=…] [reason=…] [contacts=…]` — and `reason` is passed straight through from `manual_reason`. For this task that reason was the raw internal limit identifier produced by the stall guard, [`engine.py:474`](../../../src/wastech_orchestrator/core/flow/engine.py#L474) (`_Stuck(limit_name="no_file_change")`). It is an enum-ish token for the code path, never written to be read by a human.
+
+Meanwhile [`_format_trace_message`](../../../src/wastech_orchestrator/notify/telegram.py#L418-L435) already owns an emoji vocabulary (`_TRACE_EMOJI`) — so the repo has the pattern, it is simply not applied to the terminal message.
+
+### Everything the message needed already existed
+
+For this exact run the orchestrator had already written a complete diagnosis to `.worc/logs/p10-01-governance-docs-2/` — `failure_report.json` + `stuck.md` (via [`write_failure_report`](../../../src/wastech_orchestrator/ledger.py#L147-L207)):
+
+- `node_id: "review"`, `loop: "review_fix"`, `limit_exhausted: "no_file_change"`;
+- `counters: {global_fix_iterations: 2, review_fix: 2, total_fix:review_fix: 2}`;
+- and the blocking finding, verbatim: `severity: "high"`, `paths: ["AGENTS.md"]`, `reason: "Deliverable 1 … is missing entirely — the diff only edits .agents/rules/architecture.md, and git status confirms AGENTS.md was never modified …"`.
+
+That finding states the real problem in one sentence (and is in fact VF-20's write-deny surfacing). The notification conveyed none of it. The `TaskRow` at the call site additionally holds `title`, `branch`, `current_node`, `fix_iterations`, `cleanup_last_error`, and `failure_report_path`.
+
+### The transport is already able to carry it
+
+No new plumbing is needed on the send path: [`_outgoing`](../../../src/wastech_orchestrator/notify/telegram.py#L301-L302) applies `_redact` (bot token, chat id, plus the shared structural redactor) and then `_limit_message`, which caps at `_TELEGRAM_TEXT_LIMIT = 4096` with an explicit truncation suffix ([`telegram.py:38-39`](../../../src/wastech_orchestrator/notify/telegram.py#L38-L39), [`:455-459`](../../../src/wastech_orchestrator/notify/telegram.py#L455-L459)). So a multi-line message is bounded and secret-free by construction. No `parse_mode` is set today — keep it that way (plain text + emoji) rather than taking on Markdown/HTML escaping for agent-authored text.
+
+Including a review finding's `reason` does put agent-authored prose into the chat, but that is not a new exposure class: `ask_human`'s `context` already does exactly that, through the same redaction.
+
+### Expected
+
+1. **A severity glyph, extending the existing `_TRACE_EMOJI` vocabulary** — `✅ done`, `🛑 manual_action_required` (a human is required; the branch is preserved), `❌ failed`. The operator asked specifically for a strong marker on the needs-attention case, so it must be visually distinct from a clean finish at a glance and not reuse `✅`.
+2. **Identify the task like a human would**: id **and** title (`title` is on the `TaskRow` and currently unused by the notifier).
+3. **Say where it stopped**: the flow node and, when applicable, the loop (`review` / `review_fix` here) — this is also the operator's resume point.
+4. **Explain the reason in prose, not as an identifier.** Map each internal `limit_name` / terminal reason to one human sentence (e.g. `no_file_change` → "the fix loop produced no file changes for N consecutive rounds — the agent kept emitting output without editing the tree, so the loop was cut short of `max_fix_cycles`"). A reason with no mapping must still print its raw token rather than be dropped.
+5. **Carry the blocking evidence when there is any** — the top review finding's severity + one truncated line of its `reason`, and the paths it names. This is the single highest-value addition: for this run it would have said "AGENTS.md was never modified" instead of `no_file_change`.
+6. **State what is required next** — the concrete follow-up command and the on-disk report path (`stuck.md`). Any suggested `rerun` invocation must be one that actually works from this state; VF-1/VF-2/VF-3 are precedents for a suggestion that reads plausible and then refuses, so derive it from the recorded checkpoint or omit it rather than guess.
+7. **Keep `done` terse.** Only the needs-attention statuses get the expanded body; a successful task should not become noisy.
+
+Sketch of the target for the observed run (illustrative, not a spec):
+
+```
+🛑 manual_action_required — p10-01-governance-docs-2
+P10.01 Fix governance docs for post-P3.09 workspace layout
+
+Stopped at: review (review_fix loop), after 2 fix rounds
+Why: the fix loop made no file changes for 2 consecutive rounds (no_file_change), so it was cut
+     short of max_fix_cycles — the agent produced output but never edited the tree.
+Blocking (high): Deliverable 1 is missing — AGENTS.md was never modified.
+Paths: AGENTS.md
+Branch: feat/p9-remediation
+Details: .worc/logs/p10-01-governance-docs-2/stuck.md
+```
+
+### Likely area
+
+[`notify/telegram.py`](../../../src/wastech_orchestrator/notify/telegram.py) (`_format_terminal_message` + a status-glyph map beside `_TRACE_EMOJI`; the reason→prose table belongs in the notify vocabulary next to `TRACE_REWORK_EXHAUSTED` so producer and transport share one source of truth) and [`notify/interface.py`](../../../src/wastech_orchestrator/notify/interface.py) (`Notifier.send_notification` needs the extra fields — title, stop node, loop, counters, top finding, report path — so `NullNotifier` and the test fakes move with it). The producer is [`_notify_terminal`](../../../src/wastech_orchestrator/core/orchestrator.py#L4169-L4190) plus its four call sites ([`:1705`](../../../src/wastech_orchestrator/core/orchestrator.py#L1705), [`:1742`](../../../src/wastech_orchestrator/core/orchestrator.py#L1742), [`:3717`](../../../src/wastech_orchestrator/core/orchestrator.py#L3717), [`:3878`](../../../src/wastech_orchestrator/core/orchestrator.py#L3878)) — note two of them (`_resume_manual`, `_resume_cleanup`, and the validation `_reject`) have only a `TaskRow` or not even that, so the enriched shape must degrade cleanly to today's terse line when the context is absent. Docs: [operations.md](../../operations.md) notification section + the packaged guide.
+
+## VF-23 — the pending-queue order the operator sees is not the order the daemon runs (scheduler / UX)
+
+Severity: **Medium (operator UX + a cross-platform invariant violation)** Status: **open — graduated to a task** First seen: 2026-07-25 (operator-reported) Related: VF-21
+
+Graduated in full to **[vf23-pending-queue-order-natural-sort.md](vf23-pending-queue-order-natural-sort.md)** — read that for the analysis, scope, and acceptance criteria.
+
+Short form: `scan_pending_sorted` ranks by `(priority_rank, path)` and `select_pending` is `sorted(folder.iterdir())`, so the tie-break within a priority is **bytewise** on the filename. `p10-01…` therefore runs before `p9-07…` (`'1'` 0x31 < `'9'` 0x39) while every file manager shows the natural order — deterministic, but byte order rather than human numeric order. Two further defects found in the same code while confirming it: (a) sorting `Path` objects compares `_str_normcase`, which is case-sensitive on POSIX and case-folded on Windows, so **the claim order differs per OS** — a violation of the mandatory cross-platform invariant, invisible today because validation runs on macOS; (b) `worc list --pending` builds its section from `select_pending`, **bypassing `priority_rank` and the queue filter entirely**, so a `priority: high` task appears mid-list yet runs first — the exact display-vs-run drift `scan_pending_sorted`'s docstring claims is impossible. Fix is one natural, casefolded, total ordering key used by every consumer, plus routing `worc list` through the ranking.
+
 ## What held up well across the range
 
 Worth recording so these aren't traded away in a later change:
