@@ -13,7 +13,7 @@ branch_mode: new # new (default; fork a fresh branch from base) | existing (work
 publish: pull_request # downgrade-only cap on where the publish node stops: commit | push | pull_request. Effective = min(flow_policy, publish); omit ⇒ flow policy; no-op if the flow has no publish node.
 trust_level: auto # per-task override of the dangerous-diff approval gate: strict (gate every deletion/manifest edit) | auto (default; gate only operator protected_paths). Never lowers the hard ceiling.
 auto_merge: false # true = auto-merge (DANGER: skips human review; the task author owns this call) / false = opt out / omit = config default. The task value wins outright.
-priority: high # scheduling order under `watch`: eligible tasks run high → mid → low (ties by filename). low|mid|high; omit/unrecognised ⇒ mid (fail-open). depends_on is always stronger.
+priority: high # scheduling order under `watch`: eligible tasks run high → mid → low (ties by natural filename order, p9 before p10). low|mid|high; omit/unrecognised ⇒ mid (fail-open). depends_on is always stronger.
 contacts: # handles surfaced for human-in-the-loop prompts and approvals
   - "@team-lead"
   - "@webhooks-oncall"

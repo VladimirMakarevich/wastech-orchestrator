@@ -19,6 +19,7 @@ from wastech_orchestrator.core.orchestrator import (
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.observability import logging as obslog
 from wastech_orchestrator.state_store import StateStore, TaskRow
+from wastech_orchestrator.task.model import DEFAULT_QUEUE
 
 # Every test here is a slow integration test (real git / subprocess / process tree).
 pytestmark = pytest.mark.slow
@@ -394,6 +395,19 @@ def test_watch_priority_ties_break_by_filename(make_git_config, git_repo, tmp_pa
     )
     cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
     assert [Path(p).stem for p in orch.run_calls] == ["a-high", "z-high", "m-low"]
+
+
+def test_watch_ties_break_by_natural_not_bytewise_filename(
+    make_git_config, git_repo, tmp_path: Path
+) -> None:
+    # At equal priority the daemon claims files in natural (numeric-aware) order — p9-07 first, p10
+    # last — matching what the operator reads in the file manager. Bytewise order would claim p10-01
+    # first (``'1' < '9'``), which is exactly the reported symptom.
+    config = make_git_config(git_repo.clone, auto_mode=True)
+    orch = _FakeOrch(runs=[_done("x")] * 3)
+    folder = _prio_folder(tmp_path, ("p10-01", None, ()), ("p9-9", None, ()), ("p9-07", None, ()))
+    cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
+    assert [Path(p).stem for p in orch.run_calls] == ["p9-07", "p9-9", "p10-01"]
 
 
 def test_watch_depends_on_beats_priority(make_git_config, git_repo, tmp_path: Path) -> None:
@@ -866,6 +880,57 @@ def test_cmd_list_pending_format_ids_reads_disk_queue(
 
     assert code == 0
     assert set(capsys.readouterr().out.split()) == {"task-queued"}
+
+
+def test_cmd_list_pending_matches_top_and_watch_order_and_queue_filter(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Defect 3: `worc list --pending` must show the *scheduler's* order and membership — priority-
+    # ranked and queue-filtered — identical to what `top`/`ps` display and `watch` claims, not the
+    # raw, unfiltered file-manager listing.
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    pending = git_repo.clone / "tasks" / "pending"
+    pending.mkdir(parents=True, exist_ok=True)
+
+    def _write(stem: str, *, priority: str | None = None, queue: str | None = None) -> None:
+        lines = [f"id: {stem}", 'title: "T"']
+        if priority is not None:
+            lines.append(f"priority: {priority}")
+        if queue is not None:
+            lines.append(f"queue: {queue}")
+        (pending / f"{stem}.md").write_text(
+            "---\n" + "\n".join(lines) + "\n---\n\nbody\n", encoding="utf-8"
+        )
+
+    _write("p10-01")  # mid, default
+    _write("p9-07")  # mid, default
+    _write("p9-2", priority="high")  # high, default → runs first
+    _write("other", queue="backend")  # foreign queue → filtered out of every default-queue view
+
+    # The scheduler's own order (what `watch_once` claims) for the served queue.
+    watch_order = [p.stem for p, _ in cli.scan_pending_sorted(pending, DEFAULT_QUEUE)]
+    assert watch_order == ["p9-2", "p9-07", "p10-01"]
+
+    # `top` / the console `ps` view read the same function → same labels, foreign queue absent.
+    cfg = cli.load_config_for(cli.build_parser().parse_args(["--config", str(config), "list"]))
+    assert cfg is not None
+    snap = cli.build_top_snapshot(
+        cfg, None, selector=DEFAULT_QUEUE, log_path=None, log_tail_lines=0, recent_limit=0
+    )
+    assert [q.label for q in snap.queue] == watch_order
+
+    # `worc list --pending` now routes through the ranking too: same order, foreign queue absent,
+    # each row carrying its rank position + the priority/queue it sorted on.
+    code = cli.main(["--config", str(config), "list", "--pending", "--format", "json"])
+    assert code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert [e["task_id"] for e in data] == watch_order
+    assert [e["rank"] for e in data] == ["1", "2", "3"]
+    assert data[0]["priority"] == "high"
+    assert data[0]["queue"] == "default"
+    assert all(e["task_id"] != "other" for e in data)
 
 
 def test_cmd_list_all_format_ids_unions_disk_and_db(

@@ -649,9 +649,9 @@ Details: .worc/logs/p10-01-governance-docs-2/stuck.md
 
 ## VF-23 — the pending-queue order the operator sees is not the order the daemon runs (scheduler / UX)
 
-Severity: **Medium (operator UX + a cross-platform invariant violation)** Status: **open — graduated to a task** First seen: 2026-07-25 (operator-reported) Related: VF-21
+Severity: **Medium (operator UX + a cross-platform invariant violation)** Status: **shipped 2026-07-25** First seen: 2026-07-25 (operator-reported) Related: VF-21
 
-Graduated in full to **[vf23-pending-queue-order-natural-sort.md](vf23-pending-queue-order-natural-sort.md)** — read that for the analysis, scope, and acceptance criteria.
+Graduated in full to **[vf23-pending-queue-order-natural-sort.md](vf23-pending-queue-order-natural-sort.md)** — read that for the analysis, scope, and acceptance criteria (all met: one natural, platform-stable, strict-total ordering key routed through every consumer; `worc list` now matches `top`/`ps`/`watch`).
 
 Short form: `scan_pending_sorted` ranks by `(priority_rank, path)` and `select_pending` is `sorted(folder.iterdir())`, so the tie-break within a priority is **bytewise** on the filename. `p10-01…` therefore runs before `p9-07…` (`'1'` 0x31 < `'9'` 0x39) while every file manager shows the natural order — deterministic, but byte order rather than human numeric order. Two further defects found in the same code while confirming it: (a) sorting `Path` objects compares `_str_normcase`, which is case-sensitive on POSIX and case-folded on Windows, so **the claim order differs per OS** — a violation of the mandatory cross-platform invariant, invisible today because validation runs on macOS; (b) `worc list --pending` builds its section from `select_pending`, **bypassing `priority_rank` and the queue filter entirely**, so a `priority: high` task appears mid-list yet runs first — the exact display-vs-run drift `scan_pending_sorted`'s docstring claims is impossible. Fix is one natural, casefolded, total ordering key used by every consumer, plus routing `worc list` through the ranking.
 

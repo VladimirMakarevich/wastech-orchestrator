@@ -65,7 +65,7 @@ Allowed fields:
 | `decomposition` | no | boolean | `true` permits a split for this task, `false` forbids one, omitted uses the instance default `agents.decomposition.enabled`. The task value wins; it only flips the gate (the flow + planning still decide whether a split happens). See [`decomposition`](#decomposition). |
 | `contacts` | no | list of strings | Plain-text mentions in Telegram notifications/HITL prompts. |
 | `depends_on` | no | list of strings | Other task ids that must be **merged** before this task may start (non-blocking, merge-gated scheduling). See [`depends_on`](#depends_on). |
-| `priority` | no | `low` \| `mid` \| `high` | Scheduling order for the eligibility queue. The scheduler runs eligible tasks `high → mid → low`, ties broken by filename. Omitted/unrecognised ⇒ `mid` (fail-open — a typo never blocks a task). See [`priority`](#priority). |
+| `priority` | no | `low` \| `mid` \| `high` | Scheduling order for the eligibility queue. The scheduler runs eligible tasks `high → mid → low`, ties broken by **natural (numeric-aware)** filename order (`p9` before `p10`, identical on every OS). Omitted/unrecognised ⇒ `mid` (fail-open — a typo never blocks a task). See [`priority`](#priority). |
 | `queue` | no | non-empty string | Routes the task to a worc instance whose `orchestrator.queue` selector equals this value (plain string equality). Lets several instances share one task pool without colliding. Omitted ⇒ `"default"`. **Fail-closed**: a malformed value (non-string, or empty/whitespace) rejects the task. See [`queue`](#queue). |
 | `subtasks` | no | list of strings | Operator-authored decomposition: ordered references to per-subtask spec files. Presence ⇒ the task runs as a split (one branch, one PR). See [`subtasks`](#subtasks-operator-authored-decomposition). |
 | `nodes` | no | mapping | Per-node overrides keyed by flow node id: `enabled: false` disables a node, and `model` / `reasoning` / `provider` overlay that node's executor for this run (best-effort). See [`nodes`](#nodes). |
@@ -302,7 +302,9 @@ Rules and edge cases:
 priority: high # low | mid | high — default mid
 ```
 
-Under `watch`, after dependency resolution the scheduler ranks the **eligible** tasks `high → mid → low` and breaks ties with the existing filename order, then picks the first. `depends_on` is always stronger: a higher-priority task that is still **waiting** on an unmerged dependency is skipped, so a lower-priority eligible task runs ahead of it. Priority is a re-ordering of the queue, not a concurrency change — the single-active-task invariant is unchanged, and it has no effect on an explicit `worc run <file>` (one task, nothing to order).
+Under `watch`, after dependency resolution the scheduler ranks the **eligible** tasks `high → mid → low` and breaks ties with **natural (numeric-aware)** filename order — `p9-…` sorts before `p10-…`, the same order a file manager shows and identical on every OS — then picks the first. `depends_on` is always stronger: a higher-priority task that is still **waiting** on an unmerged dependency is skipped, so a lower-priority eligible task runs ahead of it. Priority is a re-ordering of the queue, not a concurrency change — the single-active-task invariant is unchanged, and it has no effect on an explicit `worc run <file>` (one task, nothing to order).
+
+Because `priority`, `queue`, and `depends_on` all reorder the queue away from the plain alphabetical listing, read the effective run order from `worc list` / `worc top` (which print the rank, priority, and queue each task sorted on), not from your file manager.
 
 Unlike the other constrained fields, `priority` is **fail-open**: a missing value, an unknown string (`urgent`), or a wrong type all fold to `mid` and the task still runs — a typo in a scheduling hint must never reject an otherwise-valid task.
 

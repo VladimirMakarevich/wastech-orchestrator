@@ -12,6 +12,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -1211,11 +1212,61 @@ def _configure_runtime_logging(args: argparse.Namespace) -> None:
     )
 
 
+# Split a filename into runs of ASCII digits vs everything else (capturing group → the digit runs
+# land on odd indices of the result). ASCII-only so ``lstrip("0")`` and the magnitude comparison
+# below stay well-defined; any non-ASCII digit falls into a text run and is compared as folded text.
+_DIGIT_RUN = re.compile(r"([0-9]+)")
+
+# One token per run: ``(0, 0, text)`` for a text run, ``(1, magnitude, digits)`` for a digit run
+# (text sorts before digits at the same position). Uniform 3-tuple shape so the key type is flat.
+_NaturalToken = tuple[int, int, str]
+# The operator-visible ordering key: the natural tokens, then the raw name as the final tie-break.
+_NaturalKey = tuple[tuple[_NaturalToken, ...], str]
+
+
+def natural_sort_key(name: str) -> _NaturalKey:
+    """Ordering key for a pending task filename — the tie-break the whole scheduler sorts on.
+
+    This is the order the operator reads in ``worc list`` / ``worc top`` *and* the order the daemon
+    actually claims files in, so it must match a file manager's numeric-aware listing and be
+    identical on every OS:
+
+    - **Natural**: digit runs compare by magnitude, not bytewise, so ``p9`` sorts before ``p10``. A
+      digit run compares as ``(len(no_leading_zeros), no_leading_zeros)`` — a string compare, so a
+      pathological all-digits name never triggers an unbounded ``int()``, while ``007`` still equals
+      ``7`` in magnitude.
+    - **Platform-stable**: the name is casefolded *here* rather than left to ``Path.__lt__`` (whose
+      case handling is case-sensitive on POSIX but case-folded on Windows), so the scheduler's
+      decision never depends on the host OS. Never sort ``Path`` objects for a scheduling decision.
+    - **Strict total order**: the original (non-folded) name is the final element, so distinct names
+      — ``p9-07`` vs ``p9-7``, or two names differing only in case — never compare equal and the
+      result cannot depend on ``iterdir()`` yield order.
+    """
+    tokens: list[_NaturalToken] = []
+    for index, part in enumerate(_DIGIT_RUN.split(name.casefold())):
+        if index % 2:  # capturing split → odd indices are the (always non-empty) digit runs
+            stripped = part.lstrip("0")
+            tokens.append((1, len(stripped), stripped))
+        elif part:  # even indices are text; skip the empties re.split emits between adjacent runs
+            tokens.append(
+                (0, 0, part)
+            )  # middle 0 keeps the 3-tuple shape uniform (unused for text)
+    return (tuple(tokens), name)
+
+
 def select_pending(folder: Path) -> list[Path]:
-    """Pending task files (``.md`` / ``.json``), in a deterministic order."""
+    """Pending task files (``.md`` / ``.json``) in :func:`natural_sort_key` order.
+
+    Natural, platform-stable, and a strict total order — the same tie-break every ordering consumer
+    (the scheduler, ``worc list``, ``promote --all``) uses, so the order never depends on the host
+    OS or on ``iterdir()`` yield order.
+    """
     if not folder.is_dir():
         return []
-    return sorted(p for p in folder.iterdir() if p.suffix.lower() in (".md", ".json"))
+    return sorted(
+        (p for p in folder.iterdir() if p.suffix.lower() in (".md", ".json")),
+        key=lambda p: natural_sort_key(p.name),
+    )
 
 
 class _PendingScan(NamedTuple):
@@ -1267,17 +1318,18 @@ def scan_pending_sorted(folder: Path, selector: str) -> list[tuple[Path, _Pendin
     """Pending files for ``selector``'s queue, ranked exactly as :func:`watch_once` runs them.
 
     Keep only files whose ``queue`` equals ``selector`` (static partitioning across instances), then
-    sort by ``(priority_rank, path)`` — :func:`select_pending` is already filename-sorted, so the
-    path tie-break preserves the deterministic order within a priority. This is the single source of
-    truth for "what order will the daemon actually run", shared by ``watch_once`` and the read-only
-    monitor (``worc top`` / the console ``ps`` view) so the displayed order can never drift.
+    sort by ``(priority_rank, natural_sort_key(name))`` — ``priority`` is the only intentional lever
+    and the filename is the natural, platform-stable tie-break within a priority. This is the single
+    source of truth for "what order will the daemon actually run", shared by ``watch_once`` and the
+    read-only monitor (``worc list`` / ``worc top`` / the console ``ps`` view) so the shown order
+    never drifts from the claim order.
     """
     scans = [
         (p, s)
         for p, s in ((p, _scan_pending_meta(p)) for p in select_pending(folder))
         if s.queue == selector
     ]
-    scans.sort(key=lambda item: (item[1].priority_rank, item[0]))
+    scans.sort(key=lambda item: (item[1].priority_rank, natural_sort_key(item[0].name)))
     return scans
 
 
@@ -1472,9 +1524,9 @@ def watch_once(
     ``pending/`` for the operator, and re-running it would only reject it as ``duplicate_task_id``
     and quarantine the file. Resolving it (``rerun``/``finalize``) is the operator's call.
 
-    Eligible tasks are ranked by ``priority`` (high → mid → low), ties broken by the filename order
-    from :func:`select_pending`. ``depends_on`` is always stronger: a higher-priority but WAITING
-    task is skipped, so a lower-priority eligible task still runs ahead of it.
+    Eligible tasks are ranked by ``priority`` (high → mid → low), ties broken by the natural,
+    platform-stable filename order from :func:`natural_sort_key`. ``depends_on`` is always stronger:
+    a higher-priority but WAITING task is skipped, so a lower-priority eligible task runs first.
     """
     results: list[PipelineResult] = []
     resumed = orchestrator.resume()
@@ -1491,7 +1543,7 @@ def watch_once(
     auto = config.orchestrator.auto_mode.enabled
     selector = queue if queue is not None else config.orchestrator.queue
     # Partition + rank in one place (shared with the read-only monitor): drop other-queue tasks,
-    # then order by (priority_rank, filename). pending_map is order-independent.
+    # then order by (priority_rank, natural filename key). pending_map is order-independent.
     scans = scan_pending_sorted(folder, selector)
     pending_map = {s.task_id: s.depends_on for _p, s in scans if s.task_id is not None}
     for task_file, scan in scans:
@@ -3167,21 +3219,34 @@ def _task_entry(row: TaskRow, *, daemon_alive: bool = True) -> dict[str, str | N
     }
 
 
-def _pending_entry(path: Path, task_id: str | None) -> dict[str, str | None]:
-    # A queued file has no DB row yet, so this view is file-derived; the id (if any) comes from the
-    # cheap front-matter scan and an unparseable file is shown by filename instead.
+def _pending_entry(path: Path, scan: _PendingScan, rank: int) -> dict[str, str | None]:
+    # A queued file has no DB row yet, so this view is file-derived. It carries the scheduler's own
+    # ranking — the 1-based rank position plus the priority/queue it sorted on — so the operator
+    # reads the *run* order here, not the file manager's alphabetical listing. An unparseable file
+    # has no id and is shown by filename instead.
     return {
-        "task_id": task_id,
+        "task_id": scan.task_id,
         "status": "pending",
         "title": None,
         "branch": None,
         "file": path.name,
+        "rank": str(rank),
+        "priority": _PRIORITY_LABEL.get(scan.priority_rank, "mid"),
+        "queue": scan.queue,
     }
 
 
 def _entry_line(entry: dict[str, str | None]) -> str:
     status = entry["status"] or ""
     label = entry["task_id"] or entry.get("file") or "(unknown)"
+    rank = entry.get("rank")
+    if rank is not None:
+        # A ranked (pending) row leads with its run position and the priority/queue it sorted on;
+        # the "pending" status is implied by the section header, so it is dropped to keep the line
+        # about the ordering.
+        line = f"{rank + '.':<4} {entry.get('priority') or 'mid':<4}  {label}"
+        line += f"  (queue={entry.get('queue') or DEFAULT_QUEUE})"
+        return line
     line = f"{status:<22} {label}"
     title = entry.get("title")
     if title:
@@ -3532,9 +3597,14 @@ def _list_sections(
     args: argparse.Namespace, config: OrchestratorConfig, store: StateStore | None
 ) -> list[tuple[str, list[dict[str, str | None]]]]:
     """The (section name, entries) groups for the table/json views, per the focus flags."""
+    # Pending goes through the scheduler's own ranking (queue-filtered to this instance's selector,
+    # then priority-ordered), so ``worc list`` shows the same sequence and membership as ``watch``
+    # claims and ``top``/``ps`` display — never the raw, unfiltered file-manager order.
     pending = [
-        _pending_entry(path, _scan_pending_meta(path).task_id)
-        for path in select_pending(pending_dir(config))
+        _pending_entry(path, scan, rank)
+        for rank, (path, scan) in enumerate(
+            scan_pending_sorted(pending_dir(config), config.orchestrator.queue), start=1
+        )
     ]
     # Only RUNNING rows are relabelled by daemon liveness; probe once and pass it to the sections
     # that can contain a RUNNING row (active/all). recent/pending are terminal/file-only.

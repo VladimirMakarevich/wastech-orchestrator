@@ -1,6 +1,6 @@
 # VF-23 — the pending-queue order the operator sees is not the order the daemon runs: bytewise filename tie-break, platform-dependent, and `worc list` bypasses the ranking entirely
 
-Status: **open — task** Date: 2026-07-25 Owner: Vladimir Makarevich Related: [VF-21](runtime-validation-findings.md) (`watch` tick / queue behavior), [VF-14](runtime-validation-findings.md) (ledger/UX observability)
+Status: **shipped 2026-07-25** (one natural, platform-stable, strict-total `natural_sort_key` routed through `select_pending` + `scan_pending_sorted`; `worc list --pending` now priority-ranked and queue-filtered like `top`/`ps`/`watch`, each row showing its rank + priority/queue; docs say read the order from `worc list`/`worc top`, not the file manager) Date: 2026-07-25 Owner: Vladimir Makarevich Related: [VF-21](runtime-validation-findings.md) (`watch` tick / queue behavior), [VF-14](runtime-validation-findings.md) (ledger/UX observability)
 
 ## Problem (operator-stated)
 
@@ -64,13 +64,13 @@ The root cause of the confusion is that the operator infers order from a tool th
 
 ## Acceptance criteria
 
-- [ ] With `p9-07-…`, `P9-08-…`, `p9-9-…`, `p9-10-01-…`, `p10-01-…` pending at equal priority, `scan_pending_sorted` returns them in that order, and `watch_once` claims `p9-07` first.
-- [ ] The same folder produces the **identical** order under POSIX and Windows path semantics (test both flavours explicitly — no `sorted(Path)` in any scheduling path).
-- [ ] The ordering key is a strict total order: distinct filenames never compare equal, and the result is independent of `iterdir()` yield order (assert against a shuffled input).
-- [ ] `priority` still dominates the filename order, and `depends_on` still dominates `priority`.
-- [ ] `worc list --pending`, `worc top`, the console `ps` view, and `watch`'s actual claim order are the same sequence for the same folder — including when priorities differ and when another instance's `queue` is present.
-- [ ] `promote --all` processes `NN-<slug>.md` subtask specs in natural order (`9-…` before `10-…`).
-- [ ] Leading zeros do not create a distinct rank (`p9-07` and `p9-7` sort adjacently by magnitude, with a deterministic tie-break between them).
+- [x] With `p9-07-…`, `P9-08-…`, `p9-9-…`, `p9-10-01-…`, `p10-01-…` pending at equal priority, `scan_pending_sorted` returns them in that order, and `watch_once` claims `p9-07` first.
+- [x] The same folder produces the **identical** order under POSIX and Windows path semantics (test both flavours explicitly — no `sorted(Path)` in any scheduling path).
+- [x] The ordering key is a strict total order: distinct filenames never compare equal, and the result is independent of `iterdir()` yield order (assert against a shuffled input).
+- [x] `priority` still dominates the filename order, and `depends_on` still dominates `priority`.
+- [x] `worc list --pending`, `worc top`, the console `ps` view, and `watch`'s actual claim order are the same sequence for the same folder — including when priorities differ and when another instance's `queue` is present.
+- [x] `promote --all` processes `NN-<slug>.md` subtask specs in natural order (`9-…` before `10-…`).
+- [x] Leading zeros do not create a distinct rank (`p9-07` and `p9-7` sort adjacently by magnitude, with a deterministic tie-break between them).
 
 ## Docs to update in the same change
 

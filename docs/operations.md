@@ -280,7 +280,9 @@ A subscription/session **`rate_limited`** (HTTP 429 / a "session limit … reset
 
 ### Listing tasks and shell completion (`list` / `completion`)
 
-`worc list` is a read-only snapshot of what exists, so you do not have to recall an exact `task_id` to act on it. With no flags it prints three sections — the **active** task, the `tasks/pending` **queue** (read straight from the files; a file with no parseable id is shown by filename), and the most **recent** terminal tasks. Focus it with `--pending`, `--recent [N]`, or `--all` (every known task across all statuses). It opens `state.db` read-only — safe to run while a `watch` daemon is live — and writes nothing.
+`worc list` is a read-only snapshot of what exists, so you do not have to recall an exact `task_id` to act on it. With no flags it prints three sections — the **active** task, the `tasks/pending` **queue**, and the most **recent** terminal tasks. Focus it with `--pending`, `--recent [N]`, or `--all` (every known task across all statuses). It opens `state.db` read-only — safe to run while a `watch` daemon is live — and writes nothing.
+
+The **pending** section is the queue **in the exact order `watch` will run it**: filtered to this instance's `orchestrator.queue`, ranked `high → mid → low`, and broken by **natural (numeric-aware)** filename order within a priority — each row shows its rank position and the priority/queue it sorted on (a file with no parseable id is shown by filename). This is the same sequence `worc top` and the console `ps` view display. **Read the run order from `worc list` / `worc top`, not from your file manager or IDE** — a file listing shows bytewise filename order, which disagrees with the scheduler (it puts `p10-…` before `p9-…`) and even differs between operating systems, and it knows nothing about `priority`, `queue`, or `depends_on`.
 
 ```bash
 worc list                       # active + pending queue + recent terminal tasks
