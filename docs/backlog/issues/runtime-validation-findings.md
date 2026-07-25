@@ -439,7 +439,11 @@ Two separate ledger integrity problems in one window.
 
 ## VF-15 — a reused chain PR keeps the first task's title forever, and its body grows unbounded (publish)
 
-Severity: **Medium** Status: **open** First seen: 2026-07-25 (PR #15, 13 appended tasks)
+Severity: **Medium** Status: **shipped 2026-07-25** (reused PR is retitled to `N tasks on <branch>`; the body is bounded below GitHub's 65 536-char limit by compacting the oldest sections to a pointer at their on-disk `logs/<id>/summary.md`, keeping every task marker + `## title`; the residual `gh pr edit` failure is surfaced, not swallowed — see Resolution) First seen: 2026-07-25 (PR #15, 13 appended tasks)
+
+### Resolution (shipped 2026-07-25)
+
+`_append_reused_pr_body` ([git_manager.py](../../../src/wastech_orchestrator/git_manager.py)) now (1) takes the `branch`, counts the `<!-- worc-task:` markers (+1 for the PR-creating task, which carries none), and retitles via a single `gh pr edit --title "N tasks on <branch>" --body-file …` (no extra round-trip); (2) runs the assembled body through `_bound_pr_body`, which compacts the oldest sections' summaries to a one-line `logs/<id>/summary.md` pointer (`_compact_pr_section`) until under `_PR_BODY_MAX_CHARS` (60 000, a 5 536-char margin below GitHub's limit) — every marker and `## title` is kept, so the chain count and the idempotency guard stay exact and the chain stays fully listed; (3) keeps the residual `gh pr edit` failure non-blocking but with a clear, un-swallowed warning. The literal "overflow → `summary.json` follow-up" (Expected #3) was deliberately not built: bounding removes the size-overflow root cause, and `summary.json` is already written (in `finalize`) before the PR edit runs. Regression tests in [tests/git/test_git_manager.py](../../../tests/git/test_git_manager.py).
 
 ### Observed
 
@@ -495,7 +499,17 @@ Two smaller items in the same area: every node runs `timeout_seconds: 7200` (2 h
 
 ## VF-17 — the implementation role prompt tells the agent to "follow the plan" when planning is disabled, and renders an empty context heading (prompt)
 
-Severity: **Low** Status: **open** First seen: 2026-07-25 (9 of 12 successful runs)
+Severity: **Low** Status: **shipped 2026-07-25** ((a) the "follow the plan" clause in `implementation.md`/`review.md` is now gated on `{?plan_path}`; (b) the "Additional Project Context" heading is guarded by a derived `{?additional_context}` sentinel so the heading and its blank lines vanish when the section is empty — see Resolution) First seen: 2026-07-25 (9 of 12 successful runs)
+
+### Resolution (shipped 2026-07-25)
+
+(a) `implementation.md:1` and `review.md` (both the opening "against the task and plan" and the "plan's acceptance criteria" clause — same defect class) wrap their plan reference in `{?plan_path}…{/plan_path}`, mirroring the existing `documentation.md:1` pattern, so no plan artifact means no dangling clause.
+
+(b) The shared "Additional Project Context" heading was **removed**: each optional item now carries **its own heading inside its own `{?…}` block** (`## Repository Memory` / `## Subtask Scope` / `## Predecessor Handoff`), with the leading blank line folded in. A heading therefore renders exactly when its content does — the empty heading is impossible by construction, and the all-empty prompt now ends with no trailing residue at all. No renderer change, and Core holds no knowledge of what a role file puts in that section.
+
+> **Review correction (same day).** The first attempt guarded the shared heading with a Core-computed sentinel `additional_context` (`referenced_variables(template) ∩ {memory_path, subtask_spec_path, predecessor_context}`). Review flagged the hardcoded candidate tuple, and reproduction confirmed **two** failure modes on custom role files: an optional variable outside the tuple under that heading rendered its content **orphaned** (heading suppressed), and — because `referenced_variables` scans the whole template, not the region — a variable referenced in an unrelated section could resurrect the heading **with nothing under it** (the original VF-17(b) bug). Root cause: the sentinel _approximated_ region-emptiness, and Core hardcoded an assumption about operator template shape — the same "engine must stay flow-agnostic / no hardcoding" smell as VF-5/VF-10. The sentinel, its allowlist entry, and its helper were reverted in favor of the per-item-heading shape above, which needs nothing from Core. The authoring rule is now documented in `configuration.md` and the packaged `guide/flows/prompt-variables.md`, and a test asserts no packaged role prompt reintroduces a Core-side sentinel.
+
+Tests in [tests/core/test_flow_prompt.py](../../../tests/core/test_flow_prompt.py) (per-item invariant: a heading renders iff its own item does, no sibling heading leaks, no unresolved markers).
 
 ### Observed
 
@@ -511,7 +525,11 @@ Two prompt-hygiene defects visible in every rendered prompt in the window.
 
 ## VF-18 — review findings below the rework threshold are recorded and then dropped (flow)
 
-Severity: **Low** — but see below Status: **open** First seen: 2026-07-25 (`p9-06-format-gate`) Related: **[deep-research-postmortem](../deep-research-postmortem/README.md) DR-1/DR-2 escalate this** (tasks [P0.1](../deep-research-postmortem/p0-1-evaluator-gate-severity.md) / [P0.2](../deep-research-postmortem/p0-2-evaluator-findings-surfacing.md)) — the mechanism is not a "threshold" but `gate_severity`, which defaults to `high` ([`core/flow/schema.py:31`](../../../src/wastech_orchestrator/core/flow/schema.py)), and on `p9-09` it dropped a **medium** critic finding while the PR body told the operator all gates "passed"
+Severity: **Low** — but see below Status: **shipped 2026-07-25 (narrow — surfacing only)** (at task close each evaluator node's final verdict findings are merged into the task's `summary.json`/`summary.md` follow-ups, deduped against the supervisor's own list, independent of `emit_follow_ups`; the all-evaluator + supervisor-prompt generalization and the `gate_severity` gating change stay with P0.1/P0.2 — see Resolution) First seen: 2026-07-25 (`p9-06-format-gate`) Related: **[deep-research-postmortem](../deep-research-postmortem/README.md) DR-1/DR-2 escalate this** (tasks [P0.1](../deep-research-postmortem/p0-1-evaluator-gate-severity.md) / [P0.2](../deep-research-postmortem/p0-2-evaluator-findings-surfacing.md)) — the mechanism is not a "threshold" but `gate_severity`, which defaults to `high` ([`core/flow/schema.py:31`](../../../src/wastech_orchestrator/core/flow/schema.py)), and on `p9-09` it dropped a **medium** critic finding while the PR body told the operator all gates "passed"
+
+### Resolution (shipped 2026-07-25 — narrow scope)
+
+At task close, `Supervisor.finalize` ([core/supervisor.py](../../../src/wastech_orchestrator/core/supervisor.py)) merges evaluator findings into the follow-ups tuple before it writes `summary.{json,md}`: `_evaluator_finding_follow_ups` reads the **last** `in_flow_verdict` per evaluator node from the `evaluations` table (earlier, rework-superseded rounds ignored), maps each `{severity, reason, paths}` to a `FollowUp` (a long reason truncates the bold title with the full text kept in the rationale), and `_merge_follow_ups` appends only those not already present (exact-match on normalized text + paths, so the supervisor's own list wins on a collision). It runs **independent of `emit_follow_ups`**. This is the narrow VF-18 — surfacing on `review` (implementation) and any flow that runs a supervisor finalize. The **generalization** stays with the accepted [P0.2](../deep-research-postmortem/p0-2-evaluator-findings-surfacing.md) campaign item — the three "wires" (evaluator `final_message` onto `NodeOutcome`, `findings` into the supervisor's `observe`/`_step_prompt`) and a surfacing path for the supervisor-less `deep_research`/`security_audit` flows — and the `gate_severity` **gating** change is [P0.1](../deep-research-postmortem/p0-1-evaluator-gate-severity.md), both out of scope here. Tests in [tests/core/test_supervisor.py](../../../tests/core/test_supervisor.py).
 
 ### Observed
 

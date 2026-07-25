@@ -313,6 +313,92 @@ def _render_follow_ups_section(follow_ups: tuple[FollowUp, ...]) -> str:
     return "\n".join(lines) + "\n"
 
 
+# Longest a finding's reason may be before it is used verbatim as a follow-up title; longer reasons
+# become a truncated title with the full text carried in the rationale (VF-18).
+_FINDING_TITLE_MAX = 120
+
+
+def _finding_to_follow_up(finding: Any, node_id: str | None) -> FollowUp | None:
+    """Map one persisted evaluator finding (``{severity, reason, paths}``) to a :class:`FollowUp`,
+    or ``None`` when it carries no usable ``reason`` (VF-18)."""
+    if not isinstance(finding, Mapping):
+        return None
+    reason = str(finding.get("reason") or "").strip()
+    if not reason:
+        return None
+    severity = finding.get("severity")
+    paths_raw = finding.get("paths")
+    paths = (
+        tuple(str(p).strip() for p in paths_raw if str(p).strip())
+        if isinstance(paths_raw, list)
+        else ()
+    )
+    if len(reason) <= _FINDING_TITLE_MAX:
+        title, rationale = reason, ""
+    else:  # keep the bold title a label; the full text still reaches the operator via the rationale
+        title, rationale = reason[:_FINDING_TITLE_MAX].rstrip() + "…", reason
+    return FollowUp(
+        title=title,
+        rationale=rationale,
+        severity=severity if severity in ("low", "medium", "high") else "medium",
+        evidence=(f"{node_id or 'review'} evaluator finding (accepted with findings)",),
+        paths=paths,
+    )
+
+
+def _evaluator_finding_follow_ups(evaluations: list[EvaluationRow]) -> tuple[FollowUp, ...]:
+    """Derive follow-ups from the LAST in-flow verdict per evaluator node (VF-18).
+
+    An evaluator that accepts *with* findings persists them to the ``evaluations`` table and they
+    otherwise reach no operator surface. Take each evaluator node's final verdict only (earlier,
+    rework-superseded rounds are ignored) and convert its findings so they land in ``summary.{json,
+    md}`` and the PR body. ``get_evaluations`` is insertion-ordered, so the last row seen per
+    ``node_id`` is that node's final verdict.
+    """
+    last_by_node: dict[str | None, EvaluationRow] = {}
+    for row in evaluations:
+        if row.kind == "in_flow_verdict":
+            last_by_node[row.node_id] = row
+    out: list[FollowUp] = []
+    for node_id, row in last_by_node.items():
+        try:
+            findings = json.loads(row.findings_json)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(findings, list):
+            continue
+        for finding in findings:
+            follow_up = _finding_to_follow_up(finding, node_id)
+            if follow_up is not None:
+                out.append(follow_up)
+    return tuple(out)
+
+
+def _follow_up_key(follow_up: FollowUp) -> tuple[str, tuple[str, ...]]:
+    """Exact-match dedup key for a follow-up: its normalized text plus its paths (VF-18)."""
+    text = " ".join(f"{follow_up.title} {follow_up.rationale}".lower().split())
+    return (text, tuple(sorted(follow_up.paths)))
+
+
+def _merge_follow_ups(
+    primary: tuple[FollowUp, ...], extra: tuple[FollowUp, ...]
+) -> tuple[FollowUp, ...]:
+    """Append *extra* follow-ups whose exact-match key is not already in *primary* (VF-18).
+
+    *primary* (the supervisor's own list) wins on a collision, so an evaluator finding the
+    supervisor already reported is not duplicated; *extra* is also deduped against itself.
+    """
+    seen = {_follow_up_key(fu) for fu in primary}
+    merged = list(primary)
+    for follow_up in extra:
+        key = _follow_up_key(follow_up)
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(follow_up)
+    return tuple(merged)
+
+
 # F16: pseudo-tags a model sometimes emits instead of a clean tool call — the whole
 # `<summary>…</summary><follow_ups>[JSON]</follow_ups><memory_delta>[JSON]</memory_delta>
 # <lessons>[JSON]</lessons>` dump. The machine sections (`follow_ups`/`memory_delta`/`lessons`)
@@ -573,6 +659,14 @@ class Supervisor:
             digest=digest,
             resume=warm,
             task_path=task_path,
+        )
+        # VF-18: an evaluator that accepts *with* findings (sub-threshold, non-gating) persists them
+        # to the evaluations table and they otherwise reach no operator surface. Merge them into the
+        # follow-ups — deduped against the supervisor's own list — so they land in summary.{json,md}
+        # and the PR body. Runs independent of ``emit_follow_ups`` (a distinct, evidence-bearing
+        # source from the supervisor's LLM-authored follow-ups).
+        follow_ups = _merge_follow_ups(
+            follow_ups, _evaluator_finding_follow_ups(self._store.get_evaluations(task_id))
         )
         self._record(
             task_id,

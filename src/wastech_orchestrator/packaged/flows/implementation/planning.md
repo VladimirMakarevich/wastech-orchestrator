@@ -31,8 +31,8 @@ Ground the plan in the code as it exists today, not an idealized version of it:
 ## Testing To Plan For
 
 - A test per new or changed behavior, following the project's existing test conventions and locations.
-- A focused scenario test when the behavior is user-visible.
+- A focused scenario test when the behavior is user-visible.{?memory_path}
 
-## Additional Project Context
+## Repository Memory
 
-{?memory_path}A brief of repository memory relevant to this task — distilled lessons, conventions, known-fragile areas, and entity notes from prior runs — is at {memory_path}. Read it first and let it inform the plan; treat it as advisory and verify each point against the current code (it can be stale).{/memory_path}
+A brief of repository memory relevant to this task — distilled lessons, conventions, known-fragile areas, and entity notes from prior runs — is at {memory_path}. Read it first and let it inform the plan; treat it as advisory and verify each point against the current code (it can be stale).{/memory_path}

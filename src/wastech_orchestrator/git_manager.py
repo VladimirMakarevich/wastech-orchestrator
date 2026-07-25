@@ -235,6 +235,16 @@ _ALREADY_MERGED_MARKERS = ("already merged", "already been merged", "not open", 
 
 _STATUS_STARTED = "started"
 _STATUS_COMPLETED = "completed"
+
+# Reused chain-PR body bounds (F27 / VF-15). GitHub rejects an issue/PR body over 65 536 chars; we
+# keep a margin below it so a compacted body always fits with headroom. Appended task sections are
+# delimited by ``_SECTION_SEPARATOR`` and each carries ``_TASK_MARKER_PREFIX<id> -->`` so a section
+# is individually addressable (for the idempotency guard, the chain-length count, and compaction).
+_GITHUB_PR_BODY_LIMIT = 65_536
+_PR_BODY_MAX_CHARS = _GITHUB_PR_BODY_LIMIT - 5_536  # 60 000
+_TASK_MARKER_PREFIX = "<!-- worc-task:"
+_SECTION_SEPARATOR = "\n\n---\n\n"
+
 _LOG = logging.getLogger(__name__)
 
 
@@ -374,6 +384,47 @@ def _parse_ls_files_stage_z(output: str) -> dict[str, tuple[str, str, str]]:
         mode, blob_sha, stage = parts
         entries[path] = (mode, blob_sha, stage)
     return entries
+
+
+def _bound_pr_body(body: str) -> str:
+    """Keep a reused chain-PR *body* below :data:`_PR_BODY_MAX_CHARS`, else compact it (VF-15).
+
+    Bounds the body by **compacting the oldest task sections** — replacing each one's summary with a
+    one-line stub pointing at ``logs/<id>/summary.md`` — from oldest toward newest until it fits.
+    The PR-creating task's body (the head, before the first marker) and each task's marker +
+    ``## title`` are always kept, so every task stays listed and the ``<!-- worc-task:<id> -->``
+    markers (which the chain-length count and the idempotency guard rely on) are never removed.
+    Nothing is lost — the full summaries remain on disk. A body whose head alone exceeds the cap is
+    returned unchanged; publish then logs the ``gh`` error rather than silently corrupting it.
+    """
+    if len(body) <= _PR_BODY_MAX_CHARS:
+        return body
+    parts = re.split(rf"{re.escape(_SECTION_SEPARATOR)}(?={re.escape(_TASK_MARKER_PREFIX)})", body)
+    head, sections = parts[0], parts[1:]
+    if not sections:
+        return body  # nothing appended to compact (a single oversized head)
+    total = len(head) + sum(len(_SECTION_SEPARATOR) + len(s) for s in sections)
+    for i, section in enumerate(sections):  # oldest first; the newest sections stay full
+        if total <= _PR_BODY_MAX_CHARS:
+            break
+        compacted = _compact_pr_section(section)
+        total -= len(section) - len(compacted)
+        sections[i] = compacted
+    return _SECTION_SEPARATOR.join([head, *sections])
+
+
+def _compact_pr_section(section: str) -> str:
+    """Shrink one appended chain-PR section to its task marker + ``## title`` plus a stub pointing
+    at the on-disk summary (VF-15). Idempotent: re-compacting an already-stubbed section is a no-op.
+    """
+    marker_line, _, after = section.partition("\n\n")
+    title_line, _, _summary = after.partition("\n\n")
+    task_id = marker_line.removeprefix(_TASK_MARKER_PREFIX).removesuffix("-->").strip()
+    stub = (
+        f"_Summary elided to keep the PR body under GitHub's limit; "
+        f"see `logs/{task_id}/summary.md`._"
+    )
+    return f"{marker_line}\n\n{title_line}\n\n{stub}\n"
 
 
 @dataclass(frozen=True)
@@ -1794,7 +1845,9 @@ class GitManager:
             return existing.result_ref
         reused = self._find_open_pr(task_id, branch, pr_base)
         if reused is not None:
-            self._append_reused_pr_body(task_id, reused, title=title, body_path=body_path)
+            self._append_reused_pr_body(
+                task_id, reused, branch=branch, title=title, body_path=body_path
+            )
             self._record_completed(task_id, KIND_PR, branch, reused)
             return reused
 
@@ -1822,18 +1875,25 @@ class GitManager:
         return pr_url
 
     def _append_reused_pr_body(
-        self, task_id: str, pr_url: str, *, title: str, body_path: str
+        self, task_id: str, pr_url: str, *, branch: str, title: str, body_path: str
     ) -> None:
-        """Append this task's section to a reused chain PR's body, keyed by task id (F27).
+        """Append this task's section to a reused chain PR's body and retitle it (F27 / VF-15).
 
         A chain of tasks on one branch converges on a single reused PR, which otherwise keeps the
-        FIRST task's title/body — a reviewer reading a 7-task chain PR sees only task 1's scope.
-        Append ``## <title>`` (with the task's summary) under the existing body, guarded by a
-        ``<!-- worc-task:<id> -->`` marker so re-running the same task never duplicates its section.
+        FIRST task's title and an unbounded body — a reviewer reading a 7-task chain PR sees only
+        task 1's scope, and the body eventually blows past GitHub's 65 536-char limit. So:
+
+        - **Body:** append ``## <title>`` (with the task's summary) under the existing body, guarded
+          by a ``<!-- worc-task:<id> -->`` marker so re-running the same task never duplicates its
+          section, then bound the whole body below the limit by compacting the oldest sections
+          (:func:`_bound_pr_body`). Each task's full summary still lives at ``logs/<id>/``.
+        - **Title:** retitle to ``N tasks on <branch>`` so the PR's identity tracks the chain, not
+          task 1. Folded into the same ``gh pr edit`` call (no extra round-trip).
+
         Best-effort: the reuse already succeeded, so any ``gh`` failure is logged and swallowed —
-        never block publish for a cosmetic body update. Redaction rides ``body_path`` (already the
-        redacted summary the create path uses)."""
-        marker = f"<!-- worc-task:{task_id} -->"
+        never block publish for a cosmetic title/body update. Redaction rides ``body_path`` (already
+        the redacted summary the create path uses)."""
+        marker = f"{_TASK_MARKER_PREFIX}{task_id} -->"
         current = self._pr_body(pr_url)
         if current is None or marker in current:
             return  # unreadable body, or this task's section is already present (idempotent)
@@ -1841,14 +1901,22 @@ class GitManager:
             summary = Path(body_path).read_text(encoding="utf-8").strip()
         except OSError:
             summary = ""
-        section = f"{current.rstrip()}\n\n---\n\n{marker}\n\n## {title}\n\n{summary}\n"
+        section = f"{current.rstrip()}{_SECTION_SEPARATOR}{marker}\n\n## {title}\n\n{summary}\n"
+        # Chain length counts every appended task (one marker each) plus the PR-creating task, which
+        # carries no marker. Count on the pre-elision text so the title stays truthful even when
+        # older sections were trimmed from the body.
+        n_tasks = section.count(_TASK_MARKER_PREFIX) + 1
+        chain_title = f"{n_tasks} tasks on {branch}"
         body_file = task_artifact_dir(self._artifacts_root, task_id) / "pr_body_appended.md"
         body_file.parent.mkdir(parents=True, exist_ok=True)
-        body_file.write_text(section, encoding="utf-8")
-        result = self._gh(["pr", "edit", pr_url, "--body-file", str(body_file)])
+        body_file.write_text(_bound_pr_body(section), encoding="utf-8")
+        result = self._gh(
+            ["pr", "edit", pr_url, "--title", chain_title, "--body-file", str(body_file)]
+        )
         if not result.ok:
             self._log_pr(task_id).warning(
-                "could not append task section to reused PR body: %s", result.stderr.strip()
+                "could not update reused PR title/body (chain PR may not reflect this task): %s",
+                result.stderr.strip(),
             )
 
     def _pr_body(self, pr_url: str) -> str | None:

@@ -1,4 +1,4 @@
-Implement the assigned task in the working tree by following the plan. Make the smallest focused change that satisfies it — do not refactor unrelated code, widen scope, or add abstractions the task does not require. Match the existing style and idioms of the module you touch; do not reformat or re-idiom surrounding code you were not asked to change. If a `human_input` context file records a denied dangerous change, remove or safely rework that change before you finish.
+Implement the assigned task in the working tree{?plan_path} by following the plan{/plan_path}. Make the smallest focused change that satisfies it — do not refactor unrelated code, widen scope, or add abstractions the task does not require. Match the existing style and idioms of the module you touch; do not reformat or re-idiom surrounding code you were not asked to change. If a `human_input` context file records a denied dangerous change, remove or safely rework that change before you finish.
 
 ## Rules Of Record
 
@@ -32,12 +32,16 @@ Some tasks ship prose, not code — a skill/agent doc, a README section, a doc p
 - Prefer rationale, invariants, tradeoffs, cross-platform notes, and bug-prevention context over narrating what the syntax already says.
 - Do not add comments that merely restate names, types, assignments, loops, or conditionals.
 - When behavior is non-obvious or surprising, capture that reason next to the relevant code path.
-- If a block is hard to justify with a short why-comment, simplify or restructure it until the intent and rationale are clear.
+- If a block is hard to justify with a short why-comment, simplify or restructure it until the intent and rationale are clear.{?memory_path}
 
-## Additional Project Context
+## Repository Memory
 
-{?memory_path}A brief of repository memory relevant to this task — distilled lessons, conventions, known-fragile areas, and entity cards for the files you will touch — is at {memory_path}. Read it before editing and let it guide the change; treat it as advisory and verify each point against the current code (it can be stale).{/memory_path}
+A brief of repository memory relevant to this task — distilled lessons, conventions, known-fragile areas, and entity cards for the files you will touch — is at {memory_path}. Read it before editing and let it guide the change; treat it as advisory and verify each point against the current code (it can be stale).{/memory_path}{?subtask_spec_path}
 
-{?subtask_spec_path}The task is decomposed and you must implement ONLY this subtask — subtask {subtask_order} of {subtask_count} — per its immutable spec: {subtask_spec_path}{/subtask_spec_path}
+## Subtask Scope
 
-{?predecessor_context}A handoff brief covering the subtask(s) this one depends on — their changed files, locked decisions, and open edges — is at {predecessor_context}. Read it first: build on what they established, do not re-explore or duplicate it, and do not break the contracts it marks as locked. It is ground truth for facts (files, commits) and advisory for interpretation — verify interpretive claims against the current code.{/predecessor_context}
+The task is decomposed and you must implement ONLY this subtask — subtask {subtask_order} of {subtask_count} — per its immutable spec: {subtask_spec_path}{/subtask_spec_path}{?predecessor_context}
+
+## Predecessor Handoff
+
+A handoff brief covering the subtask(s) this one depends on — their changed files, locked decisions, and open edges — is at {predecessor_context}. Read it first: build on what they established, do not re-explore or duplicate it, and do not break the contracts it marks as locked. It is ground truth for facts (files, commits) and advisory for interpretation — verify interpretive claims against the current code.{/predecessor_context}

@@ -16,10 +16,12 @@ Resolve every reported finding — but each finding names one instance of a mist
 
 ## Quality Gate
 
-Work one failure at a time: reproduce it with the project's own check command for that failure (build, type-check, lint, or test), fix it minimally, then re-run that same command to confirm it passes before moving on. Keep the project's own invariants and conventions intact while fixing — including anything it documents for its own AI agents or contributors (a `CLAUDE.md`/`AGENTS.md`, or a rules directory such as `.agents/rules/`), if it ships one.
+Work one failure at a time: reproduce it with the project's own check command for that failure (build, type-check, lint, or test), fix it minimally, then re-run that same command to confirm it passes before moving on. Keep the project's own invariants and conventions intact while fixing — including anything it documents for its own AI agents or contributors (a `CLAUDE.md`/`AGENTS.md`, or a rules directory such as `.agents/rules/`), if it ships one.{?memory_path}
 
-## Additional Project Context
+## Repository Memory
 
-{?memory_path}A brief of repository memory relevant to this task — failure signatures with their canonical remedy, known-fragile areas, and entity notes for the files you are touching — is at {memory_path}. Check it for a known fix before improvising; treat it as advisory and verify each point against the current code (it can be stale).{/memory_path}
+A brief of repository memory relevant to this task — failure signatures with their canonical remedy, known-fragile areas, and entity notes for the files you are touching — is at {memory_path}. Check it for a known fix before improvising; treat it as advisory and verify each point against the current code (it can be stale).{/memory_path}{?subtask_spec_path}
 
-{?subtask_spec_path}You are fixing subtask {subtask_order} of {subtask_count}; keep your change scoped to that subtask's spec: {subtask_spec_path}{/subtask_spec_path}
+## Subtask Scope
+
+You are fixing subtask {subtask_order} of {subtask_count}; keep your change scoped to that subtask's spec: {subtask_spec_path}{/subtask_spec_path}

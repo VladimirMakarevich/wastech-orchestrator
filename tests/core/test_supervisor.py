@@ -23,8 +23,13 @@ from wastech_orchestrator.core.loop_control import record_rework
 from wastech_orchestrator.core.skills import SkillInventory, SkillRef
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.core.supervisor import (
+    _FINDING_TITLE_MAX,
     _HANDOFF_RUN_ID_BASE,
+    FollowUp,
     Supervisor,
+    _evaluator_finding_follow_ups,
+    _finding_to_follow_up,
+    _merge_follow_ups,
     parse_follow_ups,
 )
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
@@ -800,6 +805,124 @@ def test_emit_follow_ups_malformed_still_writes_summary(tmp_path: Path) -> None:
     result = sup.finalize(task_id=_TASK, task_title="T")
     assert result.summary_path is not None and result.follow_ups == ()
     assert "## Technical debt" not in result.summary_path.read_text("utf-8")
+
+
+# -- VF-18: surface sub-threshold evaluator findings --------------------------
+
+
+def _verdict(findings: list[dict[str, Any]], *, verdict: str = "accept", node_id: str = "review"):
+    return EvaluationRow(
+        task_id=_TASK,
+        kind="in_flow_verdict",
+        verdict=verdict,
+        findings_json=json.dumps(findings),
+        node_id=node_id,
+    )
+
+
+def test_evaluator_finding_follow_ups_uses_last_verdict_per_node() -> None:
+    rows = [
+        _verdict([{"severity": "high", "reason": "blocking issue", "paths": []}], verdict="rework"),
+        _verdict([{"severity": "low", "reason": "minor nit remains", "paths": ["a.py"]}]),
+        EvaluationRow(task_id=_TASK, kind="supervisor_step", verdict="advisory", node_id=None),
+    ]
+    fus = _evaluator_finding_follow_ups(rows)
+    # Only the LAST review verdict's findings — the rework-superseded round is ignored, and the
+    # supervisor_step row is not an evaluator verdict.
+    assert len(fus) == 1
+    assert fus[0].title == "minor nit remains"
+    assert fus[0].severity == "low" and fus[0].paths == ("a.py",)
+    assert "review" in fus[0].evidence[0]
+
+
+def test_finding_to_follow_up_truncates_long_reason_and_drops_empty() -> None:
+    long_reason = "x" * 200
+    fu = _finding_to_follow_up({"severity": "medium", "reason": long_reason, "paths": []}, "review")
+    assert fu is not None
+    assert fu.title.endswith("…") and len(fu.title) <= _FINDING_TITLE_MAX + 1
+    assert fu.rationale == long_reason  # full text preserved when the title is truncated
+    # No usable reason, or a non-mapping, yields nothing.
+    assert _finding_to_follow_up({"severity": "low", "reason": "", "paths": []}, "review") is None
+    assert _finding_to_follow_up("not-a-mapping", "review") is None
+
+
+def test_merge_follow_ups_exact_match_dedup() -> None:
+    primary = FollowUp("Same issue", "", "medium", evidence=("e",), paths=("p.py",))
+    dup = FollowUp("same   ISSUE", "", "low", evidence=("x",), paths=("p.py",))  # normalizes equal
+    fresh = FollowUp("Different", "", "low", evidence=("y",), paths=())
+    merged = _merge_follow_ups((primary,), (dup, fresh))
+    assert len(merged) == 2  # the duplicate is dropped, the new one kept
+    assert merged[0] is primary  # the supervisor's own list wins on a collision
+    assert merged[1].title == "Different"
+
+
+def test_finalize_surfaces_accepted_evaluator_findings(tmp_path: Path) -> None:
+    # VF-18: a sub-threshold finding an evaluator accepted reaches summary.json + the PR body even
+    # when the flow did NOT opt into supervisor-authored follow-ups.
+    store = _store(tmp_path)
+    store.record_evaluation(
+        _verdict(
+            [
+                {
+                    "severity": "medium",
+                    "reason": "`.worc/` in .prettierignore never matches anything",
+                    "paths": [".prettierignore"],
+                }
+            ]
+        )
+    )
+    router = FakeRouter([_ok("s1", "Implemented the change.")])
+    sup = _supervisor(tmp_path, router, store)  # no emit_follow_ups opt-in
+    result = sup.finalize(task_id=_TASK, task_title="T")
+
+    assert len(result.follow_ups) == 1
+    assert result.follow_ups[0].severity == "medium"
+    assert ".prettierignore" in result.follow_ups[0].paths
+    md = result.summary_path.read_text("utf-8")  # type: ignore[union-attr]
+    assert "## Technical debt / follow-ups" in md
+    assert "never matches anything" in md
+    summary_json = json.loads(result.summary_path.with_name("summary.json").read_text("utf-8"))  # type: ignore[union-attr]
+    assert len(summary_json["follow_ups"]) == 1
+    assert summary_json["follow_ups"][0]["severity"] == "medium"
+
+
+def test_finalize_dedups_evaluator_findings_against_supervisor(tmp_path: Path) -> None:
+    # VF-18: when the supervisor already reported the same item, the evaluator finding is not
+    # duplicated in the operator surface (exact-match dedup).
+    store = _store(tmp_path)
+    reason = "resolve_route mixes fallback and retry"
+    store.record_evaluation(
+        _verdict([{"severity": "medium", "reason": reason, "paths": ["src/routing/router.py"]}])
+    )
+    supervisor_follow_ups = [
+        {
+            "title": reason,
+            "rationale": "",
+            "paths": ["src/routing/router.py"],
+            "evidence": ["router.py:120 mixes fallback + retry"],
+            "severity": "medium",
+        }
+    ]
+    router = FakeRouter([_structured_follow_ups("Summary.", supervisor_follow_ups)])
+    sup = _supervisor(
+        tmp_path, router, store, flow_supervisor=SupervisorBlock(emit_follow_ups=True)
+    )
+    result = sup.finalize(task_id=_TASK, task_title="T")
+
+    assert len(result.follow_ups) == 1  # the evaluator duplicate merged away
+    md = result.summary_path.read_text("utf-8")  # type: ignore[union-attr]
+    assert md.count(reason) == 1
+
+
+def test_finalize_no_findings_leaves_no_section(tmp_path: Path) -> None:
+    # No evaluator findings and no supervisor follow-ups → no empty heading (unchanged behavior).
+    store = _store(tmp_path)
+    store.record_evaluation(_verdict([]))  # a clean accept
+    router = FakeRouter([_ok("s1", "Clean summary.")])
+    sup = _supervisor(tmp_path, router, store)
+    result = sup.finalize(task_id=_TASK, task_title="T")
+    assert result.follow_ups == ()
+    assert "## Technical debt" not in result.summary_path.read_text("utf-8")  # type: ignore[union-attr]
 
 
 # -- subtask handoff brief -----------------------------------------------------

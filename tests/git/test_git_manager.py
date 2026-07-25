@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 from collections.abc import Callable, Sequence
@@ -13,13 +14,18 @@ import pytest
 from wastech_orchestrator.config.schema import BranchMode, MergeStrategy
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import (
+    _PR_BODY_MAX_CHARS,
     _PUSH_RETRY_BACKOFF_SECONDS,
+    _SECTION_SEPARATOR,
+    _TASK_MARKER_PREFIX,
     KIND_PR_MERGE,
     RUNTIME_EXCLUDED_DIRS,
     GitCommandError,
     GitManager,
     GitResult,
     ManualActionRequired,
+    _bound_pr_body,
+    _compact_pr_section,
     append_runtime_excludes,
 )
 from wastech_orchestrator.providers.artifacts import sha256_file
@@ -1367,6 +1373,94 @@ def test_create_pr_reuse_picks_most_recent_of_multiple(
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
     url = gm.create_pr("task-001", "feature/shared", title="t", body_path="x")
     assert url == "https://x/pull/8"  # most recent by updatedAt
+
+
+def test_create_pr_reuse_retitles_to_describe_the_chain(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # VF-15: the reused PR is retitled to describe the whole chain (not left as task 1's scope), and
+    # the count includes the PR-creating task (which carries no marker) plus each appended one.
+    _task(store)
+    calls: list[list[str]] = []
+    body = tmp_path / "summary.md"
+    body.write_text("second task body\n", encoding="utf-8")
+    gh = _reuse_gh(
+        calls,
+        list_stdout='[{"url": "https://x/pull/9", "updatedAt": "2026-01-01"}]',
+        # one earlier appended section already present → this append makes it 3 tasks total
+        body_stdout="Body (task 1).\n\n---\n\n<!-- worc-task:task-000 -->\n\n## First\n\nprior",
+    )
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    gm.create_pr("task-001", "feature/shared", title="Second", body_path=str(body))
+
+    edit = next(c for c in calls if c[:2] == ["pr", "edit"])
+    assert edit[edit.index("--title") + 1] == "3 tasks on feature/shared"
+    # title and body ride one gh edit call (no extra round-trip)
+    assert "--body-file" in edit
+
+
+def test_bound_pr_body_unchanged_within_cap() -> None:
+    body = f"head{_SECTION_SEPARATOR}{_TASK_MARKER_PREFIX}t2 -->\n\n## T\n\nshort summary"
+    assert _bound_pr_body(body) == body
+
+
+def test_bound_pr_body_compacts_oldest_over_cap() -> None:
+    # VF-15: an over-limit chain body is bounded by compacting the OLDEST sections, while every task
+    # marker survives (so the chain count stays exact) and the newest section is kept in full.
+    head = "Task 1 body."
+
+    def section(i: int, filler: int) -> str:
+        return f"{_TASK_MARKER_PREFIX}t{i} -->\n\n## Title {i}\n\n" + ("x" * filler)
+
+    sections = [section(i, 5_000) for i in range(2, 20)]  # 18 sections × ~5 KB ≈ 90 KB
+    body = _SECTION_SEPARATOR.join([head, *sections])
+    assert len(body) > _PR_BODY_MAX_CHARS
+
+    out = _bound_pr_body(body)
+    assert len(out) <= _PR_BODY_MAX_CHARS
+    assert out.startswith(head)  # the PR-creating task's body is never touched
+    assert out.count(_TASK_MARKER_PREFIX) == 18  # no marker dropped → count stays exact
+    assert ("x" * 5_000) in out  # the newest section(s) remain full
+    assert "logs/t2/summary.md" in out  # the oldest was compacted to a stub pointing at its log
+
+
+def test_compact_pr_section_keeps_marker_and_title_and_is_idempotent() -> None:
+    sec = f"{_TASK_MARKER_PREFIX}t5 -->\n\n## Big change\n\n" + ("y" * 9_000)
+    out = _compact_pr_section(sec)
+    assert f"{_TASK_MARKER_PREFIX}t5 -->" in out and "## Big change" in out
+    assert "y" * 9_000 not in out  # the bulky summary is gone
+    assert "logs/t5/summary.md" in out  # replaced by a pointer to the on-disk summary
+    assert _compact_pr_section(out) == out  # re-compacting a stub changes nothing
+
+
+def test_create_pr_reuse_body_edit_failure_is_surfaced_not_fatal(
+    git_repo,
+    store: StateStore,
+    tmp_path: Path,
+    make_git_config: ConfigFactory,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # VF-15: a failing title/body update on a reused PR must not block publish — the reuse already
+    # succeeded — but it is surfaced (a clear warning), not silently swallowed.
+    _task(store)
+
+    def gh(argv: Sequence[str]) -> GitResult:
+        verb = list(argv[:2])
+        if verb == ["pr", "list"]:
+            stdout = '[{"url": "https://x/pull/9", "updatedAt": "2026-01-01"}]'
+        elif verb == ["pr", "view"]:
+            return GitResult(0, "Original body.", "", timed_out=False, launch_error=None)
+        elif verb == ["pr", "edit"]:
+            return GitResult(1, "", "network error", timed_out=False, launch_error=None)
+        else:
+            stdout = "https://x/pull/9\n"
+        return GitResult(0, stdout, "", timed_out=False, launch_error=None)
+
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    with caplog.at_level(logging.WARNING):
+        url = gm.create_pr("task-001", "feature/shared", title="T", body_path="x")
+    assert url == "https://x/pull/9"  # reuse still returns the PR; edit failure is non-fatal
+    assert "reused PR" in caplog.text and "network error" in caplog.text
 
 
 def test_create_pr_creates_new_when_no_open_pr(
