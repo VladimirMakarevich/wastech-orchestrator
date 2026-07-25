@@ -526,6 +526,14 @@ Net: with read-isolation off, an evaluator node's `Read` tool can read `.worc/.e
 
 Keep the env file (and only the env file) in the `Read` deny set regardless of `read_isolation_off` — it is a targeted secret protection, not part of the native-discovery surface that VF-6 deliberately reopened, so excluding it costs the operator nothing. Mirror the same carve-out in the Codex profile.
 
+## VF-20 — the instruction write-deny makes governance-doc tasks impossible; it must be removed and replaced by an operator notice (requirement)
+
+Severity: **High (functionality — operator-mandated)** Status: **open — graduated to a task** First seen: 2026-07-25 (`p10-01-governance-docs-2`) Related: VF-5, VF-10
+
+Graduated in full to **[vf20-governance-writes-notify-not-block.md](vf20-governance-writes-notify-not-block.md)** — read that for the requirement, evidence, scope, and acceptance criteria.
+
+Short form: VF-5's shipped resolution write-denies the tracked root instruction files (`AGENTS.md`/`AGENTS.override.md`/`CLAUDE.md`) for every workspace-write attempt, and the VF-7 preamble reinforces it in prose. `p10-01-governance-docs-2` — a documentation task whose deliverable _is_ an `AGENTS.md` edit — therefore reported _"Blocker: `AGENTS.md` is write-protected by the sandbox for this run, and I can't lift that"_ and burned $4.32 producing nothing (the same run that exposed VF-10). The operator's decision: **never block** governance/instruction files or the rules they reference (`.agents/rules/**`) — they are ordinary repository content, reviewed in the diff like anything else; `.worc/` is the only hard-denied location; and a change to them is **reported** to the operator, not refused. VF-5's accepted trade-off ("editing repository guidance under strict isolation is an unsupported edge case") is withdrawn, and its proposal to extend the deny to the `@`-import closure (`.agents/rules/*`, …) is ruled out. The `.git/`, `tasks/`, and `.worc-io/` write-denies are unaffected.
+
 ## What held up well across the range
 
 Worth recording so these aren't traded away in a later change:
