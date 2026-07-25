@@ -280,3 +280,303 @@ Cost and full call-count are not derivable from the audit — the `analyze-task-
 ### Next step
 
 Confirm the Claude/Codex CLI cost fields, then a small task to (1) populate `usage_cost` and (2) give supervisor calls an audit home; add a [follow_ups.md](../follow_ups.md) entry.
+
+**Update — shipped 2026-07-25** (commit `438ce6e`, "provider attempt auditing for supervisor layer"). Both halves are fixed and confirmed against the p9-06 → p9-09 run range: `usage_cost` is populated on every attempt (`SUM(usage_cost)` over the range = **$56.70**), and supervisor calls now get their own `provider_attempts` rows with `node_run_id` NULL (5–10 supervisor rows per task, `attempt_dir` under `stages/supervisor/`). A residual defect remains in the same writer — the attempt **timestamps** are stamped at row-write time rather than taken from the result — tracked separately as [VF-12](#vf-12--provider_attempts-and-check_runs-record-zero-duration-every-attempt-and-check-has-started_at--finished_at-observability).
+
+## Run-range validation: `p9-06-format-gate` → `p9-09-full-solution-deep-audit` (2026-07-25)
+
+A second validation pass, this time over a **contiguous 15-run window** rather than a single task, to catch defects that only show up across a sequence: state left behind by aborted runs, config that drifts out of sync with what a run just shipped, artifacts that accumulate, and cost/observability gaps that a single clean run hides.
+
+### Scope and frame
+
+|  |  |
+| --- | --- |
+| Target repo | `wastech-mdlint`, branch `feat/p9-remediation`, all runs to PR [#15](https://github.com/VladimirMakarevich/wastech-mdlint/pull/15) |
+| Window | `2026-07-24T22:58Z` → `2026-07-25T03:35Z` (4.62 h wall clock) |
+| Ledger entries | 16 (15 distinct task ids — one task is recorded twice, see [VF-14](#vf-14--the-completed-ledger-records-one-task-attempt-twice-and-a-validation-rejected-task-leaves-no-recoverable-state-observability--ux)) |
+| Outcomes | 12 `done`, 3 `failed` (2 operator-aborted, 1 validation-rejected), 1 `manual_action_required` that was then operator-failed |
+| Node runs | 83 |
+| Measured cost | **$56.70** across 12 tasks with recorded attempts — the 3 aborted runs recorded **$0** despite ~14 min of provider work ([VF-13](#vf-13--an-operator-forced-termination-leaves-orphan-running-node_runs-no-provider_attempts-row-and-no-terminal-log-line-observability)) |
+| Provider health | 0 fallbacks, 0 retries, 0 crashes, 0 timeouts, 0 exchange-contamination events, `stage_attempts=1` on every node |
+| Config | `disable_read_isolation: true`, `strict_isolation: true`, `prompt_audit: true`, `memory.enabled` flipped `true → false` mid-window |
+
+Cost concentration: `implementation` dominates (up to $3.81 on a single node), `review` is second, and the **supervisor layer is a flat ~$0.38–0.82 per task** — roughly **12% of total spend** for an advisory function whose output never gated anything in this window.
+
+## VF-9 — the VF-5 instruction-file write-lock has no operator escape hatch and directly contradicts the VF-7 security preamble (BUG, rule violation)
+
+Severity: **Critical** Status: **open** First seen: 2026-07-25 (tasks `p9-06-format-gate`, `p10-01-governance-docs-2`) Related: VF-5, VF-6
+
+### Observed
+
+The write-guard denies all writes to `AGENTS.md` / `AGENTS.override.md` / `CLAUDE.md` unconditionally, while the security preamble prepended to every prompt tells the agent it **may** change them when the task asks. Two tasks in this window were built on exactly that promise, and both were damaged by the contradiction.
+
+### Evidence
+
+- Enforcement, target run: `.worc/logs/p10-01-governance-docs-2/stages/fixing/run-000030/1-claude/claude-sandbox-settings.json` → `sandbox.filesystem.denyWrite` contains `…/AGENTS.md` and `…/CLAUDE.md`. The same paths appear as `Write(…)`/`Edit(…)` entries in `--disallowedTools` (see `request.json` → `argv`).
+- The promise, orchestrator source: [`core/flow/security_preamble.py:52-53`](../../../src/wastech_orchestrator/core/flow/security_preamble.py) — "`AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md` are read-only this run: read them for guidance, but **change them only if the task explicitly asks** (as an ordinary diff)."
+- The enforcement has no conditional: [`core/flow/nodes/agent.py:406-415`](../../../src/wastech_orchestrator/core/flow/nodes/agent.py) resolves `instruction_files` from `git ls-files` on every workspace-write attempt and threads them into `resolve_control_paths`; [`runtime_layout.py:176-186`](../../../src/wastech_orchestrator/runtime_layout.py) folds them into `denied_write_paths` with no flag. `grep -rniE "lock_instruction|instruction_lock|allow_instruction" src/` → **no matches**: there is no config key, no task field, no flow-node knob.
+- Agent's own diagnosis, `stages/fixing/run-000030/fixing.out.md`: _"every write attempt against that specific file is denied at the sandbox level — confirmed with both the `Edit` tool and a raw shell redirect (`operation not permitted: AGENTS.md`), while the identical test against `README.md` succeeded. This matches the orchestrator contract marking `AGENTS.md`/`CLAUDE.md` read-only by default for this run; **it seems this run's sandbox wasn't granted the exception the task's own text says should apply**."_
+- The evaluator believes the promise too — all three review rounds (`stages/review/run-0000{26,29,32}/findings.json`) close with _"The task explicitly authorizes editing AGENTS.md, so the read-only-by-default run rule does not apply."_
+
+### Damage in this window
+
+1. **`p10-01-governance-docs-2` died on it.** Deliverable 1 was an `AGENTS.md` edit. `planning → implementation → testing → review(rework) → fixing → testing → review(rework) → fixing → testing → review(rework)` — 3 review rounds, 2 fixing rounds, 21 min, **$4.32**, terminal `manual_action_required` → operator-failed. `failure_report.json` records `limit_exhausted: "no_file_change"`.
+2. **`p9-06-format-gate` silently routed around it.** Blocked from adding a trailing newline to `AGENTS.md`, the agent instead **added `AGENTS.md` to `.prettierignore`** with the comment _"Missing a trailing newline only; left as-is (governance doc, not touched incidentally by this change)."_ The task's whole purpose was to make the format gate honest — and it shipped with a permanent, silently-created hole in that gate. Still present in `wastech-mdlint/.prettierignore:16`.
+3. **The blocked agent probed the sandbox by writing to `README.md`** to isolate the deny (`fixing.out.md`: _"I already reverted a stray test line I'd accidentally appended to README.md while diagnosing this"_). It reverted cleanly, but an unrelated tracked file was mutated as a side effect of an unexplained deny.
+
+### Why it's a rule violation, not strictness
+
+[`.agents/rules/security.md` § MANDATORY](../../../.agents/rules/security.md): _"**Every isolation, sandbox, or provider-lockdown mechanism MUST ship with an operator-controlled way to relax or fully disable it.** Hard-wiring an always-on restriction with no operator opt-out is not acceptable, even when disabling it reduces security — that is the operator's decision to make."_ `disable_read_isolation` relaxes the **read** projection only; the instruction-file **write** lock is unreachable from any operator surface. This is the same class of defect as VF-6 addressed for reads.
+
+### Expected
+
+Two independent fixes, both needed:
+
+1. **Add the operator escape hatch** (operator-config only, never task/`extra_args`/flow-node — per the § MANDATORY boundary): e.g. `security.lock_instruction_files: true|false`. Under `false`, drop `instruction_files` from `ProviderWriteGuardPolicy`; the VF-5 reproducibility guarantee is the operator's to trade away, exactly as the read projection is.
+2. **Make the preamble truthful in the meantime.** While the lock is in force, `security_preamble.py:52-53` must not promise an exception that cannot be granted. Reword to state the lock plainly and tell the agent what to do instead (report the needed edit in its final message so the operator applies it), so a blocked agent stops burning fix loops trying.
+
+The module docstring claims the path tokens are emitted from layout constants "so the text cannot drift from the enforced denies" — the **paths** don't drift, but the **semantics** did. A test asserting preamble-vs-write-guard agreement would have caught this.
+
+## VF-10 — an agent that reports a hard blocker still returns `outcome=done`, and the fix→review edge drops the fixer's report (flow)
+
+Severity: **High** Status: **open** First seen: 2026-07-25 (`p10-01-governance-docs-2`) Related: VF-9
+
+### Observed
+
+The `fixing` node's final message was an explicit, well-written "I am blocked, here is the exact patch, please apply it or change the sandbox policy." The orchestrator recorded that node as **succeeded / done** and routed straight back to `review` — which had no access to the fixer's report and therefore re-issued a byte-identical blocking finding. Round 2 repeated the whole diagnosis from scratch.
+
+### Evidence
+
+- `state.db`: `node_runs` id=30 → `node_id=fixing, status=succeeded, outcome=done, error_class=NULL` — while `stages/fixing/run-000030/fixing.out.md` opens with _"I could not complete the primary deliverable. **Blocker: `AGENTS.md` is write-protected by the sandbox for this run, and I can't lift that.**"_ and closes with a direct question to the operator.
+- Review context is diff+findings only — `stages/review/run-000032/rendered-prompt.md` (tail) lists exactly four context files: `task`, `plan`, `current.diff`, `stages/review/run-000029/findings.json`. Neither `fixing.out.md` from run-000027 nor run-000030 is offered, even though both are present in the exchange (`exchange-seals/p10-01-governance-docs-2/seal-000001/manifest.json` lists them).
+- Cost of the blindness: round-2 `fixing` ran 221 s / $0.77 to rediscover what round-1's report already said.
+
+### Expected
+
+1. **Give an agent node a `blocked` outcome.** A node that ends with an unresolvable environmental blocker should not be indistinguishable from a node that did the work. Route it to `manual_action_required` (or a `human_input` request) with the agent's report as the failure reason, instead of feeding a no-op diff back into a review loop.
+2. **Carry the previous `<node>.out.md` into the evaluator's context** on a rework edge. The reviewer is being asked to judge whether the finding was addressed; the implementer's account of _why it wasn't_ is first-order evidence and it already exists in the exchange.
+
+### Not a regression
+
+The `no_file_change` loop-breaker worked correctly and is the only reason this cost $4.32 instead of ~$10 — `agents.max_fix_cycles` is 15, and without the detector the loop would have run to the cap. Keep it.
+
+## VF-11 — the format gate `p9-06` shipped is absent from the orchestrator's own check command set; the branch is now red against its own CI (checks / config)
+
+Severity: **High** Status: **open** First seen: 2026-07-25 (tasks `p9-06` … `p9-09`)
+
+### Observed
+
+`p9-06-format-gate` added `npm run format` to the target repo's CI `verify` job and left the tree green. The orchestrator's `checks.command_sets.default` was never updated to match, so the **next four runs re-broke the gate and every one of them passed `testing`, passed `review`, and published.**
+
+### Evidence
+
+- The gate was added: `p9-06`'s diff adds `- run: npm run format` to `.github/workflows/ci.yml`'s `verify` job.
+- The orchestrator does not run it: `.worc/config.yaml:86-108` — `command_sets.default` is `typecheck` / `lint` / `test` / `build`. No `format`.
+- Current state of the branch, with the repo's own pinned Prettier 3.8.4 (`npm run format`):
+  ```
+  [warn] docs/mdlint_v2/P10-consistency/05-test-depth.md          ← p10-05
+  [warn] docs/research/p9-09-full-solution-deep-audit/report-structure.md   ← p9-09
+  [warn] docs/research/p9-09-full-solution-deep-audit/report.md            ← p9-09
+  [warn] packages/core/test/registry-inventory.test.ts                     ← p10-04
+  [warn] Code style issues found in 4 files.
+  ```
+- Two independent supervisors noticed and filed it as a low follow-up rather than a gate failure: `p10-06`'s `summary.json` → _"[low] Pre-existing `npm run format` warnings on P10.05-adjacent files"_; `p10-08`'s → _"[low] Pre-existing prettier --check failures outside this task's scope"_. Nothing acted on it.
+
+### Second defect in the same command set
+
+`typecheck` and `build` are **the same command**. `wastech-mdlint/package.json`: `"typecheck": "tsc -b"`, `"build": "tsc -b"`. The daemon log shows the cost of the duplication — `typecheck` 0.446 s, `build` 0.391 s (a no-op re-run against the incremental build state). One of the four checks in every one of the ~54 check runs in this window carried zero signal.
+
+### Expected
+
+- Target-only, immediate: add `format` to `.worc/config.yaml`'s `default` command set and drop the duplicate `build` (or point it at something that actually differs, e.g. `npm pack --dry-run`).
+- Orchestrator-wide, the real gap: **nothing reconciles a task's own CI change with the orchestrator's check set.** A task that adds a gate to CI should surface that the run configuration now under-tests relative to CI. Cheapest honest version: have the `documentation`/supervisor step flag "this change adds a CI gate that `checks.command_sets` does not run" as a first-class finding rather than a low follow-up, since the operator is the only one who can update the config.
+
+## VF-12 — `provider_attempts` and `check_runs` record zero duration: every attempt and check has `started_at == finished_at` (observability)
+
+Severity: **Medium** Status: **open** First seen: 2026-07-25 (all 15 runs) Related: VF-8
+
+### Observed
+
+Both audit tables stamp the clock **twice at row-write time**, so no row carries a real interval. The DB cannot answer "which node was slow" or "which check hung" — even though the daemon log already prints the correct durations and the values are available in memory at the moment the row is written.
+
+### Evidence
+
+- `sqlite3 state.db "SELECT started_at, finished_at FROM check_runs LIMIT 1"` → `2026-07-24T23:12:44.286091+00:00` / `2026-07-24T23:12:44.286101+00:00` — a 10 µs "run" of `npm run typecheck`. Every row in the window is the same shape.
+- Same for every `provider_attempts` row (e.g. `p10-03-stale-comments` implementation: `01:34:16.244701` / `01:34:16.244708`), so `SUM(duration)` over the supervisor layer returns **0 s** for calls the log times at 5–25 s each.
+- The daemon log has the truth: `msg="check completed" … duration_seconds=9.938` and `msg="provider attempt completed" … duration_seconds=441.823`.
+- The data is on the object being persisted: [`core/flow/observability.py:139-140`](../../../src/wastech_orchestrator/core/flow/observability.py) writes `started_at=clock(), finished_at=clock()` — while **lines 227-228 of the same file** correctly use `attempt.result.started_at` / `attempt.result.finished_at` for the JSON artifact. `prompt-audit/timeline.jsonl` also carries the real per-attempt timestamps.
+- Second instance: [`core/flow/nodes/checks.py:235-236`](../../../src/wastech_orchestrator/core/flow/nodes/checks.py) — `started_at=self._s.clock(), finished_at=self._s.clock()`.
+
+### Expected
+
+`observability.py:139-140` → take the values from `result` (fall back to `clock()` only for a result-less attempt). `checks.py:235-236` → pass the measured start/end of the subprocess rather than re-reading the clock. Two small edits; both surfaces already have the data. Worth a regression test asserting `finished_at > started_at` for any attempt/check with a non-zero real duration.
+
+## VF-13 — an operator-forced termination leaves orphan `running` `node_runs`, no `provider_attempts` row, and no terminal log line (observability)
+
+Severity: **Medium** Status: **open** First seen: 2026-07-25 (`p10-01-governance-docs`, `p10-02-glossary-status`)
+
+### Observed
+
+Two tasks were killed mid-node by the operator. Both left `node_runs` rows permanently in `status='running'` with `finished_at=NULL`, recorded **zero** provider attempts (so zero cost) despite minutes of Opus/Sonnet work, wrote no `result.json`, and produced **no daemon-log line** explaining the termination.
+
+### Evidence
+
+- `state.db` orphans, still open: `node_runs` id=7 (`p10-01-governance-docs / planning`, started 00:00:58Z), id=21 and id=22 (`p10-02-glossary-status / implementation`, started 00:47:01Z and 00:53:52Z).
+- No cost recorded: `SELECT COUNT(*) FROM provider_attempts WHERE task_id IN ('p10-01-governance-docs','p10-02-glossary-status')` → **0**, while the artifact dirs hold a full `request.json` + `stdout.log` per attempt. Roughly 5 min + 9 min of provider work is invisible in the roll-up.
+- Silent restart: the daemon log for `p10-02-glossary-status` shows heartbeats to `elapsed_seconds=240.1` at 02:51:02, then at **02:53:52 a fresh `route resolved` + `provider attempt started` for the same node** — with no intervening line recording why the first attempt ended. Two `running` rows, one node.
+- Silent abort: `p10-01-governance-docs`'s log ends at the 300 s heartbeat (02:05:58) and the next line is an unrelated task 8 min later. The ledger nonetheless records `final_status: failed, manual: true, terminal_cleanup: completed` — so the finalize path ran and logged nothing.
+
+### Expected
+
+On any terminal transition, reconcile open `node_runs` for that task (`status='aborted'`, `finished_at=now`, `skip_reason`/`error_class` naming the operator action), and persist a `provider_attempts` row for the killed attempt with whatever usage the partial `stdout.log` yields (or an explicit `usage_delta_status='unknown'`) so an aborted run is not free in the ledger. Log the termination at `level=warning` with the reason — an operator abort is exactly the event a post-mortem needs and it is the one event the log omits.
+
+## VF-14 — the completed-ledger records one task attempt twice, and a validation-rejected task leaves no recoverable state (observability / UX)
+
+Severity: **Medium** Status: **open** First seen: 2026-07-25
+
+### Observed
+
+Two separate ledger integrity problems in one window.
+
+**(a) Duplicate row for one attempt.** `p10-01-governance-docs-2` appears **twice** in `logs/completed.jsonl` — first `final_status: manual_action_required` at `01:12:41Z` (the flow's own terminal), then `final_status: failed, manual: true` at `01:16:09Z` (the operator's). Same `attempt: 1`, same `rerun_of: null`, same `fix_iterations: 2`. Any consumer that counts lines double-counts the task and, ordering aside, may read the superseded status. The ledger has no key or supersede marker distinguishing "task reached a terminal state" from "operator changed that terminal state."
+
+**(b) `duplicate_task_id` rejection is a dead end.** `p9-10-01-governance-docs` was rejected at validation (`logs/p9-10-01-governance-docs/validation_report.json` → `{"passed": false, "reason": "duplicate_task_id", "detail": "p10-01-governance-docs"}`) because its front-matter `id:` collided with an already-processed task. What the operator is left with: a ledger row whose `title` is the **file stem** rather than the task's real title (no `tasks` row exists, so there is nothing to read a title from), a log dir containing exactly one file, and the source task file stranded in `tasks/preparing/` (`p9-10-01-governance-docs_3.md` is still there). The rejection detail names the colliding id but not the colliding task's path, so resolving it means grepping the whole tasks tree.
+
+### Expected
+
+- (a) Either append a supersede marker (`supersedes_finished_at`, or `superseded: true` on the earlier row) or make the ledger last-write-wins per `(task_id, attempt)` — and document which, since the file is the operator-facing history.
+- (b) On `duplicate_task_id`, include the **path** of the conflicting task in `detail`, and either move the rejected file to `validation.quarantine_folder` (already configured, `.worc/tasks/rejected`, and unused here) or state plainly in the log that it stays in `preparing/`. Note this also interacts with the file-stem-vs-`id` mismatch the whole P10 batch relies on: every P10 task file is named `p9-10-NN-*` while its `id:` is `p10-NN-*`, which is legal but makes ledger↔file correlation manual.
+
+## VF-15 — a reused chain PR keeps the first task's title forever, and its body grows unbounded (publish)
+
+Severity: **Medium** Status: **open** First seen: 2026-07-25 (PR #15, 13 appended tasks)
+
+### Observed
+
+`_append_reused_pr_body` was built precisely because "a reviewer reading a 7-task chain PR sees only task 1's scope" — but it fixes only the **body**. The **title** is never touched, and the body it rewrites grows without bound.
+
+### Evidence
+
+- Live PR: `gh pr view 15 --json title,body` → title is still **"P9.02 Replace localeCompare with a deterministic sort"** after 13 appended task sections; body is **66,376 characters**.
+- Growth is linear and monotonic: `p9-06` 24,038 B → `p9-08` 32,768 → `p10-05` 49,668 → `p10-08` 62,738 → `p9-09` 66,678 B. ~4 KB per task.
+- GitHub's documented issue/PR body limit is **65,536 characters**; the current body is **840 over it**. It was accepted this time, so the failure has not yet fired — but the next one or two tasks push further past a documented boundary with no headroom.
+- The failure will be quiet when it comes: [`git_manager.py:1853-1858`](../../../src/wastech_orchestrator/git_manager.py) — `gh pr edit` failure is caught and downgraded to a `warning` ("never block publish for a cosmetic body update"). The task still reports `done` with a `pr_url`, and the operator's only signal is one log line.
+
+### Expected
+
+- **Update the title on a reused PR.** The same call that appends the section should retitle to something that describes the chain (branch name, or "N tasks on `<branch>`"), not leave task 1's scope as the PR's identity.
+- **Bound the body.** Cap total length and elide the oldest sections (each already carries a `<!-- worc-task:<id> -->` marker, so they are individually addressable) — the per-task summary is also on disk in `logs/<task>/summary.md`, so the PR body does not need to be the archive.
+- **Promote a size overflow above `warning`.** "The PR body silently stopped reflecting the last N tasks" is a publish-integrity problem, not a cosmetic one; at minimum it belongs in the task's `summary.json` follow-ups where the operator will actually see it.
+
+## VF-16 — per-node model/reasoning allocation is inverted, and the review/documentation pin is a generation behind (model / config)
+
+Severity: **Medium** Status: **open** First seen: 2026-07-25 (all runs in window)
+
+### Observed
+
+Resolved per-node routing across the window (from each `stages/<node>/run-*/1-claude/request.json`):
+
+| Node                | Model             | Reasoning      | Permission      |
+| ------------------- | ----------------- | -------------- | --------------- |
+| `planning`          | `claude-sonnet-5` | `max`          | read-only       |
+| `implementation`    | `claude-sonnet-5` | `xhigh`        | workspace-write |
+| `fixing`            | `claude-sonnet-5` | `max`          | workspace-write |
+| `review`            | `claude-opus-4-8` | `xhigh`        | read-only       |
+| `documentation`     | `claude-opus-4-8` | `medium`       | workspace-write |
+| `supervisor`        | `claude-sonnet-5` | `medium`       | read-only       |
+| deep-research nodes | `claude-opus-4-8` | `high`/`xhigh` | mixed           |
+
+Three things are off:
+
+1. **The producer is the cheaper model and the reviewers are the expensive one.** `implementation` — the node that writes the code, dominates cost, and whose mistakes drive every fix loop — runs Sonnet 5 ($3/$15 per MTok), while `review` and `documentation` run Opus 4.8 ($5/$25). Reviewing more expensively than you build is backwards: `review` accepted first-pass on 11 of 12 tasks in this window, so the extra capability is not being spent where it changes an outcome.
+2. **`documentation` is the worst-priced node in the flow.** A prose summarizer at `medium` reasoning on the most expensive model. Its output (`documentation.out.md`) is a doc-status update and a summary paragraph — Sonnet 5 territory, at 60% of the price.
+3. **`claude-opus-4-8` is a generation behind at identical pricing.** Verified against the `claude-api` skill's model table: **`claude-opus-5` is $5/$25 per MTok — exactly Opus 4.8's price** — and is described as a drop-in upgrade at that pricing, specifically stronger on code review (high precision _and_ high recall, and accurate at lower effort). There is no cost argument for staying on 4.8 for `review`.
+
+### Expected
+
+Config is `.worc/config.yaml` (`agents.providers.claude.model`, `supervisor.model`) plus per-node `model`/`reasoning` overrides in `.worc/flows/implementation.yaml` and `deep_research.yaml`; packaged defaults in [`packaged/flows/`](../../../src/wastech_orchestrator/packaged/flows/).
+
+- `review`: `claude-opus-4-8` → **`claude-opus-5`**, same price, better at exactly this node's job. Then test `xhigh` → `high`; Opus 5 review is documented as staying accurate at lower effort, and review is the second-largest cost line.
+- `documentation`: → **`claude-sonnet-5`** at `medium`. Nothing this node does needs Opus.
+- `implementation`: if any node deserves the Opus tier it is this one — worth an A/B on the next batch, since a single avoided review→fix round (~$0.65–1.10 here) offsets a lot of the per-token delta.
+- Scope: target-only until the A/B says otherwise. Do **not** blanket-bump the packaged default.
+
+Two smaller items in the same area: every node runs `timeout_seconds: 7200` (2 h) regardless of shape — a `checks` node that finishes in 14 s and a deep-research synthesis get the same ceiling, so a genuinely hung cheap node burns two hours before anything notices. And `max_turns: 400` with `max_turns_gate: false` was never approached in this window (no attempt came close), so it is currently inert rather than protective.
+
+## VF-17 — the implementation role prompt tells the agent to "follow the plan" when planning is disabled, and renders an empty context heading (prompt)
+
+Severity: **Low** Status: **open** First seen: 2026-07-25 (9 of 12 successful runs)
+
+### Observed
+
+Two prompt-hygiene defects visible in every rendered prompt in the window.
+
+**(a) Dangling plan reference.** [`packaged/flows/implementation/implementation.md:1`](../../../src/wastech_orchestrator/packaged/flows/implementation/implementation.md) opens _"Implement the assigned task in the working tree **by following the plan**."_ In 9 of the 12 successful runs the task set `nodes.planning.enabled: false`, so no plan exists — and the prompt's own context-file list confirms it (`p10-03-stale-comments/stages/implementation/run-000040/rendered-prompt.md` offers exactly one file: `task`). The agent is told to follow an artifact it is not given.
+
+**(b) Empty section header.** Every rendered prompt ends with `## Additional Project Context` followed by 4–7 blank lines and then the context-file list — the heading is emitted unconditionally, with nothing under it when there is no extra context.
+
+### Expected
+
+(a) Condition the clause on the plan's presence — "…following the plan if one is provided in your context files" is enough, and the target's customized copy at `.worc/flows/implementation/implementation.md` should be updated in step with the packaged default. (b) Suppress the heading when the section is empty.
+
+## VF-18 — review findings below the rework threshold are recorded and then dropped (flow)
+
+Severity: **Low** Status: **open** First seen: 2026-07-25 (`p9-06-format-gate`)
+
+### Observed
+
+The `review` evaluator's non-blocking findings are persisted to `evaluations.findings_json` and then go nowhere: they do not gate, they are not merged into the task's follow-ups, and they are not surfaced to the operator. Anything the supervisor doesn't happen to rediscover independently is lost.
+
+### Evidence
+
+`p9-06`'s review returned `verdict: accept` with two `low` findings:
+
+1. _"`AGENTS.md` is added to `.prettierignore` … the enforced gate has a standing hole. It's a defensible choice here because AGENTS.md is read-only for this run, but **it should not stay permanently exempt**."_
+2. _"`.worc/` is listed in `.prettierignore`. `.worc/` is orchestrator-private runtime created per-run; it is absent from a clean contributor checkout and from the GitHub Actions checkout the committed CI workflow runs against, so **this entry never matches anything and is dead weight committed into product config**."_
+
+Finding 1 survived only because the supervisor independently produced an equivalent follow-up (`summary.json` → _"[low] AGENTS.md needs a trailing-newline formatting fix"_). Finding 2 was not rediscovered and vanished — and `.worc/` is still in `wastech-mdlint/.prettierignore:12`, committed into the target repo's product config.
+
+### Expected
+
+Merge sub-threshold review findings into the task's `summary.json` `follow_ups` (dedup against the supervisor's own list) so they reach the PR body. The reviewer is already doing the work and the finding is already structured; the only thing missing is the edge from `findings.json` to the follow-ups tracker.
+
+## VF-19 — under read-isolation OFF the env-file loses its `Read` deny at the tool layer, and read-only nodes have no sandbox at all (security)
+
+Severity: **Low** Status: **open** First seen: 2026-07-25 Related: VF-6
+
+### Observed
+
+With `disable_read_isolation: true` the private set is correctly downgraded to Write/Edit-only denies — but the **env file is downgraded with it**, contrary to the code's own stated intent, and read-only nodes have no second layer to catch it.
+
+### Evidence
+
+- [`providers/claude.py:667`](../../../src/wastech_orchestrator/providers/claude.py): `internal_deny_kinds = ("Write", "Edit") if read_isolation_off else ("Read", "Write", "Edit")` — applied uniformly to `read_deny_paths`, which includes the resolved env file.
+- Confirmed in the run: `p10-03-stale-comments/stages/implementation/run-000040/1-claude/request.json` → `--disallowedTools` contains `Write(…/.worc/.env)` and `Edit(…/.worc/.env)` but **no `Read(…)`** entry. The only `Read` denies are the public blacklist `Read(.env)` and `Read(secrets/**)` — cwd-relative patterns that do not match `.worc/.env`.
+- The intent says otherwise: [`claude.py:493-494`](../../../src/wastech_orchestrator/providers/claude.py) — _"The env-file `credentials` deny below is a targeted secret protection and is **kept regardless**."_ It is kept — but only in `build_sandbox_settings`, i.e. only for the OS Bash sandbox.
+- And the sandbox is not always there: `needs_sandbox` is true only for a workspace-write attempt that keeps `Bash`. Read-only nodes (`planning`, `review`, `supervisor`, and every deep-research read node) get **no `claude-sandbox-settings.json` at all** — confirmed by the artifact tree: `stages/implementation/` and `stages/documentation/` have one, `stages/review/` and `stages/planning/` do not. For those nodes the tool-glob list is the entire protection, and it has no env-file `Read` deny.
+
+Net: with read-isolation off, an evaluator node's `Read` tool can read `.worc/.env`. Nothing in this window did so — every node's `events.jsonl` is clean — and the preamble does ask the agent not to. But the mitigation is advisory where the code comment claims it is enforced.
+
+### Expected
+
+Keep the env file (and only the env file) in the `Read` deny set regardless of `read_isolation_off` — it is a targeted secret protection, not part of the native-discovery surface that VF-6 deliberately reopened, so excluding it costs the operator nothing. Mirror the same carve-out in the Codex profile.
+
+## What held up well across the range
+
+Worth recording so these aren't traded away in a later change:
+
+- **Provider layer was flawless.** 83 node runs, 0 fallbacks, 0 retries, 0 crashes, 0 timeouts, `stage_attempts=1` everywhere, `route_source=flow_node` throughout. Not one infrastructure-class failure in 4.6 h.
+- **`no_file_change` loop-breaker earned its keep.** Stopped `p10-01-governance-docs-2` at 2 fix rounds against a cap of 15 — the single largest cost saving in the window (see VF-10).
+- **VF-8 is genuinely fixed.** Cost is now measurable end to end ($56.70 over the range) and the supervisor layer is on-ledger. Only the timestamps regressed out (VF-12).
+- **The reformat constraint actually held.** `p9-06`'s "formatting-only" claim was verified mechanically after the fact: extracting `278cb4f^`, running the repo's Prettier over it, and diffing against `278cb4f` leaves 19 differing files — all either intentional content edits documented in the summary (`ci.yml`, `README`, `glossary`, the phase task file, `generate-docs.mjs` + its two sync tests) or union-type line-wrapping variants that are stable fixed points under `prettier --check` either way. No semantic change rode along. Note this check is cheap and deterministic, and the run did not do it — the supervisor summary itself flags that _"the review step accepted without a detailed diff walk being reported."_
+- **Deep-research citations are real.** All 41 sources in `p9-09`'s `sources.json` were re-checked independently: 39 in-repo citations, **0 line mismatches**. The `citation_check` gate is doing something. Its snippet check is file-scoped rather than line-scoped ([`checkers/citation.py:140-141`](../../../src/wastech_orchestrator/core/flow/checkers/citation.py): `on_line or snippet.strip() in text`), so a wrong line number would still pass — worth tightening, but it did not bite here.
+- **Exchange isolation was clean.** `exchange_contaminated=0` / `exchange_active_unsafe=0` on all 15 tasks, no `exchange-quarantine/` directory was ever created, and every terminal produced a checksum-verified seal.
+- **Planning earns its cost when it runs.** `p10-05-test-depth` spent 780 s / $2.71 on planning and produced a 19 KB, hand-traced plan that named its own riskiest step ("a wrong line number is the single most likely bug source in this whole change"). Implementation then passed review first try. Planning was disabled on 9 of 12 tasks; on the one non-trivial task where it ran, it paid.
+
+## Data gaps in this pass
+
+- **No attempt-level timing from the DB** (VF-12) — node-level wall time came from `node_runs`, per-attempt timing from parsing `daemon.log`. Slow-node analysis below the node level is not currently possible without log parsing.
+- **Aborted-run cost is unknowable** (VF-13) — the ~14 min of provider work in `p10-01-governance-docs` and `p10-02-glossary-status` has no usage record, so $56.70 is a floor, not the total.
+- **`daemon.log` timestamps are naive local time** while every JSON artifact and DB row is UTC with an offset. Correlating the two requires knowing the host's offset out-of-band (here UTC+2). Worth emitting the offset, or UTC, in the log.
+- **`daemon-startup.log` is truncated per launch**, so evidence of earlier daemon restarts within the window was already gone by the time of analysis — only the final session (05:03–05:35 local) survives.
+- **No `human_input` events occurred**, so the HITL path is unexercised in this range — including the one case that arguably warranted it (VF-10).
