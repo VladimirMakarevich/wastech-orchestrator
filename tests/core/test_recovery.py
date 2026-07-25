@@ -48,6 +48,7 @@ class RecordingNotifier:
         pr_url: str | None,
         reason: str | None,
         contacts: tuple[str, ...] = (),
+        governance_changed: tuple[str, ...] = (),
     ) -> None:
         self.calls.append((task_id, final_status))
 

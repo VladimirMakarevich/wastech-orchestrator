@@ -139,6 +139,9 @@ def test_deny_policy_and_write_guard_projected_into_profile(
     assert '"/clone/secrets" = "deny"' in profile
     assert '"/clone/.worc-io" = "read"' in profile  # exchange readable, write-denied
     assert '"/clone/tasks" = "read"' in profile
+    # VF-20: governance/instruction files are editable content — never projected as a deny.
+    for name in ("AGENTS.md", "AGENTS.override.md", "CLAUDE.md"):
+        assert name not in profile
 
 
 def test_no_prompt_text_is_interpolated_into_argv(

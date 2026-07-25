@@ -61,6 +61,11 @@ class LedgerRecord:
     manual: bool = False
     note: str | None = None
     outcome: str | None = None
+    # VF-20: repo-relative governance/instruction paths (``AGENTS.md``, ``.agents/rules/**``, …)
+    # this task's diff changed. Empty on ordinary runs — a non-blocking operator notice, the
+    # completed ledger's durable record of which runs edited their own rules. Old records omit it
+    # harmlessly.
+    governance_changed: tuple[str, ...] = ()
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -84,6 +89,7 @@ class LedgerRecord:
             "manual": self.manual,
             "note": self.note,
             "outcome": self.outcome,
+            "governance_changed": list(self.governance_changed),
         }
 
 

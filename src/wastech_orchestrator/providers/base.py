@@ -195,14 +195,13 @@ class AgentRunRequest:
     # filesystem sandbox/approvals (the ceiling stays in force).
     network_access: bool = False
     # WRI-002/003: the absolute Git-control + lifecycle roots a *workspace-write* attempt must
-    # Write/Edit-deny (exchange root, resolved gitdir/common-dir/hooks-dir, ``tasks/`` tree, and the
-    # tracked root instruction files — ``AGENTS.md``/``AGENTS.override.md``/``CLAUDE.md`` — kept
-    # readable but immutable so the agent's own native/on-demand reading of them is reproducible for
-    # the run). Set by the node runner from ``GitManager.resolve_control_paths`` only for a
-    # workspace-write attempt (the gitdir/common-dir are per-worktree and only final after branch
-    # prep); ``None`` for read-only attempts, which carry no write tools. Provider-neutral — each
-    # adapter renders it into its own tool-deny / OS-sandbox ``denyWrite`` syntax; preserved
-    # verbatim across a fallback.
+    # Write/Edit-deny (exchange root, resolved gitdir/common-dir/hooks-dir, ``tasks/`` tree). Set by
+    # the node runner from ``GitManager.resolve_control_paths`` only for a workspace-write attempt
+    # (the gitdir/common-dir are per-worktree and only final after branch prep); ``None`` for
+    # read-only attempts, which carry no write tools. Provider-neutral — each adapter renders it
+    # into its own tool-deny / OS-sandbox ``denyWrite`` syntax; preserved verbatim across a
+    # fallback. Repository governance/instruction files are intentionally not in this set — editing
+    # them is ordinary work, reported to the operator rather than blocked (VF-20).
     write_guard: ProviderWriteGuardPolicy | None = None
     # VF-7: the Core-owned orchestrator security contract prepended to the effective prompt as
     # defense-in-depth (advisory, NOT enforcement — the sandbox + deny projection enforce). Neutral

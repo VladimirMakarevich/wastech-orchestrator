@@ -159,11 +159,12 @@ class ProviderWriteGuardPolicy:
     linked-worktree ``.git`` write allowance. ``hooks_dir`` is the effective repository hooks dir
     (its ``core.hooksPath`` or ``<common-dir>/hooks``). ``tasks_dir`` is the committed ``tasks/``
     lifecycle tree — readable, never writable, so an agent can neither corrupt lifecycle bookkeeping
-    nor inject a new task file for the daemon to pick up. ``instruction_files`` are the tracked root
-    instruction files (``AGENTS.md``/``AGENTS.override.md``/``CLAUDE.md``) — kept readable but
-    write-denied so the agent's own reading of them (Codex native discovery / Claude Read tool) is
-    reproducible for the run: immutable files yield identical instructions on every node, resume,
-    and fallback, with no provider-side discovery code (VF-5).
+    nor inject a new task file for the daemon to pick up.
+
+    Repository governance/instruction files (``AGENTS.md``/``AGENTS.override.md``/``CLAUDE.md`` and
+    ``.agents/rules/**``) are deliberately **not** in this deny set: editing them is ordinary
+    repository work (VF-20). A run that changes them is reported to the operator as a notice, never
+    blocked.
     """
 
     exchange_root: Path | None
@@ -171,9 +172,6 @@ class ProviderWriteGuardPolicy:
     git_common_dir: Path
     hooks_dir: Path
     tasks_dir: Path
-    #: Tracked root instruction files (``AGENTS.md``/``AGENTS.override.md``/``CLAUDE.md``): readable
-    #: but write-denied so the agent's own reading of them is reproducible for the run (VF-5).
-    instruction_files: tuple[Path, ...] = ()
 
     @property
     def denied_write_paths(self) -> tuple[Path, ...]:
@@ -182,7 +180,6 @@ class ProviderWriteGuardPolicy:
         if self.exchange_root is not None:
             ordered.append(self.exchange_root)
         ordered.extend((self.git_dir, self.git_common_dir, self.hooks_dir, self.tasks_dir))
-        ordered.extend(self.instruction_files)
         return _dedupe(ordered)
 
 

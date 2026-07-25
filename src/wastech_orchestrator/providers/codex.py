@@ -454,11 +454,11 @@ def build_codex_argv(
         denied_read_paths=denied_read_paths,
         read_isolation_off=read_isolation_off,
     )
-    # VF-5: Codex's native ``AGENTS.md`` project-doc discovery is intentionally left ENABLED — the
-    # agent assembles its own instruction context from the repo's root files. Those files are
-    # write-denied for the run (immutable via ``write_guard``), so reproducibility comes from
-    # filesystem immutability rather than freezing-and-injecting a snapshot. (The ``.codex`` project
-    # trust control in ``_isolation_argv`` is separate and stays: the project is marked untrusted.)
+    # Codex's native ``AGENTS.md`` project-doc discovery is intentionally left ENABLED — the agent
+    # assembles its own instruction context from the repo's root files. Those files are ordinary,
+    # editable repository content (VF-20): a run that changes them is reported to the operator as a
+    # notice, not blocked. (The ``.codex`` project trust control in ``_isolation_argv`` is separate
+    # and stays: the project is marked untrusted.)
     if not request.network_access:
         # No network grant → also deny the host-side ``web_search`` tool. It runs on the OpenAI
         # backend, OUTSIDE the profile's sandbox network policy, so without this an "offline" node

@@ -38,6 +38,15 @@ def test_path_tokens_are_emitted_from_layout_constants() -> None:
         assert f"`{name}`" in text
 
 
+def test_governance_files_declared_editable_not_read_only() -> None:
+    # VF-20: the preamble must no longer call the instruction files "read-only this run"; it states
+    # they are ordinary, editable repository files (a change is reported, not blocked).
+    for off in (True, False):
+        text = build_orchestrator_security_preamble(read_isolation_off=off)
+        assert "read-only this run" not in text
+        assert "ordinary repository files" in text
+
+
 def test_preamble_is_a_pure_function_of_read_isolation_only() -> None:
     # Its only input is the effective-read-isolation bool — nothing task/flow/extra_args-derived.
     assert build_orchestrator_security_preamble(

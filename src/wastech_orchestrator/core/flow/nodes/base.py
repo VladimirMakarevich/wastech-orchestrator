@@ -242,16 +242,16 @@ class GitPort(Protocol):
 
     def compare_git_control_state(self, before: GitControlState) -> GitControlDrift | None: ...
 
-    #: The tracked files matching the given pathspecs (VF-5: the node runner uses it to resolve the
-    #: root instruction closure that ``resolve_control_paths`` write-denies for the run).
+    #: The tracked files matching the given pathspecs (used by the orchestrator to resolve the root
+    #: instruction closure it freezes for the per-run audit digest).
     def list_tracked_files(self, *pathspecs: str) -> tuple[str, ...]: ...
 
     #: WRI-002/003: absolute Git-control + ``tasks/`` roots a workspace-write attempt must
     #: Write/Edit-deny; the agent node runner threads it onto ``AgentRunRequest.write_guard``.
-    #: ``instruction_files`` (the tracked root instruction files) are resolved by the node runner
-    #: and kept readable but write-denied for the run (VF-5 reproducibility).
+    #: Repository governance/instruction files are intentionally not denied — editing them is
+    #: ordinary repository work, reported to the operator rather than blocked (VF-20).
     def resolve_control_paths(
-        self, exchange_root: str | None = None, *, instruction_files: Sequence[Path] = ()
+        self, exchange_root: str | None = None
     ) -> ProviderWriteGuardPolicy: ...
 
     def push(self, task_id: str, branch: str, *, mode: BranchMode = BranchMode.NEW) -> bool: ...

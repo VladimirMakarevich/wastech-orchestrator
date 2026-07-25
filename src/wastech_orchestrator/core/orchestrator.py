@@ -69,6 +69,7 @@ from wastech_orchestrator.core.flow.instruction_bundle import (
     freeze_repository_instructions,
     freeze_skill_package,
     freeze_task_packet,
+    governance_changed_paths,
     instruction_bundle_dir,
     load_instruction_bundle,
     write_instruction_manifest,
@@ -357,6 +358,20 @@ def effective_skip(task: NormalizedTask) -> frozenset[str]:
     return task.disabled_nodes()
 
 
+def _render_governance_section(paths: tuple[str, ...]) -> str:
+    """Markdown callout for the summary / PR body: this run edited governance files (VF-20).
+
+    A reviewer-facing notice, not a report of wrongdoing — editing governance/instruction files is
+    ordinary work. Appended only when ``paths`` is non-empty (no section on ordinary runs).
+    """
+    bullets = "\n".join(f"- `{path}`" for path in paths)
+    return (
+        "\n\n## Governance files changed\n\n"
+        "This run edited repository governance/instruction files (a notice, not a block):\n\n"
+        f"{bullets}\n"
+    )
+
+
 @dataclass(frozen=True)
 class PipelineResult:
     """The terminal outcome of running one task."""
@@ -420,6 +435,11 @@ class _Pipeline:
     # planning ``proposed_by`` post-hook does not re-read the agent's proposal. ``None`` on resume —
     # the decision is rebuilt from the persisted ``subtasks`` rows (source-agnostic).
     operator_decomposition: DecompositionDecision | None = None
+    # VF-20: repo-relative governance/instruction paths (`AGENTS.md`, `.agents/rules/**`, …) this
+    # run's net-task diff changed, captured at finalize (before terminal cleanup restores the tree).
+    # Empty on ordinary runs; drives the non-blocking operator notice (console/log WARNING, PR
+    # summary, ledger record, Telegram) — editing governance files is ordinary work, never a block.
+    governance_changed: tuple[str, ...] = ()
 
 
 class Eligibility(StrEnum):
@@ -3513,6 +3533,25 @@ class Orchestrator:
         """
         return Path(p.task_file).name if p.task_file else None
 
+    def _capture_governance_changed(self, p: _Pipeline) -> None:
+        """Record which governance/instruction files this run changed and warn the operator (VF-20).
+
+        Called at finalize, before terminal cleanup restores the working tree, so the base-anchored
+        diff still reflects the task's net change (including files earlier decomposed subtasks
+        committed). Governance/instruction files are ordinary, editable content — a change is a
+        non-blocking notice (this console/log WARNING, plus the PR summary, ledger, and Telegram),
+        never a block. Empty on ordinary tasks, so there is no noise there.
+        """
+        p.governance_changed = governance_changed_paths(
+            self._git.changed_code_paths_since_task_base()
+        )
+        if p.governance_changed:
+            self._log(p.task.id).warning(
+                "governance/instruction files changed by this task (notice, not a block): %s",
+                ", ".join(p.governance_changed),
+                extra={"governance_changed": list(p.governance_changed)},
+            )
+
     def _finalize_task_artifacts(
         self, p: _Pipeline, final: Status, *, degraded: bool = False
     ) -> Path | None:
@@ -3525,8 +3564,11 @@ class Orchestrator:
         ``degraded`` (DONE path only) flows into the deterministic fallback body as a visible
         "fallback summary" callout when the supervisor synthesis was expected but failed.
         """
+        self._capture_governance_changed(p)
         dest = self._move_task_file(p, final)
         body = self._summary_md_body(p, degraded=degraded)
+        if p.governance_changed:
+            body += _render_governance_section(p.governance_changed)
         if dest is None:
             return None
         summary_path = dest.with_name(f"{p.task.id}.summary.md")
@@ -3720,6 +3762,7 @@ class Orchestrator:
             pr_url=pr_url,
             reason=manual_reason,
             contacts=tuple(p.task.contacts),
+            governance_changed=p.governance_changed,
         )
         self._log(p.task.id).info(
             "terminal",
@@ -4174,6 +4217,7 @@ class Orchestrator:
         pr_url: str | None,
         reason: str | None,
         contacts: tuple[str, ...] = (),
+        governance_changed: tuple[str, ...] = (),
     ) -> None:
         """Best-effort terminal notification. Never raises and never alters the outcome."""
         try:
@@ -4183,6 +4227,7 @@ class Orchestrator:
                 pr_url=pr_url,
                 reason=reason,
                 contacts=contacts,
+                governance_changed=governance_changed,
             )
         except Exception as exc:
             self._log(task_id).warning(
@@ -4218,5 +4263,6 @@ class Orchestrator:
                 subtasks_completed=task_row.subtasks_completed if task_row else None,
                 attempt=attempt,
                 rerun_of=p.task.id if attempt > 1 else None,
+                governance_changed=p.governance_changed,
             )
         )

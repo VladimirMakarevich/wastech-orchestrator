@@ -76,6 +76,9 @@ def test_workspace_write_grants_write_and_readonly_guard(tmp_path: Path) -> None
     # deny set still wins
     assert fs[str(root / ".worc")] == "deny"
     assert fs["/opt/codexhome"] == "deny"
+    # VF-20: governance/instruction files are ordinary, editable content — no per-file guard entry.
+    for name in ("AGENTS.md", "AGENTS.override.md", "CLAUDE.md"):
+        assert not any(name in key for key in fs)
 
 
 def test_deny_applied_last_wins_over_read_guard(tmp_path: Path) -> None:

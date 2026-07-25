@@ -60,6 +60,26 @@ def test_send_includes_contacts_as_plain_text(fake_client: FakeTelegramClient) -
     assert "contacts=@owner @ops" in fake_client.sent[0]["text"]
 
 
+def test_send_includes_governance_changed_as_paths(fake_client: FakeTelegramClient) -> None:
+    # VF-20: a completed run that edited governance files marks which ones on the terminal message.
+    n = _notifier(fake_client)
+    n.send_notification(
+        task_id="task-gov",
+        final_status="done",
+        pr_url=None,
+        reason=None,
+        governance_changed=("AGENTS.md", ".agents/rules/security.md"),
+    )
+    assert "governance=AGENTS.md,.agents/rules/security.md" in fake_client.sent[0]["text"]
+
+
+def test_send_omits_governance_when_empty(fake_client: FakeTelegramClient) -> None:
+    # Ordinary task (no governance edits) → no governance field, no noise.
+    n = _notifier(fake_client)
+    n.send_notification(task_id="task-plain", final_status="done", pr_url=None, reason=None)
+    assert "governance=" not in fake_client.sent[0]["text"]
+
+
 def test_send_manual_action_required(fake_client: FakeTelegramClient) -> None:
     n = _notifier(fake_client)
     n.send_notification(

@@ -552,6 +552,9 @@ def test_write_guard_denies_write_edit_but_keeps_exchange_readable(
     # The exchange stays READABLE — no Read deny on it (only Write/Edit).
     assert "Read(//repo/.worc-io/**)" not in disallowed
     assert "Read(//repo/.worc-io)" not in disallowed
+    # VF-20: governance/instruction files are ordinary, editable content — never in the deny set.
+    for name in ("AGENTS.md", "AGENTS.override.md", "CLAUDE.md"):
+        assert name not in disallowed
 
 
 def test_claude_config_home_left_to_f37_not_re_denied_by_internal(

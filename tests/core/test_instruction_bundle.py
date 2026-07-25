@@ -20,6 +20,7 @@ from wastech_orchestrator.core.flow.instruction_bundle import (
     freeze_repository_instructions,
     freeze_skill_package,
     freeze_task_packet,
+    governance_changed_paths,
     load_instruction_bundle,
     write_instruction_manifest,
 )
@@ -66,6 +67,37 @@ def test_discover_repository_instructions_root_only_and_tracked(tmp_path: Path) 
     # CLAUDE.md exists on disk but is NOT tracked → excluded; AGENTS.md is tracked → included.
     found = discover_repository_instructions(tmp_path, frozenset({"AGENTS.md"}))
     assert found == [tmp_path / "AGENTS.md"]
+
+
+# -- governance-path detection (VF-20) ------------------------------------------------------------
+
+
+def test_governance_changed_paths_matches_root_instruction_files() -> None:
+    changed = ("AGENTS.md", "AGENTS.override.md", "CLAUDE.md", "src/app.py")
+    assert governance_changed_paths(changed) == ("AGENTS.md", "AGENTS.override.md", "CLAUDE.md")
+
+
+def test_governance_changed_paths_instruction_names_are_root_only() -> None:
+    # The instruction names match only at the repo root — a nested same-named file is ordinary code.
+    assert governance_changed_paths(("docs/AGENTS.md", "sub/CLAUDE.md")) == ()
+
+
+def test_governance_changed_paths_matches_agents_rules_tree_including_nested() -> None:
+    changed = (".agents/rules/security.md", ".agents/rules/a/b.md", ".agentsX/rules/x.md")
+    assert governance_changed_paths(changed) == (
+        ".agents/rules/a/b.md",
+        ".agents/rules/security.md",
+    )
+
+
+def test_governance_changed_paths_ignores_ordinary_paths_empty_and_sorts() -> None:
+    assert governance_changed_paths(()) == ()
+    assert governance_changed_paths(("src/x.py", "README.md")) == ()
+    # deduped + sorted regardless of input order
+    assert governance_changed_paths(("CLAUDE.md", "AGENTS.md", "CLAUDE.md")) == (
+        "AGENTS.md",
+        "CLAUDE.md",
+    )
 
 
 def test_freeze_repository_instructions_copies_and_digests_each_source(tmp_path: Path) -> None:

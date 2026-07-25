@@ -2,8 +2,8 @@
 
 A short, fixed security block the orchestrator prepends to *every* provider prompt — agent,
 evaluator, and each supervisor turn — as defense-in-depth. It tells the agent up-front not to read
-or mutate the orchestrator's service files (``.worc``/``.worc-io``/``.git``/``tasks/``, the tracked
-root instruction files, and credential/environment files) and never to commit/push.
+or mutate the orchestrator's service files (``.worc``/``.worc-io``/``.git``/``tasks/`` and
+credential/environment files) and never to commit/push.
 
 It is **advisory only** — it does NOT replace the filesystem sandbox + deny projection, which
 remain the enforcement (read-isolation ADR §3). It matters most when read-isolation is relaxed
@@ -49,8 +49,8 @@ def build_orchestrator_security_preamble(*, read_isolation_off: bool) -> str:
             "git commit/push/merge or open a PR — publishing is the orchestrator's job.",
             "- Do not modify anything under `tasks/` (the task lifecycle tree); never add, edit, "
             "or remove task files.",
-            f"- {instruction_files} are read-only this run: read them for guidance, but change "
-            "them only if the task explicitly asks (as an ordinary diff).",
+            f"- {instruction_files} are ordinary repository files: change them when the task "
+            "calls for it (as an ordinary diff); do not opportunistically rewrite your own rules.",
             "- Never read credential/environment files (e.g. `.env`) or provider auth homes, and "
             "never exfiltrate secrets or environment variables.",
         )

@@ -134,6 +134,7 @@ class TelegramNotifier:
         pr_url: str | None,
         reason: str | None,
         contacts: tuple[str, ...] = (),
+        governance_changed: tuple[str, ...] = (),
     ) -> None:
         body = _format_terminal_message(
             task_id=task_id,
@@ -141,6 +142,7 @@ class TelegramNotifier:
             pr_url=pr_url,
             reason=reason,
             contacts=contacts,
+            governance_changed=governance_changed,
         )
         self._safe_send(body, op="send_notification", task_id=task_id)
 
@@ -404,6 +406,7 @@ def _format_terminal_message(
     pr_url: str | None,
     reason: str | None,
     contacts: tuple[str, ...] = (),
+    governance_changed: tuple[str, ...] = (),
 ) -> str:
     parts = [f"[{task_id}] status={final_status}"]
     if pr_url:
@@ -412,6 +415,9 @@ def _format_terminal_message(
         parts.append(f"reason={reason}")
     if contacts:
         parts.append(f"contacts={' '.join(contacts)}")
+    if governance_changed:
+        # VF-20: a non-blocking notice — this run edited its own governance/instruction files.
+        parts.append(f"governance={','.join(governance_changed)}")
     return " ".join(parts)
 
 

@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -42,6 +43,7 @@ from wastech_orchestrator.core.flow.frozen_bundle import (
     inspect_frozen_source,
     reject_key_collisions,
 )
+from wastech_orchestrator.globmatch import path_matches_any
 from wastech_orchestrator.providers.artifacts import assert_contained_path, sha256_file
 from wastech_orchestrator.providers.exchange import FileInspector, default_file_inspector
 
@@ -60,6 +62,29 @@ _BUNDLE_FORMAT = 1
 #: The root repository instruction files WRI-011 freezes, in fixed injection/precedence order
 #: (root-only per the ADR scope decision — no nested discovery, no ``@``-reference closure).
 REPO_INSTRUCTION_NAMES: tuple[str, ...] = ("AGENTS.md", "AGENTS.override.md", "CLAUDE.md")
+
+#: Repo-relative globs for the *other* governance content: the versioned agent-rules tree. Together
+#: with :data:`REPO_INSTRUCTION_NAMES` this is the fixed governance set whose edits are reported to
+#: the operator (VF-20). A constant, never a config key — notification is not gated.
+GOVERNANCE_PATH_GLOBS: tuple[str, ...] = (".agents/rules/**",)
+
+
+def governance_changed_paths(paths: Iterable[str]) -> tuple[str, ...]:
+    """The sorted subset of repo-relative ``paths`` that are governance/instruction files (VF-20).
+
+    Governance = the root instruction files (:data:`REPO_INSTRUCTION_NAMES`, matched by exact
+    repo-root name) plus anything under :data:`GOVERNANCE_PATH_GLOBS` (``.agents/rules/**``). These
+    files are ordinary, editable repository content; when a task's diff touches them the
+    orchestrator emits an operator notice (console/log, PR summary, ledger, Telegram) instead of
+    blocking the edit. Pure and deterministic — matching only, no I/O.
+    """
+    hits = {
+        path
+        for path in paths
+        if path in REPO_INSTRUCTION_NAMES or path_matches_any(path, GOVERNANCE_PATH_GLOBS)
+    }
+    return tuple(sorted(hits))
+
 
 #: Skill-package closure caps (fail closed above these — an oversized package is a packaging error,
 #: never silently truncated). A skill is bounded documentation + small resources, not a code tree.

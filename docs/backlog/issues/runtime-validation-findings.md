@@ -119,6 +119,8 @@ The real cause: the operator-facing counter columns (`*_fix_total` / `*_fix_cycl
 
 Severity: **High (architectural / maintainability)** Status: **shipped 2026-07-24** (rolled back the discovery-disable + freeze-and-inject; native `AGENTS.md` discovery for Codex, agent-reads-root-files for Claude, write-deny immutability + kept digest — see Resolution) First seen: 2026-07-24.
 
+> **Amended by VF-20 (shipped 2026-07-25): the "write-deny the tracked instruction files" half of this resolution is reverted.** Editing `AGENTS.md`/`AGENTS.override.md`/`CLAUDE.md` (and `.agents/rules/**`) is ordinary repository work — those paths are no longer in `ProviderWriteGuardPolicy.denied_write_paths`; a run whose diff touches them is **reported** to the operator (console/log `WARNING`, PR/commit summary, completed-ledger `governance_changed`, Telegram) instead of blocked. The per-source freeze + `instruction_manifest_digest` stay (audit only). The trade-off accepted below — _"editing repository guidance under strict isolation is an unsupported/edge case"_ — is **withdrawn**. See [vf20-governance-writes-notify-not-block.md](vf20-governance-writes-notify-not-block.md).
+
 ### Resolution (shipped 2026-07-24)
 
 The rollback landed as proposed. The Claude "memory-only load path" open question (below) was **verified against the Claude Code docs and answered: no** — `--setting-sources` gates `CLAUDE.md` discovery **and** hooks/MCP/skills/plugins on the same switch, with no flag to load memory without re-opening the settings surface. So:
@@ -528,7 +530,7 @@ Keep the env file (and only the env file) in the `Read` deny set regardless of `
 
 ## VF-20 — the instruction write-deny makes governance-doc tasks impossible; it must be removed and replaced by an operator notice (requirement)
 
-Severity: **High (functionality — operator-mandated)** Status: **open — graduated to a task** First seen: 2026-07-25 (`p10-01-governance-docs-2`) Related: VF-5, VF-10
+Severity: **High (functionality — operator-mandated)** Status: **shipped 2026-07-25** (removed the instruction write-deny across `runtime_layout`/`git_manager`/`nodes/agent`; reworded the VF-7 preamble; a run whose diff touches a governance path is reported to the operator on four surfaces — run-log/console `WARNING`, `## Governance files changed` in the PR/commit summary, `governance_changed` on the completed-ledger record, and a `governance=` mark on the Telegram completion message — and still completes normally) First seen: 2026-07-25 (`p10-01-governance-docs-2`) Related: VF-5, VF-10
 
 Graduated in full to **[vf20-governance-writes-notify-not-block.md](vf20-governance-writes-notify-not-block.md)** — read that for the requirement, evidence, scope, and acceptance criteria.
 

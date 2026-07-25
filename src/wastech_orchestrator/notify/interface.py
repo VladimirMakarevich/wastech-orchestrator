@@ -70,8 +70,13 @@ class Notifier(Protocol):
         pr_url: str | None,
         reason: str | None,
         contacts: tuple[str, ...] = (),
+        governance_changed: tuple[str, ...] = (),
     ) -> None:
-        """Best-effort terminal notification — never raises, never blocks the pipeline."""
+        """Best-effort terminal notification — never raises, never blocks the pipeline.
+
+        ``governance_changed`` (VF-20) lists the repo-relative governance/instruction paths this
+        task's diff changed, surfaced on the terminal message; empty on ordinary runs.
+        """
 
     def send_trace(self, *, task_id: str, node_id: str, outcome: str) -> None:
         """Best-effort live progress trace for one finished flow node — never raises, never blocks.
@@ -121,6 +126,7 @@ class NullNotifier:
         pr_url: str | None,
         reason: str | None,
         contacts: tuple[str, ...] = (),
+        governance_changed: tuple[str, ...] = (),
     ) -> None:
         return None
 

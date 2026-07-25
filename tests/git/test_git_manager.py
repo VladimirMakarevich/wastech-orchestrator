@@ -2068,19 +2068,17 @@ def test_resolve_control_paths_normal_clone(
     assert (clone / "tasks").resolve() in resolved
 
 
-def test_resolve_control_paths_includes_instruction_files(
+def test_resolve_control_paths_excludes_instruction_files(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
-    # VF-5: the tracked root instruction files (resolved by the core node runner) are write-denied
-    # for the run so the agent's own reading of them is reproducible; they stay readable.
+    # VF-20: repository governance/instruction files (AGENTS.md/CLAUDE.md/…) are ordinary, editable
+    # content — never write-denied. A run that edits them is reported to the operator, not blocked.
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    clone = Path(git_repo.clone)
-    instr = [clone / "AGENTS.md", clone / "CLAUDE.md"]
-    wg = gm.resolve_control_paths("/repo/.worc-io", instruction_files=instr)
-    assert wg.instruction_files == tuple(instr)
-    resolved = {p.resolve() for p in wg.denied_write_paths}
-    assert (clone / "AGENTS.md").resolve() in resolved
-    assert (clone / "CLAUDE.md").resolve() in resolved
+    wg = gm.resolve_control_paths("/repo/.worc-io")
+    denied_names = {p.name for p in wg.denied_write_paths}
+    assert not denied_names & {"AGENTS.md", "AGENTS.override.md", "CLAUDE.md"}
+    # The write-guard no longer carries an instruction-files field at all (gone, not gated).
+    assert not hasattr(wg, "instruction_files")
 
 
 def test_resolve_control_paths_linked_worktree_splits_gitdir_and_common(

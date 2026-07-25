@@ -179,6 +179,7 @@ class RecordingNotifier:
         pr_url: str | None,
         reason: str | None,
         contacts: tuple[str, ...] = (),
+        governance_changed: tuple[str, ...] = (),
     ) -> None:
         self.calls.append(
             {
@@ -187,6 +188,7 @@ class RecordingNotifier:
                 "pr_url": pr_url,
                 "reason": reason,
                 "contacts": contacts,
+                "governance_changed": governance_changed,
             }
         )
         if self._raise_on_send:
@@ -425,6 +427,7 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
             "pr_url": "https://example/pr/1",
             "reason": None,
             "contacts": (),
+            "governance_changed": (),  # ordinary task touched no governance files
         }
     ]
     assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "main"
@@ -2202,6 +2205,7 @@ def test_rejected_task_no_branch(git_repo, make_git_config, git_run, tmp_path: P
             "pr_url": None,
             "reason": "frontmatter_missing",
             "contacts": (),
+            "governance_changed": (),
         }
     ]
 
@@ -3853,14 +3857,15 @@ def test_wri011_freezes_instruction_inputs_end_to_end(
     assert src.is_file() and "ORIGINAL REPO RULES" in src.read_text(encoding="utf-8")
     assert not (bundle / "instructions" / "repository.md").exists()
 
-    # a workspace-write implementation attempt write-denies the tracked root instruction files so
-    # what the agent reads from them stays immutable for the run (no injection needed).
+    # VF-20: a workspace-write implementation attempt does NOT deny the tracked root instruction
+    # files — editing them is ordinary repository work, reported to the operator not blocked.
+    # (The per-source freeze above still records what the agent read, for the audit digest.)
     def _denies_agents_md(r: AgentRunRequest) -> bool:
         paths = r.write_guard.denied_write_paths if r.write_guard else ()
         return any(p.name == "AGENTS.md" for p in paths)
 
     impl = [r for r in providers[ProviderId.CLAUDE].requests if r.node_id == "implementation"]
-    assert impl and all(_denies_agents_md(r) for r in impl)
+    assert impl and not any(_denies_agents_md(r) for r in impl)
 
 
 def test_wri009_resume_repopulates_task_packet_digest(
@@ -3907,13 +3912,50 @@ def test_wri009_resume_repopulates_task_packet_digest(
     assert packet_digest == hashlib.sha256(frozen_packet.read_bytes()).hexdigest()
 
 
+def test_resume_after_live_governance_edit_does_not_fail_closed(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # VF-20 §1: editing a governance file mid-task must never fail-close a continue/resume. The
+    # resume freeze path re-hashes the FROZEN copies under the bundle dir (the task-start snapshot),
+    # not the live files — so a live AGENTS.md edit after the run does not raise or block resume.
+    from types import SimpleNamespace
+
+    from wastech_orchestrator.core.flow.nodes import NodeInputs
+
+    agents = _commit_agents_md(git_repo, git_run, "ORIGINAL REPO RULES\n")
+    providers = _both()
+    orch, store, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    tid = "task-gov-resume"
+    assert orch.run_task(_complete_task(tmp_path, tid)).final_status is Status.DONE
+
+    # A governance file is now edited in the live repo (the change VF-20 allows).
+    agents.write_text("EDITED AFTER THE RUN\n", encoding="utf-8")
+
+    # The resume freeze path must still load + verify the persisted bundle without fail-closing:
+    # if it re-hashed the LIVE file, the changed AGENTS.md would raise InstructionBundleError.
+    p = SimpleNamespace(task=SimpleNamespace(id=tid), instruction_entries=[])
+    orch._freeze_task_and_repo_instructions(p, NodeInputs(flow_dir=str(tmp_path)), resume=True)  # type: ignore[arg-type]
+    assert orch._task_packet_digest(p) is not None  # no InstructionBundleError, no manual gate
+
+
 def test_wri011_frozen_instruction_copy_is_task_start_snapshot(
     git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:
-    # VF-5: the agent reads the LIVE root files (write-denied for a workspace-write attempt, so a
-    # real agent cannot tamper). The private per-source freeze — the digest/audit record — is
-    # captured once at task start, so a later live edit does not change it (a fake provider bypasses
-    # the sandbox to rewrite the file; the frozen copy stays the task-start snapshot).
+    # VF-20: the agent reads the LIVE root files and may edit them (ordinary work, reported not
+    # blocked). The private per-source freeze — the digest/audit record — is still captured once at
+    # task start, so a later live edit does not change it: "record drift, don't prevent it" (the
+    # frozen copy stays the task-start snapshot even though the live file changed).
     agents = _commit_agents_md(git_repo, git_run, "ORIGINAL REPO RULES\n")
     providers = _both()
     orch, _, _, art = _build(
@@ -3937,6 +3979,137 @@ def test_wri011_frozen_instruction_copy_is_task_start_snapshot(
     ).read_text(encoding="utf-8")
     assert "ORIGINAL REPO RULES" in frozen  # the task-start freeze (digest record) is unchanged
     assert "TAMPERED" not in frozen
+
+
+# --- VF-20: governance-change notice (never block; report on every surface) ----------------------
+
+
+def _pending_task_in_repo(git_repo, task_id: str) -> str:
+    """Write a complete task into the repo's ``tasks/pending`` tree, so its committed summary is
+    reachable via ``git show <branch>:tasks/done/<id>.summary.md``. Returns the task-file path."""
+    pending = git_repo.clone / "tasks" / "pending"
+    pending.mkdir(parents=True, exist_ok=True)
+    task_file = pending / f"{task_id}.md"
+    task_file.write_text(
+        f'---\nid: {task_id}\ntitle: "Do the thing"\n---\n\n'
+        "## Description\n\nDo it.\n\n## Acceptance criteria\n\n- works\n",
+        encoding="utf-8",
+    )
+    return str(task_file)
+
+
+def test_governance_edit_reports_notice_on_all_surfaces(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # VF-20: a run that edits governance/instruction files is NOT blocked — it completes, the edit
+    # lands, and the operator is notified on every surface: a console/log WARNING, a section in the
+    # committed PR/commit summary, the completed-ledger record, and the Telegram terminal message.
+    _commit_agents_md(git_repo, git_run, "ORIGINAL REPO RULES\n")
+    rules = git_repo.clone / ".agents" / "rules" / "security.md"
+    rules.parent.mkdir(parents=True, exist_ok=True)
+    rules.write_text("original rule\n", encoding="utf-8")
+    git_run(["add", ".agents/rules/security.md"], git_repo.clone)
+    git_run(["commit", "-m", "add rules"], git_repo.clone)
+
+    providers = _both()
+    notifier = RecordingNotifier()
+    orch, store, ledger, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+    )
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "AGENTS.md").write_text("EDITED BY TASK\n", encoding="utf-8")
+            rules.write_text("edited rule\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    warnings: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            warnings.append(record.getMessage())
+
+    logger = logging.getLogger("wastech_orchestrator")
+    handler = _Collect(level=logging.WARNING)
+    logger.addHandler(handler)
+    prior_level = logger.level
+    logger.setLevel(logging.WARNING)
+    try:
+        result = orch.run_task(_pending_task_in_repo(git_repo, "task-gov"))
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(prior_level)
+
+    assert result.final_status is Status.DONE
+    expected = (".agents/rules/security.md", "AGENTS.md")  # sorted: "." < "A"
+    # (1) console/log WARNING naming the changed governance files
+    assert any("governance" in m and "AGENTS.md" in m for m in warnings)
+    # (2) a section in the committed PR/commit summary (on the task branch)
+    branch = store.get_task("task-gov").branch
+    summary = git_run(["show", f"{branch}:tasks/done/task-gov.summary.md"], git_repo.clone)
+    assert "## Governance files changed" in summary
+    assert "`AGENTS.md`" in summary and "`.agents/rules/security.md`" in summary
+    # (3) the completed-ledger record
+    assert ledger.records()[-1]["governance_changed"] == list(expected)
+    # (4) the Telegram terminal notification
+    assert notifier.calls[-1]["governance_changed"] == expected
+
+
+def test_ordinary_task_emits_no_governance_notice(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # VF-20 no-noise AC: a run that touches no governance file emits no notice on any surface.
+    providers = _both()
+    notifier = RecordingNotifier()
+    orch, store, ledger, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+    )
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "s.py").write_text("x = 1\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    warnings: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            warnings.append(record.getMessage())
+
+    logger = logging.getLogger("wastech_orchestrator")
+    handler = _Collect(level=logging.WARNING)
+    logger.addHandler(handler)
+    prior_level = logger.level
+    logger.setLevel(logging.WARNING)
+    try:
+        result = orch.run_task(_pending_task_in_repo(git_repo, "task-plain"))
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(prior_level)
+
+    assert result.final_status is Status.DONE
+    assert not any("governance" in m for m in warnings)
+    branch = store.get_task("task-plain").branch
+    summary = git_run(["show", f"{branch}:tasks/done/task-plain.summary.md"], git_repo.clone)
+    assert "Governance files changed" not in summary
+    assert ledger.records()[-1]["governance_changed"] == []
+    assert notifier.calls[-1]["governance_changed"] == ()
 
 
 # --- WRI-007: terminal-exchange sealing (orchestrator wiring) -------------------------------------

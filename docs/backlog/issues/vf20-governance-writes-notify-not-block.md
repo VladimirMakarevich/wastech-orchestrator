@@ -1,6 +1,6 @@
 # VF-20 — governance/instruction files must never be write-blocked; report the change to the operator instead
 
-Status: **open — task** Date: 2026-07-25 Owner: Vladimir Makarevich Related: [VF-5](runtime-validation-findings.md) (the rollback that introduced the instruction write-deny), [VF-6](runtime-validation-findings.md) (`disable_read_isolation`), [VF-7](vf7-security-preamble-investigation.md) (the advisory preamble text), [VF-10](runtime-validation-findings.md) (the blocked-agent flow defect this surfaced through)
+Status: **shipped 2026-07-25** (write-deny removed; operator notice on four surfaces — run-log/console WARNING, PR/commit summary, completed-ledger `governance_changed`, Telegram) Date: 2026-07-25 Owner: Vladimir Makarevich Related: [VF-5](runtime-validation-findings.md) (the rollback that introduced the instruction write-deny), [VF-6](runtime-validation-findings.md) (`disable_read_isolation`), [VF-7](vf7-security-preamble-investigation.md) (the advisory preamble text), [VF-10](runtime-validation-findings.md) (the blocked-agent flow defect this surfaced through)
 
 ## Requirement (operator-stated, mandatory)
 
@@ -69,15 +69,15 @@ VF-5 bought exactly one genuinely valuable property with the deny — _"reproduc
 
 ## Acceptance criteria
 
-- [ ] An agent node can create, edit, and delete `AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`, and any file under `.agents/rules/`, and the change lands in the task's diff and commit like any other file.
-- [ ] `ProviderWriteGuardPolicy.denied_write_paths` no longer contains any repository-instruction path; the rendered Claude `denyWrite`/tool-deny and Codex permission profile carry none either (asserted per adapter).
-- [ ] The governance-path deny is not reachable through any config key, task front-matter field, `extra_args`, or flow node — it is gone, not gated.
-- [ ] `.worc/` remains read- and write-denied; `.git/`, its hooks/config, `tasks/`, and `.worc-io/` remain write-denied (regression-tested — this change must not widen the envelope beyond governance files).
-- [ ] The security preamble no longer claims the instruction files are read-only, and its `.worc/`/`.worc-io/`/`.git/`/`tasks/`/no-publish lines are byte-identical to today.
-- [ ] A run whose diff touches a governance path emits the operator notice on all three surfaces (run log, task record, PR/commit summary) and **still completes normally** — no approval request, no `manual_action_required`, no state-machine change.
-- [ ] A run whose diff touches no governance path emits no notice (no noise on ordinary tasks).
-- [ ] Continue/resume/fallback succeed after a governance file was edited mid-task — no digest fail-closed, no `manual_action_required`.
-- [ ] `wastech-mdlint` task `p9-10-01-governance-docs` completes its `AGENTS.md` deliverable end to end (the real-target verification for this change).
+- [x] An agent node can create, edit, and delete `AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`, and any file under `.agents/rules/`, and the change lands in the task's diff and commit like any other file.
+- [x] `ProviderWriteGuardPolicy.denied_write_paths` no longer contains any repository-instruction path; the rendered Claude `denyWrite`/tool-deny and Codex permission profile carry none either (asserted per adapter).
+- [x] The governance-path deny is not reachable through any config key, task front-matter field, `extra_args`, or flow node — it is gone, not gated (the field and its threading are deleted).
+- [x] `.worc/` remains read- and write-denied; `.git/`, its hooks/config, `tasks/`, and `.worc-io/` remain write-denied (regression-tested — this change must not widen the envelope beyond governance files).
+- [x] The security preamble no longer claims the instruction files are read-only, and its `.worc/`/`.worc-io/`/`.git/`/`tasks/`/no-publish lines are byte-identical to today.
+- [x] A run whose diff touches a governance path emits the operator notice on all three surfaces (run log, task record, PR/commit summary) — plus the Telegram completion message (operator addition) — and **still completes normally** — no approval request, no `manual_action_required`, no state-machine change.
+- [x] A run whose diff touches no governance path emits no notice (no noise on ordinary tasks).
+- [x] Continue/resume/fallback succeed after a governance file was edited mid-task — no digest fail-closed, no `manual_action_required`.
+- [ ] `wastech-mdlint` task `p9-10-01-governance-docs` completes its `AGENTS.md` deliverable end to end (the real-target verification for this change — pending an actual run against that target repo).
 
 ## Docs to update in the same change
 

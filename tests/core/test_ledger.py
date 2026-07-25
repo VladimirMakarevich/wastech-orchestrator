@@ -28,6 +28,25 @@ def test_append_is_append_only(tmp_path: Path) -> None:
     assert len(ledger.path.read_text(encoding="utf-8").splitlines()) == 2
 
 
+def test_governance_changed_field_round_trips(tmp_path: Path) -> None:
+    # VF-20: the completed-ledger record carries the governance/instruction paths a run edited.
+    ledger = Ledger(tmp_path)
+    ledger.append(
+        LedgerRecord(
+            id="g",
+            title="G",
+            final_status="done",
+            finished_at="t",
+            governance_changed=("AGENTS.md", ".agents/rules/security.md"),
+        )
+    )
+    # The default is empty and serializes to [] (ordinary runs / old records carry no governance).
+    ledger.append(LedgerRecord(id="p", title="P", final_status="done", finished_at="t"))
+    records = ledger.records()
+    assert records[0]["governance_changed"] == ["AGENTS.md", ".agents/rules/security.md"]
+    assert records[1]["governance_changed"] == []
+
+
 def test_has_task_id(tmp_path: Path) -> None:
     ledger = Ledger(tmp_path)
     assert ledger.has_task_id("a") is False
