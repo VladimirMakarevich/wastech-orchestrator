@@ -213,7 +213,16 @@ class EvaluatorNodeRunner:
         )
         return NodeResult(
             node_id=node.id,
-            outcome=NodeOutcome(kind, findings=findings, rework_exhausted=rework_exhausted),
+            outcome=NodeOutcome(
+                kind,
+                findings=findings,
+                rework_exhausted=rework_exhausted,
+                # DR-2: carry the provider's own prose, not just the typed findings. Without it the
+                # supervisor observed a bare `Outcome: accept` and its whole-task summary described
+                # an evaluator that emitted findings as a gate that "passed". The agent runner has
+                # always passed this; the evaluator runner dropped it one layer up.
+                final_message=outcome.result.final_message,
+            ),
             node_run_id=run_id,
         )
 

@@ -144,7 +144,9 @@ class FakeStore:
         self.editing_lineage[(row.task_id, row.subtask_order, row.lineage_key)] = row
 
 
-def _result(structured: dict[str, Any] | None = None) -> AgentRunResult:
+def _result(
+    structured: dict[str, Any] | None = None, *, final_message: str | None = None
+) -> AgentRunResult:
     return AgentRunResult(
         status=RunStatus.SUCCEEDED,
         provider="codex",
@@ -154,6 +156,7 @@ def _result(structured: dict[str, Any] | None = None) -> AgentRunResult:
         started_at="t0",
         finished_at="t1",
         structured_output=structured,
+        final_message=final_message,
     )
 
 
@@ -1813,6 +1816,28 @@ def test_evaluator_medium_finding_is_non_blocking_and_carried(tmp_path: Path) ->
     finding = result.outcome.findings[0]
     assert finding.severity == "medium"
     assert finding.blocking is False
+
+
+def test_evaluator_outcome_carries_the_providers_final_message(tmp_path: Path) -> None:
+    # DR-2 wire 1: the evaluator runner built its NodeOutcome without `final_message`, so the
+    # provider's own account of what it found — already written to the run dir's summary.md — was
+    # dropped one layer up. The supervisor then observed a bare `Outcome: accept` and reported the
+    # gate as having passed. The agent runner has always carried this; the evaluator now does too.
+    (tmp_path / "r.md").write_text("review {diff_path}", "utf-8")
+    node = _evaluator("review")
+    prose = "Uneven audit depth: the headline verdict rests on subsystems only spot-checked."
+    router = FakeRouter(
+        _result({"findings": [{"what": "uneven depth", "severity": "medium"}]}, final_message=prose)
+    )
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "accept"
+    assert result.outcome.final_message == prose
 
 
 def _test_quality(max_rework_per_stage: int = 1) -> EvaluatorNode:

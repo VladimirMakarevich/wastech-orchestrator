@@ -3180,6 +3180,11 @@ class Orchestrator:
                     node_run_id=node_run_id,
                     outcome_kind=outcome.kind,
                     final_message=outcome.final_message,
+                    # DR-2: an evaluator's findings are the substance of the step it just observed.
+                    # Passing only the outcome label had the supervisor acknowledge `accept` for a
+                    # node that had filed a substantive finding, and then describe the gate as
+                    # having passed in the whole-task summary.
+                    findings=outcome.findings,
                 )
             # A non-blocking evaluator that spent its whole `max_rework_per_stage` budget and
             # accepted with findings still open: warn the operator (console, always — independent of

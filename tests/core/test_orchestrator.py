@@ -853,6 +853,52 @@ def test_supervisor_layer_observes_each_step_and_writes_one_summary(
     assert "summary" not in _ran_nodes(store, "task-sup")
 
 
+def test_accepted_evaluator_findings_reach_the_observer_and_the_pr_body(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # DR-2 end to end: `review` accepts (the finding is below its `high` gate) but still recorded a
+    # finding. Before this, that finding existed only in findings.json and the evaluations table —
+    # the observer saw a bare `Outcome: accept`, and the PR body told the operator the gate passed.
+    # Both surfaces must now carry it.
+    finding_text = "docstring drift in the new helper"
+    providers = _both(
+        outputs={
+            "review": (
+                "I found one advisory issue",
+                {"findings": [{"severity": "low", "what": finding_text}]},
+            ),
+            # The finalize turn is structured here (memory is on), so script a summary: without one
+            # it degrades to the deterministic fallback, which carries no follow-ups section.
+            "supervisor": ("noted", {"summary": "Added the helper and its tests."}),
+        }
+    )
+    orch, _store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-findings"))
+    assert result.final_status is Status.DONE
+
+    # Wire 2+3: the observation of the review step carries the findings digest, not just the label.
+    prompts = [
+        path.read_text("utf-8")
+        for path in (task_artifact_dir(art, "task-findings") / "stages" / "supervisor").glob(
+            "run-*/rendered-prompt.md"
+        )
+    ]
+    review_observation = [p for p in prompts if "Node: review" in p]
+    assert review_observation, "the review step was observed"
+    assert any(f"- [low] {finding_text}" in p for p in review_observation)
+    # Wire 1: the provider's own prose reached the observer too.
+    assert any("I found one advisory issue" in p for p in review_observation)
+
+    # And the operator surface: the accepted finding lands in the summary that becomes the PR body.
+    summary = (task_artifact_dir(art, "task-findings") / "summary.md").read_text("utf-8")
+    assert "## Technical debt / follow-ups" in summary
+    assert finding_text in summary
+
+
 def test_supervisor_turns_write_rendered_prompt_and_prompt_audit(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:

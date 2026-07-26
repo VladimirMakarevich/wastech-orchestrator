@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from wastech_orchestrator.config.schema import SupervisorConfig
+from wastech_orchestrator.core.flow.engine import Finding
 from wastech_orchestrator.core.flow.nodes.base import RegisterArtifact, RouterPort
 from wastech_orchestrator.core.flow.observability import (
     record_provider_attempts,
@@ -314,8 +315,26 @@ def _render_follow_ups_section(follow_ups: tuple[FollowUp, ...]) -> str:
 
 
 # Longest a finding's reason may be before it is used verbatim as a follow-up title; longer reasons
-# become a truncated title with the full text carried in the rationale (VF-18).
+# become a truncated title with the full text carried in the rationale (VF-18). The same bound caps
+# a finding line in the observation prompt, so a chatty evaluator cannot inflate every step turn.
 _FINDING_TITLE_MAX = 120
+
+
+def _render_findings_digest(findings: Sequence[Finding]) -> str:
+    """Render an evaluator's findings as bounded lines for the observation prompt (DR-2).
+
+    Severity + reason + paths only: enough for the observer to react to what the step actually said,
+    without pulling a full review's prose into every per-step turn. Long reasons are cut at
+    :data:`_FINDING_TITLE_MAX`, the same bound the follow-up titles use.
+    """
+    lines = []
+    for finding in findings:
+        reason = " ".join(finding.reason.split())
+        if len(reason) > _FINDING_TITLE_MAX:
+            reason = reason[:_FINDING_TITLE_MAX].rstrip() + "…"
+        paths = f" ({', '.join(finding.paths)})" if finding.paths else ""
+        lines.append(f"- [{finding.severity}] {reason}{paths}")
+    return "\n".join(lines) + "\n"
 
 
 def _finding_to_follow_up(finding: Any, node_id: str | None) -> FollowUp | None:
@@ -354,13 +373,17 @@ def _evaluator_finding_follow_ups(evaluations: list[EvaluationRow]) -> tuple[Fol
     rework-superseded rounds are ignored) and convert its findings so they land in ``summary.{json,
     md}`` and the PR body. ``get_evaluations`` is insertion-ordered, so the last row seen per
     ``node_id`` is that node's final verdict.
+
+    Keyed by ``(node_id, subtask_order)``, not by node alone: a decomposed task runs the same
+    evaluator once per subtask, so keying on the node id let subtask N's verdict evict every earlier
+    subtask's findings — silently, and worse the more the task was decomposed.
     """
-    last_by_node: dict[str | None, EvaluationRow] = {}
+    last_by_node: dict[tuple[str | None, int | None], EvaluationRow] = {}
     for row in evaluations:
         if row.kind == "in_flow_verdict":
-            last_by_node[row.node_id] = row
+            last_by_node[(row.node_id, row.subtask_order)] = row
     out: list[FollowUp] = []
-    for node_id, row in last_by_node.items():
+    for (node_id, _subtask), row in last_by_node.items():
         try:
             findings = json.loads(row.findings_json)
         except json.JSONDecodeError:
@@ -584,6 +607,7 @@ class Supervisor:
         node_run_id: int,
         outcome_kind: str,
         final_message: str | None = None,
+        findings: Sequence[Finding] = (),
         subtask_order: int | None = None,
     ) -> None:
         """Observe one completed step read-only and record an advisory ``supervisor_step`` row.
@@ -591,8 +615,12 @@ class Supervisor:
         Best-effort: a failed observation is logged and swallowed — it is advisory and must never
         fail or reroute the task. Namespaced by ``source_node_run_id`` (the step), so a resumed run
         does not duplicate observations.
+
+        ``findings`` are an evaluator's typed findings for this step (DR-2): without them the
+        observation is a bare outcome label with nothing to react to, which is why the observer made
+        no tool calls on any evaluator step of the run this came from.
         """
-        prompt = self._step_prompt(task_id, node_id, outcome_kind, final_message)
+        prompt = self._step_prompt(task_id, node_id, outcome_kind, final_message, findings)
         # F50: observation is advisory and runs once per node-run, so a deep fix loop drives many
         # observe turns; it never needs a max reasoning tier, so cap it to `high` (the whole-task
         # finalize keeps the configured tier).
@@ -1139,9 +1167,16 @@ class Supervisor:
         )
 
     def _step_prompt(
-        self, task_id: str, node_id: str, outcome_kind: str, final_message: str | None
+        self,
+        task_id: str,
+        node_id: str,
+        outcome_kind: str,
+        final_message: str | None,
+        findings: Sequence[Finding] = (),
     ) -> str:
         observed = f"## Step observed\nNode: {node_id}\nOutcome: {outcome_kind}\n"
+        if findings:
+            observed += "\nFindings it recorded:\n" + _render_findings_digest(findings)
         if final_message:
             observed += f"\nThe step reported:\n{final_message}\n"
         return self._base_prompt(task_id) + "\n\n" + observed
