@@ -228,6 +228,16 @@ def test_forward_surfaces_the_guard_exit_code(
     assert cli_shell.dispatch("finalize t1 --as done", ctx).exit_code == 1
 
 
+def test_forwarded_parser_exit_is_command_local(
+    capsys: pytest.CaptureFixture[str], make_git_config: _ConfigFactory, tmp_path: Path
+) -> None:
+    ctx = _ctx(make_git_config(tmp_path / "clone"), run_cli=cli.main)
+    result = cli_shell.dispatch("status --bogus", ctx)
+    assert result.quit is False
+    assert result.exit_code == 2
+    assert "unrecognized arguments: --bogus" in capsys.readouterr().err
+
+
 # --- reliable spawn (start_watch) + attach ----------------------------------------------
 
 
@@ -470,6 +480,31 @@ def test_run_interactive_quit_smoke(
 
     rc = cli_shell._run_interactive(_ctx(make_git_config(tmp_path / "clone")))
     assert rc == 0
+
+
+def test_run_interactive_continues_after_forwarded_parser_exit(
+    monkeypatch: pytest.MonkeyPatch, make_git_config: _ConfigFactory, tmp_path: Path
+) -> None:
+    prompt_toolkit = pytest.importorskip("prompt_toolkit")
+    import prompt_toolkit.patch_stdout as patch_stdout_mod
+
+    class _ScriptedSession:
+        def __init__(self, *_a: object, **_k: object) -> None:
+            self._it = iter(["status --bogus", "help", "quit"])
+
+        async def prompt_async(self) -> str:
+            try:
+                return next(self._it)
+            except StopIteration as exc:
+                raise EOFError from exc
+
+    monkeypatch.setattr(prompt_toolkit, "PromptSession", _ScriptedSession)
+    monkeypatch.setattr(patch_stdout_mod, "patch_stdout", lambda: contextlib.nullcontext())
+
+    ctx = _ctx(make_git_config(tmp_path / "clone"), run_cli=cli.main)
+    rc = cli_shell._run_interactive(ctx)
+    assert rc == 0
+    assert "commands:" in _out(ctx)
 
 
 def test_run_interactive_quit_confirmation_declines_then_accepts(
