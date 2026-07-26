@@ -109,7 +109,7 @@ polish     ─▶ 📝 запись (без LLM) ┘
 | --- | --- | --- |
 | [P0](supervisor-finalize-packet-and-cadence.md) | детерминированный `SupervisorPacket` → fresh finalize → skip `tool`/`checks` | finalize перестаёт тащить тёплую сессию; `length` перестаёт стоить 44k |
 | [P1](supervisor-observation-cadence-p1.md) | `observe.mode` + event-триггеры + раздельные observe/finalize | убираются все 6 промежуточных наблюдений (исторические 375 726 токенов) |
-| [P2](supervisor-responsibility-split-p2.md) | вынос `StepRecorder` + раздельные бюджеты handoff/skill + per-function telemetry | видно, сколько стоила каждая функция; предупреждение, если supervisor снова доминирует |
+| [P2](supervisor-responsibility-split-p2.md) | вынос детерминированной step-записи + per-function telemetry + supervisor-отчёт в summary | видно, сколько стоила каждая функция (раздельные бюджеты и предупреждение о доминировании исключены решением P2-D1) |
 
 ## Дефолты по типам flow (после P1)
 
