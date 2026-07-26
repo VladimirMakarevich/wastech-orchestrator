@@ -15,7 +15,7 @@
 
 ## Требуемый результат
 
-Оператор управляет частотой наблюдений (`observe.mode`), а расход растёт вместе с реальными отклонениями, а не с числом обычных шагов. Настройки observe и finalize разделены (своя модель/reasoning/сессия у каждого). Content-flow работает finalize-only, implementation-flow — в event-режиме. Отдельных бюджетных потолков нет (решение P1-D6) — ограничителем служит сам режим.
+Оператор управляет частотой наблюдений (`observe.mode`), а расход растёт вместе с реальными отклонениями, а не с числом обычных шагов. Настройки observe и finalize разделены (своя модель и reasoning у каждого). Content-flow работает finalize-only, implementation-flow — в event-режиме. Отдельных бюджетных потолков нет (решение P1-D6) — ограничителем служит сам режим.
 
 ## Решения
 
@@ -133,7 +133,7 @@ Bump обязателен (плоские ключи удаляются — ст
 
 ## В объёме P1
 
-1. Расширить `SupervisorConfig` вложенными `observe`/`finalize`/`handoff` блоками; плоские `model`/`reasoning` удалить из схемы и отвергать в загрузчике, `role_file`/`provider` оставить на верхнем уровне (решение P1-D1). Bump версии схемы (текущая `CONFIG_SCHEMA_VERSION = 31` → 32) + `config/loader.py` + `config/validation.py` (reasoning ∈ allowlist, provider ∈ `agents.allowed`, mode/triggers валидны) + `_REMOVED_KEYS` в `config/upgrade.py`.
+1. Расширить `SupervisorConfig` вложенными `observe`/`finalize`/`handoff` блоками; плоские `model`/`reasoning` удалить из схемы и отвергать в загрузчике, `role_file`/`provider` оставить на верхнем уровне (решение P1-D1). Bump версии схемы (номер не пиним — решение P1-D3) + `config/loader.py` + `config/validation.py` (reasoning ∈ allowlist, provider ∈ `agents.allowed`, mode/triggers валидны) + `_REMOVED_KEYS` в `config/upgrade.py`.
 2. Добавить вложенный `observe.mode` в flow-local `SupervisorBlock` (сужение глобальной политики) — тем же паттерном, что `defaults.evaluator`: свой `_reject_unknown` в `_parse_supervisor` (решение P1-D2).
 3. В post-node hook **всегда** писать детерминированную step-запись (node/kind/outcome/факты, `note=""`), а LLM-observer вызывать **условно** по mode/триггерам. Это гарантирует полноту ledger/пакета даже когда наблюдения выключены.
 4. Реализовать event-детекцию (`rework`/`failure` из `outcome`, `fallback` из строки `node_runs`) — без расширения контракта post-node хука (решение P1-D7).
