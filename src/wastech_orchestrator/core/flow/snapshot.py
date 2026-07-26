@@ -26,6 +26,7 @@ from wastech_orchestrator.core.flow.contracts import (
     fingerprint,
 )
 from wastech_orchestrator.core.flow.schema import (
+    DEFAULT_CITATION_MANIFEST,
     DEFAULT_GATE_SEVERITY,
     SEVERITY_ORDER,
     AgentNode,
@@ -45,7 +46,11 @@ from wastech_orchestrator.core.flow.schema import (
     WhenPredicate,
 )
 from wastech_orchestrator.providers.base import ProviderId
-from wastech_orchestrator.security.identifiers import NODE_ID_PATTERN, is_valid_node_id
+from wastech_orchestrator.security.identifiers import (
+    NODE_ID_PATTERN,
+    is_portable_path_segment,
+    is_valid_node_id,
+)
 
 
 class FlowLoadError(Exception):
@@ -115,7 +120,7 @@ _EVALUATOR_FIELDS = frozenset(
         "when",
     }
 )
-_CHECKS_FIELDS = frozenset({"id", "kind", "checker", "when"})
+_CHECKS_FIELDS = frozenset({"id", "kind", "checker", "manifest", "when"})
 _TOOL_FIELDS = frozenset({"id", "kind", "tool", "args", "timeout_seconds", "when"})
 _HITL_NODE_FIELDS = frozenset({"id", "kind", "signal", "timeout_s", "when"})
 _PUBLISH_FIELDS = frozenset({"id", "kind", "policy", "when"})
@@ -458,8 +463,25 @@ def _parse_checks_node(raw: dict[str, Any]) -> ChecksNode:
         id=nid,
         kind="checks",
         checker=checker,  # type: ignore[arg-type]
+        manifest=_parse_manifest(raw.get("manifest", DEFAULT_CITATION_MANIFEST), ctx),
         when=_parse_when(raw.get("when")),
     )
+
+
+def _parse_manifest(value: Any, ctx: str) -> str:
+    """Validate a checks node's ``manifest`` as one portable path segment inside the report dir.
+
+    A flow-authored filename resolved against a directory is a traversal surface, so it goes through
+    the same segment validator the exchange uses: no separators, no ``..``, no absolute path, no
+    Windows-reserved name.
+    """
+    name = str(value)
+    if not is_portable_path_segment(name):
+        raise FlowLoadError(
+            f"invalid 'manifest' {name!r} in {ctx}: must be a single portable filename "
+            "(no path separators, no '..', not a reserved name)"
+        )
+    return name
 
 
 _SCALAR_TYPES = (str, int, float, bool)

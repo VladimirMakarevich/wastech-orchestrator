@@ -113,11 +113,20 @@ class EvaluatorNode:
     when: WhenPredicate | None = None
 
 
+#: Filename the ``citation`` checker looks for in the flow's report dir when the node does not name
+#: one. A flow whose writing node names its manifest anything else used to get a silent
+#: ``uncheckable: missing`` and a gate that did nothing, because the name was a literal in the node.
+DEFAULT_CITATION_MANIFEST = "sources.json"
+
+
 @dataclass(frozen=True, slots=True)
 class ChecksNode:
     id: str
     kind: Literal["checks"]
     checker: Literal["command_profile", "citation", "dependency_scan"]
+    #: ``citation`` only: the manifest filename inside the flow's report dir. A single path segment
+    #: (no separators, no ``..``) — it names a file the flow's own writing node produced.
+    manifest: str = DEFAULT_CITATION_MANIFEST
     when: WhenPredicate | None = None
 
 

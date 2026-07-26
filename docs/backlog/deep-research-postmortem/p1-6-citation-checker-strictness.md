@@ -1,6 +1,18 @@
 # P1.6 — make the cited line authoritative, and route the citation report to the verifier
 
-Priority: **P1** Status: **accepted** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-5
+Priority: **P1** Status: **implemented** (2026-07-26) Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-5
+
+## Implemented
+
+All five items. Step 1 took the `weak` option rather than dropping the `or` outright — the decision was made explicitly against the alternative, whose cost is concrete: the `citation_check → synthesis` fail edge has `budget: 1`, so one imprecise line number in one of N citations spends the single repair round and parks the whole run in `manual_action_required`. `weak` also gives the measurement needed to decide later whether it should gate; the flip is a one-line change. The reason string names the line the snippet is actually on, so a repair is possible in one round.
+
+Three refinements the document did not specify:
+
+- **A snippet with no `line` stays `verified`.** Such an entry claims nothing about _where_ in the file, so there is no location to mis-attribute and "this quote is in this file" is the whole claim. Only a cited line that disagrees with the snippet is `weak`.
+- **Multi-line snippets match a window as tall as the snippet**, not `lines[line - 1]`. Quoting a three-line signature is ordinary citation craft, and a single-line match would have made every multi-line quote a mis-attribution.
+- **A non-`int` `line` (e.g. `"12"`) reads as "no line cited"** and is echoed back as `null`, rather than silently skipping both the bounds check and the on-line check as before.
+
+`citation.json` entries now also carry `path` and `line`, because the whole point of routing the file to the verifier is that it can act on an entry without recovering the location from prose. `verifier.md`'s false assurance is replaced (P1.6 half only — the full rewrite is [P1.5](p1-5-research-role-prompts.md)) and it now addresses `{checks_path}` and owns the `weak`/`uncheckable` entries. `synthesis.md` is updated too: the `line` must be the line the snippet is on, and an entry with no snippet cannot be verified at all.
 
 ## Problem
 

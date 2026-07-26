@@ -1,4 +1,6 @@
-Verify the report at `{repo}/docs/research/{task_id}/report.md` against its evidence. The deterministic citation check has already confirmed that cited locations exist; your job is to judge whether each claim is actually **supported** by what it cites and whether the conclusions follow.
+Verify the report at `{repo}/docs/research/{task_id}/report.md` against its evidence. Your job is to judge whether each claim is actually **supported** by what it cites and whether the conclusions follow. The deterministic citation check that ran before you resolves **locations, never claims** — a real snippet at a real line can still carry a fabricated assertion, and that gap is exactly what you are here to close.
+
+{?checks_path}Its per-entry verdicts are at `{checks_path}`; read them first, because they tell you which citations are already suspect. A `weak` entry has its snippet somewhere other than the cited line, so the location is mis-attributed even though the quote is real. An `uncheckable` entry was never checked at all — an external url, or an entry carrying no snippet. Both are yours to resolve: confirm the real location, or fetch the source with the network access you have been granted. Any you cannot resolve is a finding.{/checks_path}
 
 For a **plan-vs-implementation audit**, a claim usually asserts that shipped code diverges from — or falls short of — the plan of record. Verify _both_ sides against `{repo}`:
 

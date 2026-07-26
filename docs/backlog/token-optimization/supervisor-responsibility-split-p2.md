@@ -57,4 +57,4 @@ SkillProposer         только при dynamic skills и непустом inv
 - `src/wastech_orchestrator/core/supervisor.py` — извлечение `StepRecorder`, раздельные capabilities и бюджеты.
 - `src/wastech_orchestrator/core/orchestrator.py` — вызов `StepRecorder` в post-node hook, сборка supervisor-отчёта в finalize.
 - `src/wastech_orchestrator/state_store.py` — per-function usage/cost (поверх normalized-usage-accounting).
-- `src/wastech_orchestrator/packaged/guide/`, `docs/worc_architecture.md`, `docs/configuration.md` — архитектура и отчётность.
+- `src/wastech_orchestrator/packaged/guide/flows/roles.md` — описание supervisor-слоя (разделённые обязанности + supervisor-отчёт в summary). Derived `docs/worc_architecture.md` / `docs/configuration.md` на `dev` отсутствуют: только doc-impact note в PR (X2).

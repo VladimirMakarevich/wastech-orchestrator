@@ -1,6 +1,6 @@
 # `deep_research` post-mortem campaign (2026-07-25)
 
-Status: **open — all items accepted (P2.9 as option 1 + 10g; 10c dropped)** Date: 2026-07-25 Owner: Vladimir Makarevich
+Status: **in progress — steps 1-4 implemented (P0.1, P0.3, P0.2, P1.6); P1.5, P1.4, P1.7, P2.8, P2.9, P3.10 open** Date: 2026-07-25 Owner: Vladimir Makarevich
 
 This folder groups everything that came out of the post-mortem of `p9-09-full-solution-deep-audit`, the **first and only production run of the `deep_research` flow**, into a single campaign with one execution order. The analysis is in [postmortem.md](postmortem.md); the files below are the implementable tasks it produced.
 
@@ -33,12 +33,12 @@ Plus one defect that is actively corrupting data rather than losing signal: the 
 
 | # | Item | What it does | Effort | Scope |
 | --- | --- | --- | --- | --- |
-| P0.1 | [Make a `medium` evaluator finding gate](p0-1-evaluator-gate-severity.md) | `gate_severity: medium` on `critical_review`; restore the deleted header comment; reconcile `critic.md` with the shipped rubric | **one line** | flow (+ packaged default) |
-| P0.2 | [Surface an accepting evaluator's findings](p0-2-evaluator-findings-surfacing.md) | Pass `final_message` through so findings reach `summary.json` and the PR body; forward `outcome.findings` to the supervisor | one line + merge | orchestrator |
-| P0.3 | [Fix the redaction false positive](p0-3-redaction-false-positive.md) | Align `_ASSIGNMENT` with the segment policy; redact decoded values, not the serialized line | small | orchestrator |
+| P0.1 | ✅ [Make a `medium` evaluator finding gate](p0-1-evaluator-gate-severity.md) | `gate_severity: medium` on `critical_review`; restore the deleted header comment; reconcile `critic.md` with the shipped rubric | **one line** | flow (+ packaged default) |
+| P0.2 | ✅ [Surface an accepting evaluator's findings](p0-2-evaluator-findings-surfacing.md) | Pass `final_message` through so findings reach `summary.json` and the PR body; forward `outcome.findings` to the supervisor | one line + merge | orchestrator |
+| P0.3 | ✅ [Fix the redaction false positive](p0-3-redaction-false-positive.md) | Align `_ASSIGNMENT` with the segment policy; redact decoded values, not the serialized line | small | orchestrator |
 | P1.4 | [Split the analysis node, add a coverage gate](p1-4-audit-coverage-gate.md) | Three sequential analysis nodes with narrow remits + a `coverage_gate` evaluator that demands a traced property per subsystem | new nodes/files | flow + role prompts |
 | P1.5 | [Fix the research role prompts](p1-5-research-role-prompts.md) | Verifier rubric + full `sources.json` coverage + an under-claiming watch-item; drop the critic's false promises; class-sweep for producers | prompt edits | prompts (target + packaged) |
-| P1.6 | [Make the cited line authoritative](p1-6-citation-checker-strictness.md) | Drop the `or` fallback (or emit `weak`); a missing snippet is `uncheckable`; publish `citation.json` on the pass path too | small | orchestrator |
+| P1.6 | ✅ [Make the cited line authoritative](p1-6-citation-checker-strictness.md) | Drop the `or` fallback (or emit `weak`); a missing snippet is `uncheckable`; publish `citation.json` on the pass path too | small | orchestrator |
 | P1.7 | [Give `deep_research` its own finalize lens](p1-7-research-finalize-summary.md) | `supervision.finalize_role_file` + a no-fabrication rule + feed it the evaluator findings | prompt + flow | packaged flow |
 | P2.8 | [Let a node's real output cross the edge](p2-8-node-output-handoff.md) | Publish the produced file, not the sign-off; give evaluators the node-output channel; optionally an upstream footer slot | medium | orchestrator |
 | P2.9 | [Keep intermediates out of the PR](p2-9-deliverable-containment.md) | Stop instructing `architecture_design` to write notes into the deliverable dir (+ 10g); no commit allowlist — filenames stay the flow author's choice | small | prompt + flow |
@@ -50,10 +50,10 @@ The order is mostly free; three dependencies are real.
 
 | Order | Item | Depends on | Why |
 | --- | --- | --- | --- |
-| 1 | P0.1 | — | One line, largest single effect: it is what turns the critic from an expensive observer into a gate. |
-| 2 | P0.3 | — | Independent, and the only item currently corrupting data. Must precede any content-inlining in P2.8. |
-| 3 | P0.2 | — | Complements P0.1: P0.1 makes substantive findings gate, P0.2 makes sub-threshold ones visible. Shipping only P0.1 still hides them. |
-| 4 | P1.6 | — | Defines what the citation gate actually promises, which P1.5 then writes into the verifier prompt. |
+| 1 | ✅ P0.1 | — | One line, largest single effect: it is what turns the critic from an expensive observer into a gate. |
+| 2 | ✅ P0.3 | — | Independent, and the only item currently corrupting data. Must precede any content-inlining in P2.8. |
+| 3 | ✅ P0.2 | — | Complements P0.1: P0.1 makes substantive findings gate, P0.2 makes sub-threshold ones visible. Shipping only P0.1 still hides them. |
+| 4 | ✅ P1.6 | — | Defines what the citation gate actually promises, which P1.5 then writes into the verifier prompt. |
 | 5 | P1.5 | P0.1, P1.6 | Needs the settled rubric (P0.1) and the settled guarantee (P1.6). |
 | 6 | P1.4 | P0.1 | A coverage gate whose findings cannot gate is decorative. |
 | 7 | P1.7 | P0.2 | The finalize lens needs findings to render. |
@@ -62,6 +62,8 @@ The order is mostly free; three dependencies are real.
 | 10 | P3.10 | — | Independent throughout; 10d resolves itself once P0.1 ships. |
 
 A useful checkpoint after step 3: **re-run the same task** (`p9-09`) unchanged and diff the outcome. P0.1 + P0.2 alone should turn a silent `accept` into at least one rework round and a visible findings section, with no other change in the flow — the cheapest possible validation that the gating chain works end to end.
+
+**Steps 1-4 are implemented** (see each item's own "Implemented" section for the decisions taken and the gaps found along the way). The checkpoint re-run has **not** been done yet, and it needs one manual step first: the packaged flows are what `worc install` copies, so a target repo's existing `.worc/flows/` still carries the old `gate_severity` default and must be refreshed or hand-edited before the re-run measures anything.
 
 ## Not in this campaign
 

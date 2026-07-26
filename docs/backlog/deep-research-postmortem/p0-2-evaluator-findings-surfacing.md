@@ -1,6 +1,19 @@
 # P0.2 — an accepting evaluator's findings must reach the operator
 
-Priority: **P0** Status: **accepted** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-2 Escalates: [VF-18](../issues/runtime-validation-findings.md)
+Priority: **P0** Status: **implemented** (2026-07-26) Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-2 Escalates: [VF-18](../issues/runtime-validation-findings.md)
+
+## Implemented
+
+**The structured-merge half of this document predates it.** `_evaluator_finding_follow_ups` / `_finding_to_follow_up` / `_merge_follow_ups` landed in `core/supervisor.py` before this task was picked up, so accepted findings already reached `summary.{json,md}` and the PR body's `## Technical debt / follow-ups` section with exact-match dedup and no empty heading. All four acceptance criteria on that path were already met; the line references in the Evidence section above are stale by ~30-60 lines.
+
+What this change added is the part that let the summary _prose_ contradict that section — all three wires, plus a defect found while tracing wire 2:
+
+1. `NodeOutcome(..., final_message=outcome.result.final_message)` in the evaluator runner.
+2. `observe(..., findings=outcome.findings)` in the orchestrator's post-node hook.
+3. A bounded findings digest in `_step_prompt` (`- [severity] reason (paths)`, reason capped at the existing `_FINDING_TITLE_MAX`), so the observer reacts to what the step said rather than to a label.
+4. `_evaluator_finding_follow_ups` keyed its last-verdict map on `node_id` alone. A decomposed task runs the same evaluator once per subtask, so subtask N's verdict evicted every earlier subtask's findings — this item's own failure mode, reintroduced for any task that decomposes. Now keyed on `(node_id, subtask_order)`.
+
+Known gap, deliberately not fixed here: when the finalize turn produces no prose, `finalize` returns early and the orchestrator's deterministic `write_minimal_summary` fallback has no follow-ups parameter, so a degraded finalize keeps the findings in `summary.json` but loses them from the PR body. Pre-existing, and already tracked as "revive-finalize durability" in [../README.md](../README.md).
 
 ## Problem
 

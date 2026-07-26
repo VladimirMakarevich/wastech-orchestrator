@@ -1,6 +1,17 @@
 # P0.3 — the secret redactor corrupts benign identifiers, breaks the audit log, and pollutes the handoff channel
 
-Priority: **P0** Status: **accepted** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-10
+Priority: **P0** Status: **implemented** (2026-07-26) Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-10
+
+## Implemented
+
+Both changes as specified. `_ASSIGNMENT` keeps its cheap prefilter but the substitution decides by `is_sensitive_key`, so one policy serves text, mappings and env vars. Harm 2 is fixed by the option this document asked for: a new `redact_jsonl` decodes each sink line, walks it with the existing `_redact_node`, and re-serializes — an escape cannot be half-consumed because it is gone before any pattern applies. Line endings and key order are preserved (CRLF survives on Windows; no `sort_keys`, so the sink stays diffable).
+
+Deliberate narrowing to record: plurals and glued compounds (`TOKENS=`, `api_keys:`, `MYTOKEN=`) also stop matching, since the segment set contains `token`, not `tokens`. That is the stated policy and already how env-var harvesting behaves, and the token-shape patterns plus the harvested-literal path still catch a credential-shaped value under any name.
+
+Two adjacent gaps found while pinning this, both fixed in the same change and both in the **widening** direction:
+
+- **`"access_token": "…"` was never redacted at all.** The name group cannot cross a quote, so a JSON key's closing quote ended the match — the `"NAME": "VALUE"` form this module's own comment claims to handle was unprotected. The acceptance criterion above lists it as a must-still-redact case; it was in fact a must-start-redacting case.
+- **`_scrub_raw_session` used a bare `str.replace`** for the raw session id — the F45 defect on a path F45 did not cover. Harmless for a UUID, but a short id rewrites those characters inside other words and shreds the JSON of the very sinks it rewrites. Now word-bounded, like the literal path in `redact_text`.
 
 ## Problem
 

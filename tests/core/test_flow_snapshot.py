@@ -334,6 +334,14 @@ def test_checks_node_has_checker(impl_snap: FlowSnapshot) -> None:
     assert testing.checker == "command_profile"
 
 
+def test_checks_node_manifest_defaults_to_sources_json() -> None:
+    # P1.6: a flow that declares nothing keeps today's behavior — the knob's absence is not a
+    # silent failure mode.
+    node = load_flow(CODESIGN / "deep_research.yaml").nodes_by_id["citation_check"]
+    assert isinstance(node, ChecksNode)
+    assert node.manifest == "sources.json"
+
+
 # -- budgets and decomposition ------------------------------------------------
 
 
@@ -626,6 +634,28 @@ def test_invalid_checker_rejected(tmp_path: Path) -> None:
     )
     with pytest.raises(FlowLoadError, match=r"invalid checker 'rogue_scan'"):
         load_flow(_write(tmp_path, body))
+
+
+def _manifest_flow(manifest: str) -> str:
+    return _VALID_BODY.replace(
+        "  edges: []\n",
+        f"    - {{ id: c, kind: checks, checker: citation, manifest: {manifest} }}\n"
+        "  edges:\n    - { from: a, to: c }\n",
+    )
+
+
+def test_checks_manifest_is_parsed(tmp_path: Path) -> None:
+    node = load_flow(_write(tmp_path, _manifest_flow("citations.json"))).nodes_by_id["c"]
+    assert isinstance(node, ChecksNode)
+    assert node.manifest == "citations.json"
+
+
+@pytest.mark.parametrize("bad", ["../outside.json", "sub/dir.json", "'/abs.json'", "'..'", "'CON'"])
+def test_invalid_checks_manifest_rejected(tmp_path: Path, bad: str) -> None:
+    # A flow-authored filename resolved against the report dir is a traversal surface, so it goes
+    # through the same portable-segment validator the exchange uses — reject, never sanitize.
+    with pytest.raises(FlowLoadError, match=r"invalid 'manifest'"):
+        load_flow(_write(tmp_path, _manifest_flow(bad)))
 
 
 def test_invalid_network_policy_rejected(tmp_path: Path) -> None:

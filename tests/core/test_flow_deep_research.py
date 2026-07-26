@@ -299,6 +299,20 @@ def test_research_low_finding_stays_advisory(tmp_path: Path) -> None:
     assert store.count_rework_verdicts("t", node_id="critical_review") == 0
 
 
+def test_passing_citation_check_routes_its_report_to_the_verifier(tmp_path: Path) -> None:
+    # P1.6 / DR-5: `checks_path` was set only on the command-profile FAILURE path, so on a passing
+    # citation check the 5 KB verdict file reached nobody — while the verifier's own prompt asserted
+    # a guarantee based on it. The next evaluator must now receive the pointer, and its rendered
+    # prompt must carry it (the packaged verifier.md addresses `{checks_path}`).
+    _, _, _, router = _drive(tmp_path, findings=[], sources=_GOOD_SOURCE)
+    verifier = next(
+        r for r in router.requests if getattr(r, "node_id", None) == "fact_verification"
+    )
+    assert verifier.check_artifacts_path is not None
+    assert Path(verifier.check_artifacts_path).name == "citation.json"
+    assert verifier.check_artifacts_path in verifier.prompt
+
+
 def test_research_broken_citation_fails_then_reworks(tmp_path: Path) -> None:
     # A hallucinated citation makes citation_check fail → synthesis rework (budget 1). The fake
     # synthesis rewrites the same (still-broken) manifest, so the pinned single rework is spent and

@@ -55,7 +55,7 @@ A node's `network_access` overrides this for that node alone (`true` grants even
 
 ### `defaults.evaluator`
 
-Applied to any evaluator node that omits the field. Keys: `session_scope` (default `fresh_disposable`), `permission_profile` (default `read-only`), `max_rework_per_stage` (default `1`), `gate_severity` (default `high`). Use it to avoid repeating the same evaluator settings across many evaluator nodes (e.g. set a stricter `gate_severity` once for a content flow's critics).
+Applied to any evaluator node that omits the field. Keys: `session_scope` (default `fresh_disposable`), `permission_profile` (default `read-only`), `max_rework_per_stage` (default `1`), `gate_severity` (built-in default `high`). Use it to avoid repeating the same evaluator settings across many evaluator nodes — `deep_research` sets `gate_severity: medium` here, which covers both of its evaluators at once.
 
 ### `decomposition`
 
@@ -112,7 +112,7 @@ Every node has an `id` (unique; see reserved ids below) and a `kind`. The six ki
 | `network_access` | bool \| null | `null` (inherit) | — | Per-node network override. |
 | `blocking` | bool | `true` | — | `true` = a `rework` verdict loops until the named-loop budget is spent, then parks to manual. `false` = advisory. |
 | `max_rework_per_stage` | int | `1` | **Only used when `blocking: false`.** | A non-blocking evaluator accepts after this many rework verdicts instead of looping. When the budget is spent with a finding still open it accepts and continues (never `manual`) — and the orchestrator emits a **console warning + a ⚠️ Telegram trace** (`accept (rework budget exhausted)`) so you know the stage moved on and may need follow-up. |
-| `gate_severity` | `blocking` \| `critical` \| `high` \| `medium` \| `low` | `high` | Must be one of the five severities. | Minimum finding severity that gates: a finding at least this severe drives `rework`, less-severe ones are advisory. Default `high` blocks high/critical/blocking. Lower it (e.g. `low`) to make a critic block on any finding — pair with a larger fix budget so the extra rework rounds have headroom. Orthogonal to `blocking` (that decides whether the node gates at all; this decides which severities count). |
+| `gate_severity` | `blocking` \| `critical` \| `high` \| `medium` \| `low` | `high` | Must be one of the five severities. | Minimum finding severity that gates: a finding at least this severe drives `rework`, less-severe ones are advisory (still reported — see below). The built-in default `high` blocks high/critical/blocking; **every packaged flow whose evaluator is a quality lens sets `medium`**, because "is this good enough" has no natural way to emit `high`. Lower it to `low` to block on any finding. Orthogonal to `blocking` (that decides whether the node gates at all; this decides which severities count) — but read them together: on a **`blocking: true`** node a gating finding loops the named-loop budget and then parks the task in `manual_action_required`, so lowering the gate there means raising that budget too. On a non-blocking node the same change costs at most `max_rework_per_stage` extra rounds and lands on accept + a ⚠️ warning. |
 | `provider` / `model` / `reasoning` | as agent | `null` | as agent | Per-node provider overrides. |
 | `when` | predicate | `null` | as agent | Conditional run. |
 
@@ -120,8 +120,11 @@ Every node has an `id` (unique; see reserved ids below) and a `kind`. The six ki
 
 | Field | Type / values | Default | Meaning |
 | --- | --- | --- | --- |
-| `checker` | `command_profile` \| `citation` \| `dependency_scan` | required | The built-in checker to run. `command_profile` runs the repo's configured `checks.command_sets`; `citation` verifies a research report's `sources.json`; `dependency_scan` runs a dependency vulnerability scan. |
+| `checker` | `command_profile` \| `citation` \| `dependency_scan` | required | The built-in checker to run. `command_profile` runs the repo's configured `checks.command_sets`; `citation` verifies a research report's citation manifest; `dependency_scan` runs a dependency vulnerability scan. |
+| `manifest` | string | `sources.json` | `citation` only: the manifest filename inside the flow's report dir. One portable filename — no path separators, no `..` (fatal at load). Set it when your writing node names its manifest something else; the wrong name yields `uncheckable: <name> missing` and a gate that does nothing. Note `repository_document`'s required-files list is fixed at `report.md` + `sources.json`, so a renamed manifest is still checked but is not registered as a `report` artifact. |
 | `when` | predicate | `null` | Conditional run. |
+
+The `citation` checker classifies each entry as `verified` (the snippet is present **at the cited line**), `weak` (the snippet is in the file but not at the cited line — a real quote, a mis-attributed location), `broken` (a path/line/snippet that does not resolve), or `uncheckable` (an external `url`, an entry with no snippet to check, or a malformed entry). **Only `broken` gates.** It never judges the `claim` field: a real snippet at a real line can still carry a fabricated assertion, which is an evaluator's job — so read a pass as "every location resolves", never as "every claim holds". The per-entry verdicts are published on both outcomes and reach the next node as `{checks_path}`.
 
 ### `tool` node
 
