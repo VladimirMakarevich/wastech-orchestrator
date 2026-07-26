@@ -1,6 +1,6 @@
 # `deep_research` post-mortem campaign (2026-07-25)
 
-Status: **in progress — steps 1-7 implemented (P0.1, P0.3, P0.2, P1.6, P1.5, P1.4, P1.7); P2.8 piece 2 shipped early with P1.4; P2.9, P3.10 open** Date: 2026-07-25 Owner: Vladimir Makarevich
+Status: **in progress — steps 1-7 implemented (P0.1, P0.3, P0.2, P1.6, P1.5, P1.4, P1.7); P2.8 piece 2 shipped early with P1.4; P2.9, P3.10 open; P1.4a proposed (spun out of P1.4)** Date: 2026-07-25 Owner: Vladimir Makarevich
 
 This folder groups everything that came out of the post-mortem of `p9-09-full-solution-deep-audit`, the **first and only production run of the `deep_research` flow**, into a single campaign with one execution order. The analysis is in [postmortem.md](postmortem.md); the files below are the implementable tasks it produced.
 
@@ -37,6 +37,7 @@ Plus one defect that is actively corrupting data rather than losing signal: the 
 | P0.2 | ✅ [Surface an accepting evaluator's findings](p0-2-evaluator-findings-surfacing.md) | Pass `final_message` through so findings reach `summary.json` and the PR body; forward `outcome.findings` to the supervisor | one line + merge | orchestrator |
 | P0.3 | ✅ [Fix the redaction false positive](p0-3-redaction-false-positive.md) | Align `_ASSIGNMENT` with the segment policy; redact decoded values, not the serialized line | small | orchestrator |
 | P1.4 | ✅ [Split the analysis node, add a coverage gate](p1-4-audit-coverage-gate.md) | Three sequential analysis nodes with narrow remits + a `coverage_gate` evaluator that demands a traced property per subsystem (the read-only git grant is deferred — see the item) | new nodes/files | flow + role prompts |
+| P1.4a | [Read-only git evidence for an audit node](p1-4a-read-only-git-evidence.md) | Spun out of P1.4 change 3, **proposed, not accepted**: a `read-only` node that may run the read-only git verbs. Not a flag — Claude prevents writes by tool absence and three guards ride on that | new capability | both providers + schema/validator/preflight |
 | P1.5 | ✅ [Fix the research role prompts](p1-5-research-role-prompts.md) | Verifier rubric + full `sources.json` coverage + an under-claiming watch-item; drop the critic's false promises; class-sweep for producers | prompt edits | prompts (target + packaged) |
 | P1.6 | ✅ [Make the cited line authoritative](p1-6-citation-checker-strictness.md) | Drop the `or` fallback (or emit `weak`); a missing snippet is `uncheckable`; publish `citation.json` on the pass path too | small | orchestrator |
 | P1.7 | ✅ [Give `deep_research` its own finalize lens](p1-7-research-finalize-summary.md) | `flow.supervisor.finalize_role_file` (the document's `supervision:` key does not exist) + a no-fabrication rule + the recorded gate verdicts rendered into the finalize prompt | prompt + flow | packaged flow + orchestrator |
@@ -57,6 +58,7 @@ The order is mostly free; three dependencies are real.
 | 5 | ✅ P1.5 | P0.1, P1.6 | Needs the settled rubric (P0.1) and the settled guarantee (P1.6). |
 | 6 | ✅ P1.4 | P0.1, **P2.8 piece 2** | A coverage gate whose findings cannot gate is decorative — and one that cannot read the analysis it grades is decorative twice over, so P2.8's evaluator node-output channel shipped with it. |
 | 7 | ✅ P1.7 | P0.2 | The finalize lens needs findings to render. |
+| — | P1.4a | — | Spun out of P1.4 when its change 3 turned out to redefine what `read-only` means rather than add a flag. Independent of everything else; unsequenced until accepted. |
 | 8 | P2.8 | P0.3 | Do not inline content through a redactor that mangles benign identifiers. |
 | 9 | P2.9 | P2.8 | If the node stops writing the blueprint, the blueprint must still reach `synthesis` some other way. |
 | 10 | P3.10 | — | Independent throughout; 10d resolves itself once P0.1 ships. |
