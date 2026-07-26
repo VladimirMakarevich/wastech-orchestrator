@@ -1,8 +1,23 @@
 # Three-branch model (`dev` / `main` / `release`) — setup spec
 
-Status: **proposed** Date: 2026-07-25 Owner: Vladimir Makarevich
+Status: **implemented** (Phases 1–4 landed 2026-07-25/26) Date: 2026-07-25 Owner: Vladimir Makarevich
 
-This is an implementation spec for a follow-up task, not a description of current behavior. Nothing here is in effect yet: today the repository has a single long-lived branch (`main`) and every `feat/…` / `fix/…` branch is cut from it. Read it end to end before running any command — the migration has one irreversible-by-accident step (the seal) and one prohibition that destroys the model if violated (`main → dev`).
+This was the implementation spec; the model is now **in effect**. It is kept as the design record — the rationale, the verified merge matrix, and the reasoning behind the seal. **For day-to-day work follow [.agents/rules/git-workflow.md](.agents/rules/git-workflow.md) §A instead** (branch model, the two hard rules, the touchpoint table, and the command recipes for merging `dev → main`, cutting a release, and porting a hotfix); this file is not the operating manual and its migration commands must not be re-run — in particular **do not create a second seal**.
+
+What actually landed:
+
+| Phase | Result |
+| --- | --- |
+| 1 — neutralise the shared files | PR #40 (`1022cc5`) + PR #41 (`d7c9608`), the latter fixing 11 links in `docs/backlog/` that this spec's link audit missed |
+| 2 — create `dev`, remove the derived docs | `cdd6a32` — 20 tracked files removed; under `docs/`, `dev` keeps only `backlog/` |
+| 3 — the seal | `8587cbe` = `git merge -s ours dev` on `main`; tree byte-identical, `git diff HEAD~1 HEAD` empty |
+| 4 — create `release` | cut from `main` at `8587cbe`, full history inherited |
+| 5 — round trip on the live branches | not yet run; the full merge matrix was verified on clones of the sealed history |
+
+Two corrections to the text below, found while implementing:
+
+- The link audit ("only three files need it") was incomplete — `docs/backlog/` stays on `dev` and linked out to the derived docs 11 times across 7 files. Fixed in PR #41. The file counts in the [concrete partition](#concrete-partition) and [acceptance criteria](#acceptance-criteria) are also stale: 20 tracked files were removed (16 markdown + 3 site assets + the LikeC4 model), leaving 30 markdown files under `docs/backlog/` out of 46 on `main` — not 18/35/49.
+- "hotfix on `main` → `git cherry-pick` into `dev` → clean" holds only for a **code-only** commit. One that also touches a `main`-only document conflicts on that path as `DU`; resolve with `git rm <path>` then `git cherry-pick --continue`.
 
 ## Goal
 
