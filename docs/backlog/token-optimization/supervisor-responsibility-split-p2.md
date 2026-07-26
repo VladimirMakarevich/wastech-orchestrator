@@ -8,6 +8,7 @@
 
 - **Требует P1** (детерминированная step-запись и раздельные observe/finalize уже есть — P2 их извлекает в отдельный компонент и делает handoff/skill бюджетируемыми).
 - Telemetry по функциям опирается на уже реализованный [normalized-usage-accounting.md](normalized-usage-accounting.md) (нормализованный usage per attempt).
+- **Актуализация 2026-07-26:** половина подложки для пункта 3 уже есть. VF-8 (DB v19) дал `provider_attempts.task_id` и сделал `node_run_id` nullable — постоянный supervisor-слой пишет свои вызовы как `node_run_id IS NULL` (`state_store.py:103-108`), так что «сколько потратил supervisor» уже считается одним запросом. Не хватает только разбивки _по функции_ (observe / finalize / handoff / skill) — это и есть работа пункта 3, а не учёт с нуля. Ридер `get_provider_attempts_for_task` существует и пока используется только в тестах: пункты 4–5 делают его первым продакшн-потребителем.
 
 ## Проблема
 
@@ -57,4 +58,4 @@ SkillProposer         только при dynamic skills и непустом inv
 - `src/wastech_orchestrator/core/supervisor.py` — извлечение `StepRecorder`, раздельные capabilities и бюджеты.
 - `src/wastech_orchestrator/core/orchestrator.py` — вызов `StepRecorder` в post-node hook, сборка supervisor-отчёта в finalize.
 - `src/wastech_orchestrator/state_store.py` — per-function usage/cost (поверх normalized-usage-accounting).
-- `src/wastech_orchestrator/packaged/guide/`, `docs/worc_architecture.md`, `docs/configuration.md` — архитектура и отчётность.
+- `src/wastech_orchestrator/packaged/guide/flows/roles.md` — описание supervisor-слоя (разделённые обязанности + supervisor-отчёт в summary). Derived `docs/worc_architecture.md` / `docs/configuration.md` на `dev` отсутствуют: только doc-impact note в PR (X2).
