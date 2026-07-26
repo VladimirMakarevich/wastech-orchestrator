@@ -265,9 +265,19 @@ skills:                             # repo skill selection (optional, §2.1)
 
 supervisor:                          # constant oversight layer above any flow — always active (§P2.1)
   role_file: "roles/supervisor.md"  # role prompt for the supervisor; path-contained under roles/
-  model: "claude-opus-5"          # null = use the global primary provider's default model
+  model: "claude-sonnet-5"        # null = use the global primary provider's default model
   reasoning: medium                 # null = use the global primary provider's default reasoning
   provider: claude                  # null = inherit the global primary; pin (∈ agents.allowed) to keep aligned with model's vendor
+  # Spend on the PRODUCER nodes, not here. This layer is advisory — it never routes, reworks, or
+  # blocks — and it runs one observation per step, so a stronger model than `agents.providers`
+  # inverts the budget: the reasoning that decides the deliverable gets the weaker one. Keep it at
+  # or below the producers' tier.
+  # Caveat worth knowing: this single `model`/`reasoning` pair covers BOTH the cheap per-step
+  # observations and the whole-task finalize turn — and that finalize turn writes `summary.md`,
+  # which becomes the pull-request body and is the only part of a long run most readers see. So you
+  # cannot yet upgrade the summary alone; splitting the two is a backlog item. Until then, a flow
+  # whose summary matters (`deep_research`) constrains what the turn may claim through its
+  # `supervisor.finalize_role_file` lens instead of through a bigger model.
 
 logging:                            # operator log verbosity + on-disk artifact retention (optional)
   level: info                       # debug | info | warning | error. Persists the structured operator

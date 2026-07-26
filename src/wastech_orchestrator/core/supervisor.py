@@ -365,36 +365,86 @@ def _finding_to_follow_up(finding: Any, node_id: str | None) -> FollowUp | None:
     )
 
 
-def _evaluator_finding_follow_ups(evaluations: list[EvaluationRow]) -> tuple[FollowUp, ...]:
-    """Derive follow-ups from the LAST in-flow verdict per evaluator node (VF-18).
+def _last_verdict_per_node(
+    evaluations: list[EvaluationRow],
+) -> dict[tuple[str | None, int | None], EvaluationRow]:
+    """Each evaluator node's FINAL in-flow verdict row (earlier rework rounds are superseded).
 
-    An evaluator that accepts *with* findings persists them to the ``evaluations`` table and they
-    otherwise reach no operator surface. Take each evaluator node's final verdict only (earlier,
-    rework-superseded rounds are ignored) and convert its findings so they land in ``summary.{json,
-    md}`` and the PR body. ``get_evaluations`` is insertion-ordered, so the last row seen per
-    ``node_id`` is that node's final verdict.
-
-    Keyed by ``(node_id, subtask_order)``, not by node alone: a decomposed task runs the same
-    evaluator once per subtask, so keying on the node id let subtask N's verdict evict every earlier
-    subtask's findings — silently, and worse the more the task was decomposed.
+    ``get_evaluations`` is insertion-ordered, so the last row seen per key is that node's final
+    verdict. Keyed by ``(node_id, subtask_order)``, not by node alone: a decomposed task runs the
+    same evaluator once per subtask, so keying on the node id let subtask N's verdict evict every
+    earlier subtask's — silently, and worse the more the task was decomposed.
     """
     last_by_node: dict[tuple[str | None, int | None], EvaluationRow] = {}
     for row in evaluations:
         if row.kind == "in_flow_verdict":
             last_by_node[(row.node_id, row.subtask_order)] = row
+    return last_by_node
+
+
+def _row_findings(row: EvaluationRow) -> list[Mapping[str, Any]]:
+    """The persisted ``{severity, reason, paths}`` findings of one verdict row (``[]`` if unusable).
+
+    Defensive on purpose: this is an advisory layer, so a malformed row is skipped, never raised.
+    """
+    try:
+        findings = json.loads(row.findings_json)
+    except json.JSONDecodeError:
+        return []
+    if not isinstance(findings, list):
+        return []
+    return [f for f in findings if isinstance(f, Mapping)]
+
+
+def _evaluator_finding_follow_ups(evaluations: list[EvaluationRow]) -> tuple[FollowUp, ...]:
+    """Derive follow-ups from the LAST in-flow verdict per evaluator node (VF-18).
+
+    An evaluator that accepts *with* findings persists them to the ``evaluations`` table and they
+    otherwise reach no operator surface. Take each evaluator node's final verdict only and convert
+    its findings so they land in ``summary.{json,md}`` and the PR body.
+    """
     out: list[FollowUp] = []
-    for (node_id, _subtask), row in last_by_node.items():
-        try:
-            findings = json.loads(row.findings_json)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(findings, list):
-            continue
-        for finding in findings:
+    for (node_id, _subtask), row in _last_verdict_per_node(evaluations).items():
+        for finding in _row_findings(row):
             follow_up = _finding_to_follow_up(finding, node_id)
             if follow_up is not None:
                 out.append(follow_up)
     return tuple(out)
+
+
+def _render_gate_digest(evaluations: list[EvaluationRow]) -> str | None:
+    """Render every evaluator node's final verdict + findings for the finalize turn (DR-3).
+
+    Without it the finalize turn writes about the gates from session memory: the run this came from
+    produced "three independent verification gates … all of which passed" with four critic findings
+    sitting in ``state.db``. Each line states the node, its verdict, and how many findings it
+    recorded, so "passed" is not writable about a gate that emitted any. Finding reasons are cut at
+    :data:`_FINDING_TITLE_MAX`, the same bound the observation digest and the follow-up titles use.
+
+    ``None`` when the task ran no in-flow evaluator (a flow with no gates), so the section is simply
+    absent rather than an empty heading.
+    """
+    lines: list[str] = []
+    for (node_id, subtask), row in _last_verdict_per_node(evaluations).items():
+        findings = _row_findings(row)
+        subtask_label = f" (subtask {subtask})" if subtask is not None else ""
+        where = f"{node_id or 'evaluator'}{subtask_label}"
+        if not findings:
+            lines.append(f"- {where}: verdict `{row.verdict}`, no findings recorded")
+            continue
+        lines.append(f"- {where}: verdict `{row.verdict}`, {len(findings)} finding(s) recorded:")
+        for finding in findings:
+            reason = " ".join(str(finding.get("reason") or "").split())
+            if len(reason) > _FINDING_TITLE_MAX:
+                reason = reason[:_FINDING_TITLE_MAX].rstrip() + "…"
+            paths_raw = finding.get("paths")
+            paths = (
+                f" ({', '.join(str(p) for p in paths_raw)})"
+                if isinstance(paths_raw, list) and paths_raw
+                else ""
+            )
+            lines.append(f"  - [{finding.get('severity') or 'unknown'}] {reason}{paths}")
+    return "\n".join(lines) if lines else None
 
 
 def _follow_up_key(follow_up: FollowUp) -> tuple[str, tuple[str, ...]]:
@@ -671,6 +721,9 @@ class Supervisor:
         """
         # ``node_run_id=0`` is the once-per-task finalize sentinel; per-step observations use the
         # observed step's id, so each supervisor turn writes a distinct artifact dir (no collision).
+        # Read the evaluation rows ONCE: the same list feeds the gate digest the turn is grounded in
+        # (DR-3) and the finding-derived follow-ups merged after it (VF-18).
+        evaluations = self._store.get_evaluations(task_id)
         warm = self._session_live
         digest = None if warm else self._finalize_digest(task_id)
         if not warm:
@@ -687,15 +740,14 @@ class Supervisor:
             digest=digest,
             resume=warm,
             task_path=task_path,
+            gates=_render_gate_digest(evaluations),
         )
         # VF-18: an evaluator that accepts *with* findings (sub-threshold, non-gating) persists them
         # to the evaluations table and they otherwise reach no operator surface. Merge them into the
         # follow-ups — deduped against the supervisor's own list — so they land in summary.{json,md}
         # and the PR body. Runs independent of ``emit_follow_ups`` (a distinct, evidence-bearing
         # source from the supervisor's LLM-authored follow-ups).
-        follow_ups = _merge_follow_ups(
-            follow_ups, _evaluator_finding_follow_ups(self._store.get_evaluations(task_id))
-        )
+        follow_ups = _merge_follow_ups(follow_ups, _evaluator_finding_follow_ups(evaluations))
         self._record(
             task_id,
             kind="supervisor_final",
@@ -739,6 +791,7 @@ class Supervisor:
         digest: str | None = None,
         resume: bool = True,
         task_path: str | None = None,
+        gates: str | None = None,
     ) -> tuple[str | None, CandidateDelta | None, tuple[FollowUp, ...]]:
         """Run the single finalize turn. Free-text when neither memory nor follow-ups are enabled
         (today's behavior — AC-S4); otherwise a structured ``{summary, ...}`` turn, so every enabled
@@ -746,12 +799,12 @@ class Supervisor:
 
         ``digest`` (recovered ``supervisor_step`` observations) and ``resume=False`` are set
         together on the revive path: the turn synthesizes from the digest on a fresh session rather
-        than resuming a dead one."""
+        than resuming a dead one. ``gates`` is the rendered evaluator-verdict digest (DR-3)."""
         with_follow_ups = self._emit_follow_ups
         if not emit_delta and not with_follow_ups:
             text = self._run(
                 task_id,
-                self._finalize_prompt(task_id, digest=digest),
+                self._finalize_prompt(task_id, digest=digest, gates=gates),
                 node_run_id=0,
                 resume_session=resume,
                 task_path=task_path,
@@ -764,6 +817,7 @@ class Supervisor:
                 with_delta=emit_delta,
                 with_follow_ups=with_follow_ups,
                 digest=digest,
+                gates=gates,
             ),
             node_run_id=0,
             output_schema=_finalize_schema(with_delta=emit_delta, with_follow_ups=with_follow_ups),
@@ -1219,6 +1273,7 @@ class Supervisor:
         with_delta: bool = False,
         with_follow_ups: bool = False,
         digest: str | None = None,
+        gates: str | None = None,
     ) -> str:
         # The finalize lens (flow ``finalize_role_file`` → built-in) carries the summary emphasis;
         # only the machine-contract additions (task context, follow-ups, memory delta) are appended
@@ -1229,6 +1284,20 @@ class Supervisor:
             + "\n\n## Task under review\nThe task specification is provided as the task packet "
             + "referenced in the context below — read it there; it is not inlined here.\n"
         )
+        if gates:
+            # DR-3: the finalize turn used to describe the gates from session memory and wrote
+            # "three independent verification gates … all of which passed" while four critic
+            # findings sat in state.db. These are the recorded verdicts, so "passed" is not
+            # writable about a gate that emitted findings.
+            prompt += (
+                "\n## Gate verdicts recorded for this task\n"
+                "Every in-flow evaluator's final verdict, with the findings it recorded. Ground "
+                "each statement you make about verification in this list: a gate that recorded "
+                "findings did **not** simply pass — say what it found and that the flow accepted "
+                "it with those findings open. Do not name a gate that is absent from this list, "
+                "and do not describe a check as something you performed yourself.\n\n"
+                f"{gates}\n"
+            )
         if digest:
             # Revive path: the working session that accumulated per-step context is gone, so seed
             # the synthesis from the recorded observations instead of relying on session memory.

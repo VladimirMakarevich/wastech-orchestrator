@@ -67,6 +67,8 @@ The supervisor is not a node — it is a read-only layer above every flow that o
 
 Only the **wording** moves into files. The structured-output schemas (the memory delta, and the `follow_ups` array when `emit_follow_ups: true`) stay in the orchestrator — your prompt can change tone and emphasis but can never break what the orchestrator parses. `handoff_role_file` is used only by decompose flows (it writes the `{predecessor_context}` handoff brief between subtasks). Set `emit_follow_ups: true` on a code flow to have the finalize turn emit an evidence-gated technical-debt list; leave it off for research/prose flows.
 
+**Set `finalize_role_file` whenever your deliverable is not a diff.** The built-in finalize lens summarizes "the actual committed change", which reads wrong for a document, a report, or a translation — and that summary becomes the pull-request body. Two things a good finalize lens says, both learned the hard way: the turn is a read-only observer, so it must describe what the _pipeline_ did rather than assert that it re-opened or spot-checked anything itself; and it must not state a count or a verdict it was not given ("all citations passed", "all gates passed"). It does not have to guess at the latter — the orchestrator appends every in-flow evaluator's recorded verdict and findings to that turn's prompt, so a gate that accepted **with** findings open cannot honestly be summarized as one that passed. The packaged `deep_research/summary.md` is the worked example.
+
 ## Writing and validating a role prompt
 
 1. State the node's single job in the imperative; name the artifacts it should read by path variable.

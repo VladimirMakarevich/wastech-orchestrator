@@ -291,6 +291,25 @@ def test_packaged_research_evaluator_prompts_state_the_verdict_mechanism(role_fi
     assert "gate_severity" not in text
 
 
+def test_deep_research_declares_its_own_finalize_lens() -> None:
+    # P1.7 / DR-3: with no `supervisor:` block the finalize turn fell through to the built-in
+    # code-flow lens ("grounded in the actual committed change") and, applied to a research
+    # deliverable, produced a summary with two false claims. The flow must declare its own lens, the
+    # file must exist, and that lens must forbid first-person verification claims — the summary is
+    # written by a read-only observer that opened 9 files while claiming to have spot-checked more.
+    snap = load_flow(CODESIGN / "deep_research.yaml")
+    assert snap.doc.supervisor is not None
+    role_file = snap.doc.supervisor.finalize_role_file
+    assert role_file == "deep_research/summary.md"
+    text = (CODESIGN / role_file).read_text(encoding="utf-8")
+    assert "Claim nothing you did not do." in text
+    assert "third person" in text
+    assert "No number, verdict or count you were not given." in text
+    # `emit_follow_ups` is a code-oriented capability; a research flow leaves it off and still gets
+    # its evaluators' findings in the summary (VF-18).
+    assert snap.doc.supervisor.emit_follow_ups is False
+
+
 def test_packaged_verifier_prompt_watches_for_omissions() -> None:
     # P1.5 items 2-4 / DR-6: the watch-list was four variants of "the report claims too much", so a
     # conservatively written report was unfalsifiable against it and `fact_verification` returned

@@ -178,8 +178,10 @@ A read-only layer above every flow that observes each step and writes the final 
 | --- | --- | --- | --- | --- |
 | `supervisor.role_file` | string | `"roles/supervisor.md"` | No path traversal (`..`/absolute). | The observe-lens prompt. |
 | `supervisor.provider` | `codex` \| `claude` \| null | `null` / install: pinned to the primary | Must be in `agents.allowed` when set. | `null` inherits the global primary; pin it so `model` reaches a provider that accepts it. |
-| `supervisor.model` | string \| null | `null` / install: the primary's model (e.g. `claude-opus-5`) | Passed through unverified; a vendor/primary mismatch warns. | `null` = the resolved provider's default. Set a stronger model for oversight if needed. |
+| `supervisor.model` | string \| null | `null` / install: the primary's model (e.g. `claude-opus-5`) | Passed through unverified; a vendor/primary mismatch warns. | `null` = the resolved provider's default. Keep it **at or below** the producer nodes' tier: this layer is advisory (it never routes, reworks, or blocks) and runs once per step, so a stronger model here inverts the budget. |
 | `supervisor.reasoning` | string \| null | `null` / install: `high` | Per-provider set (as providers, above). | `null` = the resolved provider's default. |
+
+One pair covers **both** supervisor roles: the cheap per-step observations and the whole-task finalize turn that writes `summary.md` — the pull-request body, and the only part of a long run most readers see. So you cannot currently upgrade the summary alone. A flow whose summary matters constrains what that turn may claim through its own `supervisor.finalize_role_file` lens instead (the packaged `deep_research` does exactly this: a research-shaped summary that is forbidden from asserting verification it did not perform). The finalize turn is also handed every in-flow evaluator's recorded verdict and findings, so a gate that accepted **with** findings cannot be summarized as one that simply passed.
 
 ## `logging` — operator verbosity and artifact retention
 

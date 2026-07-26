@@ -990,6 +990,61 @@ def test_finalize_dedups_evaluator_findings_against_supervisor(tmp_path: Path) -
     assert md.count(reason) == 1
 
 
+def test_finalize_prompt_carries_the_recorded_gate_verdicts(tmp_path: Path) -> None:
+    # P1.7 / DR-3: the finalize turn described the gates from session memory and wrote "three
+    # independent verification gates … all of which passed" while four critic findings sat in
+    # state.db. The recorded verdicts now ride the prompt, so "passed" is not writable about a gate
+    # that emitted findings.
+    store = _store(tmp_path)
+    store.record_evaluation(_verdict([], node_id="fact_verification"))
+    store.record_evaluation(
+        _verdict(
+            [{"severity": "medium", "reason": "uneven audit depth", "paths": ["report.md"]}],
+            node_id="critical_review",
+        )
+    )
+    router = FakeRouter([_ok("s1", "Summary.")])
+    sup = _supervisor(tmp_path, router, store)
+    sup.finalize(task_id=_TASK, task_title="T")
+
+    prompt = router.requests[-1].prompt
+    assert "## Gate verdicts recorded for this task" in prompt
+    assert "- fact_verification: verdict `accept`, no findings recorded" in prompt
+    assert "- critical_review: verdict `accept`, 1 finding(s) recorded:" in prompt
+    assert "  - [medium] uneven audit depth (report.md)" in prompt
+    assert "did **not** simply pass" in prompt  # the instruction that makes it binding
+
+
+def test_finalize_gate_section_absent_when_the_flow_has_no_evaluator(tmp_path: Path) -> None:
+    # A flow with no in-flow evaluator gets no empty heading — the section is simply absent.
+    router, store = FakeRouter([_ok("s1", "Summary.")]), _store(tmp_path)
+    _record_step(store, 1, node="implementation", outcome="done", note="wired it")
+    sup = _supervisor(tmp_path, router, store)
+    sup.finalize(task_id=_TASK, task_title="T")
+    assert "Gate verdicts" not in router.requests[-1].prompt
+
+
+def test_finalize_gate_digest_keeps_only_each_nodes_final_verdict(tmp_path: Path) -> None:
+    # A rework round is superseded, exactly as the follow-up derivation treats it: the operator sees
+    # what the gate concluded, not every intermediate round it spent.
+    store = _store(tmp_path)
+    store.record_evaluation(
+        _verdict(
+            [{"severity": "medium", "reason": "round one", "paths": []}],
+            verdict="rework",
+            node_id="critical_review",
+        )
+    )
+    store.record_evaluation(_verdict([], node_id="critical_review"))
+    router = FakeRouter([_ok("s1", "Summary.")])
+    sup = _supervisor(tmp_path, router, store)
+    sup.finalize(task_id=_TASK, task_title="T")
+
+    prompt = router.requests[-1].prompt
+    assert "- critical_review: verdict `accept`, no findings recorded" in prompt
+    assert "round one" not in prompt
+
+
 def test_finalize_no_findings_leaves_no_section(tmp_path: Path) -> None:
     # No evaluator findings and no supervisor follow-ups → no empty heading (unchanged behavior).
     store = _store(tmp_path)

@@ -212,3 +212,16 @@ flow:
 
   budgets:
     global_fix_iterations: 12
+
+  # Flow-local supervisor wording (prompt-and-supervisor ADR). Only `finalize_role_file` is set: the
+  # whole-task summary is the operator's ONLY view of an expensive research run and it becomes the
+  # pull-request body, and the built-in finalize lens is written for a code change ("grounded in the
+  # actual committed change") — applied to a deliverable that is two new Markdown files it produced a
+  # summary with two false claims and re-presented the critic's central finding as a strength.
+  # `deep_research/summary.md` is that lens for a research deliverable, and it forbids first-person
+  # verification claims: the finalize turn describes what the pipeline did, never what it personally
+  # re-opened. The gate verdicts it must ground those statements in are appended by the orchestrator.
+  # `emit_follow_ups` stays OFF — it is a code-oriented capability; the evaluators' own findings reach
+  # the summary and the PR body regardless.
+  supervisor:
+    finalize_role_file: deep_research/summary.md
