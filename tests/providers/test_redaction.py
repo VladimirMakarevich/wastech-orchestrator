@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from wastech_orchestrator.providers.redaction import (
     REDACTED,
+    redact_jsonl,
     redact_mapping,
     redact_text,
     secret_env_values,
@@ -117,6 +120,120 @@ def test_usage_counter_keys_are_not_redacted() -> None:
 def test_access_token_key_is_redacted() -> None:
     out = redact_mapping({"access_token": "value", "github_token": "value"})
     assert out == {"access_token": REDACTED, "github_token": REDACTED}
+
+
+# -- one name policy across text and mappings (DR-10) -------------------------
+
+
+@pytest.mark.parametrize(
+    "benign",
+    [
+        "tokens: thresholdSchema.optional(),",  # the real p9-09 corrupted payload
+        "input_tokens: 4447658,",
+        '"input_tokens": 4447658,',
+        "let apiKeyword = 1",
+        "secretName: foo",
+        "const TOKENS = countTokens(input)",
+        "tokens: { warn: 5, error: 10 },",  # the real p10-05 handoff corruption
+    ],
+)
+def test_benign_identifiers_survive_text_redaction(benign: str) -> None:
+    # DR-10: `_ASSIGNMENT` matched a sensitive word as a SUBSTRING of the name, so the ordinary
+    # identifier `tokens` was treated as secret-bearing. That contradicted the policy the same
+    # module documents and `is_sensitive_key` implements (`test_usage_counter_keys_are_not_redacted`
+    # is the mapping-side pin of the same rule) — and it corrupted source text in artifacts, in the
+    # committed report and in the inter-node handoff channel. One policy now serves both paths.
+    assert redact_text(benign) == benign
+
+
+@pytest.mark.parametrize(
+    ("secret_bearing", "value"),
+    [
+        ("GITHUB_TOKEN=", "ghp_notarealtoken_value"),
+        ("api_key: ", "hunter2secretvalue"),
+        ('"access_token": "', 'abcdefghijklmnop"'),  # JSON-key form, quoted value
+        ('"api_key":"', 'abcdefghijklmnop"'),  # no spaces
+        ("AWS_SECRET_ACCESS_KEY=", "abcdefghijklmnop"),
+        ("password=", "hunter2value"),
+        ("PRIVATE_KEY: ", "xyzxyzxyzxyz"),
+        ("X-Api-Key: ", "abcdefghijklmnop"),
+    ],
+)
+def test_secret_bearing_names_still_lose_their_value(secret_bearing: str, value: str) -> None:
+    # The direction that matters: narrowing the NAME matcher must not un-redact a real secret. The
+    # quoted-key rows are new coverage — a JSON key's closing quote used to end the match, so
+    # `"access_token": "…"` was never redacted despite the module claiming to handle that form.
+    out = redact_text(secret_bearing + value)
+    assert value.rstrip('"') not in out
+    assert REDACTED in out
+
+
+# -- JSON-lines sinks stay parseable (DR-10 harm 1) ---------------------------
+
+# Source-shaped payloads a provider streams back as tool results: each holds an escaped quote right
+# next to a sensitive-looking name, which is what used to break the line.
+_JSONL_CORPUS = (
+    {"text": '  tokens: "tokens",'},  # the real p9-09 events.jsonl corruption
+    {"text": '  password: "hunter2value",'},
+    {"text": 'const key = "abcdefghijklmnop";'},
+    {"type": "usage", "input_tokens": 4447658, "cache_read_input_tokens": 7490000},
+    {"nested": [{"authorization": "Bearer abcdefghij"}, "tokens: { warn: 5 }"]},
+    {"unicode": "путь: значение", "escaped": 'a \\ b "c" d'},
+)
+
+
+def test_redact_jsonl_keeps_every_line_parseable() -> None:
+    # DR-10: redaction ran on the SERIALIZED line, and the value group `[^\s"]+` ate the backslash
+    # of an escaped quote — 2 of 14 events.jsonl files in the p9-09 run had an unparsable line, and
+    # the payload lost was the tool result behind one of that run's own findings. Decoding first
+    # makes it structurally impossible: the escape is gone before any pattern applies.
+    stream = "".join(json.dumps(obj) + "\n" for obj in _JSONL_CORPUS)
+    out = redact_jsonl(stream)
+    for line in out.splitlines():
+        json.loads(line)  # raises if redaction broke the line
+
+
+def test_redact_jsonl_preserves_benign_content_and_redacts_secrets() -> None:
+    stream = json.dumps({"text": '  tokens: "tokens",', "api_key": "abcdefghijklmnop"}) + "\n"
+    decoded = json.loads(redact_jsonl(stream))
+    assert decoded["text"] == '  tokens: "tokens",'  # benign identifier survives byte-identical
+    assert decoded["api_key"] == REDACTED  # sensitive key still loses its whole value
+
+
+def test_redact_jsonl_redacts_a_secret_inside_a_decoded_string() -> None:
+    stream = json.dumps({"text": f"exported {FAKE_GH} to the log"}) + "\n"
+    decoded = json.loads(redact_jsonl(stream))
+    assert FAKE_GH not in decoded["text"]
+    assert REDACTED in decoded["text"]
+
+
+def test_redact_jsonl_falls_back_to_text_on_a_non_json_line() -> None:
+    # A provider preamble or a truncated tail must still be scrubbed, never passed through raw.
+    out = redact_jsonl("warming up\nGITHUB_TOKEN=" + FAKE_GH + '\n{"ok": true}\n')
+    assert FAKE_GH not in out
+    assert REDACTED in out
+    assert out.splitlines()[0] == "warming up"
+
+
+@pytest.mark.parametrize(
+    "stream",
+    ['{"a": 1}\r\n{"b": 2}\r\n', '{"a": 1}\n{"b": 2}\n', '{"a": 1}\n{"b": 2}', "", "\n\n"],
+)
+def test_redact_jsonl_preserves_line_endings(stream: str) -> None:
+    # Cross-platform: a CRLF stream must survive as CRLF, and a missing trailing newline must not
+    # gain one — the sink is an audit record, so its line structure is part of the evidence.
+    out = redact_jsonl(stream)
+    assert out.count("\r\n") == stream.count("\r\n")
+    assert out.endswith("\n") == stream.endswith("\n")
+
+
+def test_redact_jsonl_is_deterministic_and_order_preserving() -> None:
+    # F36: same input, same output. Key order is the provider's, not sorted, so the sink stays
+    # diffable against the raw stream.
+    stream = json.dumps({"zeta": 1, "alpha": 2, "api_key": "abcdefghijklmnop"}) + "\n"
+    first, second = redact_jsonl(stream), redact_jsonl(stream)
+    assert first == second
+    assert list(json.loads(first)) == ["zeta", "alpha", "api_key"]
 
 
 def test_secret_env_values_harvests_only_non_allowlisted_secret_names(

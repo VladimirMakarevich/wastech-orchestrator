@@ -6,7 +6,12 @@ Pure functions that scrub known-secret shapes from text and from the request rep
 * ``extra_secrets`` — exact secret values the caller already knows (e.g. the values of
   non-allowlisted, secret-named environment variables); these are matched literally.
 * token-shaped patterns (GitHub/OpenAI/Slack/AWS keys, Bearer tokens, JWTs) and sensitive
-  ``NAME=VALUE`` assignments — matched structurally.
+  ``NAME=VALUE`` assignments — matched structurally. Whether a *name* is sensitive is decided in
+  exactly one place, :func:`is_sensitive_key`, for text, mappings and env vars alike.
+
+Pick the entry point by what the payload is: :func:`redact_text` for prose and source text,
+:func:`redact_mapping` for a structured request, and :func:`redact_jsonl` for a stream of JSON lines
+(a provider event log), which redacts decoded values so a redacted line never stops parsing.
 
 The functions never mutate their inputs. :func:`read_denied_secrets` harvests the values of the
 ``security.denied_read_paths`` files (``.env``, ``secrets/**``) present in the agent's workspace so
@@ -18,6 +23,7 @@ artifact**.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 from collections.abc import Iterable, Mapping
@@ -66,18 +72,27 @@ _TOKEN_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 # Sensitive ``NAME=VALUE`` / ``NAME: VALUE`` / ``"NAME": "VALUE"`` assignments — keep the name,
-# redact the value.
+# redact the value. This regex is only a cheap PREFILTER: it finds assignment-shaped text whose name
+# contains a sensitive word anywhere, and :func:`_redact_assignment` then decides by the one name
+# policy (:func:`is_sensitive_key`). Trusting the substring match instead was a defect: it rewrote
+# the ordinary identifier ``tokens`` (``[A-Za-z0-9_]*TOKEN[A-Za-z0-9_]*`` matches it), which
+# corrupted benign source text in artifacts, logs and the inter-node handoff channel.
 _SENSITIVE_WORD = (
     r"(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY|AUTHORIZATION|CREDENTIALS?"
     r"|PRIVATE[_-]?KEY)"
 )
+#
+# The optional quote BEFORE the separator is what makes the ``"NAME": "VALUE"`` form in the comment
+# above real: the name group cannot cross a quote, so a JSON key's closing quote used to end the
+# match and ``"access_token": "…"`` was never redacted at all.
 _ASSIGNMENT = re.compile(
-    rf"(?i)([A-Za-z0-9_]*{_SENSITIVE_WORD}[A-Za-z0-9_]*)(\s*[:=]\s*\"?)([^\s\"]+)",
+    rf"(?i)([A-Za-z0-9_]*{_SENSITIVE_WORD}[A-Za-z0-9_]*)(\"?\s*[:=]\s*\"?)([^\s\"]+)",
 )
 
-# Whole-segment names whose value is redacted in a structured mapping / env var. Matching is by
-# segment (the name is split on non-alphanumerics) so ``access_token`` / ``API_KEY`` match while a
-# usage counter like ``input_tokens`` does not (its segment is ``tokens``, not ``token``).
+# Whole-segment names whose value is redacted. THE single name policy — used by the assignment
+# matcher above, by structured mappings, and by env-var harvesting, so all three agree. Matching is
+# by segment (the name is split on non-alphanumerics) so ``access_token`` / ``API_KEY`` match while
+# a usage counter like ``input_tokens`` does not (its segment is ``tokens``, not ``token``).
 _SENSITIVE_SEGMENTS: frozenset[str] = frozenset(
     {
         "token",
@@ -126,6 +141,19 @@ def secret_env_values(allowed_environment: Iterable[str]) -> tuple[str, ...]:
     )
 
 
+def _redact_assignment(match: re.Match[str]) -> str:
+    """Redact one prefiltered assignment's value, but only when its NAME is sensitive by policy.
+
+    The prefilter regex matches a sensitive word anywhere inside the name; :func:`is_sensitive_key`
+    is the authority, so ``access_token`` / ``API_KEY`` / ``GITHUB_TOKEN`` are redacted while
+    ``tokens``, ``input_tokens``, ``apiKeyword`` and ``secretName`` are left alone.
+    """
+    name, separator = match.group(1), match.group(2)
+    if not is_sensitive_key(name):
+        return match.group(0)
+    return f"{name}{separator}{REDACTED}"
+
+
 def redact_text(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
     r"""Return ``text`` with known secrets replaced by :data:`REDACTED`. Pure.
 
@@ -133,6 +161,11 @@ def redact_text(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
     substring inside a larger token. An unbounded substring replace corrupted benign text — F45: a
     short harvested value rewrote the middle of an ordinary word in a lesson ``subject``, which also
     broke the subject-derived dedup key. Deterministic (F36): the same input always redacts alike.
+
+    A sensitive ``NAME=VALUE`` assignment keeps its name and loses its value, gated on the whole-
+    segment name policy (:func:`is_sensitive_key`) so a benign identifier is never rewritten. When
+    the text is a stream of JSON lines, prefer :func:`redact_jsonl`: this function works on raw
+    characters and would consume the backslash of an escaped ``\"`` inside a JSON string.
     """
     redacted = text
     literals = sorted(
@@ -140,10 +173,44 @@ def redact_text(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
     )
     for secret in literals:
         redacted = re.sub(rf"(?<!\w){re.escape(secret)}(?!\w)", REDACTED, redacted)
-    redacted = _ASSIGNMENT.sub(rf"\1\2{REDACTED}", redacted)
+    redacted = _ASSIGNMENT.sub(_redact_assignment, redacted)
     for pattern in _TOKEN_PATTERNS:
         redacted = pattern.sub(REDACTED, redacted)
     return redacted
+
+
+def redact_jsonl(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
+    r"""Redact a JSON-lines stream via DECODED values, so every output line stays valid JSON.
+
+    :func:`redact_text` operates on raw characters, so a sensitive assignment inside a JSON string
+    (``{"text":"  password: \"x\","}``) has its value group eat the backslash of the escaped quote
+    and the line stops parsing — 2 of 14 ``events.jsonl`` files in one real run had an unrecoverable
+    line, and the payload lost was a tool result the run's own findings rested on. Decoding first
+    makes that structurally impossible: the escape is gone by the time any pattern is applied, and
+    :func:`json.dumps` re-escapes whatever survives.
+
+    Each line is decoded and walked with the same recursion as :func:`redact_mapping` (sensitive
+    keys lose their whole value; string leaves go through :func:`redact_text`). A line that is not
+    JSON — a provider preamble, a truncated tail — falls back to :func:`redact_text`, so nothing is
+    written unscrubbed. Line endings are preserved verbatim, so a CRLF stream survives on Windows,
+    and key order is preserved (no ``sort_keys``) so the sink stays diffable and deterministic
+    (F36).
+    """
+    secrets = tuple(extra_secrets)
+    out: list[str] = []
+    for raw in text.splitlines(keepends=True):
+        payload = raw.rstrip("\r\n")
+        ending = raw[len(payload) :]
+        if not payload.strip():
+            out.append(raw)
+            continue
+        try:
+            decoded = json.loads(payload)
+        except ValueError:
+            out.append(redact_text(payload, extra_secrets=secrets) + ending)
+            continue
+        out.append(json.dumps(_redact_node(decoded, secrets), ensure_ascii=False) + ending)
+    return "".join(out)
 
 
 def redact_mapping(obj: Mapping[str, Any], *, extra_secrets: Iterable[str] = ()) -> dict[str, Any]:

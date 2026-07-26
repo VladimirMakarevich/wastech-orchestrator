@@ -20,6 +20,7 @@ from wastech_orchestrator.providers.process import ProcessResult
 
 _TOKEN_SECRET = "ghp_" + "C" * 20  # token-shaped → caught by pattern redaction
 _FILE_SECRET = "plainOpaqueSecret12345"  # only caught via denied_read_paths content-scan
+_SESSION_ID = "8f14e45f-ceea-467a-9c5b-1d0e2f3a4b5c"  # UUID-shaped, as a real provider returns
 
 
 def _clone_with_env(tmp_path: Path) -> str:
@@ -120,6 +121,86 @@ def test_codex_sinks_are_redacted(
 
     assert result.status is RunStatus.SUCCEEDED
     _assert_no_secrets(*_attempt_sinks(result))
+
+
+def test_event_log_stays_parseable_when_a_tool_result_holds_escaped_quotes(
+    claude_config: ProviderConfig,
+    security_config: SecurityConfig,
+    make_request: Callable[..., AgentRunRequest],
+    tmp_path: Path,
+) -> None:
+    # DR-10 harm 1: the sinks were redacted as raw serialized text, so a source payload holding an
+    # escaped quote next to a sensitive-looking name (`  tokens: "tokens",` — a real read of a real
+    # file) lost the escape's backslash and the whole line stopped parsing. The orchestrator itself
+    # was unaffected (parsing uses the in-memory stream), so nothing failed loudly; the audit trail
+    # just silently lost tool results. Every line a sink is written with must survive as JSON.
+    clone = _clone_with_env(tmp_path)
+    payloads = (
+        {"type": "user", "content": '  tokens: "tokens",'},
+        {"type": "user", "content": '  password: "hunter2value",'},
+        {"type": "user", "content": f"leaked {_TOKEN_SECRET} and {_FILE_SECRET}"},
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": "ok",
+            "session_id": _SESSION_ID,
+        },
+    )
+    stdout = "".join(json.dumps(obj) + "\n" for obj in payloads)
+    provider = ClaudeCodeProvider(
+        claude_config,
+        security=security_config,
+        artifacts_root=str(tmp_path / "art"),
+        run_process=_fake_proc(stdout),
+    )
+    result = provider.run(make_request(working_directory=clone))
+
+    assert result.status is RunStatus.SUCCEEDED
+    for sink in (result.event_log_path, result.stdout_path):
+        lines = Path(sink).read_text(encoding="utf-8").splitlines()
+        assert len(lines) == len(payloads)
+        for line in lines:
+            json.loads(line)  # raises if redaction broke the line
+        # The benign identifier survives the round trip; the secrets do not.
+        assert '  tokens: "tokens",' in [json.loads(x).get("content") for x in lines]
+    _assert_no_secrets(*_attempt_sinks(result))
+
+
+def test_session_id_scrub_does_not_shred_the_sinks(
+    claude_config: ProviderConfig,
+    security_config: SecurityConfig,
+    make_request: Callable[..., AgentRunRequest],
+    tmp_path: Path,
+) -> None:
+    # The raw session id is scrubbed from the on-disk sinks with a word-bounded replace. It used to
+    # be a bare `str.replace`, which is the F45 defect on a path F45 did not cover: a short id
+    # rewrites every occurrence of those characters INSIDE other words, so the sinks it rewrites
+    # stop being JSON. Harmless for a UUID, fatal for a short id — pin the short one.
+    clone = _clone_with_env(tmp_path)
+    payloads = (
+        {"type": "user", "content": "result: session established, assessed"},
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": False,
+            "result": "ok",
+            "session_id": "s",
+        },
+    )
+    provider = ClaudeCodeProvider(
+        claude_config,
+        security=security_config,
+        artifacts_root=str(tmp_path / "art"),
+        run_process=_fake_proc("".join(json.dumps(o) + "\n" for o in payloads)),
+    )
+    result = provider.run(make_request(working_directory=clone))
+
+    assert result.status is RunStatus.SUCCEEDED
+    for sink in (result.event_log_path, result.stdout_path):
+        decoded = [json.loads(line) for line in Path(sink).read_text("utf-8").splitlines()]
+        assert decoded[0]["content"] == "result: session established, assessed"  # untouched
+        assert decoded[1]["session_id"] not in ("s", None)  # the standalone id IS scrubbed
 
 
 def test_build_claude_argv_denies_reads_and_commands(
