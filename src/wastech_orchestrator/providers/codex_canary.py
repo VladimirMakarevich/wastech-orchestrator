@@ -133,6 +133,15 @@ def default_canary_runner(argv: list[str], cwd: str, env: Mapping[str, str]) -> 
     return rc, stdout + result.stderr_text
 
 
+# Every Windows probe keeps the path as its **own argv member** rather than pre-formatting it into a
+# single `cmd /c "<command line>"` string. The safe runner quotes an individual argument correctly,
+# but `cmd /c` re-parses a one-string command line and splits it on spaces — so a workspace under,
+# say, `C:\Users\First Last\...` made the probe fail for a *malformed command*, not because the
+# sandbox denied it. On an `expect_denied=True` probe that reads as enforcement and masks
+# non-enforcement, which is why this must stay argv-shaped (inner `"..."` quoting does not help:
+# `cmd` then chokes on the nested quotes added around the whole string).
+
+
 def _read_cmd(path: str, system: str) -> list[str]:
     if system == "Windows":
         return ["cmd", "/c", "type", path]
@@ -140,15 +149,22 @@ def _read_cmd(path: str, system: str) -> list[str]:
 
 
 def _shell_read_cmd(path: str, system: str) -> list[str]:
-    """A shell-mediated read — proves the OS layer blocks *any* program, not one tool."""
+    """A shell-mediated read — proves the OS layer blocks *any* program, not one tool.
+
+    On Windows this coincides with :func:`_read_cmd`: ``cmd`` *is* the shell there and ``type`` is
+    one of its builtins, so the read is already shell-mediated and there is no separate direct-exec
+    form to contrast it with (the POSIX pair contrasts ``/bin/cat`` with ``/bin/sh -c cat``).
+    """
     if system == "Windows":
-        return ["cmd", "/c", f"type {path}"]
+        return ["cmd", "/c", "type", path]
     return ["/bin/sh", "-c", f"cat {shlex.quote(path)}"]
 
 
 def _write_cmd(path: str, system: str) -> list[str]:
     if system == "Windows":
-        return ["cmd", "/c", f"echo x>> {path}"]
+        # `>>` carries no space, so it survives `cmd`'s re-parse as a redirection operator while the
+        # path stays a separately quoted argv member.
+        return ["cmd", "/c", "echo", "x", ">>", path]
     return ["/bin/sh", "-c", f"printf x >> {shlex.quote(path)}"]
 
 

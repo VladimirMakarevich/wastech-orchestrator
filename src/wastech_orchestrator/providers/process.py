@@ -355,11 +355,14 @@ class _RealWin32:  # pragma: no cover - exercised only on native Windows (WRI-00
     """The real ``kernel32`` Job Object calls. Instantiated only when ``os.name == "nt"``."""
 
     def __init__(self) -> None:
-        self._k32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        # `unused-ignore` keeps the gate portable: typeshed exposes these names only when
+        # `sys.platform == "win32"`, so the ignore is needed on the Linux CI runner and redundant
+        # when mypy runs natively on Windows.
+        self._k32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined,unused-ignore]
 
     def _check(self, ok: object, call: str) -> None:
         if not ok:
-            errno = ctypes.get_last_error()  # type: ignore[attr-defined]  # Windows-only in typeshed
+            errno = ctypes.get_last_error()  # type: ignore[attr-defined,unused-ignore]
             raise OSError(errno, f"{call} failed")
 
     def create_job(self) -> int:

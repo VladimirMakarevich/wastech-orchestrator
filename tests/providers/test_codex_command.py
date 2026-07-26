@@ -53,6 +53,17 @@ def _profile_arg(argv: list[str]) -> str:
     return matches[0]
 
 
+def _fs_rule(path: str, grant: str) -> str:
+    """The rendered ``"<key>" = "<grant>"`` a POSIX fixture *path* produces in the inline profile.
+
+    Two normalizations stand between the fixture literal and the rendered TOML, and both are
+    platform-dependent: the generator maps the path through the ``to_native=str`` seam (so
+    ``/clone`` becomes ``\\clone`` on native Windows) and the renderer escapes each backslash for a
+    TOML basic string. Asserting the raw POSIX literal would only ever match on POSIX.
+    """
+    return f'"{str(Path(path)).replace(chr(92), chr(92) * 2)}" = "{grant}"'
+
+
 def _assert_reasoning_config(argv: list[str], value: str) -> None:
     assert f'model_reasoning_effort="{value}"' in _config_values(argv)
 
@@ -91,7 +102,7 @@ def test_profile_selected_and_user_config_ignored(
     argv = _argv(codex_config, make_request(working_directory="/clone"))
     profile = _profile_arg(argv)
     assert '"extends" = ":workspace"' in profile
-    assert '"/clone" = "write"' in profile
+    assert _fs_rule("/clone", "write") in profile
     assert "--ignore-user-config" in argv
 
 
@@ -133,12 +144,12 @@ def test_deny_policy_and_write_guard_projected_into_profile(
         denied_read_paths=(".env", "secrets/**"),
     )
     profile = _profile_arg(argv)
-    assert '"/clone/.worc" = "deny"' in profile  # private/control home denied
-    assert '"/home/op/.codex" = "deny"' in profile  # provider auth home denied
-    assert '"/clone/.env" = "deny"' in profile  # denied_read_paths projected
-    assert '"/clone/secrets" = "deny"' in profile
-    assert '"/clone/.worc-io" = "read"' in profile  # exchange readable, write-denied
-    assert '"/clone/tasks" = "read"' in profile
+    assert _fs_rule("/clone/.worc", "deny") in profile  # private/control home denied
+    assert _fs_rule("/home/op/.codex", "deny") in profile  # provider auth home denied
+    assert _fs_rule("/clone/.env", "deny") in profile  # denied_read_paths projected
+    assert _fs_rule("/clone/secrets", "deny") in profile
+    assert _fs_rule("/clone/.worc-io", "read") in profile  # exchange readable, write-denied
+    assert _fs_rule("/clone/tasks", "read") in profile
     # VF-20: governance/instruction files are editable content — never projected as a deny.
     for name in ("AGENTS.md", "AGENTS.override.md", "CLAUDE.md"):
         assert name not in profile
@@ -317,7 +328,7 @@ def test_read_only_request_extends_read_only_profile(
     )
     profile = _profile_arg(argv)
     assert '"extends" = ":read-only"' in profile
-    assert '"/clone" = "read"' in profile
+    assert _fs_rule("/clone", "read") in profile
     assert "--sandbox" not in argv
 
 

@@ -2,11 +2,15 @@
 
 Runs the actual generator output under the actual ``codex sandbox`` (credential-free, no model, no
 network) and asserts the deny/read-only boundary is OS-enforced on this host. This is the only test
-that proves real enforcement; the deterministic suite proves wiring only. Skipped **only** when
-``codex`` is absent — so it runs natively on Windows too when the CLI is present (WRI-006 requires
-the native-Windows sandbox be *proven*, not skipped merely for being Windows). Hosted GitHub runners
-ship no Codex CLI, so this is a local/manual gate; the deterministic 3-OS pytest matrix proves the
+that proves real enforcement; the deterministic suite proves wiring only. Hosted GitHub runners ship
+no Codex CLI, so this is a local/manual gate; the deterministic 3-OS pytest matrix proves the
 cross-platform wiring. Records the Codex version and platform in the assertion context.
+
+Skipped only when the host *cannot enforce at all* — no ``codex`` on PATH, or a sandbox backend that
+refuses to start (native Windows requires an **elevated** backend: "Restricted read-only access
+requires the elevated Windows sandbox backend"). Never skipped merely for being Windows: WRI-006
+requires the native-Windows sandbox be proven wherever it can run, so an elevated Windows host runs
+all of this in full. See :func:`_cannot_enforce` for why that gate cannot mask a leak.
 
 IMPORTANT: the workspace must NOT live under a temp root — Codex's sandbox always grants the system
 temp root (``/tmp`` / ``:slash_tmp``) as writable/readable, which would mask every carve-out. So the
@@ -16,6 +20,7 @@ afterwards.
 
 from __future__ import annotations
 
+import functools
 import os
 import platform
 import shutil
@@ -29,63 +34,18 @@ import pytest
 from wastech_orchestrator.providers.base import ErrorClass
 from wastech_orchestrator.providers.codex_canary import (
     CAPABILITY_PASSED,
+    build_canary_command,
+    build_canary_probes,
+    default_canary_runner,
     run_codex_canary,
     run_codex_capability_smoke,
 )
 from wastech_orchestrator.providers.codex_profile import (
     build_codex_permission_profile,
     render_permission_profile_arg,
+    toml_basic_string,
 )
 from wastech_orchestrator.runtime_layout import InternalDenyPolicy, ProviderWriteGuardPolicy
-
-pytestmark = [
-    pytest.mark.skipif(
-        shutil.which("codex") is None,
-        reason="needs the real codex CLI (local/manual gate; hosted CI ships none)",
-    ),
-    pytest.mark.slow,  # invokes the real codex CLI
-]
-
-
-@pytest.fixture
-def clone() -> Iterator[Path]:
-    # A non-tmp workspace so Codex's tmp grant does not mask the carve-outs (see module docstring).
-    root = Path(tempfile.mkdtemp(prefix="worc-canary-", dir=str(Path.home())))
-    try:
-        repo = root / "repo"
-        (repo / ".worc" / "logs").mkdir(parents=True)
-        (repo / ".worc-io" / "t").mkdir(parents=True)
-        (repo / "src").mkdir(parents=True)
-        (repo / ".worc" / "logs" / "req.json").write_text("PRIVATE_SECRET", encoding="utf-8")
-        (repo / ".worc-io" / "t" / "task.md").write_text("EXCHANGE_TASK", encoding="utf-8")
-        (repo / "src" / "main.py").write_text("print(1)", encoding="utf-8")
-        yield repo
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
-
-
-def _profile_arg(repo: Path, profile: str) -> str:
-    deny = InternalDenyPolicy(
-        control_home=repo / ".worc",
-        private_home=repo / ".worc",
-        env_file=None,
-        provider_homes=(),
-    )
-    wg = ProviderWriteGuardPolicy(
-        exchange_root=repo / ".worc-io",
-        git_dir=repo / ".git",
-        git_common_dir=repo / ".git",
-        hooks_dir=repo / ".git" / "hooks",
-        tasks_dir=repo / "tasks",
-    )
-    generated = build_codex_permission_profile(
-        permission_profile=profile,
-        working_directory=str(repo),
-        deny_policy=deny,
-        write_guard=wg if profile == "workspace-write" else None,
-        denied_read_paths=(".env", "secrets/**"),
-    )
-    return render_permission_profile_arg(generated)
 
 
 def _codex() -> str:
@@ -112,6 +72,99 @@ def _env() -> dict[str, str]:
 def _version() -> str:
     out = subprocess.run([_codex(), "--version"], capture_output=True, text=True, check=False)
     return (out.stdout or out.stderr).strip()
+
+
+def _profile_arg(repo: Path, profile: str) -> str:
+    deny = InternalDenyPolicy(
+        control_home=repo / ".worc",
+        private_home=repo / ".worc",
+        env_file=None,
+        provider_homes=(),
+    )
+    wg = ProviderWriteGuardPolicy(
+        exchange_root=repo / ".worc-io",
+        git_dir=repo / ".git",
+        git_common_dir=repo / ".git",
+        hooks_dir=repo / ".git" / "hooks",
+        tasks_dir=repo / "tasks",
+    )
+    generated = build_codex_permission_profile(
+        permission_profile=profile,
+        working_directory=str(repo),
+        deny_policy=deny,
+        write_guard=wg if profile == "workspace-write" else None,
+        denied_read_paths=(".env", "secrets/**"),
+    )
+    return render_permission_profile_arg(generated)
+
+
+@functools.cache
+def _cannot_enforce() -> str:
+    """Why ``codex sandbox`` cannot enforce a restricted profile on this host (``""`` when it can).
+
+    Runs one **positive control**: a read the profile explicitly grants. If even that fails the host
+    cannot demonstrate any policy, every probe below would fail for a host reason, and the canary
+    correctly reports ``CAPABILITY_UNAVAILABLE`` — a host limit, not a profile defect (production
+    surfaces it through ``worc preflight``). Native Windows needs an *elevated* sandbox backend
+    ("Restricted read-only access requires the elevated Windows sandbox backend"), so an unelevated
+    host lands here.
+
+    The gate is deliberately keyed on the probed capability and never on "is Windows": WRI-006
+    requires the native-Windows sandbox be proven where it *can* run, so an elevated Windows host
+    still executes these tests in full. It also cannot mask a leak — a host that enforces at all
+    passes this control and then runs every deny probe for real.
+    """
+    if shutil.which("codex") is None:
+        return "needs the real codex CLI (local/manual gate; hosted CI ships none)"
+    root = Path(tempfile.mkdtemp(prefix="worc-canaryprobe-", dir=str(Path.home())))
+    try:
+        repo = root / "repo"
+        (repo / "src").mkdir(parents=True)
+        (repo / "src" / "main.py").write_text("print(1)", encoding="utf-8")
+        granted = str(repo / "src" / "main.py")
+        # Probe the same profile shape the tests below use, so the skip reason carries the backend's
+        # real diagnostic (a bare profile fails with an unhelpful "Access is denied.").
+        profile = _profile_arg(repo, "read-only")
+        control = next(
+            p
+            for p in build_canary_probes(
+                private_probe=granted, exchange_probe=granted, system=platform.system()
+            )
+            if p.label == "exchange-read-allowed"
+        )
+        argv = build_canary_command(_codex(), profile, str(repo), control)
+        with tempfile.TemporaryDirectory(prefix="worc-codexhome-") as codex_home:
+            rc, output = default_canary_runner(
+                argv, str(repo), {**_env(), "CODEX_HOME": codex_home}
+            )
+        if rc != 0:
+            return f"host cannot enforce a codex sandbox profile: {output.strip()[:200]}"
+        return ""
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+pytestmark = [
+    pytest.mark.skipif(bool(_cannot_enforce()), reason=_cannot_enforce() or "host can enforce"),
+    pytest.mark.slow,  # invokes the real codex CLI
+]
+
+
+@pytest.fixture
+def clone() -> Iterator[Path]:
+    # A non-tmp workspace so Codex's tmp grant does not mask the carve-outs (see module docstring).
+    root = Path(tempfile.mkdtemp(prefix="worc-canary-", dir=str(Path.home())))
+    try:
+        repo = root / "repo"
+        (repo / ".worc" / "logs").mkdir(parents=True)
+        (repo / ".worc-io" / "t").mkdir(parents=True)
+        (repo / "src").mkdir(parents=True)
+        (repo / ".worc" / "logs" / "req.json").write_text("PRIVATE_SECRET", encoding="utf-8")
+        (repo / ".worc-io" / "t" / "task.md").write_text("EXCHANGE_TASK", encoding="utf-8")
+        (repo / "src" / "main.py").write_text("print(1)", encoding="utf-8")
+        yield repo
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
 
 
 @pytest.mark.parametrize("profile", ["read-only", "workspace-write"])
@@ -161,9 +214,12 @@ def test_capability_smoke_passes_on_real_host(profile: str) -> None:
 def test_canary_detects_a_non_enforcing_profile(clone: Path) -> None:
     # A profile that (wrongly) grants the private home read must be caught as a security leak —
     # proving the canary observes enforcement rather than rubber-stamping.
+    # `toml_basic_string` (the production renderer's own quoting) escapes the backslashes in a
+    # native Windows path; interpolating the path raw would emit invalid TOML escapes (`\U...`)
+    # and the profile would be rejected before enforcement was ever observed.
     bad = (
         'permissions.worc={ "extends" = ":workspace", "filesystem" = '
-        f'{{ ":minimal" = "read", "{clone}" = "write" }} }}'
+        f'{{ ":minimal" = "read", {toml_basic_string(str(clone))} = "write" }} }}'
     )
     outcome = run_codex_canary(
         command=_codex(),

@@ -2,8 +2,12 @@
 
 The POSIX filesystem branches run natively; the native-Windows branches (reparse points, hard-link
 count, NTFS alternate data streams) are driven by an injected fake :data:`FileInspector` returning
-simulated Windows :class:`FileFacts`, so every fail-closed path is exercised on this host too. The
-real Windows fact extraction is covered on a Windows host by the WRI-006 gate.
+simulated Windows :class:`FileFacts`, so every fail-closed path is exercised on this host too.
+
+The fake inspector proves the *branches* but cannot see a defect in the Win32 calls themselves, so
+:func:`~wastech_orchestrator.providers.exchange.windows_file_facts` is additionally exercised for
+real against a real NTFS file under ``skipif(os.name != "nt")`` — the coverage that was missing when
+a truncated find-handle and a find-handle leak shipped.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from wastech_orchestrator.providers.exchange import (
     diff_exchange_manifests,
     posix_file_facts,
     publish_to_exchange,
+    windows_file_facts,
 )
 from wastech_orchestrator.runtime_layout import EXCHANGE_HOME_DIRNAME
 
@@ -136,18 +141,31 @@ def test_publish_rejects_unsafe_relpath(task_dir: Path, bad: str) -> None:
         publish_to_exchange(task_dir, bad, "x")
 
 
+def _symlink_or_skip(link: Path, target: Path, *, target_is_directory: bool = False) -> None:
+    """Create a symlink or skip the test — creating one is a *privilege* on Windows.
+
+    Without ``SeCreateSymbolicLinkPrivilege`` (Developer Mode or an elevated shell) Windows raises
+    ``OSError [WinError 1314]``, which is a host limitation and not the boundary under test. Mirrors
+    the guard already used in test_exchange_seal.py and test_flow_tools_registry.py.
+    """
+    try:
+        link.symlink_to(target, target_is_directory=target_is_directory)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks unsupported on this host (Windows needs the symlink privilege)")
+
+
 def test_publish_rejects_symlinked_path_component(task_dir: Path, tmp_path: Path) -> None:
     task_dir.mkdir(parents=True)
     outside = tmp_path / "outside"
     outside.mkdir()
-    (task_dir / "sub").symlink_to(outside, target_is_directory=True)
+    _symlink_or_skip(task_dir / "sub", outside, target_is_directory=True)
     with pytest.raises(ExchangeError):
         publish_to_exchange(task_dir, "sub/f.txt", "x")
 
 
 def test_publish_rejects_symlinked_target(task_dir: Path, tmp_path: Path) -> None:
     task_dir.mkdir(parents=True)
-    (task_dir / "plan.md").symlink_to(tmp_path / "elsewhere")
+    _symlink_or_skip(task_dir / "plan.md", tmp_path / "elsewhere")
     with pytest.raises(ExchangeError):
         publish_to_exchange(task_dir, "plan.md", "x")
 
@@ -170,7 +188,7 @@ def test_manifest_fingerprints_regular_files(task_dir: Path) -> None:
 
 def test_manifest_rejects_real_symlink(task_dir: Path, tmp_path: Path) -> None:
     task_dir.mkdir(parents=True)
-    (task_dir / "link.md").symlink_to(tmp_path / "target")
+    _symlink_or_skip(task_dir / "link.md", tmp_path / "target")
     with pytest.raises(ExchangeError):
         build_exchange_manifest(task_dir, "t")
 
@@ -220,6 +238,54 @@ def test_manifest_rejects_simulated_ntfs_alternate_data_stream(task_dir: Path) -
         build_exchange_manifest(task_dir, "t", inspect=_fake_inspector({target: facts}))
 
 
+# --- native-Windows fact extraction (the real ctypes path, not the fake inspector) ---------------
+#
+# The simulated cases above prove the fail-closed *branches*; they cannot catch a defect in the
+# Win32 calls themselves. These two run the real `windows_file_facts` on a real NTFS file — the gap
+# that let a `c_int`-truncated 64-bit find-handle (access violation in `FindNextStreamW`) ship.
+
+
+@pytest.mark.skipif(os.name != "nt", reason="real Win32 extraction; POSIX uses posix_file_facts")
+def test_windows_file_facts_reads_a_real_regular_file(tmp_path: Path) -> None:
+    target = tmp_path / "current.diff"
+    target.write_text("diff --git a/x b/x\n", encoding="utf-8")
+    facts = windows_file_facts(target)
+    assert facts.is_regular
+    assert not facts.is_dir
+    assert not facts.is_symlink
+    assert facts.link_count == 1
+    assert facts.alt_streams == ()
+    assert facts.size == target.stat().st_size
+
+
+@pytest.mark.skipif(os.name != "nt", reason="NTFS alternate data streams are Windows-native only")
+def test_windows_file_facts_detects_a_real_alternate_data_stream(tmp_path: Path) -> None:
+    target = tmp_path / "plan.md"
+    target.write_text("x", encoding="utf-8")
+    try:
+        with Path(f"{target}:evil").open("w", encoding="utf-8") as handle:
+            handle.write("payload")
+    except OSError:  # pragma: no cover - non-NTFS volume (e.g. a FAT/exFAT temp dir)
+        pytest.skip("filesystem does not support alternate data streams")
+    facts = windows_file_facts(target)
+    assert any(name.startswith(":evil") for name in facts.alt_streams), facts.alt_streams
+
+
+@pytest.mark.skipif(os.name != "nt", reason="find-handle lifetime is a Win32-only concern")
+def test_windows_file_facts_leaks_no_handle_blocking_a_parent_rename(tmp_path: Path) -> None:
+    """A leaked stream find-handle keeps the file open, so promoting a seal dir fails (WinError 5).
+
+    This is the seal-promote failure in miniature: ``FindClose`` — not ``CloseHandle`` — releases a
+    find handle, and nothing else in the inspector may hold the inspected file open on return.
+    """
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    (staging / "plan.md").write_text("x", encoding="utf-8")
+    windows_file_facts(staging / "plan.md")
+    staging.rename(tmp_path / "final")
+    assert (tmp_path / "final" / "plan.md").is_file()
+
+
 def _case_sensitive(directory: Path) -> bool:
     probe = directory / "CaseProbe"
     probe.write_text("x", encoding="utf-8")
@@ -265,7 +331,7 @@ def test_current_task_only_rejects_symlinked_root(tmp_path: Path) -> None:
     real = tmp_path / "real"
     real.mkdir()
     exchange_root = tmp_path / EXCHANGE_HOME_DIRNAME
-    exchange_root.symlink_to(real, target_is_directory=True)
+    _symlink_or_skip(exchange_root, real, target_is_directory=True)
     with pytest.raises(ExchangeError):
         assert_exchange_current_task_only(exchange_root, "t")
 
