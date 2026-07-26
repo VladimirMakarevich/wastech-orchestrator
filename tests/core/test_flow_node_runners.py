@@ -1745,8 +1745,12 @@ def test_evaluator_non_blocking_gate_severity_self_caps(tmp_path: Path) -> None:
     inputs = _inputs(tmp_path)
     first = EvaluatorNodeRunner(services, inputs).run(node, _ctx(node))
     assert first.outcome.kind == "rework"  # medium gates under the lowered gate
+    assert first.outcome.rework_exhausted is False  # budget still had a round left
     second = EvaluatorNodeRunner(services, inputs).run(node, _ctx(node))
     assert second.outcome.kind == "accept"  # budget spent → accept, not manual
+    # P0.1: the terminal accept must be FLAGGED exhausted — that flag is the whole operator signal
+    # (console warning + ⚠️ telegram trace at orchestrator.py). A silent accept is the DR-1 defect.
+    assert second.outcome.rework_exhausted is True
 
 
 def test_evaluator_builds_memory_packet_when_role_references_it(tmp_path: Path) -> None:

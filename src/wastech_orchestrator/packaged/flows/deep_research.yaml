@@ -11,7 +11,8 @@
 #     reasoning: minimal|low|medium|high|xhigh|max  default: agents.providers.<provider>.reasoning
 #     network_access: true | false         per-node network grant/deny; default: flow network_policy (research)
 #   agent nodes also: timeout_seconds, extra_args, best_effort, permission_profile (≤ flow ceiling), when
-#   evaluator nodes also: blocking, max_rework_per_stage, gate_severity (min severity that gates; default high)
+#   evaluator nodes also: blocking, max_rework_per_stage, gate_severity (min severity that gates;
+#     built-in default high — this flow sets `medium` in `defaults.evaluator` below, see the note there)
 #     (a non-blocking evaluator that spends max_rework_per_stage with a finding still open accepts +
 #      continues — never manual — and warns you via a console warning + a ⚠️ telegram trace)
 #   Disabling a node is PER-TASK: set `nodes.<id>.enabled: false` in the task file.
@@ -25,7 +26,13 @@ flow:
   network_policy: research
 
   defaults:
-    evaluator: { session_scope: fresh_disposable, permission_profile: read-only }
+    # gate_severity: medium — this flow's evaluators judge whether a research deliverable is GOOD
+    # ENOUGH, not whether code is correct, so they have no natural way to emit `high`/`critical`; at
+    # the built-in default (`high`) a substantive `medium` finding is recorded and then dropped.
+    # Both evaluators here are `blocking: false`, so the worst case is `max_rework_per_stage` extra
+    # rounds and then accept + a ⚠️ warning — never `manual_action_required`.
+    evaluator:
+      { session_scope: fresh_disposable, permission_profile: read-only, gate_severity: medium }
 
   nodes:
     - id: refinement

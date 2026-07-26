@@ -275,6 +275,30 @@ def test_research_non_blocking_exhaustion_publishes_with_open_questions(tmp_path
     assert critic_reworks == 3
 
 
+def test_research_medium_finding_gates_and_self_caps(tmp_path: Path) -> None:
+    # P0.1/DR-1 end to end: the run this campaign came from had `critical_review` file a correct
+    # `medium` finding and the engine returned `accept` on the spot, because gate_severity defaulted
+    # to `high`. With the flow pinning `medium` the same finding drives rework rounds up to the
+    # critic's max_rework_per_stage (3) and only then accepts — reaching publish, never manual.
+    medium = [{"severity": "medium", "reason": "uneven audit depth"}]
+    result, store, _, _ = _drive(tmp_path, findings=medium, sources=_GOOD_SOURCE)
+    assert result.status is Status.DONE
+    assert result.final_node == "publish"
+    assert store.count_rework_verdicts("t", node_id="critical_review") == 3
+    # fact_verification is non-blocking with max_rework_per_stage 1, so it spends its single round.
+    assert store.count_rework_verdicts("t", node_id="fact_verification") == 1
+
+
+def test_research_low_finding_stays_advisory(tmp_path: Path) -> None:
+    # The other half of the gate: `medium` is the floor, so a `low` finding is still advisory and
+    # costs no rework round. Without this, lowering the gate would read as "any finding blocks".
+    result, store, _, _ = _drive(
+        tmp_path, findings=[{"severity": "low", "reason": "nit"}], sources=_GOOD_SOURCE
+    )
+    assert result.status is Status.DONE
+    assert store.count_rework_verdicts("t", node_id="critical_review") == 0
+
+
 def test_research_broken_citation_fails_then_reworks(tmp_path: Path) -> None:
     # A hallucinated citation makes citation_check fail → synthesis rework (budget 1). The fake
     # synthesis rewrites the same (still-broken) manifest, so the pinned single rework is spent and

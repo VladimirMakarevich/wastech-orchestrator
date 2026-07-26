@@ -37,7 +37,12 @@ flow:
       role: critic
       role_file: content_translate/en_critic.md
       blocking: true
-      # gate_severity: low  # block on ANY finding (default high); raise `critic_fix` to match
+      # A translation critic judges whether the English page is GOOD ENOUGH, so it has no natural way
+      # to emit `high`/`critical`; at the built-in default (`high`) its findings are recorded and
+      # dropped. This node is `blocking: true`, so a gating finding loops `critic_fix` until that
+      # budget is spent and then parks the task in manual_action_required — `critic_fix` is only 3
+      # here, so raise it if pages start parking (and again if you lower this to `low`).
+      gate_severity: medium
     - id: fixing
       kind: agent
       role_file: content_translate/fixing.md

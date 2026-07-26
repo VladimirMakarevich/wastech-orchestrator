@@ -251,6 +251,41 @@ def _gate_flow(defaults_gate: str | None, node_gate: str | None) -> str:
     )
 
 
+@pytest.mark.parametrize(
+    ("flow_file", "evaluator_ids"),
+    [
+        ("deep_research.yaml", ("fact_verification", "critical_review")),
+        ("security_audit.yaml", ("finding_verification",)),
+        ("blog_article.yaml", ("tone_style",)),
+        ("blog_article_revise.yaml", ("tone_style",)),
+        ("content_chapter.yaml", ("story_critic",)),
+        ("content_translate.yaml", ("en_critic",)),
+    ],
+)
+def test_packaged_quality_flows_gate_on_medium(
+    flow_file: str, evaluator_ids: tuple[str, ...]
+) -> None:
+    # P0.1/DR-1: a quality evaluator judges "is this GOOD ENOUGH", which it has no natural way to
+    # express as high/critical, so at the built-in `high` gate its findings were recorded and then
+    # dropped. Every packaged flow whose evaluators are quality lenses must pin `medium` — whether
+    # via defaults.evaluator (deep_research) or per node.
+    snap = load_flow(CODESIGN / flow_file)
+    for node_id in evaluator_ids:
+        ev = snap.nodes_by_id[node_id]
+        assert isinstance(ev, EvaluatorNode)
+        assert ev.gate_severity == "medium", f"{flow_file}:{node_id}"
+
+
+def test_implementation_review_keeps_the_high_gate(impl_snap: FlowSnapshot) -> None:
+    # The counterpart: `review` is a correctness lens on a *blocking* node, so it stays at the
+    # built-in `high`. Lowering a blocking evaluator's gate changes its exhaustion landing to
+    # manual_action_required, which is not a change P0.1 makes.
+    ev = impl_snap.nodes_by_id["review"]
+    assert isinstance(ev, EvaluatorNode)
+    assert ev.gate_severity == "high"
+    assert ev.blocking is True
+
+
 def test_evaluator_gate_severity_defaults_to_high(tmp_path: Path) -> None:
     ev = load_flow(_write(tmp_path, _gate_flow(None, None))).nodes_by_id["check"]
     assert isinstance(ev, EvaluatorNode)

@@ -11,7 +11,8 @@
 #     reasoning: minimal|low|medium|high|xhigh|max  default: agents.providers.<provider>.reasoning
 #     network_access: true | false         per-node network grant/deny; default: flow network_policy (advisories)
 #   agent nodes also: timeout_seconds, extra_args, best_effort, permission_profile (≤ flow ceiling), when
-#   evaluator nodes also: blocking, max_rework_per_stage, gate_severity (min severity that gates; default high)
+#   evaluator nodes also: blocking, max_rework_per_stage, gate_severity (min severity that gates;
+#     built-in default high — this flow sets `medium` on finding_verification, see the note there)
 #     (a non-blocking evaluator that spends max_rework_per_stage with a finding still open accepts +
 #      continues — never manual — and warns you via a console warning + a ⚠️ telegram trace)
 #   Disabling a node is PER-TASK: set `nodes.<id>.enabled: false` in the task file.
@@ -80,6 +81,10 @@ flow:
       network_access: true
       blocking: false
       max_rework_per_stage: 2
+      # A verifier judges whether a finding is SUPPORTED, which it has no way to express as
+      # `high`/`critical` — at the built-in default (`high`) its findings are recorded and dropped.
+      # Non-blocking, so the ceiling is 2 extra rounds and then accept + a ⚠️ warning.
+      gate_severity: medium
       # optional overrides (uncomment to pin this evaluator):
       # provider: claude
       # model: claude-opus-5
