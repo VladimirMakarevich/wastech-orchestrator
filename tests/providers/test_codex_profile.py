@@ -19,13 +19,19 @@ from wastech_orchestrator.providers.codex_profile import (
 )
 from wastech_orchestrator.runtime_layout import InternalDenyPolicy, ProviderWriteGuardPolicy
 
+# The fixture provider home, plus the profile key it renders to. The generator normalizes every
+# path through the `to_native=str` seam, so a POSIX fixture literal becomes `\opt\codexhome` on
+# native Windows — assert the normalized form, not the literal, or these tests only pass on POSIX.
+PROVIDER_HOME = Path("/opt/codexhome")
+PROVIDER_HOME_KEY = str(PROVIDER_HOME)
+
 
 def _deny(root: Path) -> InternalDenyPolicy:
     return InternalDenyPolicy(
         control_home=root / ".worc",
         private_home=root / ".worc",
         env_file=root / ".worc" / ".env",
-        provider_homes=(Path("/opt/codexhome"),),
+        provider_homes=(PROVIDER_HOME,),
         frozen_control_bundle=root / ".worc" / "control-bundles",
         frozen_instruction_bundle=root / ".worc" / "instruction-bundles",
     )
@@ -75,7 +81,7 @@ def test_workspace_write_grants_write_and_readonly_guard(tmp_path: Path) -> None
     assert fs[str(root / "tasks")] == "read"
     # deny set still wins
     assert fs[str(root / ".worc")] == "deny"
-    assert fs["/opt/codexhome"] == "deny"
+    assert fs[PROVIDER_HOME_KEY] == "deny"
     # VF-20: governance/instruction files are ordinary, editable content — no per-file guard entry.
     for name in ("AGENTS.md", "AGENTS.override.md", "CLAUDE.md"):
         assert not any(name in key for key in fs)
@@ -115,7 +121,7 @@ def test_read_isolation_off_downgrades_deny_to_read_keeps_blacklist(tmp_path: Pa
     )
     fs = profile["filesystem"]
     assert fs[str(root / ".worc")] == "read"  # private set now readable, still not writable
-    assert fs["/opt/codexhome"] == "read"  # provider home readable for native discovery
+    assert fs[PROVIDER_HOME_KEY] == "read"  # provider home readable for native discovery
     assert fs[str(root / ".env")] == "deny"  # public blacklist unchanged
     assert fs[str(root / "secrets")] == "deny"
     assert fs[str(root)] == "write"  # workspace still writable
@@ -133,7 +139,7 @@ def test_read_isolation_default_denies_private_set(tmp_path: Path) -> None:
         denied_read_paths=(),
     )
     assert profile["filesystem"][str(root / ".worc")] == "deny"
-    assert profile["filesystem"]["/opt/codexhome"] == "deny"
+    assert profile["filesystem"][PROVIDER_HOME_KEY] == "deny"
 
 
 def test_denied_read_dir_glob_reduced_to_subtree_no_scan(tmp_path: Path) -> None:

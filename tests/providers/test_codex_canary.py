@@ -162,6 +162,37 @@ def test_windows_probes_use_cmd_type() -> None:
     assert probes[0].command == ["cmd", "/c", "type", "C:\\clone\\.worc"]
 
 
+def test_windows_probes_keep_a_spaced_path_as_its_own_argv_member() -> None:
+    """A path with a space must never be pre-formatted into the `cmd /c` command-line string.
+
+    `cmd /c` re-parses a one-string command line and splits on spaces, so `C:\\First Last\\x` made
+    the probe fail as a malformed command. On an `expect_denied=True` probe that is
+    indistinguishable from enforcement, so a broken probe would mask a real leak.
+    """
+    spaced = "C:\\Users\\First Last\\clone\\.worc\\logs\\req.json"
+    probes = build_canary_probes(
+        private_probe=spaced,
+        exchange_probe=spaced,
+        system="Windows",
+        repo_write_probe=spaced,
+    )
+    for probe in probes:
+        assert spaced in probe.command, probe.label
+        # the path is a discrete member, never concatenated into a larger token
+        assert not any(spaced in tok and tok != spaced for tok in probe.command), probe.label
+
+
+def test_windows_write_probe_redirects_with_a_bare_operator() -> None:
+    probes = build_canary_probes(
+        private_probe="C:\\clone\\.worc",
+        exchange_probe=None,
+        system="Windows",
+        repo_write_probe="C:\\clone\\src\\main.py",
+    )
+    write = next(p for p in probes if p.label.startswith("repo-write"))
+    assert write.command == ["cmd", "/c", "echo", "x", ">>", "C:\\clone\\src\\main.py"]
+
+
 def test_private_readable_flips_reads_and_adds_write_deny() -> None:
     # VF-6: read-isolation OFF → private reads become positive controls (allowed) and a private
     # WRITE-denied probe is added to prove the control plane stays immutable.

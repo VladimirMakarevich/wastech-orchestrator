@@ -35,6 +35,7 @@ import unicodedata
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from wastech_orchestrator.providers.artifacts import (
     PathIdentityError,
@@ -434,12 +435,58 @@ def clear_exchange_task_dir(exchange_root: str | Path, task_id: str) -> None:
 # --- Native-Windows helpers (exercised on a real Windows host by WRI-006) ------------------------
 
 
+def _kernel32() -> Any:
+    """``kernel32`` with explicit prototypes for every call the helpers below make.
+
+    Declaring ``restype``/``argtypes`` is a correctness requirement, not documentation: the ctypes
+    default ``restype`` is ``c_int``, which silently truncates a 64-bit ``HANDLE`` to 32 bits. A
+    ``FindFirstStreamW`` find-handle is a pointer-width value, so the truncated handle both defeats
+    the ``INVALID_HANDLE_VALUE`` guard (a truncated ``-1`` never equals the 64-bit sentinel) and
+    faults with an access violation once handed back to ``FindNextStreamW``.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    # `unused-ignore`: typeshed exposes `WinDLL` only when `sys.platform == "win32"`, so the ignore
+    # is required on the Linux CI runner and redundant when mypy runs natively on Windows.
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined,unused-ignore]
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    k32.GetFileInformationByHandle.restype = wintypes.BOOL
+    k32.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+    k32.FindFirstStreamW.restype = wintypes.HANDLE
+    k32.FindFirstStreamW.argtypes = [
+        wintypes.LPCWSTR,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    k32.FindNextStreamW.restype = wintypes.BOOL
+    k32.FindNextStreamW.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+    # A stream-enumeration handle is a *find* handle: it must be released with `FindClose`.
+    # `CloseHandle` rejects it (ERROR_INVALID_HANDLE) and leaks it, which keeps a handle open on the
+    # enumerated file and makes a later rename of a parent directory fail with ERROR_ACCESS_DENIED.
+    k32.FindClose.restype = wintypes.BOOL
+    k32.FindClose.argtypes = [wintypes.HANDLE]
+    k32.CloseHandle.restype = wintypes.BOOL
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    return k32
+
+
 def _windows_link_count(path: Path) -> int:
     """The NTFS hard-link count via ``GetFileInformationByHandle`` (Windows only)."""
     import ctypes
     from ctypes import wintypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32 = _kernel32()
     generic_read = 0x80000000
     file_share_all = 0x1 | 0x2 | 0x4
     open_existing = 3
@@ -485,7 +532,7 @@ def _windows_alt_streams(path: Path) -> tuple[str, ...]:
     import ctypes
     from ctypes import wintypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32 = _kernel32()
     find_first_stream_info_standard = 0
 
     class _StreamData(ctypes.Structure):
@@ -509,5 +556,5 @@ def _windows_alt_streams(path: Path) -> tuple[str, ...]:
             if not kernel32.FindNextStreamW(handle, ctypes.byref(data)):
                 break
     finally:
-        kernel32.CloseHandle(handle)
+        kernel32.FindClose(handle)
     return tuple(streams)
