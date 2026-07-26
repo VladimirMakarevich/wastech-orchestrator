@@ -228,6 +228,26 @@ def test_forward_surfaces_the_guard_exit_code(
     assert cli_shell.dispatch("finalize t1 --as done", ctx).exit_code == 1
 
 
+def test_interactive_dispatch_runs_nested_cli_off_the_event_loop(
+    make_git_config: _ConfigFactory, tmp_path: Path
+) -> None:
+    calls: list[list[str]] = []
+
+    def run_cli(argv: list[str]) -> int:
+        with pytest.raises(RuntimeError, match="no running event loop"):
+            asyncio.get_running_loop()
+        calls.append(argv)
+        return 0
+
+    ctx = _ctx(make_git_config(tmp_path / "clone"), run_cli=run_cli)
+    result = asyncio.run(cli_shell._dispatch_interactive("rerun t1 --yes", ctx))
+
+    assert result.exit_code == 0
+    assert calls == [
+        ["--config", "/cfg.yaml", "rerun", "--non-interactive", "t1", "--yes"],
+    ]
+
+
 def test_forwarded_parser_exit_is_command_local(
     capsys: pytest.CaptureFixture[str], make_git_config: _ConfigFactory, tmp_path: Path
 ) -> None:

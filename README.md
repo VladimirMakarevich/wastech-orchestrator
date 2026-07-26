@@ -132,7 +132,7 @@ worc run <task-file>    process exactly one task end to end
 worc watch              process pending tasks in a loop, with periodic git sync
 worc status             show the active / latest task
 worc top                live read-only monitor of the active task and queue
-worc shell              interactive daemon console; command errors keep the session open
+worc shell              interactive daemon console; nested verbs keep the REPL loop responsive
 worc stop / restart     stop or restart the watch daemon
 worc rerun <task-id>    re-attempt a failed task
 worc merge-task <id>    update, resolve conflicts, and merge a reviewed PR

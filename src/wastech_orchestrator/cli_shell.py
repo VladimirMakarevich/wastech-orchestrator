@@ -369,6 +369,17 @@ def dispatch(line: str, ctx: ShellContext) -> ShellResult:
     return ShellResult()
 
 
+async def _dispatch_interactive(line: str, ctx: ShellContext) -> ShellResult:
+    """Dispatch a REPL command without blocking or nesting work on its asyncio loop.
+
+    Nested CLI verbs are intentionally synchronous, and may use synchronous adapters that create
+    their own short-lived event loops. Running the whole dispatch in a worker keeps those adapters
+    valid while the REPL's log-tailer task remains schedulable. The synchronous :func:`dispatch`
+    stays as the headless and scripted entry point.
+    """
+    return await asyncio.to_thread(dispatch, line, ctx)
+
+
 def _do_enqueue(ctx: ShellContext, arg: str) -> ShellResult:
     if not arg:
         print("usage: enqueue <file>", file=ctx.out)
@@ -620,7 +631,7 @@ def _run_interactive(ctx: ShellContext) -> int:
                         line = (await session.prompt_async()).strip()
                     except (EOFError, KeyboardInterrupt):
                         break
-                    if dispatch(line, ctx).quit:
+                    if (await _dispatch_interactive(line, ctx)).quit:
                         if await _confirm_quit(ctx, session):
                             break
                         print("shell: quit cancelled — daemon still serving.", file=ctx.out)
