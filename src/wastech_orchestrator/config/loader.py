@@ -533,6 +533,7 @@ def _build_security(raw: Any, issues: list[str]) -> SecurityConfig:
         {
             "strict_isolation",
             "disable_read_isolation",
+            "allow_git_evidence",
             "allowed_environment",
             "denied_read_paths",
             "denied_commands",
@@ -552,6 +553,7 @@ def _build_security(raw: Any, issues: list[str]) -> SecurityConfig:
     return SecurityConfig(
         strict_isolation=_bool(m, "strict_isolation", True, where, issues),
         disable_read_isolation=_bool(m, "disable_read_isolation", True, where, issues),
+        allow_git_evidence=_bool(m, "allow_git_evidence", False, where, issues),
         allowed_environment=_str_tuple(
             m, "allowed_environment", default_allowed_environment(), where, issues
         ),

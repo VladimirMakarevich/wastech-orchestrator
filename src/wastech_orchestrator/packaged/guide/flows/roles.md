@@ -41,6 +41,8 @@ A non-blocking evaluator (`blocking: false`) never parks the task: once its `max
 
 `role` is an audit/behavior discriminator, not a permission — every evaluator is forced `read-only` and can never use `editing_lineage` (see [reference.md](reference.md)).
 
+An audit lens that treats delivery history as evidence — "did the change that closed this milestone actually touch what it claims" — can be given the read-only git verbs with `git_evidence: true`, provided the operator turned `security.allow_git_evidence` on. It stays read-only: the verbs only report, the sandbox denies every write, and publishing is still the orchestrator's. See [Read-only git evidence](reference.md#read-only-git-evidence).
+
 ## Named output slots (`output_artifact`)
 
 Besides the generic `{<id>_path}` channel, an `agent` node can fill **one** of four fixed slots with `output_artifact:`, landing its `content` in a well-known file that later nodes read by a stable variable (the node returns the content as its structured output; the orchestrator writes the file):

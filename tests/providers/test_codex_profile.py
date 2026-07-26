@@ -229,3 +229,30 @@ def test_windows_paths_escaped_via_native_seam(tmp_path: Path) -> None:
     arg = render_permission_profile_arg(profile)
     assert "\\\\" in arg  # backslashes doubled for a valid TOML basic string
     assert "C:\\\\" in arg
+
+
+def test_git_evidence_does_not_change_the_codex_profile(tmp_path: Path) -> None:
+    """The grant is a Claude-side construct; this pins that Codex needs nothing from it, and why.
+
+    Codex's profile has three keys — ``extends`` / ``filesystem`` / ``network`` — and no command or
+    verb dimension at all. Under ``read-only`` it already permits command execution, so ``git log``
+    works there today; what forbids mutation is not a list of verbs but the sandbox: the workspace
+    is mounted ``read`` and the network is off, so ``git commit`` fails for want of a writable
+    ``.git`` and ``git push`` for want of a network. That is a stronger guarantee than an allowlist
+    and nothing in a prompt, task or flow can argue with it — which is why the two providers are
+    made to agree on the observable contract (history readable, repository unchangeable, nothing
+    published) rather than on a symmetric list of verbs.
+    """
+    root = tmp_path / "clone"
+    profile = build_codex_permission_profile(
+        permission_profile="read-only",
+        working_directory=str(root),
+        deny_policy=_deny(root),
+        write_guard=None,
+        denied_read_paths=(),
+    )
+    # The three keys, unchanged: there is no place in this shape for a verb allowlist to land.
+    assert set(profile) == {"extends", "filesystem", "network"}
+    # The mutation ban, stated as the sandbox states it.
+    assert profile["filesystem"][str(root)] == "read"  # `git commit` has nothing to write to
+    assert profile["network"] == {"enabled": False}  # `git push` has nowhere to go

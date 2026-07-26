@@ -64,6 +64,11 @@ flow:
       session_scope: fresh_disposable
       permission_profile: read-only
       network_access: false
+      # Delivery history is prime evidence for a plan-versus-implementation audit, so these
+      # three ask for the read-only git verbs. Inert unless the operator sets
+      # security.allow_git_evidence — and the node stays read-only when they do: the verbs only
+      # report and the sandbox denies every write.
+      git_evidence: true
       # optional overrides (uncomment to pin this node):
       # provider: claude
       # model: claude-opus-5
@@ -77,6 +82,11 @@ flow:
       session_scope: fresh_disposable
       permission_profile: read-only
       network_access: false
+      # Delivery history is prime evidence for a plan-versus-implementation audit, so these
+      # three ask for the read-only git verbs. Inert unless the operator sets
+      # security.allow_git_evidence — and the node stays read-only when they do: the verbs only
+      # report and the sandbox denies every write.
+      git_evidence: true
       # optional overrides (uncomment to pin this node):
       # provider: claude
       # model: claude-opus-5
@@ -90,6 +100,11 @@ flow:
       session_scope: fresh_disposable
       permission_profile: read-only
       network_access: false
+      # Delivery history is prime evidence for a plan-versus-implementation audit, so these
+      # three ask for the read-only git verbs. Inert unless the operator sets
+      # security.allow_git_evidence — and the node stays read-only when they do: the verbs only
+      # report and the sandbox denies every write.
+      git_evidence: true
       # optional overrides (uncomment to pin this node):
       # provider: claude
       # model: claude-opus-5

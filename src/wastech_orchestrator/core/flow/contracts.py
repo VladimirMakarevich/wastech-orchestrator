@@ -108,6 +108,21 @@ def resolve_network_access(node_value: bool | None, policy: NetworkPolicy | None
     return policy is not None
 
 
+def resolve_git_evidence(node_value: bool | None, allowed: bool) -> bool:
+    """Whether this node actually gets the read-only git verbs: it asked AND the operator allows it.
+
+    Both halves are required, and the operator's half is the one that grants. A node that declares
+    nothing never gets the capability; a node that declares it gets nothing either until
+    ``security.allow_git_evidence`` is on. So a flow can express the need without being able to
+    widen the envelope by itself, and turning the switch on does not hand a shell to every read-only
+    node in the run — only to the ones that asked.
+
+    ``False`` and ``None`` both mean "did not ask"; the field is tri-state to match the shape of
+    ``network_access`` and to leave room for a flow-wide default, which no flow needs today.
+    """
+    return bool(node_value) and allowed
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionUnit:
     """The foundation-owned identity of the thing being executed: ``(task_id, subtask_order)``.

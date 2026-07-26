@@ -200,6 +200,14 @@ class AgentRunRequest:
     # access; Claude allows the WebFetch/WebSearch tools. It only toggles the network — never the
     # filesystem sandbox/approvals (the ceiling stays in force).
     network_access: bool = False
+    # Whether this attempt may execute the read-only git verbs to inspect delivery history. Set by
+    # the node runner from the node's declaration AND the operator's master switch, so a flow alone
+    # can never turn it on. Default ``False`` — nothing changes for a node that does not ask.
+    # Provider-neutral, and the two providers reach the same observable contract (history readable,
+    # repository unchangeable, nothing published) by different means: Claude adds a shell scoped to
+    # those verbs and write-denies the clone in its OS sandbox, while Codex's ``read-only`` sandbox
+    # already permits commands and already forbids every mutation, so it needs nothing from this.
+    git_evidence: bool = False
     # WRI-002/003: the absolute Git-control + lifecycle roots a *workspace-write* attempt must
     # Write/Edit-deny (exchange root, resolved gitdir/common-dir/hooks-dir, ``tasks/`` tree). Set by
     # the node runner from ``GitManager.resolve_control_paths`` only for a workspace-write attempt

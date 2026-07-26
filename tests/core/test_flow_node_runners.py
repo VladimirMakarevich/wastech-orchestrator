@@ -188,6 +188,7 @@ def _services(
     snapshot: Any = None,
     packet_builder: Any = None,
     security_preamble: str | None = None,
+    allow_git_evidence: bool = False,
 ) -> Any:
     return NodeServices(
         router=router,
@@ -201,6 +202,7 @@ def _services(
         snapshot=snapshot,
         packet_builder=packet_builder,
         security_preamble=security_preamble,
+        allow_git_evidence=allow_git_evidence,
     )
 
 
@@ -2952,3 +2954,112 @@ def test_read_only_node_skips_git_control_capture(tmp_path: Path) -> None:
     )
     result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "done"  # completed; the git control capture was skipped
+
+
+# -- read-only git evidence ----------------------------------------------------
+
+
+def _audit_node() -> AgentNode:
+    return AgentNode(
+        id="audit",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.READ_ONLY,
+        git_evidence=True,
+    )
+
+
+def test_git_evidence_needs_both_the_declaration_and_the_operator_switch(tmp_path: Path) -> None:
+    # The two halves are what keep the envelope un-weakenable through a flow: a declaring node is
+    # accepted and completely inert while the operator's switch is off (the default), and a node
+    # that declares nothing gets nothing even when the switch is on.
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    declaring, silent = (
+        _audit_node(),
+        AgentNode(
+            id="audit",
+            kind="agent",
+            role_file="r.md",
+            permission_profile=PermissionProfile.READ_ONLY,
+        ),
+    )
+    for node, allowed, expected in (
+        (declaring, False, False),  # declared, not allowed → inert
+        (declaring, True, True),  # declared and allowed → granted
+        (silent, True, False),  # allowed but never asked → nothing
+        (silent, False, False),
+    ):
+        router, store = FakeRouter(_result()), FakeStore()
+        services = _services(
+            router,
+            store,
+            FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+            allow_git_evidence=allowed,
+        )
+        AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+        assert router.requests[0].git_evidence is expected
+
+
+def test_a_write_by_a_granted_read_only_node_warns_and_still_finishes(tmp_path: Path) -> None:
+    # The sandbox write-denies the whole clone for such a node, so a change means that enforcement
+    # did not hold. It is reported, not acted on: the outcome stays `done` and the task is never
+    # parked — the grant exists so an audit node can read history, and a stray file is not worth
+    # trading that capability for. `read_only_write` is what the post-node hook turns into the
+    # operator's console warning + ⚠️ trace.
+    from wastech_orchestrator.git_manager import ChangedPath
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = _audit_node()
+    git = FakeGit(changed_seq=[(), (ChangedPath(status="??", path="stray.txt"),)])
+    services = _services(
+        FakeRouter(_result()),
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=git,
+        allow_git_evidence=True,
+    )
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "done"
+    assert result.outcome.read_only_write is True
+    # The post-edit guard stays off for a read-only node: no diff is captured, so nothing downstream
+    # is ever handed the stray change.
+    assert not any(c[0] == "write_current_diff" for c in git.calls)
+
+
+def test_a_clean_granted_read_only_node_raises_no_warning(tmp_path: Path) -> None:
+    # The comparison is before-vs-after, not "is the tree dirty": a pre-existing change left by an
+    # earlier workspace-write node must not be blamed on this one.
+    from wastech_orchestrator.git_manager import ChangedPath
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    dirty = (ChangedPath(status="M", path="already.txt"),)
+    services = _services(
+        FakeRouter(_result()),
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=FakeGit(changed=dirty),
+        allow_git_evidence=True,
+    )
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(_audit_node(), _ctx(_audit_node()))
+    assert result.outcome.read_only_write is False
+
+
+def test_the_write_check_is_skipped_for_a_node_without_the_grant(tmp_path: Path) -> None:
+    # No node pays for a check that cannot apply to it: without the grant there is no shell, so the
+    # tree is never inspected.
+    from wastech_orchestrator.git_manager import ChangedPath
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(
+        id="audit", kind="agent", role_file="r.md", permission_profile=PermissionProfile.READ_ONLY
+    )
+    git = FakeGit(changed_seq=[(), (ChangedPath(status="??", path="stray.txt"),)])
+    services = _services(
+        FakeRouter(_result()),
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=git,
+        allow_git_evidence=True,
+    )
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.read_only_write is False

@@ -36,6 +36,7 @@ from wastech_orchestrator.core.flow.context_paths import (
 from wastech_orchestrator.core.flow.contracts import (
     PermissionProfile,
     SessionScope,
+    resolve_git_evidence,
     resolve_network_access,
 )
 from wastech_orchestrator.core.flow.engine import NodeContext, NodeOutcome, NodeResult
@@ -79,6 +80,7 @@ from wastech_orchestrator.core.hitl import (
     turn_gate_interaction_path,
     typed_output_schema,
 )
+from wastech_orchestrator.git_manager import ChangedPath
 from wastech_orchestrator.notify import AskKind, AskResult
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.providers.base import (
@@ -116,9 +118,10 @@ class AgentNodeRunner:
     # -- simple (non-HITL) agent run ------------------------------------------
 
     def _run_simple(self, node: AgentNode, ctx: NodeContext, route: ResolvedRoute) -> NodeResult:
+        tree_before = self._granted_shell_tree(node, ctx)
         run_id, outcome = self._invoke_with_turn_gate(node, ctx, route, human_input_path=None)
         self._apply_post_edit_guard(node, ctx, route)
-        return NodeResult(node_id=node.id, outcome=_agent_outcome(outcome), node_run_id=run_id)
+        return self._result(node, ctx, outcome, run_id, tree_before)
 
     # -- embedded HITL (refinement / planning) --------------------------------
 
@@ -132,6 +135,7 @@ class AgentNodeRunner:
         if persisted is not None:
             human_input_path = self._resume_interaction(node, ctx, path, persisted)
 
+        tree_before = self._granted_shell_tree(node, ctx)
         run_id, outcome = self._invoke_with_turn_gate(
             node, ctx, route, human_input_path=human_input_path
         )
@@ -139,7 +143,7 @@ class AgentNodeRunner:
         if typed.human_input is None:
             if had_interaction:
                 mark_consumed(path)
-            return NodeResult(node_id=node.id, outcome=_agent_outcome(outcome), node_run_id=run_id)
+            return self._result(node, ctx, outcome, run_id, tree_before)
         if had_interaction:
             raise NodeManualRequired(f"agent node {node.id!r}: unexpected repeated HITL request")
 
@@ -168,7 +172,7 @@ class AgentNodeRunner:
         if self._typed(node, ctx, outcome2).human_input is not None:
             raise NodeManualRequired(f"agent node {node.id!r}: second HITL request after an answer")
         mark_consumed(path)
-        return NodeResult(node_id=node.id, outcome=_agent_outcome(outcome2), node_run_id=run_id2)
+        return self._result(node, ctx, outcome2, run_id2, tree_before)
 
     def _resume_interaction(
         self, node: AgentNode, ctx: NodeContext, path: Any, persisted: Mapping[str, Any]
@@ -344,12 +348,68 @@ class AgentNodeRunner:
     def _is_workspace_write(self, node: AgentNode, ctx: NodeContext) -> bool:
         """True iff this node's resolved permission profile is workspace-write (WRI-009).
 
-        Only workspace-write attempts can mutate the clone, so only they are bracketed by the Git
-        control-state capture/compare and get the post-edit diff guard; a read-only agent/evaluator
-        attempt cannot mutate git, so it is neither captured nor compared.
+        Only a workspace-write attempt is *meant* to mutate the clone, so only it gets the post-edit
+        diff guard (diff capture, output containment, the dangerous-diff approval). Whether an
+        attempt *can* execute commands at all is a wider question — see :meth:`_can_run_commands`.
         """
         resolved = node.permission_profile or ctx.snapshot.doc.permission_ceiling
         return resolved == PermissionProfile.WORKSPACE_WRITE
+
+    def _has_git_evidence(self, node: AgentNode) -> bool:
+        """True iff this node asked for the read-only git verbs and the operator enabled them."""
+        return resolve_git_evidence(node.git_evidence, self._s.allow_git_evidence)
+
+    def _can_run_commands(self, node: AgentNode, ctx: NodeContext) -> bool:
+        """True iff this attempt can execute shell commands — a workspace-write node, or a
+        read-only one holding the git-evidence grant.
+
+        This, not the permission profile, is the right condition for the Git control-state
+        fingerprint: what makes ``.git`` drift possible is a shell, and a read-only node now has one
+        whenever the grant is live. Keying the bracket on the profile alone would leave exactly the
+        node class that just gained a shell unwatched.
+        """
+        return self._is_workspace_write(node, ctx) or self._has_git_evidence(node)
+
+    def _granted_shell_tree(
+        self, node: AgentNode, ctx: NodeContext
+    ) -> tuple[ChangedPath, ...] | None:
+        """The working-tree change set before a *read-only* node with a granted shell runs.
+
+        ``None`` for every other node — that is the signal to skip the comparison entirely, so no
+        node pays for a check that cannot apply to it. Snapshotting before rather than reading the
+        tree once afterwards is what keeps an earlier writer's diff from being blamed on this node
+        in a flow that mixes the two profiles.
+        """
+        if self._s.git is None or self._is_workspace_write(node, ctx):
+            return None
+        return self._s.git.changed_code_entries() if self._has_git_evidence(node) else None
+
+    def _result(
+        self,
+        node: AgentNode,
+        ctx: NodeContext,
+        outcome: StageOutcome,
+        run_id: int,
+        tree_before: tuple[ChangedPath, ...] | None,
+    ) -> NodeResult:
+        """The node's result, flagged when a read-only node with a shell changed the working tree.
+
+        The provider's sandbox write-denies the whole clone for such an attempt, so a change here
+        means that enforcement did not hold. It is reported rather than acted on: the outcome stays
+        ``done``, the run continues, and the operator gets a warning from the post-node hook. The
+        change is never consumed — no diff is published and nothing downstream is handed it, since
+        the post-edit guard that would do that stays off for a read-only node.
+        """
+        wrote = (
+            tree_before is not None
+            and self._s.git is not None
+            and self._s.git.changed_code_entries() != tree_before
+        )
+        return NodeResult(
+            node_id=node.id,
+            outcome=replace(_agent_outcome(outcome), read_only_write=wrote),
+            node_run_id=run_id,
+        )
 
     def _invoke(
         self,
@@ -382,20 +442,24 @@ class AgentNodeRunner:
             node, ctx, route, run_id, human_input_path, session_id, guard_output_baseline(baseline)
         )
         assert_request_contained(request, self._s.exchange_root)
-        # WRI-009: fingerprint the Git control state before a workspace-write attempt; the compare
-        # after `run_stage` (below) runs before any orchestrator git touches the possibly-poisoned
-        # clone. A read-only attempt cannot mutate git, so it is not captured. WRI-002: a
-        # workspace-write attempt also gets its Write/Edit-deny roots (exchange/gitdir/common/hooks/
-        # tasks) resolved fresh here (they are only final after branch prep) and threaded onto the
-        # request; a read-only attempt carries no write tools, so ``write_guard`` stays ``None``.
+        # WRI-009: fingerprint the Git control state before any attempt that can execute commands;
+        # the compare after `run_stage` (below) runs before any orchestrator git touches the
+        # possibly-poisoned clone. That is every workspace-write attempt and every read-only one
+        # holding the git-evidence grant — a shell is what makes `.git` reachable, so the profile
+        # alone is the wrong condition. WRI-002: a workspace-write attempt also gets its
+        # Write/Edit-deny roots (exchange/gitdir/common/hooks/tasks) resolved fresh here (they are
+        # only final after branch prep) and threaded onto the request; a read-only attempt carries
+        # no write tools, so ``write_guard`` stays ``None`` and its whole clone is instead
+        # write-denied in the provider's sandbox.
         git = self._s.git
         control_before = None
-        if git is not None and self._is_workspace_write(node, ctx):
+        if git is not None and self._can_run_commands(node, ctx):
             control_before = git.capture_git_control_state()
-            request = replace(
-                request,
-                write_guard=git.resolve_control_paths(self._s.exchange_root),
-            )
+            if self._is_workspace_write(node, ctx):
+                request = replace(
+                    request,
+                    write_guard=git.resolve_control_paths(self._s.exchange_root),
+                )
         # WRI-002 detection-in-depth: fingerprint the curated exchange before the attempt so a
         # provider mutation of the read-only surface is caught from parent-held state (below),
         # before
@@ -642,6 +706,10 @@ class AgentNodeRunner:
             network_access=resolve_network_access(
                 node.network_access, ctx.snapshot.doc.network_policy
             ),
+            # The read-only git verbs, when this node asked for them AND the operator enabled the
+            # grant. Like network, it toggles one capability dimension and never the filesystem
+            # ceiling — the node stays read-only, enforced by the provider's sandbox.
+            git_evidence=self._has_git_evidence(node),
             # VF-7 defense-in-depth: the Core-owned advisory security contract, threaded via
             # NodeServices; the neutral seam prepends it to the effective prompt.
             security_preamble=self._s.security_preamble,

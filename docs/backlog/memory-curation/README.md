@@ -2,6 +2,8 @@
 
 Status: **open — all items proposed (operator sign-off pending)** Date: 2026-07-26 Owner: Vladimir Makarevich
 
+Residue from the items that land — open decisions, watch items, operational consequences, deliberate non-goals, and what the `main` docs refresh must pick up — is collected in [follow_ups.md](follow_ups.md) (empty until the first item merges).
+
 This folder groups everything that came out of two documents into one campaign with one execution order: the [memory audit on WastimeApp](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/analysis/2026-07-24-wastimeapp-memory-audit.md) (2026-07-24 — the first audit of a real, 21-task-old memory store, maturity **3/10**) and the [auto-dream curation analysis](2026-07-25-auto-dream-memory-curation-analysis.md) (2026-07-25 — the operator's idea of a periodic supervisor pass over memory, assessed against the code). The audit says what is broken; the analysis says what may and may not be automated on top of it. The files below are the implementable tasks.
 
 `docs/analysis/` lives only on `main` (see `chore(dev): drop derived docs`), so the audit is linked by absolute URL. The analysis document itself is kept **inside this folder** so the campaign is self-contained on every branch.

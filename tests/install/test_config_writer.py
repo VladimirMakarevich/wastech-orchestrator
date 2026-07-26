@@ -101,6 +101,10 @@ def test_safe_security_defaults_are_written(tmp_path: Path) -> None:
     assert cfg.security.strict_isolation is True
     # USER must be allowlisted so macOS subscription CLIs can reach their Keychain credentials.
     assert "USER" in cfg.security.allowed_environment
+    # The git-evidence grant is seeded OFF, and seeded explicitly rather than left to the schema
+    # default: an opt-in capability belongs in the operator's own config where they can find it.
+    assert cfg.security.allow_git_evidence is False
+    assert "allow_git_evidence: false" in build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))
     assert "git push" in cfg.security.denied_commands
     assert "gh pr create" in cfg.security.denied_commands
     assert "gh pr merge" in cfg.security.denied_commands

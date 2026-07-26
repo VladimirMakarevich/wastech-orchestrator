@@ -31,10 +31,10 @@ Every one of the eight `manifest.json` files records `"final_status": "done"`. F
 Each frozen bundle root is a separate top-level directory of `private_home`, named by its own constant in [`runtime_layout.py`](../../src/wastech_orchestrator/runtime_layout.py):
 
 ```python
-CONTROL_BUNDLE_DIRNAME = "control-bundles"        # runtime_layout.py:46
+CONTROL_BUNDLE_DIRNAME = "control-bundles"  # runtime_layout.py:46
 INSTRUCTION_BUNDLE_DIRNAME = "instruction-bundles"  # runtime_layout.py:54
-EXCHANGE_SEAL_DIRNAME = "exchange-seals"            # runtime_layout.py:61
-EXCHANGE_QUARANTINE_DIRNAME = "exchange-quarantine" # runtime_layout.py:67
+EXCHANGE_SEAL_DIRNAME = "exchange-seals"  # runtime_layout.py:61
+EXCHANGE_QUARANTINE_DIRNAME = "exchange-quarantine"  # runtime_layout.py:67
 ```
 
 Because every path is already resolved through these four constants, the change is genuinely small — they are the only place the literals live in `src/`:

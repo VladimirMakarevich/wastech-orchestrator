@@ -448,6 +448,15 @@ def _write_guard() -> ProviderWriteGuardPolicy:
     )
 
 
+def _deny_policy() -> InternalDenyPolicy:
+    return InternalDenyPolicy(
+        control_home=Path("/repo/.worc"),
+        private_home=Path("/repo/.worc"),
+        env_file=Path("/repo/.worc/.env"),
+        provider_homes=(Path("/home/me/.claude"),),
+    )
+
+
 def test_strict_mcp_config_and_setting_sources_close_config_surface(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
@@ -745,3 +754,166 @@ def test_resolve_claude_tools_read_only_is_platform_independent() -> None:
         assert plan.mode == "dontAsk"
         assert plan.tools == ("Read", "Glob", "Grep")
         assert plan.needs_sandbox is False
+
+
+# --- read-only git evidence: the grant, the platform arm, and the argv split -----------
+
+_SANDBOX_HOSTS = (SandboxCapability.MACOS, SandboxCapability.LINUX_AVAILABLE)
+
+
+def test_read_only_grant_adds_a_shell_scoped_to_the_git_verbs() -> None:
+    # The whole point of the grant: an audit node gets a shell it can inspect history with. Bash
+    # enters the existence gate; every verb it may run is a read-only one, expressed as a pattern.
+    for cap in _SANDBOX_HOSTS:
+        plan = resolve_claude_tools("read-only", cap, False, git_evidence=True)
+        assert plan.mode == "dontAsk"
+        assert plan.tools == ("Read", "Glob", "Grep", "Bash")
+        assert plan.needs_sandbox is True  # a shell on a sandbox host is always sandboxed
+        assert "Bash(git log:*)" in plan.allow_patterns
+        assert "Bash(git show:*)" in plan.allow_patterns
+        # No mutating verb is reachable through the allowlist, so the grant cannot become a second
+        # path to publishing — that stays the orchestrator's alone.
+        assert not any(
+            f"Bash(git {verb}:*)" in plan.allow_patterns
+            for verb in ("commit", "push", "add", "checkout", "reset", "clean")
+        )
+
+
+def test_read_only_without_the_grant_is_unchanged_everywhere() -> None:
+    # The declaration is the only thing that adds reach: an undeclared node resolves exactly as it
+    # does today on every host, sandbox or not.
+    for cap in SandboxCapability:
+        plan = resolve_claude_tools("read-only", cap, False, git_evidence=False)
+        assert plan.tools == ("Read", "Glob", "Grep")
+        assert plan.allow_patterns == ()
+        assert plan.needs_sandbox is False
+
+
+def test_grant_is_inert_on_workspace_write() -> None:
+    # A workspace-write node already has an unscoped shell. The grant must not narrow it — that
+    # would be a restriction wearing the name of a capability — so the plan is untouched.
+    for cap in _SANDBOX_HOSTS:
+        granted = resolve_claude_tools("workspace-write", cap, False, git_evidence=True)
+        plain = resolve_claude_tools("workspace-write", cap, False)
+        assert granted == plain
+        assert granted.allow_patterns == ()
+        assert "Bash" in granted.tools
+
+
+def test_granted_read_only_shell_drops_on_native_windows_under_strict() -> None:
+    # Native Windows has no supported Bash sandbox. The feature degrades to today's read-only node
+    # (the role prompt's capability-conditional wording then applies) rather than quietly becoming
+    # an unsandboxed shell — the same choice the adapter already makes for workspace-write.
+    plan = resolve_claude_tools(
+        "read-only", SandboxCapability.NATIVE_WINDOWS, False, git_evidence=True
+    )
+    assert plan.tools == ("Read", "Glob", "Grep")
+    assert plan.allow_patterns == ()  # patterns for a tool that no longer exists would be noise
+    assert plan.needs_sandbox is False
+
+
+def test_granted_read_only_shell_kept_on_native_windows_when_isolation_is_off() -> None:
+    # strict_isolation: false is the operator saying they own the risk — the same arm the adapter
+    # already takes for workspace-write on this host.
+    plan = resolve_claude_tools(
+        "read-only",
+        SandboxCapability.NATIVE_WINDOWS,
+        False,
+        strict_isolation=False,
+        git_evidence=True,
+    )
+    assert "Bash" in plan.tools
+    assert "Bash(git log:*)" in plan.allow_patterns
+    assert plan.needs_sandbox is False
+
+
+def test_granted_read_only_shell_refuses_a_linux_host_missing_sandbox_deps() -> None:
+    # The refusal used to be reachable only through workspace-write. Re-keying it on "the plan keeps
+    # Bash" is what makes it fire here too: a shell that cannot be sandboxed is not run at all.
+    with pytest.raises(ProviderError) as excinfo:
+        resolve_claude_tools(
+            "read-only", SandboxCapability.LINUX_MISSING_DEPS, False, git_evidence=True
+        )
+    assert excinfo.value.error_class is ErrorClass.CAPABILITY_UNAVAILABLE
+    assert "bubblewrap+socat" in str(excinfo.value)
+    # ...and under strict_isolation: false the operator keeps it, unsandboxed.
+    plan = resolve_claude_tools(
+        "read-only",
+        SandboxCapability.LINUX_MISSING_DEPS,
+        False,
+        strict_isolation=False,
+        git_evidence=True,
+    )
+    assert "Bash" in plan.tools
+    assert plan.needs_sandbox is False
+
+
+def test_workspace_write_platform_behavior_is_unchanged_by_the_re_keying() -> None:
+    # Bash is in the workspace-write baseline, so "profile == workspace-write" and "the plan keeps
+    # Bash" select the same arm. Pinned so the re-keying cannot regress the existing profile.
+    assert resolve_claude_tools("workspace-write", SandboxCapability.MACOS, False).needs_sandbox
+    assert resolve_claude_tools(
+        "workspace-write", SandboxCapability.LINUX_AVAILABLE, False
+    ).needs_sandbox
+    dropped = resolve_claude_tools("workspace-write", SandboxCapability.NATIVE_WINDOWS, False)
+    assert "Bash" not in dropped.tools
+    assert dropped.tools == ("Read", "Glob", "Grep", "Edit", "Write")
+    with pytest.raises(ProviderError):
+        resolve_claude_tools("workspace-write", SandboxCapability.LINUX_MISSING_DEPS, False)
+
+
+def test_argv_puts_names_in_tools_and_patterns_in_allowed_tools(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(
+        claude_config,
+        make_request(permission_profile="read-only", git_evidence=True),
+        denied=DENIED,
+    )
+    tools = argv[argv.index("--tools") + 1].split(",")
+    allowed = argv[argv.index("--allowedTools") + 1].split(",")
+    # --tools is the hard existence gate and takes bare names only; a pattern there would be read
+    # as a tool that does not exist.
+    assert tools == ["Read", "Glob", "Grep", "Bash"]
+    assert not any("(" in name for name in tools)
+    # --allowedTools carries the patterns, and a bare `Bash` must NOT be in it: a bare name
+    # auto-approves every invocation of that tool and overrides its own narrower pattern, which
+    # would hand back exactly the unrestricted shell the patterns exist to prevent.
+    assert "Bash" not in allowed
+    assert "Bash(git log:*)" in allowed
+    assert allowed[:3] == ["Read", "Glob", "Grep"]  # unscoped tools keep their bare names
+    # The denied-commands floor is untouched and still beats any allow.
+    disallowed = argv[argv.index("--disallowedTools") + 1]
+    assert "Bash(git commit:*)" in disallowed
+    assert "Bash(git push:*)" in disallowed
+
+
+def test_argv_is_byte_identical_for_a_node_that_does_not_declare_the_grant(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # The regression the split has to satisfy: with no patterns, --tools and --allowedTools carry
+    # the same joined string they always have. Checked on both profiles.
+    for profile in ("read-only", "workspace-write"):
+        req = make_request(permission_profile=profile, write_guard=_write_guard())
+        argv = _argv(claude_config, req, internal_deny=_INTERNAL_DENY, denied=DENIED)
+        assert argv[argv.index("--tools") + 1] == argv[argv.index("--allowedTools") + 1]
+
+
+def test_granted_read_only_shell_write_denies_the_whole_clone(tmp_path: Path) -> None:
+    # What keeps such a node read-only is the sandbox, not the verb list: the clone root is
+    # write-denied, so a command the allowlist somehow let through still cannot change the repo.
+    settings = build_sandbox_settings(
+        _deny_policy(),
+        None,  # a read-only attempt carries no write_guard
+        network_access=False,
+        deny_write_root=Path("/repo"),
+    )["sandbox"]
+    assert "/repo" in settings["filesystem"]["denyWrite"]
+    assert settings["allowUnsandboxedCommands"] is False
+
+
+def test_sandbox_settings_unchanged_when_no_deny_write_root_is_passed() -> None:
+    policy = _deny_policy()
+    assert build_sandbox_settings(
+        policy, _write_guard(), network_access=False
+    ) == build_sandbox_settings(policy, _write_guard(), network_access=False, deny_write_root=None)

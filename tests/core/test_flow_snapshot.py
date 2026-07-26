@@ -771,3 +771,49 @@ def test_nodes_by_id_is_readonly(impl_snap: FlowSnapshot) -> None:
 def test_source_path_recorded(impl_snap: FlowSnapshot) -> None:
     assert impl_snap.source_path is not None
     assert impl_snap.source_path.name == "implementation.yaml"
+
+
+def test_agent_git_evidence_tristate(tmp_path: Path) -> None:
+    # Same tri-state parse as network_access: an omitted field must stay None rather than being
+    # coerced to False, so "did not ask" and "explicitly declined" remain distinguishable.
+    def _ge(value: str) -> str:
+        return _VALID_BODY.replace(_RF, _RF + f"      git_evidence: {value}\n")
+
+    for body, expected in ((_ge("true"), True), (_ge("false"), False), (_VALID_BODY, None)):
+        node = load_flow(_write(tmp_path, body)).nodes_by_id["a"]
+        assert isinstance(node, AgentNode)
+        assert node.git_evidence is expected
+
+
+def test_evaluator_git_evidence_tristate(tmp_path: Path) -> None:
+    def _ev_flow(line: str) -> str:
+        return (
+            "flow:\n"
+            "  name: t\n"
+            "  task_type: t\n"
+            "  permission_ceiling: workspace-write\n"
+            "  output_policy: code_change\n"
+            "  publishing: pull_request\n"
+            "  nodes:\n"
+            "    - id: work\n"
+            "      kind: agent\n"
+            "      role_file: roles/work.md\n"
+            "    - id: check\n"
+            "      kind: evaluator\n"
+            "      role: review\n"
+            "      role_file: roles/review.md\n"
+            f"{line}"
+            "  edges:\n"
+            "    - { from: work, to: check }\n"
+        )
+
+    for line, expected in (
+        ("      git_evidence: true\n", True),
+        ("      git_evidence: false\n", False),
+        ("", None),
+    ):
+        p = tmp_path / "ev_ge.yaml"
+        p.write_text(_ev_flow(line))
+        ev = load_flow(p).nodes_by_id["check"]
+        assert isinstance(ev, EvaluatorNode)
+        assert ev.git_evidence is expected

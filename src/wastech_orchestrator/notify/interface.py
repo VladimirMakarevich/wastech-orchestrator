@@ -21,6 +21,12 @@ AskFailure = Literal["timeout", "transport_error", "invalid_response"]
 #: vocabulary) so producer and transport share one source of truth.
 TRACE_REWORK_EXHAUSTED = "accept (rework budget exhausted)"
 
+#: Synthetic ``send_trace`` outcome label for a read-only node holding the git-evidence grant that
+#: changed the working tree — something its sandbox is supposed to make impossible. The node still
+#: finished (``done``) and the run continues; the ⚠️ says the read-only guarantee did not hold and
+#: the tree needs a look. Same producer/transport split as :data:`TRACE_REWORK_EXHAUSTED`.
+TRACE_READ_ONLY_WRITE = "done (read-only node wrote to the workspace)"
+
 #: Maps an internal terminal reason / loop ``limit_name`` (:mod:`core.flow.engine`) to one human
 #: sentence for the operator-facing terminal notification (VF-22). These tokens are code-path
 #: identifiers, never written to be read; :func:`terminal_reason_prose` turns the known ones into

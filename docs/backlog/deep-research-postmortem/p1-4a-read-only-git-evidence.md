@@ -1,8 +1,51 @@
 # P1.4a — read-only git evidence for an audit node
 
-Priority: **P2** (execution position: **next, ahead of P2.8** — operator decision 2026-07-26) Status: **accepted** Date: 2026-07-26 Source: [p1-4](p1-4-audit-coverage-gate.md) change 3, [postmortem.md](postmortem.md) DR-7 sub-defect 1
+Priority: **P2** (execution position: **next, ahead of P2.8** — operator decision 2026-07-26) Status: **implemented** Date: 2026-07-26 Source: [p1-4](p1-4-audit-coverage-gate.md) change 3, [postmortem.md](postmortem.md) DR-7 sub-defect 1
 
 Spun out of [P1.4](p1-4-audit-coverage-gate.md), which shipped changes 1 and 2 and deferred change 3. This document exists because the deferred piece is not a flag: it changes what `read-only` **means**, and four separate places in the orchestrator currently rely on the old meaning.
+
+## Implemented
+
+Open items, watch items and deliberate non-goals left behind by this work are carried in the campaign's [follow_ups.md](follow_ups.md) — the `.git`-drift reading below is the one that wants an operator yes/no.
+
+All five changes, plus the declaration on the three `deep_research` analysis nodes this document was written about. The grant ships **inert**: `security.allow_git_evidence` defaults to `false`, so a declaring flow validates, loads and runs exactly as it did before.
+
+### The probe first: `--allowedTools` patterns are enforced in the allow direction
+
+The one thing this design rested on and nobody had checked. Four probes against a real `claude` 2.1.217 in a throwaway git repo, all under the argv the adapter builds (`--permission-mode dontAsk`, `--setting-sources ""`, `--strict-mcp-config`):
+
+1. **A `Bash` call matching no pattern is auto-denied.** `--tools Read,Glob,Grep,Bash --allowedTools "Read,Glob,Grep,Bash(git log:*)"`, asked to run `echo PWNED > pwned.txt`: the tool result came back `is_error`, tagged `"non_execution_kind": "permission-rule"`, the terminal event listed the call under `permission_denials`, and no file appeared. This is the behavior the grant needs, so the Claude half stands as designed rather than falling back to "sandbox only".
+2. **A matching pattern is auto-approved.** `git log --oneline -1` ran clean with `permission_denials: []` — the capability is real, not merely un-denied.
+3. **A bare tool name in `--allowedTools` overrides its own narrower pattern.** With `--allowedTools "Read,Glob,Grep,Bash,Bash(git log:*)"` the same `echo PWNED > …` **succeeded** and the file was created. This one contradicts §1 of this document and is the reason the implementation deviates from it — see below.
+4. **A compound command riding a matching prefix is denied.** `git log --oneline -1 && echo PWNED_D > pwned_d.txt` was refused outright, so the matcher is not a naive prefix test.
+
+### Deviation from §1: the two lists must be disjoint per tool, not concatenated
+
+§1 says `build_claude_argv` joins `plan.tools` into `--tools` and `plan.tools + plan.allow_patterns` into `--allowedTools`. Probe 3 shows that would ship a fully open shell: the bare `Bash` in the auto-approve list wins over `Bash(git log:*)` sitting beside it, and every command would be approved. Implemented instead as `ClaudeToolPlan.allowed_tools`, which drops any tool name that a pattern scopes and appends the patterns: `--tools` gets `Read,Glob,Grep,Bash`, `--allowedTools` gets `Read,Glob,Grep,Bash(git log:*),…`. A plan that scopes nothing produces the identical joined string on both flags, so today's argv is byte-for-byte unchanged — pinned by a test on both profiles.
+
+### The rest, as specified
+
+- **§2 re-keying.** `resolve_claude_tools` now branches on `"Bash" in tools` rather than on the profile name, and takes a `git_evidence` flag. Workspace-write is unaffected (Bash is in its baseline, so the same arm is selected); a granted read-only node now gets the OS sandbox on a sandbox host, the `LINUX_MISSING_DEPS` refusal on a Linux/WSL2 host without `bwrap`+`socat`, and the Bash drop on native Windows under `strict_isolation`. The grant is guarded on `"Bash" not in tools`, so on workspace-write it is a no-op — scoping a shell that is already unscoped would be a restriction wearing the name of a capability.
+- **§3 read-only-ness.** `build_sandbox_settings` grew `deny_write_root`; the adapter passes the clone root for a read-only attempt, so the sandbox — not the allowlist — is what holds the node to reading. The git control-state fingerprint is now captured for "this attempt can execute commands" (`_can_run_commands`) rather than for workspace-write alone. `_apply_post_edit_guard` stays off.
+- **§4 declaration surface.** Per-node tri-state `git_evidence` on agent and evaluator nodes (schema, snapshot loader with a shared `_parse_tristate`, validator, ceiling check) plus `security.allow_git_evidence`, default off, wired through the loader, the config writer, `config.example.yaml`, `preflight`, the run log, and the config reference. `resolve_git_evidence(node_value, allowed)` is the single place both halves are required. The verb list is P1.4's, unchanged, and `security.denied_commands` is untouched.
+- **§5 documentation.** `guide/flows/reference.md` gained a "Read-only git evidence" section that states the observable contract — history readable, repository unchangeable, nothing published — and then says plainly that Claude reaches it with an allowlist plus an OS sandbox while Codex reaches it with the sandbox alone. No symmetric verb list is claimed anywhere. The rest of the shipped guide follows the field where it already tracks its siblings: the node-field tables and the `roles.md` evaluator note, the `flows/README.md` foot-guns and the `config/README.md` security bullets, and the three authoring skills (`worc-flow-tune`'s knob list, `worc-config`'s safe-defaults checklist, `worc-flow`'s do-not-over-grant rule — the last one steers an author away from the workaround this document rejected, raising an audit node to `workspace-write` just to get a shell).
+
+### Decisions taken during implementation
+
+- **A stray write warns; `.git` drift still parks.** Operator decision 2 says a read-only node with a shell must never park the task, and that is implemented for a **working-tree write**: `NodeOutcome.read_only_write` drives a console warning plus a ⚠️ `TRACE_READ_ONLY_WRITE` trace, the outcome stays `done`, and nothing downstream is handed the change. Git **control-state** drift is left on its existing path (`NodeManualRequired`). The two are different events: a stray file is the accident decision 2 is about, while a rewritten `.git/config` or hook is the WRI-009 security violation this document's §1 named as an unwatched hole — and §1 asks for the fingerprint so drift "is still detected", which is only meaningful if detection still acts. Downgrading it here would weaken an existing invariant for exactly the node class that just gained a shell. Flagged rather than assumed: if the intent was that even `.git` poisoning only warns, that is a one-line change at the compare site.
+- **The write check is before-versus-after, not "is the tree dirty".** An absolute check would blame a granted read-only node for a diff an earlier `workspace-write` node left behind. The change set is snapshotted before the node runs and compared after, and only for a node that actually holds the grant — nothing else pays for the two `git` calls.
+- **`git_evidence` on a workspace-write node is a validation error.** It would be inert there (see §2 above), and a flag that silently does nothing reads as protection. The message points at the fix.
+- **`--allowedTools` joined `_REQUIRED_CLAUDE_FLAGS`.** The confinement of a granted shell rests on that flag, and the adapter already passes it unconditionally, so a CLI that dropped it was going to fail at runtime anyway — the preflight probe now catches it before a paid call. This is the "probe at preflight" §4 asks for; the _semantics_ question above is a fact about the CLI that a `--help` grep cannot answer, so it was settled by the manual probes and recorded here.
+- **The three `deep_research` analysis nodes declare it.** They are the nodes this document was written about, and leaving the capability reachable-but-unused would mean hand-editing a packaged flow to get any benefit. Inert by default. Their prompts' capability-conditional "delivery evidence" wording is deliberately **left as it is** — it stays correct after the grant, since the same flow still runs without a shell whenever the switch is off, the provider is Claude on native Windows, or the node is routed somewhere without a sandbox.
+
+### Deliberately not done
+
+- **No `isolation_reasons` arm for the grant.** That preflight sees only provider config and cannot tell whether any node declares `git_evidence`, so keying it on the switch alone would fail preflight for runs that never use the capability. The host check that matters is per-attempt and already lives in the adapter, with the declaration in hand. Reasoning recorded in `security/isolation.py`.
+- **Codex untouched.** No code change; a test pins that its profile is unchanged _and why_ — three keys, no verb dimension, workspace mounted `read`, network off, which is a stronger mutation ban than any allowlist.
+- **No evaluator-side write detection.** The field is accepted on evaluator nodes and reaches the request, but the before/after tree comparison lives in the agent runner only, as §3 describes. An evaluator with a granted shell is protected by the same sandbox; it just would not produce the warning if that sandbox failed.
+- **The `None` / `False` distinction on the node field carries no behavior.** Both mean "did not ask". The tri-state is the shape operator decision 1 called for and mirrors `network_access`; a flow-wide default would be the thing that gives `False` its own meaning, and no flow needs one.
+
+Doc impact for the `main` refresh: a new `security.*` key and a new per-node flow field (`configuration.md`, the flow-authoring page), and the read-only permission profile no longer implies "no shell" (`worc_architecture.md`, `glossary.md`).
 
 ## Problem
 

@@ -59,6 +59,14 @@ class AgentNode:
     #: this node alone; ``None`` (default) inherits the flow's ``network_policy`` default. Toggles
     #: only the network dimension — never the filesystem permission ceiling.
     network_access: bool | None = None
+    #: ask for the read-only git verbs so this node can inspect delivery history (an audit node
+    #: citing a commit rather than grepping a changelog). ``True`` requests the grant; ``False`` and
+    #: ``None`` (default) do not. The request is only ever honored when the operator's
+    #: ``security.allow_git_evidence`` is on — with it off a declaring node is accepted and inert,
+    #: which is what keeps a flow from widening the envelope on its own. Grants reading only: the
+    #: verbs cannot mutate, the sandbox write-denies the clone, and publishing stays the
+    #: orchestrator's.
+    git_evidence: bool | None = None
     #: which provider runs this node; None → the config's global primary (PRE.1). Validated against
     #: ``agents.allowed`` at preflight; never relaxes the security ceiling.
     provider: ProviderId | None = None
@@ -94,6 +102,9 @@ class EvaluatorNode:
     #: per-node override of the flow-wide network grant (see :class:`AgentNode`); ``None`` inherits
     #: the flow's ``network_policy`` default. Toggles only the network dimension.
     network_access: bool | None = None
+    #: ask for the read-only git verbs (see :class:`AgentNode`); honored only when the operator's
+    #: ``security.allow_git_evidence`` is on. An evaluator stays read-only either way.
+    git_evidence: bool | None = None
     blocking: bool = True
     #: Per-instance rework ceiling for a NON-blocking evaluator (e.g. ``test_quality``): after this
     #: many rework verdicts it accepts (→ continue) instead of looping. Ignored when ``blocking`` is

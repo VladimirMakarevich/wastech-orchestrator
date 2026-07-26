@@ -89,6 +89,7 @@ _AGENT_FIELDS = frozenset(
         "lineage_affinity",
         "permission_profile",
         "network_access",
+        "git_evidence",
         "provider",
         "model",
         "reasoning",
@@ -111,6 +112,7 @@ _EVALUATOR_FIELDS = frozenset(
         "session_scope",
         "permission_profile",
         "network_access",
+        "git_evidence",
         "blocking",
         "max_rework_per_stage",
         "gate_severity",
@@ -193,14 +195,16 @@ def _reject_unknown(raw: dict[str, Any], allowed: frozenset[str], ctx: str) -> N
         raise FlowLoadError(f"unknown field(s) {extra} in {ctx} (fail-closed)")
 
 
-def _parse_network_access(raw: dict[str, Any]) -> bool | None:
-    """Tri-state per-node ``network_access``: ``None`` (omitted ⇒ inherit) vs explicit ``bool``.
+def _parse_tristate(raw: dict[str, Any], key: str) -> bool | None:
+    """A tri-state per-node capability flag: ``None`` (omitted) vs an explicit ``bool``.
 
-    ``None`` must be preserved as "inherit the flow default" — ``bool(None)`` is ``False``, which
-    would silently turn inherit into an explicit deny.
+    ``None`` must be preserved rather than coerced — ``bool(None)`` is ``False``, which would turn
+    "omitted" into an explicit deny and lose the distinction the caller resolves against its own
+    default (``network_access`` inherits the flow's ``network_policy``; ``git_evidence`` does not
+    inherit anything today, but is parsed the same way so both fields read alike).
     """
-    na = raw.get("network_access")
-    return None if na is None else bool(na)
+    value = raw.get(key)
+    return None if value is None else bool(value)
 
 
 def _parse_skills(raw: Any, ctx: str) -> tuple[str, ...]:
@@ -392,7 +396,8 @@ def _parse_agent_node(raw: dict[str, Any]) -> AgentNode:
         session_scope=_enum(SessionScope, ss_raw, ctx),
         lineage_affinity=raw.get("lineage_affinity") or None,
         permission_profile=permission_profile,
-        network_access=_parse_network_access(raw),
+        network_access=_parse_tristate(raw, "network_access"),
+        git_evidence=_parse_tristate(raw, "git_evidence"),
         provider=provider,
         model=raw.get("model") or None,
         reasoning=raw.get("reasoning") or None,
@@ -438,7 +443,8 @@ def _parse_evaluator_node(raw: dict[str, Any], defaults: EvaluatorDefaults) -> E
         role_file=role_file,
         session_scope=_enum(SessionScope, ss_raw, ctx),
         permission_profile=_enum(PermissionProfile, pp_raw, ctx),
-        network_access=_parse_network_access(raw),
+        network_access=_parse_tristate(raw, "network_access"),
+        git_evidence=_parse_tristate(raw, "git_evidence"),
         blocking=bool(raw.get("blocking", True)),
         max_rework_per_stage=int(raw.get("max_rework_per_stage", defaults.max_rework_per_stage)),
         gate_severity=_parse_gate_severity(raw.get("gate_severity", defaults.gate_severity), ctx),

@@ -443,6 +443,20 @@ def _check_ceiling(snap: FlowSnapshot) -> list[Violation]:
                     c(f"agent {node.id!r}: extra_args {reason}")
                     for reason in find_forbidden_args(list(node.extra_args))
                 )
+            if node.git_evidence and (node.permission_profile or ceiling) is (
+                PermissionProfile.WORKSPACE_WRITE
+            ):
+                # The grant adds a shell to a profile that has none. A workspace-write node already
+                # has an unscoped one, so the declaration would buy nothing there — and narrowing
+                # that shell to the git verbs is the opposite of what the field means. Rejected
+                # rather than ignored: a flag that silently does nothing reads as protection.
+                errs.append(
+                    c(
+                        f"agent {node.id!r}: git_evidence applies only to a read-only node; a "
+                        "workspace-write node already has an unrestricted shell (drop the field, "
+                        "or set permission_profile: read-only)"
+                    )
+                )
             _check_path(node.id, node.role_file, errs)
 
     # Flow-local supervisor prompt files are flow-dir-contained, exactly like a node role_file: a

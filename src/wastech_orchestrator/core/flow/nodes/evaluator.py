@@ -37,7 +37,11 @@ from wastech_orchestrator.core.flow.context_paths import (
     build_node_output_paths,
     build_path_context,
 )
-from wastech_orchestrator.core.flow.contracts import SessionScope, resolve_network_access
+from wastech_orchestrator.core.flow.contracts import (
+    SessionScope,
+    resolve_git_evidence,
+    resolve_network_access,
+)
 from wastech_orchestrator.core.flow.engine import Finding, NodeContext, NodeOutcome, NodeResult
 from wastech_orchestrator.core.flow.nodes.base import (
     EvaluatorInfraError,
@@ -356,6 +360,9 @@ class EvaluatorNodeRunner:
             network_access=resolve_network_access(
                 node.network_access, ctx.snapshot.doc.network_policy
             ),
+            # The read-only git verbs, when this evaluator asked for them AND the operator enabled
+            # the grant. Reading only: the evaluator stays read-only on the filesystem either way.
+            git_evidence=resolve_git_evidence(node.git_evidence, self._s.allow_git_evidence),
             # VF-7 defense-in-depth: the Core-owned advisory security contract, threaded via
             # NodeServices; the neutral seam prepends it to the effective prompt.
             security_preamble=self._s.security_preamble,

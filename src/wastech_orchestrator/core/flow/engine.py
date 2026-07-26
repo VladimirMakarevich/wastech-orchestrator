@@ -127,6 +127,12 @@ class NodeOutcome:
     still open. The engine never inspects it (``accept`` is ``accept`` for routing); the
     orchestrator's post-node hook surfaces it as an operator warning + Telegram trace so a human
     knows the stage moved on and may need follow-up.
+
+    ``read_only_write`` is the same shape of signal for a different event: a read-only node holding
+    the git-evidence grant changed the working tree, which the provider's sandbox is supposed to
+    make impossible. The outcome stays ``done`` and the run continues — the grant buys an audit node
+    real history, and parking a task over a stray file would trade that for a hypothetical — but the
+    post-node hook warns the operator through the same console + ⚠️ trace surface.
     """
 
     kind: str
@@ -134,6 +140,7 @@ class NodeOutcome:
     structured_output: Mapping[str, object] | None = None
     final_message: str | None = None
     rework_exhausted: bool = False
+    read_only_write: bool = False
 
 
 def skip_outcome(node: FlowNode) -> NodeOutcome:

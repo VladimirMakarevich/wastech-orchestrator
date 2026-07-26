@@ -4398,3 +4398,96 @@ def test_stale_foreign_exchange_goes_manual_not_crash(
     assert not _ran_nodes(store, "task-h1")  # no node launched over the dirty exchange
     assert task.cleanup_last_error is not None and "task-OTHER" in task.cleanup_last_error
     assert ledger.records()[0]["final_status"] == "manual_action_required"
+
+
+_GIT_EVIDENCE_FLOW = """
+flow:
+  name: implementation
+  task_type: implementation
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: pull_request
+  nodes:
+    - id: implementation
+      kind: agent
+      role_file: roles/implementation.md
+      session_scope: editing_lineage
+      permission_profile: workspace-write
+    - id: audit
+      kind: agent
+      role_file: roles/audit.md
+      permission_profile: read-only
+      git_evidence: true
+    - id: publish
+      kind: publish
+      policy: pull_request
+  edges:
+    - { from: implementation, to: audit }
+    - { from: audit, to: publish }
+  budgets:
+    global_fix_iterations: 30
+"""
+
+
+def test_read_only_node_that_writes_warns_operator_and_never_parks_the_task(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # A read-only node holding the git-evidence grant is held to reading by the provider's sandbox
+    # (the whole clone is write-denied). If a write lands anyway the operator is told — console
+    # warning + the ⚠️ trace — and the run continues to DONE. It is never parked in
+    # manual_action_required: the grant exists so an audit node can read delivery history, and
+    # trading that for a stray file would be the wrong bargain.
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+    from wastech_orchestrator.notify import TRACE_READ_ONLY_WRITE
+
+    flows = tmp_path / "flows"
+    (flows / "roles").mkdir(parents=True)
+    (flows / "roles" / "implementation.md").write_text("Implement {task_path}.", "utf-8")
+    (flows / "roles" / "audit.md").write_text("Audit the change.", "utf-8")
+    (flows / "implementation.yaml").write_text(_GIT_EVIDENCE_FLOW, "utf-8")
+
+    providers = _both()
+    notifier = RecordingNotifier()
+    orch, _store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+        config_kwargs={"telegram_trace": True, "allow_git_evidence": True},
+    )
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
+
+    # The implementation node writes legitimately; the audit node then writes too — the case the
+    # sandbox is supposed to prevent, simulated here because the fake provider has no sandbox.
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        if request.node_id == "audit":
+            assert request.git_evidence is True  # the grant reached the provider
+            (git_repo.clone / "stray.txt").write_text("should not exist\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    messages: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    logger = logging.getLogger("wastech_orchestrator")
+    handler = _Collect()
+    logger.addHandler(handler)
+    try:
+        result = orch.run_task(_complete_task(tmp_path, "task-row"))
+    finally:
+        logger.removeHandler(handler)
+
+    assert result.final_status is Status.DONE  # warned, not parked
+    audit_traces = [c["outcome"] for c in notifier.trace_calls if c["node_id"] == "audit"]
+    assert audit_traces == [TRACE_READ_ONLY_WRITE]
+    assert any("changed the working tree" in m for m in messages)

@@ -162,6 +162,7 @@ from wastech_orchestrator.memory import (
     ensure_store,
 )
 from wastech_orchestrator.notify import (
+    TRACE_READ_ONLY_WRITE,
     TRACE_REWORK_EXHAUSTED,
     Notifier,
     NullNotifier,
@@ -2247,6 +2248,9 @@ class Orchestrator:
             # "auto"). protected_paths is global-only (no per-task override).
             trust_level=(p.task.trust_level or self._config.security.trust_level),
             protected_paths=self._config.security.protected_paths,
+            # Operator-only, like protected_paths: a task cannot turn the git-evidence grant on, and
+            # neither can a flow — a node's declaration is honored only while this is true.
+            allow_git_evidence=self._config.security.allow_git_evidence,
             # VF-7 defense-in-depth: the Core-owned advisory security contract, resolved once from
             # config; the neutral seam prepends it to every agent/evaluator prompt.
             security_preamble=self._security_preamble(),
@@ -2453,6 +2457,14 @@ class Orchestrator:
                     "disable_read_isolation": self._config.security.disable_read_isolation,
                     "strict_isolation": self._config.security.strict_isolation,
                 },
+            )
+        if self._config.security.allow_git_evidence:
+            # Same reasoning as the read-isolation announce above: an optional capability that
+            # widens what a node may execute is stated in the run log rather than left implicit.
+            self._log(p.task.id).info(
+                "git-evidence ON — a node declaring git_evidence may run the read-only git verbs "
+                "to inspect delivery history; the repository stays unwritable (the sandbox denies "
+                "writes) and commit/push/PR stay the orchestrator's alone"
             )
         if self._config.security.strict_isolation:
             reasons = check_isolation(self._config, self._isolation_checks)
@@ -3201,12 +3213,28 @@ class Orchestrator:
                         "findings": len(outcome.findings),
                     },
                 )
+            # A read-only node holding the git-evidence grant that changed the working tree: its
+            # sandbox write-denies the whole clone, so this means that enforcement did not hold.
+            # Warn and keep going — the node's own outcome stays `done` and the task is never parked
+            # over it, because the grant exists so an audit node can read history and a stray file
+            # is not worth trading that for. The change is not consumed by anything downstream.
+            if outcome.read_only_write:
+                self._log(p.task.id).warning(
+                    "a read-only node with the git-evidence grant changed the working tree — "
+                    "continuing; inspect the tree, the sandbox should have denied this",
+                    extra={"stage": node.id},
+                )
             # Best-effort live progress trace: one message per executed node finish (never on a
             # skip). Gated on the flag alone — when Telegram is off the notifier is a NullNotifier
             # and this is a no-op. Carries only node id + outcome (no secrets); never raises. A
-            # budget-exhausted accept traces as the ⚠️ TRACE_REWORK_EXHAUSTED label, not a clean ✅.
+            # budget-exhausted accept traces as the ⚠️ TRACE_REWORK_EXHAUSTED label, not a clean ✅;
+            # so does a read-only node that wrote (TRACE_READ_ONLY_WRITE).
             if self._config.telegram.trace:
-                trace_outcome = TRACE_REWORK_EXHAUSTED if rework_exhausted else outcome.kind
+                trace_outcome = outcome.kind
+                if rework_exhausted:
+                    trace_outcome = TRACE_REWORK_EXHAUSTED
+                elif outcome.read_only_write:
+                    trace_outcome = TRACE_READ_ONLY_WRITE
                 self._notifier.send_trace(task_id=p.task.id, node_id=node.id, outcome=trace_outcome)
             # Chronological per-run index: one line per executed node run of every kind, so an
             # operator can read a re-running node's sequence without listing run-*/ dirs. Runs that
