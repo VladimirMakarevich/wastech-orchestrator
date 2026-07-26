@@ -605,13 +605,11 @@ class PromptVarWarning:
 def lint_prompt_variables(snapshot: FlowSnapshot) -> list[PromptVarWarning]:
     """Scan every node role file for ``{name}`` / ``{?name}`` tokens outside the flow's valid-set.
 
-    The valid-set is **flow-derived** and **node-kind-aware**, matching each node's real effective
-    allowlist: an **agent** node is checked against :func:`~.prompt_vars.valid_prompt_vars` (core
-    allowlist ∪ every agent node's ``{<id>_path}``), so referencing an upstream node's output by id
-    is fine; an **evaluator** node is checked against the core :data:`ALLOWED_PROMPT_VARS` alone
-    (the generic ``{<id>_path}`` channel does not extend to evaluators — they render it verbatim, so
-    it *should* be flagged). Either way a typo (``{plna_path}``) or a ``{X_path}`` naming no node is
-    reported (file + token) as rendering verbatim.
+    The valid-set is **flow-derived**, matching each node's real effective allowlist: an **agent**
+    or **evaluator** node is checked against :func:`~.prompt_vars.valid_prompt_vars` (core allowlist
+    ∪ every agent/tool node's ``{<id>_path}``), so referencing an upstream node's output by id is
+    fine from either kind. A typo (``{plna_path}``) or a ``{X_path}`` naming no node is reported
+    (file + token) as rendering verbatim.
 
     The flow-local **supervisor** prompts (``supervisor.{role_file, finalize_role_file,
     handoff_role_file}``) are role files too, scanned against the tiny set the supervisor actually
@@ -634,7 +632,11 @@ def lint_prompt_variables(snapshot: FlowSnapshot) -> list[PromptVarWarning]:
         role_file = getattr(node, "role_file", None)
         if not isinstance(role_file, str):
             continue  # checks / hitl / publish nodes carry no prompt template
-        allowed = flow_allowed if isinstance(node, AgentNode) else ALLOWED_PROMPT_VARS
+        # Both kinds that carry a ``role_file`` render the flow-derived set; a future kind that
+        # grows one would render the core set alone until its runner opts in.
+        allowed = (
+            flow_allowed if isinstance(node, AgentNode | EvaluatorNode) else ALLOWED_PROMPT_VARS
+        )
         try:
             template = read_role_file(flow_dir, role_file)
         except RoleFileError:

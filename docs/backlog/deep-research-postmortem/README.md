@@ -1,6 +1,6 @@
 # `deep_research` post-mortem campaign (2026-07-25)
 
-Status: **in progress — steps 1-4 implemented (P0.1, P0.3, P0.2, P1.6); P1.5, P1.4, P1.7, P2.8, P2.9, P3.10 open** Date: 2026-07-25 Owner: Vladimir Makarevich
+Status: **in progress — steps 1-4 + P1.4 implemented (P0.1, P0.3, P0.2, P1.6, P1.4); P2.8 piece 2 shipped early with P1.4; P1.5, P1.7, P2.9, P3.10 open** Date: 2026-07-25 Owner: Vladimir Makarevich
 
 This folder groups everything that came out of the post-mortem of `p9-09-full-solution-deep-audit`, the **first and only production run of the `deep_research` flow**, into a single campaign with one execution order. The analysis is in [postmortem.md](postmortem.md); the files below are the implementable tasks it produced.
 
@@ -36,11 +36,11 @@ Plus one defect that is actively corrupting data rather than losing signal: the 
 | P0.1 | ✅ [Make a `medium` evaluator finding gate](p0-1-evaluator-gate-severity.md) | `gate_severity: medium` on `critical_review`; restore the deleted header comment; reconcile `critic.md` with the shipped rubric | **one line** | flow (+ packaged default) |
 | P0.2 | ✅ [Surface an accepting evaluator's findings](p0-2-evaluator-findings-surfacing.md) | Pass `final_message` through so findings reach `summary.json` and the PR body; forward `outcome.findings` to the supervisor | one line + merge | orchestrator |
 | P0.3 | ✅ [Fix the redaction false positive](p0-3-redaction-false-positive.md) | Align `_ASSIGNMENT` with the segment policy; redact decoded values, not the serialized line | small | orchestrator |
-| P1.4 | [Split the analysis node, add a coverage gate](p1-4-audit-coverage-gate.md) | Three sequential analysis nodes with narrow remits + a `coverage_gate` evaluator that demands a traced property per subsystem | new nodes/files | flow + role prompts |
+| P1.4 | ✅ [Split the analysis node, add a coverage gate](p1-4-audit-coverage-gate.md) | Three sequential analysis nodes with narrow remits + a `coverage_gate` evaluator that demands a traced property per subsystem (the read-only git grant is deferred — see the item) | new nodes/files | flow + role prompts |
 | P1.5 | [Fix the research role prompts](p1-5-research-role-prompts.md) | Verifier rubric + full `sources.json` coverage + an under-claiming watch-item; drop the critic's false promises; class-sweep for producers | prompt edits | prompts (target + packaged) |
 | P1.6 | ✅ [Make the cited line authoritative](p1-6-citation-checker-strictness.md) | Drop the `or` fallback (or emit `weak`); a missing snippet is `uncheckable`; publish `citation.json` on the pass path too | small | orchestrator |
 | P1.7 | [Give `deep_research` its own finalize lens](p1-7-research-finalize-summary.md) | `supervision.finalize_role_file` + a no-fabrication rule + feed it the evaluator findings | prompt + flow | packaged flow |
-| P2.8 | [Let a node's real output cross the edge](p2-8-node-output-handoff.md) | Publish the produced file, not the sign-off; give evaluators the node-output channel; optionally an upstream footer slot | medium | orchestrator |
+| P2.8 | [Let a node's real output cross the edge](p2-8-node-output-handoff.md) | Publish the produced file, not the sign-off; ✅ give evaluators the node-output channel (shipped with P1.4); optionally an upstream footer slot | medium | orchestrator |
 | P2.9 | [Keep intermediates out of the PR](p2-9-deliverable-containment.md) | Stop instructing `architecture_design` to write notes into the deliverable dir (+ 10g); no commit allowlist — filenames stay the flow author's choice | small | prompt + flow |
 | P3.10 | [Flow and config hygiene](p3-10-flow-and-config-hygiene.md) | Unreachable `refinement`, an always-true gate, dead `resume_own_lineage`, supervisor cost, reasoning trim, target config re-sync | small | flow + config |
 
@@ -55,7 +55,7 @@ The order is mostly free; three dependencies are real.
 | 3 | ✅ P0.2 | — | Complements P0.1: P0.1 makes substantive findings gate, P0.2 makes sub-threshold ones visible. Shipping only P0.1 still hides them. |
 | 4 | ✅ P1.6 | — | Defines what the citation gate actually promises, which P1.5 then writes into the verifier prompt. |
 | 5 | P1.5 | P0.1, P1.6 | Needs the settled rubric (P0.1) and the settled guarantee (P1.6). |
-| 6 | P1.4 | P0.1 | A coverage gate whose findings cannot gate is decorative. |
+| 6 | ✅ P1.4 | P0.1, **P2.8 piece 2** | A coverage gate whose findings cannot gate is decorative — and one that cannot read the analysis it grades is decorative twice over, so P2.8's evaluator node-output channel shipped with it. |
 | 7 | P1.7 | P0.2 | The finalize lens needs findings to render. |
 | 8 | P2.8 | P0.3 | Do not inline content through a redactor that mangles benign identifiers. |
 | 9 | P2.9 | P2.8 | If the node stops writing the blueprint, the blueprint must still reach `synthesis` some other way. |
@@ -63,7 +63,7 @@ The order is mostly free; three dependencies are real.
 
 A useful checkpoint after step 3: **re-run the same task** (`p9-09`) unchanged and diff the outcome. P0.1 + P0.2 alone should turn a silent `accept` into at least one rework round and a visible findings section, with no other change in the flow — the cheapest possible validation that the gating chain works end to end.
 
-**Steps 1-4 are implemented** (see each item's own "Implemented" section for the decisions taken and the gaps found along the way). The checkpoint re-run has **not** been done yet, and it needs one manual step first: the packaged flows are what `worc install` copies, so a target repo's existing `.worc/flows/` still carries the old `gate_severity` default and must be refreshed or hand-edited before the re-run measures anything.
+**Steps 1-4 and P1.4 are implemented** (see each item's own "Implemented" section for the decisions taken and the gaps found along the way). The checkpoint re-run has **not** been done yet, and it needs one manual step first: the packaged flows are what `worc install` copies, so a target repo's existing `.worc/flows/` still carries the old `gate_severity` default — and now also the old single `repository_analysis` node — and must be refreshed or hand-edited before the re-run measures anything.
 
 ## Not in this campaign
 

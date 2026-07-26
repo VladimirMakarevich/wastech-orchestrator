@@ -28,8 +28,10 @@ def node_output_vars(snapshot: FlowSnapshot) -> frozenset[str]:
     Every **agent** node's output is persisted to ``<node_id>.out.md`` and every **tool** node's
     stdout to ``tools/<node_id>/stdout.txt`` (P5); both are addressable downstream as
     ``{<node_id>_path}`` (a path to a Core-written, redacted artifact, never inlined content). Only
-    these two kinds get the generic channel — evaluator / checks / human nodes keep their dedicated
-    variables (``review_path`` / ``checks_path``).
+    these two kinds *produce* the channel — an evaluator / checks / human node exposes nothing here
+    and keeps its dedicated variable (``review_path`` / ``checks_path``). **Reading** it is not
+    restricted to agents: an evaluator role prompt resolves these names too (DR-7 — a gate that
+    judges an upstream node's work must be able to see that work).
     """
     return frozenset(
         f"{node.id}_path" for node in snapshot.doc.nodes if isinstance(node, (AgentNode, ToolNode))

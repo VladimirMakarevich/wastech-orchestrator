@@ -112,6 +112,8 @@ Implement the change.{?analyze_path} Follow the analysis at {analyze_path}.{/ana
 
 One node exposes exactly one output — to publish several results, split into several nodes. A node id (agent or tool — both expose `{<id>_path}`) may not collide with a reserved core-variable prefix (`task`, `plan`, `diff`, `checks`, `review`, `repo`, `skills`, `memory`, `stage`, `subtask*`); that is a fatal load error.
 
+An **`evaluator`** prompt reads the same names, so a gate can judge what an upstream node actually reported rather than only the file a later node wrote from it. The packaged `deep_research` flow uses this for its `coverage_gate`: three analysis passes each publish a report, and the gate opens all three (`{?analysis_core_path}` …) and compares them against the repository before the flow writes a conclusion on top of them.
+
 ## Custom tool nodes (`kind: tool`)
 
 A `tool` node runs **your own** executable (any language) from `.worc/tools/` instead of an LLM — for deterministic logic that is neither "smart" work (`agent`) nor a built-in gate (`checks`). Drop the program at `.worc/tools/<name>` (on POSIX, `chmod +x`; on Windows add a `.cmd`/`.exe` — the resolver finds `<name>.cmd` from the same flow name), or use a built-in tool `install` already delivered (e.g. `check_chapter`, `check_length`), then reference it by name:

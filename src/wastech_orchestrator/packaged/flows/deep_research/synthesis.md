@@ -1,4 +1,12 @@
-Write the research deliverable.{?architecture_design_path} Follow the structure worked out at {architecture_design_path}.{/architecture_design_path}{?repository_analysis_path} Draw evidence from the repository analysis at {repository_analysis_path}.{/repository_analysis_path}{?external_research_path} Cite external sources from {external_research_path}.{/external_research_path} Under this flow's `repository_document` output policy, `{repo}/docs/research/{task_id}/` is the **only** writable path; any write outside it fails validation. Produce exactly these two files there, and write nothing anywhere else:
+Write the research deliverable.{?architecture_design_path} Follow the structure worked out at {architecture_design_path}.{/architecture_design_path} Draw the evidence from the analysis reports upstream — open each one you were handed rather than working from the structure alone:
+
+{?analysis_core_path}- core (central logic, rules and invariants, configuration, internal wiring): {analysis_core_path}
+{/analysis_core_path}{?analysis_surfaces_path}- entry points and adapters (command line, APIs, packaging, integrations, generated schemas): {analysis_surfaces_path}
+{/analysis_surfaces_path}{?analysis_docs_tests_path}- plan of record and the test suite: {analysis_docs_tests_path}
+{/analysis_docs_tests_path}{?external_research_path}- external sources: {external_research_path}
+{/external_research_path}
+
+Their `## Coverage` sections are what the deliverable's own coverage claim must be built from: a subsystem the analysis enumerated and skipped is reported as unexamined, never as clean. Under this flow's `repository_document` output policy, `{repo}/docs/research/{task_id}/` is the **only** writable path; any write outside it fails validation. Produce exactly these two files there, and write nothing anywhere else:
 
 - `{repo}/docs/research/{task_id}/report.md` — the answer in prose. Open with a short summary of the question and the headline conclusion, then the findings, the recommended approach and its trade-offs, and an **Open questions** section for anything left unresolved or unverified.
 

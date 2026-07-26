@@ -50,9 +50,17 @@ flow:
       # timeout_seconds: 7200
       # network_access: false
       # extra_args: []
-    - id: repository_analysis
+    # The repository analysis runs as THREE sequential passes over disjoint surfaces, each with a
+    # fresh context window and a narrow mandatory remit (core → entry points/adapters → plan of
+    # record + tests). One node asked to walk everything self-triages: it goes deep on what it
+    # recognises and labels the rest "no findings" (measured: 18% of the in-scope files opened, with
+    # 93% of the turn budget unused). The remit is what forces even depth — a pass that may only
+    # report on the CLI cannot spend its budget re-reading the core. Roughly flat total cost, since
+    # each pass reads less. For a small question, disable the passes you do not need PER TASK
+    # (`nodes.analysis_surfaces.enabled: false`) rather than editing this graph.
+    - id: analysis_core
       kind: agent
-      role_file: deep_research/repository_analysis.md
+      role_file: deep_research/analysis_core.md
       session_scope: fresh_disposable
       permission_profile: read-only
       network_access: false
@@ -63,6 +71,53 @@ flow:
       # timeout_seconds: 7200
       # network_access: false
       # extra_args: []
+    - id: analysis_surfaces
+      kind: agent
+      role_file: deep_research/analysis_surfaces.md
+      session_scope: fresh_disposable
+      permission_profile: read-only
+      network_access: false
+      # optional overrides (uncomment to pin this node):
+      # provider: claude
+      # model: claude-opus-5
+      # reasoning: high
+      # timeout_seconds: 7200
+      # network_access: false
+      # extra_args: []
+    - id: analysis_docs_tests
+      kind: agent
+      role_file: deep_research/analysis_docs_tests.md
+      session_scope: fresh_disposable
+      permission_profile: read-only
+      network_access: false
+      # optional overrides (uncomment to pin this node):
+      # provider: claude
+      # model: claude-opus-5
+      # reasoning: high
+      # timeout_seconds: 7200
+      # network_access: false
+      # extra_args: []
+    # Measures the audit instead of reading it: every subsystem the task declares must show a
+    # traced property, not a bare "no findings" label. It reads the three passes' own reports
+    # through the `{<node_id>_path}` channel and re-derives their file sets from the repository, so
+    # a thin pass is caught before `synthesis` writes a conclusion on top of it. Its rework edge
+    # re-enters the chain at `analysis_core`, because a gap can sit in any of the three remits and
+    # only the pass that owns it can close it; each pass then works from this gate's findings, so a
+    # re-entry is bounded by the named gaps rather than a second full sweep.
+    - id: coverage_gate
+      kind: evaluator
+      role: verifier
+      role_file: deep_research/coverage.md
+      session_scope: fresh_disposable
+      permission_profile: read-only
+      network_access: false
+      blocking: false
+      max_rework_per_stage: 2
+      # optional overrides (uncomment to pin this evaluator):
+      # provider: claude
+      # model: claude-opus-5
+      # reasoning: high
+      # network_access: false
     - id: external_research
       kind: agent
       role_file: deep_research/external_research.md
@@ -139,8 +194,12 @@ flow:
       policy: documentation_pull_request
 
   edges:
-    - { from: refinement, to: repository_analysis }
-    - { from: repository_analysis, to: external_research }
+    - { from: refinement, to: analysis_core }
+    - { from: analysis_core, to: analysis_surfaces }
+    - { from: analysis_surfaces, to: analysis_docs_tests }
+    - { from: analysis_docs_tests, to: coverage_gate }
+    - { from: coverage_gate, to: external_research, outcome: accept }
+    - { from: coverage_gate, to: analysis_core, outcome: rework, budget: 2 }
     - { from: external_research, to: architecture_design }
     - { from: architecture_design, to: synthesis }
     - { from: synthesis, to: citation_check }

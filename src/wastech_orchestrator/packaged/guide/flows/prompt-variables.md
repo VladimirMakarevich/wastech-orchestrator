@@ -60,6 +60,8 @@ A block whose name is not an allowlisted variable, or an unbalanced `{?a}…{/b}
 
 Every **agent** node's output is automatically persisted (as `<node_id>.out.md`), and every **`tool`** node's redacted stdout too, under that run's `logs/<task-id>/stages/<node_id>/run-<run-id>/` directory. Each is exposed to later nodes as `{<node_id>_path}` — a **path** to that file (never the inlined content). This is how you chain your own nodes: a node reads what an upstream node produced by naming it. No declaration, no config — the channel is derived from the node id. When a node re-runs (a fix loop), every pass is kept and `{<node_id>_path}` resolves to the **latest** run.
 
+Both `agent` and `evaluator` role prompts resolve these names, so an evaluator can judge an upstream node's **work** and not only the file some later node wrote from it — that is how a coverage gate grades the analysis passes it sits behind. Only `agent` and `tool` nodes _produce_ the channel (below).
+
 ```text
 {?analyze_path}Base the implementation on the analysis at {analyze_path}.{/analyze_path}
 ```
@@ -77,7 +79,7 @@ Every **agent** node's output is automatically persisted (as `<node_id>.out.md`)
 - A node id that collides with a reserved core-variable prefix (`task`, `plan`, `diff`, `checks`, `review`, `repo`, `skills`, `memory`, `stage`, or anything starting with `subtask`) — a fatal flow-load error, because `{plan_path}` etc. already mean the core variable.
 - `{X_path}` where `X` names no node in the flow — it renders verbatim (and the lint warns).
 - Expecting **two** named outputs from one node — a node exposes exactly one `{<id>_path}`. A node that fills a special slot (`plan` / `summary` / `enriched_spec` via `output_artifact`) uses that slot's variable (`{plan_path}` …) as its channel and writes **no** `{<id>_path}`.
-- `{<id>_path}` from an **evaluator / checks / human** node — only agent and `tool` nodes expose it; those kinds keep their dedicated `{review_path}` / `{checks_path}`.
+- `{<id>_path}` **of** an evaluator / checks / human node — only agent and `tool` nodes _expose_ one; those kinds publish through their dedicated `{review_path}` / `{checks_path}` instead. (An evaluator prompt may freely _read_ an agent's or tool's `{<id>_path}`.)
 
 ## What the renderer will never do
 

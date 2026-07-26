@@ -1840,6 +1840,100 @@ def test_evaluator_outcome_carries_the_providers_final_message(tmp_path: Path) -
     assert result.outcome.final_message == prose
 
 
+def test_evaluator_resolves_an_upstream_node_output_path(tmp_path: Path) -> None:
+    # DR-7: an evaluator that judges an upstream node's *work* (a coverage gate) has to see that
+    # work. The generic {<id>_path} channel now resolves inside an evaluator role file exactly as it
+    # does for an agent; before, it rendered verbatim and such a gate could only judge the
+    # repository, never the audit of it.
+    (tmp_path / "gate.md").write_text(
+        "Gate.{?scan_path} Read the scan at {scan_path}.{/scan_path}", "utf-8"
+    )
+    scan = AgentNode(id="scan", kind="agent", role_file="scan.md")
+    gate = EvaluatorNode(
+        id="gate",
+        kind="evaluator",
+        role="verifier",
+        role_file="gate.md",
+        permission_profile=PermissionProfile.READ_ONLY,
+    )
+    doc = FlowDoc(
+        name="t",
+        task_type="t",
+        permission_ceiling=PermissionProfile.WORKSPACE_WRITE,
+        output_policy=OutputPolicy.CODE_CHANGE,
+        publishing=PublishingPolicy.PULL_REQUEST,
+        nodes=(scan, gate),
+        edges=(),
+        budgets=MappingProxyType({}),
+    )
+    snap = FlowSnapshot(
+        doc=doc,
+        nodes_by_id=MappingProxyType({"scan": scan, "gate": gate}),
+        adjacency=MappingProxyType({}),
+        flow_fingerprint="fp",
+    )
+    scan_out = tmp_path / "logs" / "task-1" / "stages" / "scan" / "run-000001" / "scan.out.md"
+    scan_out.parent.mkdir(parents=True, exist_ok=True)
+    scan_out.write_text("SCAN RESULT", "utf-8")
+
+    router = FakeRouter(_result({"findings": []}))
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    ctx = NodeContext(
+        snapshot=snap, run_state=FlowRunState(flow_fingerprint="fp"), node=gate, task_id="task-1"
+    )
+    EvaluatorNodeRunner(services, _inputs(tmp_path)).run(gate, ctx)
+    assert f"Read the scan at {scan_out.as_posix()}." in router.requests[0].prompt
+
+
+def test_evaluator_node_output_var_empty_before_upstream_runs(tmp_path: Path) -> None:
+    # The other half: an upstream node that has not produced output leaves the block dropped, so a
+    # gate placed before its inputs exist renders no dangling pointer.
+    (tmp_path / "gate.md").write_text(
+        "Gate.{?scan_path} Read the scan at {scan_path}.{/scan_path}", "utf-8"
+    )
+    scan = AgentNode(id="scan", kind="agent", role_file="scan.md")
+    gate = EvaluatorNode(
+        id="gate",
+        kind="evaluator",
+        role="verifier",
+        role_file="gate.md",
+        permission_profile=PermissionProfile.READ_ONLY,
+    )
+    doc = FlowDoc(
+        name="t",
+        task_type="t",
+        permission_ceiling=PermissionProfile.WORKSPACE_WRITE,
+        output_policy=OutputPolicy.CODE_CHANGE,
+        publishing=PublishingPolicy.PULL_REQUEST,
+        nodes=(scan, gate),
+        edges=(),
+        budgets=MappingProxyType({}),
+    )
+    snap = FlowSnapshot(
+        doc=doc,
+        nodes_by_id=MappingProxyType({"scan": scan, "gate": gate}),
+        adjacency=MappingProxyType({}),
+        flow_fingerprint="fp",
+    )
+    router = FakeRouter(_result({"findings": []}))
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    ctx = NodeContext(
+        snapshot=snap, run_state=FlowRunState(flow_fingerprint="fp"), node=gate, task_id="task-1"
+    )
+    EvaluatorNodeRunner(services, _inputs(tmp_path)).run(gate, ctx)
+    assert router.requests[0].prompt == "Gate."
+
+
 def _test_quality(max_rework_per_stage: int = 1) -> EvaluatorNode:
     return EvaluatorNode(
         id="testing_quality",

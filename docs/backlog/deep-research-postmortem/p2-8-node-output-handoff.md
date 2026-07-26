@@ -30,6 +30,10 @@ Structural causes:
 - [`core/flow/nodes/evaluator.py:378-386`](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py) — `_prompt_variables()` never calls `_node_output_paths` (the agent path does, at `agent.py:606-610` / `:669`), so evaluators **structurally cannot** reference an upstream node's output. That is why `verifier.md` and `critic.md` hardcode `{repo}/docs/research/{task_id}/report.md`.
 - [`core/flow/postprocess.py:183-189`](../../../src/wastech_orchestrator/core/flow/postprocess.py) — `_slot_content` publishes `structured_output["content"]` or `final_message`, i.e. the chat sign-off. A node whose real product is a written file publishes only its summary.
 
+## Status note
+
+**Piece 2 has already shipped**, pulled forward as the enabler for [P1.4](p1-4-audit-coverage-gate.md) (2026-07-26): its `coverage_gate` evaluator sits before `report.md` exists and could otherwise read nothing at all. `build_node_output_paths` now lives in `core/flow/context_paths.py`, both the agent and the evaluator runner call it, the evaluator renders with the flow-derived allowlist, and the prompt-variable lint treats an evaluator like an agent. What remains of piece 2 is only its second half — removing the hardcoded `{repo}/docs/research/{task_id}/report.md` from `verifier.md`/`critic.md` — which is blocked on **piece 1**: `{synthesis_path}` resolves to the node's chat sign-off, so swapping it in today would point both evaluators at a 4 KB summary instead of the deliverable.
+
 ## Change
 
 Three separable pieces, in increasing cost:

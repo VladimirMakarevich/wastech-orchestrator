@@ -33,7 +33,10 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from wastech_orchestrator.core.flow.context_paths import build_path_context
+from wastech_orchestrator.core.flow.context_paths import (
+    build_node_output_paths,
+    build_path_context,
+)
 from wastech_orchestrator.core.flow.contracts import SessionScope, resolve_network_access
 from wastech_orchestrator.core.flow.engine import Finding, NodeContext, NodeOutcome, NodeResult
 from wastech_orchestrator.core.flow.nodes.base import (
@@ -50,6 +53,7 @@ from wastech_orchestrator.core.flow.nodes.exchange_publish import (
 )
 from wastech_orchestrator.core.flow.observability import record_run_observability
 from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file, render_role_prompt
+from wastech_orchestrator.core.flow.prompt_vars import valid_prompt_vars
 from wastech_orchestrator.core.flow.schema import SEVERITY_ORDER, EvaluatorNode, FlowNode
 from wastech_orchestrator.core.flow.usage_accounting import (
     deserialize_usage,
@@ -308,8 +312,14 @@ class EvaluatorNodeRunner:
         session_id: str | None = None,
         resume_baseline_output_tokens: int | None = None,
     ) -> AgentRunRequest:
+        # The renderer stays the fixed security core; the caller widens *which names* it may
+        # substitute to the flow-derived set (core allowlist ∪ each agent/tool node's {<id>_path}),
+        # exactly as the agent runner does, and only ever places path values in the dict.
         prompt = render_role_prompt(
-            self._in.flow_dir, node.role_file, self._prompt_variables(ctx, node)
+            self._in.flow_dir,
+            node.role_file,
+            self._prompt_variables(ctx, node),
+            allowed=valid_prompt_vars(ctx.snapshot),
         )
         return AgentRunRequest(
             task_id=ctx.task_id,
@@ -419,13 +429,26 @@ class EvaluatorNodeRunner:
 
     def _prompt_variables(self, ctx: NodeContext, node: EvaluatorNode) -> dict[str, object | None]:
         paths = build_path_context(self._in, self._s.repo_dir)
-        return {
+        variables: dict[str, object | None] = {
             "task_id": ctx.task_id,
             "stage": node.id,
             "repo_path": paths["repo"],
             **paths,
             "memory_path": self._memory_path(node, ctx),
         }
+        # DR-7: an evaluator judging the *work* (a coverage gate, a critic) needs the upstream
+        # node's output, not only the report a later node wrote from it. Same channel the agent
+        # runner reads, same rule — a path to a Core-written redacted artifact, never inlined
+        # content, and empty (block drops) for a node that has not run.
+        variables.update(
+            build_node_output_paths(
+                ctx.snapshot.doc.nodes,
+                ctx.task_id,
+                exchange_root=self._s.exchange_root,
+                artifacts_root=self._s.artifacts_root,
+            )
+        )
+        return variables
 
     def _memory_path(self, node: EvaluatorNode, ctx: NodeContext) -> str | None:
         """Build this evaluator's memory packet and return its path — node-driven (F31).

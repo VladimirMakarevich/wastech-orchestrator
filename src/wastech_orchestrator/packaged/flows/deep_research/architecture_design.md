@@ -1,6 +1,14 @@
 From the repository and external evidence, work out the structure of the answer so the synthesis can present it with citations.
 
-{?repository_analysis_path}Base this on the repository analysis at {repository_analysis_path}.{/repository_analysis_path}{?external_research_path} Fold in the external evidence at {external_research_path}.{/external_research_path}{?refinement_path} Keep it scoped to the brief at {refinement_path}.{/refinement_path}
+Base this on the repository analysis, which arrived as up to three passes over disjoint surfaces — read every report you were handed, and treat the union of them as the evidence base:
+
+{?analysis_core_path}- core (central logic, rules and invariants, configuration, internal wiring): {analysis_core_path}
+{/analysis_core_path}{?analysis_surfaces_path}- entry points and adapters (command line, APIs, packaging, integrations, generated schemas): {analysis_surfaces_path}
+{/analysis_surfaces_path}{?analysis_docs_tests_path}- plan of record and the test suite: {analysis_docs_tests_path}
+{/analysis_docs_tests_path}{?external_research_path}- external evidence: {external_research_path}
+{/external_research_path}{?refinement_path}
+
+Keep it scoped to the brief at {refinement_path}.{/refinement_path}
 
 ## What To Produce
 

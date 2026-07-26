@@ -29,7 +29,10 @@ from wastech_orchestrator.core.dangerous_diff import (
     DangerousDiff,
     evaluate_diff_gate,
 )
-from wastech_orchestrator.core.flow.context_paths import build_path_context
+from wastech_orchestrator.core.flow.context_paths import (
+    build_node_output_paths,
+    build_path_context,
+)
 from wastech_orchestrator.core.flow.contracts import (
     PermissionProfile,
     SessionScope,
@@ -54,7 +57,7 @@ from wastech_orchestrator.core.flow.observability import record_run_observabilit
 from wastech_orchestrator.core.flow.output_policy import resolve_output_policy, within_subdir
 from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file, render_role_prompt
 from wastech_orchestrator.core.flow.prompt_vars import valid_prompt_vars
-from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode, ToolNode
+from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode
 from wastech_orchestrator.core.flow.usage_accounting import (
     deserialize_usage,
     guard_output_baseline,
@@ -77,12 +80,7 @@ from wastech_orchestrator.core.hitl import (
     typed_output_schema,
 )
 from wastech_orchestrator.notify import AskKind, AskResult
-from wastech_orchestrator.providers.artifacts import (
-    TOOL_STDOUT_FILENAME,
-    exchange_latest_run_file,
-    latest_run_file,
-    task_artifact_dir,
-)
+from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.providers.base import (
     MAX_TURNS_SUBTYPE,
     AgentRunRequest,
@@ -690,35 +688,13 @@ class AgentNodeRunner:
         return path
 
     def _node_output_paths(self, ctx: NodeContext) -> dict[str, object | None]:
-        """The generic ``{<node_id>_path}`` variables for every agent + tool node in the flow.
-
-        A value resolves to the node's **latest** persisted output (an agent's ``<node_id>.out.md``
-        or a tool's redacted ``stdout.txt``) — now kept per-run under
-        ``stages/<node_id>/run-<id>/`` — so a re-running upstream node exposes its most recent pass
-        while every earlier pass stays on disk. A not-yet-run or special-slot node's variable is
-        empty (``None``) and a ``{?<id>_path}…{/<id>_path}`` block drops cleanly. Fan-in is free: a
-        node names each upstream output it wants (``{scan_path}``, ``{md-check_path}``). The stored
-        value is a POSIX path string (cross-platform). Only agent and tool nodes get this channel
-        (node-output ADR + P5)."""
-        paths: dict[str, object | None] = {}
-        for other in ctx.snapshot.doc.nodes:
-            if isinstance(other, AgentNode):
-                filename = f"{other.id}.out.md"
-            elif isinstance(other, ToolNode):
-                filename = TOOL_STDOUT_FILENAME
-            else:
-                continue
-            # Fan-in resolves the upstream node's newest published output. With an exchange wired,
-            # outputs are published there (postprocess/tool), so resolve from it; a harness without
-            # one keeps resolving the private tree (today's behavior).
-            if self._s.exchange_root:
-                found = exchange_latest_run_file(
-                    self._s.exchange_root, ctx.task_id, other.id, filename
-                )
-            else:
-                found = latest_run_file(self._s.artifacts_root, ctx.task_id, other.id, filename)
-            paths[f"{other.id}_path"] = found.as_posix() if found is not None else None
-        return paths
+        """The generic ``{<node_id>_path}`` variables for this flow (shared with the evaluator)."""
+        return build_node_output_paths(
+            ctx.snapshot.doc.nodes,
+            ctx.task_id,
+            exchange_root=self._s.exchange_root,
+            artifacts_root=self._s.artifacts_root,
+        )
 
     def _memory_path(self, node: AgentNode, ctx: NodeContext) -> str | None:
         """Build this node's memory packet and return its path — node-driven (FR4/D5).

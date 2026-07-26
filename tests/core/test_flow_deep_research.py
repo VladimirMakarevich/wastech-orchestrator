@@ -123,16 +123,44 @@ class _Router:
 
 
 class _FakeAgent:
-    """Agent runner stand-in: writes the research deliverable when it runs the synthesis node."""
+    """Agent runner stand-in: writes the research deliverable when it runs the synthesis node.
 
-    def __init__(self, repo_dir: Path, task_id: str, *, sources: list[dict[str, Any]]) -> None:
+    It also persists each node's ``<id>.out.md`` under ``stages/<id>/run-NNNNNN/`` the way the real
+    postprocess step does, so the generic ``{<node_id>_path}`` channel resolves — that is what the
+    coverage gate reads to judge the analysis passes it sits behind.
+    """
+
+    def __init__(
+        self,
+        repo_dir: Path,
+        task_id: str,
+        *,
+        sources: list[dict[str, Any]],
+        artifacts_root: Path,
+        inputs: NodeInputs,
+    ) -> None:
         self._repo = repo_dir
         self._task_id = task_id
         self._sources = sources
+        self._artifacts_root = artifacts_root
+        self._inputs = inputs
         self.calls: list[str] = []
+        #: ``(node id, the review_path visible to it)`` per call — the rework handoff channel.
+        self.seen_review_path: list[tuple[str, str | None]] = []
 
     def run(self, node: FlowNode, ctx: NodeContext) -> NodeResult:
         self.calls.append(node.id)
+        self.seen_review_path.append((node.id, self._inputs.review_path))
+        run_dir = (
+            self._artifacts_root
+            / "logs"
+            / self._task_id
+            / "stages"
+            / node.id
+            / f"run-{len(self.calls):06d}"
+        )
+        run_dir.mkdir(parents=True, exist_ok=True)
+        (run_dir / f"{node.id}.out.md").write_text(f"# {node.id}\n", encoding="utf-8")
         if node.id == "synthesis":
             import json
 
@@ -204,7 +232,9 @@ def _drive(
     router = _Router(findings=findings, session_id=session_id)
     services = _services(tmp_path, store, router)
     inputs = NodeInputs(flow_dir=DEEP_RESEARCH.source_path.parent)  # type: ignore[union-attr]
-    agent = _FakeAgent(tmp_path, "t", sources=sources)
+    agent = _FakeAgent(
+        tmp_path, "t", sources=sources, artifacts_root=tmp_path / "art", inputs=inputs
+    )
     publish = _FakePassthrough()
     runners = {
         "agent": agent,
@@ -251,6 +281,62 @@ def test_research_external_research_optional_skip(tmp_path: Path) -> None:
     assert result.status is Status.DONE
     assert "external_research" not in agent.calls
     assert "architecture_design" in agent.calls  # the skip passed straight through to the next node
+
+
+def test_analysis_runs_as_three_passes_then_the_coverage_gate(tmp_path: Path) -> None:
+    # P1.4 / DR-7: one node asked to walk everything self-triaged (18% of the in-scope files, 93% of
+    # its turn budget unused). The analysis is now three sequential passes over disjoint surfaces,
+    # each with its own narrow remit, and a coverage gate sits behind them — before the run's first
+    # producer of prose, so a thin pass is caught before anything is written on top of it.
+    _, _, agent, router = _drive(tmp_path, findings=[], sources=_GOOD_SOURCE)
+    assert agent.calls[:3] == ["analysis_core", "analysis_surfaces", "analysis_docs_tests"]
+    gate_index = next(
+        i for i, r in enumerate(router.requests) if getattr(r, "node_id", None) == "coverage_gate"
+    )
+    # The gate ran before any evaluator that judges the report itself.
+    later = [getattr(r, "node_id", None) for r in router.requests[gate_index + 1 :]]
+    assert "coverage_gate" not in later
+    assert {"fact_verification", "critical_review"} <= set(later)
+
+
+def test_coverage_gate_reads_each_analysis_pass_report(tmp_path: Path) -> None:
+    # The gate measures the audit, so it must see what each pass actually reported: the three
+    # {<node_id>_path} pointers resolve in its rendered prompt. Until the evaluator runner gained
+    # that channel the gate could only judge the repository, never the analysis of it.
+    _, _, _, router = _drive(tmp_path, findings=[], sources=_GOOD_SOURCE)
+    gate = next(r for r in router.requests if getattr(r, "node_id", None) == "coverage_gate")
+    for node_id in ("analysis_core", "analysis_surfaces", "analysis_docs_tests"):
+        out = tmp_path / "art" / "logs" / "t" / "stages" / node_id
+        latest = max(out.glob(f"run-*/{node_id}.out.md"))
+        assert latest.as_posix() in gate.prompt
+
+
+def test_coverage_gate_finding_reworks_the_whole_analysis_chain(tmp_path: Path) -> None:
+    # A subsystem with no traced property is a `medium` finding, which gates (P0.1) and re-enters at
+    # analysis_core — a gap can sit in any of the three remits and only the pass that owns it can
+    # close it. Non-blocking with max_rework_per_stage 2, so it self-caps and the flow still
+    # publishes rather than parking the task.
+    medium = [{"severity": "medium", "reason": "the CLI subsystem shows no traced property"}]
+    result, store, agent, _ = _drive(tmp_path, findings=medium, sources=_GOOD_SOURCE)
+    assert result.status is Status.DONE
+    assert store.count_rework_verdicts("t", node_id="coverage_gate") == 2
+    # Two reworks → three passes of the whole chain, in order, every time.
+    assert agent.calls.count("analysis_core") == 3
+    assert agent.calls.count("analysis_surfaces") == 3
+    assert agent.calls.count("analysis_docs_tests") == 3
+
+
+def test_coverage_gate_rework_hands_its_findings_to_the_next_pass(tmp_path: Path) -> None:
+    # The re-entry is bounded by the named gaps, not a second blind sweep: the reworked analysis
+    # nodes receive the gate's findings artifact as {review_path}, which is what the re-entry
+    # section of each analysis prompt works from. On the FIRST pass there is none (no evaluator has
+    # run), so the block drops and the prompt reads as a first sweep.
+    medium = [{"severity": "medium", "reason": "the CLI subsystem shows no traced property"}]
+    _, _, agent, _ = _drive(tmp_path, findings=medium, sources=_GOOD_SOURCE)
+    core_passes = [path for node_id, path in agent.seen_review_path if node_id == "analysis_core"]
+    assert core_passes[0] is None  # first sweep: no gate has spoken yet
+    assert all(p is not None for p in core_passes[1:]), core_passes
+    assert all("coverage_gate" in str(p) for p in core_passes[1:]), core_passes
 
 
 def test_research_happy_path_produces_report_and_sources(tmp_path: Path) -> None:
