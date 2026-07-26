@@ -36,7 +36,7 @@ Supervisor — самый тяжёлый потребитель Claude-конт�
 2. `finalize` всегда строит пакет и всегда запускается на fresh-сессии, засеянной пакетом; ветка тёплого resume удаляется. `summary.json` по-прежнему пишется всегда; deterministic-фолбэк оркестратора при неудаче turn сохраняется без изменений.
 3. Пропуск `observe` для `node.kind ∈ {tool, checks}` в post-node hook.
 4. Тесты (см. раздел ниже).
-5. Синхронизация доков, которые физически есть на `dev` (решение X2, 2026-07-26): `src/wastech_orchestrator/packaged/guide/flows/roles.md:63` утверждает, что supervisor «observes **each step** and writes the final summary» — после P0 это неверно, фразу нужно переписать под «наблюдаются исполненные ноды, кроме `tool`/`checks`/`publish`» и под packet-first finalize. Схема config в P0 не меняется, поэтому `packaged/config.example.yaml` и `guide/config/reference.md` не трогаем. Derived `docs/` на `dev` не существует — вместо правки в описании PR оставляем строку doc-impact («затронуты finalize + cadence supervisor; вероятно влияет на `worc_architecture.md` и `configuration.md`») как хлебную крошку для реверс-инжиниринга на `main`.
+5. Синхронизация docs: `docs/worc_architecture.md` / `docs/configuration.md` (поведение finalize + cadence), packaged-доки не трогаем (схема config в P0 не меняется).
 
 Ожидаемый эффект на исследованном прогоне: пропуск `length` снимает минимум 44 107 input-токенов; fresh finalize из компактного пакета ориентировочно уменьшает финальный вызов (сейчас 104 567 input-токенов) на 65–85 тыс. Точные числа — по A/B (см. критерии).
 
@@ -75,4 +75,4 @@ Supervisor — самый тяжёлый потребитель Claude-конт�
 - `src/wastech_orchestrator/core/supervisor.py` — `SupervisorPacket`, всегда-fresh finalize, сборка пакета из `_finalize_digest` + durable-фактов.
 - `src/wastech_orchestrator/core/orchestrator.py` — условие пропуска `tool`/`checks` в post-node hook (`~:2902`); прокидывание фактов задачи (changed paths / diff / findings / checks) в `finalize`.
 - `tests/core/test_supervisor.py`, `tests/core/test_flow_engine.py` — см. выше.
-- `src/wastech_orchestrator/packaged/guide/flows/roles.md` — единственный присутствующий на `dev` doc-файл, который описывает это поведение: cadence-фраза про «each step» (`:63`) и packet-first finalize. Derived `docs/worc_architecture.md` / `docs/configuration.md` на этой ветке отсутствуют — только doc-impact note в PR (X2).
+- `docs/worc_architecture.md`, `docs/configuration.md` — поведение finalize (fresh, packet-first) и cadence (`tool`/`checks` не наблюдаются).

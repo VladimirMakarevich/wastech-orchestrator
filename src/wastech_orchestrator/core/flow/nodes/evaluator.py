@@ -3,8 +3,11 @@
 Runs the evaluator's ``role_file`` prompt (read-only) through the router and maps its structured
 verdict to an engine outcome: a gating finding -> ``rework``, an otherwise-clean verdict ->
 ``accept``. A finding gates when its severity is at least as severe as the node's ``gate_severity``
-(default ``high`` — blocks on ``high``/``critical``/``blocking``, leaving ``medium``/``low``
-advisory; lower it to make a content critic block on any finding). The findings schema
+(built-in default ``high`` — blocks ``high``/``critical``/``blocking``, leaving ``medium``/``low``
+advisory; the packaged flows whose evaluators are *quality* lenses set ``medium``, since "is this
+good enough" has no natural way to emit ``high``). A finding that does not gate is not discarded:
+it rides ``NodeOutcome.findings`` to the operator surface via the supervisor's follow-ups. The
+findings schema
 (``output_schema``, F19) is mandatory: a run whose ``structured_output`` does not carry a parseable
 ``findings`` array never silently accepts — it degrades straight to ``manual`` (fail-closed), the
 same as a provider that could not run the node at all. A **blocking** evaluator gates

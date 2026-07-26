@@ -73,7 +73,7 @@ flow:
 4. Реализовать event-детекцию (rework/failure/hitl/dangerous_diff/fallback/subtask_boundary) из данных, уже доступных в hook.
 5. Бюджеты `max_calls` + `max_digest_tokens` (в реальных токенах через уже готовый normalized usage; char-граница — лишь запасной вариант) и `on_budget_exhausted: deterministic_only`.
 6. Packaged-дефолты: content-flow → `observation_mode: none`; `implementation` → `events`.
-7. Тесты (см. ниже) и синхронизация доков, которые физически есть на `dev` (решение X2, 2026-07-26): `packaged/config.example.yaml` (новый вложенный блок supervisor), `packaged/guide/config/reference.md:173-182` (таблица плоских ключей `supervisor.{role_file,provider,model,reasoning}` перестаёт соответствовать схеме), `packaged/guide/flows/reference.md:22` (состав `SupervisorBlock` + режим наблюдений), `packaged/guide/flows/roles.md` (cadence) и packaged-flows. Derived `docs/` на `dev` нет — вместо правки строка doc-impact в описании PR.
+7. Тесты (см. ниже) и синхронизация docs + `packaged/config.example.yaml` + `packaged/guide/`.
 
 Ожидаемый эффект: для `blog_article_revise` finalize-only убирает исторические 375 726 observation input-токенов; общий supervisor input реалистично падает с ~480 тыс. до ~30–60 тыс. (целевой диапазон, подтверждается A/B).
 
@@ -108,4 +108,4 @@ flow:
 - `src/wastech_orchestrator/core/orchestrator.py` — детерминированная step-запись + условный observe + event-детекция + бюджеты в post-node hook.
 - `src/wastech_orchestrator/core/supervisor.py` — раздельные observe/finalize маршруты и (опц.) fresh observe digest.
 - `src/wastech_orchestrator/packaged/config.example.yaml`, `packaged/flows/*`, `packaged/guide/` — operator-facing дефолты и доки.
-- Derived `docs/configuration.md` / `docs/worc_architecture.md` — на `dev` отсутствуют: канон cadence реконструируется отдельной задачей на `main`, здесь только doc-impact note в PR (X2).
+- `docs/configuration.md`, `docs/worc_architecture.md` — канон поведения cadence.
