@@ -1,6 +1,6 @@
 # P1.4a — read-only git evidence for an audit node
 
-Priority: **P2** Status: **proposed** Date: 2026-07-26 Source: [p1-4](p1-4-audit-coverage-gate.md) change 3, [postmortem.md](postmortem.md) DR-7 sub-defect 1
+Priority: **P2** (execution position: **next, ahead of P2.8** — operator decision 2026-07-26) Status: **accepted** Date: 2026-07-26 Source: [p1-4](p1-4-audit-coverage-gate.md) change 3, [postmortem.md](postmortem.md) DR-7 sub-defect 1
 
 Spun out of [P1.4](p1-4-audit-coverage-gate.md), which shipped changes 1 and 2 and deferred change 3. This document exists because the deferred piece is not a flag: it changes what `read-only` **means**, and four separate places in the orchestrator currently rely on the old meaning.
 
@@ -74,13 +74,13 @@ The grant must not turn a read-only node into an ungoverned writer. Concretely:
 
 - the sandbox policy for such a node denies **write to the whole workspace root**, not only the internal deny set — the shell's read-only-ness must be enforced by the sandbox, the way Codex enforces it, and not left to the goodwill of an allowlist;
 - the WRI-009 git-control fingerprint is captured for it (drop the `_is_workspace_write` condition in favour of "this attempt can execute commands"), so `.git` drift is still detected;
-- decide explicitly whether `_apply_post_edit_guard` should run for it. A node that cannot write needs no diff gate; a node that _could_ write through a bug in the layers above should not be the one place where nothing checks. The cheap, honest answer is to run the containment check and treat any diff at all from a read-only node as a fail-closed policy violation rather than a dangerous-diff prompt.
+- `_apply_post_edit_guard` stays **off** for such a node, and a diff from it is **not** fail-closed (operator decision, 2026-07-26). The sandbox denial in the first bullet is the enforcement; if a write nevertheless lands, the run reports it to the operator as a warning and continues. Rationale: the guard's whole apparatus — diff capture, `output_policy` containment, the dangerous-diff approval round-trip — exists for a node whose job is to edit, and a read-only node parking a task over a stray write would trade a real capability for a hypothetical. Use the surface that already exists for exactly this shape of signal: the console warning plus a ⚠️ Telegram trace the orchestrator emits when a non-blocking evaluator accepts with findings open.
 
 On a host with **no** sandbox (native Windows), the choice is the same one the adapter already makes for workspace-write: drop `Bash` under `strict_isolation` and let the prompt's capability-conditional wording take over. That keeps the feature from silently becoming "unsandboxed shell on Windows".
 
 ### 4. Declaration surface
 
-Recommended: a **per-node tri-state** (e.g. `git_evidence: true | false | null`) on agent and evaluator nodes, gated by an operator **config master switch** defaulting to off.
+**Decided (operator, 2026-07-26): both places** — a **per-node tri-state** (e.g. `git_evidence: true | false | null`) on agent and evaluator nodes, gated by an operator **config master switch** defaulting to off.
 
 - The per-node field follows the precedent already in the schema: `network_access` is a per-node tri-state that toggles exactly one capability dimension without touching the filesystem ceiling, and the campaign's own constraint requires every mechanism to be reachable declaratively rather than by identity. A config-only key would blanket _every_ read-only node in the run, handing a shell to `fact_verification` and `critical_review` as well, which is strictly worse.
 - The config switch is what keeps the AGENTS.md invariant intact — the envelope is not weakened _through a flow node_, because with the switch off a flow's request resolves to nothing. Mirror `security.strict_isolation` / `security.disable_read_isolation` in shape and default.
@@ -102,13 +102,13 @@ The shipped docs must not claim a symmetric verb allowlist. For Claude: an allow
 
 - An audit node declaring the capability, in a run whose operator enabled it, can execute the allowlisted read-only git verbs under both providers, and the deliverable can cite a commit.
 - Every mutating verb fails under both providers, including on a host with no OS sandbox, and the failure is a provider-level refusal rather than a prompt-level convention.
-- A read-only node with a shell that writes to the workspace is detected: the write fails, or the run fails closed.
+- A read-only node with a shell **cannot** write to the workspace: the write is denied by the sandbox. If one lands anyway, the operator is warned (console + ⚠️ trace) and the run continues — it never parks the task.
 - With the config switch off (the default) a declaring flow behaves exactly as it does today — same argv, same tool set.
 - The `--allowedTools` pattern semantics are proven by a preflight probe, not assumed.
 
 ## Test
 
-Unit on `resolve_claude_tools`: the existence set and the allow-pattern set for each profile × capability × declaration combination, including the native-Windows drop and the `LINUX_MISSING_DEPS` refusal now firing for a read-only-with-shell plan. Unit on the argv builder: `--tools` carries bare names only, `--allowedTools` carries the patterns, `--disallowedTools` still carries `denied_commands` (deny beats allow). Unit on the Codex profile: unchanged by this feature, with a test that pins _why_ (workspace `read` + `network.enabled: false` is the mutation ban). Fake-CLI integration per the `/fake-cli` skill for the end-to-end argv under both providers. A validator test that the declaration is rejected when the config switch is off, or accepted-and-inert — whichever the maintainer picks in §4.
+Unit on `resolve_claude_tools`: the existence set and the allow-pattern set for each profile × capability × declaration combination, including the native-Windows drop and the `LINUX_MISSING_DEPS` refusal now firing for a read-only-with-shell plan. Unit on the argv builder: `--tools` carries bare names only, `--allowedTools` carries the patterns, `--disallowedTools` still carries `denied_commands` (deny beats allow). Unit on the Codex profile: unchanged by this feature, with a test that pins _why_ (workspace `read` + `network.enabled: false` is the mutation ban). Fake-CLI integration per the `/fake-cli` skill for the end-to-end argv under both providers. A validator test that a declaring node with the config switch off is **accepted and inert** (per §4's decision, the switch is the grant, so a declaration alone is not an error). A test that a write from a read-only-with-shell node yields the operator warning and a `done` outcome, never `manual_action_required` (§3's decision).
 
 ## Scope / risk
 
@@ -116,11 +116,15 @@ Both provider adapters, the flow schema, the validator, the preflight, the confi
 
 Main risk: §1's four assumptions are the kind that are load-bearing without being written down anywhere central. The mitigation is that each one is named above with its file and line, and that the default-off switch means a mistake ships inert.
 
-## Open questions for the maintainer
+## Decisions (operator, 2026-07-26)
 
-1. **§4's declaration shape** — per-node field plus config switch, as recommended, or config-only for a smaller surface?
-2. **§3's third bullet** — should a read-only node's diff be a fail-closed policy violation, or is denying the write at the sandbox enough?
-3. **Priority.** Filed as P2 on the reasoning that it improves audit quality rather than fixing a wrong result, and that P1.4's prompt wording removed the false claim. If the missing history evidence is judged to have contributed to the two release-blocking false negatives, it belongs above P2.8.
+All three questions this document opened are answered; nothing is left blocking implementation.
+
+1. **Declaration shape — both places.** Per-node tri-state plus the operator config master switch, default off (§4).
+2. **A stray write is not fail-closed.** The sandbox denial is the enforcement; a write that lands anyway is an operator warning, not a parked task (§3). `_apply_post_edit_guard` stays off for a read-only node.
+3. **Priority raised above [P2.8](p2-8-node-output-handoff.md).** The missing history evidence is judged to have contributed to the two release-blocking false negatives, so this is the next thing after the current pull request lands rather than a P2 tail item. The `Priority:` header stays `P2` as a severity label; the execution position is what changed.
+
+One item is still unverified rather than undecided: whether `--permission-mode dontAsk` auto-denies a `Bash` invocation matching no `--allowedTools` pattern (§2). That is a fact about the CLI, not a choice — it is probed at preflight, and if the probe shows patterns are not enforced in the allow direction, the Claude half falls back to "sandbox only, no verb allowlist", exactly like Codex.
 
 ## Depends on
 
