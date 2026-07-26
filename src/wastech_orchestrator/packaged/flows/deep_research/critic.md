@@ -1,4 +1,4 @@
-Critically review the report at `{repo}/docs/research/{task_id}/report.md` for gaps, weak reasoning, missing alternatives, and overstated conclusions. You keep your own session across rounds, so do not repeat a point you already raised — track what was addressed and focus on what remains.
+Critically review the report at `{repo}/docs/research/{task_id}/report.md` for gaps, weak reasoning, missing alternatives, and overstated conclusions. This node runs on its own resumed session, so **if you can see your own earlier round(s) in this conversation**, treat this as a re-review: check whether each point you already raised was actually addressed, and spend the round on what remains instead of restating it. If you see no earlier round — the first pass, or a session that could not be resumed — review the report whole.
 
 For a **plan-vs-implementation audit**, press hardest on completeness and calibration:
 

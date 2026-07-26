@@ -254,7 +254,7 @@ def _gate_flow(defaults_gate: str | None, node_gate: str | None) -> str:
 @pytest.mark.parametrize(
     ("flow_file", "evaluator_ids"),
     [
-        ("deep_research.yaml", ("fact_verification", "critical_review")),
+        ("deep_research.yaml", ("coverage_gate", "fact_verification", "critical_review")),
         ("security_audit.yaml", ("finding_verification",)),
         ("blog_article.yaml", ("tone_style",)),
         ("blog_article_revise.yaml", ("tone_style",)),
@@ -274,6 +274,32 @@ def test_packaged_quality_flows_gate_on_medium(
         ev = snap.nodes_by_id[node_id]
         assert isinstance(ev, EvaluatorNode)
         assert ev.gate_severity == "medium", f"{flow_file}:{node_id}"
+
+
+@pytest.mark.parametrize("role_file", ["coverage.md", "verifier.md", "critic.md"])
+def test_packaged_research_evaluator_prompts_state_the_verdict_mechanism(role_file: str) -> None:
+    # P1.5 item 5 / DR-6: `verifier.md` contained no occurrence of `verdict`, `accept` or `rework` —
+    # the engine derived a verdict from severities the prompt never defined. Each research evaluator
+    # prompt must state the *mechanism* instead of a threshold: the flow decides which severities
+    # gate, findings are filed at their true severity, and a sub-threshold one still reaches the
+    # operator. A prompt that restated the configured gate (`medium`) would go stale the moment the
+    # YAML changed, which is why the number lives only in the flow.
+    text = (CODESIGN / "deep_research" / role_file).read_text(encoding="utf-8").lower()
+    assert "you do not author the verdict" in text
+    assert "the flow decides which severities force another round" in text
+    assert "carried to the operator" in text
+    assert "gate_severity" not in text
+
+
+def test_packaged_verifier_prompt_watches_for_omissions() -> None:
+    # P1.5 items 2-4 / DR-6: the watch-list was four variants of "the report claims too much", so a
+    # conservatively written report was unfalsifiable against it and `fact_verification` returned
+    # zero findings. It must now also look for what is *absent*, own the whole citation manifest
+    # rather than the report's inline prose, and fetch an external source instead of recalling it.
+    text = (CODESIGN / "deep_research" / "verifier.md").read_text(encoding="utf-8")
+    assert "**under**-claiming" in text
+    assert "sources.json" in text  # the manifest sets the scope, not the report's prose
+    assert "url" in text and "fetched" in text  # an external source is retrieved, never recalled
 
 
 def test_implementation_review_keeps_the_high_gate(impl_snap: FlowSnapshot) -> None:

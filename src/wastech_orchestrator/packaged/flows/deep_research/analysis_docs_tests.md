@@ -12,6 +12,8 @@ A gate downstream re-derives this remit's file list from the repository and comp
 
 Record an exact `path:line` for every observation you intend to make a claim about — these become the citations the synthesis has to anchor, so they must point at text that is really there.
 
+**Every finding is a pattern, not an instance.** Before you record one, grep the corpus for the whole class and record every site — same defect shape, sibling file, second call site, other implementation of the same rule. This flow's first production run filed one inert-option defect while a worse one sat in a sibling file, one duplicate-detection bug while exact duplicates sat in another rule, and one unsafe-regex defect 170 lines from the correct escaping helper. A finding that names one site when five exist understates its own severity and lets four of them ship.
+
 ## What to look for
 
 1. **Exit-criteria coverage.** For each unit, read its stated exit criteria and confirm the corresponding code exists and behaves as specified. Note anything marked done in the plan but thin, stubbed, or missing in code.
