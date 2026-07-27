@@ -59,7 +59,7 @@ Not orchestrator defects; hygiene on the validation target:
 
 - `.worc/config.example.yaml` is at `schema_version: 24` against a packaged `31` — seven versions of missing guidance (`repo.branch_mode`, `tasks/preparing/`, `security.disable_read_isolation`, `providers.claude.allow_native_memory`, the codex `sandbox:` → `permission_profile:` move), while `config.yaml`'s own header directs the operator to read it. Re-copy from `packaged/config.example.yaml`.
 - `agents.retry.max_blocked_s: 3600.0` against a current default of `21600.0` — a mid-run rate limit would fail the task ~5 h early. Did not fire here.
-- `agents.providers.codex.model: gpt-5.4` against packaged `gpt-5.5`. Inert for this flow (Codex is never used), but stale.
+- ~~`agents.providers.codex.model: gpt-5.4` against packaged `gpt-5.5`.~~ **Withdrawn 2026-07-27 — the discrepancy does not exist.** The packaged value is `gpt-5.4` in both places that carry it (`install/config_writer.py`'s `_PROVIDER_DEFAULTS` and `packaged/config.example.yaml`), and no `gpt-5.5` appears anywhere in the repository. It was `gpt-5.5` once and was deliberately changed to `gpt-5.4` in commit `5b36af0` on **2026-07-11**, a fortnight before this campaign — so the claim was already untrue when written, presumably checked against a remembered value rather than the file. The target's config is correct on this key; nothing to re-sync.
 - The packaged `config.example.yaml:266-270` suggests Opus for the _supervisor_ and Sonnet as the _primary provider_ — the inverse of what this operator configured, and the operator's arrangement is the better one. Correct the packaged example.
 
 ## 10g — `deep_research` runs no repository command before committing

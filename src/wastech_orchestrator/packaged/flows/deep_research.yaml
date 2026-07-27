@@ -208,6 +208,13 @@ flow:
     # repository that defines no matching set passes vacuously, so this node costs nothing until
     # there is something to run. Name a *checking* command (`format:check`, a Markdown linter); a
     # command that rewrites files trips the green-but-dirtying guard and parks the task.
+    # Once you DO configure a matching set, this node changes how the flow can fail: the gate is
+    # fail-closed, so if the command's toolchain is missing on the host the task parks in
+    # `manual_action_required` rather than publishing (a fix loop cannot install toolchains). Note
+    # `skip_if_unavailable: true` only half helps — it turns the launch failure into a loud skip, but
+    # a set that was the only one selected and is then skipped leaves the gate with nothing run,
+    # which parks the task on the same path. The clean escape is per-task:
+    # `nodes.document_checks.enabled: false`.
     - id: document_checks
       kind: checks
       checker: command_profile

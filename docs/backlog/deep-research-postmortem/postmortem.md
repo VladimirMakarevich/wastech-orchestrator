@@ -468,6 +468,6 @@ Each lever below is carried as an implementable task in this folder — see [REA
 | 12 | Drop `when: { fact: derived.needs_refinement }` from `refinement`; stop disabling it per task | flow | one line | DR-8 |
 | 13 | A size-bounded `{<node_id>_content}` channel, and `_node_output_paths` in the evaluator runner | orchestrator | medium | DR-4 |
 | 14 | `architecture_design` xhigh → high; `fact_verification` high → medium; `supervisor.reasoning` medium → low | flow + config | ≈ −$0.9 per run | DR-9 |
-| 15 | Target hygiene: `.worc/config.example.yaml` is 7 schema versions behind (24 vs 31); `agents.retry.max_blocked_s: 3600` vs the current default `21600`; `codex.model: gpt-5.4` vs `gpt-5.5` | config | re-sync | — |
+| 15 | Target hygiene: `.worc/config.example.yaml` is 7 schema versions behind (24 vs 31); `agents.retry.max_blocked_s: 3600` vs the current default `21600`. ~~`codex.model: gpt-5.4` vs `gpt-5.5`~~ — **that third one was wrong**: the packaged value is `gpt-5.4` (changed from `gpt-5.5` in `5b36af0`, 2026-07-11, before this run), so the target is correct on it. Verified and withdrawn 2026-07-27; see [p3-10](p3-10-flow-and-config-hygiene.md) 10f. | config | re-sync | — |
 
 `claude-opus-4-8` → `claude-opus-5` is already tracked as VF-16; note only that for this flow the change must be made in `.worc/flows/deep_research.yaml` (seven pinned occurrences), because the node pins override `config.yaml` entirely.

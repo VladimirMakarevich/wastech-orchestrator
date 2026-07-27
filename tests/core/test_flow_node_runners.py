@@ -2931,8 +2931,9 @@ def test_workspace_write_git_control_drift_is_manual(tmp_path: Path) -> None:
 
 
 def test_read_only_node_skips_git_control_capture(tmp_path: Path) -> None:
-    # A read-only attempt cannot mutate git, so it is neither captured nor compared — a git whose
-    # capture would explode is never called.
+    # A read-only attempt without the git-evidence grant has no shell at all, so it is neither
+    # captured nor compared — a git whose capture would explode is never called. (A *granted*
+    # read-only node does get fingerprinted, from the reporting bracket — see the section below.)
     class _ExplodingGit(FakeGit):
         def capture_git_control_state(self) -> object:
             raise AssertionError("a read-only node must not capture git control state")
@@ -3026,6 +3027,35 @@ def test_a_write_by_a_granted_read_only_node_warns_and_still_finishes(tmp_path: 
     assert not any(c[0] == "write_current_diff" for c in git.calls)
 
 
+def test_git_control_drift_by_a_granted_read_only_node_warns_and_still_finishes(
+    tmp_path: Path,
+) -> None:
+    # Operator decision 2 (2026-07-26) is read literally: a read-only node holding the grant never
+    # parks the task — not even for the sharper of the two events. Control-state drift (a poisoned
+    # hook, `.git/config`, the index) therefore reports where a workspace-write attempt raises
+    # NodeManualRequired. The outcome carries the redacted aspect-level summary rather than a bare
+    # flag because continuing means the orchestrator's own next git command runs in that clone: the
+    # warning is the whole mitigation, so it has to say *what* changed.
+    from wastech_orchestrator.git_manager import GitControlDrift, GitControlDriftItem
+
+    class _DriftGit(FakeGit):
+        def compare_git_control_state(self, before: object) -> GitControlDrift:
+            return GitControlDrift((GitControlDriftItem("hooks", "hook 'post-commit' added"),))
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = _audit_node()
+    services = _services(
+        FakeRouter(_result()),
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=_DriftGit(),
+        allow_git_evidence=True,
+    )
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "done"  # warned, not parked
+    assert result.outcome.read_only_git_drift == "hooks: hook 'post-commit' added"
+
+
 def test_a_clean_granted_read_only_node_raises_no_warning(tmp_path: Path) -> None:
     # The comparison is before-vs-after, not "is the tree dirty": a pre-existing change left by an
     # earlier workspace-write node must not be blamed on this one.
@@ -3042,6 +3072,7 @@ def test_a_clean_granted_read_only_node_raises_no_warning(tmp_path: Path) -> Non
     )
     result = AgentNodeRunner(services, _inputs(tmp_path)).run(_audit_node(), _ctx(_audit_node()))
     assert result.outcome.read_only_write is False
+    assert result.outcome.read_only_git_drift is None
 
 
 def test_the_write_check_is_skipped_for_a_node_without_the_grant(tmp_path: Path) -> None:

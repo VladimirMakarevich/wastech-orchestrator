@@ -42,6 +42,8 @@ Touch points:
 
 Roughly half a day to a day including tests and docs.
 
+**`{report_dir}` was separately declined once — that decline does not block this item.** The `deep_research` post-mortem's P2.8 rejected adding the variable as "a new core variable for one sentence": it wanted the deliverable's _directory_ only so a verifier prompt could name it, and the deliverable already reaches the evaluators on the node-output channel with the manifest's location published in `citation.json`. Its own condition for reconsidering was "if a role prompt needs the _directory_ for something other than reaching a file a node produced" — which **this item satisfies**, and not marginally: without the variable the role prompts keep writing to the literal old path, and the containment guard hard-stops the task on the first write. Noted here because that decline is recorded in a campaign folder that gets deleted, and a reader who met it without this context would reasonably shelve the seam it calls optional.
+
 ## Pitfalls
 
 1. **The private policy must not escape.** For `private_control_workspace_report` an override outside `.worc/` breaks the "never enters git" invariant. Simplest and most honest: reject the override for that policy outright.

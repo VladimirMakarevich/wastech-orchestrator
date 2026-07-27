@@ -4491,3 +4491,67 @@ def test_read_only_node_that_writes_warns_operator_and_never_parks_the_task(
     audit_traces = [c["outcome"] for c in notifier.trace_calls if c["node_id"] == "audit"]
     assert audit_traces == [TRACE_READ_ONLY_WRITE]
     assert any("changed the working tree" in m for m in messages)
+
+
+def test_read_only_node_that_poisons_a_git_hook_warns_operator_and_never_parks_the_task(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The sharper half of the same rule (operator decision 2, read literally): the granted read-only
+    # node plants a `.git/hooks/post-commit`, which is the WRI-009 event — the next git command in
+    # that clone is the orchestrator's own, so a hook is how a read-only node borrows the
+    # orchestrator's credentials. It still does not park the task: the operator gets a warning
+    # naming the drifted aspect plus the ⚠️ trace, and the run continues. A workspace-write node
+    # doing the same is still terminal (see test_workspace_write_git_control_drift_is_manual).
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+    from wastech_orchestrator.notify import TRACE_READ_ONLY_GIT_DRIFT
+
+    flows = tmp_path / "flows"
+    (flows / "roles").mkdir(parents=True)
+    (flows / "roles" / "implementation.md").write_text("Implement {task_path}.", "utf-8")
+    (flows / "roles" / "audit.md").write_text("Audit the change.", "utf-8")
+    (flows / "implementation.yaml").write_text(_GIT_EVIDENCE_FLOW, "utf-8")
+
+    providers = _both()
+    notifier = RecordingNotifier()
+    orch, _store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+        config_kwargs={"telegram_trace": True, "allow_git_evidence": True},
+    )
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
+
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        if request.node_id == "audit":
+            hook = git_repo.clone / ".git" / "hooks" / "post-commit"
+            hook.parent.mkdir(parents=True, exist_ok=True)
+            hook.write_text("#!/bin/sh\necho poisoned\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    messages: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    logger = logging.getLogger("wastech_orchestrator")
+    handler = _Collect()
+    logger.addHandler(handler)
+    try:
+        result = orch.run_task(_complete_task(tmp_path, "task-row"))
+    finally:
+        logger.removeHandler(handler)
+
+    assert result.final_status is Status.DONE  # warned, not parked
+    audit_traces = [c["outcome"] for c in notifier.trace_calls if c["node_id"] == "audit"]
+    assert audit_traces == [TRACE_READ_ONLY_GIT_DRIFT]
+    assert any("changed git control state" in m for m in messages)

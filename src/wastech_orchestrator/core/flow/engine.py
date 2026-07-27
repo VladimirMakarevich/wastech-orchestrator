@@ -133,6 +133,14 @@ class NodeOutcome:
     make impossible. The outcome stays ``done`` and the run continues — the grant buys an audit node
     real history, and parking a task over a stray file would trade that for a hypothetical — but the
     post-node hook warns the operator through the same console + ⚠️ trace surface.
+
+    ``read_only_git_drift`` is the second, sharper event on that same never-park path (operator
+    decision 2, 2026-07-26): the same node class changed **Git control state** — a hook,
+    ``.git/config``, the index. It carries the redacted drift summary rather than a bool precisely
+    because the warning *is* the mitigation here — an operator told only "something changed" would
+    inspect the working tree, while the aspect that matters ("hooks: hook 'post-commit' added") is
+    the one that makes the next orchestrator git command execute provider-supplied code. The same
+    node on a ``workspace-write`` profile still parks the task; see the agent runner.
     """
 
     kind: str
@@ -141,6 +149,7 @@ class NodeOutcome:
     final_message: str | None = None
     rework_exhausted: bool = False
     read_only_write: bool = False
+    read_only_git_drift: str | None = None
 
 
 def skip_outcome(node: FlowNode) -> NodeOutcome:
