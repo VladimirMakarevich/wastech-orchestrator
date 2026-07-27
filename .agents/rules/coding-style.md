@@ -16,6 +16,18 @@
 - Do not add comments that merely restate names, types, assignments, loops, or conditionals.
 - When behavior is non-obvious, surprising, or constrained by a real limitation, capture that reason next to the relevant code path.
 - Comments must be self-contained and independent. Never reference project documents, tickets, ADRs, PRs, backlog items, or other files in a comment (no "see docs/...", "per the ADR", "as described in ...") — those move, get renamed, or are deleted, leaving the comment dangling. State the actual `why` inline so the comment stands on its own without any external artifact.
+- **A bare document identifier is a reference too, and is forbidden the same way.** Task, finding, requirement, and section tags — `WRI-009`, `VF-18`, `F19`, `P2.1`, `AC-W1`, `DR-2`, `Q10`, `§P2.1`, `(rule #14)`, `(idea 29)` — carry no meaning to anyone without the document they index, and that document is usually gone: the backlog folder they came from gets merged and deleted, so the tag decays into noise that makes the code look explained when it is not. This applies everywhere the text outlives the document, not just in `#` comments: docstrings, log records, exception messages, and every operator-facing string under `src/wastech_orchestrator/packaged/` (flows, role prompts, `guide/`, `config.example.yaml`), where the reader has no access to our backlog at all. A tag does mark something real — that the line is shaped by a decision — so when removing it, keep the reason and drop only the identifier; never leave a stub that states only the mechanism. If the tag was never explained and the reason cannot be recovered from the code, delete the tag and leave the rest of the text as it is rather than inventing a rationale. External identifiers that are not our documents (`CVE-…`, `RFC …`, upstream issue numbers, CLI flag names) are not affected.
+
+  ```python
+  # Before — the tag is the only rationale, and its document no longer exists:
+  # F19: findings schema mandatory; fail-closed if not honored.
+  # After — the rationale is in the code, so the deleted document costs nothing:
+  # The findings schema is mandatory: a role prompt that asked for findings "in
+  # prose" was unenforceable, because extraction reads only structured_output and
+  # no provider filled it without an output_schema — the gate silently
+  # fail-OPENED and accepted on every real run.
+  ```
+
 - Historical narrative in comments is forbidden. Comments document the current design and intent only; do not leave "used to be", "changed from", or compatibility-tombstone commentary behind after a rewrite.
 - If a block is hard to justify with a short why-comment, simplify or restructure it until the intent and rationale are clear.
 
