@@ -15,6 +15,8 @@ Cover pure logic without external processes:
 - error classification (`ProviderError` → class);
 - state machine transitions;
 - secret redaction and path normalization;
+- frozen control bundles on both platform branches: POSIX keeps one executable per tool, while Windows preserves the same-name launcher and payload with separate manifest digests;
+- custom-tool outcome classification: a silent stderr-only crash parks without charging a fix iteration, an ordinary non-zero linter report still fails as quality, JSON outcomes remain authoritative, and a second identical no-finding failure stops the loop;
 - retry / fallback / fix-cycle limits, the global fix-iteration budget, and the stuck condition;
 - repeated stage execution uses distinct persisted stage-run artifact paths, including an integration case with two fixing cycles whose provider attempt counters both start at `1`;
 - the `refinement` skip decision (already-complete task vs. needs enrichment);

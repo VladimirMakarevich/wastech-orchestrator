@@ -117,7 +117,9 @@ security:
                                       #   is the master switch: strict_isolation: false forces this on
                                       #   regardless. Operator-config ONLY (never a task/flow/extra_args
                                       #   key). `worc preflight` prints `read-isolation: OFF` when in
-                                      #   effect — never a silent weakening.
+                                      #   effect — never a silent weakening. Native Windows Codex
+                                      #   needs the elevated sandbox backend when read-isolation is
+                                      #   ON; without it preflight/the pre-launch canary fails closed.
   allowed_environment:                  # REPLACES (does not extend) the default — keep the OS-launch
                                         # essentials for YOUR OS or the spawned CLI may fail to start.
                                         # A name absent from the host OS is simply skipped, so this

@@ -13,8 +13,9 @@ provider deny target (:class:`~wastech_orchestrator.runtime_layout.InternalDenyP
 
 Three operations:
 
-* :func:`freeze_control_bundle` — copy the referenced flow YAML, role files, and tool executables
-  into the bundle (regular single-link files only), record a manifest, and return the bound handle.
+* :func:`freeze_control_bundle` — copy the referenced flow YAML, role files, and complete supported
+  tool launch sets into the bundle (regular single-link files only), record a manifest, and return
+  the bound handle.
 * :func:`verify_bundle_integrity` — re-hash the frozen bundle against its recorded digest (used on
   ``continue``/resume, which must reuse the original frozen bytes, never re-freeze).
 * :func:`digest_live_control_inputs` — re-hash the **live** control inputs with the same identity
@@ -60,7 +61,7 @@ MANIFEST_NAME = "manifest.json"
 
 #: Bump when the on-disk bundle layout / manifest schema changes (an old bundle then fails to
 #: verify and the task is treated as needing a fresh/restart).
-_BUNDLE_FORMAT = 1
+_BUNDLE_FORMAT = 2
 
 
 class ControlBundleError(FrozenBundleError):
@@ -96,10 +97,10 @@ def _referenced_inputs(snapshot: FlowSnapshot, flow_dir: Path, tools: ToolRegist
     """Enumerate the exact control inputs the flow references, in a deterministic order.
 
     The flow YAML, every node ``role_file``, the supervisor block's three role files, and the
-    executable each ``tool`` node resolves to (via the **live** registry — a resolution failure is
-    a mutation/misconfig and fails closed). Role files are keyed by their flow-relative path so the
-    frozen copy resolves identically under the bundle ``flows/`` dir; tools by their resolved
-    filename so the per-task registry finds them with the same candidate logic.
+    complete supported launch set for each ``tool`` node (via the **live** registry — a resolution
+    failure is a mutation/misconfig and fails closed). Role files are keyed by their flow-relative
+    path so the frozen copy resolves identically under the bundle ``flows/`` dir; tools by their
+    registry-relative candidate paths so a Windows launcher keeps its same-name payload beside it.
     """
     if snapshot.source_path is None:
         raise ControlBundleError("flow snapshot has no source path; cannot freeze control plane")
@@ -126,10 +127,12 @@ def _referenced_inputs(snapshot: FlowSnapshot, flow_dir: Path, tools: ToolRegist
     tool_names = sorted({node.tool for node in snapshot.doc.nodes if node.kind == "tool"})
     for name in tool_names:
         try:
-            resolved = tools.resolve(name)
+            candidates = tools.existing_candidates(name)
         except ToolResolutionError as exc:
             raise ControlBundleError(f"tool {name!r} no longer resolves: {exc}") from exc
-        refs.append(_Ref(f"{_TOOLS_SUBDIR}/{resolved.name}", resolved))
+        for candidate in candidates:
+            relative = candidate.relative_to(tools.tools_dir).as_posix()
+            refs.append(_Ref(f"{_TOOLS_SUBDIR}/{relative}", candidate))
     return refs
 
 
