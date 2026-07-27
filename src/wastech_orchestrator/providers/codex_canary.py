@@ -23,11 +23,13 @@ curated exchange.
 
 from __future__ import annotations
 
+import ntpath
 import platform
 import shlex
 import shutil
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -61,6 +63,8 @@ _CANARY_UNRUNNABLE = "canary-sandbox-unrunnable"
 _CAPABILITY_MARKERS: tuple[str, ...] = (
     _CANARY_UNRUNNABLE,
     "refusing to run unsandboxed",
+    "restricted read-only access requires the elevated windows sandbox backend",
+    "helper copy failed",
     "missing codex-linux-sandbox",
     "sandbox helper",
     "orchestrator_helper_launch_failed",
@@ -142,9 +146,23 @@ def default_canary_runner(argv: list[str], cwd: str, env: Mapping[str, str]) -> 
 # `cmd` then chokes on the nested quotes added around the whole string).
 
 
+def _native(path: str, system: str) -> str:
+    """Normalize a probe path to the target OS's separators.
+
+    Probe paths reach the canary in mixed form: the private probe is a native path, while the
+    exchange probe (``AgentRunRequest.task_path``) is POSIX-shaped even on Windows. ``cmd`` resolves
+    neither ``type C:/a/b`` nor ``echo x >> C:/a/b`` — it reports the file as missing — so an
+    unnormalized path fails the probe for a *malformed command* rather than a policy verdict: the
+    required read reads as a capability gap, and the paired ``expect_denied=True`` write reads as
+    enforcement, masking a real leak. Keyed on the injected ``system``, not the host, so the
+    deterministic suite exercises the Windows shape from any platform.
+    """
+    return ntpath.normpath(path) if system == "Windows" else path
+
+
 def _read_cmd(path: str, system: str) -> list[str]:
     if system == "Windows":
-        return ["cmd", "/c", "type", path]
+        return ["cmd", "/c", "type", _native(path, system)]
     return ["/bin/cat", path]
 
 
@@ -156,7 +174,7 @@ def _shell_read_cmd(path: str, system: str) -> list[str]:
     form to contrast it with (the POSIX pair contrasts ``/bin/cat`` with ``/bin/sh -c cat``).
     """
     if system == "Windows":
-        return ["cmd", "/c", "type", path]
+        return ["cmd", "/c", "type", _native(path, system)]
     return ["/bin/sh", "-c", f"cat {shlex.quote(path)}"]
 
 
@@ -164,7 +182,7 @@ def _write_cmd(path: str, system: str) -> list[str]:
     if system == "Windows":
         # `>>` carries no space, so it survives `cmd`'s re-parse as a redirection operator while the
         # path stays a separately quoted argv member.
-        return ["cmd", "/c", "echo", "x", ">>", path]
+        return ["cmd", "/c", "echo", "x", ">>", _native(path, system)]
     return ["/bin/sh", "-c", f"printf x >> {shlex.quote(path)}"]
 
 
@@ -277,6 +295,24 @@ def build_canary_command(
     ]
 
 
+@contextmanager
+def _sandbox_probe_env(env: Mapping[str, str], system: str) -> Iterator[dict[str, str]]:
+    """Yield the environment in which ``codex sandbox`` can exercise the generated profile.
+
+    Native Windows stores the sandbox accounts, helper, credentials, and capability grants in
+    ``CODEX_HOME``. Replacing that home would remove the grant substrate the canary is meant to
+    test. The generated ``permissions.worc`` table is still supplied as an inline ``-c`` override
+    and selected explicitly with ``-P``, so operator configuration cannot replace the tested
+    profile. POSIX sandbox backends keep no such state in ``CODEX_HOME`` and retain the stronger
+    empty-home isolation from operator configuration.
+    """
+    if system == "Windows":
+        yield dict(env)
+        return
+    with tempfile.TemporaryDirectory(prefix="worc-codexhome-") as codex_home:
+        yield {**dict(env), "CODEX_HOME": codex_home}
+
+
 def run_codex_canary(
     *,
     command: str,
@@ -297,13 +333,13 @@ def run_codex_canary(
     undemonstrable sandbox is a ``CAPABILITY_UNAVAILABLE``. Records each probe's verdict as
     redaction-safe evidence (paths only, never file contents).
 
-    Two hardening guarantees (final-review H4): (1) the probes run under a throwaway ``CODEX_HOME``
-    so the operator's ``~/.codex/config.toml`` cannot alter profile resolution — ``codex sandbox``
-    has no ``--ignore-user-config`` flag, so an empty home reproduces the ``exec`` config layering
-    (no model / no network → no credentials needed); (2) the canary refuses to return ``ok`` unless
-    at least one **positive control** — an ``expect_denied=False`` read — actually succeeded, so a
-    broken probe harness (every command failing) can never be mistaken for a fully-enforcing
-    sandbox.
+    Two hardening guarantees (final-review H4): (1) on POSIX the probes run under a throwaway
+    ``CODEX_HOME`` so the operator's ``~/.codex/config.toml`` cannot alter profile resolution; on
+    native Windows they retain the caller's home because it contains the sandbox grant substrate,
+    while the inline ``-c permissions.worc={...}`` override and explicit ``-P worc`` selection keep
+    the generated profile authoritative; (2) the canary refuses to return ``ok`` unless at least
+    one **positive control** — an ``expect_denied=False`` read — actually succeeded, so a broken
+    probe harness (every command failing) can never be mistaken for a fully-enforcing sandbox.
     """
     evidence: list[dict[str, object]] = []
     probes = build_canary_probes(
@@ -317,8 +353,7 @@ def run_codex_canary(
         repo_writable=extra.repo_writable,
     )
     saw_positive_control = False
-    with tempfile.TemporaryDirectory(prefix="worc-codexhome-") as codex_home:
-        probe_env = {**dict(env), "CODEX_HOME": codex_home}
+    with _sandbox_probe_env(env, system) as probe_env:
         for probe in probes:
             argv = build_canary_command(command, profile_arg, working_directory, probe)
             try:
@@ -335,13 +370,17 @@ def run_codex_canary(
             evidence.append(
                 {"probe": probe.label, "expect_denied": probe.expect_denied, "denied": denied}
             )
-            if any(marker in lowered for marker in _CAPABILITY_MARKERS):
+            capability_marker = next(
+                (marker for marker in _CAPABILITY_MARKERS if marker in lowered), None
+            )
+            if capability_marker is not None:
                 return CanaryOutcome(
                     ok=False,
                     error_class=ErrorClass.CAPABILITY_UNAVAILABLE,
                     message=(
                         f"codex sandbox could not enforce the permission profile on this host "
-                        f"(probe {probe.label!r}); the requested isolation cannot be demonstrated"
+                        f"(probe {probe.label!r}); the requested isolation cannot be demonstrated "
+                        f"({capability_marker})"
                     ),
                     evidence=tuple(evidence),
                 )

@@ -304,6 +304,25 @@ def _unquote(arg: str) -> str:
     return arg
 
 
+def _run_cli_command(ctx: ShellContext, argv: list[str]) -> ShellResult:
+    """Run one nested CLI command without letting its parser terminate the containing console.
+
+    ``argparse`` reports help and usage errors by raising :class:`SystemExit`. That exit belongs to
+    the submitted command, while only the console's explicit ``quit``/``exit`` verbs own the REPL
+    lifetime. Integer exit codes are preserved; a non-integer payload is printed because catching
+    it prevents the Python entry point from doing so.
+    """
+    try:
+        return ShellResult(exit_code=ctx.run_cli(argv))
+    except SystemExit as exc:
+        if exc.code is None:
+            return ShellResult()
+        if isinstance(exc.code, int):
+            return ShellResult(exit_code=exc.code)
+        print(f"shell: {exc.code}", file=ctx.out)
+        return ShellResult(exit_code=1)
+
+
 def dispatch(line: str, ctx: ShellContext) -> ShellResult:
     """Map one console line onto an existing verb or a thin helper. Adds no orchestration logic."""
     command, remainder = _split_verb(line)
@@ -336,20 +355,29 @@ def dispatch(line: str, ctx: ShellContext) -> ShellResult:
     if command == "down":
         # The stop ladder lives in cmd_stop; forward flags verbatim, but --non-interactive so a busy
         # daemon is refused-with-instructions rather than dropping into input() in the REPL (H1).
-        return ShellResult(exit_code=ctx.run_cli(_argv(ctx, "stop", ["--non-interactive", *rest])))
+        return _run_cli_command(ctx, _argv(ctx, "stop", ["--non-interactive", *rest]))
     if command == "restart":
-        return ShellResult(
-            exit_code=ctx.run_cli(_argv(ctx, "restart", ["--non-interactive", *rest]))
-        )
+        return _run_cli_command(ctx, _argv(ctx, "restart", ["--non-interactive", *rest]))
     if command == "rerun":
         # rerun's confirmation prompt fights the REPL's own stdin reader exactly like down/restart
         # (H1); forward --non-interactive so it refuses-with-instructions (pass --yes) instead of
         # blocking inside input().
-        return ShellResult(exit_code=ctx.run_cli(_argv(ctx, "rerun", ["--non-interactive", *rest])))
+        return _run_cli_command(ctx, _argv(ctx, "rerun", ["--non-interactive", *rest]))
     if command in _FORWARD_VERBS:
-        return ShellResult(exit_code=ctx.run_cli(_argv(ctx, command, rest)))
+        return _run_cli_command(ctx, _argv(ctx, command, rest))
     print(f"shell: unknown command {command!r} (try 'help')", file=ctx.out)
     return ShellResult()
+
+
+async def _dispatch_interactive(line: str, ctx: ShellContext) -> ShellResult:
+    """Dispatch a REPL command without blocking or nesting work on its asyncio loop.
+
+    Nested CLI verbs are intentionally synchronous, and may use synchronous adapters that create
+    their own short-lived event loops. Running the whole dispatch in a worker keeps those adapters
+    valid while the REPL's log-tailer task remains schedulable. The synchronous :func:`dispatch`
+    stays as the headless and scripted entry point.
+    """
+    return await asyncio.to_thread(dispatch, line, ctx)
 
 
 def _do_enqueue(ctx: ShellContext, arg: str) -> ShellResult:
@@ -603,7 +631,7 @@ def _run_interactive(ctx: ShellContext) -> int:
                         line = (await session.prompt_async()).strip()
                     except (EOFError, KeyboardInterrupt):
                         break
-                    if dispatch(line, ctx).quit:
+                    if (await _dispatch_interactive(line, ctx)).quit:
                         if await _confirm_quit(ctx, session):
                             break
                         print("shell: quit cancelled — daemon still serving.", file=ctx.out)

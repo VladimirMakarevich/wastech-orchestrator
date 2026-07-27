@@ -11,10 +11,17 @@ Outcome contract (see :func:`parse_tool_output`), in priority order:
 
 1. **launch-error / timeout** → :class:`~.base.NodeManualRequired` (infra, not a quality fail — it
    never spends a fix iteration), mirroring the ``checks`` command-profile gate.
-2. Otherwise a JSON object with an ``outcome`` key is **authoritative** (``pass`` / ``fail`` /
+2. **non-zero exit + empty stdout + non-empty stderr** → manual as a crashed/malfunctioning tool,
+   with a redacted stderr head in the operator message; it cannot be an actionable quality verdict
+   and never spends a fix iteration.
+3. Otherwise a JSON object with an ``outcome`` key is **authoritative** (``pass`` / ``fail`` /
    ``route:<label>``); an invalid value fails closed to manual.
-3. Otherwise the **exit code** gates: ``0`` → ``pass``, non-zero → ``fail`` (linter style). Any JSON
+4. Otherwise the **exit code** gates: ``0`` → ``pass``, non-zero → ``fail`` (linter style). Any JSON
    object still enriches ``findings`` / ``data``.
+
+Two identical ``fail`` results without findings from the same tool node park on the second result,
+before another fix edge can be charged. This bounds a degenerate gate/fixer loop whose checker says
+the same non-actionable thing after the fixer changed real content.
 
 The core **records** ``findings`` (→ ``NodeOutcome.findings``) and ``data`` (→
 ``NodeOutcome.structured_output``) but never *applies* them: the orchestrator hands a tool no git
@@ -31,6 +38,7 @@ import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -64,6 +72,7 @@ _MEDIUM_SEVERITIES = frozenset({"warning", "medium", "moderate"})
 # cannot launch a batch file directly with ``shell=False`` — it must run through the command
 # interpreter. `.exe`/`.com` are PE images CreateProcess starts directly, so they are NOT here.
 _BATCH_SUFFIXES = frozenset({".bat", ".cmd"})
+_STDERR_HEAD_CHARS = 500
 
 
 class ToolContractError(Exception):
@@ -92,6 +101,10 @@ class ToolNodeRunner:
     def __init__(self, services: NodeServices, inputs: NodeInputs) -> None:
         self._s = services
         self._in = inputs
+        # Transient by design, like the engine's no-file-change stall guard: a restart gives the
+        # repaired environment a fresh chance, while one live run cannot burn its full fix budget
+        # on an identical no-finding verdict.
+        self._last_no_finding_failure: dict[str, str] = {}
 
     def run(self, node: FlowNode, ctx: NodeContext) -> NodeResult:
         assert isinstance(node, ToolNode)
@@ -121,7 +134,9 @@ class ToolNodeRunner:
             stdout_path=str(stdout_path),
             stdin_text=self._build_stdin(node, ctx),
         )
-        redacted_stdout = self._write_redacted_artifacts(node_dir, stdout_path, result)
+        redacted_stdout, redacted_stderr = self._write_redacted_artifacts(
+            node_dir, stdout_path, result
+        )
         # Expose the redacted stdout artifact downstream as {<node_id>_path} (symmetric with an
         # agent node), regardless of outcome — a partial output on failure is still useful context.
         # The private stdout.txt stays the audit record; the redacted exchange copy is what the
@@ -148,7 +163,24 @@ class ToolNodeRunner:
                 "failure a fix loop cannot resolve; task parked for manual action"
             )
 
-        # (2)/(3) Outcome by JSON ``outcome`` (authoritative) or exit code (linter style).
+        # A child process may launch successfully while its interpreter/launcher payload crashes.
+        # Empty stdout means it produced no verdict; stderr is the only diagnostic, so routing this
+        # shape to a fixer would spend quality budget on an infrastructure malfunction.
+        if (
+            result.exit_code not in (None, 0)
+            and not redacted_stdout.strip()
+            and redacted_stderr.strip()
+        ):
+            self._complete(run_id, status="crashed")
+            stderr_head = _stderr_head(redacted_stderr)
+            raise NodeManualRequired(
+                f"tool node {node.id!r}: the tool {node.tool!r} exited with code "
+                f"{result.exit_code} without stdout; the checker crashed or malfunctioned. "
+                f"Redacted stderr: {stderr_head!r}. Task parked for manual action; no fix "
+                "iteration was charged"
+            )
+
+        # Outcome by JSON ``outcome`` (authoritative) or exit code (linter style).
         try:
             contract = parse_tool_output(result.exit_code, redacted_stdout)
         except ToolContractError as exc:
@@ -157,6 +189,13 @@ class ToolNodeRunner:
                 f"tool node {node.id!r}: the tool {node.tool!r} emitted an invalid outcome ({exc}) "
                 "— failing closed to manual review"
             ) from exc
+
+        if self._is_repeated_no_finding_failure(node, contract, result.exit_code, redacted_stdout):
+            self._complete(run_id, status="stalled", outcome=contract.outcome)
+            raise NodeManualRequired(
+                f"tool node {node.id!r}: the tool {node.tool!r} repeated an identical failure "
+                "without findings; task parked before another fix iteration could be charged"
+            )
 
         self._complete(run_id, status=_run_status(contract.outcome), outcome=contract.outcome)
         return NodeResult(
@@ -201,8 +240,8 @@ class ToolNodeRunner:
 
     def _write_redacted_artifacts(
         self, node_dir: Path, stdout_path: Path, result: ProcessResult
-    ) -> str:
-        """Redact and persist stdout (in place) + stderr; return the redacted stdout text.
+    ) -> tuple[str, str]:
+        """Redact and persist stdout (in place) + stderr; return both redacted streams.
 
         ``run_process`` streams raw stdout to ``stdout_path``; we read it back, redact, and
         overwrite so the artifact — and the ``{<node_id>_path}`` a downstream agent reads — never
@@ -210,11 +249,26 @@ class ToolNodeRunner:
         """
         secrets = self._s.prompt_secrets
         redacted_stdout = redact_text(_read_text(stdout_path), extra_secrets=secrets)
+        redacted_stderr = redact_text(result.stderr_text, extra_secrets=secrets)
         stdout_path.write_text(redacted_stdout, encoding="utf-8")
-        (node_dir / TOOL_STDERR_FILENAME).write_text(
-            redact_text(result.stderr_text, extra_secrets=secrets), encoding="utf-8"
-        )
-        return redacted_stdout
+        (node_dir / TOOL_STDERR_FILENAME).write_text(redacted_stderr, encoding="utf-8")
+        return redacted_stdout, redacted_stderr
+
+    def _is_repeated_no_finding_failure(
+        self,
+        node: ToolNode,
+        contract: ToolContract,
+        exit_code: int | None,
+        redacted_stdout: str,
+    ) -> bool:
+        """Detect the second identical, non-actionable failure from one tool node."""
+        if contract.outcome != "fail" or contract.findings:
+            self._last_no_finding_failure.pop(node.id, None)
+            return False
+        fingerprint = sha256(f"{exit_code}\0{redacted_stdout}".encode()).hexdigest()
+        repeated = self._last_no_finding_failure.get(node.id) == fingerprint
+        self._last_no_finding_failure[node.id] = fingerprint
+        return repeated
 
     def _register(self, task_id: str, node_id: str, path: str) -> None:
         if self._s.register_artifact is not None:
@@ -247,7 +301,8 @@ def parse_tool_output(exit_code: int | None, stdout: str) -> ToolContract:
     an invalid value raises :class:`ToolContractError`). Otherwise the exit code gates (``0`` →
     ``pass``, else ``fail``). ``findings`` / ``data`` are read from any JSON object regardless —
     they enrich the audit trail but never change the outcome the exit code already decided. Pure;
-    the launch-error / timeout infra case is handled by the runner before this is called.
+    the launch-error / timeout and silent-crash infra cases are handled by the runner before this
+    is called.
     """
     parsed = _parse_json_object(stdout)
     findings = _findings_from(parsed)
@@ -327,3 +382,8 @@ def _read_text(path: Path) -> str:
         return path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return ""
+
+
+def _stderr_head(stderr: str) -> str:
+    """Return a compact bounded diagnostic suitable for the operator-facing stop reason."""
+    return " ".join(stderr.strip().splitlines())[:_STDERR_HEAD_CHARS]

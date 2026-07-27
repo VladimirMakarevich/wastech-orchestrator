@@ -159,12 +159,12 @@ The `citation` checker classifies each entry as `verified` (the snippet is prese
 
 | Field | Type / values | Default | Constraint | Meaning |
 | --- | --- | --- | --- | --- |
-| `tool` | string | required | Resolved against `.worc/tools/<tool>` by the `ToolRegistry` (fail-closed; not a path). | Your executable's registered name. |
+| `tool` | string | required | Resolved against `.worc/tools/<tool>` by the `ToolRegistry` (fail-closed; not a path). A frozen task copies the whole existing same-name launch set (`name` plus Windows launcher suffix siblings); no arbitrary helper/data files. | Your executable's registered name. |
 | `args` | flat scalar mapping (str/int/float/bool) | `{}` | Nested/non-scalar values are a fatal load error; no secrets. | Args passed to the tool on stdin. |
 | `timeout_seconds` | int \| null | `null` | — | Wall-clock timeout; resolves node → `config.tools.default_timeout_seconds` → 3600s. A timeout parks the task at `manual_action_required`. |
 | `when` | predicate | `null` | — | Conditional run. |
 
-The tool runs under the same ceiling as an agent (argv-no-shell, mandatory timeout, allowlisted env), gates the graph by exit code (`0`→`pass`, non-zero→`fail`) or a printed JSON `{outcome, findings, data}`, and exposes its stdout as `{<id>_path}`.
+The tool runs under the same ceiling as an agent (argv-no-shell, mandatory timeout, allowlisted env), gates the graph by exit code (`0`→`pass`, non-zero→`fail`) or a printed JSON `{outcome, findings, data}`, and exposes its stdout as `{<id>_path}`. A non-zero exit with empty stdout and non-empty stderr is a crashed checker, not a quality fail: it parks at `manual_action_required` with a bounded redacted stderr diagnostic and does not charge a fix iteration. Two identical `fail` results without findings from the same node also park on the second result before another fix iteration is charged; changed output or findings reset that guard.
 
 ### `hitl` node
 

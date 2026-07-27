@@ -117,7 +117,9 @@ security:
                                       #   is the master switch: strict_isolation: false forces this on
                                       #   regardless. Operator-config ONLY (never a task/flow/extra_args
                                       #   key). `worc preflight` prints `read-isolation: OFF` when in
-                                      #   effect — never a silent weakening.
+                                      #   effect — never a silent weakening. Native Windows Codex
+                                      #   needs the elevated sandbox backend when read-isolation is
+                                      #   ON; without it preflight/the pre-launch canary fails closed.
   allow_git_evidence: false           # DEFAULT false. Master switch for the read-only git-evidence
                                       #   grant: a flow node that declares `git_evidence: true` may
                                       #   run the read-only git verbs (log, show, diff, blame,

@@ -10,12 +10,14 @@ Transport exceptions are logged with token + chat id redacted and are never re-r
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Coroutine, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -581,20 +583,34 @@ def _default_client_factory(secrets: _Secrets, _cfg: TelegramConfig) -> _Telegra
     return _HttpTelegramClient(bot_token=secrets.bot_token)
 
 
+def _run_sync[T](factory: Callable[[], Coroutine[Any, Any, T]]) -> T:
+    """Run one fresh coroutine behind the synchronous notifier contract.
+
+    A caller that already owns an asyncio loop cannot use :func:`asyncio.run` on that thread. In
+    that case the coroutine is constructed and run on a dedicated worker; otherwise the direct path
+    avoids the thread. A factory is required so no coroutine object crosses event-loop boundaries.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(factory())
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="worc-telegram") as pool:
+        return pool.submit(lambda: asyncio.run(factory())).result()
+
+
 class _HttpTelegramClient:
     """Thin synchronous wrapper around ``python-telegram-bot``'s HTTP surface.
 
     ``python-telegram-bot`` 21+ is asynchronous. Each synchronous entry point owns a short-lived
-    event loop and uses ``Bot`` as an async context manager, which initializes and shuts down its
-    HTTP client correctly. Exceptions propagate to the notifier, which logs and swallows them.
+    event loop, moved to a worker when the caller already has a running loop, and uses ``Bot`` as an
+    async context manager, which initializes and shuts down its HTTP client correctly. Exceptions
+    propagate to the notifier, which logs and swallows them.
     """
 
     def __init__(self, *, bot_token: str) -> None:
         self._bot_token = bot_token
 
     def send_message(self, *, chat_id: str, text: str) -> None:
-        import asyncio
-
         from telegram import Bot
 
         async def send() -> None:
@@ -602,11 +618,9 @@ class _HttpTelegramClient:
                 await bot.send_message(chat_id=chat_id, text=text)
 
         with _suppress_transport_request_logs():
-            asyncio.run(send())
+            _run_sync(send)
 
     def get_me(self) -> str:
-        import asyncio
-
         from telegram import Bot
 
         async def fetch() -> str:
@@ -615,11 +629,9 @@ class _HttpTelegramClient:
                 return me.username or me.first_name
 
         with _suppress_transport_request_logs():
-            return asyncio.run(fetch())
+            return _run_sync(fetch)
 
     def get_chat(self, *, chat_id: str) -> str:
-        import asyncio
-
         from telegram import Bot
 
         async def fetch() -> str:
@@ -628,11 +640,9 @@ class _HttpTelegramClient:
                 return chat.title or chat.full_name or chat.type
 
         with _suppress_transport_request_logs():
-            return asyncio.run(fetch())
+            return _run_sync(fetch)
 
     def get_webhook_url(self) -> str:
-        import asyncio
-
         from telegram import Bot
 
         async def fetch() -> str:
@@ -641,11 +651,9 @@ class _HttpTelegramClient:
                 return info.url or ""
 
         with _suppress_transport_request_logs():
-            return asyncio.run(fetch())
+            return _run_sync(fetch)
 
     def check_polling(self) -> None:
-        import asyncio
-
         from telegram import Bot
         from telegram.error import Conflict
 
@@ -662,7 +670,7 @@ class _HttpTelegramClient:
                     ) from exc
 
         with _suppress_transport_request_logs():
-            asyncio.run(check())
+            _run_sync(check)
 
     def send_prompt(
         self,
@@ -672,8 +680,6 @@ class _HttpTelegramClient:
         kind: AskKind,
         interaction_id: str,
     ) -> _SentPrompt:
-        import asyncio
-
         from telegram import Bot, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup
 
         async def send() -> _SentPrompt:
@@ -708,7 +714,7 @@ class _HttpTelegramClient:
                 return _SentPrompt(message_id=message.message_id, update_offset=offset)
 
         with _suppress_transport_request_logs():
-            return asyncio.run(send())
+            return _run_sync(send)
 
     async def _drain_pending(self, bot: Any) -> int | None:
         offset: int | None = None
@@ -745,8 +751,6 @@ class _HttpTelegramClient:
         kind: AskKind,
         deadline_monotonic: float,
     ) -> _ClientReply | None:
-        import asyncio
-
         from telegram import Bot
 
         target_chat = int(chat_id)
@@ -857,7 +861,7 @@ class _HttpTelegramClient:
                             )
 
         with _suppress_transport_request_logs():
-            return asyncio.run(poll())
+            return _run_sync(poll)
 
 
 @contextmanager

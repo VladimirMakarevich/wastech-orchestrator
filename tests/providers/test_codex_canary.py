@@ -11,6 +11,8 @@ import subprocess
 from collections.abc import Mapping
 from pathlib import Path
 
+import pytest
+
 from wastech_orchestrator.providers.base import ErrorClass
 from wastech_orchestrator.providers.codex_canary import (
     CAPABILITY_PASSED,
@@ -116,10 +118,22 @@ def test_denied_read_that_succeeds_is_security_configuration_error() -> None:
     assert "not enforcing" in outcome.message
 
 
-def test_capability_marker_is_capability_unavailable() -> None:
-    outcome = _run(_seq_runner([(1, "windows: refusing to run unsandboxed")]))
+@pytest.mark.parametrize(
+    ("message", "safe_detail"),
+    [
+        ("windows: refusing to run unsandboxed", "refusing to run unsandboxed"),
+        (
+            "Restricted read-only access requires the elevated Windows sandbox backend",
+            "restricted read-only access requires the elevated windows sandbox backend",
+        ),
+        ("helper copy failed", "helper copy failed"),
+    ],
+)
+def test_capability_marker_is_capability_unavailable(message: str, safe_detail: str) -> None:
+    outcome = _run(_seq_runner([(1, message)]))
     assert not outcome.ok
     assert outcome.error_class is ErrorClass.CAPABILITY_UNAVAILABLE
+    assert safe_detail in outcome.message
 
 
 def test_allowed_read_blocked_is_capability_unavailable() -> None:
@@ -182,6 +196,40 @@ def test_windows_probes_keep_a_spaced_path_as_its_own_argv_member() -> None:
         assert not any(spaced in tok and tok != spaced for tok in probe.command), probe.label
 
 
+def test_windows_probes_normalize_a_posix_shaped_path() -> None:
+    """A POSIX-shaped path must reach `cmd` with native separators.
+
+    The exchange probe is `AgentRunRequest.task_path`, which stays POSIX-shaped on Windows. `cmd`
+    resolves neither `type C:/a/b` nor `echo x >> C:/a/b` — it reports the file as missing — so an
+    unnormalized path fails the read probe as a capability gap and lets the paired write probe
+    "pass" while proving nothing.
+    """
+    posix = "C:/clone/.worc-io/task-1/task.md"
+    native = "C:\\clone\\.worc-io\\task-1\\task.md"
+    probes = build_canary_probes(
+        private_probe="C:\\clone\\.worc",
+        exchange_probe=posix,
+        system="Windows",
+        repo_write_probe=posix,
+    )
+    for probe in probes:
+        assert posix not in probe.command, probe.label
+    read = next(p for p in probes if p.label == "exchange-read-allowed")
+    assert read.command == ["cmd", "/c", "type", native]
+    exchange_write = next(p for p in probes if p.label == "exchange-write-denied")
+    assert exchange_write.command == ["cmd", "/c", "echo", "x", ">>", native]
+
+
+def test_posix_probes_leave_the_path_untouched() -> None:
+    probes = build_canary_probes(
+        private_probe="/clone/.worc",
+        exchange_probe="/clone/.worc-io/task-1/task.md",
+        system="Linux",
+    )
+    read = next(p for p in probes if p.label == "exchange-read-allowed")
+    assert read.command == ["/bin/cat", "/clone/.worc-io/task-1/task.md"]
+
+
 def test_windows_write_probe_redirects_with_a_bare_operator() -> None:
     probes = build_canary_probes(
         private_probe="C:\\clone\\.worc",
@@ -236,6 +284,52 @@ def _smoke_runner(*, writable: bool):
 
 def _empty_inventory(command: str, env: Mapping[str, str]) -> tuple[bool, str]:
     return True, "No MCP servers configured yet."
+
+
+@pytest.mark.parametrize(
+    ("system", "sandbox_uses_operator_home"),
+    [("Windows", True), ("Linux", False), ("Darwin", False)],
+)
+def test_capability_smoke_uses_platform_appropriate_codex_home(
+    tmp_path: Path, system: str, sandbox_uses_operator_home: bool
+) -> None:
+    calls: list[tuple[list[str], str, dict[str, str]]] = []
+    sandbox_runner = _smoke_runner(writable=True)
+
+    def _recording_runner(argv: list[str], cwd: str, env: Mapping[str, str]) -> tuple[int, str]:
+        calls.append((argv, cwd, dict(env)))
+        if argv[1:3] == ["mcp", "list"]:
+            return 0, "No MCP servers configured yet."
+        return sandbox_runner(argv, cwd, env)
+
+    operator_env = {"CODEX_HOME": "operator-codex-home", "UNCHANGED": "yes"}
+    report = run_codex_capability_smoke(
+        command="codex",
+        home_dir=tmp_path,
+        env=operator_env,
+        permission_profile="workspace-write",
+        system=system,
+        runner=_recording_runner,
+    )
+
+    assert report.status == CAPABILITY_PASSED
+    sandbox_calls = [call for call in calls if call[0][1] == "sandbox"]
+    assert sandbox_calls
+    for _, _, probe_env in sandbox_calls:
+        assert probe_env["UNCHANGED"] == "yes"
+        if sandbox_uses_operator_home:
+            assert probe_env == operator_env
+        else:
+            assert probe_env["CODEX_HOME"] != operator_env["CODEX_HOME"]
+            assert Path(probe_env["CODEX_HOME"]).name.startswith("worc-codexhome-")
+
+    inventory_calls = [call for call in calls if call[0][1:3] == ["mcp", "list"]]
+    assert len(inventory_calls) == 1
+    _, inventory_cwd, inventory_env = inventory_calls[0]
+    assert inventory_env["UNCHANGED"] == "yes"
+    assert inventory_env["CODEX_HOME"] == inventory_cwd
+    assert inventory_env["CODEX_HOME"] != operator_env["CODEX_HOME"]
+    assert Path(inventory_env["CODEX_HOME"]).name.startswith("worc-mcp-home-")
 
 
 def test_capability_smoke_workspace_write_passes(tmp_path: Path) -> None:
