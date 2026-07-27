@@ -1,6 +1,6 @@
 # Codex canary: the throwaway `CODEX_HOME` disables Codex on native Windows
 
-Status: **accepted** Date: 2026-07-26 Owner: Vladimir Makarevich
+Status: **implemented** Date: 2026-07-26 Owner: Vladimir Makarevich
 
 A blocking defect, not a deferred feature. On native Windows the WRI-003 permission-profile canary runs every probe under a throwaway `CODEX_HOME`. The Codex Windows sandbox keeps its capability-SID and account state in `CODEX_HOME`, so an empty home has no grants and cannot create them without the elevated backend — **every probe is denied, including the positive control**. The canary therefore fails on a host where the profile is in fact enforced, and because the same canary gates every `codex exec` in [`_pre_launch_check`](../../src/wastech_orchestrator/providers/codex.py#L653), Codex is effectively unusable: each attempt raises `CAPABILITY_UNAVAILABLE` and the Router falls over to Claude.
 
