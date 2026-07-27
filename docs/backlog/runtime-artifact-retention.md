@@ -115,7 +115,14 @@ This is a correction to the earlier reading of these as "manual/migration backup
 
 ## Acceptance decisions (2026-07-27)
 
-**Implementation order.** Part 1 (RA-D1…RA-D5) is independent and goes first. RA-D6 is written against the single `.worc/runs/` parent decided in [private-home-footprint.md](private-home-footprint.md) PH-D1, so land that grouping before the retention verb — otherwise the verb is written against four roots and ported to one. RA-D7 rides with either.
+**Implementation order** across both items — four changes, one hard dependency:
+
+1. **Part 1 here (RA-D1…RA-D5).** Independent of everything else and first, because it is the defect the operator actually reported and it establishes the guard/reporting shape the retention verb then copies.
+2. **The grouping (`private-home-footprint.md` PH-D1…PH-D4).** A mechanical path change plus the new guide page. Must precede step 3.
+3. **RA-D6 — the retention switch and `worc runs clean`.** The one hard dependency: it is written against the single `.worc/runs/` parent, so if the grouping has not landed the verb is written against four roots and then ported to one.
+4. **RA-D7 — keep-last-N for the orchestrator's own `.bak` artifacts.** Independent; last only because it touches the `install --reconfigure` path rather than the runtime one.
+
+Steps 1 and 4 do not depend on 2 or 3 and may run in parallel with them. Note what the ordering does **not** buy: the orphaned old-layout directories in existing targets are removed by hand whichever order is chosen, because PH-D1 deliberately ships no migration code and `runs clean` addresses `runs/`, not the pre-rename roots beside it. That is a documentation obligation on step 2, not a sequencing problem.
 
 ### RA-D1 — bare `clean` sweeps the whole logs root; the ledger stays behind `--all`
 
