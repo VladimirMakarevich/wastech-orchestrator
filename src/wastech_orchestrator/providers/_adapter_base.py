@@ -102,7 +102,7 @@ class ParsedEvents:
 
 @dataclass(frozen=True)
 class IsolationCapabilityReport:
-    """A provider's live, no-model isolation capability-probe verdict for ``worc preflight`` (H7).
+    """A provider's live, no-model isolation capability-probe verdict for ``worc preflight``.
 
     ``ok`` is pass/fail; ``status`` a short machine label (e.g. ``passed``/``unsupported``/
     ``policy-failed``); ``detail`` a secret-free operator line. ``fatal`` marks a result that must
@@ -130,7 +130,7 @@ def coerce_usage_cost(value: object) -> float | None:
     """A ``float`` USD cost from a raw value, or ``None`` for an absent / non-numeric / bool value.
 
     Shared by the adapters mapping a provider-reported dollar figure (e.g. Claude's stream-json
-    ``total_cost_usd``) into :class:`NormalizedUsage.cost` (VF-8). Accepts an ``int`` or ``float``;
+    ``total_cost_usd``) into :class:`NormalizedUsage.cost`. Accepts an ``int`` or ``float``;
     ``bool`` is rejected because ``isinstance(True, int)`` is true.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -210,7 +210,7 @@ class BaseCliProvider:
         self._config = config
         self._security = security
         self._artifacts_root = Path(artifacts_root)
-        # WRI-002/003: the internal read-deny set (private/control homes, secrets, provider auth
+        # The internal read-deny set (private/control homes, secrets, provider auth
         # homes, frozen bundles) the adapter projects into its tool/OS-sandbox deny policy. On the
         # base so both adapters project the same set; ``None`` in unit harnesses that don't test it.
         self._deny_policy = deny_policy
@@ -266,7 +266,7 @@ class BaseCliProvider:
     def _stdin_text(self, request: AgentRunRequest) -> str:
         """The text fed to the CLI on stdin: the Core prompt + the context-files footer.
 
-        Both adapters use this as-is — neither injects repository instructions (VF-5): the agent
+        Both adapters use this as-is — neither injects repository instructions: the agent
         reads the repo's root instruction files itself (Codex via native ``AGENTS.md`` discovery,
         Claude via its Read tool), so stdin carries only the flow prompt + the context-file paths.
         """
@@ -306,13 +306,13 @@ class BaseCliProvider:
 
         Runs on the same augmented ``env`` the real launch uses. A subclass raises
         :class:`ProviderError` to fail closed pre-model (e.g. Codex proves its generated permission
-        profile is actually enforced with a ``codex sandbox`` canary — WRI-003). Default: no-op, so
+        profile is actually enforced with a ``codex sandbox`` canary). Default: no-op, so
         no paid model call is a structural guarantee for providers that need no pre-launch proof.
         """
         return None
 
     def isolation_capability_smoke(self, *, home_dir: Path) -> IsolationCapabilityReport | None:
-        """Subclass hook: a live, no-model isolation capability probe for ``worc preflight`` (H7).
+        """Subclass hook: a live, no-model isolation capability probe for ``worc preflight``.
 
         Default ``None`` — no live probe (the offline ``isolation_reasons`` gate already covers the
         provider). A subclass (Codex) stands up a throwaway fixture under *home_dir* — which MUST be
@@ -325,7 +325,7 @@ class BaseCliProvider:
     # --- shared lifecycle ----------------------------------------------------------------------
 
     def preflight(self) -> ProviderHealth:
-        """Detect the executable and parse its version (auth is best-effort/offline in P2)."""
+        """Detect the executable and parse its version (auth is best-effort/offline)."""
         label = self._executable_label()
         env = self._augment_child_env(build_child_env(self._security.allowed_environment))
         with tempfile.TemporaryDirectory() as scratch:
@@ -448,7 +448,7 @@ class BaseCliProvider:
         self._write_request(paths, request, argv=argv)
 
         env = self._augment_child_env(build_child_env(self._security.allowed_environment))
-        # Deterministic no-model pre-launch check on the real launch env (WRI-003 Codex canary): a
+        # Deterministic no-model pre-launch check on the real launch env (the Codex canary): a
         # ProviderError here fails closed BEFORE any model call. The request artifact is already
         # written; a subclass may record its own evidence under ``paths``.
         self._pre_launch_check(request, argv, env, paths)
@@ -492,7 +492,7 @@ class BaseCliProvider:
         )
         Path(paths.events_path).write_text(redacted_stdout, encoding="utf-8")
 
-        # WRI-012 quiescence barrier: before ANY output is parsed or trusted, the provider process
+        # Quiescence barrier: before ANY output is parsed or trusted, the provider process
         # tree must be proven quiescent. If ``run_process`` could not prove the containment empty, a
         # background/detached descendant may still be writing the repo/exchange — a fail-closed
         # SECURITY condition, never a quality failure and never a fallback. Finalize the failed
@@ -541,7 +541,7 @@ class BaseCliProvider:
             self._finalize_failure(paths, request, started_at, finished_at, proc, error)
             raise
 
-        # The raw session id lives ONLY in state.db (durable sessions, P2.2). The resume id was
+        # The raw session id lives ONLY in state.db (durable sessions). The resume id was
         # already redacted via ``extra_secrets``; scrub the freshly emitted id from the on-disk
         # streams too, while keeping the raw id on the in-memory result for the lineage store.
         if parsed.session_id:
@@ -632,8 +632,9 @@ class BaseCliProvider:
         """Replace a raw session id with :data:`REDACTED` in the on-disk stdout/events streams.
 
         Word-bounded, like the literal path in ``redact_text``: an unbounded substring replace is
-        the F45 defect, and here it would rewrite every occurrence of a short session id *inside*
-        other words — shredding the JSON structure of the very sinks this method rewrites.
+        the very defect that boundary exists to prevent, and here it would rewrite every occurrence
+        of a short session id *inside* other words — shredding the JSON structure of the very sinks
+        this method rewrites.
         """
         if not raw_session_id:
             return
@@ -711,7 +712,7 @@ class BaseCliProvider:
 
     def _extra_secrets(self, request: AgentRunRequest) -> tuple[str, ...]:
         """Literal secrets to redact: secret-named parent env values + denied-read file contents +
-        the raw resume session id (durable sessions, P2.2 — it must never leave state.db, so it is
+        the raw resume session id (durable sessions — it must never leave state.db, so it is
         scrubbed from the request argv / stdout / stderr / events / result)."""
         session = (request.session_id,) if request.session_id else ()
         return (

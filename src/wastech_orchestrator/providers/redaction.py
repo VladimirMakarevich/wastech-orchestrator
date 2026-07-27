@@ -1,4 +1,4 @@
-"""Secret redaction (.agents/rules/security.md).
+"""Secret redaction — the single scrubbing seam every sink goes through.
 
 Pure functions that scrub known-secret shapes from text and from the request representation
 **before** anything is written to an artifact, log, or SQLite. There are two inputs:
@@ -34,7 +34,7 @@ REDACTED = "[REDACTED]"
 
 
 def normalized_session_id(raw_session_id: str) -> str:
-    """A stable, non-secret outward form of a provider session id (durable sessions, P2.2).
+    """A stable, non-secret outward form of a provider session id (durable sessions).
 
     The raw session id lives **only** in ``state.db`` (the ``editing_lineage`` table); everywhere
     else (artifacts, logs, the ``result.json`` audit) the session is referred to by this normalized
@@ -47,7 +47,7 @@ def normalized_session_id(raw_session_id: str) -> str:
 # Literal secrets shorter than this are ignored: redacting a very short value would mangle ordinary
 # text without protecting anything meaningful (real tokens are long). Aligned with
 # ``_MIN_DENIED_SECRET_LEN`` below — every harvest source already floors literals at 8, so this
-# loses no real secret while adding defense-in-depth against a short literal slipping in (F45).
+# loses no real secret while adding defense-in-depth against a short literal slipping in.
 _MIN_LITERAL_LEN = 8
 
 # Threshold for a token harvested from a denied_read_paths file. Higher than _MIN_LITERAL_LEN so
@@ -158,9 +158,10 @@ def redact_text(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
     r"""Return ``text`` with known secrets replaced by :data:`REDACTED`. Pure.
 
     Literal ``extra_secrets`` are replaced only on word boundaries (``(?<!\w)…(?!\w)``), never as a
-    substring inside a larger token. An unbounded substring replace corrupted benign text — F45: a
-    short harvested value rewrote the middle of an ordinary word in a lesson ``subject``, which also
-    broke the subject-derived dedup key. Deterministic (F36): the same input always redacts alike.
+    substring inside a larger token. An unbounded substring replace corrupted benign text in the
+    field: a short harvested value rewrote the middle of an ordinary word in a lesson ``subject``,
+    which also broke the subject-derived dedup key. Deterministic: the same input always redacts
+    alike.
 
     A sensitive ``NAME=VALUE`` assignment keeps its name and loses its value, gated on the whole-
     segment name policy (:func:`is_sensitive_key`) so a benign identifier is never rewritten. When
@@ -193,8 +194,7 @@ def redact_jsonl(text: str, *, extra_secrets: Iterable[str] = ()) -> str:
     keys lose their whole value; string leaves go through :func:`redact_text`). A line that is not
     JSON — a provider preamble, a truncated tail — falls back to :func:`redact_text`, so nothing is
     written unscrubbed. Line endings are preserved verbatim, so a CRLF stream survives on Windows,
-    and key order is preserved (no ``sort_keys``) so the sink stays diffable and deterministic
-    (F36).
+    and key order is preserved (no ``sort_keys``) so the sink stays diffable and deterministic.
     """
     secrets = tuple(extra_secrets)
     out: list[str] = []

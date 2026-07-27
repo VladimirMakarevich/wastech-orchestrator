@@ -1,4 +1,4 @@
-"""Exchange publication boundary (WRI-001, .agents/rules/security.md).
+"""Exchange publication boundary — the only provider-readable orchestration surface.
 
 The exchange root ``<repo>/.worc-io/<task-id>/`` is the **only** provider-readable orchestration
 surface. Everything that crosses into it does so through :func:`publish_to_exchange`, a single
@@ -13,9 +13,10 @@ redaction + path-safety seam:
 * the write is atomic (temp + :func:`os.replace`) and LF byte-stable.
 
 :func:`build_exchange_manifest` re-derives the clean-surface fingerprint (file type, link
-identity/count, relative name, size, content digest) and is the seam WRI-002/WRI-007 diff pre/post
-attempt and on seal. Per-OS filesystem inspection is behind the injectable :data:`FileInspector`
-seam so both the POSIX and native-Windows fail-closed branches are unit-testable on any host.
+identity/count, relative name, size, content digest) and is the seam the tamper check diffs
+pre/post attempt and on seal. Per-OS filesystem inspection is behind the injectable
+:data:`FileInspector` seam so both the POSIX and native-Windows fail-closed branches are
+unit-testable on any host.
 
 This module is a leaf (``.importlinter`` ``providers-are-leaf``): it must not import ``core`` /
 ``memory``, so it carries its own small atomic writer rather than reusing ``memory._io`` /
@@ -88,7 +89,7 @@ def posix_file_facts(path: Path) -> FileFacts:
 def windows_file_facts(path: Path) -> FileFacts:
     """:data:`FileInspector` for native Windows — reparse points, hard-link count, and NTFS ADS.
 
-    Exercised on a real Windows host by the WRI-006 cross-platform gate; on other hosts the fake
+    Exercised on a real Windows host by the cross-platform gate; on other hosts the fake
     inspector drives the same fail-closed branches. Fails closed (:class:`ExchangeError`) rather
     than guessing when a Win32 query cannot be completed on a regular file.
     """
@@ -251,7 +252,7 @@ class ExchangeEntry:
 
 @dataclass(frozen=True)
 class ExchangeManifest:
-    """The clean-surface fingerprint of one task's exchange (WRI-002/WRI-007 diff two of these)."""
+    """The clean-surface fingerprint of one task's exchange (the tamper check diffs two)."""
 
     task_id: str
     entries: tuple[ExchangeEntry, ...]
@@ -284,8 +285,8 @@ def diff_exchange_manifests(before: ExchangeManifest, after: ExchangeManifest) -
     Empty means the curated exchange is byte-for-byte unchanged. Compares by relative name and
     content digest (plus regular-file identity), so a content edit, an add/delete/rename, or a
     hard-link/identity swap is reported — but a timestamp-only touch is **not** (mtime is not in the
-    fingerprint). WRI-002 diffs a pre-attempt manifest against a post-attempt one; any change is a
-    non-fallback policy violation and the changed copy is never consumed downstream.
+    fingerprint). The orchestrator diffs a pre-attempt manifest against a post-attempt one; any
+    change is a non-fallback policy violation and the changed copy is never consumed downstream.
     """
     before_by_name = {entry.relname: entry for entry in before.entries}
     after_by_name = {entry.relname: entry for entry in after.entries}
@@ -364,7 +365,7 @@ def assert_exchange_current_task_only(
 
     The pre-launch invariant: the exchange root is a real (non-symlink) directory whose only child
     is ``<task_id>`` (a real directory), or it is absent/empty. A foreign task dir, a stray file, or
-    a symlinked root/task dir fails closed. Terminal sealing/restoration is WRI-007.
+    a symlinked root/task dir fails closed. Sealing a terminal exchange is a separate step.
     """
     inspector = inspect or default_file_inspector()
     root = Path(exchange_root)
@@ -423,16 +424,16 @@ def assert_orchestration_paths_contained(
 def clear_exchange_task_dir(exchange_root: str | Path, task_id: str) -> None:
     """Remove a task's active exchange dir (fresh/restart start clean; interim terminal reset).
 
-    Interim helper: WRI-007 replaces the terminal use with a quiescence-gated seal → checksum-verify
-    into private audit → remove, plus contaminated-tree quarantine. Robust Windows read-only/locked
-    handling is likewise WRI-007's; here a failure surfaces rather than being swallowed.
+    Interim helper: the terminal path is instead a quiescence-gated seal → checksum-verify into
+    private audit → remove, plus contaminated-tree quarantine. Robust Windows read-only/locked
+    handling belongs to that sealing path too; here a failure surfaces rather than being swallowed.
     """
     task_dir = exchange_task_dir(exchange_root, task_id)
     if os.path.lexists(task_dir):
         shutil.rmtree(task_dir)
 
 
-# --- Native-Windows helpers (exercised on a real Windows host by WRI-006) ------------------------
+# --- Native-Windows helpers (exercised on a real Windows host by the CI gate) ---------------------
 
 
 def _kernel32() -> Any:

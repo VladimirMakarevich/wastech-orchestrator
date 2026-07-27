@@ -52,7 +52,7 @@ class ErrorClass(StrEnum):
     # The provider CLI rejected OUR invocation with an argparse/usage error (bad flags/args we
     # built; codex uses exit 2) — distinct from a genuine UNSUPPORTED_VERSION. Deliberately NOT in
     # FALLBACK_ELIGIBLE: a bad argv we generate must surface loudly and never silently fail over to
-    # the other provider (F38 was masked exactly this way, classified as an unsupported version).
+    # the other provider (this was masked exactly this way, classified as an unsupported version).
     INVALID_INVOCATION = "invalid_invocation"
     # The provider rejected OUR model request with a model/schema HTTP 400 (bad request /
     # unsupported schema / unsupported parameter) — a different layer from INVALID_INVOCATION (the
@@ -72,8 +72,8 @@ class ErrorClass(StrEnum):
     # recognized transient limit keeps its own RATE_LIMITED park.
     AGENT_NO_PROGRESS = "agent_no_progress"
     # The provider could not resume the requested session (lost transcript / provider reset it). The
-    # Router retries the SAME provider once with a fresh session — it is infra (durable sessions,
-    # P2.2), never a quality failure, so it never falls back to another provider and never charges a
+    # Router retries the SAME provider once with a fresh session — it is infra (durable sessions),
+    # never a quality failure, so it never falls back to another provider and never charges a
     # fix iteration. Deliberately NOT in FALLBACK_ELIGIBLE.
     SESSION_UNAVAILABLE = "session_unavailable"
     # An operator stop killed the agent mid-run (reliable-stop). Produced only by the Router when a
@@ -81,7 +81,7 @@ class ErrorClass(StrEnum):
     # distinguishable from a genuine PROCESS_CRASHED. Deliberately NOT in FALLBACK_ELIGIBLE (never
     # respawn a fresh agent after a stop) nor TRANSIENT_RETRYABLE; the Core parks the task instead.
     CANCELLED = "cancelled"
-    # The provider process-tree quiescence barrier could not prove the containment empty (WRI-012):
+    # The provider process-tree quiescence barrier could not prove the containment empty:
     # a background/detached/reparented descendant may still be running and writing the repo/exchange
     # after the root exited. This is a SECURITY / manual-action condition, never a quality failure.
     # Deliberately NOT in FALLBACK_ELIGIBLE (never respawn a fresh agent while an unknown writer may
@@ -89,7 +89,7 @@ class ErrorClass(StrEnum):
     # Core routes it to ``manual_action_required`` and the children-file handle is retained.
     CONTAINMENT_UNVERIFIED = "containment_unverified"
     # A required host isolation capability is unavailable, detected DETERMINISTICALLY BEFORE any
-    # model invocation (WRI-002): e.g. a Claude workspace-write node on Linux/WSL2 whose Bash
+    # model invocation: e.g. a Claude workspace-write node on Linux/WSL2 whose Bash
     # sandbox
     # needs ``bubblewrap``+``socat`` which are absent. The adapter refuses to run Bash unsandboxed
     # and raises this from the argv builder — nothing is launched, so no paid call is made. NOT a
@@ -176,7 +176,7 @@ class AgentRunRequest:
     check_artifacts_path: str | None = None
     review_artifacts_path: str | None = None
     human_input_path: str | None = None
-    # VF-10: on a rework re-entry, the previous author (e.g. ``fixing``) node's report — its own
+    # On a rework re-entry, the previous author (e.g. ``fixing``) node's report — its own
     # account of what it did or why it could not address the last findings. Set by the evaluator
     # runner from the exchange (``None`` on the first pass / for non-evaluator requests), so the
     # reviewer judges "was the finding addressed" with the implementer's account in hand instead of
@@ -194,7 +194,7 @@ class AgentRunRequest:
     # subtracts it so a resumed run that produced no NEW output is recognized (a cumulative
     # ``output_tokens`` is never 0 on a resume). Inert whenever ``session_id`` is ``None``.
     resume_baseline_output_tokens: int | None = None
-    # Whether the agent process may reach the network (P3.2 ``network_policy`` enforcement). Default
+    # Whether the agent process may reach the network (``network_policy`` enforcement). Default
     # ``False`` — the flow grants network only by declaring ``network_policy``; absent, no network.
     # The adapter maps it onto its sandbox: Codex enables the workspace-write sandbox's network
     # access; Claude allows the WebFetch/WebSearch tools. It only toggles the network — never the
@@ -208,16 +208,16 @@ class AgentRunRequest:
     # those verbs and write-denies the clone in its OS sandbox, while Codex's ``read-only`` sandbox
     # already permits commands and already forbids every mutation, so it needs nothing from this.
     git_evidence: bool = False
-    # WRI-002/003: the absolute Git-control + lifecycle roots a *workspace-write* attempt must
+    # The absolute Git-control + lifecycle roots a *workspace-write* attempt must
     # Write/Edit-deny (exchange root, resolved gitdir/common-dir/hooks-dir, ``tasks/`` tree). Set by
     # the node runner from ``GitManager.resolve_control_paths`` only for a workspace-write attempt
     # (the gitdir/common-dir are per-worktree and only final after branch prep); ``None`` for
     # read-only attempts, which carry no write tools. Provider-neutral — each adapter renders it
     # into its own tool-deny / OS-sandbox ``denyWrite`` syntax; preserved verbatim across a
     # fallback. Repository governance/instruction files are intentionally not in this set — editing
-    # them is ordinary work, reported to the operator rather than blocked (VF-20).
+    # them is ordinary work, reported to the operator rather than blocked.
     write_guard: ProviderWriteGuardPolicy | None = None
-    # VF-7: the Core-owned orchestrator security contract prepended to the effective prompt as
+    # The Core-owned orchestrator security contract prepended to the effective prompt as
     # defense-in-depth (advisory, NOT enforcement — the sandbox + deny projection enforce). Neutral
     # text built once in Core (``core/flow/security_preamble``) and carried here; the single neutral
     # seam ``build_effective_prompt`` prepends it, so every request kind (agent/evaluator/
@@ -253,7 +253,7 @@ def build_context_footer(request: AgentRunRequest) -> str:
 def build_effective_prompt(request: AgentRunRequest) -> str:
     """Combine the orchestrator security preamble, the Core-assembled prompt, and the footer.
 
-    Order in the single stdin channel: ``preamble → prompt → footer`` (VF-7). A ``None``/empty
+    Order in the single stdin channel: ``preamble → prompt → footer``. A ``None``/empty
     preamble or footer is omitted, so an unset preamble yields today's output byte-for-byte. Pure
     text concatenation — no CLI syntax; the preamble content is built in Core and carried on the
     request.
@@ -295,7 +295,7 @@ class NormalizedUsage:
     invariant that holds for both providers: ``input_total == uncached_input + cache_read +
     (cache_write or 0)``. ``cost`` is the provider-reported spend for the scope, in USD, when the
     CLI emits one (Claude's stream-json ``total_cost_usd``) — ``None`` when it does not (Codex emits
-    no dollar figure), never a guessed value (VF-8).
+    no dollar figure), never a guessed value.
     """
 
     scope: UsageScope
@@ -351,8 +351,7 @@ class AgentProvider(Protocol):
     """Common interface for Codex and Claude Code.
 
     Adapters implement this protocol. They do NOT perform fallback and do NOT change the
-    state machine — that is the responsibility of the Router and Core (see
-    .agents/rules/architecture.md).
+    state machine — that is the responsibility of the Router and Core.
     """
 
     id: str

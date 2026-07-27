@@ -97,7 +97,7 @@ _BYPASS_MODE = "bypassPermissions"
 # documented headless read-only mode: it auto-denies every non-allowlisted tool with no prompt and
 # no ``plan``-mode interactive UX (``AskUserQuestion``/``ExitPlanMode``, ``~/.claude/plans``) that a
 # headless run cannot answer — a read-only agent that needs to ask surfaces it through the role's
-# structured output instead (F21). ``workspace-write`` maps to ``acceptEdits`` (auto-approve reads +
+# structured output instead. ``workspace-write`` maps to ``acceptEdits`` (auto-approve reads +
 # edits + safe workspace commands without prompting) — the Claude equivalent of the Codex
 # ``workspace-write`` sandbox. The ``Bash`` baseline is removed on native Windows (no OS sandbox) by
 # :func:`resolve_claude_tools`.
@@ -107,7 +107,7 @@ _PROFILE_MAP: dict[str, tuple[str, tuple[str, ...]]] = {
 }
 
 # The web tools added to ``--allowedTools``/``--tools`` only when the flow grants network
-# (request.network_access); omitted otherwise so a headless run cannot reach the network (P3.2).
+# (request.network_access); omitted otherwise so a headless run cannot reach the network.
 _NETWORK_TOOLS: tuple[str, ...] = ("WebFetch", "WebSearch")
 
 # The read-only git verbs a node may execute when the operator enabled the git-evidence grant and
@@ -133,7 +133,7 @@ _GIT_EVIDENCE_VERBS: tuple[str, ...] = (
 
 
 class SandboxCapability(StrEnum):
-    """Whether Claude's OS-enforced Bash sandbox can be used on the host (WRI-002).
+    """Whether Claude's OS-enforced Bash sandbox can be used on the host.
 
     macOS uses Seatbelt (always available). Linux and WSL2 both report ``platform.system()==
     "Linux"`` and need ``bubblewrap`` (``bwrap``) + ``socat`` on ``PATH``. Native Windows has no
@@ -181,7 +181,7 @@ def _bash_sandbox_available(capability: SandboxCapability) -> bool:
 
 @dataclass(frozen=True)
 class ClaudeToolPlan:
-    """The resolved per-attempt Claude tool posture (WRI-002).
+    """The resolved per-attempt Claude tool posture.
 
     ``mode`` is the ``--permission-mode`` value; ``tools`` is the exact built-in tool set behind
     the hard ``--tools`` existence gate; ``allow_patterns`` holds the scoped ``Tool(arg:*)`` entries
@@ -217,7 +217,7 @@ def resolve_claude_tools(
     strict_isolation: bool = True,
     git_evidence: bool = False,
 ) -> ClaudeToolPlan:
-    """Resolve the mode + built-in tool set + sandbox need for a profile on a host (WRI-002).
+    """Resolve the mode + built-in tool set + sandbox need for a profile on a host.
 
     The single source of the platform decision (used by both :func:`build_claude_argv` and the
     settings-file write so they never disagree). ``git_evidence`` is the resolved per-node grant:
@@ -334,7 +334,7 @@ _CLAUDE_SIGNATURES = make_signatures(
         (ErrorClass.UNSUPPORTED_VERSION, r"unsupported version"),
         (
             # argparse/usage rejection of OUR argv — a bad-argv bug on our side, not a version gate.
-            # A separate class so it surfaces loudly instead of silently failing over (F38). A stale
+            # A separate class so it surfaces loudly instead of silently failing over. A stale
             # CLI that emits "unknown option" for a newer flag is caught by the preflight check.
             ErrorClass.INVALID_INVOCATION,
             r"unknown option|unrecognized option|unexpected argument",
@@ -380,7 +380,7 @@ def _deny_read_tools_for(denied_read_paths: Sequence[str]) -> list[str]:
 def claude_config_home() -> Path:
     """The Claude Code config/credential home: ``$CLAUDE_CONFIG_DIR`` or the ``~/.claude`` default.
 
-    Resolved from the same environment the spawned child inherits. Shared with the WRI-004
+    Resolved from the same environment the spawned child inherits. Shared with the
     ``InternalDenyPolicy`` assembly (composition root) so the provider-owned auth/config home is a
     single source of truth instead of a literal duplicated across the deny surfaces.
     """
@@ -391,7 +391,7 @@ def claude_config_home() -> Path:
 
 def _native_memory_deny_tools() -> list[str]:
     """Deny ``Write``/``Edit``/``Read`` on the Claude Code config dir so the spawned agent cannot
-    read, inject, or leak **native project memory** outside the target working tree (F37).
+    read, inject, or leak **native project memory** outside the target working tree.
 
     Claude Code keeps per-project memory at ``<config_dir>/projects/<cwd-slug>/memory/*.md`` — a
     durable store OUTSIDE the repo, so anything written there escapes ``current.diff``, the commit,
@@ -469,7 +469,7 @@ _RESERVED_CLAUDE_FLAGS: frozenset[str] = frozenset(
 # ``--tools`` (the hard built-in-tool existence gate), ``--allowedTools`` (the auto-approve list,
 # and the only place a scoped tool pattern is expressed — a granted read-only shell is confined to
 # its verbs by that list plus the OS sandbox). Probed at preflight so enum/flag drift is caught
-# before the model runs (WRI-002 / final-review H2 — the Claude counterpart to Codex's
+# before the model runs (the Claude counterpart to Codex's
 # ``exec --help`` ``-c/--config`` probe).
 _REQUIRED_CLAUDE_FLAGS: tuple[str, ...] = (
     "--permission-mode",
@@ -537,7 +537,7 @@ def build_sandbox_settings(
     read_isolation_off: bool = False,
     deny_write_root: Path | None = None,
 ) -> dict[str, Any]:
-    """Build the adapter-owned Claude OS Bash-sandbox settings (WRI-002).
+    """Build the adapter-owned Claude OS Bash-sandbox settings.
 
     The private internal read-deny set is sealed for both read AND write; the write-guard roots
     (exchange, gitdir/common-dir/hooks, ``tasks/``) are write-denied only (they stay readable).
@@ -557,7 +557,7 @@ def build_sandbox_settings(
     a verb allowlist.
     """
     internal = [_sandbox_path(p) for p in deny_policy.denied_paths]
-    # VF-6: with read-isolation OFF the private set stays WRITE-denied (control plane immutable) but
+    # With read-isolation OFF the private set stays WRITE-denied (control plane immutable) but
     # is no longer read-denied, so the sandboxed Bash may read it for native discovery. The env-file
     # ``credentials`` deny below is a targeted secret protection and is kept regardless.
     deny_read = [] if read_isolation_off else list(internal)
@@ -644,10 +644,10 @@ def build_claude_argv(
 ) -> list[str]:
     """Build the ``claude -p`` argv (a list, never a shell string).
 
-    ``read_isolation_off`` (VF-6, the effective ``security.read_isolation_off``) relaxes only the
+    ``read_isolation_off`` (the effective ``security.read_isolation_off``) relaxes only the
     READ side: ``--setting-sources project`` (not ``""``) restores native ``CLAUDE.md`` + project
     settings/hooks/MCP/skills discovery, ``--strict-mcp-config`` is dropped, the private
-    ``internal_deny_read_paths`` set becomes readable (still Write/Edit-denied), and the F37
+    ``internal_deny_read_paths`` set becomes readable (still Write/Edit-denied), and the
     native-memory deny is lifted. The public ``denied_read_paths`` blacklist and the WRITE side
     (command denies, Write/Edit denies, write-guard) are unchanged.
 
@@ -656,7 +656,7 @@ def build_claude_argv(
     authority-bearing Claude flag (:data:`_RESERVED_CLAUDE_FLAGS` —
     tools/settings/MCP/plugins/agents/
     add-dir/file/Chrome/IDE/remote/worktree/system-prompt/session), or the requested profile is the
-    forbidden full-access mode — defence in depth over the P1 config validator. Raises
+    forbidden full-access mode — defence in depth over the config validator. Raises
     ``CAPABILITY_UNAVAILABLE`` (a pre-model infra error) when a strict workspace-write attempt needs
     the Bash sandbox on a supported host whose sandbox dependencies are missing (:func:
     `resolve_claude_tools`). A ``--permission-mode`` override in ``extra_args`` (incl.
@@ -666,13 +666,13 @@ def build_claude_argv(
     The prompt is delivered on stdin, never on the command line; context reaches Claude only as file
     paths. Isolation is one adapter-owned effective policy: ``--tools`` is the hard built-in tool
     existence gate; ``--allowedTools`` auto-approves them (a headless run cannot prompt);
-    ``--disallowedTools`` carries the ``security.*`` command/read denies, the F37 native-memory
+    ``--disallowedTools`` carries the ``security.*`` command/read denies, the native-memory
     deny,
     and the internal private/exchange/Git ``//``-anchored denies; ``--setting-sources ""`` +
     ``--strict-mcp-config`` close the user/project/local + MCP surfaces; and (workspace-write,
     sandbox
     hosts) ``--settings`` points at the OS Bash-sandbox policy file. ``internal_deny_read_paths`` is
-    the WRI-004 :class:`InternalDenyPolicy` set (private/control homes, secrets, provider homes,
+    the :class:`InternalDenyPolicy` set (private/control homes, secrets, provider homes,
     frozen bundles); ``request.write_guard`` carries the exchange/Git/``tasks/`` write-deny roots.
     """
     combined_extra = tuple(config.extra_args) + tuple(request.extra_args)
@@ -700,7 +700,7 @@ def build_claude_argv(
         "--verbose",
     ]
     if read_isolation_off:
-        # VF-6 operator escape hatch: read-isolation is OFF. Restore Claude's NATIVE project
+        # Operator escape hatch: read-isolation is OFF. Restore Claude's NATIVE project
         # discovery — ``--setting-sources project`` re-loads the target repo's ``CLAUDE.md`` + its
         # project settings (hooks, MCP, skills, plugins) that ``--setting-sources ""`` closes
         # under isolation — and DROP ``--strict-mcp-config`` so project-declared MCP servers load.
@@ -709,7 +709,7 @@ def build_claude_argv(
         # WRITE side (denyWrite / Write/Edit denies / command denies) below still applies.
         argv += ["--setting-sources", "project"]
     else:
-        # Security lockdown (WRI-002): load NO user/project/local setting sources, so Claude never
+        # Security lockdown: load NO user/project/local setting sources, so Claude never
         # loads the target repo's / user's settings — no hooks, MCP, skills, or plugins (also refuse
         # any MCP server not passed via ``--mcp-config``, and none is, so zero MCP tools load). An
         # accepted consequence is that native ``CLAUDE.md`` memory auto-load is off too — the CLI
@@ -728,17 +728,17 @@ def build_claude_argv(
         argv += ["--tools", ",".join(plan.tools)]
         argv += ["--allowedTools", ",".join(plan.allowed_tools)]
     denied_tools = _deny_tools_for(denied_commands) + _deny_read_tools_for(denied_read_paths)
-    # F37: confine native project memory out of the spawn — unless the operator has opted in to the
+    # Confine native project memory out of the spawn — unless the operator has opted in to the
     # agent's own native memory (agents.providers.claude.allow_native_memory) OR read-isolation is
-    # OFF (VF-6), both deliberate, operator-owned restorations of Claude's own native memory (that
-    # store is unaudited and outside the redaction net). The claude config home is left to this F37
-    # rule (gated by the opt-in), so the internal deny below excludes it to avoid re-denying
-    # ``~/.claude`` and breaking the opt-in.
+    # OFF, both deliberate, operator-owned restorations of Claude's own native memory (that
+    # store is unaudited and outside the redaction net). The claude config home is left to this
+    # native-memory rule (gated by the opt-in), so the internal deny below excludes it to avoid
+    # re-denying ``~/.claude`` and breaking the opt-in.
     if not config.allow_native_memory and not read_isolation_off:
         denied_tools += _native_memory_deny_tools()
     claude_home = claude_config_home()
     read_deny_paths = [p for p in internal_deny_read_paths if p != claude_home]
-    # VF-6: with read-isolation OFF the private set stays WRITE-denied (the control plane must stay
+    # With read-isolation OFF the private set stays WRITE-denied (the control plane must stay
     # immutable) but becomes READABLE so the agent can natively discover it; under isolation it is
     # Read+Write+Edit-denied. The public ``denied_read_paths`` blacklist (above) is unchanged.
     internal_deny_kinds = ("Write", "Edit") if read_isolation_off else ("Read", "Write", "Edit")
@@ -750,7 +750,7 @@ def build_claude_argv(
     if denied_tools:
         argv += ["--disallowedTools", ",".join(denied_tools)]
     if sandbox_settings_path is not None:
-        # WRI-002: the adapter-owned OS Bash-sandbox policy (workspace-write on a sandbox host). The
+        # The adapter-owned OS Bash-sandbox policy (workspace-write on a sandbox host). The
         # CLI parent reads this file directly (outside the sandbox), so a private-home path is fine.
         argv += ["--settings", sandbox_settings_path]
     model = request.model or config.model
@@ -824,7 +824,7 @@ def _normalize_claude_usage(
     ``input_tokens + cache_creation_input_tokens + cache_read_input_tokens`` — and folds reasoning
     into output, so ``reasoning_output`` stays ``None``. Each invocation is self-contained (not
     cumulative). ``total_cost_usd`` is the per-invocation dollar figure the terminal ``result``
-    event carries as a **sibling** of ``usage`` (VF-8); it rides the same per-invocation scope, so
+    event carries as a **sibling** of ``usage``; it rides the same per-invocation scope, so
     no baseline subtraction applies. Returns ``None`` when no usage was emitted.
     """
     if not usage:
@@ -854,7 +854,7 @@ def parse_stream_json(stdout_text: str) -> ParsedEvents:
     final_message: str | None = None
     structured_output: dict[str, Any] | None = None
     usage: dict[str, Any] | None = None
-    # VF-8: the per-invocation dollar cost the terminal ``result`` event carries as a sibling of
+    # The per-invocation dollar cost the terminal ``result`` event carries as a sibling of
     # ``usage`` (not inside it), so it is captured separately and threaded into the normalizer.
     total_cost_usd: object = None
     session_id: str | None = None
@@ -944,7 +944,7 @@ class ClaudeCodeProvider(BaseCliProvider):
         **kwargs: Any,
     ) -> None:
         super().__init__(config, **kwargs)
-        # WRI-002: the host Bash-sandbox capability seam. ``None`` resolves the real host at call
+        # The host Bash-sandbox capability seam. ``None`` resolves the real host at call
         # time (so a test can monkeypatch ``default_sandbox_probe``); tests inject a concrete probe
         # to exercise every platform branch deterministically on any CI host.
         self._sandbox_probe = sandbox_probe
@@ -956,7 +956,7 @@ class ClaudeCodeProvider(BaseCliProvider):
         return _CLAUDE_SIGNATURES
 
     def _preflight_capability_error(self, env: Mapping[str, str]) -> str | None:
-        """Verify ``claude --help`` still exposes the isolation-critical flags (WRI-002 / H2).
+        """Verify ``claude --help`` still exposes the isolation-critical flags.
 
         The adapter's read-isolation rests on :data:`_REQUIRED_CLAUDE_FLAGS`. A CLI that renamed or
         removed any would otherwise reach a paid model call and only then fail with "unknown
@@ -970,7 +970,7 @@ class ClaudeCodeProvider(BaseCliProvider):
             return None
         required = _REQUIRED_CLAUDE_FLAGS
         if self._security.read_isolation_off:
-            # VF-6: with read-isolation OFF the adapter no longer emits ``--strict-mcp-config`` (it
+            # With read-isolation OFF the adapter no longer emits ``--strict-mcp-config`` (it
             # runs native MCP discovery), so the CLI need not expose it. ``--setting-sources`` is
             # still emitted (``project``) and the permission-mode / hard tool gate stay required.
             required = tuple(f for f in required if f != "--strict-mcp-config")
@@ -984,7 +984,7 @@ class ClaudeCodeProvider(BaseCliProvider):
         return None
 
     def _preflight_degraded_reasons(self, env: Mapping[str, str]) -> tuple[str, ...]:
-        """Flag Claude CLI drift that breaks durable-session resume nodes (H2).
+        """Flag Claude CLI drift that breaks durable-session resume nodes.
 
         ``--resume`` backs every durable-session resume node. A CLI missing it still runs fresh
         (non-resume) nodes, so — like Codex's ``exec resume`` probe — this is advisory: fatal only

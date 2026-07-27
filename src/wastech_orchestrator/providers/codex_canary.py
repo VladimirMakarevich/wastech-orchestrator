@@ -1,4 +1,4 @@
-"""No-model effective-policy canary for the Codex permission profile (WRI-003).
+"""No-model effective-policy canary for the Codex permission profile.
 
 Before ``codex exec`` starts, prove the generated profile is actually enforced on THIS host/CLI by
 running the *same* profile under ``codex sandbox -P`` (a no-model sandbox runner) and
@@ -6,7 +6,7 @@ checking that internal paths are denied and the exchange is read-only. ``codex s
 exactly the profile ``codex exec`` selects via ``default_permissions`` — one definition, two
 selectors — so a pass here is real OS-enforcement evidence, not prompt hygiene.
 
-Classification (mirrors WRI-002's error-class split):
+Classification (mirrors the provider error-class split):
 
 * a **denied path that turned out readable/writable** (a real leak) → ``CONFIGURATION_ERROR``, a
   non-fallback security result: the profile is not enforcing and no other provider should be tried;
@@ -207,7 +207,7 @@ def build_canary_probes(
     ``read-only``). The exchange, when a file is available, must be readable but not writable — and
     also serves as a positive control on the per-attempt path where no *repo_probe* is supplied.
 
-    ``private_readable`` (VF-6, read-isolation OFF) flips the private-read expectation: the private
+    ``private_readable`` (read-isolation OFF) flips the private-read expectation: the private
     set is now READABLE (the reads become positive controls) but a private WRITE must still be
     denied, so a ``private-write-denied`` probe is added to prove the profile keeps the control
     plane immutable.
@@ -333,7 +333,7 @@ def run_codex_canary(
     undemonstrable sandbox is a ``CAPABILITY_UNAVAILABLE``. Records each probe's verdict as
     redaction-safe evidence (paths only, never file contents).
 
-    Two hardening guarantees (final-review H4): (1) on POSIX the probes run under a throwaway
+    Two hardening guarantees: (1) on POSIX the probes run under a throwaway
     ``CODEX_HOME`` so the operator's ``~/.codex/config.toml`` cannot alter profile resolution; on
     native Windows they retain the caller's home because it contains the sandbox grant substrate,
     while the inline ``-c permissions.worc={...}`` override and explicit ``-P worc`` selection keep
@@ -419,13 +419,13 @@ def run_codex_canary(
     return CanaryOutcome(ok=True, evidence=tuple(evidence))
 
 
-# --- No-model capability smoke (worc preflight / host gate; final-review H4/H7, WRI-006) ---------
+# --- No-model capability smoke (worc preflight / host gate) -------------------------------------
 
 #: Smoke verdicts. ``passed`` = the profile is OS-enforced here; ``unsupported`` = the sandbox could
 #: not run / demonstrate the policy on this host (maps to the pre-model ``CAPABILITY_UNAVAILABLE``
 #: classification); ``policy-failed`` = a denied path was actually read/written (maps to the
 #: non-fallback ``CONFIGURATION_ERROR`` security result). Kept distinct so preflight never silently
-#: downgrades strict isolation (WRI-006 acceptance criterion).
+#: downgrades strict isolation.
 CAPABILITY_PASSED = "passed"
 CAPABILITY_UNSUPPORTED = "unsupported"
 CAPABILITY_POLICY_FAILED = "policy-failed"
@@ -456,7 +456,7 @@ def _inventory_via_runner(
     """Run ``codex mcp list`` through the sandbox *runner* under a throwaway ``CODEX_HOME``.
 
     With the user config isolated (empty home), a strict-isolation Codex run must resolve **no** MCP
-    servers; this records the effective inventory as evidence (WRI-006 tool-surface inspection).
+    servers; this records the effective inventory as evidence for tool-surface inspection.
     Reusing the *runner* seam keeps the whole smoke deterministic when a fake runner is injected.
     """
     with tempfile.TemporaryDirectory(prefix="worc-mcp-home-") as home:
@@ -494,14 +494,14 @@ def run_codex_capability_smoke(
     read/write), then records a no-model tool-surface inventory (``codex mcp list``). Returns a
     :class:`CapabilitySmokeReport` whose ``status`` distinguishes ``passed`` / ``unsupported``
     (``CAPABILITY_UNAVAILABLE``) / ``policy-failed`` (``CONFIGURATION_ERROR``) — never silently
-    downgrading. Reusable by ``worc preflight`` (H7) and the local/manual host smoke; the
+    downgrading. Reusable by ``worc preflight`` and the local/manual host smoke; the
     deterministic suite injects a scripted *runner* + *inventory_probe* so no real sandbox spawns.
     """
     sys_name = system if system is not None else platform.system()
     root = Path(tempfile.mkdtemp(prefix="worc-cap-smoke-", dir=str(home_dir)))
     try:
         repo = root / "repo"
-        # Runtime-home dirnames come from runtime_layout (WRI-004 AST guard: no hand-joined
+        # Runtime-home dirnames come from runtime_layout (an AST guard forbids hand-joined
         # ``.worc`` / ``.worc-io`` literal), so the fixture mirrors the real layout by construction.
         control = repo / CONTROL_HOME_DIRNAME
         exchange = repo / EXCHANGE_HOME_DIRNAME

@@ -88,7 +88,7 @@ _DEFAULT_PROFILE = "workspace-write"
 _LAST_MESSAGE_FILENAME = "last-message.txt"
 _OUTPUT_SCHEMA_FILENAME = "output-schema.json"
 
-# Codex feature flags disabled for an autonomous orchestrator attempt (WRI-003): the non-shell tool
+# Codex feature flags disabled for an autonomous orchestrator attempt: the non-shell tool
 # surfaces that could reach the local filesystem or spawn work outside the profiled shell
 # sandbox — hooks, custom subagents/multi-agent, computer use, in-app browser, apps/plugins. Each
 # maps to ``-c features.<name>=false``. The MCP inventory is neutralized by ``--ignore-user-config``
@@ -107,7 +107,7 @@ _DISABLED_FEATURES: tuple[str, ...] = (
 
 # Authority-bearing Codex flags an operator may NOT supply through config/flow ``extra_args``: they
 # would select, replace, or weaken the permission profile, config-isolation, workspace, tool, or
-# network policy the adapter owns (WRI-003). Distinct from the cross-provider absolute bans in
+# network policy the adapter owns. Distinct from the cross-provider absolute bans in
 # ``security.forbidden_args`` (``--dangerously*`` / ``--yolo`` / ``--ignore-rules`` / ``--sandbox``
 # with no value) — these are rejected regardless of ``strict_isolation``. The full-access escape
 # is reached only through the ``sandbox: danger-full-access`` config field, never argv.
@@ -126,7 +126,7 @@ _RESERVED_CODEX_FLAGS: frozenset[str] = frozenset(
         # ``never`` policy the adapter owns. Selecting a ``--sandbox`` mode makes Codex stop
         # applying our generated ``default_permissions="worc"`` profile, so the private-file read
         # denials (``.worc``/``.env``/``state.db``) silently vanish — the isolation this cluster
-        # exists to enforce. Reserved regardless of ``strict_isolation`` (WRI-003 AC6).
+        # exists to enforce. Reserved regardless of ``strict_isolation``.
         "--full-auto",
         "-a",
         "--ask-for-approval",
@@ -223,7 +223,7 @@ _CODEX_SIGNATURES = make_signatures(
         (
             # argparse/usage rejection of OUR argv (codex exit 2) — a bad-argv bug on our side, not
             # a version gate. A separate class so it surfaces loudly instead of silently failing
-            # over (F38 was masked as unsupported_version). A stale CLI that emits "unknown option"
+            # over (this was masked as unsupported_version). A stale CLI that emits "unknown option"
             # for a newer flag is caught by the preflight version check first.
             ErrorClass.INVALID_INVOCATION,
             r"unknown option|unrecognized option|unexpected argument",
@@ -254,7 +254,7 @@ def codex_config_home() -> Path:
     """The Codex config/credential home: ``$CODEX_HOME`` or the ``~/.codex`` default.
 
     Codex authenticates through the operator's own home (credentials stay outside the orchestrator).
-    Shared with the WRI-004 ``InternalDenyPolicy`` assembly (composition root) so the provider-owned
+    Shared with the ``InternalDenyPolicy`` assembly (composition root) so the provider-owned
     auth/config home is a single source of truth rather than a duplicated literal.
     """
     raw = os.environ.get("CODEX_HOME")
@@ -315,7 +315,7 @@ def _find_reserved_codex_args(args: Sequence[str]) -> list[str]:
 
 
 def _effective_permission_profile(config: ProviderConfig, request: AgentRunRequest) -> str:
-    """The access level for this attempt (WRI-003).
+    """The access level for this attempt.
 
     A flow node's ceiling (``request.permission_profile``) may lower the provider default to
     ``read-only`` but never raise it: ``read-only`` wins whenever either side requests it.
@@ -349,7 +349,7 @@ def _isolation_argv(
     denied_read_paths: Sequence[str],
     read_isolation_off: bool,
 ) -> list[str]:
-    """The exec-level sandbox + config-isolation options for one attempt (WRI-003).
+    """The exec-level sandbox + config-isolation options for one attempt.
 
     Default: a generated permission profile (``read-only``/``workspace-write``) selected as the
     active ``default_permissions``, the operator's user ``config.toml`` ignored (auth still uses
@@ -360,7 +360,7 @@ def _isolation_argv(
     task/flow/``extra_args``) instead emits the legacy ``--sandbox danger-full-access`` and makes no
     read-isolation claim.
 
-    ``read_isolation_off`` (VF-6) restores Codex's NATIVE config discovery — the private profile
+    ``read_isolation_off`` restores Codex's NATIVE config discovery — the private profile
     carve-outs are downgraded to read-only (:func:`build_codex_permission_profile`), the operator's
     user ``config.toml`` is loaded (no ``--ignore-user-config``), the project is TRUSTED (so its
     ``.codex`` config/rules/hooks apply), and the ``hooks`` feature is re-enabled — symmetric with
@@ -419,7 +419,7 @@ def build_codex_argv(
     ``--ignore-user-config``, ``--enable``/``--disable``, ...). Isolation is a generated permission
     profile via ``default_permissions`` (:func:`_isolation_argv`); the full-access escape is
     reached only through the ``sandbox: danger-full-access`` config field, gated by
-    ``strict_isolation`` at preflight (security rule #3). The prompt is delivered on stdin (the
+    ``strict_isolation`` at preflight. The prompt is delivered on stdin (the
     trailing ``-``), never on the command line.
     """
     combined_extra = tuple(config.extra_args) + tuple(request.extra_args)
@@ -460,19 +460,19 @@ def build_codex_argv(
     )
     # Codex's native ``AGENTS.md`` project-doc discovery is intentionally left ENABLED — the agent
     # assembles its own instruction context from the repo's root files. Those files are ordinary,
-    # editable repository content (VF-20): a run that changes them is reported to the operator as a
+    # editable repository content: a run that changes them is reported to the operator as a
     # notice, not blocked. (The ``.codex`` project trust control in ``_isolation_argv`` is separate
     # and stays: the project is marked untrusted.)
     if not request.network_access:
         # No network grant → also deny the host-side ``web_search`` tool. It runs on the OpenAI
         # backend, OUTSIDE the profile's sandbox network policy, so without this an "offline" node
-        # could still reach the web (F5: a network_access=false writer performed 9 web searches). An
+        # could still reach the web (a network_access=false writer performed 9 web searches). An
         # online node keeps web_search as its resolved grant; the profile keeps the shell sandbox
-        # offline regardless (a workspace-write node is never online — validator rule F17b).
+        # offline regardless (a workspace-write node is never online — a validator rule).
         argv += ["-c", 'web_search="disabled"']
     if output_schema_path is not None:
         argv += ["--output-schema", output_schema_path]
-    # Durable session resume (P2.2): ``codex exec [exec-options] resume <SESSION_ID>`` continues the
+    # Durable session resume: ``codex exec [exec-options] resume <SESSION_ID>`` continues the
     # prior session. SESSION_ID is positional right after ``resume``; the prompt is read from stdin
     # (-). --model and model_reasoning_effort (-c) are resume-compatible, so they follow the
     # subcommand; on the fresh path (no subcommand) they follow the exec options.
@@ -522,7 +522,7 @@ def _normalize_codex_usage(usage: Mapping[str, Any] | None) -> NormalizedUsage |
     Codex reports ``input_tokens`` inclusive of the cached subset, so uncached input is derived; it
     has no cache-creation counter, so ``cache_write`` stays ``None``. Its ``token_count`` /
     ``turn.completed`` events carry token counts but **no dollar figure**, so ``cost`` stays
-    ``None`` (VF-8) — never a guessed value. Returns ``None`` when no usage was emitted, preserving
+    ``None`` — never a guessed value. Returns ``None`` when no usage was emitted, preserving
     the no-work guard's "absent usage never fires" contract.
     """
     if not usage:
@@ -553,13 +553,13 @@ def parse_events(
     Tolerant of stray non-JSON lines as long as a recognizable terminal ``result`` event is present.
     Raises :class:`ProviderError` (``INVALID_OUTPUT``) when no terminal event can be found.
 
-    F19/F22 (codex-cli 0.139.0, verified by smoke test): the terminal ``turn.completed`` event
+    Verified by smoke test against codex-cli 0.139.0: the terminal ``turn.completed`` event
     carries only ``{type, usage}`` — no ``output`` field — so a schema-requested run never fills
     ``structured_output`` from the event stream alone; the schema result instead lands in the
     ``--output-last-message`` file (and mirrors it as an ``agent_message`` event's text). When
     ``schema_requested`` and no terminal ``output`` was seen, parse ``last_message_text`` as the
     structured output. Fails **closed**: an unparseable/non-object last message leaves
-    ``structured_output`` at ``None`` rather than guessing — the evaluator runner (F19) then routes
+    ``structured_output`` at ``None`` rather than guessing — the evaluator runner then routes
     the verdict to manual instead of a silent accept. ``usage`` is also read directly off the
     terminal event, mirroring ``claude.py``'s ``parse_stream_json``.
     """
@@ -639,7 +639,7 @@ class CodexProvider(BaseCliProvider):
     def __init__(
         self, config: ProviderConfig, *, canary_runner: CanaryRunner | None = None, **kwargs: Any
     ) -> None:
-        """Like the base, plus an injectable ``canary_runner`` (WRI-003).
+        """Like the base, plus an injectable ``canary_runner``.
 
         Defaults to real ``codex sandbox``; tests inject a fake so the deterministic suite
         never spawns the real sandbox. Everything else is forwarded to :class:`BaseCliProvider`.
@@ -657,7 +657,7 @@ class CodexProvider(BaseCliProvider):
         env: Mapping[str, str],
         paths: ArtifactPaths,
     ) -> None:
-        """Prove the generated permission profile is OS-enforced before ``codex exec`` (WRI-003).
+        """Prove the generated permission profile is OS-enforced before ``codex exec``.
 
         Runs the *same* profile under ``codex sandbox -P`` (no model, no network) and checks the
         private home is denied (direct and shell-mediated) and the exchange is read-only, on real
@@ -696,7 +696,7 @@ class CodexProvider(BaseCliProvider):
             raise ProviderError(outcome.error_class, outcome.message)
 
     def isolation_capability_smoke(self, *, home_dir: Path) -> IsolationCapabilityReport | None:
-        """Prove the generated profile is OS-enforced on this host, no model (H7 / WRI-006).
+        """Prove the generated profile is OS-enforced on this host, no model.
 
         Surfaced by ``worc preflight`` so the operator learns BEFORE a run that the Codex sandbox
         cannot enforce here (old CLI / missing sandbox helper) or is mis-generated — instead of a
@@ -725,7 +725,7 @@ class CodexProvider(BaseCliProvider):
         )
 
     def _sandbox_needs_windows_helper(self) -> bool:
-        """Whether the configured permission profile engages the Windows sandbox helper (WRI-003).
+        """Whether the configured permission profile engages the Windows sandbox helper.
 
         The helper backs the native-Windows OS sandbox a ``workspace-write`` profile uses;
         ``read-only`` and the full-access escape (``sandbox: danger-full-access``) do not launch it.
