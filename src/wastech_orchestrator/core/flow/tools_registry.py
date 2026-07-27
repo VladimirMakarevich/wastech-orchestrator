@@ -41,8 +41,12 @@ class ToolRegistry:
     a flow that references one is rejected at validation.
     """
 
-    def __init__(self, tools_dir: Path) -> None:
+    def __init__(self, tools_dir: Path, *, system: str | None = None) -> None:
         self._dir = tools_dir
+        # The injectable platform seam keeps both launch rules testable on every host. ``None``
+        # deliberately defers to ``os.name`` at use time so existing callers and tests that patch
+        # the host branch retain their behavior.
+        self._system = system
 
     @property
     def tools_dir(self) -> Path:
@@ -72,9 +76,9 @@ class ToolRegistry:
                 f"tool {name!r} resolves outside the tools directory {base.as_posix()!r} "
                 "(path traversal or symlink escape) — rejected fail-closed"
             )
-        for candidate in _candidate_names(name):
+        for candidate in _candidate_names(name, system=self._system):
             path = (self._dir / candidate).resolve()
-            if path.is_file() and _is_executable(path):
+            if path.is_file() and _is_executable(path, system=self._system):
                 return path
         # Nothing launchable found: report against the bare name (the common case) with the same
         # actionable guidance as before.
@@ -88,16 +92,36 @@ class ToolRegistry:
             "(POSIX: set the +x bit; Windows: use a launchable suffix such as .exe/.bat/.cmd)"
         )
 
+    def existing_candidates(self, name: str) -> tuple[Path, ...]:
+        """Return every existing file in *name*'s OS-specific launch set.
 
-def _candidate_names(name: str) -> list[str]:
+        :meth:`resolve` runs first, preserving the fail-closed guarantee that at least one candidate
+        is launchable. The returned paths keep their unresolved directory entries so a control
+        bundle's no-follow inspector can reject a symlink/reparse point rather than silently
+        inspecting its target.
+
+        This set is also the complete supported multi-file tool shape: an extensionless payload and
+        same-name Windows launcher siblings (for example ``check`` + ``check.cmd``). Arbitrary
+        helper modules or data files are not inferred from executable contents.
+        """
+        self.resolve(name)
+        return tuple(
+            path
+            for candidate in _candidate_names(name, system=self._system)
+            if (path := self._dir / candidate).is_file()
+        )
+
+
+def _candidate_names(name: str, *, system: str | None = None) -> list[str]:
     """The file names to try for a tool, in priority order.
 
     POSIX resolves the bare name (an extensionless ``+x`` script). Windows has no execute bit, so a
     bare name is launchable only if it already carries a suffix; otherwise each known launcher
     suffix is appended so one fixed tool name in a packaged flow finds its ``.cmd``/``.exe``
-    sibling. Sorted for deterministic resolution order.
+    sibling. Sorted for deterministic resolution order. ``system`` is an injectable
+    ``platform.system()``-style name; ``None`` uses the current host through ``os.name``.
     """
-    if os.name != "nt" or Path(name).suffix.lower() in _WINDOWS_EXECUTABLE_SUFFIXES:
+    if not _is_windows(system) or Path(name).suffix.lower() in _WINDOWS_EXECUTABLE_SUFFIXES:
         return [name]
     return [name, *(name + suffix for suffix in sorted(_WINDOWS_EXECUTABLE_SUFFIXES))]
 
@@ -111,8 +135,13 @@ def _is_within(path: Path, base: Path) -> bool:
         return False
 
 
-def _is_executable(path: Path) -> bool:
+def _is_executable(path: Path, *, system: str | None = None) -> bool:
     """Whether *path* is launchable on the host OS (POSIX ``+x`` bit / Windows suffix)."""
-    if os.name == "nt":
+    if _is_windows(system):
         return path.suffix.lower() in _WINDOWS_EXECUTABLE_SUFFIXES
     return os.access(path, os.X_OK)
+
+
+def _is_windows(system: str | None) -> bool:
+    """Resolve the injectable platform seam without mutating process-global platform state."""
+    return system == "Windows" if system is not None else os.name == "nt"
