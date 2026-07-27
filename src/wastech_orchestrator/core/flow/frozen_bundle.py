@@ -1,12 +1,12 @@
-"""Shared primitives for the per-task frozen bundles (WRI-010 control plane, WRI-011 inputs).
+"""Shared primitives for the per-task frozen bundles (the control plane and the agent inputs).
 
 Two independent freezers snapshot different-but-adjacent inputs at task start:
 
-* :mod:`~wastech_orchestrator.core.flow.control_bundle` (WRI-010) freezes the *control plane* — the
+* :mod:`~wastech_orchestrator.core.flow.control_bundle` freezes the *control plane* — the
   flow YAML, role/supervisor prompts, and tool executables — because a later orchestrator node
   reads/executes those bytes with the orchestrator's own authority, so a mid-run mutation is an
   execution-boundary violation routed to ``manual_action_required``.
-* :mod:`~wastech_orchestrator.core.flow.instruction_bundle` (WRI-011) freezes the *agent inputs* —
+* :mod:`~wastech_orchestrator.core.flow.instruction_bundle` freezes the *agent inputs* —
   the task packet, selected skill packages, and root repository instruction files — so a later
   agent/evaluator/supervisor/resume/fallback call cannot receive instructions the running task was
   never validated against.
@@ -46,7 +46,8 @@ def inspect_frozen_source(
 ) -> None:
     """Fail closed unless ``path`` is an existing regular, single-link, ADS-free, non-symlink file.
 
-    A no-follow inspection (the WRI-001 seam): the source must not be a symlink/reparse point, must
+    A no-follow inspection (the exchange's seam): the source must not be a symlink/reparse point,
+    must
     be a regular file (not a fifo/socket/device), must have exactly one hard link (no alias back to
     another live location), and must carry no NTFS alternate data stream. ``label`` names the input
     class in the error message (e.g. ``"control input"``, ``"skill file"``) so the message reads

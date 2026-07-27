@@ -1,4 +1,4 @@
-"""Route a node's agent-facing artifact into the provider-readable exchange (WRI-001).
+"""Route a node's agent-facing artifact into the provider-readable exchange.
 
 A thin wrapper the node runners, per-node post-processing, and the orchestrator share. Each routing
 point stays **additive**: the caller keeps its private authoritative write (and its
@@ -31,10 +31,10 @@ from wastech_orchestrator.providers.exchange import (
 
 
 class ExchangeMutationManual(NodeManualRequired):
-    """An agent-side exchange mutation was detected (WRI-002) — routed to manual_action_required.
+    """An agent-side exchange mutation was detected — routed to manual_action_required.
 
     Carries the parent-held pre-attempt manifest (``before``) and the post-attempt manifest
-    (``after``) so the terminal seam (WRI-007) can quarantine the contaminated tree as evidence with
+    (``after``) so the terminal sealing seam can quarantine the contaminated tree as evidence with
     both manifests recorded, instead of sealing it as a clean snapshot. A plain
     :class:`NodeManualRequired` (no manifest to record) is used for the pre-run integrity failures.
     """
@@ -48,7 +48,7 @@ class ExchangeMutationManual(NodeManualRequired):
 
 
 def assert_request_contained(request: AgentRunRequest, exchange_root: str) -> None:
-    """Fail closed unless every provider-input path in ``request`` is under the exchange (WRI-001).
+    """Fail closed unless every provider-input path in ``request`` is under the exchange.
 
     A containment breach is a routing bug about to leak a private/live path to the provider — never
     a fallback infrastructure error, so it routes to non-fallback ``manual_action_required``. A
@@ -63,7 +63,7 @@ def assert_request_contained(request: AgentRunRequest, exchange_root: str) -> No
 
 
 def capture_exchange_manifest(exchange_root: str, task_id: str) -> ExchangeManifest | None:
-    """Fingerprint the current-task exchange before a provider attempt (WRI-002 detection-in-depth).
+    """Fingerprint the current-task exchange before a provider attempt (detection-in-depth).
 
     Returns ``None`` when no exchange is wired or the task dir does not exist yet (nothing to
     protect). A pre-existing path-safety violation (a planted symlink/hard-link/ADS surfaced by the
@@ -87,9 +87,9 @@ def capture_exchange_manifest(exchange_root: str, task_id: str) -> ExchangeManif
 def assert_exchange_unchanged(
     before: ExchangeManifest | None, exchange_root: str, task_id: str, *, node_id: str
 ) -> None:
-    """Fail closed unless the exchange is byte-identical to ``before`` (WRI-002).
+    """Fail closed unless the exchange is byte-identical to ``before``.
 
-    Called after a provider attempt (once WRI-012 has proven the provider tree quiescent), before
+    Called after a provider attempt (once the quiescence barrier has proven the tree empty), before
     any
     downstream node consumes an exchange artifact. A mutation — content edit, add/delete/rename,
     identity swap, or a path-safety violation raised by the re-walk — is a non-fallback security

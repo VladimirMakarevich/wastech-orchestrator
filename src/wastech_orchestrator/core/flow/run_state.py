@@ -1,16 +1,16 @@
-"""Flow runtime checkpoint — the per-run engine state (P1.1, persistence in P1.2).
+"""Flow runtime checkpoint — the per-run engine state.
 
 :class:`FlowRunState` is the mutable checkpoint the engine threads through a single graph
 traversal: where execution currently is (``current_node``), what has run (``completed_nodes``), and
-the loop/budget counters (``loop_counters``). Per the resume model (``index.md``) the durable
+the loop/budget counters (``loop_counters``). The durable
 checkpoint is ``{completed_nodes, current_node, loop_counters, publish_operations}``;
 ``publish_operations`` is read from the state store (idempotency lives there) and is **not**
 duplicated here.
 
-In P1.1 the state is in-memory only. P1.2 adds the persistence seam (hydrate from ``node_runs`` +
-``tasks`` + ``publish_operations``, schema v4) without changing this shape.
+The recorder persists and rehydrates this exact shape (from ``node_runs`` + ``tasks`` +
+``publish_operations``), so the in-memory checkpoint and the durable one never diverge.
 
-``loop_counters`` is a single ``dict[str, int]`` keyed by (P1.1/P1.2 decision):
+``loop_counters`` is a single ``dict[str, int]`` keyed by:
 
 * a named loop's name (``loop: test_fix``) — the consecutive-cycle counter for that loop;
 * the synthetic edge key ``"<from>-><to>:<outcome>"`` — for an inline ``budget: N`` rework edge;
@@ -40,14 +40,14 @@ class FlowRunState:
     #: the consecutive counter under the bare loop name — which ``reset()`` zeroes on a forward
     #: edge — a total is bumped on every rework of that loop and never reset, so it survives loop
     #: convergence and (like the global counter) accumulates across subtasks. It lives in this same
-    #: dict, so the recorder persists/rehydrates it for free (F49). The ``:`` cannot appear in an
+    #: dict, so the recorder persists/rehydrates it for free. The ``:`` cannot appear in an
     #: operator-chosen loop name, so this cannot collide with a real loop key.
     TOTAL_PREFIX: ClassVar[str] = "total_fix:"
 
     flow_fingerprint: str
     current_node: str | None = None
-    #: Ordered trace of node executions (a node re-appears each time a loop re-enters it). P1.2
-    #: refines how resume uses this; P1.1 only appends.
+    #: Ordered trace of node executions (a node re-appears each time a loop re-enters it);
+    #: append-only.
     completed_nodes: list[str] = field(default_factory=list)
     loop_counters: dict[str, int] = field(default_factory=dict)
 

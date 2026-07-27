@@ -1,11 +1,11 @@
-"""Allowlisted path context shared by prompt rendering and the tool-node stdin (P5, seam #4).
+"""Allowlisted path context shared by prompt rendering and the tool-node stdin.
 
 The single collector of the allowlisted artifact paths a node may see — the repo root plus the
 task / plan / diff / checks / review artifact paths. Extracted from the agent runner's private
 ``_prompt_variables`` so exactly one definition feeds both:
 
 * the agent / evaluator prompt-variable dict (``{repo}``, ``{task_path}``, …), and
-* the ``tool`` node's stdin ``paths`` object (P5) — the *same* allowlisted set, never secrets, the
+* the ``tool`` node's stdin ``paths`` object — the *same* allowlisted set, never secrets, the
   full environment, or a raw session id.
 
 Keeping it here (not on a runner) means a new node kind reuses the same allowlist with no
@@ -64,8 +64,8 @@ def build_node_output_paths(
     (cross-platform).
 
     Only agent and tool nodes *produce* this channel; both the agent and the evaluator runner *read*
-    it (DR-7: a coverage gate that cannot see what the analysis nodes reported can only judge the
-    repository, never the audit of it).
+    it — a coverage gate that cannot see what the analysis nodes reported can only judge the
+    repository, never the audit of it.
     """
     paths: dict[str, object | None] = {}
     for node in nodes:

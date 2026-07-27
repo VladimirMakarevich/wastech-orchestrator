@@ -10,8 +10,8 @@ flow graph. This module computes that set once, so two callers agree:
   ``render_prompt``, which stays the fixed security core and substitutes only names in the set it is
   given (every value still a path).
 
-Keeping both on one helper is the whole point of building the lint flow-aware from the start: the
-node-output ADR extends :func:`node_output_vars` and both the lint and the renderer follow with no
+Keeping both on one helper is the whole point of building the lint flow-aware from the start:
+extending :func:`node_output_vars` is enough for both the lint and the renderer to follow, with no
 further change.
 """
 
@@ -26,11 +26,11 @@ def node_output_vars(snapshot: FlowSnapshot) -> frozenset[str]:
     """The ``{<node_id>_path}`` names the flow's agent + tool nodes expose (node-output channel).
 
     Every **agent** node's output is persisted to ``<node_id>.out.md`` and every **tool** node's
-    stdout to ``tools/<node_id>/stdout.txt`` (P5); both are addressable downstream as
+    stdout to ``tools/<node_id>/stdout.txt``; both are addressable downstream as
     ``{<node_id>_path}`` (a path to a Core-written, redacted artifact, never inlined content). Only
     these two kinds *produce* the channel — an evaluator / checks / human node exposes nothing here
     and keeps its dedicated variable (``review_path`` / ``checks_path``). **Reading** it is not
-    restricted to agents: an evaluator role prompt resolves these names too (DR-7 — a gate that
+    restricted to agents: an evaluator role prompt resolves these names too (a gate that
     judges an upstream node's work must be able to see that work).
     """
     return frozenset(

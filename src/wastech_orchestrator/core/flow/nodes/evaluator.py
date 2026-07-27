@@ -1,4 +1,4 @@
-"""Evaluator node runner (P1.3/P2.1) — the shared in-flow evaluator primitive.
+"""Evaluator node runner — the shared in-flow evaluator primitive.
 
 Runs the evaluator's ``role_file`` prompt (read-only) through the router and maps its structured
 verdict to an engine outcome: a gating finding -> ``rework``, an otherwise-clean verdict ->
@@ -8,14 +8,14 @@ advisory; the packaged flows whose evaluators are *quality* lenses set ``medium`
 good enough" has no natural way to emit ``high``). A finding that does not gate is not discarded:
 it rides ``NodeOutcome.findings`` to the operator surface via the supervisor's follow-ups. The
 findings schema
-(``output_schema``, F19) is mandatory: a run whose ``structured_output`` does not carry a parseable
+(``output_schema``) is mandatory: a run whose ``structured_output`` does not carry a parseable
 ``findings`` array never silently accepts — it degrades straight to ``manual`` (fail-closed), the
 same as a provider that could not run the node at all. A **blocking** evaluator gates
 every time it finds a blocking issue; the engine's named-loop budget bounds the rework cycles
 (exhaustion -> manual). A **non-blocking**
 evaluator (e.g. ``test_quality``) self-caps: it reworks until its own per-instance budget
 (``max_rework_per_stage``) is spent, then takes the ``accept`` edge (-> continue), **never** manual
-(P2.4). That budget-exhausted accept sets ``NodeOutcome.rework_exhausted`` so the orchestrator warns
+That budget-exhausted accept sets ``NodeOutcome.rework_exhausted`` so the orchestrator warns
 the operator (console + Telegram trace) the stage moved on with findings still open. Each pass
 writes an immutable ``evaluations`` row (``in_flow_verdict``) namespaced by the
 source ``node_run`` id — the per-instance rework limit is derived by COUNTing those verdicts, not a
@@ -91,7 +91,7 @@ def _severity_rank(token: str) -> int:
     return SEVERITY_ORDER.index(t) if t in SEVERITY_ORDER else len(SEVERITY_ORDER)
 
 
-#: F19 — the mandatory structured findings schema every in-flow evaluator role (review / verifier /
+#: The mandatory structured findings schema every in-flow evaluator role (review / verifier /
 #: critic / operator-defined) is prompted to return. A role-prompt asking for findings "in prose"
 #: was unenforceable: extraction reads only ``structured_output``, which no provider filled without
 #: an ``output_schema`` — the gate silently fail-**opened** to ``accept`` on every real run. An
@@ -99,7 +99,7 @@ def _severity_rank(token: str) -> int:
 #: provider did not honor the schema and fails **closed** (see ``_findings_or_none``/``run``).
 _FINDINGS_SCHEMA: dict[str, Any] = {
     "type": "object",
-    # F24/F41: OpenAI Structured Outputs (how codex CLI enforces ``--output-schema``) rejects a
+    # OpenAI Structured Outputs (how codex CLI enforces ``--output-schema``) rejects a
     # schema with a 400 unless every object node BOTH carries ``additionalProperties: false`` AND
     # lists every ``properties`` key in ``required`` — the same convention followed in
     # ``hitl.py``/``supervisor.py``/``memory/delta.py``. ``path``/``fix`` stay optional by being
@@ -159,7 +159,7 @@ class EvaluatorNodeRunner:
             node, ctx, route, run_id, session_id, guard_output_baseline(baseline)
         )
         assert_request_contained(request, self._s.exchange_root)
-        # WRI-002 detection-in-depth: fingerprint the curated exchange before the (read-only)
+        # Detection-in-depth: fingerprint the curated exchange before the (read-only)
         # evaluator attempt so a provider mutation of the immutable surface is caught from
         # parent-held state after quiescence, before its findings are trusted downstream.
         exchange_before = capture_exchange_manifest(self._s.exchange_root, ctx.task_id)
@@ -197,7 +197,7 @@ class EvaluatorNodeRunner:
             exchange_before, self._s.exchange_root, ctx.task_id, node_id=node.id
         )
         if raw_findings is None:
-            # F19 fail-closed: the provider did not honor the mandatory findings schema (missing
+            # Fail closed: the provider did not honor the mandatory findings schema (missing
             # or malformed ``findings`` array) — never silently accept. There is nothing for
             # `fixing` to act on (no parsed findings), so this degrades straight to manual (like
             # the no-provider case above) rather than spending a rework cycle on an empty verdict.
@@ -228,7 +228,7 @@ class EvaluatorNodeRunner:
                 kind,
                 findings=findings,
                 rework_exhausted=rework_exhausted,
-                # DR-2: carry the provider's own prose, not just the typed findings. Without it the
+                # Carry the provider's own prose, not just the typed findings. Without it the
                 # supervisor observed a bare `Outcome: accept` and its whole-task summary described
                 # an evaluator that emitted findings as a gate that "passed". The agent runner has
                 # always passed this; the evaluator runner dropped it one layer up.
@@ -339,23 +339,26 @@ class EvaluatorNodeRunner:
             diff_path=self._in.diff_path,
             check_artifacts_path=self._in.checks_path,
             review_artifacts_path=self._in.review_path,
-            # VF-10: on a rework re-entry, hand the reviewer the previous author node's report so it
+            # On a rework re-entry, hand the reviewer the previous author node's report so it
             # judges "was the finding addressed" with the implementer's account (including a stated
             # blocker) in hand, not the diff alone. ``None`` on the first pass (no prior report).
             rework_report_path=self._prior_rework_report_path(node, ctx),
-            output_schema=_FINDINGS_SCHEMA,  # F19: mandatory; fail-closed if not honored (run())
+            # Mandatory, not advisory: extraction reads only ``structured_output``, so without a
+            # schema no provider fills it and ``run()`` fails **closed** to manual rather than
+            # silently accepting a verdict nobody produced.
+            output_schema=_FINDINGS_SCHEMA,
             model=node.model,
             reasoning=node.reasoning,
             # Evaluators never inherit an author's editing lineage (validator-enforced read-only).
             # A ``fresh_disposable`` evaluator starts clean each pass; a ``resume_own_lineage`` one
             # (the research critic) resumes its OWN durable session so it remembers what it flagged
-            # across rework rounds (P3.3). The resumed session (and its usage baseline) is resolved
+            # across rework rounds. The resumed session (and its usage baseline) is resolved
             # by the caller so the row is read once.
             session_id=session_id,
             resume_baseline_output_tokens=resume_baseline_output_tokens,
             # Network is a per-node override on top of the flow-wide default (a research verifier
             # may need it): the node's ``network_access`` wins, else it inherits the flow's
-            # ``network_policy`` default (P3.2). It only toggles network — evaluators stay read-only
+            # ``network_policy`` default. It only toggles network — evaluators stay read-only
             # on the filesystem.
             network_access=resolve_network_access(
                 node.network_access, ctx.snapshot.doc.network_policy
@@ -363,7 +366,7 @@ class EvaluatorNodeRunner:
             # The read-only git verbs, when this evaluator asked for them AND the operator enabled
             # the grant. Reading only: the evaluator stays read-only on the filesystem either way.
             git_evidence=resolve_git_evidence(node.git_evidence, self._s.allow_git_evidence),
-            # VF-7 defense-in-depth: the Core-owned advisory security contract, threaded via
+            # Defense-in-depth: the Core-owned advisory security contract, threaded via
             # NodeServices; the neutral seam prepends it to the effective prompt.
             security_preamble=self._s.security_preamble,
         )
@@ -374,7 +377,7 @@ class EvaluatorNodeRunner:
         The evaluator's own ``rework`` edge names the author it sends work back to (``review →
         fixing`` in the implementation flow). On a re-entry that author has already published its
         ``<node>.out.md`` to the exchange; surface the newest one so the reviewer reads the
-        implementer's account (VF-10). ``None`` when there is no rework edge, no exchange is wired,
+        implementer's account. ``None`` when there is no rework edge, no exchange is wired,
         or the author has not run yet (the first review pass) — the footer then omits the slot.
         """
         if not self._s.exchange_root:
@@ -393,7 +396,7 @@ class EvaluatorNodeRunner:
     def _resume_node_lineage(
         self, node: EvaluatorNode, ctx: NodeContext, route: ResolvedRoute
     ) -> NodeLineageRow | None:
-        """The durable own session this evaluator resumes, or ``None`` for a fresh session (P3.3).
+        """The durable own session this evaluator resumes, or ``None`` for a fresh session.
 
         A ``fresh_disposable`` evaluator always starts clean (``None``). A ``resume_own_lineage``
         one (the research critic) resumes the session it stored on its previous pass — but only when
@@ -411,7 +414,7 @@ class EvaluatorNodeRunner:
     def _persist_own_lineage(
         self, node: EvaluatorNode, ctx: NodeContext, outcome: StageOutcome
     ) -> None:
-        """Persist a ``resume_own_lineage`` evaluator's session after a successful pass (P3.3).
+        """Persist a ``resume_own_lineage`` evaluator's session after a successful pass.
 
         A ``fresh_disposable`` evaluator never writes a lineage. The raw session id is stored ONLY
         in ``state.db`` (redacted everywhere else), keyed by ``(task_id, node_id, subtask_order)``
@@ -443,7 +446,7 @@ class EvaluatorNodeRunner:
             **paths,
             "memory_path": self._memory_path(node, ctx),
         }
-        # DR-7: an evaluator judging the *work* (a coverage gate, a critic) needs the upstream
+        # An evaluator judging the *work* (a coverage gate, a critic) needs the upstream
         # node's output, not only the report a later node wrote from it. Same channel the agent
         # runner reads, same rule — a path to a Core-written redacted artifact, never inlined
         # content, and empty (block drops) for a node that has not run.
@@ -458,16 +461,16 @@ class EvaluatorNodeRunner:
         return variables
 
     def _memory_path(self, node: EvaluatorNode, ctx: NodeContext) -> str | None:
-        """Build this evaluator's memory packet and return its path — node-driven (F31).
+        """Build this evaluator's memory packet and return its path — node-driven.
 
         Mirrors the agent runner: the per-node packet path is returned only when memory is enabled
         AND the node's (operator-editable) role prompt references ``{memory_path}``; otherwise
         ``None`` (the conditional block drops). ``review``/``fixing`` are the reviewer-preference
         nodes in ``packet.py``, so review most wants recurring reviewer expectations — but the
         evaluator runner never wired the packet, leaving ``review.md``'s ``{?memory_path}`` block
-        dead. Best-effort: any memory failure degrades to no packet (AC-R4)."""
+        dead. Best-effort: any memory failure degrades to no packet."""
         builder = self._s.packet_builder
-        if builder is None:  # memory disabled (Q10) — no store, empty variable, today's behavior
+        if builder is None:  # memory disabled — no store, empty variable, unchanged behavior
             return None
         try:
             template = read_role_file(self._in.flow_dir, node.role_file)
@@ -475,7 +478,7 @@ class EvaluatorNodeRunner:
             return None  # render_role_prompt surfaces the real read error
         if "{memory_path}" not in template and "{?memory_path}" not in template:
             return None
-        # F48: this task's changed paths (per-task chain base), not the whole shared branch's, so
+        # This task's changed paths (per-task chain base), not the whole shared branch's, so
         # the packet's path-overlap ranking stays relevant on a chain branch.
         touched = (
             self._s.git.changed_code_paths_since_task_base() if self._s.git is not None else []
@@ -486,7 +489,7 @@ class EvaluatorNodeRunner:
         )
         if written is None:
             return None
-        # The store + private packet stay private; only the redacted packet crosses (WRI-001).
+        # The store + private packet stay private; only the redacted packet crosses.
         return publish_file(
             self._s.exchange_root,
             ctx.task_id,
@@ -515,7 +518,7 @@ class EvaluatorNodeRunner:
 
     @staticmethod
     def _findings_or_none(structured: Mapping[str, Any] | None) -> list[dict[str, Any]] | None:
-        """The parsed findings list, or ``None`` when the schema was not honored (F19 fail-closed).
+        """The parsed findings list, or ``None`` when the schema was not honored (fails closed).
 
         ``None`` covers a missing ``structured_output``, a non-mapping one, or one whose
         ``findings`` key is absent/not a list — all mean the provider ignored ``output_schema``.
@@ -543,10 +546,10 @@ class EvaluatorNodeRunner:
 def _to_finding(raw: Mapping[str, Any]) -> Finding:
     """Map a raw structured finding to the typed :class:`Finding` (severity / reason / paths).
 
-    ``what``/``path`` are the F19 schema's field names; ``reason``/``title``/``message``/``paths``
-    (plural) stay as fallbacks for any pre-schema finding shape. The full raw dict (incl. ``fix``)
-    is preserved as-is in the ``findings.json`` artifact ``fixing`` reads — this typed projection is
-    only for the audit trail and ``NodeOutcome.findings``.
+    ``what``/``path`` are the findings schema's field names; ``reason``/``title``/``message``/
+    ``paths`` (plural) stay as fallbacks for any pre-schema finding shape. The full raw dict (incl.
+    ``fix``) is preserved as-is in the ``findings.json`` artifact ``fixing`` reads — this typed
+    projection is only for the audit trail and ``NodeOutcome.findings``.
     """
     sev_token = str(raw.get("severity", "")).lower()
     if raw.get("blocking") is True or sev_token in _BLOCKING_SEVERITIES:

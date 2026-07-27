@@ -1,4 +1,4 @@
-"""Flow snapshot — loader and resolver for flow YAML files (P0.2).
+"""Flow snapshot — loader and resolver for flow YAML files.
 
 ``load_flow(path)`` reads a YAML file, applies ``defaults``, builds lookup
 tables, and returns an immutable :class:`FlowSnapshot`. The ``flow_fingerprint``
@@ -158,12 +158,12 @@ _EVALUATOR_DEFAULTS_FIELDS = frozenset(
 # Core checker set: flow may not invent a checker kind.
 _CHECKER_KINDS = frozenset({"command_profile", "citation", "dependency_scan"})
 
-# Output-artifact slots (P1.4): the well-known names an agent node may persist its output to. The
+# Output-artifact slots: the well-known names an agent node may persist its output to. The
 # slot vocabulary is core-fixed (a flow may not invent a slot — fail-closed at load).
 _OUTPUT_ARTIFACT_SLOTS = frozenset({"enriched_spec", "plan", "summary", "report"})
 
-# Reserved core-variable prefixes an **agent or tool** node id may not collide with (node-output
-# ADR + P5): both node kinds expose ``{<id>_path}``, so an id equal to one of these — or starting
+# Reserved core-variable prefixes an **agent or tool** node id may not collide with: both node
+# kinds expose ``{<id>_path}``, so an id equal to one of these — or starting
 # with ``subtask`` — would shadow a fixed core variable (``{plan_path}``, ``{review_path}``,
 # ``{subtask_spec_path}``, …). A collision is a fatal load error. Evaluator/checks/human nodes do
 # not get ``{<id>_path}`` (so the packaged ``review`` evaluator and ``testing`` checks node are ok).
@@ -172,9 +172,9 @@ _RESERVED_NODE_ID_NAMES = frozenset(
 )
 _RESERVED_NODE_ID_PREFIX = "subtask"
 
-# ``when`` fact namespaces. The exact value allowlist per namespace is
-# finalized when the P1 engine fact resolver lands; here we fail-closed on the namespace prefix so
-# a bare/typo'd fact (e.g. ``summary_enabled`` with no namespace) is rejected at load time.
+# ``when`` fact namespaces. The exact value allowlist per namespace belongs to the engine's fact
+# resolver; here we fail-closed on the namespace prefix so a bare/typo'd fact (e.g.
+# ``summary_enabled`` with no namespace) is rejected at load time.
 _WHEN_FACT_NAMESPACES = ("derived.", "config.")
 
 
@@ -525,7 +525,7 @@ def _parse_tool_args(raw: Any, ctx: str) -> dict[str, str | int | float | bool]:
     """Parse a tool node's ``args`` as a flat allowlisted scalar mapping (no nesting, no secrets).
 
     A nested mapping / list / ``None`` / any non-scalar value is a fatal load error — the tool
-    contract passes only flat scalars on stdin (P5). ``bool`` is accepted (an ``int`` subclass,
+    contract passes only flat scalars on stdin. ``bool`` is accepted (an ``int`` subclass,
     already covered by the scalar tuple).
     """
     if raw is None:

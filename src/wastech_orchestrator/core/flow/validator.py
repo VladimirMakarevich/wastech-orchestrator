@@ -1,4 +1,4 @@
-"""Fatal load-time flow validator (P0.3 + P4.2 config-aware layer).
+"""Fatal load-time flow validator, plus the config-aware layer.
 
 :func:`validate_flow` runs two **config-free** layers; the first violation in either is not fatal
 alone — all violations are collected and reported together so the operator can fix everything in
@@ -13,7 +13,7 @@ one pass:
      :func:`~wastech_orchestrator.security.forbidden_args.find_forbidden_args`; ``role_file``
      paths contain no traversal (``..`` or absolute).
 
-:func:`validate_flow_against_config` is the **config-aware** third layer (P4.2): it needs the
+:func:`validate_flow_against_config` is the **config-aware** third layer: it needs the
 ``OrchestratorConfig`` (node providers ∈ ``agents.allowed``; node reasoning is valid for the
 resolved provider; Codex never receives a write-enabled node with network access;
 ``permission_ceiling`` ≤ a configured provider's capability; and — under
@@ -111,7 +111,7 @@ def validate_flow_against_config(
     config: OrchestratorConfig,
     tools: ToolRegistry | None = None,
 ) -> None:
-    """Validate a flow against the operator's :class:`OrchestratorConfig` (P4.2).
+    """Validate a flow against the operator's :class:`OrchestratorConfig`.
 
     The config-aware third layer, run by the :class:`~.registry.FlowRegistry` after
     :func:`validate_flow`. It rejects a flow that is structurally valid but cannot be safely or
@@ -317,8 +317,8 @@ def _check_graph(snap: FlowSnapshot) -> list[Violation]:
     # 7. lineage_affinity must reference an agent with editing_lineage session scope that is itself
     #    a lineage owner (no affinity of its own — chains are forbidden, one hop only), and the two
     #    nodes must not declare conflicting explicit providers (you cannot resume one provider's
-    #    editing session on another — durable sessions, P2.2). The lineage key routed at runtime is
-    #    ``node.lineage_affinity or node.id`` (multiple-editing-lineages ADR).
+    #    editing session on another). The lineage key routed at runtime is
+    #    ``node.lineage_affinity or node.id``.
     for node in doc.nodes:
         if not isinstance(node, AgentNode) or node.lineage_affinity is None:
             continue
@@ -482,7 +482,7 @@ def _check_path(node_id: str, path: str, errs: list[Violation]) -> None:
         )
 
 
-# -- config consistency (P4.2) ------------------------------------------------
+# -- config consistency -------------------------------------------------------
 
 
 def _check_config_consistency(
@@ -577,7 +577,7 @@ def _check_config_consistency(
                 for reason in find_full_access_args(node.extra_args)
             )
 
-    # 4. Every ``tool`` node names a registered, contained, executable operator tool (P5). The name
+    # 4. Every ``tool`` node names a registered, contained, executable operator tool. The name
     #    is a free operator string (like a flow name), so — like the provider check — it is resolved
     #    here, fail-closed, before any launch. Skipped when no registry is wired (config-free unit
     #    path); the fatal install/preflight gate always supplies one.

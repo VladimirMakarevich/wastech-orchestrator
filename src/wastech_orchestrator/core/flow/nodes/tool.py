@@ -1,4 +1,4 @@
-"""Custom tool node runner (P5) — runs an operator executable out-of-process under the ceiling.
+"""Custom tool node runner — runs an operator executable out-of-process under the ceiling.
 
 A ``tool`` node runs an operator's own program (any language) from ``<repo>/.worc/tools/`` through
 the same :func:`~wastech_orchestrator.providers.process.run_process` ceiling an ``agent`` node uses:
@@ -140,7 +140,7 @@ class ToolNodeRunner:
         # Expose the redacted stdout artifact downstream as {<node_id>_path} (symmetric with an
         # agent node), regardless of outcome — a partial output on failure is still useful context.
         # The private stdout.txt stays the audit record; the redacted exchange copy is what the
-        # fan-in resolves (stderr stays private — provider-denied). WRI-001.
+        # fan-in resolves (stderr stays private — provider-denied).
         self._register(ctx.task_id, node.id, str(stdout_path))
         publish_node_run_file(
             self._s.exchange_root,
@@ -209,7 +209,7 @@ class ToolNodeRunner:
     # -- helpers ---------------------------------------------------------------
 
     def _resolve(self, node: ToolNode, run_id: int) -> Path:
-        """Resolve the tool name → executable, fail-closed to manual if the registry can't (P5.2).
+        """Resolve the tool name → executable, fail-closed to manual if the registry can't.
 
         Validation already resolved every ``tool`` at preflight, so this succeeds in the normal
         case; it fails closed only if the operator layer is absent or the file changed since then.
@@ -295,7 +295,7 @@ def _launch_argv(tool_path: Path) -> list[str]:
 
 
 def parse_tool_output(exit_code: int | None, stdout: str) -> ToolContract:
-    """Resolve a tool's outcome from its exit code + optional JSON stdout (P5 outcome contract).
+    """Resolve a tool's outcome from its exit code + optional JSON stdout.
 
     A JSON object with an ``outcome`` key is authoritative (``pass`` / ``fail`` / ``route:<label>``;
     an invalid value raises :class:`ToolContractError`). Otherwise the exit code gates (``0`` →

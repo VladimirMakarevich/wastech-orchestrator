@@ -1,4 +1,4 @@
-"""Data-driven per-node post-processing (P1.4) — mechanics the engine post-node hook runs.
+"""Data-driven per-node post-processing — mechanics the engine post-node hook runs.
 
 Two mechanisms, both triggered by **declared data**, never a stage name:
 
@@ -43,12 +43,12 @@ class _Slot:
     #: slot not fed to any prompt (the enriched spec has no ``{...}`` variable).
     inputs_field: str | None
     #: whether this slot is agent-facing and its ``inputs_field`` must resolve to the redacted
-    #: exchange copy (WRI-001). Only ``plan`` feeds a downstream provider path; ``enriched_spec`` is
+    #: exchange copy. Only ``plan`` feeds a downstream provider path; ``enriched_spec`` is
     #: audit-only and ``summary`` is an orchestrator publish input — both stay private.
     exchange: bool = False
     #: whether this slot is written into the flow's private ``output_policy`` report directory
     #: (redacted) instead of the task artifact dir. The ``report`` slot migrates the security_audit
-    #: node off its old agent-written ``.worc/security-reports/`` contract (WRI-001): the agent now
+    #: node off any agent-written report contract: the agent now
     #: returns the report as structured output and the orchestrator writes it here privately.
     report: bool = False
 
@@ -82,7 +82,7 @@ def apply_output_artifact(
     ``final_message`` (the free-form summary agent), via :func:`_slot_content`. An agent-facing slot
     (``plan``) also publishes a redacted copy to the exchange and points its ``inputs_field`` at it;
     a ``report`` slot is written (redacted) into the flow's private ``report_dir`` instead of the
-    task artifact dir. The private slot file stays the audit record (WRI-001).
+    task artifact dir. The private slot file stays the audit record.
     """
     slot_name = node.output_artifact
     if slot_name is None:
@@ -131,7 +131,7 @@ def write_node_output(
 ) -> str | None:
     """Persist a node's output to ``<artifacts>/<node_id>.out.md``; return the path or ``None``.
 
-    The generic node-output channel (node-output ADR): every agent node's output is written and
+    The generic node-output channel: every agent node's output is written and
     exposed downstream as ``{<node_id>_path}`` (a *path*, never inlined content). The content is the
     same as a slot (``structured_output["content"]`` or ``final_message``, via ``_slot_content``) —
     unless the node declares ``output_file``, in which case the file it produced under
@@ -161,7 +161,7 @@ def write_node_output(
     path.write_text(redacted, encoding="utf-8")
     register(task_id, "node_output", str(path))
     # The private .out.md stays the audit record; the redacted exchange copy is what the downstream
-    # {<node_id>_path} fan-in resolves (WRI-001).
+    # {<node_id>_path} fan-in resolves.
     publish_node_run_file(
         exchange_root,
         task_id,

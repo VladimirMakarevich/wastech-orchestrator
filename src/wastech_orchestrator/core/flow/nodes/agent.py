@@ -1,4 +1,4 @@
-"""Agent node runner (P1.3/P1.4) — thin adapter to the AgentRouter.
+"""Agent node runner — thin adapter to the AgentRouter.
 
 Builds an :class:`~wastech_orchestrator.providers.base.AgentRunRequest` from the node fields + the
 unit inputs (the node's ``role_file`` is the prompt template; only allowlisted path variables are
@@ -96,7 +96,7 @@ from wastech_orchestrator.state_store import EditingLineageRow, NodeRunRow
 
 @dataclass(frozen=True, slots=True)
 class _GrantedShellBefore:
-    """WRI-009 state captured before a read-only node with a granted shell runs, for reporting.
+    """State captured before a read-only node with a granted shell runs, for reporting.
 
     Both fields exist to be compared against after the attempt: ``control`` catches a poisoned
     hook / ``.git/config`` / index, ``tree`` catches a stray working-tree write. Neither parks.
@@ -202,7 +202,7 @@ class AgentNodeRunner:
         return self._exchange_human_input(node, ctx, path)
 
     def _exchange_human_input(self, node: AgentNode, ctx: NodeContext, path: Any) -> str:
-        """Publish the sanitized answer-only HITL packet to the exchange; return its path (WRI-001).
+        """Publish the sanitized answer-only HITL packet to the exchange; return its path.
 
         The full durable interaction record (including the Telegram/durable transport handle) stays
         private; only the redacted ``{kind, question, answer, approved}`` projection becomes the
@@ -279,7 +279,7 @@ class AgentNodeRunner:
             return
         raise NodeManualRequired(f"agent node {node.id!r}: human input invalid")
 
-    # -- max-turns gate (idea 29) ---------------------------------------------
+    # -- max-turns gate -------------------------------------------------------
 
     def _invoke_with_turn_gate(
         self,
@@ -358,7 +358,7 @@ class AgentNodeRunner:
     # -- shared invocation ----------------------------------------------------
 
     def _is_workspace_write(self, node: AgentNode, ctx: NodeContext) -> bool:
-        """True iff this node's resolved permission profile is workspace-write (WRI-009).
+        """True iff this node's resolved permission profile is workspace-write.
 
         Only a workspace-write attempt is *meant* to mutate the clone, so only it gets the post-edit
         diff guard (diff capture, output containment, the dangerous-diff approval). Whether an
@@ -374,7 +374,7 @@ class AgentNodeRunner:
     def _granted_shell_before(
         self, node: AgentNode, ctx: NodeContext
     ) -> _GrantedShellBefore | None:
-        """The WRI-009 fingerprints taken before a *read-only* node with a granted shell runs.
+        """The fingerprints taken before a *read-only* node with a granted shell runs.
 
         ``None`` for every other node — that is the signal to skip both comparisons entirely, so no
         node pays for a check that cannot apply to it. This bracket, not the profile-keyed one in
@@ -466,12 +466,12 @@ class AgentNodeRunner:
             node, ctx, route, run_id, human_input_path, session_id, guard_output_baseline(baseline)
         )
         assert_request_contained(request, self._s.exchange_root)
-        # WRI-009: fingerprint the Git control state before a workspace-write attempt; the compare
+        # Fingerprint the Git control state before a workspace-write attempt; the compare
         # after `run_stage` (below) runs before any orchestrator git touches the possibly-poisoned
         # clone, and drift there parks the task. A read-only attempt holding the git-evidence grant
         # also has a shell and so can also reach `.git` — it is fingerprinted too, but from the
-        # outer reporting bracket (`_granted_shell_before`), because decision 2 says such a node
-        # warns instead of parking. WRI-002: a workspace-write attempt also gets its Write/Edit-deny
+        # outer reporting bracket (`_granted_shell_before`), because such a node deliberately
+        # warns instead of parking. A workspace-write attempt also gets its Write/Edit-deny
         # roots (exchange/gitdir/common/hooks/tasks) resolved fresh here (only final after branch
         # prep) and threaded onto the request; a read-only attempt carries no write tools, so
         # ``write_guard`` stays ``None`` and its whole clone is instead write-denied in the
@@ -484,7 +484,7 @@ class AgentNodeRunner:
                 request,
                 write_guard=git.resolve_control_paths(self._s.exchange_root),
             )
-        # WRI-002 detection-in-depth: fingerprint the curated exchange before the attempt so a
+        # Detection-in-depth: fingerprint the curated exchange before the attempt so a
         # provider mutation of the read-only surface is caught from parent-held state (below),
         # before
         # any downstream node consumes it. Applies to every agent profile — the exchange is
@@ -515,7 +515,7 @@ class AgentNodeRunner:
                 f"agent node {node.id!r}: no provider could complete it ({err})",
                 error_class=error_class,
             )
-        # WRI-009/002: the result is trusted (WRI-012 proved provider-tree quiescence inside the
+        # The result is trusted (the quiescence barrier proved the provider tree empty inside the
         # adapter), so compare now — before `_apply_post_edit_guard`'s `git diff`/commit touch the
         # clone and before any downstream node reads the exchange. Git control-state drift on a
         # workspace-write attempt or an exchange mutation is a non-fallback policy violation →
@@ -547,7 +547,7 @@ class AgentNodeRunner:
             return
         private_diff = self._s.git.write_current_diff(ctx.task_id)
         # Keep the private authoritative diff as the audit artifact; expose only the redacted
-        # exchange copy as {diff_path} to the provider (WRI-001).
+        # exchange copy as {diff_path} to the provider.
         self._in.diff_path = publish_file(
             self._s.exchange_root,
             ctx.task_id,
@@ -725,7 +725,7 @@ class AgentNodeRunner:
             # Network is a per-node override on top of the flow-wide default: the node's
             # ``network_access`` wins (a node-level grant works even in a flow with no
             # ``network_policy``; a node-level ``False`` opts out), and absent it the node inherits
-            # the flow's ``network_policy`` default (P3.2). It only toggles network — never the
+            # the flow's ``network_policy`` default. It only toggles network — never the
             # filesystem permission ceiling.
             network_access=resolve_network_access(
                 node.network_access, ctx.snapshot.doc.network_policy
@@ -734,13 +734,13 @@ class AgentNodeRunner:
             # grant. Like network, it toggles one capability dimension and never the filesystem
             # ceiling — the node stays read-only, enforced by the provider's sandbox.
             git_evidence=self._has_git_evidence(node),
-            # VF-7 defense-in-depth: the Core-owned advisory security contract, threaded via
+            # Defense-in-depth: the Core-owned advisory security contract, threaded via
             # NodeServices; the neutral seam prepends it to the effective prompt.
             security_preamble=self._s.security_preamble,
         )
 
     def _prompt_variables(self, ctx: NodeContext, node: AgentNode) -> dict[str, object | None]:
-        # The allowlisted artifact paths come from the shared collector (seam #4) so the agent
+        # The allowlisted artifact paths come from the shared collector so the agent
         # prompt and the tool-node stdin never drift; the rest (ids, skills, memory) is prompt-only.
         paths = build_path_context(self._in, self._s.repo_dir)
         variables: dict[str, object | None] = {
@@ -789,15 +789,15 @@ class AgentNodeRunner:
         )
 
     def _memory_path(self, node: AgentNode, ctx: NodeContext) -> str | None:
-        """Build this node's memory packet and return its path — node-driven (FR4/D5).
+        """Build this node's memory packet and return its path — node-driven.
 
         Returns the per-node packet path only when memory is enabled AND the node's (operator-
         editable) role prompt references ``{memory_path}``; otherwise ``None`` (so the variable
         renders empty and the conditional block drops). A node not referencing it never triggers a
         build, so a custom operator node opts in with no Core change. Best-effort: a memory read
-        must never break a node run, so any failure degrades to no packet (AC-R4)."""
+        must never break a node run, so any failure degrades to no packet."""
         builder = self._s.packet_builder
-        if builder is None:  # memory disabled (Q10) — no store, empty variable, today's behavior
+        if builder is None:  # memory disabled — no store, empty variable, unchanged behavior
             return None
         try:
             template = read_role_file(self._in.flow_dir, node.role_file)
@@ -805,7 +805,7 @@ class AgentNodeRunner:
             return None  # render_role_prompt surfaces the real read error
         if "{memory_path}" not in template and "{?memory_path}" not in template:
             return None
-        # F48: this task's changed paths (per-task chain base), not the whole shared branch's, so
+        # This task's changed paths (per-task chain base), not the whole shared branch's, so
         # the packet's path-overlap ranking stays relevant on a chain branch.
         touched = (
             self._s.git.changed_code_paths_since_task_base() if self._s.git is not None else []
@@ -817,7 +817,7 @@ class AgentNodeRunner:
         if written is None:
             return None
         # The memory store + the private packet stay private; only the redacted per-node packet
-        # crosses into the exchange as {memory_path} (WRI-001).
+        # crosses into the exchange as {memory_path}.
         return publish_file(
             self._s.exchange_root,
             ctx.task_id,
@@ -871,7 +871,7 @@ class AgentNodeRunner:
     def _resume_lineage(
         self, node: AgentNode, ctx: NodeContext, route: ResolvedRoute
     ) -> EditingLineageRow | None:
-        """The durable editing lineage this node resumes, or ``None`` for a fresh session (P2.2).
+        """The durable editing lineage this node resumes, or ``None`` for a fresh session.
 
         Only an ``editing_lineage`` node resumes an editing session, keyed by its lineage
         (:func:`_lineage_key`), and only when the stored lineage was produced by the same provider
@@ -950,7 +950,7 @@ def _same_provider_session_id(outcome: StageOutcome, route: ResolvedRoute) -> st
 
 
 def _is_max_turns(outcome: StageOutcome) -> bool:
-    """True when the outcome is a Claude run that exhausted its ``max_turns`` cap (idea 29).
+    """True when the outcome is a Claude run that exhausted its ``max_turns`` cap.
 
     Detected structurally via ``NormalizedError.failure_subtype`` — a quality ``task_failure`` the
     router returns as-is (no fallback), carrying the session id needed to resume on continue."""

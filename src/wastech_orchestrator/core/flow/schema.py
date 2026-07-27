@@ -1,4 +1,4 @@
-"""Flow schema — Python types for the YAML flow document (P0.2).
+"""Flow schema — Python types for the YAML flow document.
 
 The flow-graph document as frozen dataclasses.
 Pure: no IO, no YAML parsing, no fingerprinting — only types.
@@ -75,7 +75,7 @@ class AgentNode:
     timeout_seconds: int | None = None
     output_schema: str | None = None  # JSON-encoded when present
     #: optional well-known artifact slot the agent's output is persisted to and threaded downstream
-    #: (``enriched_spec`` / ``plan`` / ``summary``); the core writes it after the node runs (P1.4).
+    #: (``enriched_spec`` / ``plan`` / ``summary``); the core writes it after the node runs.
     output_artifact: str | None = None
     #: the file this node *produces*, named by the flow: when set, that file's content — not the
     #: node's closing message — is what the ``{<node_id>_path}`` channel carries downstream. One
@@ -150,7 +150,7 @@ class ChecksNode:
 
 @dataclass(frozen=True, slots=True)
 class ToolNode:
-    """A custom operator tool node (P5): runs an operator executable out-of-process.
+    """A custom operator tool node: runs an operator executable out-of-process.
 
     Unlike :class:`ChecksNode` (whose ``checker`` is a closed core-owned ``Literal``), ``tool`` is a
     **free string** naming an operator executable registered under ``<repo>/.worc/tools/`` — the
@@ -220,7 +220,7 @@ class DecompositionConfig:
 
 @dataclass(frozen=True, slots=True)
 class SupervisorBlock:
-    """Flow-local supervisor prompt overrides + the follow-ups opt-in (prompt-and-supervisor ADR).
+    """Flow-local supervisor prompt overrides + the follow-ups opt-in.
 
     The supervisor is a constant layer above any flow; this block lets a flow reshape *its wording*
     without touching global config. Only wording moves into files — the structured-output schemas
@@ -229,9 +229,8 @@ class SupervisorBlock:
 
     * ``role_file`` — the observe lens, overriding the global ``config.supervisor.role_file``.
     * ``finalize_role_file`` — the final-summary emphasis (no global counterpart — YAGNI).
-    * ``handoff_role_file`` — the intra-task subtask handoff brief (subtask-context-handoff ADR; no
-      global counterpart). A third supervisor prompt, same contract: wording in a file, schema in
-      code.
+    * ``handoff_role_file`` — the intra-task subtask handoff brief (no global counterpart). A third
+      supervisor prompt, same contract: wording in a file, schema in code.
     * ``emit_follow_ups`` — opt the flow's finalize turn into the structured ``{summary,
       follow_ups}`` contract (a per-flow, code-oriented capability; default off). Memory is
       orthogonal (the same turn additionally emits ``memory_delta`` when memory is enabled).

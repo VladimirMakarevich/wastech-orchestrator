@@ -1,4 +1,4 @@
-"""Deterministic citation-manifest validator (P3.1) — no LLM, no network.
+"""Deterministic citation-manifest validator — no LLM, no network.
 
 The research synthesis node writes a manifest beside its report (``sources.json`` by default; the
 checks node's ``manifest`` field names it): one entry per cited source, each pointing into the
@@ -22,7 +22,7 @@ check, and the flow's ``citation_check → synthesis (fail)`` edge sends synthes
 it. ``weak`` is deliberately non-gating — an imprecise line number is worth surfacing to the
 verifier, but failing a run over it would park the task for a citation whose quote is genuine. A
 **missing or malformed manifest** is ``uncheckable`` and does **not** crash or fail — we cannot
-prove a hallucination from an unreadable manifest, and the after-stage output guard (P3.2) is what
+prove a hallucination from an unreadable manifest, and the after-stage output guard is what
 enforces that the manifest exists at all. No network: an external ``url`` is uncheckable.
 """
 

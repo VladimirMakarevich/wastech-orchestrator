@@ -1,4 +1,4 @@
-"""Flow execution engine — graph driver with engine-owned transitions (P1.1).
+"""Flow execution engine — graph driver with engine-owned transitions.
 
 :class:`FlowEngine` executes a validated :class:`~.snapshot.FlowSnapshot`: starting at the entry
 node it runs each node through its :class:`NodeRunner`, takes the node's :class:`NodeOutcome`,
@@ -10,7 +10,8 @@ dispatch-on-``Status`` pipeline loop the orchestrator used before the flow engin
 Guarantees:
 
 * **Outcome ⊆ declared edges.** The chosen outcome must match a declared outgoing edge; a mismatch
-  is an :class:`EngineInternalError` (the fatal validator, P0.3, already rejects malformed graphs at
+  is an :class:`EngineInternalError` (the fatal load-time validator already rejects malformed
+  graphs at
   load, so this is a runtime assertion against a buggy runner).
 * **Bounded termination.** Every ``rework``/``fail`` edge is charged against a single global fix
   counter plus its named loop or inline budget; exhausting any limit ends the run at
@@ -18,7 +19,7 @@ Guarantees:
   run at ``DONE``.
 
 Budget bookkeeping is generic on purpose: the engine knows nothing about ``test_fix`` /
-``review_fix`` / supervisor by name (the P3 abstraction test forbids domain knowledge in the
+``review_fix`` / supervisor by name (an abstraction test forbids domain knowledge in the
 engine). Named loops use ``>=`` semantics — increment then compare (verified by the fix-loop
 scenarios) — and inline ``budget: N`` edges use ``allow N`` semantics. Flow ``budgets`` parameterize
 the limits;
@@ -51,7 +52,7 @@ from wastech_orchestrator.core.loop_control import global_cap, loop_cap, record_
 from wastech_orchestrator.core.state_machine import Status
 
 #: Resolves a ``when.fact`` (``derived.*`` / ``config.*``) to a boolean. Injected so the engine
-#: carries no knowledge of where facts come from (P1.3/P1.4 wire the real resolver).
+#: carries no knowledge of where facts come from (the driver wires the real resolver).
 FactResolver = Callable[[str], bool]
 #: Reports whether the operator requested a cooperative stop. Injected by the watch daemon; the
 #: engine treats it as a generic boundary interrupt and stays ignorant of stop files and signals.
@@ -89,7 +90,7 @@ def _never_cancelled() -> bool:
 
 @dataclass(frozen=True, slots=True)
 class Finding:
-    """A single evaluator finding (the shared evaluator primitive, P2.1).
+    """A single evaluator finding (the shared evaluator primitive).
 
     ``severity`` is the typed audit-trail projection (``low``/``medium``/``high``). Whether a
     finding actually drives ``rework`` is decided by the evaluator runner against the node's
@@ -167,7 +168,7 @@ def skip_outcome(node: FlowNode) -> NodeOutcome:
 
 @dataclass(frozen=True, slots=True)
 class NodeResult:
-    """A node's execution result: its outcome plus the ``node_runs`` row id it recorded (P1.2)."""
+    """A node's execution result: its outcome plus the ``node_runs`` row id it recorded."""
 
     node_id: str
     outcome: NodeOutcome
@@ -176,7 +177,7 @@ class NodeResult:
 
 @dataclass(frozen=True, slots=True)
 class NodeContext:
-    """Read-only context handed to a :class:`NodeRunner`. P1.3 enriches with artifact paths."""
+    """Read-only context handed to a :class:`NodeRunner` (the driver adds the artifact paths)."""
 
     snapshot: FlowSnapshot
     run_state: FlowRunState
@@ -186,15 +187,15 @@ class NodeContext:
 
 
 class NodeRunner(Protocol):
-    """Implemented by each node kind in ``core/flow/nodes/*.py`` (P1.3). Returns an outcome; it
+    """Implemented by each node kind in ``core/flow/nodes/*.py``. Returns an outcome; it
     never transitions the graph or the task status — that is the engine's sole responsibility."""
 
     def run(self, node: FlowNode, ctx: NodeContext) -> NodeResult: ...
 
 
 class RunRecorder(Protocol):
-    """Engine-level persistence seam. P1.1 uses an in-memory fake; P1.2 backs it by the state store
-    (``record_skip`` / checkpoint of ``current_node`` + ``loop_counters`` / failure report)."""
+    """Engine-level persistence seam (``record_skip`` / checkpoint of ``current_node`` +
+    ``loop_counters`` / failure report). Backed by the state store; tests use an in-memory fake."""
 
     def record_skip(self, node: FlowNode, *, reason: str, subtask_order: int | None) -> None: ...
 
@@ -245,7 +246,7 @@ def edge_key(edge: Edge) -> str:
 #: Called after each *executed* (non-skipped) node with ``(node, outcome, node_run_id)`` so the core
 #: can persist a declared ``output_artifact`` slot / read the decomposition contract and let the
 #: orchestrator's supervisor layer observe the completed step (keyed by its ``node_run_id``) before
-#: the next node runs. Injected by the driver (P1.4); the engine carries no post-processing
+#: the next node runs. Injected by the driver; the engine carries no post-processing
 #: knowledge itself — passing the run id it already holds is generic, not domain knowledge.
 PostNodeHook = Callable[[FlowNode, NodeOutcome, int], None]
 
@@ -505,7 +506,7 @@ class FlowEngine:
         glob = record_rework(self._run_state)
         if edge.loop is not None:
             cycles = self._run_state.bump(edge.loop)
-            # Cumulative per-loop total for the audit trail (F49): bumped on every rework of this
+            # Cumulative per-loop total for the audit trail: bumped on every rework of this
             # loop, never reset on a forward edge, so a converged loop is not attributed 0.
             self._run_state.bump(FlowRunState.total_key(edge.loop))
             if cycles >= self._loop_cap(edge.loop):

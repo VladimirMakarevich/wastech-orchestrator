@@ -1,4 +1,4 @@
-"""Per-node observability (P1.4) — rendered-prompt, prompt-audit, and provider-attempt records.
+"""Per-node observability — rendered-prompt, prompt-audit, and provider-attempt records.
 
 Writes the rendered prompt + prompt-audit JSON and the per-attempt provider-attempt rows so the
 engine path produces the same audit surfaces the integration suite asserts. The agent/evaluator
@@ -34,7 +34,7 @@ if TYPE_CHECKING:
 class ProviderAttemptSink(Protocol):
     """The single state-store method :func:`record_provider_attempts` needs, so the recorder is
     reusable by both a graph node (its ``NodeServices.store``) and the constant supervisor layer
-    (its own store) without importing the concrete ``StateStore`` (VF-8)."""
+    (its own store) without importing the concrete ``StateStore``."""
 
     def record_provider_attempt(self, attempt: ProviderAttemptRow) -> None: ...
 
@@ -114,7 +114,7 @@ def record_provider_attempts(
     """Persist one ``provider_attempts`` row per attempt (primary + any fallback) — always recorded.
 
     Every row carries the owning ``task_id`` so a cost/usage roll-up sums by task without a
-    ``node_runs`` join (VF-8). ``node_run_id`` is the ``node_runs`` id for a graph node, or ``None``
+    ``node_runs`` join. ``node_run_id`` is the ``node_runs`` id for a graph node, or ``None``
     for the constant supervisor layer (not a graph node). The result-bearing attempt (the router
     leaves at most one) also carries its normalized token usage as a summation-safe per-run delta
     against the resumed session's baseline. Takes the store + clock explicitly (not a full
@@ -136,7 +136,7 @@ def record_provider_attempts(
                 error_class=attempt.error_class.value if attempt.error_class else None,
                 exit_code=result.exit_code if result else None,
                 attempt_dir=attempt_dir,
-                # VF-12: stamp the attempt's real measured interval from the result (already the
+                # Stamp the attempt's real measured interval from the result (already the
                 # values the prompt-audit artifact uses below); fall back to the clock only for a
                 # result-less attempt (an infra fallback that never produced a result).
                 started_at=result.started_at if result else clock(),

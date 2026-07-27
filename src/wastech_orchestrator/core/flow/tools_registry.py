@@ -1,4 +1,4 @@
-"""Tool registry — resolves an operator ``tool`` name → a registered executable path (P5).
+"""Tool registry — resolves an operator ``tool`` name → a registered executable path.
 
 Modeled on :class:`~wastech_orchestrator.core.flow.registry.FlowRegistry` (NOT on a checker
 mechanism — there is no checker registry, only a closed ``Literal``). Operator tools live under
@@ -12,8 +12,8 @@ only a real, contained, executable file, never an arbitrary path:
 * **executability** — POSIX: the ``+x`` bit; Windows: a launchable suffix (``.exe``/``.bat``/…),
   since Windows has no execute bit (cross-platform rule).
 
-Trust is *file-based*; a signature / hash registry is a deferred follow-up (same decision as flows,
-security-ceiling.md §8). The registry never launches anything and holds no state beyond the
+Trust is *file-based*; a signature / hash registry is a deferred follow-up, the same call made for
+operator flows. The registry never launches anything and holds no state beyond the
 directory path.
 """
 

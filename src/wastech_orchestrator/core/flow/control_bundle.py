@@ -1,4 +1,4 @@
-"""Frozen control bundle (WRI-010) — a per-task immutable snapshot of the effective control plane.
+"""Frozen control bundle — a per-task immutable snapshot of the effective control plane.
 
 The operator control plane (``<repo>/.worc`` = ``control_home``: the flow YAML, role/supervisor
 prompts, and ``tools/`` executables) lives under the provider working directory. Every consumer
@@ -20,9 +20,10 @@ Three operations:
   ``continue``/resume, which must reuse the original frozen bytes, never re-freeze).
 * :func:`digest_live_control_inputs` — re-hash the **live** control inputs with the same identity
   checks; the orchestrator compares this to the frozen baseline after every provider attempt (once
-  WRI-012 has proven the provider tree quiescent). Any drift is a non-fallback security violation.
+  the quiescence barrier has proven the provider tree empty). Any drift is a non-fallback
+  security violation.
 
-Identity is enforced by reusing the WRI-001 no-follow inspector
+Identity is enforced by reusing the exchange's no-follow inspector
 (:func:`~wastech_orchestrator.providers.exchange.default_file_inspector`), the shared containment
 belt (:func:`~wastech_orchestrator.providers.artifacts.assert_contained_path`), and the chunked
 digest (:func:`~wastech_orchestrator.providers.artifacts.sha256_file`) — no new identity code. A
@@ -269,7 +270,7 @@ def digest_live_control_inputs(
     """Re-hash the **live** control inputs the frozen bundle was built from, same order/keys.
 
     The orchestrator captures this at freeze time (it equals ``bundle_digest``) and recomputes it
-    after every provider attempt once WRI-012 has proven the provider tree quiescent. A mismatch —
+    after every provider attempt once the quiescence barrier has proven the tree empty. A mismatch —
     or a planted symlink/hard-link surfaced by :func:`_inspect_source` — means a live control file
     changed under the running task: a non-fallback security violation.
     """
