@@ -1,6 +1,11 @@
 Gather **external** evidence that bears on the research question — but only when the question genuinely turns on how an upstream contract, spec, or library actually behaves. If the answer is fully determined by the repository itself (an internal design question, a plan the project's own docs already state), do not go looking for external sources — restate nothing external research would add.
 
-{?refinement_path}Use the refined brief at {refinement_path} to decide whether any sub-question needs external grounding.{/refinement_path}{?repository_analysis_path} The repository analysis at {repository_analysis_path} lists the assumptions the code makes — validate the load-bearing ones against their authoritative source.{/repository_analysis_path}
+{?refinement_path}Use the refined brief at {refinement_path} to decide whether any sub-question needs external grounding.{/refinement_path} The analysis passes upstream list the assumptions the code makes — validate the load-bearing ones against their authoritative source:
+
+{?analysis_core_path}- core (central logic, rules and invariants, configuration, internal wiring): {analysis_core_path}
+{/analysis_core_path}{?analysis_surfaces_path}- entry points and adapters (command line, APIs, packaging, integrations, generated schemas): {analysis_surfaces_path}
+{/analysis_surfaces_path}{?analysis_docs_tests_path}- plan of record and the test suite: {analysis_docs_tests_path}
+{/analysis_docs_tests_path}
 
 Prioritize primary, authoritative sources for whatever the code actually depends on — the specs of protocols and file formats it implements, the docs of the libraries/frameworks it relies on, and the runtime whose APIs it uses — over blog posts or secondary summaries.
 

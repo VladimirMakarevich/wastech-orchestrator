@@ -1,6 +1,17 @@
 # P0.1 — make a `medium` evaluator finding actually gate
 
-Priority: **P0** Status: **accepted** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-1 Escalates: [VF-18](../issues/runtime-validation-findings.md)
+Priority: **P0** Status: **implemented** (2026-07-26) Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-1 Escalates: [VF-18](../issues/runtime-validation-findings.md)
+
+## Implemented
+
+Decision on step 2: `medium` on **every packaged flow whose evaluators are quality lenses** — `deep_research` (via `defaults.evaluator`, covering both), `security_audit`, `blog_article`, `blog_article_revise`, `content_chapter`, `content_translate`. The built-in `DEFAULT_GATE_SEVERITY` stays `high`, and `implementation`'s `review` stays `high`: it is a correctness lens on a `blocking: true` node, where a lowered gate changes the exhaustion landing to `manual_action_required`.
+
+Two consequences to know about:
+
+- **The four content critics are `blocking: true`**, so for them exhaustion parks the task rather than accepting with a warning. Their loop budgets are `style_fix: 10` / `style_fix: 10` / `critic_fix: 6` / `critic_fix: 3`. No budget was changed — `content_translate`'s `critic_fix: 3` is the thinnest and the one to raise if pages start parking.
+- **Target-only remainder**: an operator's installed `.worc/flows/*.yaml` is a copy, so it needs `worc install` (or a hand edit) to pick up the new default and the restored header comment. Nothing in this repo can change an existing installation.
+
+Step 4 went further than "reconcile the number": both `deep_research` prompts now state the _mechanism_ (the flow decides which severities gate; file everything at its true severity; a sub-threshold finding is carried to the operator, not discarded) instead of restating a threshold that drifts out of the YAML — the pattern the content critics already used. The "carry into the report's Open questions" clause is deleted. `security_audit/verifier.md` already claimed medium gates and is now correct without an edit.
 
 ## Problem
 

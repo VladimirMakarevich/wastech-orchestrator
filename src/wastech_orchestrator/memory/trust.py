@@ -1,4 +1,4 @@
-"""Trust levels and the promotion-durability gate (design §7).
+"""Trust levels and the promotion-durability gate.
 
 Trust is the spine of the poisoning defenses: it is assigned by the deterministic ``MemoryService``
 (never self-certified by a candidate), and a record's trust level alone decides whether it is even
@@ -13,7 +13,7 @@ from enum import StrEnum
 
 
 class TrustLevel(StrEnum):
-    """How much a piece of memory can be trusted (design §7), most→least trusted."""
+    """How much a piece of memory can be trusted, most→least trusted."""
 
     REPO_OBSERVED = "repo-observed"  # verifiable from current code/config
     HUMAN_CURATED = "human-curated"  # operator wrote/approved (required for procedural)
@@ -40,7 +40,8 @@ DURABLE_TRUST_LEVELS: frozenset[TrustLevel] = frozenset(
 def is_durable_candidate(trust: TrustLevel) -> bool:
     """Whether ``trust`` is *eligible* (necessary, not sufficient) for a durable long-term record.
 
-    This is the trust-level half of AC-SF5: a low-trust record can never behave as a high-trust one.
+    This is the trust-level half of the guarantee that a low-trust record can never behave as a
+    high-trust one.
     The promotion gate (a later phase) applies the remaining rules (evidence, recurrence, and the
     ``artifact-backed`` validator pass) before anything is actually promoted.
     """

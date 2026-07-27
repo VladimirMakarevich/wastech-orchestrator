@@ -1,4 +1,4 @@
-"""Unit tests for the constant supervisor layer + evaluator primitive (flow-engine P2.1).
+"""Unit tests for the constant supervisor layer + evaluator primitive.
 
 The supervisor is the orchestrator-level oversight layer above any flow: per-step read-only
 observation in its own resume_own_lineage session, advisory-only (never reworks/routes), and a
@@ -17,6 +17,7 @@ import pytest
 from wastech_orchestrator.config.loader import ConfigError, loads_config
 from wastech_orchestrator.config.schema import SupervisorConfig
 from wastech_orchestrator.config.validation import validate_config
+from wastech_orchestrator.core.flow.engine import Finding
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import SupervisorBlock
 from wastech_orchestrator.core.loop_control import record_rework
@@ -145,7 +146,7 @@ def _supervisor(
 
 
 def test_supervisor_request_carries_security_preamble(tmp_path: Path) -> None:
-    # VF-7: the supervisor's own read-only turn carries the Core-owned preamble too.
+    # The supervisor's own read-only turn carries the Core-owned preamble too.
     router, store = FakeRouter(), _store(tmp_path)
     sup = _supervisor(
         tmp_path, router, store, security_preamble="[Orchestrator security contract] baseline"
@@ -173,6 +174,58 @@ def test_supervisor_observes_each_completed_step(tmp_path: Path) -> None:
     assert [e.kind for e in evals] == ["supervisor_step", "supervisor_step"]
     assert [e.source_node_run_id for e in evals] == [5, 7]
     assert all(e.verdict == "advisory" and e.node_id is None for e in evals)
+
+
+def test_observe_prompt_carries_the_evaluator_findings_digest(tmp_path: Path) -> None:
+    # `_step_prompt` had no slot for findings, so the observation for the critic step
+    # was a bare `## Step observed / Outcome: accept` with nothing to react to — and the observer
+    # made zero tool calls on every evaluator step of the run this came from. Severity + reason +
+    # paths now reach the prompt, which is what the observer is being asked to acknowledge.
+    router, store = FakeRouter(), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store)
+    sup.observe(
+        task_id=_TASK,
+        node_id="critical_review",
+        node_run_id=82,
+        outcome_kind="accept",
+        findings=(
+            Finding(severity="medium", reason="Uneven audit depth", paths=("report.md",)),
+            Finding(severity="low", reason="Wording nit"),
+        ),
+    )
+    prompt = router.requests[0].prompt
+    assert "## Step observed" in prompt
+    assert "Node: critical_review" in prompt
+    assert "Outcome: accept" in prompt
+    assert "- [medium] Uneven audit depth (report.md)" in prompt
+    assert "- [low] Wording nit" in prompt
+
+
+def test_observe_prompt_has_no_findings_section_when_there_are_none(tmp_path: Path) -> None:
+    # An agent step, or a clean evaluator: no heading, no empty list.
+    router, store = FakeRouter(), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store)
+    sup.observe(task_id=_TASK, node_id="implementation", node_run_id=5, outcome_kind="done")
+    assert "Findings it recorded" not in router.requests[0].prompt
+
+
+def test_observe_prompt_bounds_a_long_finding_reason(tmp_path: Path) -> None:
+    # A chatty evaluator must not inflate every per-step turn: the digest line is capped at the same
+    # bound the follow-up titles use, and newlines are folded so one finding stays one line.
+    router, store = FakeRouter(), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store)
+    sup.observe(
+        task_id=_TASK,
+        node_id="review",
+        node_run_id=9,
+        outcome_kind="accept",
+        findings=(Finding(severity="high", reason="y\n" * 200),),
+    )
+    digest = next(
+        line for line in router.requests[0].prompt.splitlines() if line.startswith("- [high]")
+    )
+    assert len(digest) <= _FINDING_TITLE_MAX + len("- [high] ") + 1
+    assert digest.endswith("…")
 
 
 def test_supervisor_observe_writes_rendered_prompt_when_registered(tmp_path: Path) -> None:
@@ -211,7 +264,7 @@ def test_supervisor_observability_write_failure_does_not_break_turn(tmp_path: Pa
 
 
 def test_supervisor_pins_its_provider_at_route(tmp_path: Path) -> None:
-    # F39: the supervisor resolves the route with its own `provider` (here claude), not an implicit
+    # The supervisor resolves the route with its own `provider` (here claude), not an implicit
     # None-inherits-primary — so its claude model reaches claude even under a codex primary.
     router, store = FakeRouter(), _store(tmp_path)
     sup = _supervisor(tmp_path, router, store, provider=ProviderId.CLAUDE)
@@ -422,7 +475,7 @@ def test_supervisor_finalize_best_effort_when_llm_unavailable(tmp_path: Path) ->
 
 
 def test_finalize_sanitizes_leaked_structured_dump(tmp_path: Path) -> None:
-    # F16: a model that emits its structured output as a `<summary>…</summary><follow_ups>[JSON]
+    # A model that emits its structured output as a `<summary>…</summary><follow_ups>[JSON]
     # </follow_ups><memory_delta>…` text dump must never let those machine sections ride into
     # summary.md (the PR body). Only the human prose survives.
     leaked = (
@@ -466,7 +519,7 @@ def test_finalize_writes_prompt_audit_when_enabled(tmp_path: Path) -> None:
 
 
 def test_finalize_prefixes_h1_when_missing(tmp_path: Path) -> None:
-    # F10: a headless paragraph-slab summary gets a deterministic `# {task_title}` H1 prefix.
+    # A headless paragraph-slab summary gets a deterministic `# {task_title}` H1 prefix.
     router, store = FakeRouter([_ok("s1", "One flat line of synthesis.")]), _store(tmp_path)
     sup = _supervisor(tmp_path, router, store)
     path = sup.finalize(task_id=_TASK, task_title="My Task").summary_path
@@ -475,7 +528,7 @@ def test_finalize_prefixes_h1_when_missing(tmp_path: Path) -> None:
 
 
 def test_finalize_keeps_model_h1_without_double_prefix(tmp_path: Path) -> None:
-    # F10: when the model already opened with its own top-level heading, don't double-prefix.
+    # When the model already opened with its own top-level heading, don't double-prefix.
     router, store = FakeRouter([_ok("s1", "# Model heading\n\nBody.")]), _store(tmp_path)
     sup = _supervisor(tmp_path, router, store)
     path = sup.finalize(task_id=_TASK, task_title="T").summary_path
@@ -564,7 +617,7 @@ def test_finalize_digest_none_when_no_usable_observations(tmp_path: Path) -> Non
 
 
 def test_finalize_failed_does_not_clobber_existing_summary_json(tmp_path: Path) -> None:
-    # F16: a failed finalize (no provider result) must NOT overwrite an existing non-empty
+    # A failed finalize (no provider result) must NOT overwrite an existing non-empty
     # summary.json with a blank one (symmetric to leaving summary.md untouched on failure).
     store = _store(tmp_path)
     # First finalize succeeds and writes a non-empty summary.json.
@@ -580,7 +633,7 @@ def test_finalize_failed_does_not_clobber_existing_summary_json(tmp_path: Path) 
 
 
 def test_schema_turn_caps_max_reasoning_but_free_text_keeps_it(tmp_path: Path) -> None:
-    # F7b: a structured-output turn is capped to `high` when configured at a max tier (xhigh/max) so
+    # A structured-output turn is capped to `high` when configured at a max tier (xhigh/max) so
     # the schema turn is not fragile; a free-text turn keeps the configured tier.
     schema_router, store = FakeRouter([_structured("Sum.", {})]), _store(tmp_path)
     sup_schema = _supervisor(tmp_path, schema_router, store, reasoning="xhigh")
@@ -596,7 +649,7 @@ def test_schema_turn_caps_max_reasoning_but_free_text_keeps_it(tmp_path: Path) -
 
 
 def test_observe_turn_caps_max_reasoning(tmp_path: Path) -> None:
-    # F50: per-step observation is advisory and runs once per node-run, so a deep fix loop drives
+    # Per-step observation is advisory and runs once per node-run, so a deep fix loop drives
     # many observe turns; it never needs a max tier — cap it to `high` (like a schema turn), while
     # the free-text finalize above keeps the configured tier.
     router, store = FakeRouter(), _store(tmp_path)
@@ -621,7 +674,7 @@ def _structured(summary: str, memory_delta: dict[str, Any]) -> AgentRunResult:
 
 
 def test_finalize_emits_delta_on_the_same_turn(tmp_path: Path) -> None:
-    # AC-W1: with memory enabled, the SAME finalize turn yields the summary + the candidate delta.
+    # With memory enabled, the SAME finalize turn yields the summary + the candidate delta.
     memory_delta = {
         "lessons": [
             {
@@ -643,7 +696,7 @@ def test_finalize_emits_delta_on_the_same_turn(tmp_path: Path) -> None:
 
 
 def test_finalize_call_count_identical_with_memory_on_or_off(tmp_path: Path) -> None:
-    # AC-W1: enabling memory adds no provider turns.
+    # Enabling memory adds no provider turns.
     counts: list[int] = []
     cases = (("off", FakeRouter([_ok("s", "sum")])), ("on", FakeRouter([_structured("sum", {})])))
     for name, router in cases:
@@ -731,7 +784,7 @@ def test_finalize_lens_fallback_flow_then_builtin(tmp_path: Path) -> None:
 
 
 def test_finalize_free_text_when_no_follow_ups_no_delta(tmp_path: Path) -> None:
-    # AC-S4: absent/false emit_follow_ups and memory off -> the finalize turn stays free-text (no
+    # Absent/false emit_follow_ups and memory off -> the finalize turn stays free-text (no
     # output_schema forced), exactly today's behavior.
     router = FakeRouter([_ok("s", "plain summary")])
     sup = _supervisor(tmp_path, router, _store(tmp_path))  # no flow block => emit_follow_ups False
@@ -807,16 +860,23 @@ def test_emit_follow_ups_malformed_still_writes_summary(tmp_path: Path) -> None:
     assert "## Technical debt" not in result.summary_path.read_text("utf-8")
 
 
-# -- VF-18: surface sub-threshold evaluator findings --------------------------
+# -- surface sub-threshold evaluator findings ---------------------------------
 
 
-def _verdict(findings: list[dict[str, Any]], *, verdict: str = "accept", node_id: str = "review"):
+def _verdict(
+    findings: list[dict[str, Any]],
+    *,
+    verdict: str = "accept",
+    node_id: str = "review",
+    subtask_order: int | None = None,
+):
     return EvaluationRow(
         task_id=_TASK,
         kind="in_flow_verdict",
         verdict=verdict,
         findings_json=json.dumps(findings),
         node_id=node_id,
+        subtask_order=subtask_order,
     )
 
 
@@ -833,6 +893,22 @@ def test_evaluator_finding_follow_ups_uses_last_verdict_per_node() -> None:
     assert fus[0].title == "minor nit remains"
     assert fus[0].severity == "low" and fus[0].paths == ("a.py",)
     assert "review" in fus[0].evidence[0]
+
+
+def test_evaluator_finding_follow_ups_keeps_each_subtask(tmp_path: Path) -> None:
+    # A decomposed task runs the same evaluator once per subtask, so the "last verdict per node" key
+    # has to include the subtask: keyed on node_id alone, subtask 3's verdict evicted subtasks 1 and
+    # 2, and their accepted findings reached no operator surface at all — silently, and worse the
+    # more the task was decomposed.
+    rows = [
+        _verdict([{"severity": "low", "reason": "nit in subtask 1", "paths": []}], subtask_order=1),
+        _verdict([{"severity": "low", "reason": "nit in subtask 2", "paths": []}], subtask_order=2),
+        _verdict([{"severity": "low", "reason": "superseded", "paths": []}], subtask_order=3),
+        _verdict([{"severity": "low", "reason": "nit in subtask 3", "paths": []}], subtask_order=3),
+    ]
+    titles = [fu.title for fu in _evaluator_finding_follow_ups(rows)]
+    assert titles == ["nit in subtask 1", "nit in subtask 2", "nit in subtask 3"]
+    assert "superseded" not in titles  # the per-(node, subtask) last-verdict rule still holds
 
 
 def test_finding_to_follow_up_truncates_long_reason_and_drops_empty() -> None:
@@ -857,7 +933,7 @@ def test_merge_follow_ups_exact_match_dedup() -> None:
 
 
 def test_finalize_surfaces_accepted_evaluator_findings(tmp_path: Path) -> None:
-    # VF-18: a sub-threshold finding an evaluator accepted reaches summary.json + the PR body even
+    # A sub-threshold finding an evaluator accepted reaches summary.json + the PR body even
     # when the flow did NOT opt into supervisor-authored follow-ups.
     store = _store(tmp_path)
     store.record_evaluation(
@@ -887,7 +963,7 @@ def test_finalize_surfaces_accepted_evaluator_findings(tmp_path: Path) -> None:
 
 
 def test_finalize_dedups_evaluator_findings_against_supervisor(tmp_path: Path) -> None:
-    # VF-18: when the supervisor already reported the same item, the evaluator finding is not
+    # When the supervisor already reported the same item, the evaluator finding is not
     # duplicated in the operator surface (exact-match dedup).
     store = _store(tmp_path)
     reason = "resolve_route mixes fallback and retry"
@@ -912,6 +988,61 @@ def test_finalize_dedups_evaluator_findings_against_supervisor(tmp_path: Path) -
     assert len(result.follow_ups) == 1  # the evaluator duplicate merged away
     md = result.summary_path.read_text("utf-8")  # type: ignore[union-attr]
     assert md.count(reason) == 1
+
+
+def test_finalize_prompt_carries_the_recorded_gate_verdicts(tmp_path: Path) -> None:
+    # The finalize turn described the gates from session memory and wrote "three
+    # independent verification gates … all of which passed" while four critic findings sat in
+    # state.db. The recorded verdicts now ride the prompt, so "passed" is not writable about a gate
+    # that emitted findings.
+    store = _store(tmp_path)
+    store.record_evaluation(_verdict([], node_id="fact_verification"))
+    store.record_evaluation(
+        _verdict(
+            [{"severity": "medium", "reason": "uneven audit depth", "paths": ["report.md"]}],
+            node_id="critical_review",
+        )
+    )
+    router = FakeRouter([_ok("s1", "Summary.")])
+    sup = _supervisor(tmp_path, router, store)
+    sup.finalize(task_id=_TASK, task_title="T")
+
+    prompt = router.requests[-1].prompt
+    assert "## Gate verdicts recorded for this task" in prompt
+    assert "- fact_verification: verdict `accept`, no findings recorded" in prompt
+    assert "- critical_review: verdict `accept`, 1 finding(s) recorded:" in prompt
+    assert "  - [medium] uneven audit depth (report.md)" in prompt
+    assert "did **not** simply pass" in prompt  # the instruction that makes it binding
+
+
+def test_finalize_gate_section_absent_when_the_flow_has_no_evaluator(tmp_path: Path) -> None:
+    # A flow with no in-flow evaluator gets no empty heading — the section is simply absent.
+    router, store = FakeRouter([_ok("s1", "Summary.")]), _store(tmp_path)
+    _record_step(store, 1, node="implementation", outcome="done", note="wired it")
+    sup = _supervisor(tmp_path, router, store)
+    sup.finalize(task_id=_TASK, task_title="T")
+    assert "Gate verdicts" not in router.requests[-1].prompt
+
+
+def test_finalize_gate_digest_keeps_only_each_nodes_final_verdict(tmp_path: Path) -> None:
+    # A rework round is superseded, exactly as the follow-up derivation treats it: the operator sees
+    # what the gate concluded, not every intermediate round it spent.
+    store = _store(tmp_path)
+    store.record_evaluation(
+        _verdict(
+            [{"severity": "medium", "reason": "round one", "paths": []}],
+            verdict="rework",
+            node_id="critical_review",
+        )
+    )
+    store.record_evaluation(_verdict([], node_id="critical_review"))
+    router = FakeRouter([_ok("s1", "Summary.")])
+    sup = _supervisor(tmp_path, router, store)
+    sup.finalize(task_id=_TASK, task_title="T")
+
+    prompt = router.requests[-1].prompt
+    assert "- critical_review: verdict `accept`, no findings recorded" in prompt
+    assert "round one" not in prompt
 
 
 def test_finalize_no_findings_leaves_no_section(tmp_path: Path) -> None:
@@ -1138,12 +1269,12 @@ def test_evaluation_immutable_and_counted(tmp_path: Path) -> None:
     assert not hasattr(store, "delete_evaluation")
 
 
-# -- provider-attempt audit for the supervisor layer (VF-8) -------------------
+# -- provider-attempt audit for the supervisor layer --------------------------
 
 
 class _AttemptsRouter:
     """Like ``FakeRouter`` but surfaces one provider ATTEMPT per call (the base returns none), so
-    the supervisor's own ``provider_attempts`` recording (VF-8) has attempts to persist. Resolves to
+    the supervisor's own ``provider_attempts`` recording has attempts to persist. Resolves to
     the given primary so a resumed cumulative (codex) session can be exercised."""
 
     def __init__(
@@ -1214,7 +1345,7 @@ def _codex_turn(session_id: str, input_total: int, output_total: int) -> AgentRu
 
 
 def test_supervisor_records_provider_attempt_with_cost(tmp_path: Path) -> None:
-    # VF-8: a supervisor turn's billable provider call earns a ``provider_attempts`` row with
+    # A supervisor turn's billable provider call earns a ``provider_attempts`` row with
     # ``node_run_id`` NULL and its cost, so a whole-task roll-up includes the supervisor spend.
     router = _AttemptsRouter([_claude_turn(cost=0.05, output_total=42)])
     store = _store(tmp_path)
@@ -1233,7 +1364,7 @@ def test_supervisor_records_provider_attempt_with_cost(tmp_path: Path) -> None:
 
 
 def test_supervisor_provider_attempt_usage_is_summation_safe_delta(tmp_path: Path) -> None:
-    # VF-8 (full): the supervisor resumes its OWN session, so a cumulative (codex) provider counts
+    # The supervisor resumes its OWN session, so a cumulative (codex) provider counts
     # cumulatively; the recorded per-turn usage is the summation-safe delta, not the raw cumulative.
     router = _AttemptsRouter(
         [_codex_turn("s1", 100, 10), _codex_turn("s1", 150, 25)], primary=ProviderId.CODEX

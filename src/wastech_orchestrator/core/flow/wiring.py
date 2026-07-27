@@ -1,6 +1,6 @@
 """Wiring — build :class:`NodeServices` / :class:`NodeInputs` from the orchestrator's live state.
 
-The builder seam the cutover (P1.4) uses: ``run_task``/``resume`` resolve a validated
+The builder seam ``run_task``/``resume`` use: they resolve a validated
 ``FlowSnapshot``, then call these functions to turn the orchestrator's collaborators (router /
 checks / git / notifier / store) and the per-run ``_Pipeline`` into the data bundles the node
 runners read. Keeping it here (not in ``orchestrator.py``) keeps the node layer free of any
@@ -70,6 +70,7 @@ def build_node_services(
     scan_timeout_s: int = 600,
     trust_level: str = "strict",
     protected_paths: tuple[str, ...] = (),
+    allow_git_evidence: bool = False,
     security_preamble: str | None = None,
     packet_builder: PacketBuilderPort | None = None,
     tool_registry: ToolResolverPort | None = None,
@@ -107,6 +108,7 @@ def build_node_services(
         scan_timeout_s=scan_timeout_s,
         trust_level=trust_level,
         protected_paths=protected_paths,
+        allow_git_evidence=allow_git_evidence,
         security_preamble=security_preamble,
         packet_builder=packet_builder,
         tool_registry=tool_registry,
@@ -132,7 +134,7 @@ def build_node_inputs(
     (``pull_request_title`` / ``summary_body_path`` / ``commit_message``) are not pipeline
     attributes — the publish wrapper computes and passes them;
     ``check_sets`` are the normalized ``checks.command_sets`` (diff-selected at run time by the
-    checks node). Editing-session continuity is durable now (the ``editing_lineage`` store, P2.2),
+    checks node). Editing-session continuity is durable (the ``editing_lineage`` store),
     not an in-memory map.
     """
     return NodeInputs(

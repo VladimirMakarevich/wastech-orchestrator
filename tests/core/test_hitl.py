@@ -126,7 +126,7 @@ def test_persisted_handle_rejects_invalid_kind() -> None:
 def test_sanitized_answer_packet_is_answer_only() -> None:
     # The durable HITL record (write_waiting_interaction + write_answer shape) carries the transport
     # handle, interaction id, Telegram message id, deadline, and status — none of which may cross
-    # into the provider-readable exchange (WRI-001). Only kind/question/answer/approved survive.
+    # into the provider-readable exchange. Only kind/question/answer/approved survive.
     durable = {
         "schema_version": 1,
         "interaction_id": "h-secret-1",

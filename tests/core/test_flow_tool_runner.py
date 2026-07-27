@@ -1,4 +1,4 @@
-"""Custom tool node runner — execution under the process ceiling + outcome contract (P5.3).
+"""Custom tool node runner — execution under the process ceiling + outcome contract.
 
 Exercises the runner with a fake ``run_process`` and a fake tool registry so we can assert the
 security ceiling (argv-no-shell, allowlisted env, no secrets on stdin, redacted artifacts), the
@@ -54,6 +54,19 @@ class FakeRunProcess:
         self._stdout, self._stderr = stdout, stderr
         self._exit_code, self._timed_out, self._launch_error = exit_code, timed_out, launch_error
         self.calls: list[dict[str, Any]] = []
+
+    def set_result(
+        self,
+        *,
+        stdout: str,
+        stderr: str = "",
+        exit_code: int | None,
+        timed_out: bool = False,
+        launch_error: str | None = None,
+    ) -> None:
+        """Script the next and subsequent calls while preserving the captured-call history."""
+        self._stdout, self._stderr = stdout, stderr
+        self._exit_code, self._timed_out, self._launch_error = exit_code, timed_out, launch_error
 
     def __call__(
         self,
@@ -171,10 +184,12 @@ def _inputs(tmp_path: Path) -> NodeInputs:
     )
 
 
-def _ctx(snapshot: FlowSnapshot, node: FlowNode) -> NodeContext:
+def _ctx(
+    snapshot: FlowSnapshot, node: FlowNode, run_state: FlowRunState | None = None
+) -> NodeContext:
     return NodeContext(
         snapshot=snapshot,
-        run_state=FlowRunState(flow_fingerprint="fp"),
+        run_state=run_state or FlowRunState(flow_fingerprint="fp"),
         node=node,
         task_id="task-1",
     )
@@ -271,6 +286,36 @@ def test_tool_timeout_and_launch_error_go_manual(tmp_path: Path) -> None:
         assert store.completed[-1]["outcome"] is None  # infra, not a quality pass/fail
 
 
+def test_tool_nonzero_empty_stdout_with_stderr_is_crash_without_fix_charge(
+    tmp_path: Path,
+) -> None:
+    fake = FakeRunProcess(
+        stdout=" \n",
+        stderr="python: can't open file 'missing-payload' (credential=private-value)",
+        exit_code=2,
+    )
+    store = FakeStore()
+    run_state = FlowRunState(
+        flow_fingerprint="fp",
+        loop_counters={FlowRunState.GLOBAL_FIX_KEY: 3},
+    )
+    services = _services(tmp_path, fake, store, prompt_secrets=("private-value",))
+    runner = ToolNodeRunner(services, _inputs(tmp_path))
+
+    with pytest.raises(NodeManualRequired) as exc:
+        runner.run(_TOOL, _ctx(_snapshot(_TOOL), _TOOL, run_state))
+
+    message = str(exc.value)
+    assert "md-check" in message
+    assert "missing-payload" in message
+    assert "checker crashed or malfunctioned" in message
+    assert "private-value" not in message
+    assert "[REDACTED]" in message
+    assert run_state.fix_iterations == 3
+    assert store.completed[-1]["status"] == "crashed"
+    assert store.completed[-1]["outcome"] is None
+
+
 def test_core_ignores_tool_git_state_side_effects(tmp_path: Path) -> None:
     # git is None and the FakeStore has NO commit/evaluation methods: the run completing proves the
     # runner has no path that applies a returned value to git/state — it only records the node_run.
@@ -301,6 +346,49 @@ def test_tool_json_outcome_authoritative_and_route(tmp_path: Path) -> None:
     # ... and route:* flows through as the edge-selecting outcome.
     fake2, store2 = FakeRunProcess(stdout='{"outcome": "route:large"}', exit_code=0), FakeStore()
     assert _run(tmp_path, fake2, store2).outcome.kind == "route:large"
+
+
+def test_repeated_identical_failure_without_findings_parks_before_another_charge(
+    tmp_path: Path,
+) -> None:
+    fake = FakeRunProcess(stdout="same linter report", exit_code=1)
+    store = FakeStore()
+    run_state = FlowRunState(
+        flow_fingerprint="fp",
+        loop_counters={FlowRunState.GLOBAL_FIX_KEY: 1},
+    )
+    runner = ToolNodeRunner(_services(tmp_path, fake, store), _inputs(tmp_path))
+    ctx = _ctx(_snapshot(_TOOL), _TOOL, run_state)
+
+    assert runner.run(_TOOL, ctx).outcome.kind == "fail"
+    with pytest.raises(NodeManualRequired, match="repeated an identical failure without findings"):
+        runner.run(_TOOL, ctx)
+
+    assert run_state.fix_iterations == 1
+    assert store.completed[-1]["status"] == "stalled"
+    assert store.completed[-1]["outcome"] == "fail"
+
+
+def test_changed_or_actionable_tool_failure_resets_repeated_failure_guard(tmp_path: Path) -> None:
+    store = FakeStore()
+    fake = FakeRunProcess(stdout="first report", exit_code=1)
+    services = _services(tmp_path, fake, store)
+    runner = ToolNodeRunner(services, _inputs(tmp_path))
+    ctx = _ctx(_snapshot(_TOOL), _TOOL)
+    assert runner.run(_TOOL, ctx).outcome.kind == "fail"
+
+    fake.set_result(
+        stdout=json.dumps(
+            {
+                "outcome": "fail",
+                "findings": [{"severity": "error", "reason": "actionable"}],
+            }
+        ),
+        exit_code=1,
+    )
+    assert runner.run(_TOOL, ctx).outcome.findings
+    fake.set_result(stdout="first report", exit_code=1)
+    assert runner.run(_TOOL, ctx).outcome.kind == "fail"
 
 
 def test_tool_malformed_json_outcome_fail_closed(tmp_path: Path) -> None:

@@ -1,15 +1,15 @@
-"""DerivedIndex — minimal repo introspection for staleness (design §1, plan 04.4).
+"""DerivedIndex — minimal repo introspection for staleness.
 
 Answers the only question the curation path needs of the live repo: *does this path / symbol still
 exist?* That feeds `apply_delta` validation (write path) and `CleanupJob` staleness (cleanup path).
 
 Two deliberate properties:
 
-* **A rebuildable cache, not memory truth** (NFR3). The source of truth is the **live repo** — a
+* **A rebuildable cache, not memory truth.** The source of truth is the **live repo** — a
   tracked-path set (``git ls-files``) plus filesystem stat for paths, and a literal scan for
   symbols. The optional ``derived/repo_map.json`` materialization is a pure cache: deletable and
   recomputable from the current tree, carrying **no audit and no snapshots** (unlike real memory).
-* **Cross-platform paths.** Every stored/compared path string is the ``as_posix()`` form (AC-X1),
+* **Cross-platform paths.** Every stored/compared path string is the ``as_posix()`` form,
   and ``git ls-files`` already emits forward slashes on every OS.
 
 The tracked-path source is injected (``tracked_paths_provider``) so the index is unit-testable
@@ -111,8 +111,8 @@ class DerivedIndex:
         paths to scan the answer is conservatively ``True`` — an unscoped symbol is never treated as
         stale (fail-closed: cleanup must not drop on a check it cannot perform).
 
-        Built and unit-tested, but **intentionally not yet wired into production**: V1 validates
-        only path existence (write-path entity validation — F1 — and cleanup staleness — F2).
+        Built and unit-tested, but **intentionally not yet wired into production**: today only
+        path existence is validated (write-path entity validation and cleanup staleness).
         Symbol-level validation is a deferred follow-up; this is the seam it will use.
         """
         if not symbol:

@@ -22,7 +22,7 @@ Every `agent` and `evaluator` node returns a **typed structured result**, not fr
 | `agent` named by `decomposition.proposed_by` (planning) | `content` + optional `human_input` + `decompose` + `subtasks` | Emit subtasks only when decomposition is permitted. |
 | `evaluator` | `{ findings: [ { severity, path, what, fix } ] }` | **Fail-closed**: a missing or malformed findings result routes the task to `manual_action_required` — never a silent `accept`. A prose-only "looks good" hard-stops the task. Return an **empty `findings` array** when clean, not prose. |
 
-Example evaluator prompt (the built-in `review.md`): _"Report each finding with a severity, and mark anything that must change before merge as blocking. Weight the review: correctness and invariant violations block; quality and style observations are advisory unless they introduce real risk … No findings means the diff is clean — return an empty `findings` array, not prose."_ Which severities actually gate is the node's `gate_severity` (default `high`), not the prompt's job — see [reference.md](reference.md).
+Example evaluator prompt (the built-in `review.md`): _"Report each finding with a severity, and mark anything that must change before merge as blocking. Weight the review: correctness and invariant violations block; quality and style observations are advisory unless they introduce real risk … No findings means the diff is clean — return an empty `findings` array, not prose."_ Which severities actually gate is the node's `gate_severity` (built-in default `high`; the packaged quality critics set `medium`), not the prompt's job — so a prompt should tell the model to grade honestly and say that the flow decides, never restate a severity threshold that can drift out of the YAML. See [reference.md](reference.md). A finding below the gate is not discarded: it is carried to the operator in the run summary and the pull-request body, so "file it anyway" is the right instruction.
 
 Example planning prompt (`refinement.md`): _"Enrich the task into a complete spec… Return the typed structured result required by the output schema. Set `human_input` only when a material ambiguity cannot be resolved from repository evidence."_
 
@@ -41,6 +41,8 @@ A non-blocking evaluator (`blocking: false`) never parks the task: once its `max
 
 `role` is an audit/behavior discriminator, not a permission — every evaluator is forced `read-only` and can never use `editing_lineage` (see [reference.md](reference.md)).
 
+An audit lens that treats delivery history as evidence — "did the change that closed this milestone actually touch what it claims" — can be given the read-only git verbs with `git_evidence: true`, provided the operator turned `security.allow_git_evidence` on. It stays read-only: the verbs only report, the sandbox denies every write, and publishing is still the orchestrator's. See [Read-only git evidence](reference.md#read-only-git-evidence).
+
 ## Named output slots (`output_artifact`)
 
 Besides the generic `{<id>_path}` channel, an `agent` node can fill **one** of four fixed slots with `output_artifact:`, landing its `content` in a well-known file that later nodes read by a stable variable (the node returns the content as its structured output; the orchestrator writes the file):
@@ -54,6 +56,20 @@ Besides the generic `{<id>_path}` channel, an `agent` node can fill **one** of f
 
 The vocabulary is fixed to these four; a flow only chooses which node fills each, and one node fills at most one slot.
 
+## When the node's product is a file it writes (`output_file`)
+
+A node that writes a document — a report, a translated chapter, a generated spec — has two outputs: the file, and whatever it says about the file when it finishes. By default the `{<id>_path}` channel carries the **message**, which is the smaller of the two and usually a summary of the other. Name the file with `output_file:` and the channel carries the file instead:
+
+```yaml
+- id: synthesis
+  kind: agent
+  role_file: my_flow/synthesis.md
+  permission_profile: workspace-write
+  output_file: report.md # {synthesis_path} → this file, not the closing message
+```
+
+One portable filename (no `/`, no `..`), resolved inside the flow's `output_policy` report directory — the only place the node may write anyway — or the repository root for a policy without one. It is mutually exclusive with `output_artifact` (a slot node's channel is its slot). Two things to write into the prompt when you use it: the file has to **stand alone**, since no closing message travels with it, and the filename in the prompt has to match the one in the flow. If the file never appears the channel falls back to the message and the run logs a warning — never a silent empty handoff.
+
 ## Custom output schema (the one real foot-gun)
 
 An `agent` node may set an inline `output_schema:` to return data of your own shape. If you do, **every object in the schema — top level and every nested object — must set `additionalProperties: false`.** Codex enforces `--output-schema` through OpenAI Structured Outputs and rejects a non-strict schema with a hard **400**, failing the node on every run. Claude tolerates a loose schema, but write it strict so the flow runs on both providers. Prefer the built-in contract unless you genuinely need a custom shape; keep a string `content` field if the node also fills a slot.
@@ -66,6 +82,8 @@ The supervisor is not a node — it is a read-only layer above every flow that o
 - a flow-local override via the flow's `supervisor:` block (`role_file` / `finalize_role_file` / `handoff_role_file`), resolved inside the flow's own folder.
 
 Only the **wording** moves into files. The structured-output schemas (the memory delta, and the `follow_ups` array when `emit_follow_ups: true`) stay in the orchestrator — your prompt can change tone and emphasis but can never break what the orchestrator parses. `handoff_role_file` is used only by decompose flows (it writes the `{predecessor_context}` handoff brief between subtasks). Set `emit_follow_ups: true` on a code flow to have the finalize turn emit an evidence-gated technical-debt list; leave it off for research/prose flows.
+
+**Set `finalize_role_file` whenever your deliverable is not a diff.** The built-in finalize lens summarizes "the actual committed change", which reads wrong for a document, a report, or a translation — and that summary becomes the pull-request body. Two things a good finalize lens says, both learned the hard way: the turn is a read-only observer, so it must describe what the _pipeline_ did rather than assert that it re-opened or spot-checked anything itself; and it must not state a count or a verdict it was not given ("all citations passed", "all gates passed"). It does not have to guess at the latter — the orchestrator appends every in-flow evaluator's recorded verdict and findings to that turn's prompt, so a gate that accepted **with** findings open cannot honestly be summarized as one that passed. The packaged `deep_research/summary.md` is the worked example.
 
 ## Writing and validating a role prompt
 

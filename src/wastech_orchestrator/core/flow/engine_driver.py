@@ -1,4 +1,4 @@
-"""Engine driver — assembles the per-unit node runners and runs the engine (P1.4 step A).
+"""Engine driver — assembles the per-unit node runners and runs the engine.
 
 This is the seam between the generic :class:`~wastech_orchestrator.core.flow.engine.FlowEngine` and
 the core-owned node runners: :func:`build_node_runners` constructs the per-kind runner registry from
@@ -47,7 +47,7 @@ from wastech_orchestrator.core.flow.snapshot import FlowSnapshot, reachable_node
 
 @dataclass(frozen=True)
 class DecompositionRegions:
-    """The three phases a decomposed flow is driven in (P1.4 slice 5).
+    """The three phases a decomposed flow is driven in.
 
     The graph is one connected flow; decomposition carves it into a ``pre`` prefix that runs once
     (entry…proposed_by), a ``region`` (the ``sub_flow``) that runs once per subtask, and a ``post``

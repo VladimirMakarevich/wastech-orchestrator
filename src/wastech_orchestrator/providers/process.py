@@ -1,4 +1,4 @@
-"""Safe process runner (.agents/rules/coding-style.md).
+"""Safe process runner.
 
 The single chokepoint for launching any external CLI. Every provider subprocess goes through
 ``run_process``. The runner is deliberately provider-agnostic: it knows nothing about Codex/Claude
@@ -43,7 +43,7 @@ def _unavailable_killpg(pgid: int, sig: int) -> None:  # pragma: no cover - Wind
 _KILLPG: Callable[[int, int], None] = getattr(os, "killpg", _unavailable_killpg)
 _SIGKILL: int = getattr(signal, "SIGKILL", signal.SIGTERM)
 
-# Bounded quiescence-proof budget (WRI-012): after terminating the containment, prove that no
+# Bounded quiescence-proof budget: after terminating the containment, prove that no
 # member remains within this wall-clock, re-killing and re-probing this often. Kept as module
 # constants (not config) — a safety barrier is not an operator-tunable knob, and tests drive their
 # own timings through the containment seams.
@@ -57,7 +57,7 @@ _TRACKER_POLL_SECONDS = 2.0
 
 @dataclass(frozen=True)
 class QuiescenceResult:
-    """Outcome of the WRI-012 process-tree quiescence barrier for one attempt.
+    """Outcome of the process-tree quiescence barrier for one attempt.
 
     ``proven`` is ``True`` only when the containment was terminated and demonstrated **empty**
     within the bounded budget — no group member and no tracked/adopted descendant remains. When it
@@ -83,7 +83,7 @@ class ProcessResult:
     duration_seconds: float
     stdout_path: str
     stderr_text: str  # captured stderr, NOT yet redacted — the caller redacts before writing it
-    # WRI-012: the containment quiescence proof for this attempt. ``None`` when no process launched
+    # The containment quiescence proof for this attempt. ``None`` when no process launched
     # (nothing to contain). ``proven=False`` is a fail-closed security condition — the adapter turns
     # it into a non-fallback ``CONTAINMENT_UNVERIFIED`` before any output is parsed or trusted.
     quiescence: QuiescenceResult | None = None
@@ -105,7 +105,7 @@ class AgentHandleRecorder:
 
 
 class ProcessContainment(Protocol):
-    """A platform process-containment object whose lifetime the orchestrator owns (WRI-012).
+    """A platform process-containment object whose lifetime the orchestrator owns.
 
     Every provider attempt runs inside one. It hides the platform primitive (a POSIX process group
     plus descendant tracking, or a Windows Job Object) so the process runner — and, above it, the
@@ -140,7 +140,7 @@ class ProcessContainment(Protocol):
 
 class PosixProcessContainment:
     """POSIX containment: a process group (``start_new_session``) plus during-run descendant
-    tracking, with a bounded emptiness proof (WRI-012).
+    tracking, with a bounded emptiness proof.
 
     The child leads its own session/group, so its whole in-group subtree is reaped by one
     ``killpg``. A descendant that breaks away into a **new** session (``setsid``) leaves that group,
@@ -281,7 +281,7 @@ class PosixProcessContainment:
         return alive
 
 
-# --- Windows Job Object containment (WRI-012) -----------------------------------------------------
+# --- Windows Job Object containment ---------------------------------------------------------------
 # ctypes struct/constant definitions for the Job Object primitive. Defined unconditionally (they are
 # pure type declarations that import cleanly on every platform); the actual ``kernel32`` calls in
 # ``_RealWin32`` run only under ``os.name == "nt"``.
@@ -351,7 +351,7 @@ class Win32JobApi(Protocol):
     def close(self, job: int) -> None: ...
 
 
-class _RealWin32:  # pragma: no cover - exercised only on native Windows (WRI-006 gate)
+class _RealWin32:  # pragma: no cover - exercised only on native Windows
     """The real ``kernel32`` Job Object calls. Instantiated only when ``os.name == "nt"``."""
 
     def __init__(self) -> None:
@@ -399,12 +399,12 @@ class _RealWin32:  # pragma: no cover - exercised only on native Windows (WRI-00
 
 
 class WindowsJobObjectContainment:
-    """Windows containment via a kill-on-close Job Object (WRI-012).
+    """Windows containment via a kill-on-close Job Object.
 
     A Job Object owns its members across reparenting, unlike ``taskkill /T`` after the root exits,
     so it is the only primitive that can *prove* the tree gone. The child is assigned to the job
     immediately after launch; ``KILL_ON_JOB_CLOSE`` means an orchestrator crash (which closes the
-    job handle) also kills the whole tree — the deliberate crash-semantics change WRI-012 documents.
+    job handle) also kills the whole tree — a deliberate crash-semantics trade for a provable kill.
     Emptiness is proven by ``QueryInformationJobObject`` reporting zero assigned processes after
     ``TerminateJobObject``. If the job cannot be created or the process cannot be assigned,
     containment was never established → the proof fails closed (``proven=False``).
@@ -495,7 +495,7 @@ class WindowsJobObjectContainment:
 
 def _default_make_containment() -> ProcessContainment:
     """Pick the platform containment: a Windows Job Object, else the POSIX process group."""
-    if os.name == "nt":  # pragma: no cover - Windows-only branch (WRI-006 gate)
+    if os.name == "nt":  # pragma: no cover - Windows-only branch
         return WindowsJobObjectContainment(win32=_RealWin32())
     return PosixProcessContainment()
 
@@ -517,11 +517,11 @@ def _trusted_make_containment() -> ProcessContainment:
     cannot spawn a descendant that breaks away into its own session (``setsid``), because such an
     escapee is exactly what the sweep exists to catch. It is **not** a weaker sandbox: the process
     group still contains and reaps the whole in-group subtree; only the extra escaped-descendant
-    detection is dropped. The full WRI-012 barrier for untrusted agent subtrees is unchanged.
+    detection is dropped. The full barrier for untrusted agent subtrees is unchanged.
     Windows already contains via a kill-on-close Job Object with no per-call scan, so it is returned
     unchanged.
     """
-    if os.name == "nt":  # pragma: no cover - Windows-only branch (WRI-006 gate)
+    if os.name == "nt":  # pragma: no cover - Windows-only branch
         return WindowsJobObjectContainment(win32=_RealWin32())
     return PosixProcessContainment(snapshot_fn=_no_descendants)
 
@@ -565,7 +565,7 @@ def run_process(
         (missing/!executable binary) is reported via ``launch_error`` rather than raised; a timeout
         via ``timed_out``.
 
-    **WRI-012 quiescence barrier.** Every attempt runs inside a containment object whose lifetime
+    **Quiescence barrier.** Every attempt runs inside a containment object whose lifetime
     this call owns. On **every** exit path — clean exit, non-zero exit, timeout, interrupt, or any
     exception — the containment is terminated and **proven empty** within a bounded budget before
     the result is returned, so a background/detached descendant that outlived the root process
@@ -652,7 +652,7 @@ def run_process(
                         proc.communicate()
                     raise
                 finally:
-                    # WRI-012 barrier — on EVERY exit path: terminate the containment and prove it
+                    # Quiescence barrier on EVERY exit path: terminate the containment and prove it
                     # empty within the bounded budget before this call returns. Clear the external
                     # hard-stop handle ONLY once quiescence is proven; an unproven subtree keeps the
                     # handle so a later stop/recovery can still reap the survivor.

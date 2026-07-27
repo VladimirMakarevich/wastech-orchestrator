@@ -24,16 +24,16 @@ _FAKE_AGENT = Path(__file__).resolve().parent / "fakes" / "fake_agent.py"
 
 @pytest.fixture(autouse=True)
 def _assume_bash_sandbox_available(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make the deterministic suite host-independent by assuming a sandbox-capable host (WRI-002).
+    """Make the deterministic suite host-independent by assuming a sandbox-capable host.
 
     The Claude Bash-sandbox capability depends on the real host (macOS Seatbelt / a Linux+WSL2 with
     bubblewrap+socat), so a bwrap-less CI would otherwise flag every workspace-write
     ``isolation_reasons``
     / ``check_isolation`` / provider run. The deterministic suite cannot prove the real host
     boundary
-    anyway (no real Claude) — the real proof is the WRI-006 native gate — so we pin the default
+    anyway (no real Claude) — the real proof is the native-Windows CI gate — so we pin the default
     probe
-    to "available"; the WRI-002 platform-branch tests inject a concrete ``SandboxCapability`` to
+    to "available"; the platform-branch tests inject a concrete ``SandboxCapability`` to
     exercise the native-Windows / missing-deps branches.
     """
     monkeypatch.setattr(
@@ -59,7 +59,7 @@ def seed_builtin_flows(clone: Path) -> None:
     flow-content tests like
     ``validate-flow`` keep full control of ``.worc/flows/``). ``.worc/``/``.worc-io/`` are excluded
     via the clone-local ``.git/info/exclude`` (as ``worc install`` does), so seeding never dirties
-    git and even a merge's ``git add -A`` skips them (WRI-009's commit gate refuses a staged
+    git and even a merge's ``git add -A`` skips them (the commit gate refuses a staged
     ``.worc``). Idempotent.
     """
     worc_flows = clone / ".worc" / "flows"
@@ -176,6 +176,7 @@ def build_git_config(
     tasks_dir: str = "tasks",
     telegram_trace: bool = False,
     memory_enabled: bool = False,
+    allow_git_evidence: bool = False,
     checkout_base_on_cleanup: bool | None = None,
 ) -> OrchestratorConfig:
     """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks."""
@@ -218,6 +219,7 @@ repo:
     codex:
       command: "codex"
 security:
+  allow_git_evidence: {str(allow_git_evidence).lower()}
   allowed_environment:
 {env_lines}
 {validation_block}{telegram_block}checks:

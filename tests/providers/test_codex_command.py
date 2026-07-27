@@ -71,7 +71,7 @@ def _assert_reasoning_config(argv: list[str], value: str) -> None:
 def test_leaves_project_doc_discovery_enabled(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # VF-5: Codex's native AGENTS.md project-doc discovery is intentionally left ENABLED — the agent
+    # Codex's native AGENTS.md project-doc discovery is intentionally left ENABLED — the agent
     # reads the repo's root instruction files itself; no ``project_doc_max_bytes`` override is set.
     argv = _argv(codex_config, make_request())
     assert not any(c.startswith("project_doc_max_bytes") for c in _config_values(argv))
@@ -89,7 +89,7 @@ def test_argv_is_codex_exec_reading_from_stdin(
     assert argv.index("--ask-for-approval") < argv.index("exec")
     assert "--json" in argv
     assert argv[argv.index("--output-last-message") + 1] == LAST_MSG
-    # WRI-003: isolation is a generated permission profile, NOT the legacy --sandbox mode flag.
+    # Isolation is a generated permission profile, NOT the legacy --sandbox mode flag.
     assert "--sandbox" not in argv
     assert f'default_permissions="{PROFILE_NAME}"' in _config_values(argv)
 
@@ -97,7 +97,7 @@ def test_argv_is_codex_exec_reading_from_stdin(
 def test_profile_selected_and_user_config_ignored(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # WRI-003: the generated profile is injected as ONE inline-table -c value and selected as
+    # The generated profile is injected as ONE inline-table -c value and selected as
     # default_permissions; the operator's base config.toml is ignored (auth still uses CODEX_HOME).
     argv = _argv(codex_config, make_request(working_directory="/clone"))
     profile = _profile_arg(argv)
@@ -150,7 +150,7 @@ def test_deny_policy_and_write_guard_projected_into_profile(
     assert _fs_rule("/clone/secrets", "deny") in profile
     assert _fs_rule("/clone/.worc-io", "read") in profile  # exchange readable, write-denied
     assert _fs_rule("/clone/tasks", "read") in profile
-    # VF-20: governance/instruction files are editable content — never projected as a deny.
+    # Governance/instruction files are editable content — never projected as a deny.
     for name in ("AGENTS.md", "AGENTS.override.md", "CLAUDE.md"):
         assert name not in profile
 
@@ -166,7 +166,7 @@ def test_no_prompt_text_is_interpolated_into_argv(
 def test_no_legacy_sandbox_network_override(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # WRI-003: the old workspace-write network override is gone; network lives in the profile.
+    # The old workspace-write network override is gone; network lives in the profile.
     for networked in (True, False):
         argv = _argv(codex_config, make_request(network_access=networked))
         assert "sandbox_workspace_write.network_access=true" not in _config_values(argv)
@@ -176,7 +176,7 @@ def test_no_legacy_sandbox_network_override(
 def test_web_search_disabled_when_offline(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # F5: an offline node must also deny the host web_search tool (backend-side, outside the profile
+    # An offline node must also deny the host web_search tool (backend-side, outside the profile
     # network policy) so network_access=false is truly offline.
     argv = _argv(codex_config, make_request())
     assert 'web_search="disabled"' in _config_values(argv)
@@ -242,7 +242,7 @@ def test_forbidden_extra_args_in_request_are_rejected(
         "--sandbox",
         "--add-dir",
         "--ignore-user-config",
-        # C2 (WRI-003 AC6): approval/sandbox-mode selectors an operator must not slip in — they
+        # Approval/sandbox-mode selectors an operator must not slip in — they
         # replace the ``never`` approval policy the adapter owns and/or turn on a ``--sandbox`` mode
         # that makes Codex drop our ``default_permissions="worc"`` profile (private-file denials).
         "--full-auto",
@@ -253,7 +253,7 @@ def test_forbidden_extra_args_in_request_are_rejected(
 def test_reserved_authority_extra_args_are_rejected(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest], flag: str
 ) -> None:
-    # WRI-003: an operator cannot select/replace the owned permission, config, or tool authority.
+    # An operator cannot select/replace the owned permission, config, or tool authority.
     cfg = replace(codex_config, extra_args=(flag, "x"))
     with pytest.raises(ProviderError) as exc:
         _argv(cfg, make_request())
@@ -297,7 +297,7 @@ def test_danger_full_access_escape_builds_legacy_sandbox_argv(
 def test_default_isolation_argv_unchanged(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # VF-6 regression: default (read-isolation ON) → user config ignored, project untrusted, all
+    # Regression: default (read-isolation ON) → user config ignored, project untrusted, all
     # non-shell tool surfaces disabled (incl. hooks).
     argv = _argv(codex_config, make_request())
     assert "--ignore-user-config" in argv
@@ -309,7 +309,7 @@ def test_default_isolation_argv_unchanged(
 def test_read_isolation_off_restores_native_codex_config(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # VF-6: native config discovery restored — user config loaded (no --ignore-user-config), project
+    # Native config discovery restored — user config loaded (no --ignore-user-config), project
     # TRUSTED (so .codex config/rules apply), and the `hooks` feature re-enabled. The heavier
     # autonomous tool surfaces stay disabled (out of read-isolation scope).
     argv = _argv(codex_config, make_request(), read_isolation_off=True)

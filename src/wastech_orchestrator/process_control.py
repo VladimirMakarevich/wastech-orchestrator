@@ -1,4 +1,4 @@
-"""PID-file and graceful-shutdown plumbing for the ``watch`` daemon (backlog: stop/restart).
+"""PID-file and graceful-shutdown plumbing for the ``watch`` daemon.
 
 Pure and print-free by design: the CLI owns all operator output and exit codes; this module only
 reads/writes the PID file, probes liveness, signals a process, and bridges ``SIGTERM`` to a

@@ -33,7 +33,7 @@ def _new_task(task_id: str = "task-001") -> TaskRow:
 
 
 def test_no_memory_tables_in_state_db(store: StateStore) -> None:
-    # AC-S3: the memory subsystem is files-first — its tiers/audit/quarantine live under
+    # The memory subsystem is files-first — its tiers/audit/quarantine live under
     # .worc/memory/, NEVER in state.db. Guard the exact table set so an accidental memory table is
     # caught; the subsystem's only state.db touch is the reused `evaluations` marker row
     # (kind="memory_write"), not a new table. (Update this set consciously when a table is added.)
@@ -197,7 +197,7 @@ def test_counters_round_trip(store: StateStore) -> None:
     counters = store.get_counters("task-001")
     assert counters.test_fix_cycles == 2
     assert counters.review_fix_cycles == 1
-    # F49: the cumulative totals round-trip alongside the consecutive counters.
+    # The cumulative totals round-trip alongside the consecutive counters.
     assert counters.test_fix_total == 4
     assert counters.review_fix_total == 7
     assert counters.fix_iterations == 3
@@ -312,7 +312,7 @@ def test_provider_attempt_usage_columns_default_null(store: StateStore) -> None:
 
 
 def test_provider_attempts_for_task_includes_supervisor_layer(store: StateStore) -> None:
-    # VF-8: a whole-task roll-up keyed off ``task_id`` sees both a flow node's attempt AND the
+    # A whole-task roll-up keyed off ``task_id`` sees both a flow node's attempt AND the
     # constant supervisor layer's (``node_run_id`` NULL), so the summed cost/usage is complete.
     store.insert_task(_new_task())
     run_id = store.record_node_run(
@@ -628,7 +628,7 @@ def test_insert_task_upsert_refreshes_registration_fields(store: StateStore) -> 
     assert row.created_at == created  # creation timestamp preserved
 
 
-# --- editing_lineage (durable sessions, P2.2) ---------------------------------------------
+# --- editing_lineage (durable sessions) ---------------------------------------------------
 
 
 def test_editing_lineage_roundtrip_and_one_per_lineage(store: StateStore) -> None:

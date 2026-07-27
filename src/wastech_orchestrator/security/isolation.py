@@ -14,11 +14,18 @@ node either declares an allowed ``provider`` or defaults to the global primary, 
 configured-but-unused provider block never bricks an otherwise-valid run.
 
 Read-isolation is orthogonal to this gate. The operator escape hatch
-``security.disable_read_isolation`` (VF-6) — like the master ``strict_isolation: false`` — relaxes
+``security.disable_read_isolation`` — like the master ``strict_isolation: false`` — relaxes
 only the READ side (native discovery + the private read-deny projection); this preflight validates
 the WRITE/permission/sandbox ceiling, which stays in force regardless. So ``disable_read_isolation``
 is a sanctioned opt-out, never itself a preflight reason (the per-provider ``isolation_reasons`` do
 not examine it), and the ``strict_isolation`` preflight is unaffected.
+
+``security.allow_git_evidence`` is likewise not a reason here, but for the opposite reason: it does
+not relax the ceiling at all. A node it grants a shell to is held to reading by that same ceiling —
+the adapter refuses the attempt outright (``CAPABILITY_UNAVAILABLE``) on a host where the shell
+could not be sandboxed, which is a per-attempt decision the adapter makes with the node's
+declaration in hand. This gate sees only the provider config, so it cannot tell whether any node
+declares the grant; flagging on the switch alone would fail preflight for runs that never use it.
 """
 
 from __future__ import annotations

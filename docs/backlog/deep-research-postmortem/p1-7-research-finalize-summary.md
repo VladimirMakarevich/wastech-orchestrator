@@ -1,6 +1,30 @@
 # P1.7 — give `deep_research` its own finalize lens, and stop the summary fabricating
 
-Priority: **P1** Status: **accepted** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-3
+Priority: **P1** Status: **implemented** (2026-07-26) Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-3
+
+## Implemented
+
+Items 1, 2 and 3, plus the `config.example.yaml` correction. Item 4 is answered rather than implemented — see below.
+
+**The field is `flow.supervisor`, not `supervision`.** Both this document and the campaign README name a `supervision:` block; the flow schema has no such key and, since every flow mapping is a fail-closed allowlist, writing it would have been a fatal load error rather than a silently ignored one. The real key is `supervisor:` (`SupervisorBlock`: `role_file` / `finalize_role_file` / `handoff_role_file` / `emit_follow_ups`), which is what the flow now declares — `finalize_role_file: deep_research/summary.md` and nothing else. `emit_follow_ups` stays off: it is a code-oriented capability, and a research flow's evaluator findings already reach `summary.{json,md}` and the PR body through VF-18.
+
+**Item 2, the no-fabrication rule, is two rules rather than one**, because the run produced two distinct failure shapes. "Claim nothing you did not do" bans the first-person verification claim (the turn is a read-only observer; it describes what the _pipeline_ did, in the third person, and attributes an independent check to the node that actually performed it). "No number, verdict or count you were not given" bans the other half — "the citation check independently passed all 41 entries" was written on a step with zero tool calls, and it was 39 verified plus 2 `uncheckable`. The prompt names both claim shapes explicitly and tells the turn to prefer a qualitative statement over invented precision.
+
+**Item 3 is a generic orchestrator change, not a `deep_research` one.** `finalize()` now reads the `evaluations` rows once and renders every in-flow evaluator's **final** verdict plus its findings into the finalize prompt under `## Gate verdicts recorded for this task`, with the instruction that a gate which recorded findings "did **not** simply pass". Details worth recording:
+
+- The last verdict per `(node_id, subtask_order)` wins, reusing exactly the keying VF-18 established — a superseded rework round is not shown, and a decomposed task does not let subtask N evict subtask N-1.
+- `_last_verdict_per_node` and `_row_findings` are factored out of `_evaluator_finding_follow_ups`, so the digest and the follow-ups cannot drift apart on which verdict counts.
+- One store read now feeds both (it used to happen after the turn, for follow-ups only).
+- Finding reasons are cut at the same `_FINDING_TITLE_MAX` bound the observation digest and the follow-up titles use, so a chatty evaluator cannot inflate the turn.
+- A flow with no in-flow evaluator renders no section at all, rather than an empty heading.
+
+Every flow gains this, which is the point: "all gates passed" was writable in any flow with a non-blocking evaluator, not only this one.
+
+**Item 4 — the model.** Not changed, and this is the honest answer rather than a deferral: `SupervisorConfig` carries one `model`/`reasoning` pair for both supervisor roles, so there is no way to upgrade the finalize turn without also upgrading every per-step observation — which is the expensive half and the one [DR-9](postmortem.md) wants to spend _less_ on. Splitting them is already designed in [supervisor-observation-cadence-p1](../token-optimization/supervisor-observation-cadence-p1.md) and belongs there. What this change does instead is remove the reason the weaker model was dangerous: the turn is no longer inventing the gate verdicts, it is being handed them.
+
+The `config.example.yaml` note was correct and the example was inverted — it pinned `claude-opus-5` on the advisory supervisor while the primary provider (which runs every producer node) sat on `claude-sonnet-5`. Corrected to the cheaper tier with the reasoning written out: keep the oversight layer at or below the producers' tier, and note that the one knob also governs the finalize turn, so a flow whose summary matters constrains that turn through its lens rather than through a bigger model. The same guidance is now in the shipped `guide/config/reference.md` and `guide/flows/{README,roles}.md`, since those are what an operator reads after `install`.
+
+Target-only remainder: a target's `.worc/flows/deep_research.yaml` needs the `supervisor:` block and the new `deep_research/summary.md`, and its `.worc/config.yaml` carries whatever supervisor model the operator chose — the packaged example is only the default for a fresh `install`.
 
 ## Problem
 

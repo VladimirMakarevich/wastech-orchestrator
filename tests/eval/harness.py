@@ -1,14 +1,14 @@
-"""Offline replay harness (plan 05.5) — the gate for the V2/V3/V4 roadmap (AC-O1..O4).
+"""Offline replay harness — the gate for the memory roadmap.
 
 Deterministic, **model-free** metric machinery: given per-task metrics *recorded* from replaying
 historical tasks on fixed models/prompts in each mode (memory-off / memory-on / memory-on-without-
-entity-cards), it summarizes the metric stack (blueprint §10.1), compares memory-off vs memory-on,
+entity-cards), it summarizes the metric stack, compares memory-off vs memory-on,
 and renders a baseline report. Running the models to produce those records is **out of scope** here
-(blueprint §10.2 "offline replay … fixed models/prompts"); this is the aggregation + gate layer,
+(offline replay over fixed models/prompts); this is the aggregation + gate layer,
 which is what stays deterministic and unit-testable.
 
 The AC-O thresholds live here as constants so the baseline sets the targets and the same code that
-records the baseline also decides whether a future phase has earned its measured lift (AC-O4).
+records the baseline also decides whether a future phase has earned its measured lift.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
-# AC-O success thresholds (blueprint §10.3). Provisional — locked once a real baseline exists.
+# Success thresholds. Provisional — locked once a real baseline exists.
 AC_O1_MIN_REDUCTION = 0.10  # ≥10% fewer tokens OR less wall-clock on repeated-repo tasks
 AC_O2_MIN_IMPROVEMENT = 0.10  # ≥10pp better first-pass review/test success on repeated hotspots
 AC_O3_MAX_STALE_CONTRADICTION = 0.05  # stale-contradiction rate < 5%
@@ -28,10 +28,12 @@ MODE_ON_NO_ENTITY = "memory-on-without-entity"
 
 @dataclass(frozen=True)
 class TaskMetrics:
-    """One replayed task's recorded metrics (blueprint §10.1), in one mode.
+    """One replayed task's recorded metrics, in one mode.
 
-    ``repeated_repo`` / ``hotspot`` flag the AC-O1 / AC-O2 measurement subsets. The safety counters
-    (``secret_leaks`` / ``external_only_promotions`` / ``stale_contradictions``) feed AC-O3;
+    ``repeated_repo`` / ``hotspot`` flag the efficiency / first-pass measurement subsets. The
+    safety counters
+    (``secret_leaks`` / ``external_only_promotions`` / ``stale_contradictions``) feed the safety
+    verdict;
     ``active_records`` is the denominator for the stale-contradiction rate.
     """
 
@@ -67,7 +69,7 @@ class ModeSummary:
 
 @dataclass(frozen=True)
 class Comparison:
-    """memory-off vs memory-on deltas + the AC-O verdicts. ``measured_lift`` is the AC-O4 gate."""
+    """memory-off vs memory-on deltas + the verdicts. ``measured_lift`` is the roadmap gate."""
 
     token_reduction_pct: float
     wall_clock_reduction_pct: float
@@ -78,7 +80,7 @@ class Comparison:
 
     @property
     def measured_lift(self) -> bool:
-        """AC-O4 roadmap gate: a future phase ships only on a measured efficiency/quality win."""
+        """Roadmap gate: a future phase ships only on a measured efficiency/quality win."""
         return self.meets_ac_o1 or self.meets_ac_o2
 
 
@@ -129,10 +131,10 @@ def compare_modes(off: ModeSummary, on: ModeSummary) -> Comparison:
         token_reduction_pct=token_reduction,
         wall_clock_reduction_pct=wall_reduction,
         hotspot_first_pass_improvement_pp=hotspot_improvement,
-        # AC-O1: a reduction in tokens OR wall-clock clears the bar.
+        # A reduction in tokens OR wall-clock clears the bar.
         meets_ac_o1=max(token_reduction, wall_reduction) >= AC_O1_MIN_REDUCTION,
         meets_ac_o2=hotspot_improvement >= AC_O2_MIN_IMPROVEMENT,
-        # AC-O3 is a property of the memory-on run itself (its own safety counters).
+        # Safety is a property of the memory-on run itself (its own safety counters).
         meets_ac_o3=(
             on.stale_contradiction_rate < AC_O3_MAX_STALE_CONTRADICTION
             and on.secret_leaks == 0
@@ -178,14 +180,14 @@ def render_baseline_markdown(baseline: Baseline) -> str:
             f"- token reduction (repeated-repo): {comp.token_reduction_pct:.0%}",
             f"- wall-clock reduction (repeated-repo): {comp.wall_clock_reduction_pct:.0%}",
             f"- first-pass improvement (hotspots): {comp.hotspot_first_pass_improvement_pp:+.0%}",
-            f"- AC-O1 (≥10% tokens or wall-clock): {'PASS' if comp.meets_ac_o1 else 'FAIL'}",
-            f"- AC-O2 (≥10pp first-pass on hotspots): {'PASS' if comp.meets_ac_o2 else 'FAIL'}",
+            f"- efficiency (≥10% tokens or wall-clock): {'PASS' if comp.meets_ac_o1 else 'FAIL'}",
+            f"- first-pass (≥10pp on hotspots): {'PASS' if comp.meets_ac_o2 else 'FAIL'}",
             (
-                f"- AC-O3 (stale<5%, 0 leaks, 0 external promotions): "
+                f"- safety (stale<5%, 0 leaks, 0 external promotions): "
                 f"{'PASS' if comp.meets_ac_o3 else 'FAIL'}"
             ),
             (
-                f"- AC-O4 measured-lift gate (V2/V3/V4 unlocked): "
+                f"- measured-lift gate (next phase unlocked): "
                 f"{'YES' if comp.measured_lift else 'NO'}"
             ),
         ]

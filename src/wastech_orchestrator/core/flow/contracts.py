@@ -1,14 +1,14 @@
-"""Provider-neutral flow execution vocabulary (flow-engine P0.1).
+"""Provider-neutral flow execution vocabulary for the flow engine.
 
 The shared contract types consumed by the flow engine, its schema/validator, and the state store,
 defined once so follow-on slices do not invent parallel enums or mappings. This module is pure: no
-IO, no git, no SQLite, no provider CLI knowledge, and (in P0.1) no consumers yet.
+IO, no git, no SQLite, and no provider CLI knowledge.
 
-It carries the foundation execution vocabulary that the absorbed backlog programs share: the
+It carries the foundation execution vocabulary every execution slice shares: the
 run-role audit field (``run_kind`` + ``role``), session scope, the deterministic ``QualityAction``
 -> lifecycle mapping, output/publishing policy identifiers, the execution-unit identity, and a
 deterministic secret-free fingerprint primitive. The flow-graph schema vocabulary (node kinds,
-checkers, edges) belongs to the schema slice (P0.2); the ceiling to the validator slice (P0.3).
+checkers, edges) belongs to the schema module; the ceiling to the validator.
 
 Enum values deliberately avoid YAML 1.1 boolean/null tokens (``on``/``off``/``yes``/``no``).
 """
@@ -58,7 +58,8 @@ class SessionScope(StrEnum):
 
 
 class PermissionProfile(StrEnum):
-    """The orchestrator permission profile a node resolves to (clamped to the ceiling in P0.3)."""
+    """The orchestrator permission profile a node resolves to (the validator clamps it to the
+    flow's ceiling)."""
 
     READ_ONLY = "read-only"
     WORKSPACE_WRITE = "workspace-write"
@@ -108,6 +109,21 @@ def resolve_network_access(node_value: bool | None, policy: NetworkPolicy | None
     return policy is not None
 
 
+def resolve_git_evidence(node_value: bool | None, allowed: bool) -> bool:
+    """Whether this node actually gets the read-only git verbs: it asked AND the operator allows it.
+
+    Both halves are required, and the operator's half is the one that grants. A node that declares
+    nothing never gets the capability; a node that declares it gets nothing either until
+    ``security.allow_git_evidence`` is on. So a flow can express the need without being able to
+    widen the envelope by itself, and turning the switch on does not hand a shell to every read-only
+    node in the run — only to the ones that asked.
+
+    ``False`` and ``None`` both mean "did not ask"; the field is tri-state to match the shape of
+    ``network_access`` and to leave room for a flow-wide default, which no flow needs today.
+    """
+    return bool(node_value) and allowed
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionUnit:
     """The foundation-owned identity of the thing being executed: ``(task_id, subtask_order)``.
@@ -129,7 +145,7 @@ def fingerprint(payload: Mapping[str, object]) -> str:
     """Deterministic, key-order-independent SHA-256 over a canonical JSON serialization.
 
     The reusable primitive behind ``flow_fingerprint`` (the resolved graph snapshot) and
-    ``execution_policy_fingerprint`` (a single resolved execution descriptor), both added in P0.2.
+    ``execution_policy_fingerprint`` (a single resolved execution descriptor).
     The caller is responsible for passing a secret-free payload — no redaction happens here.
     """
 

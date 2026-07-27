@@ -14,7 +14,7 @@ integer — audit remediation #17.)
   ``agents.max_fix_cycles``. They reset to 0 when the loop converges (a forward edge is taken), so
   a task that *succeeded* after N reworks persists 0 here — a live figure, not an audit total.
 * ``test_fix_total`` / ``review_fix_total`` — the *cumulative* per-loop rework total for the whole
-  task, never reset on convergence (F49). Use these, not the consecutive counters, to attribute how
+  task, never reset on convergence. Use these, not the consecutive counters, to attribute how
   many reworks a completed task actually took to a given loop.
 * ``fix_iterations`` — a single global per-task counter, incremented on every entry into ``fixing``;
   bounded by ``agents.max_total_fix_iterations`` (the hard stop guaranteeing termination). Equals
@@ -40,7 +40,7 @@ class LoopCounters:
 
     test_fix_cycles: int = 0
     review_fix_cycles: int = 0
-    #: Cumulative per-loop rework totals for the whole task (never reset on convergence — F49).
+    #: Cumulative per-loop rework totals for the whole task (never reset on convergence).
     test_fix_total: int = 0
     review_fix_total: int = 0
     fix_iterations: int = 0
@@ -67,7 +67,7 @@ class LoopCounters:
 
 
 def record_rework(run_state: FlowRunState) -> int:
-    """The single rework-accounting path: increment the global ``fix_iterations`` once (P2.1).
+    """The single rework-accounting path: increment the global ``fix_iterations`` once.
 
     Every in-flow rework/fail edge the engine takes — the test-driven loop (``test_fix``) and the
     review-driven loop (``review_fix``) alike — charges its global cost here and **only** here, so a

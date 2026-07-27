@@ -1,4 +1,4 @@
-"""Tests for the exchange publication boundary (WRI-001).
+"""Tests for the exchange publication boundary.
 
 The POSIX filesystem branches run natively; the native-Windows branches (reparse points, hard-link
 count, NTFS alternate data streams) are driven by an injected fake :data:`FileInspector` returning
@@ -407,7 +407,7 @@ def test_clear_exchange_task_dir_removes_the_tree(task_dir: Path) -> None:
     clear_exchange_task_dir(task_dir.parent, "add-http-retry")
 
 
-# --- WRI-002: pre/post-attempt manifest diff (parent-held mutation detection) ---------------------
+# --- pre/post-attempt manifest diff (parent-held mutation detection) ------------------------------
 
 
 def _seed(task_dir: Path, files: dict[str, str]) -> None:

@@ -72,6 +72,8 @@ And none of these roots live under `.worc/logs/`, so `worc logs clean` will neve
 
 **Timing note — this is the reason to decide now.** These roots do not exist on `main`; they are introduced by the WRI cluster on the current `feat/agent-worc-read-isolation` branch (confirmed: `git cat-file -p main:src/.../runtime_layout.py` contains none of the four constants, and `wastech-mdlint`'s `.worc/` has no such directories yet). So there is no accumulated mess to migrate and no operator expectation to break — the retention policy can ship _with_ the feature instead of being retrofitted after the first operator fills a disk. That window closes when the branch lands.
 
+**Adjacent item.** [private-home-footprint.md](private-home-footprint.md) covers _where_ these four roots live and whether the operator can interpret them (grouping them under one parent; documenting that a `seal-*` on a successful task is normal). Its recommended grouping would leave this item **one** retention root to reason about instead of four — worth deciding together, though neither blocks the other.
+
 Open questions worth resolving before it does: are the frozen bundles audit evidence with a mandated retention, or a rerun cache that may be evicted? Does `rerun --continue` need only the latest seal, and if so can older seals be dropped on a successful terminal? Should retention be uniform across the four roots or per-root (quarantine is evidence of a security event and probably should not auto-delete)? And whichever way it goes, deleting from these roots must respect the WRI deny boundary — they are provider deny targets, so a cleanup path must not become a way to reach them.
 
 ### Adjacent, observed while investigating

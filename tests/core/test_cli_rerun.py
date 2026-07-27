@@ -200,7 +200,7 @@ def _seed(
     db.parent.mkdir(parents=True, exist_ok=True)
     store = StateStore.open(db)
     store.insert_task(row)
-    if node_run is not None:  # (node_id, node_kind) for the interrupted node — F14 reads node_kind
+    if node_run is not None:  # (node_id, node_kind) for the interrupted node
         from wastech_orchestrator.state_store import NodeRunRow
 
         node_id, node_kind = node_run
@@ -270,7 +270,7 @@ def test_rerun_refuses_non_recoverable_status(
 def test_rerun_recovers_stale_running_task(
     git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # Killed-task recovery (VF-3): an operator stop leaves the row at ``running``. With no live
+    # Killed-task recovery: an operator stop leaves the row at ``running``. With no live
     # daemon holding the slot (cmd_rerun's daemon pre-check already passed to reach plan_rerun),
     # rerun accepts it directly — no ``finalize --as failed`` dance.
     project = tmp_path / "project"
@@ -361,7 +361,7 @@ def test_rerun_refuses_when_task_file_truly_missing(
 def test_rerun_refuses_fresh_in_operator_owned_branch_mode(
     git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # branch-mode ADR: a fresh rerun resets the branch to base — forbidden in existing/current mode
+    # A fresh rerun resets the branch to base — forbidden in existing/current mode
     # where the branch is the operator's. Once the task has produced work (a flow checkpoint), the
     # refusal stands and directs them to `rerun --continue`. (A *pre-checkpoint* failure instead
     # restarts in place — see test_rerun_restart_in_place_routes_without_branch_reset.)
@@ -637,7 +637,7 @@ def test_rerun_continue_refuses_without_recoverable_stage(
 def test_rerun_continue_in_publish_allows_uncommitted_code(
     git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """F14: when ``commit_code`` failed inside the publish node, the agent's code is left
+    """When ``commit_code`` failed inside the publish node, the agent's code is left
     uncommitted in the working tree. ``rerun --continue`` re-enters publish (commit_code is
     idempotent and docommits it), so that dirty state must NOT be refused as "unaccounted changes".
     """

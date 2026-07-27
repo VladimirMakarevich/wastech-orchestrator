@@ -40,26 +40,26 @@ def _utc_now_iso() -> str:
 #
 # The entries below describe how the **current** ``_SCHEMA`` differs from each past version (they
 # document the cutover, they are NOT migration steps ``_migrate`` performs):
-# v4 (flow-engine P1.2): added the ``node_runs`` per-node audit table and the durable
+# v4: added the ``node_runs`` per-node audit table and the durable
 # :class:`~wastech_orchestrator.core.flow.run_state.FlowRunState` checkpoint columns
 # (``tasks.current_node`` / ``tasks.flow_run_counters`` / ``tasks.flow_fingerprint``). These are the
 # only **additive** columns ``_migrate`` knows how to add to a ``0``/new database.
-# v5 (flow-engine P1.4 cutover): the ``provider_attempts`` FK to ``stage_runs`` was dropped so the
+# v5: the ``provider_attempts`` FK to ``stage_runs`` was dropped so the
 # flow-engine path can store the ``node_runs`` id there (both monotonic).
-# v6 (flow-engine P1 Slice 7): the legacy ``stage_runs`` table was dropped (the engine writes
+# v6: the legacy ``stage_runs`` table was dropped (the engine writes
 # ``node_runs``) and ``provider_attempts.stage_run_id`` was renamed to ``node_run_id``.
-# v7 (flow-engine P1 Slice 7): ``tasks.interrupted_status`` was dropped — the granular statuses it
+# v7: ``tasks.interrupted_status`` was dropped — the granular statuses it
 # stored are gone; ``rerun --continue`` re-enters at the ``current_node`` flow checkpoint.
-# v8 (flow-engine P2.1): added the immutable, append-only ``evaluations`` table — the per-verdict
+# v8: added the immutable, append-only ``evaluations`` table — the per-verdict
 # audit for in-flow evaluators (``in_flow_verdict``) and the constant supervisor layer's per-step /
 # final advisory observations (``supervisor_step`` / ``supervisor_final``). A fresh database creates
 # it via ``_SCHEMA``; a brand-new (``0``) database adopts it (no additive column to migrate).
-# v9 (flow-engine P2.2): added the ``editing_lineage`` table — the durable per-execution-unit
+# v9: added the ``editing_lineage`` table — the durable per-execution-unit
 # editing session (provider + raw session id), the **only** place a raw session id is ever stored
 # (it is redacted everywhere else). One active editing session per ``(task_id, subtask_order)``;
 # resume for Claude/Codex reads it, the author nodes (implementation/fixing) update it. Created on a
 # fresh DB by ``_SCHEMA`` (no additive column to migrate).
-# v10 (flow-engine P3.3): added the ``node_lineage`` table — the durable own session for a
+# v10: added the ``node_lineage`` table — the durable own session for a
 # ``resume_own_lineage`` node (the research critic), keyed by ``(task_id, node_id, subtask_order)``
 # so a node remembers what it flagged across rework rounds. Like ``editing_lineage`` the raw session
 # id lives only here. Created on a fresh DB by ``_SCHEMA`` (no additive column to migrate).
@@ -79,7 +79,7 @@ def _utc_now_iso() -> str:
 # failed only after it stays parked longer than ``agents.retry.max_blocked_s``. Additive, so
 # ``_migrate`` adds it on a brand-new (``0``) database; an older versioned DB is still refused
 # fail-closed and recreated (greenfield).
-# v14 (2026-07-08, F49): added the **additive** ``tasks.test_fix_total`` /
+# v14 (2026-07-08): added the **additive** ``tasks.test_fix_total`` /
 # ``tasks.review_fix_total`` columns — the cumulative per-loop rework totals for the whole task.
 # Unlike the consecutive
 # ``*_fix_cycles`` columns (zeroed when the loop converges), these are never reset, so a task that
@@ -100,7 +100,7 @@ def _utc_now_iso() -> str:
 # the running-cumulative ``usage_snapshot`` on ``editing_lineage`` and ``node_lineage``. All
 # nullable, so ``_migrate`` adds them on a brand-new (``0``) database; an older versioned DB is
 # refused fail-closed and recreated (greenfield).
-# v19 (VF-8, provider-attempt task anchor + supervisor spend): ``provider_attempts`` gains a
+# v19 (provider-attempt task anchor + supervisor spend): ``provider_attempts`` gains a
 # ``task_id`` (so a cost/usage roll-up no longer has to join through ``node_runs.id``) and its
 # ``node_run_id`` becomes NULLABLE — the constant supervisor layer records its own provider calls
 # with ``node_run_id`` NULL (it is not a graph node, so it has no ``node_runs`` row to point at).
@@ -131,22 +131,23 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # v13: the B-lite soft-pause timestamp (transient-provider-failure-recovery).
     if "blocked_since" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN blocked_since TEXT")
-    # v14: cumulative per-loop rework totals (F49).
+    # v14: cumulative per-loop rework totals.
     if "test_fix_total" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN test_fix_total INTEGER NOT NULL DEFAULT 0")
     if "review_fix_total" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN review_fix_total INTEGER NOT NULL DEFAULT 0")
-    # WRI-010: the frozen control-bundle digest (parent-held identity a continue/resume verifies).
+    # The frozen control-bundle digest (parent-held identity a continue/resume verifies).
     if "control_bundle_digest" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN control_bundle_digest TEXT")
-    # v17 (WRI-011): the frozen agent-input instruction-manifest digest (task packet + skill
-    # packages + root repository instructions + the WRI-010 control digest). Parent-held identity a
+    # v17: the frozen agent-input instruction-manifest digest (task packet + skill
+    # packages + root repository instructions + the control digest). Parent-held identity a
     # continue/resume verifies; a differing digest is never resumed into the same provider session.
     if "instruction_manifest_digest" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN instruction_manifest_digest TEXT")
-    # v18 (WRI-007): terminal-exchange sealing guard flags. ``exchange_contaminated`` records that
-    # WRI-002 detected an agent-side exchange mutation, so the terminal seam quarantines the tree as
-    # evidence instead of sealing it (and continue is refused). ``exchange_active_unsafe`` records
+    # v18: terminal-exchange sealing guard flags. ``exchange_contaminated`` records that
+    # the tamper check detected an agent-side exchange mutation, so the terminal seam quarantines
+    # the tree as evidence instead of sealing it (and continue is refused).
+    # ``exchange_active_unsafe`` records
     # that the active exchange could not be safely sealed/removed — provider-tree quiescence was
     # unproven, or a Windows lock/read-only blocked cleanup — so every later provider launch is
     # blocked until it is resolved. Both survive a restart (the mutation/lock may be detected in one
@@ -163,10 +164,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_usage_columns(conn: sqlite3.Connection) -> None:
-    """Additive usage columns (v16 normalized-usage + v19 VF-8 task anchor).
+    """Additive usage columns (v16 normalized-usage + the v19 task anchor).
 
     v16 added the per-run delta on ``provider_attempts`` and the running cumulative snapshot on the
-    two lineage tables — all nullable, so no defaults. v19 (VF-8) added the ``task_id`` anchor to
+    two lineage tables — all nullable, so no defaults. v19 added the ``task_id`` anchor to
     ``provider_attempts`` (NOT NULL with a placeholder default so the additive ALTER is legal; every
     writer supplies the real id, and this path is only reachable by a pre-versioning ``0`` database
     that predates the column — none exist in greenfield). The coupled ``node_run_id`` NULLABILITY
@@ -297,11 +298,11 @@ CREATE TABLE IF NOT EXISTS node_runs (
 
 CREATE TABLE IF NOT EXISTS provider_attempts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    -- the task this provider call belongs to (VF-8): a task-level cost/usage roll-up is
+    -- the task this provider call belongs to: a task-level cost/usage roll-up is
     -- ``WHERE task_id = ?`` and needs no join through ``node_runs``.
     task_id TEXT NOT NULL,
     -- the ``node_runs`` id this attempt belongs to (a plain monotonic id, not an FK), or NULL for
-    -- the constant supervisor layer, which is not a graph node and has no ``node_runs`` row (VF-8).
+    -- the constant supervisor layer, which is not a graph node and has no ``node_runs`` row.
     node_run_id INTEGER,
     provider TEXT NOT NULL,
     attempt INTEGER NOT NULL,
@@ -494,7 +495,7 @@ class NodeRunRow:
 
 @dataclass(frozen=True)
 class ProviderAttemptRow:
-    # The owning task (VF-8) — always set, so a roll-up need not join through ``node_runs``.
+    # The owning task — always set, so a roll-up need not join through ``node_runs``.
     task_id: str
     # The ``node_runs`` id this attempt belongs to, or ``None`` for the constant supervisor layer
     # (not a graph node, so no ``node_runs`` row — its rows are the ``node_run_id IS NULL`` ones).
@@ -570,7 +571,7 @@ class SubtaskRow:
 
 @dataclass(frozen=True)
 class EvaluationRow:
-    """One immutable, append-only evaluation record (flow-engine P2.1).
+    """One immutable, append-only evaluation record.
 
     Carries three kinds (``kind``): an in-flow evaluator's ``in_flow_verdict`` (``accept`` /
     ``rework`` with its findings, namespaced by ``source_node_run_id``); and the supervisor layer's
@@ -594,7 +595,7 @@ class EvaluationRow:
 
 @dataclass(frozen=True)
 class EditingLineageRow:
-    """A durable editing session for one execution unit (flow-engine P2.2).
+    """A durable editing session for one execution unit.
 
     Keyed ``(task_id, subtask_order, lineage_key)`` — one execution unit
     (``contracts.ExecutionUnit`` = ``(task_id, subtask_order)``) can hold more than one durable
@@ -620,7 +621,7 @@ class EditingLineageRow:
 
 @dataclass(frozen=True)
 class NodeLineageRow:
-    """The durable own session for a ``resume_own_lineage`` node (flow-engine P3.3).
+    """The durable own session for a ``resume_own_lineage`` node.
 
     Keyed by ``(task_id, node_id, subtask_order)`` — the research critic keeps its own session
     across rework rounds so it remembers what it already flagged. Like :class:`EditingLineageRow`,
@@ -897,7 +898,7 @@ class StateStore:
                 current_node=None,
                 flow_run_counters=None,
                 flow_fingerprint=None,
-                # WRI-007: a fresh rerun starts from a clean exchange, so any prior terminal guard
+                # A fresh rerun starts from a clean exchange, so any prior terminal guard
                 # (contaminated tree / unsafe active dir) no longer applies to the new attempt.
                 exchange_contaminated=0,
                 exchange_active_unsafe=0,
@@ -1078,7 +1079,7 @@ class StateStore:
         skip_reason: str | None = None,
         conn: sqlite3.Connection | None = None,
     ) -> list[NodeRunRow]:
-        """Close any still-``running`` node runs for a task at a terminal transition (VF-13).
+        """Close any still-``running`` node runs for a task at a terminal transition.
 
         A node run has one write path: reserved ``running`` (:meth:`record_node_run`) then finalized
         by :meth:`complete_node_run`. A hard operator stop (``--force-full`` SIGKILL) kills the
@@ -1149,7 +1150,7 @@ class StateStore:
         return row["current_node"], row["flow_run_counters"], row["flow_fingerprint"]
 
     def get_control_bundle_digest(self, task_id: str) -> str | None:
-        """Return the task's persisted WRI-010 frozen-control-bundle digest, or ``None``.
+        """Return the task's persisted frozen-control-bundle digest, or ``None``.
 
         ``None`` when the task was never frozen (legacy row / never reached the engine). A
         continue/resume verifies the on-disk bundle against this parent-held value; fresh/restart
@@ -1165,7 +1166,7 @@ class StateStore:
         return None if digest is None else str(digest)
 
     def get_instruction_manifest_digest(self, task_id: str) -> str | None:
-        """Return the task's persisted WRI-011 frozen-instruction-manifest digest, or ``None``.
+        """Return the task's persisted frozen-instruction-manifest digest, or ``None``.
 
         ``None`` when the task's agent inputs were never frozen (legacy row / never reached the
         engine). A continue/resume verifies the on-disk instruction bundle against this parent-held
@@ -1182,9 +1183,10 @@ class StateStore:
         return None if digest is None else str(digest)
 
     def get_exchange_guard(self, task_id: str) -> tuple[bool, bool]:
-        """Return ``(contaminated, active_unsafe)`` — the WRI-007 terminal-exchange guard flags.
+        """Return ``(contaminated, active_unsafe)`` — the terminal-exchange guard flags.
 
-        ``contaminated`` means WRI-002 detected an agent-side exchange mutation, so the terminal
+        ``contaminated`` means the tamper check detected an agent-side exchange mutation, so the
+        terminal
         seam quarantines the tree instead of sealing it and continue is refused. ``active_unsafe``
         means the active exchange could not be safely sealed/removed (unproven quiescence or a
         Windows lock), so every later provider launch is blocked until it is cleared. Both default
@@ -1260,7 +1262,7 @@ class StateStore:
         return [_provider_attempt_from_row(row) for row in cur.fetchall()]
 
     def get_provider_attempts_for_task(self, task_id: str) -> list[ProviderAttemptRow]:
-        """Every provider attempt for a task — flow nodes **and** the supervisor layer (VF-8).
+        """Every provider attempt for a task — flow nodes **and** the supervisor layer.
 
         The complete set of billable provider calls a cost/usage roll-up sums, keyed off the
         ``task_id`` column directly (no ``node_runs`` join), so the supervisor's calls
@@ -1512,7 +1514,7 @@ class StateStore:
     def get_editing_lineage(
         self, task_id: str, lineage_key: str, subtask_order: int | None = None
     ) -> EditingLineageRow | None:
-        """The active editing session for one lineage of an execution unit, or ``None`` (P2.2)."""
+        """The active editing session for one lineage of an execution unit, or ``None``."""
         subtask = _NO_SUBTASK if subtask_order is None else subtask_order
         cur = self._conn.execute(
             "SELECT provider, raw_session_id, updated_at, usage_snapshot FROM editing_lineage "
@@ -1569,7 +1571,7 @@ class StateStore:
             c.execute("DELETE FROM editing_lineage WHERE task_id = ?", (task_id,))
             c.execute("DELETE FROM node_lineage WHERE task_id = ?", (task_id,))
 
-    # --- node_lineage (resume_own_lineage durable sessions, P3.3) -------------------------
+    # --- node_lineage (resume_own_lineage durable sessions) -------------------------------
 
     def get_node_lineage(
         self, task_id: str, node_id: str, subtask_order: int | None = None

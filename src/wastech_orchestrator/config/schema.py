@@ -39,7 +39,7 @@ from wastech_orchestrator.providers.base import ProviderId
 # v8 (2026-06-16, prompt-audit): adds the optional top-level `prompt_audit` flag (default false).
 # Old configs omit it and take the safe `false` default — no migration flips anything;
 # `upgrade-config` adds it from the packaged template. A per-task `prompt_audit` overrides it.
-# v9 (flow-engine P1 Slice 7): the `prompts` block (`templates_dir`/`mode`) is removed — a flow
+# v9: the `prompts` block (`templates_dir`/`mode`) is removed — a flow
 # node's prompt template is its `role_file`, not a stage-indexed packaged default. `upgrade-config`
 # strips an operator's `prompts:` block; old configs still load fail-open (the key is ignored).
 # v10 (2026-06-19, flexible-flow stage-skip): the global `agents.skip_stages` list is removed — with
@@ -77,7 +77,7 @@ from wastech_orchestrator.providers.base import ProviderId
 # strips it, but `command_sets` is operator-authored — never auto-generated (no host inspection).
 # v16 (2026-06-25, deletion-approval-allowlist): a *format* add of optional
 # `security.deletion_approval_exempt_paths` — a list of repo-relative globs whose deletions/renames
-# are exempt from the dangerous-diff approval gate (security rule #14). Default `[]` = today's
+# are exempt from the dangerous-diff approval gate. Default `[]` = today's
 # behavior (everything gated). It filters only the deletion classification; dependency manifests are
 # never exemptable. Old configs load fail-open (the key defaults to empty) and `upgrade-config`
 # adds it from the template.
@@ -102,8 +102,11 @@ from wastech_orchestrator.providers.base import ProviderId
 # v20 (2026-06-27, transient-provider-failure-recovery): a *format* add of the optional
 # `agents.retry` block — `{max_attempts, base_delay_s, max_delay_s, max_blocked_s}` — the bounded
 # same-provider transient-retry policy (Option A) plus the B-lite soft-pause ceiling. Absent => safe
-# defaults (max_attempts=2, base_delay_s=2.0, max_delay_s=30.0, max_blocked_s=3600.0); old configs
-# load fail-open and `upgrade-config` adds it from the template.
+# defaults; old configs load fail-open and `upgrade-config` adds it from the template. The values
+# v20 shipped were `max_attempts=2, base_delay_s=2.0, max_delay_s=30.0, max_blocked_s=3600.0`;
+# `max_blocked_s` was later raised to 21600.0 (6h > a provider's ~5h usage window, so a
+# rate-limited task waits out the reset instead of failing an hour in) — `RetryConfig` below is the
+# live source for all four.
 # v21 (2026-06-27, telegram-step-trace): a *format* add of the optional `telegram.trace` bool
 # (default false) — a one-way, best-effort live progress feed that pushes one message per flow node
 # finish (`<emoji> <node-id> → <outcome>`, node id + outcome only, no secrets). A no-op when
@@ -141,14 +144,14 @@ from wastech_orchestrator.providers.base import ProviderId
 # `model` reaches a provider that accepts it (fixes claude-model-on-codex under a codex primary);
 # validated ∈ `agents.allowed` and for reasoning support, symmetric with flow nodes. Absent =>
 # inherit primary (today's behavior exactly). Old configs load fail-open; `upgrade-config` adds it.
-# v28 (2026-07-08, P5 custom tool-nodes): adds the optional `tools` block with
+# v28 (2026-07-08, custom tool-nodes): adds the optional `tools` block with
 # `default_timeout_seconds` (default 3600 = 1h) — the flow-wide default wall-clock timeout for a
 # `tool` node whose own `timeout_seconds` is unset. Absent block => 3600s exactly; a per-node
 # `timeout_seconds` overrides it. Old configs load fail-open with the default; `config_writer`
 # writes the block on a fresh install (discoverability, like `logging`).
 # v29 (2026-07-11, agent-native-memory-opt-in): adds the optional Claude-only
 # `agents.providers.claude.allow_native_memory` bool (default false) — an operator opt-in that, when
-# true, drops the F37 native-memory deny so Claude Code's own auto-memory (`~/.claude/projects/
+# true, drops the native-memory deny so Claude Code's own auto-memory (`~/.claude/projects/
 # <repo>/memory/`) persists across tasks. Off (default/absent) => the deny stays in place (today's
 # behavior exactly). It relaxes a security control (that store is unaudited, no redaction
 # guarantee), so it is a conscious opt-in: `config_writer` does NOT write it on a fresh install and
@@ -160,7 +163,7 @@ from wastech_orchestrator.providers.base import ProviderId
 # stay); false never returns (global off); true forces new + existing to return; current always
 # stays. Old (absent) configs take null => today's `new`-mode behavior is preserved. `config_writer`
 # does NOT write it on a fresh install; documented in `config.example.yaml` only.
-# v31 (WRI-003): a Codex node's isolation is now a generated permission profile driven by
+# v31: a Codex node's isolation is a generated permission profile driven by
 # `permission_profile`; the legacy `agents.providers.codex.sandbox: read-only|workspace-write` is
 # rejected by the validator and folded into `permission_profile` by `upgrade-config`. `sandbox`
 # survives only as the `danger-full-access` escape (gated by `strict_isolation: false`).
@@ -175,7 +178,7 @@ class AuditBranch(StrEnum):
 
 
 class BranchMode(StrEnum):
-    """Where a task's git operations point (branch-mode ADR).
+    """Where a task's git operations point.
 
     ``new`` (the default) creates a fresh task branch from ``repo.base_branch`` — today's behavior.
     ``existing`` works in a named, already-existing branch (``branch_ref``). ``current`` works in
@@ -190,7 +193,7 @@ class BranchMode(StrEnum):
 
 
 class PublishScope(StrEnum):
-    """Per-task, downgrade-only cap on how far the ``publish`` node goes (branch-mode ADR).
+    """Per-task, downgrade-only cap on how far the ``publish`` node goes.
 
     A *cap*, never an escalation: the effective scope is ``min(flow_policy, task.publish)`` over the
     ranking ``commit < push < pull_request``. ``commit`` stops after the code/audit commits,
@@ -207,7 +210,7 @@ class PublishScope(StrEnum):
 class AutoModeConfig:
     enabled: bool
     # When true, `watch` sends a Telegram approve/deny prompt before claiming each pending task
-    # (idea 27). Deny / timeout / no transport stops chaining for that cycle (fail-closed); the task
+    # Deny / timeout / no transport stops chaining for that cycle (fail-closed); the task
     # stays pending. Requires `telegram.enabled` (preflight). Gates new claims only — resuming an
     # in-flight task on daemon restart is never gated.
     confirm_next_task: bool = False
@@ -232,12 +235,12 @@ class RepoConfig:
     local_path: str
     base_branch: str
     branch_prefix: str
-    # Instance default for where task git operations point (branch-mode ADR). A per-task
+    # Instance default for where task git operations point. A per-task
     # ``branch_mode`` overrides it. Defaults to ``new`` (create a fresh task branch from
     # ``base_branch``), so an absent key reproduces today's behavior exactly.
     branch_mode: BranchMode = BranchMode.NEW
     # Whether terminal cleanup returns the working tree to ``base_branch`` after a terminal outcome
-    # (branch-mode ADR). ``None`` (default) defers to the branch mode: ``new`` returns to base,
+    # ``None`` (default) defers to the branch mode: ``new`` returns to base,
     # ``existing`` and ``current`` stay on the branch. ``False`` never returns (a global off switch,
     # including ``new``); ``True`` forces ``new`` and ``existing`` to return. ``current`` always
     # stays put regardless, since the operator owns its (possibly dirty) tree.
@@ -290,7 +293,7 @@ class ProviderConfig:
     permission_profile: str
     extra_args: tuple[str, ...] = ()
     # Codex escape: the sole remaining value is ``danger-full-access`` — the operator's explicit,
-    # loudly-unisolated opt-out, gated by ``strict_isolation: false`` (WRI-003). The access level
+    # loudly-unisolated opt-out, gated by ``strict_isolation: false``. The access level
     # (``read-only`` | ``workspace-write``) now lives in the provider-neutral ``permission_profile``
     # above; a legacy ``sandbox: read-only|workspace-write`` is rejected (migrate via
     # ``upgrade-config``). Inert on Claude.
@@ -302,12 +305,12 @@ class ProviderConfig:
     # Exactly one configured provider must set ``primary: true`` — the global primary that runs any
     # flow node with no ``provider`` field, and the single infrastructure-fallback target (PRE.1).
     primary: bool = False
-    # Claude-only (idea 29): when true, a run that exhausts ``max_turns`` (``error_max_turns``)
+    # Claude-only: when true, a run that exhausts ``max_turns`` (``error_max_turns``)
     # pauses for a durable Telegram continue/stop prompt instead of failing immediately; continue
     # resumes the same agent session with a fresh turn grant. Requires ``telegram.enabled``
     # (preflight). With this on, a low ``max_turns`` (~50–100) is safe — extendable on demand.
     max_turns_gate: bool = False
-    # Claude-only opt-in (agent-native-memory-opt-in): when true, the adapter DROPS the F37
+    # Claude-only opt-in: when true, the adapter DROPS the
     # native-memory deny so Claude Code's own auto-memory (``<config_dir>/projects/<repo>/memory/``)
     # persists across tasks on this repo. Default false keeps the deny in place. RISK: that store is
     # outside the orchestrator's redaction net and audit (an unredacted ``originSessionId`` was once
@@ -339,7 +342,7 @@ class SecurityConfig:
     allowed_environment: tuple[str, ...]
     denied_read_paths: tuple[str, ...]
     denied_commands: tuple[str, ...]
-    # Approval policy for the mid-task dangerous-diff gate (security rule #14). ``strict`` gates any
+    # Approval policy for the mid-task dangerous-diff gate. ``strict`` gates any
     # deletion/rename or dependency-manifest edit; ``auto`` turns the diff-shape gate off so only a
     # ``protected_paths`` match raises approval. The dataclass default is the safe fallback
     # ``strict``; a fresh install writes ``auto`` (config_writer).
@@ -347,7 +350,7 @@ class SecurityConfig:
     # Operator allowlist (repo-relative globs) of paths that ALWAYS require approval on any change,
     # regardless of ``trust_level`` — the always-ask floor no level can lower. Empty = no floor.
     protected_paths: tuple[str, ...] = ()
-    # Operator escape hatch (VF-6): fully disable READ-isolation for provider runs. When on it
+    # Operator escape hatch: fully disable READ-isolation for provider runs. When on it
     # restores the provider's native project-instruction/config discovery (Claude re-loads
     # ``CLAUDE.md`` + project settings/hooks/MCP/skills via ``--setting-sources project``; Codex
     # re-reads the user ``config.toml`` and the project ``.codex`` config/hooks/rules) and lifts the
@@ -357,14 +360,25 @@ class SecurityConfig:
     # PR control layer. The public ``denied_read_paths`` blacklist also stays enforced. Operator-
     # config ONLY (never a task / ``extra_args`` / flow-node key). Defaults to ``True`` — read-
     # isolation is OFF out of the box: a deliberate deployment-posture choice that departs from the
-    # § MANDATORY default-safe guidance in security.md (owned in rule #3). Set it ``False`` to keep
+    # project's own default-safe rule for isolation. Set it ``False`` to keep
     # read-isolation on. ``strict_isolation`` is still the master switch and always wins toward
     # relaxation (see :attr:`read_isolation_off`).
     disable_read_isolation: bool = True
+    # Operator master switch for the read-only git-evidence grant. A flow node may declare
+    # ``git_evidence: true`` to ask for the read-only git verbs (``log``/``show``/``diff``/… — every
+    # one of them reports, none mutates or publishes) so an audit node can cite a commit instead of
+    # substituting a changelog grep for delivery history. The declaration alone grants nothing: with
+    # this switch off — the default — a declaring flow loads, validates and runs exactly as it does
+    # today. That split is what keeps the envelope un-weakenable through a flow: the capability is
+    # reachable declaratively, but only the operator can turn it on. Operator-config ONLY (never a
+    # task / ``extra_args`` / flow-node key). Enabling it does not make the node writable: Claude
+    # confines the shell to those verbs and write-denies the whole clone in its OS sandbox, Codex's
+    # read-only sandbox already forbids every mutation, and ``denied_commands`` stays the floor.
+    allow_git_evidence: bool = False
 
     @property
     def read_isolation_off(self) -> bool:
-        """Effective read-isolation state for a provider run (VF-6) — the ONE place the formula
+        """Effective read-isolation state for a provider run — the ONE place the formula
         lives, so no adapter recomputes it. Read-isolation is off when the operator explicitly
         disabled it OR strict isolation is off entirely: ``strict_isolation: false`` relaxes
         everything and overrides even an explicit ``disable_read_isolation: false``. Effective
@@ -490,7 +504,7 @@ class SkillsConfig:
     just filtered, never an error.
     """
 
-    # Off by default (F1): the once-per-task supervisor proposal is opt-in, so an absent ``skills``
+    # Off by default: the once-per-task supervisor proposal is opt-in, so an absent ``skills``
     # block (and a fresh ``worc install``) does not pay for a dynamic layer the repo may not need —
     # fail-quiet, symmetric to how ``worc install`` now writes ``dynamic: false`` explicitly.
     dynamic: bool = False
@@ -499,14 +513,15 @@ class SkillsConfig:
 
 @dataclass(frozen=True)
 class SupervisorConfig:
-    """The constant supervisor layer (flow-engine P2.1) — oversight ABOVE any flow, not a node.
+    """The constant supervisor layer — oversight ABOVE any flow, not a node.
 
     It exists for every task under any flow shape: it observes each completed step read-only through
     its own ``resume_own_lineage`` session (~1 LLM call/step) and synthesizes the summary + advisory
     caveats at whole-task close. Trusted at the ``config.yaml`` level and validated under the same
     ceiling as flow nodes: ``permission_profile`` is forced ``read-only`` in code, ``reasoning`` ∈
     the allowlist (loader), and ``role_file`` is path-contained (validator). The own session is
-    in-memory in P2.1; durable ``resume_own_lineage`` is P2.2. ``model``/``reasoning`` empty → the
+    in-memory; a durable ``resume_own_lineage`` session is a node-level scope. ``model``/
+    ``reasoning`` empty → the
     provider default. ``provider`` empty → the global primary; set it (validated in
     ``agents.allowed``) to pin the layer to a provider — e.g. keep the supervisor on claude while
     the primary is codex, so its ``model`` reaches a provider that accepts it.
@@ -540,46 +555,46 @@ class MemoryConfig:
     """Repo-scoped persistent memory: global toggle + bounded knobs.
 
     Absent block => ``enabled=False`` — the pre-memory behavior (no store, no candidate delta, empty
-    memory packets, ``worc memory`` is a no-op, no background cleanup; Q10). This dataclass default
+    memory packets, ``worc memory`` is a no-op, no background cleanup). This dataclass default
     stays ``False`` as the safe fallback, but a fresh ``worc install`` ships ``enabled: true`` (both
     the packaged ``config.example.yaml`` and the generated ``config.yaml`` via
     ``config_writer.build_config_mapping``), so memory is on out of the box. Every numeric knob
-    carries the design's locked default (§10) and is a bounded, runtime-clamped value — none is a
+    carries a locked default and is a bounded, runtime-clamped value — none is a
     fatal config error (an odd value is clamped at use, per the "fatal only without a safe fallback"
     rule). The write / read / curation paths consume these knobs at runtime (all phases shipped).
     """
 
     enabled: bool = False
-    # Short-term episodic TTL in days (design §4: 14–45d window). Long-term has no TTL.
+    # Short-term episodic TTL in days (the intended window is 14–45d). Long-term has no TTL.
     short_term_ttl_days: int = 30
-    # Per-node retrieval packet caps (Q5) — deliberately small (precision over recall); the
+    # Per-node retrieval packet caps — deliberately small (precision over recall); the
     # PacketBuilder enforces them.
     packet_max_lines: int = 120
     packet_max_long_term: int = 3
     packet_max_entity: int = 5
-    # Inert since the memory V2 ADR: the episodic tier is write-only (never injected into a packet),
+    # Inert: the episodic tier is write-only (never injected into a packet),
     # so this cap is no longer read; kept as the absent-block default to avoid a schema churn for a
     # dead knob (mirrors ``cleanup_promotions_per_pass``).
     packet_max_episodic: int = 3
-    # Promotion-to-long-term thresholds (Q3). Since the memory V2 ADR (move 3) the recurrence gate
+    # Promotion-to-long-term thresholds. The recurrence gate
     # applies only to ``artifact-backed`` lessons — repo-verified / human-curated / review-verified
     # lessons promote on first sight. A gated lesson clears it when it recurred in
     # >= ``promote_min_tasks`` tasks within ``promote_window_days``.
     promote_min_tasks: int = 2
     promote_window_days: int = 60
-    # Background-cleanup budget (Q1) — bounded autonomy; the CleanupJob honors it (a later phase).
+    # Background-cleanup budget — bounded autonomy; the CleanupJob honors it.
     cleanup_min_interval_s: int = 300
     cleanup_max_scanned: int = 200
     cleanup_max_edits: int = 50
     cleanup_max_wall_clock_s: float = 5.0
     # Documentation-only invariant (not read at runtime): the never-promote guarantee is
     # structural — `CleanupJob` only demotes / expires / quarantines / merges and has no promote
-    # code path, so this stays 0 (AC-C3). The knob states the invariant in config; a non-zero value
+    # code path, so this stays 0. The knob states the invariant in config; a non-zero value
     # is inert (cleanup still never creates a long-term lesson).
     cleanup_promotions_per_pass: int = 0
 
 
-# The built-in fallback timeout for a tool node (P5) when neither the node's ``timeout_seconds`` nor
+# The built-in fallback timeout for a tool node when neither the node's ``timeout_seconds`` nor
 # ``tools.default_timeout_seconds`` is set. One hour — long enough for a heavy operator scan, short
 # enough to bound a hung binary. The ``ToolsConfig`` default equals this, so an absent ``tools``
 # block resolves to the same 3600s.
@@ -588,7 +603,7 @@ DEFAULT_TOOL_TIMEOUT_SECONDS = 3600
 
 @dataclass(frozen=True)
 class ToolsConfig:
-    """Custom tool-node settings (P5): the flow-wide default timeout for ``tool`` nodes.
+    """Custom tool-node settings: the flow-wide default timeout for ``tool`` nodes.
 
     Absent block => ``default_timeout_seconds=3600`` (1h). Resolution precedence for a tool node is
     ``node.timeout_seconds`` → ``tools.default_timeout_seconds`` → the built-in

@@ -1,4 +1,4 @@
-"""Unit tests for the fatal load-time flow validator (flow-engine P0.3).
+"""Unit tests for the fatal load-time flow validator.
 
 Each test covers exactly one violation class so regressions are easy to localise. "Valid flow"
 tests confirm that all three co-design flows pass the validator without violations.
@@ -402,7 +402,7 @@ flow:
 
 
 def test_conflicting_provider_override_rejected_under_affinity(tmp_path: Path) -> None:
-    # Durable sessions (P2.2): a node cannot resume another provider's editing session, so an
+    # Durable sessions: a node cannot resume another provider's editing session, so an
     # explicit provider that differs from its lineage_affinity target's provider is rejected.
     yaml = """\
 flow:
@@ -871,3 +871,68 @@ def test_disabled_stranded_skip_outcome_raises(tmp_path: Path) -> None:
     with pytest.raises(FlowValidationError) as exc:
         validate_disabled_nodes(snap, frozenset({"router"}))
     assert _has(exc.value.violations, "graph", "skip-outcome")
+
+
+# -- read-only git evidence ----------------------------------------------------
+
+_GIT_EVIDENCE_FLOW = """\
+flow:
+  name: t
+  task_type: t
+  permission_ceiling: {ceiling}
+  output_policy: code_change
+  publishing: pull_request
+  nodes:
+    - id: a
+      kind: agent
+      role_file: t/a.md
+      {profile}
+      git_evidence: true
+    - id: b
+      kind: publish
+      policy: pull_request
+  edges:
+    - {{ from: a, to: b }}
+"""
+
+
+def test_git_evidence_accepted_on_a_read_only_node(tmp_path: Path) -> None:
+    # The declaration is valid on its own: whether it actually grants anything is the operator's
+    # security.allow_git_evidence to decide at run time, not the flow validator's.
+    content = _GIT_EVIDENCE_FLOW.format(
+        ceiling="workspace-write", profile="permission_profile: read-only"
+    )
+    validate_flow(_snap(content, tmp_path))
+
+
+def test_git_evidence_accepted_under_a_read_only_ceiling(tmp_path: Path) -> None:
+    # No per-node profile: the node inherits the flow's read-only ceiling, which is where the grant
+    # applies, so the declaration is meaningful and accepted.
+    content = """\
+flow:
+  name: t
+  task_type: t
+  permission_ceiling: read-only
+  output_policy: private_control_workspace_report
+  publishing: local_artifact
+  nodes:
+    - id: a
+      kind: agent
+      role_file: t/a.md
+      git_evidence: true
+    - id: b
+      kind: publish
+      policy: local_artifact
+  edges:
+    - { from: a, to: b }
+"""
+    validate_flow(_snap(content, tmp_path))
+
+
+def test_git_evidence_rejected_on_a_workspace_write_node(tmp_path: Path) -> None:
+    # A workspace-write node already has an unrestricted shell, so the field would do nothing there.
+    # Rejected rather than ignored — a flag that silently does nothing reads as protection.
+    content = _GIT_EVIDENCE_FLOW.format(
+        ceiling="workspace-write", profile="permission_profile: workspace-write"
+    )
+    assert _has(_violations(content, tmp_path), "ceiling", "git_evidence applies only to a")

@@ -1,18 +1,18 @@
-"""Candidate memory delta — the structured output the supervisor emits at finalize (design §10, Q9).
+"""Candidate memory delta — the structured output the supervisor emits at finalize.
 
 The supervisor (the single LLM touch in the write path) proposes *what to remember*; this module
 defines the contract and a tolerant, model-free parser that turns the raw structured output into
 typed **candidate** records. Candidates are not stored records:
 
 * They carry a ``trust_hint`` that is **advisory only** — :meth:`MemoryService.apply_delta` assigns
-  the final trust deterministically (design §7); a candidate can never self-certify to a durable
-  level (AC-SF5).
+  the final trust deterministically; a candidate can never self-certify to a durable
+  level.
 * ``evidence`` entries are **pointers** (artifact path / commit / symbol), never raw content.
 
 All *semantic* validation (non-empty evidence, path/symbol existence, promotion) lives in
 ``apply_delta`` (02.4), not here — this parser is purely structural. Following the codebase's
 ``_parse_skill_map`` precedent it is best-effort: malformed entries are skipped, fully unusable
-input yields ``None``, and it **never raises** (Q9). The provider turn is constrained by
+input yields ``None``, and it **never raises**. The provider turn is constrained by
 :data:`DELTA_OUTPUT_SCHEMA` (``additionalProperties: False``), so extra fields are rejected at
 generation time and never reach the parser.
 """
@@ -92,7 +92,7 @@ _EVIDENCE_SCHEMA: dict[str, Any] = {
     },
     "required": ["type", "ref"],
 }
-# Nullable so a strict-required optional field can be omitted by emitting ``null`` (F41): OpenAI
+# Nullable so a strict-required optional field can be omitted by emitting ``null``: OpenAI
 # strict mode forces every ``properties`` key into ``required``, so optionality is expressed by the
 # type union, not by absence. Every use below is an optional field; the tolerant readers treat
 # ``null`` identically to an absent key.

@@ -1,4 +1,4 @@
-"""Real-host, no-model canary smoke for the Codex permission profile (WRI-003).
+"""Real-host, no-model canary smoke for the Codex permission profile.
 
 Runs the actual generator output under the actual ``codex sandbox`` (credential-free, no model, no
 network) and asserts the deny/read-only boundary is OS-enforced on this host. This is the only test
@@ -6,11 +6,12 @@ that proves real enforcement; the deterministic suite proves wiring only. Hosted
 no Codex CLI, so this is a local/manual gate; the deterministic 3-OS pytest matrix proves the
 cross-platform wiring. Records the Codex version and platform in the assertion context.
 
-Skipped only when the host *cannot enforce at all* — no ``codex`` on PATH, or a sandbox backend that
-refuses to start (native Windows requires an **elevated** backend: "Restricted read-only access
-requires the elevated Windows sandbox backend"). Never skipped merely for being Windows: WRI-006
-requires the native-Windows sandbox be proven wherever it can run, so an elevated Windows host runs
-all of this in full. See :func:`_cannot_enforce` for why that gate cannot mask a leak.
+Skipped only when the host *cannot enforce the tested read-isolation profile* — no ``codex`` on
+PATH, or a sandbox backend that refuses to start (native Windows requires an **elevated** backend
+for restricted reads: "Restricted read-only access requires the elevated Windows sandbox
+backend"). Never skipped merely for being Windows: the native-Windows sandbox must be
+proven wherever it can run, so an elevated Windows host runs all of this in full. See
+:func:`_cannot_enforce` for why that gate cannot mask a leak.
 
 IMPORTANT: the workspace must NOT live under a temp root — Codex's sandbox always grants the system
 temp root (``/tmp`` / ``:slash_tmp``) as writable/readable, which would mask every carve-out. So the
@@ -61,7 +62,15 @@ def _env() -> dict[str, str]:
     codex_dir = str(Path(_codex()).parent)
     if platform.system() == "Windows":
         env = {"PATH": os.pathsep.join([codex_dir, os.environ.get("PATH", "")])}
-        for key in ("USERPROFILE", "SystemRoot", "SYSTEMROOT", "TEMP", "TMP", "LOCALAPPDATA"):
+        for key in (
+            "USERPROFILE",
+            "SystemRoot",
+            "SYSTEMROOT",
+            "TEMP",
+            "TMP",
+            "LOCALAPPDATA",
+            "CODEX_HOME",
+        ):
             value = os.environ.get(key)
             if value:
                 env[key] = value
@@ -109,10 +118,10 @@ def _cannot_enforce() -> str:
     ("Restricted read-only access requires the elevated Windows sandbox backend"), so an unelevated
     host lands here.
 
-    The gate is deliberately keyed on the probed capability and never on "is Windows": WRI-006
-    requires the native-Windows sandbox be proven where it *can* run, so an elevated Windows host
-    still executes these tests in full. It also cannot mask a leak — a host that enforces at all
-    passes this control and then runs every deny probe for real.
+    The gate is deliberately keyed on the probed capability and never on "is Windows": the release
+    requires the native-Windows read-isolation sandbox be proven where it *can* run, so an elevated
+    Windows host still executes these tests in full. It also cannot mask a leak — a host that
+    enforces the tested profile passes this control and then runs every deny probe for real.
     """
     if shutil.which("codex") is None:
         return "needs the real codex CLI (local/manual gate; hosted CI ships none)"
@@ -133,10 +142,14 @@ def _cannot_enforce() -> str:
             if p.label == "exchange-read-allowed"
         )
         argv = build_canary_command(_codex(), profile, str(repo), control)
-        with tempfile.TemporaryDirectory(prefix="worc-codexhome-") as codex_home:
-            rc, output = default_canary_runner(
-                argv, str(repo), {**_env(), "CODEX_HOME": codex_home}
-            )
+        probe_env = _env()
+        if platform.system() == "Windows":
+            rc, output = default_canary_runner(argv, str(repo), probe_env)
+        else:
+            with tempfile.TemporaryDirectory(prefix="worc-codexhome-") as codex_home:
+                rc, output = default_canary_runner(
+                    argv, str(repo), {**probe_env, "CODEX_HOME": codex_home}
+                )
         if rc != 0:
             return f"host cannot enforce a codex sandbox profile: {output.strip()[:200]}"
         return ""
@@ -192,7 +205,7 @@ def test_generated_profile_is_os_enforced(clone: Path, profile: str) -> None:
 
 @pytest.mark.parametrize("profile", ["read-only", "workspace-write"])
 def test_capability_smoke_passes_on_real_host(profile: str) -> None:
-    # WRI-006 / H7: the self-contained no-model capability smoke `worc preflight` runs — it builds
+    # The self-contained no-model capability smoke `worc preflight` runs — it builds
     # its own throwaway fixture (private denied incl. a workspace symlink alias, repo-read positive
     # control, repo-write per profile, exchange read-only) and records the MCP inventory — must be
     # OS-enforced (`passed`) on a host with the real codex CLI.

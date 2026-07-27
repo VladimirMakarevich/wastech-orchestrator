@@ -61,7 +61,7 @@ class LedgerRecord:
     manual: bool = False
     note: str | None = None
     outcome: str | None = None
-    # VF-20: repo-relative governance/instruction paths (``AGENTS.md``, ``.agents/rules/**``, …)
+    # Repo-relative governance/instruction paths (``AGENTS.md``, ``.agents/rules/**``, …)
     # this task's diff changed. Empty on ordinary runs — a non-blocking operator notice, the
     # completed ledger's durable record of which runs edited their own rules. Old records omit it
     # harmlessly.
@@ -128,7 +128,7 @@ class Ledger:
 
     def only_validation_rejects(self, task_id: str) -> bool:
         """True iff ``task_id`` appears in the ledger and **every** record for it is a validation
-        reject (F6).
+        reject.
 
         A gate reject appends a ``failed`` record carrying a ``validation_reason`` before the task
         was ever claimed — there is no ``tasks`` row and no branch. Such a record must not reserve
@@ -165,7 +165,7 @@ def write_failure_report(
 ) -> tuple[str, str]:
     """Write ``failure_report.json`` + ``stuck.md``; return both paths.
 
-    Flow-neutral (flow-engine P1.2): the base fields (``task_id``/``node_id``/``loop``/``counters``)
+    Flow-neutral: the base fields (``task_id``/``node_id``/``loop``/``counters``)
     are always written; the implementation-specific sections (``last_check_log``,
     ``last_review_findings``, ``final_diff``) stay empty when the flow has no such nodes.
     """

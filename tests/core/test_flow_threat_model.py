@@ -1,9 +1,9 @@
-"""Threat model as tests (flow-engine P4.2).
+"""Threat model as tests.
 
 One test per row of the operator-flow threat model — this file **is** the catalogue: each test
 proves one attack vector is closed **independently of the flow YAML / task content**. Rows
-already proven structurally in P0.3/P0.5 assert against :func:`validate_flow` / :func:`load_flow`;
-the config-aware rows (P4.2) assert against :func:`validate_flow_against_config`. Keeping the whole
+already proven structurally assert against :func:`validate_flow` / :func:`load_flow`;
+the config-aware rows assert against :func:`validate_flow_against_config`. Keeping the whole
 catalogue in one file makes "is every ceiling threat covered?" answerable at a glance.
 """
 
@@ -134,7 +134,7 @@ git:
 
 
 # =============================================================================
-# Structural threats (closed at load time — P0.3 / P0.5)
+# Structural threats (closed at load time)
 # =============================================================================
 
 
@@ -254,7 +254,7 @@ def test_threat_write_outside_output_policy(tmp_path: Path) -> None:
 
 
 # =============================================================================
-# Config-aware threats (closed by validate_flow_against_config — P4.2)
+# Config-aware threats (closed by validate_flow_against_config)
 # =============================================================================
 
 

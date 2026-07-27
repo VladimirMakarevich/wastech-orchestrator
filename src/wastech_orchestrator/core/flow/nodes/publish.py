@@ -1,4 +1,4 @@
-"""Publish node runner (P1.3/P1.4) — thin adapter to the GitManager.
+"""Publish node runner — thin adapter to the GitManager.
 
 Publishing is the orchestrator's sole responsibility (the hard invariant: providers and flows never
 touch git). The runner maps the flow's ``PublishingPolicy`` to the idempotent git operations and
@@ -8,9 +8,9 @@ rather than a terminal failure — see :meth:`PublishNodeRunner.run` for why.
 
 ``pull_request`` / ``documentation_pull_request`` take the PR path: commit code, commit the audit
 trail, push the branch, open the PR — each idempotent via ``publish_operations``. The documentation
-PR needs no special staging: the after-stage output guard (P3.2) already confined the writes to the
+PR needs no special staging: the after-stage output guard already confined the writes to the
 report directory, so the existing scoped staging commits only those docs.
-``private_control_workspace_report`` (P3.2) stores the report under the gitignored ``.worc/``
+``private_control_workspace_report`` stores the report under the gitignored ``.worc/``
 control workspace and touches git not at all — it fails closed if that report would be git-trackable
 (so it can never enter staging/a commit/a PR), leaving the target repo byte-for-byte. ``none`` /
 ``local_artifact`` write no git either (the deliverable is the in-workspace artifact). Task finalize
@@ -78,7 +78,7 @@ class PublishNodeRunner:
             # operations are idempotent via `publish_operations`, so `rerun --continue` re-enters
             # this node and completes the push/PR without duplicating the commits.
             #
-            # F12: the git stderr is the only diagnosis of *why* publish failed. Without surfacing
+            # The git stderr is the only diagnosis of *why* publish failed. Without surfacing
             # it the operator sees only `error_class=publish_failed` and must reproduce it by hand,
             # so log it (ERROR, daemon log) and persist it as a node artifact. Scrub secrets: git
             # stderr (paths/pathspec) is normally safe, but a remote URL / push error can echo a
@@ -112,7 +112,7 @@ class PublishNodeRunner:
 
     def _record_publish_error(self, ctx: NodeContext, node: PublishNode, detail: str) -> None:
         """Persist the (already-redacted) git failure as a ``publish_error`` node artifact so the
-        cause survives the run and is diagnosable off-line (F12). Best-effort: a write/register
+        cause survives the run and is diagnosable off-line. Best-effort: a write/register
         failure must never mask the manual stop, so it is swallowed."""
         if self._s.register_artifact is None:
             return
@@ -142,7 +142,7 @@ class PublishNodeRunner:
         # both land in it (legacy ordering); the committed summary.md is the PR body, falling back
         # to the logs/ summary slot.
         committed_summary = self._s.finalize() if self._s.finalize is not None else None
-        # Per-task downgrade-only cap (branch-mode ADR): stop after the commits (`commit`) or before
+        # Per-task downgrade-only cap: stop after the commits (`commit`) or before
         # the PR (`push`). This branch IS ``min(flow_policy, task.publish)`` — a PR flow's implicit
         # scope is ``pull_request``, so capping here caps it. Full sequence when unset (``None``).
         scope = self._in.publish_scope
@@ -172,7 +172,7 @@ class PublishNodeRunner:
         )
 
     def _store_private_report(self, ctx: NodeContext) -> str | None:
-        """Finalize a ``private_control_workspace_report`` deliverable without touching git (P3.2).
+        """Finalize a ``private_control_workspace_report`` deliverable without touching git.
 
         The report is already written under the gitignored ``.worc/`` control workspace by the
         writing node (the after-stage guard confined it there). This node touches git **not at all**

@@ -49,7 +49,7 @@ def _codex_after_upgrade(operator_codex: dict[str, object]) -> dict[str, object]
 
 
 def test_migrates_safe_codex_sandbox_to_permission_profile() -> None:
-    # WRI-003: a legacy safe `sandbox` folds into the neutral `permission_profile` and is dropped.
+    # A legacy safe `sandbox` folds into the neutral `permission_profile` and is dropped.
     codex = _codex_after_upgrade({"sandbox": "read-only"})
     assert "sandbox" not in codex
     assert codex["permission_profile"] == "read-only"

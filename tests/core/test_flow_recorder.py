@@ -1,4 +1,4 @@
-"""StateStoreRunRecorder + resume hydration (flow-engine P1.2)."""
+"""StateStoreRunRecorder + resume hydration."""
 
 from __future__ import annotations
 
@@ -65,7 +65,7 @@ def test_recorder_writes_flow_neutral_failure_report(tmp_path: Path) -> None:
 
 
 def test_recorder_failure_report_carries_findings_and_diff(tmp_path: Path) -> None:
-    # F50: the stuck report must carry the REAL last in-flow review findings and working-tree diff,
+    # The stuck report must carry the REAL last in-flow review findings and working-tree diff,
     # not the old hardcoded (none)/(empty) — so a terminal is diagnosable without hand-recovery.
     store = _store(tmp_path)
     store.record_evaluation(
@@ -126,7 +126,7 @@ def test_hydrate_rebuilds_checkpoint_from_saved_snapshot(tmp_path: Path) -> None
 def test_recovery_does_not_rereresolve_flow(tmp_path: Path) -> None:
     # hydrate_run_state takes only the store + task id — no config/registry — so resume can never
     # re-resolve the flow from live config; it returns exactly the persisted snapshot fingerprint
-    # (the P1.2 recovery invariant; the orchestrator-level recovery dispatch lands in P1.4).
+    # (the recorder's recovery invariant; the orchestrator dispatches recovery itself).
     store = _store(tmp_path)
     StateStoreRunRecorder(store, "t1", artifacts_root=tmp_path).save_checkpoint(
         FlowRunState(flow_fingerprint="snap-abc123", current_node="review")

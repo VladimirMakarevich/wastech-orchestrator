@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from dataclasses import dataclass
@@ -93,6 +94,27 @@ def test_http_client_uses_async_lifecycle_without_leaking_request_url(
 
     assert reply is not None and reply.text == "yes"
     assert token not in caplog.text
+
+
+def test_http_client_send_succeeds_inside_a_running_event_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delivered: list[tuple[str | int, str]] = []
+
+    class _RecordingBot(_FakeBot):
+        async def send_message(self, *, chat_id: str | int, text: str, **_: object) -> _Message:
+            delivered.append((chat_id, text))
+            return await super().send_message(chat_id=chat_id, text=text)
+
+    monkeypatch.setattr(telegram, "Bot", _RecordingBot)
+    client = _HttpTelegramClient(bot_token="token")
+
+    async def send_from_loop() -> None:
+        client.send_message(chat_id="42", text="hello from loop")
+
+    asyncio.run(send_from_loop())
+
+    assert delivered == [("42", "hello from loop")]
 
 
 def test_http_client_ignores_foreign_and_unrelated_question_replies(

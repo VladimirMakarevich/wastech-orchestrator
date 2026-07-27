@@ -1,4 +1,4 @@
-"""Candidate-delta contract (02.1): tolerant structural parser; trust_hint stays advisory."""
+"""Candidate-delta contract: tolerant structural parser; trust_hint stays advisory."""
 
 from __future__ import annotations
 

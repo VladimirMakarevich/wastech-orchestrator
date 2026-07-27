@@ -1,4 +1,4 @@
-"""Unit tests for the WRI-010 frozen control bundle.
+"""Unit tests for the frozen control bundle.
 
 The freeze copies the exact control inputs a flow references (flow YAML, role files, tool
 executables) into a private immutable bundle, records a manifest + digest, binds later consumers to
@@ -11,6 +11,7 @@ deterministically on every OS without needing to plant a real symlink/hard link/
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -25,6 +26,7 @@ from wastech_orchestrator.core.flow.control_bundle import (
 )
 from wastech_orchestrator.core.flow.snapshot import load_flow
 from wastech_orchestrator.core.flow.tools_registry import ToolRegistry
+from wastech_orchestrator.providers.artifacts import sha256_file
 from wastech_orchestrator.providers.exchange import FileFacts, default_file_inspector
 
 _FLOW_YAML = """\
@@ -94,6 +96,59 @@ def test_freeze_copies_exactly_the_referenced_inputs(tmp_path: Path) -> None:
     # The frozen tool keeps its executable bit on POSIX (bytes + mode via copy2).
     if os.name != "nt":
         assert os.access(bundle.tools_dir / _tool_name(), os.X_OK)
+
+
+def test_freeze_windows_copies_launcher_and_same_name_payload(tmp_path: Path) -> None:
+    flow_dir, tools_dir = _make_control_plane(tmp_path / "live")
+    for delivered in tools_dir.iterdir():
+        delivered.unlink()
+    payload = tools_dir / "mytool"
+    launcher = tools_dir / "mytool.cmd"
+    payload.write_bytes(b"print('payload')\n")
+    launcher.write_bytes(b'@python "%~dp0mytool" %*\r\n')
+    snapshot = load_flow(flow_dir / "sample.yaml")
+
+    bundle = freeze_control_bundle(
+        tmp_path / "bundle",
+        snapshot,
+        flow_dir,
+        ToolRegistry(tools_dir, system="Windows"),
+    )
+
+    assert (bundle.tools_dir / payload.name).read_bytes() == payload.read_bytes()
+    assert (bundle.tools_dir / launcher.name).read_bytes() == launcher.read_bytes()
+    manifest = json.loads((bundle.root / MANIFEST_NAME).read_text(encoding="utf-8"))
+    entries = {entry["path"]: entry["sha256"] for entry in manifest["entries"]}
+    assert entries["tools/mytool"] == sha256_file(bundle.tools_dir / "mytool")
+    assert entries["tools/mytool.cmd"] == sha256_file(bundle.tools_dir / "mytool.cmd")
+    # The frozen registry finds the same launcher and its relative `%~dp0` payload is now beside it.
+    assert ToolRegistry(bundle.tools_dir, system="Windows").resolve("mytool").name == "mytool.cmd"
+
+
+def test_freeze_posix_keeps_one_file_per_tool(tmp_path: Path) -> None:
+    flow_dir, tools_dir = _make_control_plane(tmp_path / "live")
+    for delivered in tools_dir.iterdir():
+        delivered.unlink()
+    payload = tools_dir / "mytool"
+    payload.write_bytes(b"#!/usr/bin/env python3\nprint('payload')\n")
+    payload.chmod(0o755)
+    (tools_dir / "mytool.cmd").write_bytes(b'@python "%~dp0mytool" %*\r\n')
+    snapshot = load_flow(flow_dir / "sample.yaml")
+
+    bundle = freeze_control_bundle(
+        tmp_path / "bundle",
+        snapshot,
+        flow_dir,
+        ToolRegistry(tools_dir, system="Linux"),
+    )
+
+    assert (bundle.tools_dir / "mytool").read_bytes() == payload.read_bytes()
+    assert not (bundle.tools_dir / "mytool.cmd").exists()
+    manifest = json.loads((bundle.root / MANIFEST_NAME).read_text(encoding="utf-8"))
+    tool_paths = [
+        entry["path"] for entry in manifest["entries"] if entry["path"].startswith("tools/")
+    ]
+    assert tool_paths == ["tools/mytool"]
 
 
 def test_freeze_digest_is_deterministic(tmp_path: Path) -> None:

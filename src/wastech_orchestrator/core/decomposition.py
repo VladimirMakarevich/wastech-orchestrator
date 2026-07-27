@@ -190,7 +190,7 @@ def subtask_spec_path(artifacts_root: str | Path, task_id: str, order: int, slug
 
 
 def subtask_handoff_path(artifacts_root: str | Path, task_id: str, order: int, slug: str) -> Path:
-    """Path to one subtask's ``NN-<slug>.handoff.md`` context brief (subtask-context-handoff ADR).
+    """Path to one subtask's ``NN-<slug>.handoff.md`` context brief.
 
     Sits beside the immutable spec under ``logs/<task-id>/subtasks/`` — local, uncommitted,
     redaction-scrubbed, archived/deleted with the task, and **never** written to the memory tiers

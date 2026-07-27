@@ -1,4 +1,4 @@
-"""VF-7: the Core-owned, provider-neutral orchestrator security contract.
+"""The Core-owned, provider-neutral orchestrator security contract.
 
 A short, fixed security block the orchestrator prepends to *every* provider prompt — agent,
 evaluator, and each supervisor turn — as defense-in-depth. It tells the agent up-front not to read
@@ -6,9 +6,9 @@ or mutate the orchestrator's service files (``.worc``/``.worc-io``/``.git``/``ta
 credential/environment files) and never to commit/push.
 
 It is **advisory only** — it does NOT replace the filesystem sandbox + deny projection, which
-remain the enforcement (read-isolation ADR §3). It matters most when read-isolation is relaxed
-(VF-6): then the sandbox no longer blocks those reads and this soft barrier is the only thing left,
-so an explicit read-restraint paragraph is appended in that case.
+remain the enforcement. It matters most when the operator relaxes read-isolation: then the sandbox
+no longer blocks those reads and this soft barrier is the only thing left, so an explicit
+read-restraint paragraph is appended in that case.
 
 Provider-neutral by construction: this module builds only text. The orchestrator resolves the string
 once (config-derived, not per-node) and carries it on
@@ -25,7 +25,7 @@ from wastech_orchestrator.runtime_layout import CONTROL_HOME_DIRNAME, EXCHANGE_H
 
 
 def build_orchestrator_security_preamble(*, read_isolation_off: bool) -> str:
-    """Build the orchestrator security contract prepended to every provider prompt (VF-7).
+    """Build the orchestrator security contract prepended to every provider prompt.
 
     ``read_isolation_off`` is the effective read-isolation state
     (:attr:`~wastech_orchestrator.config.schema.SecurityConfig.read_isolation_off`): when true the

@@ -1,4 +1,4 @@
-"""Unit tests for the PID-file + graceful-shutdown plumbing (backlog: stop/restart).
+"""Unit tests for the PID-file + graceful-shutdown plumbing.
 
 Pure: every OS seam (``os.kill``, ``signal.signal``, sleeping, the clock) is injected, so nothing
 here touches a real process or signal.
@@ -305,7 +305,7 @@ def test_stop_process_soft_timeout_stays_pending(tmp_path: Path) -> None:
 
 
 def test_stop_process_soft_timeout_never_reaps_the_agent_subtree(tmp_path: Path) -> None:
-    # Regression (P0 down-command gap): the POSIX soft-timeout must not reach the recorded active
+    # Regression: the POSIX soft-timeout must not reach the recorded active
     # agent's subtree and must leave the children handle intact for a later --force-full.
     path = tmp_path / "orchestrator.pid"
     stop_path = tmp_path / "orchestrator.stop"

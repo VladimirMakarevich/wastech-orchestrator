@@ -114,7 +114,7 @@ class FakeProvider:
         elif request.node_id == "review" and (
             not isinstance(structured, dict) or "findings" not in structured
         ):
-            # F19: the review evaluator requires a well-formed findings array; a well-formed empty
+            # The review evaluator requires a well-formed findings array; a well-formed empty
             # one is a clean, accepting verdict — the default when a test doesn't override it.
             structured = {"findings": []}
         return AgentRunResult(
@@ -385,7 +385,7 @@ def _impl_writes_file(provider_id: str) -> FakeProvider:
 def test_notify_terminal_enriches_manual_from_failure_report(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # VF-22: _notify_terminal assembles TerminalDetails from the TaskRow + on-disk failure report
+    # _notify_terminal assembles TerminalDetails from the TaskRow + on-disk failure report
     # for a needs-attention terminal — stop node, loop, the most-severe blocking finding, and the
     # stuck.md report path — all keyed by task_id, so every call site enriches without extra
     # plumbing. The most-severe finding wins over a low nit in the same report.
@@ -449,7 +449,7 @@ def test_notify_terminal_enriches_manual_from_failure_report(
 
 
 def test_notify_terminal_done_passes_no_details(git_repo, make_git_config, tmp_path: Path) -> None:
-    # VF-22 item 7: a clean done carries no enrichment (stays terse) — details is None.
+    # A clean done carries no enrichment (stays terse) — details is None.
     notifier = RecordingNotifier()
     orch, store, _ledger, _art = _build(
         git_repo,
@@ -516,7 +516,7 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
             "reason": None,
             "contacts": (),
             "governance_changed": (),  # ordinary task touched no governance files
-            "details": None,  # VF-22: a clean done stays terse (no enrichment)
+            "details": None,  # a clean done stays terse (no enrichment)
         }
     ]
     assert git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone) == "main"
@@ -683,7 +683,7 @@ def _run_complete_task_store_dir(
 ) -> Path:
     """Drive one complete happy-path task; return the private-home ``memory`` store dir.
 
-    The memory store lives under ``layout.private_home`` (WRI-004) — here the injected ``art`` dir,
+    The memory store lives under ``layout.private_home`` — here the injected ``art`` dir,
     which coincides with ``<repo>/.worc`` in production. The dir may not exist (memory disabled).
     """
     providers = _both()
@@ -709,7 +709,7 @@ def _run_complete_task_store_dir(
 
 
 def test_memory_disabled_run_writes_no_store(git_repo, make_git_config, tmp_path: Path) -> None:
-    # AC-S4: the default (disabled) run is byte-for-byte the pre-memory behavior — the same task
+    # The default (disabled) run is byte-for-byte the pre-memory behavior — the same task
     # completes DONE and NO `.worc/memory` store is written at all.
     store_dir = _run_complete_task_store_dir(
         git_repo, make_git_config, tmp_path, memory_enabled=False
@@ -823,7 +823,7 @@ def _evaluations(store: StateStore, task_id: str) -> list:
 def test_supervisor_layer_observes_each_step_and_writes_one_summary(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # P2.1: the constant supervisor layer runs above any flow — it observes every executed
+    # The constant supervisor layer runs above any flow — it observes every executed
     # (non-publish) node read-only (advisory), and synthesizes the summary once at whole-task close.
     providers = _both()
     orch, store, _, art = _build(
@@ -851,6 +851,52 @@ def test_supervisor_layer_observes_each_step_and_writes_one_summary(
     assert (task_artifact_dir(art, "task-sup") / "summary.md").exists()
     # There is no summary graph node anymore — the layer owns it.
     assert "summary" not in _ran_nodes(store, "task-sup")
+
+
+def test_accepted_evaluator_findings_reach_the_observer_and_the_pr_body(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # End to end: `review` accepts (the finding is below its `high` gate) but still recorded a
+    # finding. Before this, that finding existed only in findings.json and the evaluations table —
+    # the observer saw a bare `Outcome: accept`, and the PR body told the operator the gate passed.
+    # Both surfaces must now carry it.
+    finding_text = "docstring drift in the new helper"
+    providers = _both(
+        outputs={
+            "review": (
+                "I found one advisory issue",
+                {"findings": [{"severity": "low", "what": finding_text}]},
+            ),
+            # The finalize turn is structured here (memory is on), so script a summary: without one
+            # it degrades to the deterministic fallback, which carries no follow-ups section.
+            "supervisor": ("noted", {"summary": "Added the helper and its tests."}),
+        }
+    )
+    orch, _store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-findings"))
+    assert result.final_status is Status.DONE
+
+    # Wire 2+3: the observation of the review step carries the findings digest, not just the label.
+    prompts = [
+        path.read_text("utf-8")
+        for path in (task_artifact_dir(art, "task-findings") / "stages" / "supervisor").glob(
+            "run-*/rendered-prompt.md"
+        )
+    ]
+    review_observation = [p for p in prompts if "Node: review" in p]
+    assert review_observation, "the review step was observed"
+    assert any(f"- [low] {finding_text}" in p for p in review_observation)
+    # Wire 1: the provider's own prose reached the observer too.
+    assert any("I found one advisory issue" in p for p in review_observation)
+
+    # And the operator surface: the accepted finding lands in the summary that becomes the PR body.
+    summary = (task_artifact_dir(art, "task-findings") / "summary.md").read_text("utf-8")
+    assert "## Technical debt / follow-ups" in summary
+    assert finding_text in summary
 
 
 def test_supervisor_turns_write_rendered_prompt_and_prompt_audit(
@@ -885,7 +931,7 @@ def test_supervisor_turns_write_rendered_prompt_and_prompt_audit(
 
 
 def test_finalize_tail_is_logged(git_repo, make_git_config, tmp_path: Path) -> None:
-    # P2.1: the end-of-run tail (whole-task summary → publish prep) emits transition log lines so a
+    # The end-of-run tail (whole-task summary → publish prep) emits transition log lines so a
     # long silent window (context assembly + the summary LLM call) is observable, not a hang.
     # Capture on the ``wastech_orchestrator`` logger directly — once any run configures runtime
     # logging it sets ``propagate = False``, so a root-attached caplog would miss these records.
@@ -919,7 +965,7 @@ def test_finalize_tail_is_logged(git_repo, make_git_config, tmp_path: Path) -> N
 def test_supervisor_summary_once_per_whole_task_not_subtask(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # P2.1: with decomposition the summary synthesis is once at whole-task close — not per subtask.
+    # With decomposition the summary synthesis is once at whole-task close — not per subtask.
     subtasks = {
         "decompose": True,
         "subtasks": [
@@ -1057,7 +1103,7 @@ def test_failed_checks_then_fix_then_pass(git_repo, make_git_config, tmp_path: P
 def test_fix_iterations_synced_to_operator_surfaces(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # F6: the engine owns loop counting in FlowRunState; the operator-facing tasks.fix_iterations
+    # The engine owns loop counting in FlowRunState; the operator-facing tasks.fix_iterations
     # (CLI status / get_counters) and the ledger must reflect it, not stay at the stale 0 they read
     # before the cutover synced them. One test-fix cycle => fix_iterations == 1 on both surfaces.
     providers = _both()
@@ -1175,7 +1221,7 @@ def test_resume_restores_review_path_from_latest_verdict_run(
     inputs = NodeInputs(flow_dir=str(tmp_path))
     orch._restore_engine_inputs(SimpleNamespace(task=SimpleNamespace(id=tid)), inputs)
     # Recovery re-publishes the latest verdict's findings into the exchange and points {review_path}
-    # there (WRI-001); the private findings.json stays the audit record.
+    # there; the private findings.json stays the audit record.
     expected = (
         exchange_node_run_dir(orch._exchange_root, tid, "review", 9) / "findings.json"
     ).as_posix()
@@ -1282,7 +1328,7 @@ def test_review_infra_empty_diff_annotates_reason(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
     # EXPERIMENTAL(no-work-infra) — remove with the feature.
-    # F7 (honest terminal): when the evaluator-infra degrade-to-manual fires with NO working-tree
+    # Honest terminal: when the evaluator-infra degrade-to-manual fires with NO working-tree
     # change, the reason must say so plainly, so the manual terminal never implies a diff to review
     # that does not exist. Here implementation makes no edit (no _patch_impl_edit), so the diff is
     # empty when review infra-fails.
@@ -1344,7 +1390,7 @@ def test_rate_limited_exhaustion_parks_task_resumable(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
     # A subscription/session limit that exhausts every provider (RATE_LIMITED) must NOT go terminal
-    # (the bug both post-mortems hit): it parks as resumable (RUNNING, blocked_since stamped) and
+    # It parks as resumable (RUNNING, blocked_since stamped) and
     # waits out the reset — no failure report, no ledger record, no burned queue / fix budget.
     providers = _both(infra_fail={"implementation"}, infra_error_class=ErrorClass.RATE_LIMITED)
     orch, store, ledger, art = _build(
@@ -1366,7 +1412,7 @@ def test_rate_limited_exhaustion_parks_task_resumable(
 def test_containment_unverified_goes_manual_action_required(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # WRI-012: an unproven provider process tree on implementation is a security / manual-action
+    # An unproven provider process tree on implementation is a security / manual-action
     # condition. Unlike a transient infra class it must NOT park (an auto-resume must not paper over
     # an uncontained writer), and unlike a quality failure it must NOT fall back — the task goes
     # terminal MANUAL_ACTION_REQUIRED so an operator intervenes, and publish never runs.
@@ -1390,9 +1436,9 @@ def test_containment_unverified_goes_manual_action_required(
 def test_live_control_plane_edit_during_run_is_manual_not_fallback(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # WRI-010: an agent that rewrites a live control file (here the flow YAML) during a provider
+    # An agent that rewrites a live control file (here the flow YAML) during a provider
     # attempt is caught by the post-node verify — the provider tree is already proven quiescent
-    # (WRI-012), so a live diff means a control file was mutated under the run. It is a non-fallback
+    # so a live diff means a control file was mutated under the run. It is a non-fallback
     # manual-action security violation, and no downstream node runs on the provider-selected bytes.
     providers = _both()
     orch, store, ledger, _ = _build(
@@ -1425,7 +1471,7 @@ def test_live_control_plane_edit_during_run_is_manual_not_fallback(
 def test_autorecovery_after_parked_live_edit_stays_conflict_manual(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # WRI-010 (preserved): AUTOMATIC crash-recovery — `resume()` WITHOUT an operator `continue_task`
+    # AUTOMATIC crash-recovery — `resume()` WITHOUT an operator `continue_task`
     # — must NOT adopt a live control-plane edit made while the task was parked. A crash can follow
     # an agent mutation, so auto-recovery keeps the frozen bundle and refuses the drift, routing to
     # manual. (An operator `rerun --continue` deliberately DOES adopt — see the next test.)
@@ -1456,7 +1502,7 @@ def test_autorecovery_after_parked_live_edit_stays_conflict_manual(
 def test_continue_task_after_parked_live_edit_adopts_flow(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # VF-3: an operator `rerun --continue` (continue_task) after editing the live flow while parked
+    # An operator `rerun --continue` (continue_task) after editing the live flow while parked
     # ADOPTS the edit — it re-freezes the control plane from the current on-disk flow, records a new
     # digest, and resumes to DONE rather than refusing like auto-recovery above. Agent-tamper
     # detection during the resumed run is unaffected (the post-node hook rebaselines to the new
@@ -1485,7 +1531,7 @@ def test_continue_task_after_parked_live_edit_adopts_flow(
 
     assert result.final_status is Status.DONE  # adopted the edited flow and resumed, not refused
     assert store.get_control_bundle_digest("task-adopt") != control_before  # re-frozen on adopt
-    # WRI-011 composite identity stays consistent: the instruction manifest re-binds the new
+    # The composite identity stays consistent: the instruction manifest re-binds the new
     # control digest, so its persisted digest changes too.
     assert store.get_instruction_manifest_digest("task-adopt") != inst_before
     assert "publish" in _ran_nodes(store, "task-adopt")  # resumed past implementation
@@ -1697,7 +1743,7 @@ flow:
 
 
 def test_minimal_flow_implement_only(git_repo, make_git_config, tmp_path: Path) -> None:
-    # P2.5: a degenerate flow (implementation → publish, no checks / review / fixing) is a valid
+    # A degenerate flow (implementation → publish, no checks / review / fixing) is a valid
     # graph shape and executes; the constant supervisor layer still writes the summary. A flow
     # without a checks node simply has no mutation guard (optional via graph shape).
     from wastech_orchestrator.core.flow.registry import FlowRegistry
@@ -1864,7 +1910,7 @@ def test_decomposed_task_commits_each_subtask(
 def test_decomposed_subtask_spec_path_reaches_implementation_prompt(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # F5 / MC3: in decomposition mode each subtask's edit nodes must be scoped to that subtask — the
+    # In decomposition mode each subtask's edit nodes must be scoped to that subtask — the
     # active immutable spec path (and "subtask N of M") is rendered into the implementation prompt,
     # so subtask 1 sees 01-first.md and subtask 2 sees 02-second.md.
     subtasks = {
@@ -2295,7 +2341,7 @@ def test_rejected_task_no_branch(git_repo, make_git_config, git_run, tmp_path: P
             "reason": "frontmatter_missing",
             "contacts": (),
             "governance_changed": (),
-            "details": None,  # VF-22: a validation reject has no tasks row → no enrichment
+            "details": None,  # a validation reject has no tasks row → no enrichment
         }
     ]
 
@@ -2441,7 +2487,7 @@ def test_publish_failure_after_finalize_is_manual_not_stranded_done(
     # A git failure during publishing AFTER finalize has moved the task file to tasks/done/ and
     # committed the audit trail must not mislabel the work: the deliverable is committed, only the
     # push/PR did not finish → resumable MANUAL_ACTION_REQUIRED, with the task file consistently in
-    # done/ (never stranded as a failed/ artifact, never marked FAILED). (F1 / MC2.)
+    # done/ (never stranded as a failed/ artifact, never marked FAILED).
     providers = _both()
     orch, store, ledger, _ = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
@@ -3368,7 +3414,7 @@ def test_supervisor_proposed_skills_reach_downstream_stages(
     orch, store, _, art = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
     )
-    # This test exercises the dynamic proposal, which is opt-in (F1: default off).
+    # This test exercises the dynamic proposal, which is opt-in (default off).
     from dataclasses import replace
 
     from wastech_orchestrator.config.schema import SkillsConfig
@@ -3547,7 +3593,7 @@ def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path
     stages = [r["node_id"] for r in node_records]
     assert stages == ["planning", "implementation", "review", "documentation"]
 
-    # The constant supervisor layer (P2.1) is itself part of the audit trail now: it observes
+    # The constant supervisor layer is itself part of the audit trail now: it observes
     # every completed step (reusing that step's node_run_id — including non-agent steps like
     # checks, which write no prompt-audit record of their own) and writes the once-per-task
     # finalize turn under the reserved node_run_id=0 sentinel (it runs last but is namespaced
@@ -3707,7 +3753,7 @@ def test_dependency_eligibility_dep_merged_is_eligible_and_backfills_sha(
 def test_dependency_eligibility_dep_merged_out_of_band_records_pr_merge_op(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # F11: a dependency whose PR was merged out of band (no orchestrator-armed pr_merge op) still
+    # A dependency whose PR was merged out of band (no orchestrator-armed pr_merge op) still
     # gets a `pr_merge` audit op written when the daemon auto-advances the dependent on the live
     # merged-PR check — so the merge-event audit ledger is complete for watch-driven merge-gated
     # tasks without stopping the daemon for `worc prs --sync`.
@@ -3766,7 +3812,7 @@ def test_dependency_eligibility_dep_failed_waits_forever(
 def test_dependency_eligibility_abandoned_dep_hints_replacement(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # F25: abandon+retry-under-a-new-id leaves the dependent WAITING forever with no clue. The
+    # Abandon+retry-under-a-new-id leaves the dependent WAITING forever with no clue. The
     # detail must point at the done same-title replacement so the operator can fix depends_on.
     orch, store, ledger, _ = _build(
         git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
@@ -3903,11 +3949,11 @@ def test_reject_dependency_quarantines_and_records_failed(
     assert record["validation_reason"] == "invalid_depends_on"
 
 
-# -- WRI-011: frozen agent instruction inputs --------------------------------------------------
+# -- frozen agent instruction inputs -----------------------------------------------------------
 
 
 def _commit_agents_md(git_repo, git_run, body: str) -> Path:
-    """Add + commit a tracked root ``AGENTS.md`` so WRI-011 discovers/freezes it."""
+    """Add + commit a tracked root ``AGENTS.md`` so the bundle discovers/freezes it."""
     agents = git_repo.clone / "AGENTS.md"
     agents.write_text(body, encoding="utf-8")
     git_run(["add", "AGENTS.md"], git_repo.clone)
@@ -3915,11 +3961,11 @@ def _commit_agents_md(git_repo, git_run, body: str) -> Path:
     return agents
 
 
-def test_wri011_freezes_instruction_inputs_end_to_end(
+def test_instruction_inputs_are_frozen_end_to_end(
     git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:
     # A complete task persists a composite instruction-manifest digest and freezes the task packet +
-    # per-source repository-instruction files into the private bundle for the digest. (VF-5: no
+    # per-source repository-instruction files into the private bundle for the digest. (No
     # concatenated payload is built or injected; the agent reads the live root files itself, and a
     # workspace-write attempt write-denies them so what it reads stays immutable for the run.)
     _commit_agents_md(git_repo, git_run, "ORIGINAL REPO RULES\n")
@@ -3942,12 +3988,12 @@ def test_wri011_freezes_instruction_inputs_end_to_end(
     assert store.get_instruction_manifest_digest("task-frz")  # composite digest persisted
     bundle = art / "instruction-bundles" / "task-frz"
     assert (bundle / "task" / "task.md").is_file()  # frozen (private) task packet
-    # VF-5: the per-source file is frozen for the digest — no concatenated repository.md payload.
+    # The per-source file is frozen for the digest — no concatenated repository.md payload.
     src = bundle / "instructions" / "src" / "AGENTS.md"
     assert src.is_file() and "ORIGINAL REPO RULES" in src.read_text(encoding="utf-8")
     assert not (bundle / "instructions" / "repository.md").exists()
 
-    # VF-20: a workspace-write implementation attempt does NOT deny the tracked root instruction
+    # A workspace-write implementation attempt does NOT deny the tracked root instruction
     # files — editing them is ordinary repository work, reported to the operator not blocked.
     # (The per-source freeze above still records what the agent read, for the audit digest.)
     def _denies_agents_md(r: AgentRunRequest) -> bool:
@@ -3958,10 +4004,10 @@ def test_wri011_freezes_instruction_inputs_end_to_end(
     assert impl and not any(_denies_agents_md(r) for r in impl)
 
 
-def test_wri009_resume_repopulates_task_packet_digest(
+def test_resume_repopulates_task_packet_digest(
     git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:
-    # H3 (WRI-009 ↔ WRI-011): on ``rerun --continue`` the frozen (key, digest) entries must be
+    # on ``rerun --continue`` the frozen (key, digest) entries must be
     # repopulated from the verified manifest so ``_task_packet_digest`` is NOT None — otherwise
     # ``commit_audit`` silently skips the lifecycle-vs-packet check on resume and a task file
     # rewritten while the task was parked could be committed unchecked. The fresh path always
@@ -4005,7 +4051,7 @@ def test_wri009_resume_repopulates_task_packet_digest(
 def test_resume_after_live_governance_edit_does_not_fail_closed(
     git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:
-    # VF-20 §1: editing a governance file mid-task must never fail-close a continue/resume. The
+    # Editing a governance file mid-task must never fail-close a continue/resume. The
     # resume freeze path re-hashes the FROZEN copies under the bundle dir (the task-start snapshot),
     # not the live files — so a live AGENTS.md edit after the run does not raise or block resume.
     from types import SimpleNamespace
@@ -4029,7 +4075,7 @@ def test_resume_after_live_governance_edit_does_not_fail_closed(
     tid = "task-gov-resume"
     assert orch.run_task(_complete_task(tmp_path, tid)).final_status is Status.DONE
 
-    # A governance file is now edited in the live repo (the change VF-20 allows).
+    # A governance file is now edited in the live repo (deliberately allowed).
     agents.write_text("EDITED AFTER THE RUN\n", encoding="utf-8")
 
     # The resume freeze path must still load + verify the persisted bundle without fail-closing:
@@ -4039,10 +4085,10 @@ def test_resume_after_live_governance_edit_does_not_fail_closed(
     assert orch._task_packet_digest(p) is not None  # no InstructionBundleError, no manual gate
 
 
-def test_wri011_frozen_instruction_copy_is_task_start_snapshot(
+def test_frozen_instruction_copy_is_task_start_snapshot(
     git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:
-    # VF-20: the agent reads the LIVE root files and may edit them (ordinary work, reported not
+    # The agent reads the LIVE root files and may edit them (ordinary work, reported not
     # blocked). The private per-source freeze — the digest/audit record — is still captured once at
     # task start, so a later live edit does not change it: "record drift, don't prevent it" (the
     # frozen copy stays the task-start snapshot even though the live file changed).
@@ -4071,7 +4117,7 @@ def test_wri011_frozen_instruction_copy_is_task_start_snapshot(
     assert "TAMPERED" not in frozen
 
 
-# --- VF-20: governance-change notice (never block; report on every surface) ----------------------
+# --- governance-change notice (never block; report on every surface) -----------------------------
 
 
 def _pending_task_in_repo(git_repo, task_id: str) -> str:
@@ -4091,7 +4137,7 @@ def _pending_task_in_repo(git_repo, task_id: str) -> str:
 def test_governance_edit_reports_notice_on_all_surfaces(
     git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:
-    # VF-20: a run that edits governance/instruction files is NOT blocked — it completes, the edit
+    # A run that edits governance/instruction files is NOT blocked — it completes, the edit
     # lands, and the operator is notified on every surface: a console/log WARNING, a section in the
     # committed PR/commit summary, the completed-ledger record, and the Telegram terminal message.
     _commit_agents_md(git_repo, git_run, "ORIGINAL REPO RULES\n")
@@ -4156,7 +4202,7 @@ def test_governance_edit_reports_notice_on_all_surfaces(
 def test_ordinary_task_emits_no_governance_notice(
     git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:
-    # VF-20 no-noise AC: a run that touches no governance file emits no notice on any surface.
+    # No noise: a run that touches no governance file emits no notice on any surface.
     providers = _both()
     notifier = RecordingNotifier()
     orch, store, ledger, _ = _build(
@@ -4202,7 +4248,7 @@ def test_ordinary_task_emits_no_governance_notice(
     assert notifier.calls[-1]["governance_changed"] == ()
 
 
-# --- WRI-007: terminal-exchange sealing (orchestrator wiring) -------------------------------------
+# --- terminal-exchange sealing (orchestrator wiring) ----------------------------------------------
 
 
 def test_terminal_seals_and_removes_active_exchange(
@@ -4231,7 +4277,7 @@ def test_terminal_seals_and_removes_active_exchange(
 def test_seal_terminal_exchange_quarantines_on_mutation(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # The terminal seam quarantines a WRI-002-flagged tree as evidence instead of sealing it.
+    # The terminal seam quarantines a tamper-flagged tree as evidence instead of sealing it.
     orch, store, _, art = _build(
         git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
     )
@@ -4258,9 +4304,9 @@ def test_seal_terminal_exchange_quarantines_on_mutation(
 def test_seal_terminal_exchange_survives_bare_oserror(
     git_repo, make_git_config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # M7: seal_exchange can raise a bare OSError (ENOSPC on a full disk / EACCES) AFTER the terminal
+    # `seal_exchange` can raise a bare OSError (ENOSPC on a full disk / EACCES) AFTER the terminal
     # status + ledger are committed. `_seal_terminal_exchange` promises "Never raises" — it must
-    # flag the tree unsafe (blocking later launches) instead of crashing into the H1 daemon-crash
+    # flag the tree unsafe (blocking later launches) instead of crashing into the daemon-crash
     # path with no signal.
     orch, store, _, _ = _build(
         git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
@@ -4282,7 +4328,7 @@ def test_seal_terminal_exchange_survives_bare_oserror(
 def test_containment_unverified_marks_exchange_unsafe_and_skips_seal(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # WRI-012 unproven quiescence must not seal (an unknown descendant may still write); the task is
+    # Unproven quiescence must not seal (an unknown descendant may still write); the task is
     # flagged unsafe so every later provider launch is blocked until an operator resolves it.
     providers = _both(
         infra_fail={"implementation"}, infra_error_class=ErrorClass.CONTAINMENT_UNVERIFIED
@@ -4297,7 +4343,7 @@ def test_containment_unverified_marks_exchange_unsafe_and_skips_seal(
     assert result.final_status is Status.MANUAL_ACTION_REQUIRED
     assert store.get_exchange_guard("task-unsafe")[1] is True  # exchange_active_unsafe set
     assert not exchange_seal_root(art, "task-unsafe").exists()  # no snapshot built over the tree
-    # C1 part 2: the terminal Git/cleanup is withheld while the tree is not proven quiescent — the
+    # The terminal Git/cleanup is withheld while the tree is not proven quiescent — the
     # cleanup checkout did not run (no Git action against a possibly-live working tree).
     task = store.get_task("task-unsafe")
     assert task is not None and task.cleanup_completed is False
@@ -4307,7 +4353,7 @@ def test_containment_unverified_marks_exchange_unsafe_and_skips_seal(
 def test_containment_unverified_on_evaluator_marks_unsafe_and_skips_seal(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # C1 (WRI-012 ↔ WRI-007 seam): an EVALUATOR node (review) whose provider tree cannot be proven
+    # An EVALUATOR node (review) whose provider tree cannot be proven
     # quiescent must fail closed exactly like an agent node — even though its (green) diff would
     # otherwise be shippable. Before the fix the evaluator branch degraded straight to manual
     # WITHOUT flagging the exchange unsafe, so the seal ran and the leftover tree leaked to the next
@@ -4332,7 +4378,7 @@ def test_containment_unverified_on_evaluator_marks_unsafe_and_skips_seal(
 def test_stale_foreign_exchange_goes_manual_not_crash(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # H1: a stale/foreign entry left in the exchange root (e.g. a prior task whose seal was
+    # A stale/foreign entry left in the exchange root (e.g. a prior task whose seal was
     # interrupted) must fail closed to manual_action_required — never let a bare ExchangeError
     # escape uncaught and crash-loop the daemon. The border still holds (no provider launches over a
     # dirty exchange), so nothing downstream runs.
@@ -4352,3 +4398,160 @@ def test_stale_foreign_exchange_goes_manual_not_crash(
     assert not _ran_nodes(store, "task-h1")  # no node launched over the dirty exchange
     assert task.cleanup_last_error is not None and "task-OTHER" in task.cleanup_last_error
     assert ledger.records()[0]["final_status"] == "manual_action_required"
+
+
+_GIT_EVIDENCE_FLOW = """
+flow:
+  name: implementation
+  task_type: implementation
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: pull_request
+  nodes:
+    - id: implementation
+      kind: agent
+      role_file: roles/implementation.md
+      session_scope: editing_lineage
+      permission_profile: workspace-write
+    - id: audit
+      kind: agent
+      role_file: roles/audit.md
+      permission_profile: read-only
+      git_evidence: true
+    - id: publish
+      kind: publish
+      policy: pull_request
+  edges:
+    - { from: implementation, to: audit }
+    - { from: audit, to: publish }
+  budgets:
+    global_fix_iterations: 30
+"""
+
+
+def test_read_only_node_that_writes_warns_operator_and_never_parks_the_task(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # A read-only node holding the git-evidence grant is held to reading by the provider's sandbox
+    # (the whole clone is write-denied). If a write lands anyway the operator is told — console
+    # warning + the ⚠️ trace — and the run continues to DONE. It is never parked in
+    # manual_action_required: the grant exists so an audit node can read delivery history, and
+    # trading that for a stray file would be the wrong bargain.
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+    from wastech_orchestrator.notify import TRACE_READ_ONLY_WRITE
+
+    flows = tmp_path / "flows"
+    (flows / "roles").mkdir(parents=True)
+    (flows / "roles" / "implementation.md").write_text("Implement {task_path}.", "utf-8")
+    (flows / "roles" / "audit.md").write_text("Audit the change.", "utf-8")
+    (flows / "implementation.yaml").write_text(_GIT_EVIDENCE_FLOW, "utf-8")
+
+    providers = _both()
+    notifier = RecordingNotifier()
+    orch, _store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+        config_kwargs={"telegram_trace": True, "allow_git_evidence": True},
+    )
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
+
+    # The implementation node writes legitimately; the audit node then writes too — the case the
+    # sandbox is supposed to prevent, simulated here because the fake provider has no sandbox.
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        if request.node_id == "audit":
+            assert request.git_evidence is True  # the grant reached the provider
+            (git_repo.clone / "stray.txt").write_text("should not exist\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    messages: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    logger = logging.getLogger("wastech_orchestrator")
+    handler = _Collect()
+    logger.addHandler(handler)
+    try:
+        result = orch.run_task(_complete_task(tmp_path, "task-row"))
+    finally:
+        logger.removeHandler(handler)
+
+    assert result.final_status is Status.DONE  # warned, not parked
+    audit_traces = [c["outcome"] for c in notifier.trace_calls if c["node_id"] == "audit"]
+    assert audit_traces == [TRACE_READ_ONLY_WRITE]
+    assert any("changed the working tree" in m for m in messages)
+
+
+def test_read_only_node_that_poisons_a_git_hook_warns_operator_and_never_parks_the_task(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The sharper half of the same rule (operator decision 2, read literally): the granted read-only
+    # node plants a `.git/hooks/post-commit`, the drift event — the next git command in
+    # that clone is the orchestrator's own, so a hook is how a read-only node borrows the
+    # orchestrator's credentials. It still does not park the task: the operator gets a warning
+    # naming the drifted aspect plus the ⚠️ trace, and the run continues. A workspace-write node
+    # doing the same is still terminal (see test_workspace_write_git_control_drift_is_manual).
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+    from wastech_orchestrator.notify import TRACE_READ_ONLY_GIT_DRIFT
+
+    flows = tmp_path / "flows"
+    (flows / "roles").mkdir(parents=True)
+    (flows / "roles" / "implementation.md").write_text("Implement {task_path}.", "utf-8")
+    (flows / "roles" / "audit.md").write_text("Audit the change.", "utf-8")
+    (flows / "implementation.yaml").write_text(_GIT_EVIDENCE_FLOW, "utf-8")
+
+    providers = _both()
+    notifier = RecordingNotifier()
+    orch, _store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+        config_kwargs={"telegram_trace": True, "allow_git_evidence": True},
+    )
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
+
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+        if request.node_id == "audit":
+            hook = git_repo.clone / ".git" / "hooks" / "post-commit"
+            hook.parent.mkdir(parents=True, exist_ok=True)
+            hook.write_text("#!/bin/sh\necho poisoned\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    messages: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    logger = logging.getLogger("wastech_orchestrator")
+    handler = _Collect()
+    logger.addHandler(handler)
+    try:
+        result = orch.run_task(_complete_task(tmp_path, "task-row"))
+    finally:
+        logger.removeHandler(handler)
+
+    assert result.final_status is Status.DONE  # warned, not parked
+    audit_traces = [c["outcome"] for c in notifier.trace_calls if c["node_id"] == "audit"]
+    assert audit_traces == [TRACE_READ_ONLY_GIT_DRIFT]
+    assert any("changed git control state" in m for m in messages)

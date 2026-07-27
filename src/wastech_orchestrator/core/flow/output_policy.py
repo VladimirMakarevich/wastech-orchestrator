@@ -3,8 +3,8 @@
 The scalar :class:`~wastech_orchestrator.core.flow.contracts.OutputPolicy` declared on a flow
 resolves here into a foundation :class:`ResolvedOutputPolicy`: the single repo-relative directory
 the flow's writing nodes may write into, the files the flow must produce there, and whether the
-deliverable is *private* (must never enter git). The same resolution is the seam shared by P3.1 (the
-``citation`` checker reads ``sources.json`` from the report directory) and P3.2 (the after-stage
+deliverable is *private* (must never enter git). The same resolution is the seam shared by the
+``citation`` checker (which reads ``sources.json`` from the report directory) and the after-stage
 write guard + the publish node enforce containment / privacy against it).
 
 Pure: no IO, no git, no provider knowledge — only the policy → (path, required files, privacy)

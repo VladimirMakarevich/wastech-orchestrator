@@ -1,4 +1,4 @@
-"""Memory records + trust (01.3): trust required & readable, durability gate, serialization."""
+"""Memory records + trust: trust required & readable, durability gate, serialization."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ def test_six_trust_levels_have_canonical_string_values() -> None:
     ],
 )
 def test_durability_gate_reads_trust(trust: TrustLevel, durable: bool) -> None:
-    # AC-SF5 groundwork: a low-trust record can never behave as a high-trust one.
+    # A low-trust record can never behave as a high-trust one.
     assert is_durable_candidate(trust) is durable
     assert (trust in DURABLE_TRUST_LEVELS) is durable
 

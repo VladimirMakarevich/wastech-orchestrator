@@ -90,7 +90,12 @@ flow:
       role: critic
       role_file: blog_article_revise/tone_style.md
       blocking: true
-      # gate_severity: low  # block on ANY finding (default high); raise `style_fix` to match
+      # A style critic judges whether the piece is GOOD ENOUGH, so it has no natural way to emit
+      # `high`/`critical`; at the built-in default (`high`) its findings are recorded and dropped.
+      # This node is `blocking: true`, so a gating finding loops `style_fix` until that budget is
+      # spent and then parks the task in manual_action_required — raise `style_fix` if you lower this
+      # further (`low` = block on ANY finding).
+      gate_severity: medium
     - id: polish
       kind: agent
       role_file: blog_article_revise/polish.md

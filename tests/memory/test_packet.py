@@ -1,7 +1,7 @@
-"""PacketBuilder (03.1/03.2/03.5): deterministic filter + ranking, caps, empty state.
+"""PacketBuilder: deterministic filter + ranking, caps, empty state.
 
 The read path is model-free: every test builds packets from a store written by the service — no
-router, no model anywhere (AC-R3 reproducibility, AC-R2 caps, AC-R4 empty state, AC-R1 path-only).
+router, no model anywhere: reproducibility, caps, empty state, path-only.
 """
 
 from __future__ import annotations
@@ -64,11 +64,11 @@ def _lesson(
     )
 
 
-# -- selection / ranking (03.1) -----------------------------------------------
+# -- selection / ranking ------------------------------------------------------
 
 
 def test_build_is_deterministic(service: MemoryService) -> None:
-    # AC-R3: same inputs → byte-identical packet (stable sort, no clock/randomness in ranking).
+    # Same inputs → byte-identical packet (stable sort, no clock/randomness in ranking).
     for i in range(4):
         service.append(_lesson(f"m{i}", statement=f"lesson {i}"), audit=_AUDIT)
     builder = _builder(service)
@@ -120,7 +120,7 @@ def _hold_lesson(service: MemoryService, *, subject: str, ev_type: str) -> None:
 
 
 def test_durable_held_quarantine_lesson_is_surfaced(service: MemoryService) -> None:
-    # F43: a durable lesson still held in quarantine (awaiting recurrence) is real repo knowledge —
+    # A durable lesson still held in quarantine (awaiting recurrence) is real repo knowledge —
     # the packet surfaces it instead of leaving it write-only.
     _hold_lesson(service, subject="rv", ev_type="check")  # artifact-backed → durable, held 1/2
     assert service.read_long_term(LongTermKind.REVIEWER) == []  # held, not promoted
@@ -130,7 +130,7 @@ def test_durable_held_quarantine_lesson_is_surfaced(service: MemoryService) -> N
 
 
 def test_agent_inferred_quarantine_is_not_surfaced(service: MemoryService) -> None:
-    # F43: only DURABLE-trust held lessons are surfaced; external/agent-inferred stays invisible.
+    # Only DURABLE-trust held lessons are surfaced; external/agent-inferred stays invisible.
     _hold_lesson(service, subject="ai", ev_type="web")  # external-untrusted
     assert len(service.read_quarantine()) == 1
     packet = _builder(service).build(PacketContext(node_id="review"))
@@ -138,7 +138,7 @@ def test_agent_inferred_quarantine_is_not_surfaced(service: MemoryService) -> No
 
 
 def test_episodes_are_never_rendered(service: MemoryService) -> None:
-    # Memory V2 (move 1): the episodic tier is a write-only shell — an episode in the store is never
+    # The episodic tier is write-only — an episode in the store is never
     # selected into a packet (even with content) and never on its own produces one.
     service.append(
         EpisodeRecord(
@@ -169,7 +169,7 @@ def test_render_shows_durable_evidence_ref(service: MemoryService) -> None:
 
 def test_render_drops_rotting_evidence_ref(service: MemoryService) -> None:
     # A lesson whose only evidence is a rotting pointer (commit SHA / task id / .worc/logs dir) has
-    # no "see …" link — the ref stays in the store as provenance but is filtered at render (V2 Q2).
+    # no "see …" link — the ref stays in the store as provenance but is filtered at render.
     rotting = (
         Evidence(type="commit", ref="a1b2c3d4e5f6"),
         Evidence(type="task", ref="t-42"),
@@ -239,7 +239,7 @@ def test_review_prefers_reviewer_lessons(service: MemoryService) -> None:
     assert planning.long_term[0]["memory_id"] == "rev"  # "rev" < "sem" by id tiebreak
 
 
-# -- caps (03.2 / AC-R2) ------------------------------------------------------
+# -- caps ---------------------------------------------------------------------
 
 
 def test_count_caps_are_enforced(service: MemoryService) -> None:
@@ -268,7 +268,7 @@ def test_implementation_gets_more_entity_cards(service: MemoryService) -> None:
 
 
 def test_line_backstop_drops_whole_records_never_partial(service: MemoryService) -> None:
-    # AC-R2 / NFR4: over the line backstop, whole lowest-ranked records are dropped (entity first),
+    # Over the line backstop, whole lowest-ranked records are dropped (entity first),
     # never a truncated record. A tiny cap forces the drop; what survives renders in full.
     service.append(_lesson("keep", statement="durable lesson"), audit=_AUDIT)
     service.append(
@@ -290,7 +290,7 @@ def test_line_backstop_drops_whole_records_never_partial(service: MemoryService)
     assert len(rendered.splitlines()) <= 5
 
 
-# -- empty state (03.5 / AC-R4) -----------------------------------------------
+# -- empty state --------------------------------------------------------------
 
 
 def test_empty_store_yields_empty_packet(service: MemoryService) -> None:
@@ -299,7 +299,7 @@ def test_empty_store_yields_empty_packet(service: MemoryService) -> None:
 
 
 def test_write_packet_writes_no_file_when_empty(service: MemoryService, tmp_path: Path) -> None:
-    # AC-R4: a node with no relevant memory gets NO packet file (so {memory_path} renders empty).
+    # A node with no relevant memory gets NO packet file (so {memory_path} renders empty).
     dest = tmp_path / "logs" / "t1" / "memory" / "planning.md"
     result = _builder(service).write_packet(
         node_id="planning", task_type=None, touched_paths=(), dest=dest

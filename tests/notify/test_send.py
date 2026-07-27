@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 
 from wastech_orchestrator.notify.interface import (
+    TRACE_READ_ONLY_GIT_DRIFT,
+    TRACE_READ_ONLY_WRITE,
     TRACE_REWORK_EXHAUSTED,
     NullNotifier,
     TerminalDetails,
@@ -67,7 +69,7 @@ def test_send_includes_contacts_as_plain_text(fake_client: FakeTelegramClient) -
 
 
 def test_send_includes_governance_changed_as_paths(fake_client: FakeTelegramClient) -> None:
-    # VF-20: a completed run that edited governance files marks which ones on the terminal message.
+    # A completed run that edited governance files marks which ones on the terminal message.
     n = _notifier(fake_client)
     n.send_notification(
         task_id="task-gov",
@@ -103,7 +105,7 @@ def test_send_manual_action_required(fake_client: FakeTelegramClient) -> None:
 
 
 def test_send_manual_action_required_enriched(fake_client: FakeTelegramClient) -> None:
-    # VF-22: a needs-attention terminal carrying details renders the actionable multi-line body —
+    # A needs-attention terminal carrying details renders the actionable multi-line body —
     # glyph + id, title, where it stopped, a prose reason, the blocking finding + paths, the report.
     n = _notifier(fake_client)
     details = TerminalDetails(
@@ -161,7 +163,7 @@ def test_send_failed_enriched_echoes_unknown_reason_and_uses_cross_glyph(
 
 
 def test_send_done_stays_terse_with_glyph(fake_client: FakeTelegramClient) -> None:
-    # VF-22 item 7: a clean done stays a single terse line (with a ✅ glyph), never the enriched
+    # A clean done stays a single terse line (with a ✅ glyph), never the enriched
     # body — even if details were somehow supplied, `done` is not a needs-attention status.
     n = _notifier(fake_client)
     n.send_notification(
@@ -250,6 +252,24 @@ def test_send_trace_rework_exhausted_renders_warning(fake_client: FakeTelegramCl
     n.send_trace(task_id="t", node_id="review", outcome=TRACE_REWORK_EXHAUSTED)
     text = fake_client.sent[0]["text"]
     assert "⚠️" in text and TRACE_REWORK_EXHAUSTED in text
+
+
+def test_send_trace_read_only_write_renders_warning(fake_client: FakeTelegramClient) -> None:
+    # A read-only node that wrote to the workspace renders ⚠️ too: the node finished, but the
+    # read-only guarantee did not hold and the tree needs a look.
+    n = _notifier(fake_client)
+    n.send_trace(task_id="t", node_id="audit", outcome=TRACE_READ_ONLY_WRITE)
+    text = fake_client.sent[0]["text"]
+    assert "⚠️" in text and TRACE_READ_ONLY_WRITE in text
+
+
+def test_send_trace_read_only_git_drift_renders_warning(fake_client: FakeTelegramClient) -> None:
+    # Same ⚠️, sharper event: the node finished and the run continues, but git control state drifted,
+    # so a human has to stop the run before the clone is committed or pushed.
+    n = _notifier(fake_client)
+    n.send_trace(task_id="t", node_id="audit", outcome=TRACE_READ_ONLY_GIT_DRIFT)
+    text = fake_client.sent[0]["text"]
+    assert "⚠️" in text and TRACE_READ_ONLY_GIT_DRIFT in text
 
 
 def test_send_trace_failure_is_swallowed(fake_client: FakeTelegramClient) -> None:

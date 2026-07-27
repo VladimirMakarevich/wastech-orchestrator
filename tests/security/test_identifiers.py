@@ -1,4 +1,4 @@
-"""Portable artifact path-identity validators (WRI-008).
+"""Portable artifact path-identity validators.
 
 These validators are pure and **host-independent** by construction — there is no platform seam to
 inject, so the same string is accepted/rejected identically on Windows, macOS, and Linux. That is
@@ -19,7 +19,7 @@ from wastech_orchestrator.security.identifiers import (
 )
 
 # Every Windows reserved device stem. Each is reserved case-insensitively and even with an
-# extension, so ``con``, ``CON``, ``con.txt`` all resolve to the device (AC6).
+# extension, so ``con``, ``CON``, ``con.txt`` all resolve to the device.
 _DEVICE_STEMS = [
     "con",
     "prn",
@@ -30,7 +30,7 @@ _DEVICE_STEMS = [
 ]
 
 
-# --- Windows reserved names (AC6) ----------------------------------------------------------------
+# --- Windows reserved names ----------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("stem", _DEVICE_STEMS)
@@ -125,7 +125,7 @@ def test_invalid_node_ids(node_id: str) -> None:
     "node_id", ["a", "planning", "test_fix", "static-scan", "pass2", "node-1", "a" * 64]
 )
 def test_valid_node_id_is_a_substitutable_prompt_token(node_id: str) -> None:
-    # AC3: every accepted node id forms a token the renderer actually substitutes as
+    # Every accepted node id forms a token the renderer actually substitutes as
     # {<node-id>_path} — verified against the real renderer token grammar, not a re-derived pattern.
     token = f"{node_id}_path"
     assert referenced_variables("before {" + token + "} after") == {token}

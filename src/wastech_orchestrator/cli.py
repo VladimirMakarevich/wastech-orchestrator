@@ -535,7 +535,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="never prompt: any confirmation that isn't already resolved by --yes/"
         "--reset-fix-budget/--no-reset-fix-budget is refused (exit 1) instead of asked. Used by "
-        "scripts/CI and by 'worc shell' (a prompt would fight the REPL's stdin, H1)",
+        "scripts/CI and by 'worc shell' (a prompt would fight the REPL's stdin)",
     )
 
     finalize_cmd = sub.add_parser(
@@ -1090,7 +1090,7 @@ def load_config_for(args: argparse.Namespace) -> OrchestratorConfig | None:
 
 
 def layout_for(config: OrchestratorConfig) -> RuntimeLayout:
-    """The one provider-neutral :class:`RuntimeLayout` for the configured repo (WRI-004).
+    """The one provider-neutral :class:`RuntimeLayout` for the configured repo.
 
     Built here at the CLI composition boundary and injected into consumers so each declares which
     surface it owns. ``control_home`` and ``private_home`` both resolve to ``<repo>/.worc`` today.
@@ -1105,7 +1105,7 @@ def worc_home_for(config: OrchestratorConfig) -> Path:
     ``workspace/``, ``checks/``, the resolved check profile, validation reports, the memory store —
     lives here. It is the private-surface accessor; control-plane consumers
     (config/flows/tools/guide) use ``layout_for(config).control_home`` instead. The two coincide
-    until WRI-005 relocates the private home.
+    until the private home is relocated.
     """
     return layout_for(config).private_home
 
@@ -1276,7 +1276,7 @@ class _PendingScan(NamedTuple):
     depends_on: tuple[str, ...]
     priority_rank: int
     queue: str
-    # Front-matter ``title`` (or ``None``) — shown in the next-task confirmation prompt (idea 27),
+    # Front-matter ``title`` (or ``None``) — shown in the next-task confirmation prompt,
     # alongside the id. Allowlisted for the prompt; never carries diff/prompt content.
     title: str | None = None
 
@@ -1450,7 +1450,7 @@ def _confirm_next_task(
     task_id: str | None,
     title: str | None,
 ) -> bool:
-    """Ask the operator (Telegram) to approve claiming the next pending task (idea 27).
+    """Ask the operator (Telegram) to approve claiming the next pending task.
 
     Returns ``True`` only on an explicit approval; deny / timeout / no transport → ``False``
     (fail-closed STOP — the task stays pending, the operator decides later). Non-durable by design:
@@ -1567,7 +1567,7 @@ def watch_once(
         if config.orchestrator.auto_mode.confirm_next_task and not _confirm_next_task(
             orchestrator, config, task_id, scan.title
         ):
-            break  # operator denied / silent → leave pending, stop chaining this cycle (idea 27)
+            break  # operator denied / silent → leave pending, stop chaining this cycle
         result = orchestrator.run_task(str(task_file))
         results.append(result)
         if result.final_status is Status.MANUAL_ACTION_REQUIRED:
@@ -1580,11 +1580,11 @@ def watch_once(
 def _build_cleanup_hook(config: OrchestratorConfig) -> Callable[[], None] | None:
     """A rate-limited memory-cleanup callable for the ``watch_loop`` idle gap, or ``None``.
 
-    Returns ``None`` when memory is disabled (Q10) — then no cleanup is ever scheduled. Otherwise a
+    Returns ``None`` when memory is disabled — then no cleanup is ever scheduled. Otherwise a
     best-effort closure that runs one bounded :meth:`CleanupJob.run_once` at most every
-    ``cleanup_min_interval_s`` (Q1), building a fresh store view + ``DerivedIndex`` each pass so the
+    ``cleanup_min_interval_s``, building a fresh store view + ``DerivedIndex`` each pass so the
     repo-introspection never goes stale across a long-lived daemon. A failure is logged and
-    swallowed — cleanup must never crash the watcher or delay the next task pickup (AC-C2)."""
+    swallowed — cleanup must never crash the watcher or delay the next task pickup."""
     if not config.memory.enabled:
         return None
     min_interval = float(config.memory.cleanup_min_interval_s)
@@ -1669,7 +1669,7 @@ def watch_loop(
         iteration += 1
         # Idle-gap memory cleanup: the single-slot invariant guarantees no active task here, but
         # double-check (a RUNNING soft-pause still holds the slot) so cleanup never races a task or
-        # delays the next pickup (AC-C2). Rate-limiting + bounds live inside the hook.
+        # delays the next pickup. Rate-limiting + bounds live inside the hook.
         if cleanup_hook is not None and not has_active_task(config):
             cleanup_hook()
         if poll_interval <= 0:
@@ -1702,7 +1702,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     config = load_config_for(args)
     if config is None:
         return 2
-    preflight.require_git_control()  # WRI-009: git must honor `core.hooksPath` (>= 2.9)
+    preflight.require_git_control()  # git must honor `core.hooksPath` (>= 2.9)
     if config.git.create_pull_request:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
         preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
@@ -1729,7 +1729,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"{result.task_id}: paused — provider unavailable, will resume")
         return _EXIT_BY_STATUS[Status.RUNNING]
     if result.validation_reason:
-        # F5a: a gate reject prints the machine reason AND the field+cause detail, so the operator
+        # A gate reject prints the machine reason AND the field+cause detail, so the operator
         # sees WHICH front-matter field and WHY without opening the JSON validation report.
         detail = f" ({result.validation_detail})" if result.validation_detail else ""
         print(f"{result.task_id}: rejected — {result.validation_reason}{detail}", file=sys.stderr)
@@ -1902,7 +1902,7 @@ def cmd_rerun(args: argparse.Namespace) -> int:
         _report_rerun_plan(plan)
         return 0
 
-    preflight.require_git_control()  # WRI-009: git must honor `core.hooksPath` (>= 2.9)
+    preflight.require_git_control()  # git must honor `core.hooksPath` (>= 2.9)
     if config.git.create_pull_request:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
         preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
@@ -1910,7 +1910,7 @@ def cmd_rerun(args: argparse.Namespace) -> int:
     for note in plan.notes:
         print(f"rerun: note: {note}")
     # --non-interactive (also forced by a non-TTY stdin) never calls input(): a nested blocking
-    # input() fights 'worc shell's own stdin reader (H1: the single-stdin-reader rule) — the same
+    # input() fights 'worc shell's own stdin reader (the single-stdin-reader rule) — the same
     # class of bug already fixed for 'stop'/'restart'. Refuse-with-instructions instead of hanging.
     non_interactive = getattr(args, "non_interactive", False) or not sys.stdin.isatty()
     # The prompt names what actually happens in each mode. --continue reuses the existing branch in
@@ -2336,8 +2336,8 @@ def cmd_memory(args: argparse.Namespace) -> int:
     """Dispatch the ``memory`` subcommands: show / validate (read-only) | compact / restore.
 
     Disabled memory (``memory.enabled: false`` or the block absent) is a clean no-op for every verb
-    (Q10). The mutating verbs (compact / restore) refuse while a task is active and offer
-    ``--dry-run`` to print their plan first (AC-C1)."""
+    The mutating verbs (compact / restore) refuse while a task is active and offer
+    ``--dry-run`` to print their plan first."""
     _configure_runtime_logging(args)
     config = load_config_for(args)
     if config is None:
@@ -2420,7 +2420,7 @@ def _cmd_memory_validate(config: OrchestratorConfig, layout: MemoryLayout) -> in
 
 
 def _cmd_memory_compact(config: OrchestratorConfig, layout: MemoryLayout, *, dry_run: bool) -> int:
-    """Run a fuller (uncapped) cleanup pass now — refused while a task is active (FR6/AC-C2)."""
+    """Run a fuller (uncapped) cleanup pass now — refused while a task is active."""
     if has_active_task(config):
         print("memory compact: a task is active — refusing; run when the orchestrator is idle")
         return 1
@@ -2449,7 +2449,7 @@ def _cmd_memory_compact(config: OrchestratorConfig, layout: MemoryLayout, *, dry
 def _cmd_memory_restore(
     config: OrchestratorConfig, layout: MemoryLayout, *, snapshot: str | None, dry_run: bool
 ) -> int:
-    """Roll the store back to an audit snapshot — refused while a task is active (AC-SF4)."""
+    """Roll the store back to an audit snapshot — refused while a task is active."""
     if has_active_task(config):
         print("memory restore: a task is active — refusing; run when the orchestrator is idle")
         return 1
@@ -2570,7 +2570,7 @@ def run_preflight(
     as a health line here — the only place the ``.env`` notice appears.
 
     ``capability_smoke`` (set only by ``worc preflight``, never the installer's auto-run) opts into
-    each healthy provider's live no-model isolation capability probe (H7): Codex runs a real
+    each healthy provider's live no-model isolation capability probe: Codex runs a real
     ``codex sandbox`` smoke of the generated profile so an old CLI / missing sandbox helper /
     mis-generated policy surfaces here rather than mid-run. A proven policy leak fails preflight
     unconditionally; an undemonstrable sandbox degrades like a capability gap (fatal only with no
@@ -2602,7 +2602,7 @@ def run_preflight(
                 ok = False
                 lines.append(f"{pid.value}: FAIL — {reason} (no fallback provider)")
 
-        # H7: live no-model isolation capability smoke (Codex ``codex sandbox``), opt-in via
+        # Live no-model isolation capability smoke (Codex ``codex sandbox``), opt-in via
         # ``worc preflight`` and only for a healthy provider under strict isolation. A proven leak
         # is unconditionally fatal (non-fallback security result); an undemonstrable sandbox
         # degrades like a capability gap (fatal only with no fallback provider).
@@ -2630,7 +2630,7 @@ def run_preflight(
         enforced = "enforced" if config.security.strict_isolation else "strict_isolation=false"
         lines.append(f"isolation: OK ({enforced})")
 
-    # VF-6: loudly surface the operator's read-isolation escape hatch — never a silent weakening.
+    # Loudly surface the operator's read-isolation escape hatch — never a silent weakening.
     if config.security.read_isolation_off:
         why = (
             "security.disable_read_isolation=true"
@@ -2642,6 +2642,15 @@ def run_preflight(
             "discovery (Claude CLAUDE.md + project settings/hooks/MCP/skills; Codex user + .codex "
             "config/hooks/rules) and the private read-deny projection is lifted; the write-guard, "
             "commit/staging gates, PR control, and denied_read_paths blacklist stay in force"
+        )
+
+    # Same principle for the git-evidence grant: an operator reading preflight should see which
+    # optional capabilities are live, not have to infer them from the config file.
+    if config.security.allow_git_evidence:
+        lines.append(
+            "git-evidence: ON (security.allow_git_evidence=true) — a flow node declaring "
+            "git_evidence may run the read-only git verbs to inspect delivery history; the "
+            "repository stays unwritable (sandbox) and commit/push/PR stay the orchestrator's"
         )
 
     lines.extend(_summarize_command_sets(config))
@@ -2673,7 +2682,7 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     if config is None:
         return 2
     env_file, _ = resolve_env_file_path(args)
-    # ``worc preflight`` opts into the live no-model capability smoke (H7); the installer's
+    # ``worc preflight`` opts into the live no-model capability smoke; the installer's
     # auto-preflight (``_install_run_preflight``) keeps the default (offline) to stay fast.
     ok, lines = run_preflight(config, env_file=env_file, capability_smoke=True)
     for line in lines:
@@ -2796,7 +2805,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     config = load_config_for(args)
     if config is None:
         return 2
-    preflight.require_git_control()  # WRI-009: git must honor `core.hooksPath` (>= 2.9)
+    preflight.require_git_control()  # git must honor `core.hooksPath` (>= 2.9)
     if config.git.create_pull_request:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
         preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
@@ -2809,7 +2818,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     pid_path = process_control.pid_file_path(worc_home_for(config))
     stop_path = process_control.stop_file_path(worc_home_for(config))
     children_path = process_control.children_file_path(worc_home_for(config))
-    cleanup_hook = _build_cleanup_hook(config)  # None when memory is disabled (Q10)
+    cleanup_hook = _build_cleanup_hook(config)  # None when memory is disabled
 
     # Single pass: no PID file, no signal handler, no stop wiring — and NO agent-handle recorder, so
     # it never clobbers a concurrent daemon's children file. A hung single-pass agent is still
@@ -2957,7 +2966,7 @@ def _gated_stop(
         force_full=getattr(args, "force_full", False),
         # --non-interactive forces the refuse-with-instructions path (no _confirm_yes/input()). The
         # console always passes it so a busy 'down'/'restart' never blocks on input() inside the
-        # prompt_toolkit REPL (H1: the single-stdin-reader rule).
+        # prompt_toolkit REPL (the single-stdin-reader rule).
         interactive=sys.stdin.isatty() and not getattr(args, "non_interactive", False),
     )
     if not decision.proceed:
@@ -3647,7 +3656,7 @@ def _list_ids(store: StateStore | None, scope: str | None) -> int:
 
 
 def _print_section_ids(sections: list[tuple[str, list[dict[str, str | None]]]]) -> int:
-    """Print the bare ids of the focused sections (F4): the same disk+DB source as the table view,
+    """Print the bare ids of the focused sections: the same disk+DB source as the table view,
     so `--pending --format ids` lists queued tasks that have no DB row yet. An unparseable pending
     file has no id and is skipped (there is no usable id to print)."""
     ids = {tid for _, items in sections for e in items if (tid := e.get("task_id"))}
@@ -3671,7 +3680,7 @@ def cmd_list(args: argparse.Namespace) -> int:
     fmt = "ids" if args.scope else args.format
     db_path = Path(worc_home_for(config)) / "state.db"
     store = StateStore.open_readonly(db_path) if db_path.is_file() else None
-    # F4: when a section focus flag is combined with `--format ids`, derive the ids from the same
+    # When a section focus flag is combined with `--format ids`, derive the ids from the same
     # source as the table view (disk pending files + DB) instead of DB-only — a freshly-queued
     # pending task has no DB row yet, so the DB-only path printed nothing. `--scope` stays
     # DB-derived (it is completion-facing, about rerun/status eligibility, which is a DB property).
@@ -4071,7 +4080,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"error: {exc}")
         return 2
     except ManualActionRequired as exc:
-        # A foreground command (e.g. `rerun`'s reset-to-base filter refuse-gate, M5) hit a condition
+        # A foreground command (e.g. `rerun`'s reset-to-base filter refuse-gate) hit a condition
         # that needs an operator to act. Surface it as a clean message + exit 2, not a traceback. In
         # the daemon/run paths catch ManualActionRequired internally and map it to a status,
         # so it never reaches here.

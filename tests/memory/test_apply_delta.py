@@ -1,4 +1,4 @@
-"""apply_delta funnel (02.4/02.5): validate, trust, merge, promote/quarantine, audit."""
+"""apply_delta funnel: validate, trust, merge, promote/quarantine, audit."""
 
 from __future__ import annotations
 
@@ -71,7 +71,7 @@ def test_human_curated_lesson_auto_promotes(service: MemoryService) -> None:
 
 
 def test_missing_evidence_is_quarantined_never_promoted(service: MemoryService) -> None:
-    # AC-W2: a candidate with no evidence is quarantined, never long-term.
+    # A candidate with no evidence is quarantined, never long-term.
     result = _apply(service, CandidateDelta(lessons=(_lesson(ev_type=None),)))
     assert result.quarantined == 1
     assert service.read_long_term(LongTermKind.SEMANTIC) == []
@@ -80,14 +80,14 @@ def test_missing_evidence_is_quarantined_never_promoted(service: MemoryService) 
 
 @pytest.mark.parametrize("ev_type", ["web", "mcp", "mystery"])
 def test_external_and_agent_inferred_never_durable(service: MemoryService, ev_type: str) -> None:
-    # AC-SF2/AC-W4: external-untrusted / agent-inferred candidates quarantine, never long-term.
+    # External-untrusted / agent-inferred candidates quarantine, never long-term.
     _apply(service, CandidateDelta(lessons=(_lesson(ev_type=ev_type),)))
     assert service.read_long_term(LongTermKind.SEMANTIC) == []
     assert len(service.read_quarantine()) == 1
 
 
 def test_artifact_backed_promotes_only_after_recurrence(service: MemoryService) -> None:
-    # Q3: durable-but-not-auto-promote stays short-term until it recurs in a 2nd task.
+    # Durable-but-not-auto-promote stays short-term until it recurs in a 2nd task.
     delta = CandidateDelta(lessons=(_lesson(ev_type="check", subject="cfg"),))
     _apply(service, delta, task_id="t1")
     assert service.read_long_term(LongTermKind.SEMANTIC) == []  # one short of recurrence
@@ -98,7 +98,7 @@ def test_artifact_backed_promotes_only_after_recurrence(service: MemoryService) 
 
 
 def test_recurrence_dedups_across_drifting_subject_by_scope(service: MemoryService) -> None:
-    # F30: the same lesson recurring under DIFFERENT subject wording but the SAME scope.paths must
+    # The same lesson recurring under DIFFERENT subject wording but the SAME scope.paths must
     # accumulate recurrence (one memory_id), so a real repeat promotes — the prettier-baseline-drift
     # lesson recurred in 3 tasks under 3 subjects and never promoted because ids diverged.
     def lesson(subject: str) -> CandidateLesson:
@@ -119,7 +119,7 @@ def test_recurrence_dedups_across_drifting_subject_by_scope(service: MemoryServi
 
 
 def test_pathless_lesson_still_keys_on_subject(service: MemoryService) -> None:
-    # A path-less lesson keeps the pre-F30 subject key: distinct subjects stay distinct.
+    # A path-less lesson keeps the subject key: distinct subjects stay distinct.
     _apply(service, CandidateDelta(lessons=(_lesson(subject="alpha"),)), task_id="t1")
     _apply(service, CandidateDelta(lessons=(_lesson(subject="beta"),)), task_id="t2")
     # Two different lessons, each 1/2 -> both held, nothing promoted by spurious recurrence.
@@ -152,7 +152,7 @@ def test_merge_keeps_oldest_id_and_unions_evidence(service: MemoryService) -> No
 
 
 def test_failure_source_writes_episode_but_never_long_term(service: MemoryService) -> None:
-    # AC-W3: a failed/manual close writes short-term but never promotes (even a strong lesson).
+    # A failed/manual close writes short-term but never promotes (even a strong lesson).
     result = _apply(
         service,
         CandidateDelta(lessons=(_lesson(ev_type="operator"),)),
@@ -179,7 +179,7 @@ def _indexed_service(tmp_path: Path, tracked: set[str]) -> MemoryService:
 
 
 def test_entity_verified_path_stored_missing_or_pathless_quarantined(tmp_path: Path) -> None:
-    # F1/NFR2: with a DerivedIndex wired, an entity card earns durable repo-observed only when its
+    # With a DerivedIndex wired, an entity card earns durable repo-observed only when its
     # paths verify present in the live repo. A hallucinated/gone path is downgraded -> quarantine;
     # a path-less card is quarantined as before. Nothing is ever silently deleted.
     service = _indexed_service(tmp_path, tracked={"src/real.py"})
@@ -201,7 +201,7 @@ def test_entity_verified_path_stored_missing_or_pathless_quarantined(tmp_path: P
 
 
 def test_entity_cards_dedupe_by_path_and_accumulate_task_ids(tmp_path: Path) -> None:
-    # F44: two cards for the same file — with different LLM-authored entity_ids (wording drift) —
+    # Two cards for the same file — with different LLM-authored entity_ids (wording drift) —
     # merge into ONE card keyed by canonical path, and last_seen_task_ids accumulates every task.
     service = _indexed_service(tmp_path, tracked={"src/mod.py"})
     _apply(
@@ -229,7 +229,7 @@ def test_entity_cards_dedupe_by_path_and_accumulate_task_ids(tmp_path: Path) -> 
 
 
 def test_merge_audit_names_scope_key_and_single_id(service: MemoryService) -> None:
-    # F46: merging into an existing active record names the real dedup key (kind+scope.paths), not
+    # Merging into an existing active record names the real dedup key (kind+scope.paths), not
     # "same subject", and scopes affected_ids to just the merged record (not every row in the file).
     lesson = CandidateLesson(
         kind=LongTermKind.SEMANTIC,
@@ -274,7 +274,7 @@ def test_every_mutation_is_audited_and_chain_holds(service: MemoryService) -> No
 
 
 def test_every_audit_row_carries_nonempty_rationale(service: MemoryService) -> None:
-    # F9 (full AC-SF3): every mutation records a human-readable rationale beside the pre/post
+    # Every mutation records a human-readable rationale beside the pre/post
     # hashes, so `worc memory show/validate` explains WHY each record was appended / quarantined.
     _apply(service, CandidateDelta(lessons=(_lesson(ev_type="operator"),)))  # promotes
     rows = service.audit.rows()
@@ -283,7 +283,7 @@ def test_every_audit_row_carries_nonempty_rationale(service: MemoryService) -> N
 
 
 def test_quarantine_rationale_names_the_cause(service: MemoryService) -> None:
-    # F9: a non-durable candidate is held with a concrete deterministic cause (not an empty string).
+    # A non-durable candidate is held with a concrete deterministic cause (not an empty string).
     _apply(service, CandidateDelta(lessons=(_lesson(ev_type="agent"),)))  # agent-inferred → held
     rows = service.audit.rows()
     quarantine_rows = [r for r in rows if r.get("action") == "quarantine"]
@@ -292,7 +292,7 @@ def test_quarantine_rationale_names_the_cause(service: MemoryService) -> None:
 
 
 def test_missing_evidence_quarantine_rationale(service: MemoryService) -> None:
-    # F9: a no-evidence candidate names evidence as the cause.
+    # A no-evidence candidate names evidence as the cause.
     _apply(service, CandidateDelta(lessons=(_lesson(ev_type=None),)))
     rows = service.audit.rows()
     assert any(

@@ -247,7 +247,7 @@ class ValidationGate:
         if id_value in depends_on:
             return _rej(ValidationReason.INVALID_DEPENDS_ON, f"{id_value!r} depends on itself")
 
-        # duplicate_task_id — vs. the tasks table + the ledger, exempting a recovery re-run. F6: a
+        # duplicate_task_id — vs. the tasks table + the ledger, exempting a recovery re-run. A
         # ledger id whose ONLY trace is a validation reject (no tasks row, never claimed) does not
         # reserve the id — the operator's "rejected → fix → re-submit under the same id" loop must
         # work. A real duplicate (a tasks row, or a ledger record from an actual attempt) still
@@ -279,10 +279,11 @@ class ValidationGate:
         if branch_mode_reject is not None:
             return branch_mode_reject, None
         branch_mode, branch_ref, publish, branch_name = branch_fields
-        # F40: a task that both merge-gates on a dependency (`depends_on`) and pins itself to a
+        # A task that both merge-gates on a dependency (`depends_on`) and pins itself to a
         # pre-existing branch (`branch_ref` ⟹ branch_mode 'existing') can deadlock when that branch
         # IS a dependency's own still-open PR branch — the dependency never merges because this task
-        # builds on it (this stalled all of P5 at step 2). The gate cannot resolve a dependency's
+        # builds on it (this stalled a whole task chain at its second step). The gate cannot
+        # resolve a dependency's
         # branch (that is live scheduler state), so this is an advisory warning, not a reject: an
         # independent shared branch alongside a dependency is legitimate.
         if depends_on and branch_ref is not None:

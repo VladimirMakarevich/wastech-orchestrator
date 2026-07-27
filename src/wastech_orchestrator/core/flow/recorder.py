@@ -1,4 +1,4 @@
-"""Persistence adapter for the flow engine (P1.2).
+"""Persistence adapter for the flow engine.
 
 :class:`StateStoreRunRecorder` implements the engine's
 :class:`~wastech_orchestrator.core.flow.engine.RunRecorder` seam against the SQLite state store and
@@ -26,7 +26,7 @@ from wastech_orchestrator.state_store import StateStore
 
 
 def read_last_findings(store: StateStore, task_id: str) -> list[Any] | None:
-    """The most recent in-flow evaluator verdict's findings for the failure report (F50).
+    """The most recent in-flow evaluator verdict's findings for the failure report.
 
     Returns ``None`` when the run recorded no in-flow verdict (so the report reads "(none)" only
     when that is the truth) or the stored JSON is unusable.
@@ -42,7 +42,7 @@ def read_last_findings(store: StateStore, task_id: str) -> list[Any] | None:
 
 
 def read_final_diff(artifacts_root: str | Path, task_id: str) -> str:
-    """The task's working-tree diff artifact (already written + redacted) for the report (F50).
+    """The task's working-tree diff artifact (already written + redacted) for the report.
 
     Reads back ``<task-dir>/current.diff`` written by ``GitManager.write_current_diff`` during the
     agent nodes; ``""`` when absent (e.g. no edit node ran) — an honest empty, not a masked one.

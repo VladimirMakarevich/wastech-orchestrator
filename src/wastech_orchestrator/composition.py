@@ -44,7 +44,7 @@ ISOLATION_CHECKS: dict[ProviderId, IsolationCheck] = {
 
 # ProviderId → its config/credential home resolver, bound here (the composition root) so the
 # provider-neutral :class:`RuntimeLayout` never learns a provider-specific path. Used to populate
-# the WRI-004 :class:`InternalDenyPolicy` with the operator-owned auth homes to deny.
+# the :class:`InternalDenyPolicy` with the operator-owned auth homes to deny.
 _PROVIDER_CONFIG_HOMES: dict[ProviderId, Callable[[], Path]] = {
     ProviderId.CLAUDE: claude.claude_config_home,
     ProviderId.CODEX: codex.codex_config_home,
@@ -57,16 +57,16 @@ def build_internal_deny_policy(
     *,
     env_file: Path | None = None,
 ) -> InternalDenyPolicy:
-    """Assemble the WRI-004 internal deny policy at the composition boundary.
+    """Assemble the internal deny policy at the composition boundary.
 
     Collects the control/private homes from the provider-neutral ``layout``, the resolved
     default/explicit ``env_file`` (which may live outside ``private_home``), the config or
-    credential homes of the *configured* providers (:data:`_PROVIDER_CONFIG_HOMES`), the WRI-010
-    frozen-control-bundle root (``<private_home>/control-bundles``), and the WRI-011
+    credential homes of the *configured* providers (:data:`_PROVIDER_CONFIG_HOMES`), the
+    frozen-control-bundle root (``<private_home>/control-bundles``), and the
     frozen-instruction-bundle root (``<private_home>/instruction-bundles``). Resolving the provider
     homes here — not inside :class:`RuntimeLayout` — keeps the layout provider-neutral.
 
-    WRI-004/010/011 only represent these targets; WRI-002/003 project them into provider policy.
+    These are representations only; the provider adapters project them into their own policy.
     """
     provider_homes = tuple(
         _PROVIDER_CONFIG_HOMES[pid]()
@@ -96,7 +96,7 @@ def build_providers(
     Used by :func:`build_orchestrator` and the CLI ``preflight`` command. Providers own the private
     artifact tree, so they are rooted at ``layout.private_home``. ``agent_handle_recorder`` is set
     only by the ``watch`` daemon so a hard stop can reap a running agent's whole subtree; it is
-    ``None`` for one-shot CLI runs and tests. ``deny_policy`` (WRI-002/003) is the internal
+    ``None`` for one-shot CLI runs and tests. ``deny_policy`` is the internal
     read-deny
     set each adapter projects into its tool/OS-sandbox policy; when ``None`` it is built from the
     ``layout`` (the CLI ``preflight`` caller passes nothing — it never launches an agent).
@@ -149,7 +149,7 @@ def build_orchestrator(
     the Orchestrator). The Core depends only on these interfaces — never on a provider directly.
 
     ``env_file`` is the CLI-resolved default/explicit ``.env`` path, threaded only into the internal
-    deny policy (WRI-004 groundwork; unread until WRI-002/003 project it).
+    deny policy (the adapters project it into provider syntax).
 
     ``is_recovery_rerun`` is threaded into the gate so the ``rerun`` command can admit exactly
     the re-run id past the duplicate-id check (scoped to one id; every other gate check still runs).
@@ -160,7 +160,7 @@ def build_orchestrator(
     a crash), so it never falls back to a fresh agent.
     """
     private_home = layout.private_home
-    # WRI-002/003: build the internal deny policy once (with the resolved ``env_file``) and thread
+    # Build the internal deny policy once (with the resolved ``env_file``) and thread
     # it
     # into the providers (read/write-deny projection), the Orchestrator (audit), and — as the
     # offline

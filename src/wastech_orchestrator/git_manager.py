@@ -1,8 +1,8 @@
-"""Git Manager (.agents/rules/git-workflow.md).
+"""Git Manager — the sole owner of commit / push / pull-request.
 
 The **only** component that commits, pushes, or opens pull requests — agents never do. Every git
-and ``gh`` invocation goes through the P2 safe process runner as an **argv list** (no shell string,
-no user-string interpolation), with an allowlisted environment.
+and ``gh`` invocation goes through the shared safe process runner as an **argv list** (no shell
+string, no user-string interpolation), with an allowlisted environment.
 
 Responsibilities:
 
@@ -56,11 +56,12 @@ from wastech_orchestrator.task.parser import slugify_bounded
 # Git/gh operations are bounded but slower than a trivial command (network fetch/push allowed).
 GIT_TIMEOUT_SECONDS = 300
 
-# F13 defense-in-depth: a push can fail for a genuinely transient reason (a network blip, or
+# Defense-in-depth: a push can fail for a genuinely transient reason (a network blip, or
 # `.git/index.lock` contention with a concurrent git process) that a short retry resolves. Only the
 # failures whose stderr matches one of these markers are retried — a deterministic failure (a
 # rejected non-fast-forward, a bad pathspec, an auth error) must still fail loudly and immediately,
-# so F12 surfaces it, never be masked by retries. Matched case-insensitively against the (redacted)
+# so the stderr diagnostic surfaces it, never be masked by retries. Matched case-insensitively
+# against the (redacted)
 # git stderr.
 _TRANSIENT_GIT_STDERR_MARKERS = (
     "index.lock",
@@ -99,7 +100,7 @@ _RUNTIME_IGNORE_COMMENT = (
 # is not already ignored, so each root is handled independently — a repo that already ignores
 # `.worc/` (e.g. an operator's `.worc/*` + `!.worc/flows/` scheme) still gets the `.worc-io/`
 # exchange line without a blanket `.worc/` re-append that would defeat the operator's negation.
-# `.worc-io/` (WRI-001) is the provider-readable exchange — a sibling runtime root that must also
+# `.worc-io/` is the provider-readable exchange — a sibling runtime root that must also
 # never enter a commit. `tasks/` is intentionally NOT ignored — it holds the committed audit trail.
 _RUNTIME_IGNORE_ROOTS: tuple[tuple[str, str], ...] = (
     (f"{CONTROL_HOME_DIRNAME}/state.db", f"{CONTROL_HOME_DIRNAME}/"),
@@ -113,7 +114,7 @@ RUNTIME_GITIGNORE_LINES: tuple[str, ...] = (
     f"{EXCHANGE_HOME_DIRNAME}/",
 )
 
-# WRI-009: the private, empty hooks directory every orchestrator git command points at via
+# The private, empty hooks directory every orchestrator git command points at via
 # `-c core.hooksPath`, so a target-repo hook (or an agent-set `core.hooksPath`) can never execute in
 # an orchestrator-owned git process. It lives under the private home (a provider-denied root) and
 # is created empty once per manager. An *absolute path to a real empty dir* is required — an empty
@@ -147,7 +148,7 @@ _GIT_HARDENING_ENV: dict[str, str] = {
     "GCM_INTERACTIVE": "Never",
 }
 
-# WRI-009: repo-local/worktree config keys whose *value is a program* git would execute during a
+# Repo-local/worktree config keys whose *value is a program* git would execute during a
 # filter (clean/smudge/process), an external/textconv diff, or a fetch/push. A command-line `-c`
 # cannot blanket a filter/diff driver — its name comes from `.gitattributes` — so the agent-writable
 # config surface is inventoried and any such key is refused. `git config --list` lowercases the
@@ -196,11 +197,11 @@ def _missing_runtime_ignore_lines(is_ignored: Callable[[str], bool]) -> list[str
     """The ignore lines for the runtime roots not yet covered, per root (empty when all covered).
 
     Each root (``.worc/``, ``.worc-io/``) is decided independently against its own probe, so an
-    operator's own ``.worc/*`` + ``!.worc/flows/`` scheme (see ``docs/how-to.md``) is never stomped:
+    operator's own ``.worc/*`` + ``!.worc/flows/`` scheme is never stomped:
     when ``.worc/`` is already ignored, the blanket ``.worc/`` line is skipped (re-appending it
     would silently re-exclude ``.worc/flows/`` — a parent-dir exclusion from any source blocks
     re-inclusion of its children), while the ``.worc-io/`` exchange line is still added if missing
-    (WRI-001). The comment header rides along only when at least one root line is added.
+    The comment header rides along only when at least one root line is added.
     """
     lines = [line for probe, line in _RUNTIME_IGNORE_ROOTS if not is_ignored(probe)]
     return [_RUNTIME_IGNORE_COMMENT, *lines] if lines else []
@@ -236,7 +237,7 @@ _ALREADY_MERGED_MARKERS = ("already merged", "already been merged", "not open", 
 _STATUS_STARTED = "started"
 _STATUS_COMPLETED = "completed"
 
-# Reused chain-PR body bounds (F27 / VF-15). GitHub rejects an issue/PR body over 65 536 chars; we
+# Reused chain-PR body bounds. GitHub rejects an issue/PR body over 65 536 chars; we
 # keep a margin below it so a compacted body always fits with headroom. Appended task sections are
 # delimited by ``_SECTION_SEPARATOR`` and each carries ``_TASK_MARKER_PREFIX<id> -->`` so a section
 # is individually addressable (for the idempotency guard, the chain-length count, and compaction).
@@ -342,12 +343,13 @@ def _parse_porcelain_status_z(output: str) -> list[tuple[str, str]]:
     return entries
 
 
-# --- Git control-state fingerprint (WRI-009) ------------------------------------------------
+# --- Git control-state fingerprint ----------------------------------------------------------
 #
 # A provider with workspace write can mutate the clone's Git *control* state — the index, HEAD/refs,
 # repo-local config, hooks, and operation markers — not just ordinary working-tree files (which are
 # the point of the run). The orchestrator fingerprints that control state immediately before a
-# workspace-write attempt and compares it after WRI-012 proves the provider process tree quiescent;
+# workspace-write attempt and compares it after the quiescence barrier proves the provider process
+# tree empty;
 # any change is a non-fallback `manual_action_required` policy violation. The fingerprint keeps only
 # identities and content/value *hashes* (never raw config values or hook bytes), so it carries no
 # secret, and the drift evidence is redacted path/key/name level only.
@@ -387,7 +389,7 @@ def _parse_ls_files_stage_z(output: str) -> dict[str, tuple[str, str, str]]:
 
 
 def _bound_pr_body(body: str) -> str:
-    """Keep a reused chain-PR *body* below :data:`_PR_BODY_MAX_CHARS`, else compact it (VF-15).
+    """Keep a reused chain-PR *body* below :data:`_PR_BODY_MAX_CHARS`, else compact it.
 
     Bounds the body by **compacting the oldest task sections** — replacing each one's summary with a
     one-line stub pointing at ``logs/<id>/summary.md`` — from oldest toward newest until it fits.
@@ -415,7 +417,7 @@ def _bound_pr_body(body: str) -> str:
 
 def _compact_pr_section(section: str) -> str:
     """Shrink one appended chain-PR section to its task marker + ``## title`` plus a stub pointing
-    at the on-disk summary (VF-15). Idempotent: re-compacting an already-stubbed section is a no-op.
+    at the on-disk summary. Idempotent: re-compacting an already-stubbed section is a no-op.
     """
     marker_line, _, after = section.partition("\n\n")
     title_line, _, _summary = after.partition("\n\n")
@@ -429,7 +431,7 @@ def _compact_pr_section(section: str) -> str:
 
 @dataclass(frozen=True)
 class HookFacts:
-    """Identity of one entry in the effective git hooks directory (WRI-009)."""
+    """Identity of one entry in the effective git hooks directory."""
 
     kind: str  # "file" | "symlink" | "dir" | "other"
     target: str | None  # POSIX symlink target when kind == "symlink"
@@ -439,7 +441,7 @@ class HookFacts:
 
 @dataclass(frozen=True)
 class GitControlState:
-    """Fingerprint of the Git control surfaces a provider attempt must not mutate (WRI-009).
+    """Fingerprint of the Git control surfaces a provider attempt must not mutate.
 
     ``config`` maps each repo-local (+worktree) key to the sha256 of each of its values — hashes,
     never raw values, since a value can be secret-bearing (e.g. a remote URL or a signing-key path).
@@ -468,7 +470,7 @@ class GitControlDriftItem:
 
 @dataclass(frozen=True)
 class GitControlDrift:
-    """One or more control-state changes detected across a provider attempt (WRI-009)."""
+    """One or more control-state changes detected across a provider attempt."""
 
     items: tuple[GitControlDriftItem, ...]
 
@@ -502,7 +504,7 @@ class _ActiveTask:
     slug: str
     branch: str
     partial_counter: int = 0
-    # F32: the commit the working branch sat at when THIS task started. Set only for
+    # The commit the working branch sat at when THIS task started. Set only for
     # ``existing``/``current`` (chain-continuation) modes, where the branch already carries prior
     # tasks' commits; ``None`` for ``new`` (the branch is cut fresh from ``base_branch``, so the
     # config base is exactly the task's start). Diffs use it so review/docs see only this task's
@@ -531,13 +533,13 @@ class GitManager:
         # from the code commit alongside the gitignored `.worc/` runtime home.
         self._tasks_dir = config.paths.tasks_dir
         self._excluded_dirs = (*RUNTIME_EXCLUDED_DIRS, self._tasks_dir)
-        # WRI-009: orchestrator-injected no-prompt/no-editor git env on top of the security
+        # Orchestrator-injected no-prompt/no-editor git env on top of the security
         # allowlist; applies to both `git` (`_run`) and `gh` (`_gh`), which shells out to git.
         self._env = {
             **build_child_env(config.security.allowed_environment),
             **_GIT_HARDENING_ENV,
         }
-        # WRI-009: an empty hooks dir every git command points at (see `_harden_git_argv`), so no
+        # An empty hooks dir every git command points at (see `_harden_git_argv`), so no
         # target-repo hook runs in an orchestrator git process. Absolute, real, empty.
         self._null_hooks_dir = Path(self._artifacts_root) / GIT_NULL_HOOKS_DIRNAME
         self._null_hooks_dir.mkdir(parents=True, exist_ok=True)
@@ -547,7 +549,7 @@ class GitManager:
         self._active: _ActiveTask | None = None
         # Whether the task lifecycle dir is gitignored (cached; drives the code-commit pathspec).
         self._tasks_dir_ignored_cache: bool | None = None
-        # Injectable backoff for the transient-push retry (F13); real time in production, patched in
+        # Injectable backoff for the transient-push retry; real time in production, patched in
         # tests so the bounded retry never actually sleeps.
         self._sleep: Callable[[float], None] = time.sleep
 
@@ -556,7 +558,7 @@ class GitManager:
     def _run(self, argv: Sequence[str]) -> GitResult:
         """Run an argv list in the clone via the safe process runner; capture stdout + stderr.
 
-        Every ``git`` invocation is hardened first (WRI-009, :meth:`_harden_git_argv`) so a
+        Every ``git`` invocation is hardened first (:meth:`_harden_git_argv`) so a
         target-repo hook/filter/editor/pager/signing program can never execute in an
         orchestrator-owned git process. ``gh`` argv is left unchanged (env-only hardening).
 
@@ -564,7 +566,7 @@ class GitManager:
         contains and reaps the whole subtree, but the per-call ``ps`` descendant sweep is skipped —
         a large speedup for the many small git calls a task makes. It is sound because a hardened
         git process cannot spawn a ``setsid``-escaped writer (no hooks/pager/ext-diff/textconv/
-        signing helpers). ``gh`` is less constrained, so it keeps the full WRI-012 barrier.
+        signing helpers). ``gh`` is less constrained, so it keeps the full quiescence barrier.
         """
         argv = list(argv)
         hardened = self._harden_git_argv(argv)
@@ -600,7 +602,7 @@ class GitManager:
         )
 
     def _harden_git_argv(self, argv: list[str]) -> list[str]:
-        """Insert the WRI-009 hardening prefix into a ``git`` argv (leaves ``gh``/other argv as-is).
+        """Insert the hardening prefix into a ``git`` argv (leaves ``gh``/other argv as-is).
 
         Produces ``git --no-pager -c core.hooksPath=<empty> -c ... <subcommand> ...``. A
         command-line ``-c`` overrides repo/global/system config, beating a repo that sets its own
@@ -631,8 +633,9 @@ class GitManager:
 
     def _git_checked_retryable(self, *args: str) -> str:
         """Like :meth:`_git_checked` but retries a *transient* failure with a short bounded backoff
-        (F13). A deterministic failure (stderr not matching :data:`_TRANSIENT_GIT_STDERR_MARKERS`)
-        re-raises on the first attempt — retries must never mask a real bug (F12 still surfaces it).
+        A deterministic failure (stderr not matching :data:`_TRANSIENT_GIT_STDERR_MARKERS`)
+        re-raises on the first attempt — retries must never mask a real bug, and the stderr
+        diagnostic still surfaces it.
         """
         for attempt in range(_PUSH_MAX_RETRIES + 1):
             try:
@@ -677,7 +680,8 @@ class GitManager:
     def list_tracked_files(self, *pathspecs: str) -> tuple[str, ...]:
         """Repo-relative POSIX paths of every tracked file, optionally under ``pathspecs``.
 
-        Used by WRI-011 to discover which root repository-instruction files (``AGENTS.md`` etc.) are
+        Used by the instruction bundle to discover which root repository-instruction files
+        (``AGENTS.md`` etc.) are
         tracked and to enumerate a selected skill's package closure (``ls-files -- <package-dir>``).
         ``ls-files`` is ignore-aware, bounded (untracked build/vendor trees never appear), and emits
         forward-slash paths on every platform. Best-effort: a working copy with no git data yields
@@ -725,7 +729,7 @@ class GitManager:
         performs a plain checkout (``existing``) or nothing at all (``current``), so the operator's
         local state is preserved.
         """
-        # WRI-009: no orchestrator git (incl. the checkout below, which runs smudge filters) may run
+        # No orchestrator git (incl. the checkout below, which runs smudge filters) may run
         # a repo-local program-launching driver.
         self._assert_no_untrusted_filters()
         if mode is BranchMode.EXISTING:
@@ -734,7 +738,7 @@ class GitManager:
             branch = self._prepare_current(task_id, slug)
         else:
             branch = self._prepare_new(task_id, slug, epoch=epoch, branch_name=branch_name)
-        # WRI-009: with the branch attached, refuse to start if a non-artifact entry is already
+        # With the branch attached, refuse to start if a non-artifact entry is already
         # staged — a bare ``git commit`` would sweep it into the task's scoped commit. existing/
         # current never reset, so this is a fail-closed refusal; unstaged edits are left untouched.
         self.assert_index_clean_at_start()
@@ -777,7 +781,7 @@ class GitManager:
             self._git_checked("checkout", "-b", branch_ref, f"origin/{branch_ref}")
         else:  # defensive: the pre-branch preflight already verified existence
             raise GitCommandError(f"branch_ref {branch_ref!r} does not exist locally or on origin")
-        self._active.base_ref = self._head_sha()  # F32: chain start = this branch's current tip
+        self._active.base_ref = self._head_sha()  # chain start = this branch's current tip
         return branch_ref
 
     def _prepare_current(self, task_id: str, slug: str) -> str:
@@ -787,7 +791,7 @@ class GitManager:
         if branch is None:  # defensive: the preflight rejects a detached HEAD for `current`
             raise GitCommandError("branch_mode 'current' requires a branch (HEAD is detached)")
         self._active = _ActiveTask(task_id=task_id, slug=slug, branch=branch)
-        self._active.base_ref = self._head_sha()  # F32: chain start = this branch's current tip
+        self._active.base_ref = self._head_sha()  # chain start = this branch's current tip
         return branch
 
     def _head_sha(self) -> str | None:
@@ -795,7 +799,7 @@ class GitManager:
         return self._git("rev-parse", "HEAD").stdout.strip() or None
 
     def _diff_base(self) -> str:
-        """The ref the task's change is diffed against: the per-task chain start (F32) when set,
+        """The ref the task's change is diffed against: the per-task chain start when set,
         else the config ``base_branch``. Equal to ``base_branch`` for ``new`` mode, so a
         non-chained run's diffs are unchanged; for ``existing``/``current`` it is the branch tip at
         task start, so review/docs/PR body see only this task's change, not the whole chain."""
@@ -838,7 +842,7 @@ class GitManager:
         # shadowed by that override; it only mints a name in the degenerate "no stored branch" case,
         # where ``delete_branch`` below is a no-op anyway.
         branch = self.branch_name(task_id, slug, epoch=int(time.time()), override=branch_name)
-        # M5: `checkout base` + `pull` update tracked files → run smudge filters; mirror the
+        # `checkout base` + `pull` update tracked files → run smudge filters; mirror the
         # commit/checkout refuse-gate. Rerun is foreground, so raising ManualActionRequired
         # (surfaced cleanly by the CLI) is the right signal for a poisoned repo-local driver.
         self._assert_no_untrusted_filters()
@@ -939,7 +943,7 @@ class GitManager:
         current = self._git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
         if current != base:
             return
-        # M5: `pull` updates tracked files → runs smudge filters, so mirror the commit/checkout
+        # `pull` updates tracked files → runs smudge filters, so mirror the commit/checkout
         # filter refuse-gate. This best-effort discovery runs in the watch loop and must NOT raise
         # (that would crash the loop), so a poisoned repo-local driver skips the pull (leaves the
         # working copy untouched, per this method's contract) and logs it — the per-task fingerprint
@@ -964,7 +968,7 @@ class GitManager:
         """Merge ``origin/<base>`` into the task ``branch`` in the clone; True iff it conflicts.
 
         Checks out the branch, fetches, then ``git merge --no-commit origin/<base>`` — a **merge
-        commit**, not a rebase (no history rewrite of reviewed commits, no force-push). WRI-009:
+        commit**, not a rebase (no history rewrite of reviewed commits, no force-push).
         ``--no-commit`` means a clean 3-way merge is left *staged* with ``MERGE_HEAD`` live rather
         than auto-committed, so the caller finalizes it through the gated
         :meth:`commit_merge_resolution` (which proves the staged set) — an auto-commit would bypass
@@ -972,7 +976,7 @@ class GitManager:
         commit; a conflicting merge stops with ``MERGE_HEAD`` live and markers in the tree for the
         caller to resolve + commit (or abort). Only the operator merge routine calls this.
         """
-        # WRI-009: the merge checks out/merges files, running smudge filters — refuse first.
+        # The merge checks out/merges files, running smudge filters — refuse first.
         self._assert_no_untrusted_filters()
         self._git_checked("checkout", branch)
         self._git("fetch", "origin")
@@ -1030,8 +1034,8 @@ class GitManager:
         Adds only the runtime roots not already covered per root (see
         :func:`_missing_runtime_ignore_lines`), so an operator's own ``.worc/*`` + ``!.worc/flows/``
         scheme that deliberately un-ignores ``.worc/flows/`` to track flows in git (see
-        ``docs/how-to.md``) is never stomped — the blanket ``.worc/`` line is not re-appended —
-        while the newer ``.worc-io/`` exchange line is still added when missing (WRI-001).
+        is never stomped — the blanket ``.worc/`` line is not re-appended —
+        while the newer ``.worc-io/`` exchange line is still added when missing.
         """
         lines = _missing_runtime_ignore_lines(
             lambda probe: self._git("check-ignore", "-q", probe).ok
@@ -1081,7 +1085,7 @@ class GitManager:
         path.write_text(diff_text, encoding="utf-8")
         return str(path)
 
-    # --- Git control-state fingerprint (WRI-009) -----------------------------------
+    # --- Git control-state fingerprint ---------------------------------------------
 
     def capture_git_control_state(self) -> GitControlState:
         """Fingerprint the Git control state a provider attempt must not mutate.
@@ -1187,17 +1191,17 @@ class GitManager:
     ) -> ProviderWriteGuardPolicy:
         """Absolute Git-control + lifecycle roots a workspace-write attempt must Write/Edit-deny.
 
-        Provider-neutral (WRI-002/003): the node runner resolves this fresh for each workspace-write
+        Provider-neutral: the node runner resolves this fresh for each workspace-write
         attempt — the gitdir/common-dir are only final after branch prep and differ for a linked
         worktree — and threads it onto ``AgentRunRequest.write_guard``; each adapter renders it into
         its own tool-deny / OS-sandbox ``denyWrite`` syntax (the Core never learns that syntax).
-        Read-only git plumbing, reusing the same resolution as the WRI-009 control-state fingerprint
+        Read-only git plumbing, reusing the same resolution as the control-state fingerprint
         (``rev-parse`` + :meth:`_hooks_dir`). ``git_dir`` and ``git_common_dir`` are returned
         separately because a linked worktree's per-worktree gitdir differs from the shared common
         dir and both must be denied. Fails closed (:class:`GitCommandError`) on a git-resolution
         failure so an unguarded run is impossible. Repository governance/instruction files
         (``AGENTS.md`` etc.) are intentionally not denied — editing them is ordinary repository
-        work, reported to the operator as a notice rather than blocked (VF-20).
+        work, reported to the operator as a notice rather than blocked.
         """
         git_dir = Path(self._git_checked("rev-parse", "--absolute-git-dir"))
         git_common_dir = Path(self._git_checked("rev-parse", "--git-common-dir"))
@@ -1297,7 +1301,7 @@ class GitManager:
         return items
 
     def _untrusted_config_programs(self) -> list[str]:
-        """Agent-writable config keys whose value is a program git could execute (WRI-009).
+        """Agent-writable config keys whose value is a program git could execute.
 
         A filter/diff clean/smudge/process/command/textconv driver, or repo-local
         ``core.sshCommand``/``credential.helper``. Operator global/system config is trusted and not
@@ -1320,7 +1324,7 @@ class GitManager:
         """Refuse (manual action) before staging/checkout if the agent-writable config defines a
         program-launching driver.
 
-        The operator-authorized-filter allowlist is a deferred WRI-009 follow-up; under the current
+        An operator-authorized-filter allowlist is a deferred follow-up; under the current
         contract any untrusted repo-local driver stops the run in manual action rather than letting
         an orchestrator git command execute agent-selected code. An agent ``.gitattributes`` edit
         cannot authorize a new process because a *repo-local* driver program is refused outright
@@ -1397,10 +1401,10 @@ class GitManager:
         return self._changed_code_paths_from(self._config.repo.base_branch)
 
     def changed_code_paths_since_task_base(self) -> list[str]:
-        """Code paths changed vs the per-task chain base — this task's files only (F48).
+        """Code paths changed vs the per-task chain base — this task's files only.
 
         Same shape as :meth:`changed_code_paths_since_base`, but diffs against :meth:`_diff_base`
-        (the branch tip at task start, F32) instead of the coarse ``base_branch``. On a shared/chain
+        (the branch tip at task start) instead of the coarse ``base_branch``. On a shared/chain
         branch (``existing``/``current`` mode) that means it returns only THIS task's changed paths,
         not the whole chain's — so the memory packet's path-overlap ranking stays relevant to the
         current task instead of saturating on every prior task's files. Equals
@@ -1439,7 +1443,7 @@ class GitManager:
         in the index, so the commit picks it up without re-adding — they are simply dropped from the
         ``git add`` pathspec. This happens when the agent itself stages a delete/move (``git rm`` /
         ``git mv`` that git did not record as a rename); the porcelain X column is ``D`` and the Y
-        (working-tree) column is blank (F18).
+        (working-tree) column is blank.
         """
         porcelain = self._git("status", "--porcelain", "-z").stdout
         deletions: set[str] = set()
@@ -1464,7 +1468,7 @@ class GitManager:
 
         Fully-staged deletions are dropped from the positive pathspec: ``git add`` cannot match a
         path that is absent from the working tree with no unstaged difference, and the deletion is
-        already in the index (F18). The returned list may therefore hold only the ``:(exclude)``
+        already in the index. The returned list may therefore hold only the ``:(exclude)``
         guard (or be empty); :meth:`_commit` skips ``git add`` entirely when no positive path
         remains and commits the pre-staged index.
         """
@@ -1486,13 +1490,13 @@ class GitManager:
             self._tasks_dir_ignored_cache = self._git("check-ignore", "-q", probe).ok
         return self._tasks_dir_ignored_cache
 
-    # --- staged-set / index gates (WRI-009) ----------------------------------------
+    # --- staged-set / index gates --------------------------------------------------
 
     def assert_index_clean_at_start(self) -> None:
-        """Refuse to start (manual action) if a non-artifact entry is already staged (WRI-009).
+        """Refuse to start (manual action) if a non-artifact entry is already staged.
 
         A bare ``git commit`` commits the whole index, so an operator/agent pre-staged baseline is
-        swept into the orchestrator's scoped commit. Under the one documented contract WRI-009
+        swept into the orchestrator's scoped commit. Under the one documented contract this
         adopts we refuse with actionable guidance rather than reset (``existing``/``current`` never
         reset); an *unstaged* dirty working tree is preserved and never flagged.
         """
@@ -1512,7 +1516,7 @@ class GitManager:
             )
 
     def assert_exchange_never_staged(self) -> None:
-        """Fail closed (manual action) if this commit would touch a runtime-artifact path (WRI-009).
+        """Fail closed (manual action) if this commit would touch a runtime-artifact path.
 
         An ignore rule is not a commit boundary — a provider can ``git add -f`` an ignored path — so
         this checks the index directly, in two ways: the transient exchange ``.worc-io`` must never
@@ -1549,7 +1553,7 @@ class GitManager:
         )
 
     def assert_staged_allowed(self, allowed: Collection[str] | None) -> None:
-        """Prove the whole staged set is within this operation's allowlist before commit (WRI-009).
+        """Prove the whole staged set is within this operation's allowlist before commit.
 
         A bare ``git commit`` commits the entire index, not only what the scoped ``git add`` staged,
         so every commit path proves the staged set first. ``allowed`` as a collection is a positive
@@ -1635,7 +1639,7 @@ class GitManager:
         positive = [p for p in pathspec if not p.startswith(":(exclude)")]
         if positive:  # skip when only fully-staged deletions remain — the index already has them
             self._git_checked("add", "--", *pathspec)
-        # WRI-009: the bare `git commit` commits the whole index — prove it holds only `paths`.
+        # The bare `git commit` commits the whole index — prove it holds only `paths`.
         self.assert_staged_allowed(set(paths))
         self._git_checked("commit", "-m", message)
         sha = self._git_checked("rev-parse", "HEAD")
@@ -1681,7 +1685,7 @@ class GitManager:
         # are configured, so the flow's testing node could not catch the markers itself).
         if "leftover conflict marker" in self._git("diff", "--cached", "--check").stdout.lower():
             raise GitCommandError("merge resolution left conflict markers; refusing to commit")
-        # WRI-009: a base merge stages arbitrary base code (add -A) — exclude-mode rejects only a
+        # A base merge stages arbitrary base code (add -A) — exclude-mode rejects only a
         # staged runtime-artifact path (e.g. a pre-merge force-added `.worc-io/*`).
         self.assert_staged_allowed(None)
         self._git_checked("commit", "-m", message)
@@ -1692,10 +1696,10 @@ class GitManager:
     def _assert_lifecycle_matches_packet(
         self, task_id: str, stageable: Sequence[str], task_packet_digest: str
     ) -> None:
-        """Verify the lifecycle ``<id>.md`` is byte-identical to the frozen task packet (WRI-009).
+        """Verify the lifecycle ``<id>.md`` is byte-identical to the frozen task packet.
 
         The audit commit publishes ``tasks/{done,failed}/<id>.md``; its content must still match the
-        task the run was authorized from (the WRI-011 frozen packet digest). A mismatch means the
+        task the run was authorized from (the frozen packet digest). A mismatch means the
         task file was rewritten under the running task — a security violation, never a commit input.
         Only the task packet is checked; ``<id>.summary.md`` is orchestrator-authored.
         """
@@ -1720,7 +1724,7 @@ class GitManager:
         live under the gitignored ``.worc/`` home and are never committed. The code change rides in
         the separate scoped code commit, so this never touches code paths.
 
-        WRI-009: the lifecycle ``<id>.md`` is verified byte-identical to the WRI-011 frozen task
+        The lifecycle ``<id>.md`` is verified byte-identical to the frozen task
         packet (``task_packet_digest``) before staging — a rewritten task file is a security
         violation, not a commit input. ``None`` skips it (a merge/synthetic run has no packet).
         """
@@ -1764,7 +1768,7 @@ class GitManager:
         if task_packet_digest is not None:
             self._assert_lifecycle_matches_packet(task_id, stageable, task_packet_digest)
         if stageable and self._git("add", "-A", "--", *stageable).ok:
-            # WRI-009: only this task's lifecycle files may be in the index at the audit commit.
+            # Only this task's lifecycle files may be in the index at the audit commit.
             self.assert_staged_allowed(set(stageable))
             commit = self._git("commit", "-m", message)
             if commit.ok:
@@ -1877,7 +1881,7 @@ class GitManager:
     def _append_reused_pr_body(
         self, task_id: str, pr_url: str, *, branch: str, title: str, body_path: str
     ) -> None:
-        """Append this task's section to a reused chain PR's body and retitle it (F27 / VF-15).
+        """Append this task's section to a reused chain PR's body and retitle it.
 
         A chain of tasks on one branch converges on a single reused PR, which otherwise keeps the
         FIRST task's title and an unbounded body — a reviewer reading a 7-task chain PR sees only
@@ -2053,12 +2057,12 @@ class GitManager:
         ``{diff_path}`` / the PR body / the failure report. For ``new`` mode the base is
         ``base_branch`` (the branch is cut from it and it does not advance), so a non-decomposed run
         equals ``git diff HEAD``; for a ``existing``/``current`` chain branch the base is the branch
-        tip at task start (F32), so review/docs see only this task's change, not the whole unmerged
+        tip at task start, so review/docs see only this task's change, not the whole unmerged
         chain (which previously showed every prior task — e.g. 35 files for ~5 changed). The
         dangerous-diff guard classifies from :meth:`changed_code_entries` (HEAD-relative), not this
         artifact, so the base here does not change what the guard gates.
 
-        Two completeness fixes (F20): plain ``git diff`` never reports untracked files, so a brand
+        Two completeness fixes: plain ``git diff`` never reports untracked files, so a brand
         new file was silently missing from the artifact — bracket the diff with a transient
         intent-to-add (staged, then immediately reset back to untracked; no persistent index
         change, so :meth:`changed_code_entries`/:meth:`changed_code_paths` still see them as
@@ -2086,20 +2090,20 @@ class GitManager:
         if offenders:
             bind(_LOG, task_id=task_id, component="diff").warning(
                 "committed control bytes (NUL) in %d file(s) — invisible to git diff/review even "
-                "with --text (F35): %s",
+                "with --text: %s",
                 len(offenders),
                 ", ".join(offenders),
             )
         return str(path)
 
     def control_byte_paths(self) -> list[str]:
-        """Repo-relative POSIX paths of this task's changed files that contain a NUL byte (F35).
+        """Repo-relative POSIX paths of this task's changed files that contain a NUL byte.
 
         A committed NUL delimiter makes a file git-**binary** — invisible in ``git diff``/GitHub
-        review even with ``--text`` (F20) — so a NUL that slips into source escapes human review.
+        review even with ``--text`` — so a NUL that slips into source escapes human review.
         Best-effort scan of the task's changed files (committed-since-base + uncommitted); a file
         that cannot be read (e.g. deleted) is skipped. Returns ``[]`` when clean. Orchestrator-side
-        and repo-agnostic, so the F23→F35 recurrence surfaces in the run logs instead of only via a
+        and repo-agnostic, so a recurrence surfaces in the run logs instead of only via a
         manual ``git show``."""
         offenders: list[str] = []
         for rel in self.changed_code_paths_since_base():
@@ -2133,7 +2137,7 @@ class GitManager:
     def returns_to_base(self, mode: BranchMode) -> bool:
         """Whether terminal cleanup should check out ``base_branch`` for this branch mode.
 
-        Resolves ``repo.checkout_base_on_cleanup`` (branch-mode ADR): ``current`` never returns
+        Resolves ``repo.checkout_base_on_cleanup``: ``current`` never returns
         (the operator owns its tree); otherwise an explicit flag wins, and when unset the default
         is per-mode — ``new`` returns to base, ``existing`` stays on the branch.
         """
@@ -2157,7 +2161,7 @@ class GitManager:
         ``preserve_own_wip`` (set by the caller only for a resumable ``manual_action_required``
         park carrying the task's OWN uncommitted work) treats a dirty ``new``-mode tree like the
         operator-owned case: that WIP is the task's resume input, so leave HEAD on the branch and
-        report safe rather than fail-closing on it (VF-1).
+        report safe rather than fail-closing on it.
         """
         if not self.returns_to_base(mode):
             branch = self.current_branch() or self._config.repo.base_branch
@@ -2185,7 +2189,7 @@ class GitManager:
             self._write_cleanup_artifact(task_id, outcome, completed=False)
             return outcome
 
-        # M5: `checkout base` runs smudge filters; mirror the commit/checkout refuse-gate. This
+        # `checkout base` runs smudge filters; mirror the commit/checkout refuse-gate. This
         # method reports unsafe outcomes rather than raising, so convert the refusal to one — a
         # poisoned repo-local driver leaves the slot blocked (fail-closed) until the operator clears
         # it, exactly like a failed checkout below.

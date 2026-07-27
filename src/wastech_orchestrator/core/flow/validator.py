@@ -1,4 +1,4 @@
-"""Fatal load-time flow validator (P0.3 + P4.2 config-aware layer).
+"""Fatal load-time flow validator, plus the config-aware layer.
 
 :func:`validate_flow` runs two **config-free** layers; the first violation in either is not fatal
 alone — all violations are collected and reported together so the operator can fix everything in
@@ -13,7 +13,7 @@ one pass:
      :func:`~wastech_orchestrator.security.forbidden_args.find_forbidden_args`; ``role_file``
      paths contain no traversal (``..`` or absolute).
 
-:func:`validate_flow_against_config` is the **config-aware** third layer (P4.2): it needs the
+:func:`validate_flow_against_config` is the **config-aware** third layer: it needs the
 ``OrchestratorConfig`` (node providers ∈ ``agents.allowed``; node reasoning is valid for the
 resolved provider; Codex never receives a write-enabled node with network access;
 ``permission_ceiling`` ≤ a configured provider's capability; and — under
@@ -111,7 +111,7 @@ def validate_flow_against_config(
     config: OrchestratorConfig,
     tools: ToolRegistry | None = None,
 ) -> None:
-    """Validate a flow against the operator's :class:`OrchestratorConfig` (P4.2).
+    """Validate a flow against the operator's :class:`OrchestratorConfig`.
 
     The config-aware third layer, run by the :class:`~.registry.FlowRegistry` after
     :func:`validate_flow`. It rejects a flow that is structurally valid but cannot be safely or
@@ -317,8 +317,8 @@ def _check_graph(snap: FlowSnapshot) -> list[Violation]:
     # 7. lineage_affinity must reference an agent with editing_lineage session scope that is itself
     #    a lineage owner (no affinity of its own — chains are forbidden, one hop only), and the two
     #    nodes must not declare conflicting explicit providers (you cannot resume one provider's
-    #    editing session on another — durable sessions, P2.2). The lineage key routed at runtime is
-    #    ``node.lineage_affinity or node.id`` (multiple-editing-lineages ADR).
+    #    editing session on another). The lineage key routed at runtime is
+    #    ``node.lineage_affinity or node.id``.
     for node in doc.nodes:
         if not isinstance(node, AgentNode) or node.lineage_affinity is None:
             continue
@@ -443,6 +443,20 @@ def _check_ceiling(snap: FlowSnapshot) -> list[Violation]:
                     c(f"agent {node.id!r}: extra_args {reason}")
                     for reason in find_forbidden_args(list(node.extra_args))
                 )
+            if node.git_evidence and (node.permission_profile or ceiling) is (
+                PermissionProfile.WORKSPACE_WRITE
+            ):
+                # The grant adds a shell to a profile that has none. A workspace-write node already
+                # has an unscoped one, so the declaration would buy nothing there — and narrowing
+                # that shell to the git verbs is the opposite of what the field means. Rejected
+                # rather than ignored: a flag that silently does nothing reads as protection.
+                errs.append(
+                    c(
+                        f"agent {node.id!r}: git_evidence applies only to a read-only node; a "
+                        "workspace-write node already has an unrestricted shell (drop the field, "
+                        "or set permission_profile: read-only)"
+                    )
+                )
             _check_path(node.id, node.role_file, errs)
 
     # Flow-local supervisor prompt files are flow-dir-contained, exactly like a node role_file: a
@@ -468,7 +482,7 @@ def _check_path(node_id: str, path: str, errs: list[Violation]) -> None:
         )
 
 
-# -- config consistency (P4.2) ------------------------------------------------
+# -- config consistency -------------------------------------------------------
 
 
 def _check_config_consistency(
@@ -563,7 +577,7 @@ def _check_config_consistency(
                 for reason in find_full_access_args(node.extra_args)
             )
 
-    # 4. Every ``tool`` node names a registered, contained, executable operator tool (P5). The name
+    # 4. Every ``tool`` node names a registered, contained, executable operator tool. The name
     #    is a free operator string (like a flow name), so — like the provider check — it is resolved
     #    here, fail-closed, before any launch. Skipped when no registry is wired (config-free unit
     #    path); the fatal install/preflight gate always supplies one.
@@ -605,13 +619,11 @@ class PromptVarWarning:
 def lint_prompt_variables(snapshot: FlowSnapshot) -> list[PromptVarWarning]:
     """Scan every node role file for ``{name}`` / ``{?name}`` tokens outside the flow's valid-set.
 
-    The valid-set is **flow-derived** and **node-kind-aware**, matching each node's real effective
-    allowlist: an **agent** node is checked against :func:`~.prompt_vars.valid_prompt_vars` (core
-    allowlist ∪ every agent node's ``{<id>_path}``), so referencing an upstream node's output by id
-    is fine; an **evaluator** node is checked against the core :data:`ALLOWED_PROMPT_VARS` alone
-    (the generic ``{<id>_path}`` channel does not extend to evaluators — they render it verbatim, so
-    it *should* be flagged). Either way a typo (``{plna_path}``) or a ``{X_path}`` naming no node is
-    reported (file + token) as rendering verbatim.
+    The valid-set is **flow-derived**, matching each node's real effective allowlist: an **agent**
+    or **evaluator** node is checked against :func:`~.prompt_vars.valid_prompt_vars` (core allowlist
+    ∪ every agent/tool node's ``{<id>_path}``), so referencing an upstream node's output by id is
+    fine from either kind. A typo (``{plna_path}``) or a ``{X_path}`` naming no node is reported
+    (file + token) as rendering verbatim.
 
     The flow-local **supervisor** prompts (``supervisor.{role_file, finalize_role_file,
     handoff_role_file}``) are role files too, scanned against the tiny set the supervisor actually
@@ -634,7 +646,11 @@ def lint_prompt_variables(snapshot: FlowSnapshot) -> list[PromptVarWarning]:
         role_file = getattr(node, "role_file", None)
         if not isinstance(role_file, str):
             continue  # checks / hitl / publish nodes carry no prompt template
-        allowed = flow_allowed if isinstance(node, AgentNode) else ALLOWED_PROMPT_VARS
+        # Both kinds that carry a ``role_file`` render the flow-derived set; a future kind that
+        # grows one would render the core set alone until its runner opts in.
+        allowed = (
+            flow_allowed if isinstance(node, AgentNode | EvaluatorNode) else ALLOWED_PROMPT_VARS
+        )
         try:
             template = read_role_file(flow_dir, role_file)
         except RoleFileError:

@@ -1,7 +1,7 @@
-"""Generate the Codex permission profile (WRI-003).
+"""Generate the Codex permission profile.
 
-Pure, platform-parameterized: turns the requested access level plus the orchestrator's WRI-004
-:class:`InternalDenyPolicy` and WRI-009 :class:`ProviderWriteGuardPolicy` into a Codex
+Pure, platform-parameterized: turns the requested access level plus the orchestrator's
+:class:`InternalDenyPolicy` and :class:`ProviderWriteGuardPolicy` into a Codex
 ``[permissions.<name>]`` profile, then renders it as one inline-table ``-c`` value the adapter
 injects. Injecting the whole profile as ONE inline table is deliberate: incremental dotted ``-c``
 keys fail Codex's untagged-enum parse of ``FilesystemPermissionToml`` (verified on codex-cli
@@ -120,8 +120,9 @@ def build_codex_permission_profile(
     exchange, resolved Git dirs, and ``tasks/`` tree from *write_guard* so they stay readable
     but immutable. Both profiles ``deny`` the *deny_policy* set (private/control homes, resolved
     env-file, provider auth homes incl. ``CODEX_HOME``, frozen bundles) and the public
-    *denied_read_paths* blacklist. Network is disabled in both (F17b keeps a Codex workspace-write
-    node offline). Deny rules are applied last so a deny always wins on any path collision.
+    *denied_read_paths* blacklist. Network is disabled in both (a validator rule keeps a Codex
+    workspace-write node offline). Deny rules are applied last so a deny always wins on any path
+    collision.
     """
     if permission_profile not in _EXTENDS:
         raise ProviderError(
@@ -141,7 +142,7 @@ def build_codex_permission_profile(
     # Deny last: private/control/secret roots always win over any read/write grant above.
     needs_glob_scan = False
     if deny_policy is not None:
-        # VF-6: with read-isolation OFF the private set is downgraded from ``deny`` (read+write
+        # With read-isolation OFF the private set is downgraded from ``deny`` (read+write
         # blocked) to ``read`` — it stays WRITE-denied (a ``read`` grant more specific than the
         # workspace ``write`` keeps the control plane immutable) but becomes READABLE so the agent
         # can run native ``.codex``/config discovery. Under isolation it stays fully ``deny``. The

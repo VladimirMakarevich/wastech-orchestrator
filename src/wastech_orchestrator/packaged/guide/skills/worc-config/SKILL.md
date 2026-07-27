@@ -34,6 +34,7 @@ Before drafting or changing any field, consult `reference.md` in the packaged co
 4. Keep the safe defaults unless the operator overrides them deliberately.
    - exactly one provider is `primary: true`;
    - `strict_isolation: true`;
+   - `allow_git_evidence: false` unless a flow here audits delivery history;
    - `auto_merge: false`;
    - no forbidden `extra_args`;
    - secrets stay in env vars, not YAML.

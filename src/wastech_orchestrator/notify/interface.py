@@ -21,8 +21,22 @@ AskFailure = Literal["timeout", "transport_error", "invalid_response"]
 #: vocabulary) so producer and transport share one source of truth.
 TRACE_REWORK_EXHAUSTED = "accept (rework budget exhausted)"
 
+#: Synthetic ``send_trace`` outcome label for a read-only node holding the git-evidence grant that
+#: changed the working tree — something its sandbox is supposed to make impossible. The node still
+#: finished (``done``) and the run continues; the ⚠️ says the read-only guarantee did not hold and
+#: the tree needs a look. Same producer/transport split as :data:`TRACE_REWORK_EXHAUSTED`.
+TRACE_READ_ONLY_WRITE = "done (read-only node wrote to the workspace)"
+
+#: Synthetic ``send_trace`` outcome label for the sharper half of the same event: a read-only node
+#: holding the git-evidence grant changed Git **control** state — a hook, ``.git/config``, the
+#: index. The node still finished (``done``) and the run continues (such a node never parks a task),
+#: so this ⚠️ is what tells the operator to stop the run before the next orchestrator git command
+#: executes whatever was planted. Distinct from :data:`TRACE_READ_ONLY_WRITE` because the two need
+#: different reactions: a stray file can be ignored, a poisoned hook cannot.
+TRACE_READ_ONLY_GIT_DRIFT = "done (read-only node changed git control state)"
+
 #: Maps an internal terminal reason / loop ``limit_name`` (:mod:`core.flow.engine`) to one human
-#: sentence for the operator-facing terminal notification (VF-22). These tokens are code-path
+#: sentence for the operator-facing terminal notification. These tokens are code-path
 #: identifiers, never written to be read; :func:`terminal_reason_prose` turns the known ones into
 #: prose and passes an unknown token through verbatim (never dropped). Kept here in the notify
 #: vocabulary — beside :data:`TRACE_REWORK_EXHAUSTED` — so producer and transport share one source.
@@ -42,7 +56,7 @@ _TERMINAL_REASON_PROSE: dict[str, str] = {
 
 
 def terminal_reason_prose(reason: str | None) -> str | None:
-    """One human sentence for a terminal ``reason`` token, or the raw token when unmapped (VF-22).
+    """One human sentence for a terminal ``reason`` token, or the raw token when unmapped.
 
     Returns ``None`` for an empty reason so the caller omits the line. A dynamic inline-budget token
     (``budget:<from>-><to>``) is described generically; any other unknown token is returned verbatim
@@ -59,7 +73,7 @@ def terminal_reason_prose(reason: str | None) -> str | None:
 
 @dataclass(frozen=True)
 class TerminalFinding:
-    """The single most-severe blocking finding to surface on a terminal notification (VF-22)."""
+    """The single most-severe blocking finding to surface on a terminal notification."""
 
     severity: str
     reason: str
@@ -68,7 +82,7 @@ class TerminalFinding:
 
 @dataclass(frozen=True)
 class TerminalDetails:
-    """Operator-facing enrichment for a needs-attention terminal notification (VF-22).
+    """Operator-facing enrichment for a needs-attention terminal notification.
 
     Every field is optional: the producer fills what the task's ``TaskRow`` + on-disk failure report
     carry, and the transport degrades to today's terse line when they are absent (a clean ``done``
@@ -138,10 +152,10 @@ class Notifier(Protocol):
     ) -> None:
         """Best-effort terminal notification — never raises, never blocks the pipeline.
 
-        ``governance_changed`` (VF-20) lists the repo-relative governance/instruction paths this
+        ``governance_changed`` lists the repo-relative governance/instruction paths this
         task's diff changed, surfaced on the terminal message; empty on ordinary runs.
 
-        ``details`` (VF-22) carries the operator-facing enrichment for a needs-attention terminal
+        ``details`` carries the operator-facing enrichment for a needs-attention terminal
         (title, stop node/loop, blocking finding, report path); ``None`` — a clean ``done``, or a
         call site without the context — renders the terse one-line message.
         """

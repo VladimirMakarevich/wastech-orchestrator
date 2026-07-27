@@ -1,8 +1,8 @@
-"""Unit tests for the WRI-004 runtime layout leaf and internal deny policy.
+"""Unit tests for the runtime layout leaf and internal deny policy.
 
 Two invariants are pinned here:
 
-* :meth:`RuntimeLayout.default` reproduces the pre-WRI-004 paths exactly (``<repo>/.worc`` for both
+* :meth:`RuntimeLayout.default` resolves ``<repo>/.worc`` for both
   the control and private homes, ``<repo>/.worc-io`` for the exchange), path-for-path, on POSIX and
   Windows path shapes.
 * :class:`InternalDenyPolicy` carries the control/private homes, the resolved env-file (which may

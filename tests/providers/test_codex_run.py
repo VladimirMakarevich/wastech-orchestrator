@@ -149,7 +149,7 @@ def test_canary_passes_then_run_proceeds_and_writes_evidence(
     tmp_path: Path,
     make_request: Callable[..., AgentRunRequest],
 ) -> None:
-    # WRI-003 + H4: with a deny set present, the pre-launch canary runs; the frozen exchange task
+    # With a deny set present, the pre-launch canary runs; the frozen exchange task
     # packet is the mandatory positive control. Probe order: private-read, private-shell-read,
     # exchange-read (allowed), exchange-write (denied). When they hold, the real launch proceeds.
     fake = FakeRun(stdout=_success_stream(), last_message='{"summary":"ok"}')
@@ -261,7 +261,7 @@ def test_stdin_is_plain_prompt_without_injection(
     tmp_path: Path,
     make_request: Callable[..., AgentRunRequest],
 ) -> None:
-    # VF-5: Codex no longer injects a repository-instruction block — stdin is just the flow prompt
+    # Codex no longer injects a repository-instruction block — stdin is just the flow prompt
     # (+ context-file footer); the agent reads the repo's root files itself via native discovery.
     provider = _provider(codex_config, security_config, tmp_path, FakeRun())
     stdin = provider._stdin_text(make_request(prompt="just the task"))
@@ -297,7 +297,7 @@ def test_schema_requested_structured_output_from_last_message(
     tmp_path: Path,
     make_request: Callable[..., AgentRunRequest],
 ) -> None:
-    # F19 (codex-cli 0.139.0 smoke-tested behavior): a schema-constrained run's terminal
+    # Smoke-tested against codex-cli 0.139.0: a schema-constrained run's terminal
     # `turn.completed` event carries only `{type, usage}` — no `output` field — so the schema
     # result must come from the `--output-last-message` file instead.
     stream = "\n".join(
@@ -652,7 +652,7 @@ def test_raw_session_id_redacted_in_artifacts(
     tmp_path: Path,
     make_request: Callable[..., AgentRunRequest],
 ) -> None:
-    # Durable sessions (P2.2): the raw session id lives ONLY in state.db. The resume id we pass via
+    # Durable sessions: the raw session id lives ONLY in state.db. The resume id we pass via
     # ``exec resume <id>`` and the freshly emitted id (``sess-99``) must not appear verbatim in any
     # artifact (request argv / stdout / events / result.json) — but the in-memory result keeps the
     # raw emitted id so the orchestrator can persist it to the editing_lineage store.
@@ -700,7 +700,7 @@ class _ProbingFakeRun:
     def __init__(self, *, help_has_config: bool, resume_help: str | None = None) -> None:
         self._help_has_config = help_has_config
         # Canned ``codex exec resume --help`` text; None => the healthy 0.142.x form advertising the
-        # -m/--model and -c/--config options this adapter places after ``resume`` (F38 probe).
+        # -m/--model and -c/--config options this adapter places after ``resume`` (probe).
         self._resume_help = resume_help
         self.argvs: list[list[str]] = []
 
@@ -809,7 +809,7 @@ def test_preflight_probes_config_support_when_reasoning_unset(
 def test_preflight_no_resume_grammar_drift_on_current_codex(
     codex_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
 ) -> None:
-    # F38: `codex exec resume --help` advertising -m/--model and -c/--config (the 0.142.x form)
+    # `codex exec resume --help` advertising -m/--model and -c/--config (the 0.142.x form)
     # yields no degradation — the resume argv this adapter builds is valid.
     fake = _ProbingFakeRun(help_has_config=True)
     provider = CodexProvider(
@@ -828,7 +828,7 @@ def test_preflight_no_resume_grammar_drift_on_current_codex(
 def test_preflight_flags_resume_grammar_drift(
     codex_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
 ) -> None:
-    # F38: a future `codex exec resume --help` that no longer advertises -m/-c means the options the
+    # A future `codex exec resume --help` that no longer advertises -m/-c means the options the
     # adapter places after `resume` would be rejected — surfaced as an advisory degradation (fatal
     # only without a fallback; `run_preflight` decides). It is NOT a hard capability block.
     fake = _ProbingFakeRun(

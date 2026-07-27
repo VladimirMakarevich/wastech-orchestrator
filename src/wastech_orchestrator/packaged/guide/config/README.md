@@ -60,6 +60,7 @@ Treat this block as a guardrail, not a convenience area:
 - Keep `strict_isolation: true` unless the operator consciously accepts full-access runs.
 - Pass only names in `allowed_environment`; secret **values** never belong in the file.
 - Keep `denied_commands` complete; it replaces the default list rather than extending it.
+- `allow_git_evidence` (default `false`) is the master switch for the read-only git-evidence grant: only with it on does a flow node's `git_evidence: true` actually give that node the read-only git verbs. It never makes a node writable — the sandbox still denies every write and `denied_commands` still applies — but leave it off unless a flow you run genuinely audits delivery history.
 - Do not add `extra_args` that disable sandboxing, approvals, or rule enforcement.
 - `trust_level` sets the approval threshold for the mid-task dangerous-diff gate: `auto` (default) lets routine in-repo deletions/edits proceed; `strict` gates every deletion or dependency-manifest edit. It never lowers the hard ceiling — only which diffs raise the gate.
 - `protected_paths` is the always-ask floor: repo-relative globs (same dialect as `checks.command_sets[].paths`) that require approval on **any** change regardless of `trust_level`. Default `[]` (no floor); add sensitive surfaces here (e.g. `.github/workflows/**`, `src/security/**`).
@@ -132,4 +133,4 @@ After editing the config:
 2. Fix every reported provider, isolation, flow, or Telegram issue.
 3. If the package was upgraded, run `worc upgrade-config` first so the file has the current schema shape.
 
-[reference.md](reference.md) is the complete field reference — you should not need anything outside this guide to configure the orchestrator. The orchestrator repository's `docs/configuration.md` and `docs/operations.md` carry the same material with extra contributor-facing detail (design rationale, internals); reach for them only if you are working on the orchestrator itself.
+[reference.md](reference.md) is the complete field reference — it documents every key, so this guide is all you need to configure the orchestrator. The orchestrator's own repository adds contributor-facing material on top of the same fields (design rationale, internals); that is only worth reading if you are working on the orchestrator itself.

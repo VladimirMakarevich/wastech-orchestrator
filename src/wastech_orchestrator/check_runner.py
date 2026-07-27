@@ -1,7 +1,8 @@
 """Check Runner (the ``testing`` stage).
 
 Runs the operator's selected ``checks.command_sets`` — normalized to ``checks.model.ResolvedCheck``
-argv lists, never shell strings — through the P2 safe process runner, each in its set's ``cwd`` with
+argv lists, never shell strings — through the shared safe process runner, each in its set's ``cwd``
+with
 an allowlisted environment and the set's (or global) timeout. Each run is written to
 ``checks/<run-id>.log``.
 
@@ -45,7 +46,7 @@ _LOG = logging.getLogger(__name__)
 
 
 def _utc_now_iso() -> str:
-    """Wall-clock UTC ISO timestamp for a check's ``check_runs`` interval (VF-12).
+    """Wall-clock UTC ISO timestamp for a check's ``check_runs`` interval.
 
     A per-check wall-clock read bracketing the launched check, distinct from the monotonic clock
     used for the duration log line — mirrors how the provider adapter stamps its attempt timestamps.
@@ -62,7 +63,7 @@ class CheckRunResult:
     timed_out: bool
     passed: bool
     log_path: str
-    # VF-12: the check's real wall-clock interval, captured around the launched check, so the
+    # The check's real wall-clock interval, captured around the launched check, so the
     # ``check_runs`` row carries a measured duration instead of two identical row-write stamps.
     started_at: str
     finished_at: str
@@ -165,7 +166,7 @@ class CheckRunner:
                     continue
                 cwd = Path(clone_dir) / check.cwd if check.cwd else Path(clone_dir)
                 started = self._monotonic()
-                started_at = clock()  # VF-12: wall-clock bracket for the check_runs interval
+                started_at = clock()  # wall-clock bracket for the check_runs interval
                 log.info("check started", extra=fields)
                 result = run_with_heartbeat(
                     partial(
@@ -182,7 +183,7 @@ class CheckRunner:
                     fields=fields,
                     monotonic=self._monotonic,
                 )
-                finished_at = clock()  # VF-12: end of the wall-clock bracket
+                finished_at = clock()  # end of the wall-clock bracket
                 self._append_stderr(log_path, result.stderr_text, result)
                 launch_failed = result.launch_error is not None
                 passed = result.exit_code == 0 and not result.timed_out and not launch_failed
@@ -240,7 +241,7 @@ class CheckRunner:
     ) -> CheckRunResult:
         """Record a skipped check with a loud, distinct log line (never overwritten).
 
-        A skip launches nothing, so ``started_at`` == ``finished_at`` (VF-12): an honest zero-length
+        A skip launches nothing, so ``started_at`` == ``finished_at``: an honest zero-length
         interval, distinct from the old row-write double-stamp of a check that really ran.
         """
         log_path.write_text(

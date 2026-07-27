@@ -1,4 +1,4 @@
-"""Flow agent/evaluator prompt assembly (P1.3).
+"""Flow agent/evaluator prompt assembly.
 
 A node's prompt template is the contents of its ``role_file``; the security-critical renderer (the
 fixed core) is unchanged:

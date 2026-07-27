@@ -48,7 +48,7 @@ def test_implementation_flow_loads_with_documentation_node(impl_snap: FlowSnapsh
 
 
 def test_documentation_node_is_explicitly_offline(impl_snap: FlowSnapshot) -> None:
-    # Decision B (F17b): the offline stance is pinned explicitly (not left to the implicit
+    # Decision B: the offline stance is pinned explicitly (not left to the implicit
     # default) so it survives even if this flow later gains a flow-wide network_policy. It
     # resolves to `False` for the node regardless of the flow default.
     from wastech_orchestrator.core.flow.contracts import resolve_network_access

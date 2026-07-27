@@ -1,4 +1,4 @@
-"""Flow snapshot — loader and resolver for flow YAML files (P0.2).
+"""Flow snapshot — loader and resolver for flow YAML files.
 
 ``load_flow(path)`` reads a YAML file, applies ``defaults``, builds lookup
 tables, and returns an immutable :class:`FlowSnapshot`. The ``flow_fingerprint``
@@ -26,6 +26,7 @@ from wastech_orchestrator.core.flow.contracts import (
     fingerprint,
 )
 from wastech_orchestrator.core.flow.schema import (
+    DEFAULT_CITATION_MANIFEST,
     DEFAULT_GATE_SEVERITY,
     SEVERITY_ORDER,
     AgentNode,
@@ -45,7 +46,11 @@ from wastech_orchestrator.core.flow.schema import (
     WhenPredicate,
 )
 from wastech_orchestrator.providers.base import ProviderId
-from wastech_orchestrator.security.identifiers import NODE_ID_PATTERN, is_valid_node_id
+from wastech_orchestrator.security.identifiers import (
+    NODE_ID_PATTERN,
+    is_portable_path_segment,
+    is_valid_node_id,
+)
 
 
 class FlowLoadError(Exception):
@@ -84,12 +89,14 @@ _AGENT_FIELDS = frozenset(
         "lineage_affinity",
         "permission_profile",
         "network_access",
+        "git_evidence",
         "provider",
         "model",
         "reasoning",
         "timeout_seconds",
         "output_schema",
         "output_artifact",
+        "output_file",
         "best_effort",
         "hitl",
         "extra_args",
@@ -106,6 +113,7 @@ _EVALUATOR_FIELDS = frozenset(
         "session_scope",
         "permission_profile",
         "network_access",
+        "git_evidence",
         "blocking",
         "max_rework_per_stage",
         "gate_severity",
@@ -115,7 +123,7 @@ _EVALUATOR_FIELDS = frozenset(
         "when",
     }
 )
-_CHECKS_FIELDS = frozenset({"id", "kind", "checker", "when"})
+_CHECKS_FIELDS = frozenset({"id", "kind", "checker", "manifest", "when"})
 _TOOL_FIELDS = frozenset({"id", "kind", "tool", "args", "timeout_seconds", "when"})
 _HITL_NODE_FIELDS = frozenset({"id", "kind", "signal", "timeout_s", "when"})
 _PUBLISH_FIELDS = frozenset({"id", "kind", "policy", "when"})
@@ -150,12 +158,12 @@ _EVALUATOR_DEFAULTS_FIELDS = frozenset(
 # Core checker set: flow may not invent a checker kind.
 _CHECKER_KINDS = frozenset({"command_profile", "citation", "dependency_scan"})
 
-# Output-artifact slots (P1.4): the well-known names an agent node may persist its output to. The
+# Output-artifact slots: the well-known names an agent node may persist its output to. The
 # slot vocabulary is core-fixed (a flow may not invent a slot — fail-closed at load).
 _OUTPUT_ARTIFACT_SLOTS = frozenset({"enriched_spec", "plan", "summary", "report"})
 
-# Reserved core-variable prefixes an **agent or tool** node id may not collide with (node-output
-# ADR + P5): both node kinds expose ``{<id>_path}``, so an id equal to one of these — or starting
+# Reserved core-variable prefixes an **agent or tool** node id may not collide with: both node
+# kinds expose ``{<id>_path}``, so an id equal to one of these — or starting
 # with ``subtask`` — would shadow a fixed core variable (``{plan_path}``, ``{review_path}``,
 # ``{subtask_spec_path}``, …). A collision is a fatal load error. Evaluator/checks/human nodes do
 # not get ``{<id>_path}`` (so the packaged ``review`` evaluator and ``testing`` checks node are ok).
@@ -164,9 +172,9 @@ _RESERVED_NODE_ID_NAMES = frozenset(
 )
 _RESERVED_NODE_ID_PREFIX = "subtask"
 
-# ``when`` fact namespaces. The exact value allowlist per namespace is
-# finalized when the P1 engine fact resolver lands; here we fail-closed on the namespace prefix so
-# a bare/typo'd fact (e.g. ``summary_enabled`` with no namespace) is rejected at load time.
+# ``when`` fact namespaces. The exact value allowlist per namespace belongs to the engine's fact
+# resolver; here we fail-closed on the namespace prefix so a bare/typo'd fact (e.g.
+# ``summary_enabled`` with no namespace) is rejected at load time.
 _WHEN_FACT_NAMESPACES = ("derived.", "config.")
 
 
@@ -188,14 +196,16 @@ def _reject_unknown(raw: dict[str, Any], allowed: frozenset[str], ctx: str) -> N
         raise FlowLoadError(f"unknown field(s) {extra} in {ctx} (fail-closed)")
 
 
-def _parse_network_access(raw: dict[str, Any]) -> bool | None:
-    """Tri-state per-node ``network_access``: ``None`` (omitted ⇒ inherit) vs explicit ``bool``.
+def _parse_tristate(raw: dict[str, Any], key: str) -> bool | None:
+    """A tri-state per-node capability flag: ``None`` (omitted) vs an explicit ``bool``.
 
-    ``None`` must be preserved as "inherit the flow default" — ``bool(None)`` is ``False``, which
-    would silently turn inherit into an explicit deny.
+    ``None`` must be preserved rather than coerced — ``bool(None)`` is ``False``, which would turn
+    "omitted" into an explicit deny and lose the distinction the caller resolves against its own
+    default (``network_access`` inherits the flow's ``network_policy``; ``git_evidence`` does not
+    inherit anything today, but is parsed the same way so both fields read alike).
     """
-    na = raw.get("network_access")
-    return None if na is None else bool(na)
+    value = raw.get(key)
+    return None if value is None else bool(value)
 
 
 def _parse_skills(raw: Any, ctx: str) -> tuple[str, ...]:
@@ -380,6 +390,8 @@ def _parse_agent_node(raw: dict[str, Any]) -> AgentNode:
             f"valid slots: {sorted(_OUTPUT_ARTIFACT_SLOTS)}"
         )
 
+    output_file = _parse_output_file(raw.get("output_file"), ctx, slot=output_artifact)
+
     return AgentNode(
         id=nid,
         kind="agent",
@@ -387,13 +399,15 @@ def _parse_agent_node(raw: dict[str, Any]) -> AgentNode:
         session_scope=_enum(SessionScope, ss_raw, ctx),
         lineage_affinity=raw.get("lineage_affinity") or None,
         permission_profile=permission_profile,
-        network_access=_parse_network_access(raw),
+        network_access=_parse_tristate(raw, "network_access"),
+        git_evidence=_parse_tristate(raw, "git_evidence"),
         provider=provider,
         model=raw.get("model") or None,
         reasoning=raw.get("reasoning") or None,
         timeout_seconds=raw.get("timeout_seconds"),
         output_schema=output_schema,
         output_artifact=output_artifact,
+        output_file=output_file,
         best_effort=bool(raw.get("best_effort", False)),
         hitl=_parse_hitl_settings(raw.get("hitl")),
         extra_args=tuple(str(a) for a in raw.get("extra_args", [])),
@@ -433,7 +447,8 @@ def _parse_evaluator_node(raw: dict[str, Any], defaults: EvaluatorDefaults) -> E
         role_file=role_file,
         session_scope=_enum(SessionScope, ss_raw, ctx),
         permission_profile=_enum(PermissionProfile, pp_raw, ctx),
-        network_access=_parse_network_access(raw),
+        network_access=_parse_tristate(raw, "network_access"),
+        git_evidence=_parse_tristate(raw, "git_evidence"),
         blocking=bool(raw.get("blocking", True)),
         max_rework_per_stage=int(raw.get("max_rework_per_stage", defaults.max_rework_per_stage)),
         gate_severity=_parse_gate_severity(raw.get("gate_severity", defaults.gate_severity), ctx),
@@ -458,8 +473,49 @@ def _parse_checks_node(raw: dict[str, Any]) -> ChecksNode:
         id=nid,
         kind="checks",
         checker=checker,  # type: ignore[arg-type]
+        manifest=_parse_manifest(raw.get("manifest", DEFAULT_CITATION_MANIFEST), ctx),
         when=_parse_when(raw.get("when")),
     )
+
+
+def _parse_output_file(value: Any, ctx: str, *, slot: str | None) -> str | None:
+    """Validate an agent node's ``output_file`` as one portable filename it produces.
+
+    Resolved against a directory the orchestrator owns, so it goes through the same segment
+    validator the exchange and the citation manifest use: no separators, no ``..``, no absolute
+    path, no reserved name. Declaring it together with ``output_artifact`` is a fatal
+    contradiction — a slot node's channel *is* its slot, so the produced file is never read.
+    """
+    if value is None:
+        return None
+    name = str(value)
+    if not is_portable_path_segment(name):
+        raise FlowLoadError(
+            f"invalid 'output_file' {name!r} in {ctx}: must be a single portable filename "
+            "(no path separators, no '..', not a reserved name)"
+        )
+    if slot is not None:
+        raise FlowLoadError(
+            f"{ctx} declares both 'output_file' and 'output_artifact' {slot!r}: a slot node's "
+            "channel is its slot, so the produced file would never be read — choose one"
+        )
+    return name
+
+
+def _parse_manifest(value: Any, ctx: str) -> str:
+    """Validate a checks node's ``manifest`` as one portable path segment inside the report dir.
+
+    A flow-authored filename resolved against a directory is a traversal surface, so it goes through
+    the same segment validator the exchange uses: no separators, no ``..``, no absolute path, no
+    Windows-reserved name.
+    """
+    name = str(value)
+    if not is_portable_path_segment(name):
+        raise FlowLoadError(
+            f"invalid 'manifest' {name!r} in {ctx}: must be a single portable filename "
+            "(no path separators, no '..', not a reserved name)"
+        )
+    return name
 
 
 _SCALAR_TYPES = (str, int, float, bool)
@@ -469,7 +525,7 @@ def _parse_tool_args(raw: Any, ctx: str) -> dict[str, str | int | float | bool]:
     """Parse a tool node's ``args`` as a flat allowlisted scalar mapping (no nesting, no secrets).
 
     A nested mapping / list / ``None`` / any non-scalar value is a fatal load error — the tool
-    contract passes only flat scalars on stdin (P5). ``bool`` is accepted (an ``int`` subclass,
+    contract passes only flat scalars on stdin. ``bool`` is accepted (an ``int`` subclass,
     already covered by the scalar tuple).
     """
     if raw is None:

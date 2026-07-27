@@ -1,13 +1,13 @@
-"""Checks node runner (P1.3/P1.4/P3.1) — dispatch on the node's ``checker``.
+"""Checks node runner — dispatch on the node's ``checker``.
 
 A ``checks`` node names a ``checker``; this runner dispatches on it, and every checker maps to the
 same engine outcome — ``pass`` / ``fail`` — so the engine needs no per-checker special case:
 
-* ``command_profile`` (P1.3) — runs the resolved quality-gate commands through the CheckRunner
+* ``command_profile`` — runs the resolved quality-gate commands through the CheckRunner
   (exit codes authoritative). Used by the implementation flow's ``testing`` node.
-* ``citation`` (P3.1) — the deterministic, no-LLM citation-manifest validator: a hallucinated
+* ``citation`` — the deterministic, no-LLM citation-manifest validator: a hallucinated
   citation fails the check, gating the synthesis loop. Used by ``deep_research``.
-* ``dependency_scan`` (P3.1) — the core-owned argv advisory scanners as evidence: it always emits
+* ``dependency_scan`` — the core-owned argv advisory scanners as evidence: it always emits
   ``pass`` (the scan ran); whether findings gate is the flow's decision (its edges). Used by
   ``security_audit``.
 
@@ -15,7 +15,7 @@ The flow never supplies commands / scanners: the command profile is resolved
 by the orchestrator and the scanner set is core-owned in
 :mod:`~wastech_orchestrator.core.flow.checkers`.
 
-**Mutation guard (P2.4).** The ``command_profile`` path snapshots the working tree before and after
+**Mutation guard.** The ``command_profile`` path snapshots the working tree before and after
 the checks; if a *passing* check mutated commit-candidate files (e.g. an auto-formatter rewrote
 sources), it fails closed to manual review — a green-but-dirtying check must not pass silently. This
 is a core-owned property of the ``checks`` node and cannot be declared away or disabled by the flow.
@@ -75,7 +75,7 @@ class ChecksNodeRunner:
             return self._run_dependency_scan(node, ctx, run_id)
         return self._run_command_profile(node, ctx, run_id)
 
-    # -- command_profile (P1.3/P2.4) ------------------------------------------
+    # -- command_profile ------------------------------------------------------
 
     def _run_command_profile(self, node: ChecksNode, ctx: NodeContext, run_id: int) -> NodeResult:
         before = self._capture()  # working-tree state before the checks can mutate anything
@@ -122,7 +122,7 @@ class ChecksNodeRunner:
 
         The authoritative full log is already written privately by the CheckRunner; this copies the
         first failing command's log (redacted) into the exchange and points ``checks_path`` at it,
-        so the live ``fixing`` node receives ``{checks_path}`` with no restart (WRI-001). With no
+        so the live ``fixing`` node receives ``{checks_path}`` with no restart. With no
         exchange wired (a unit harness) it points at the private log (previously it stayed unset).
         """
         log = outcome.first_failure_log
@@ -136,21 +136,23 @@ class ChecksNodeRunner:
             extra_secrets=self._s.prompt_secrets,
         )
 
-    # -- citation (P3.1) ------------------------------------------------------
+    # -- citation ------------------------------------------------------------
 
     def _run_citation(self, node: ChecksNode, ctx: NodeContext, run_id: int) -> NodeResult:
-        """Validate the research ``sources.json`` manifest; a hallucinated citation → ``fail``."""
+        """Validate the flow's citation manifest; a hallucinated citation → ``fail``."""
         checks_dir = self._checks_dir(ctx.task_id)
         resolved = resolve_output_policy(ctx.snapshot.doc.output_policy, ctx.task_id)
         report_dir = resolved.report_dir(self._s.repo_dir)
-        # A missing manifest (no report dir, or sources.json absent) → uncheckable, never a crash.
-        manifest = (report_dir or checks_dir) / "sources.json"
-        started_at = self._s.clock()  # VF-12: bracket the (in-process) validation work
+        # A missing manifest (no report dir, or the named file absent) → uncheckable, never a crash.
+        # The filename comes from the node, so a flow whose writing node names its manifest anything
+        # else is checkable — as a literal it silently produced a gate that did nothing.
+        manifest = (report_dir or checks_dir) / node.manifest
+        started_at = self._s.clock()  # bracket the (in-process) validation work
         report = validate_citations(self._s.repo_dir, manifest)
         finished_at = self._s.clock()
         run_dir = self._run_dir(ctx.task_id, node.id, run_id)
         artifact = run_dir / "citation.json"
-        artifact.write_text(_citation_json(report), encoding="utf-8")
+        artifact.write_text(_citation_json(report, self._repo_relpath(manifest)), encoding="utf-8")
         self._record_check_run(
             ctx,
             command="citation",
@@ -162,9 +164,26 @@ class ChecksNodeRunner:
             finished_at=finished_at,
         )
         self._register(ctx.task_id, "citation", str(artifact))
+        self._publish_citation_report(ctx, artifact)
         return self._complete(run_id, node, passed=report.passed)
 
-    # -- dependency_scan (P3.1) ----------------------------------------------
+    def _publish_citation_report(self, ctx: NodeContext, artifact: Path) -> None:
+        """Publish the per-entry verdicts and point ``{checks_path}`` at them, on BOTH outcomes.
+
+        ``checks_path`` used to be set only by the command-profile failure path, so on a passing
+        citation check the report reached nobody — while the downstream verifier's prompt asserted a
+        guarantee based on it and could not audit that claim. The next evaluator now receives the
+        entry list, including the non-gating ``weak``/``uncheckable`` ones it is responsible for.
+        """
+        self._in.checks_path = publish_file(
+            self._s.exchange_root,
+            ctx.task_id,
+            f"checks/{artifact.name}",
+            str(artifact),
+            extra_secrets=self._s.prompt_secrets,
+        )
+
+    # -- dependency_scan -----------------------------------------------------
 
     def _run_dependency_scan(self, node: ChecksNode, ctx: NodeContext, run_id: int) -> NodeResult:
         """Run the core-owned advisory scanners as evidence; always ``pass`` (the scan ran)."""
@@ -207,6 +226,19 @@ class ChecksNodeRunner:
         )
         return NodeResult(node_id=node.id, outcome=NodeOutcome(result_kind), node_run_id=run_id)
 
+    def _repo_relpath(self, path: Path) -> str | None:
+        """*path* relative to the clone (POSIX), or ``None`` when it lies outside it.
+
+        The manifest's own location is published with the verdicts so the evaluator that consumes
+        them can open the manifest for each entry's claim without being told a directory convention
+        in its prompt. ``None`` for a flow with no report directory, where the looked-up manifest
+        sits in the private artifact tree and no agent may read it.
+        """
+        try:
+            return path.relative_to(self._s.repo_dir).as_posix()
+        except ValueError:
+            return None
+
     def _checks_dir(self, task_id: str) -> Path:
         checks_dir = Path(task_artifact_dir(self._s.artifacts_root, task_id)) / "checks"
         checks_dir.mkdir(parents=True, exist_ok=True)
@@ -231,7 +263,7 @@ class ChecksNodeRunner:
         finished_at: str,
         skipped: bool = False,
     ) -> None:
-        # VF-12: the caller supplies the check's measured interval (bracketed around the actual
+        # The caller supplies the check's measured interval (bracketed around the actual
         # work) rather than reading the clock twice at row-write time, so ``check_runs`` carries a
         # real duration the operator can query ("which check was slow").
         self._s.store.record_check_run(
@@ -293,14 +325,26 @@ class ChecksNodeRunner:
         return outcome
 
 
-def _citation_json(report: CitationReport) -> str:
+def _citation_json(report: CitationReport, manifest_path: str | None) -> str:
+    # `path`/`line` are echoed per entry: this file is now handed to the downstream verifier, which
+    # cannot act on an entry whose location it would have to recover from the reason prose.
+    # `manifest_path` names the manifest that was validated, so that verifier can open it for each
+    # entry's claim (the verdicts carry locations, never claims) without its prompt hardcoding where
+    # a deliverable lives.
     return (
         json.dumps(
             {
+                "manifest_path": manifest_path,
                 "manifest_status": report.manifest_status,
                 "passed": report.passed,
                 "entries": [
-                    {"source_id": e.source_id, "status": e.status.value, "reason": e.reason}
+                    {
+                        "source_id": e.source_id,
+                        "status": e.status.value,
+                        "reason": e.reason,
+                        "path": e.path,
+                        "line": e.line,
+                    }
                     for e in report.entries
                 ],
             },

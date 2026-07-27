@@ -1,9 +1,9 @@
-"""POSIX integration fixtures for the WRI-012 quiescence barrier (real processes).
+"""POSIX integration fixtures for the quiescence barrier (real processes).
 
 These spawn genuine multi-generation / detached / reparented child processes and prove that a
 background writer cannot modify the filesystem after ``run_process`` returns — the acceptance
 criteria that only a real process tree can exercise. POSIX-only (the Windows Job Object path is
-covered by the seam tests in ``test_containment.py`` and lands under the WRI-006 native gate).
+covered by the seam tests in ``test_containment.py`` and lands under the native-Windows gate).
 
 The seam-injected fail-closed / unprovable behaviour lives in ``test_containment.py``; here every
 survivor is one we own, so it is always genuinely reaped (a real process cannot resist SIGKILL).
@@ -120,7 +120,7 @@ def test_setsid_detached_writer_is_tracked_and_reaped(tmp_path: Path) -> None:
 def test_trusted_containment_skips_the_descendant_scan() -> None:
     """The trusted factory (what ``GitManager`` git calls use, ``trusted=True``) builds a POSIX
     containment whose descendant snapshot is the no-op — it never runs the per-call ``ps`` sweep,
-    proving quiescence via the ``killpg(pgid, 0)`` group probe alone. This is the P0 speedup."""
+    proving quiescence via the ``killpg(pgid, 0)`` group probe alone — the suite-wide speedup."""
     containment = process_mod._trusted_make_containment()
     assert isinstance(containment, PosixProcessContainment)
     assert containment._snapshot is process_mod._no_descendants

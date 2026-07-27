@@ -325,7 +325,7 @@ def test_duplicate_task_id_in_ledger(config: OrchestratorConfig) -> None:
 
 
 def test_validation_reject_only_ledger_id_is_resubmittable(config: OrchestratorConfig) -> None:
-    # F6: an id whose only ledger trace is a validation reject (no tasks row) does NOT count as a
+    # An id whose only ledger trace is a validation reject (no tasks row) does NOT count as a
     # duplicate — the "rejected → fix → re-submit under the same id" loop works.
     result = _gate(config, ledger_ids={"task-001"}, validation_reject_ids={"task-001"}).validate(
         _src(_GOOD)
@@ -334,7 +334,7 @@ def test_validation_reject_only_ledger_id_is_resubmittable(config: OrchestratorC
 
 
 def test_validation_reject_but_also_claimed_still_duplicate(config: OrchestratorConfig) -> None:
-    # F6 regression: if a real tasks row also exists, the id is still reserved (a real attempt),
+    # Regression: if a real tasks row also exists, the id is still reserved (a real attempt),
     # even though a validation-reject ledger record is present.
     result = _gate(
         config,
@@ -630,7 +630,7 @@ def test_nodes_unknown_subkey_rejected(config: OrchestratorConfig) -> None:
 
 @pytest.mark.parametrize("key", ["disable_read_isolation", "strict_isolation"])
 def test_nodes_security_isolation_subkey_rejected(config: OrchestratorConfig, key: str) -> None:
-    # VF-6 / security invariant: read-isolation (and strict_isolation) are operator-config ONLY —
+    # Security invariant: read-isolation (and strict_isolation) are operator-config ONLY —
     # a task node override can never set them (only enabled/model/reasoning/provider are accepted).
     block = f"nodes:\n  planning:\n    {key}: true\n"
     result = _gate(config).validate(_src(_nodes_task(block)))
@@ -894,7 +894,7 @@ def test_branch_name_over_byte_ceiling_rejected(config: OrchestratorConfig) -> N
     assert result.reason is ValidationReason.INVALID_BRANCH_NAME
 
 
-# --- branch mode / branch_ref / publish (branch-mode ADR) --------------------------------
+# --- branch mode / branch_ref / publish --------------------------------------------------
 
 _BODY = "\n\n## Description\n\nDo it.\n"
 
@@ -950,7 +950,7 @@ def test_depends_on_with_existing_branch_ref_warns_but_passes(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # F40: combining depends_on with a pinned pre-existing branch can deadlock when that branch is a
+    # Combining depends_on with a pinned pre-existing branch can deadlock when that branch is a
     # dependency's own unmerged PR branch — an advisory warning, not a reject (can be legitimate).
     monkeypatch.setattr(logging.getLogger(LOGGER_NAME), "propagate", True)  # so caplog sees it
     with caplog.at_level(logging.WARNING):

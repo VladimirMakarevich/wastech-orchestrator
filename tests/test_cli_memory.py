@@ -1,4 +1,4 @@
-"""`worc memory` CLI (04.1): show / validate (read-only); compact / restore (mutating)."""
+"""`worc memory` CLI: show / validate (read-only); compact / restore (mutating)."""
 
 from __future__ import annotations
 
@@ -147,7 +147,7 @@ def test_restore_dry_run_then_rollback(
     assert service.read_long_term(LongTermKind.SEMANTIC) == []  # dry-run changed nothing
 
     assert cli._cmd_memory_restore(config, layout, snapshot=None, dry_run=False) == 0  # type: ignore[arg-type]
-    assert len(service.read_long_term(LongTermKind.SEMANTIC)) == 1  # rolled back (AC-SF4)
+    assert len(service.read_long_term(LongTermKind.SEMANTIC)) == 1  # rolled back
 
 
 def test_restore_no_snapshots(

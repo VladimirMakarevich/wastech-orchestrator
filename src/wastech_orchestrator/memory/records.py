@@ -1,15 +1,15 @@
-"""Memory record schemas (design §4, blueprint §5.3) — typed, frozen, provenance-bearing.
+"""Memory record schemas — typed, frozen, provenance-bearing.
 
 Three tiers: short-term episodic (:class:`EpisodeRecord`), long-term lessons
 (:class:`LongTermRecord`, routed by ``kind`` to semantic / procedural / reviewer / failures), and
 entity cards (:class:`EntityRecord`). Invariants the skeleton enforces:
 
 * **Trust is required.** Every record carries a ``trust_level`` as a non-default field, so a record
-  cannot be constructed without one (AC-SF5 groundwork). The service assigns the final trust — a
+  cannot be constructed without one. The service assigns the final trust — a
   record never self-certifies.
 * **Provenance travels with the record** (``evidence`` / ``artifact_paths``).
 * **No hidden clock.** Ids and timestamps are supplied by the caller; nothing here reads the time.
-* **POSIX paths.** Any stored path string is the ``as_posix()`` form (AC-X1).
+* **POSIX paths.** Any stored path string is the ``as_posix()`` form.
 
 :func:`as_row` is the JSON-serializable form the service redacts and writes; ``StrEnum`` fields
 (trust, kind) serialize to their string value automatically.
@@ -50,7 +50,7 @@ class MemoryTier(StrEnum):
 
 @dataclass(frozen=True)
 class Evidence:
-    """A provenance pointer backing a record (blueprint §5.3).
+    """A provenance pointer backing a record.
 
     ``type`` is the source class (e.g. ``repo_doc`` | ``task`` | ``check`` | ``review`` | ``diff`` |
     ``artifact``); ``ref`` is the pointer itself (a path, task id, or artifact path).
@@ -70,7 +70,7 @@ class Relationship:
 
 @dataclass(frozen=True)
 class Scope:
-    """Where a lesson applies — drives path-scoped retrieval (design §10).
+    """Where a lesson applies — drives path-scoped retrieval.
 
     ``nodes`` are flow node ids (there is no ``Stage`` enum). ``paths`` are POSIX repo-relative.
     """
@@ -84,7 +84,7 @@ class Scope:
 class EpisodeRecord:
     """A distilled per-run outcome (short-term episodic tier).
 
-    Raw resume/debug detail stays in ``logs/<task-id>/`` + ``state.db`` (Q7); this keeps only the
+    Raw resume/debug detail stays in ``logs/<task-id>/`` + ``state.db``; this keeps only the
     distilled episode plus ``artifact_paths`` pointers.
     """
 
@@ -129,7 +129,7 @@ class LongTermRecord:
     last_verified_at: str | None = None
     usage_count: int = 0
     supersedes: tuple[str, ...] = ()
-    # Recurrence bookkeeping (design §5 / Q3): the distinct tasks that have proposed this lesson and
+    # Recurrence bookkeeping: the distinct tasks that have proposed this lesson and
     # when it was first seen — drive the "recurred in >= N tasks within the window" promotion gate.
     # Carried on quarantined (pending) records; an active promoted record keeps the history too.
     first_seen_at: str | None = None

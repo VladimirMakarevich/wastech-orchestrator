@@ -87,7 +87,7 @@ def test_busy_interactive_prompt_names_force_full_as_interrupt_now(
     monkeypatch: pytest.MonkeyPatch, make_git_config: _ConfigFactory, tmp_path
 ) -> None:
     # The busy prompt must point the operator at --force-full to interrupt the running agent NOW
-    # (soft finishes the current flow node) — the discoverability gap the ADR closes.
+    # (soft finishes the current flow node) — the discoverability gap this closes.
     captured: list[str] = []
     monkeypatch.setattr(cli, "has_active_task", lambda _c: True)
     monkeypatch.setattr(cli, "_confirm_yes", lambda prompt: captured.append(prompt) or False)
@@ -202,7 +202,7 @@ def test_cmd_stop_busy_no_flag_non_tty_refuses(
 def test_cmd_stop_non_interactive_refuses_busy_without_prompting_even_on_a_tty(
     monkeypatch: pytest.MonkeyPatch, make_git_config: _ConfigFactory, tmp_path
 ) -> None:
-    # H1: even with a TTY (the console's stdin), --non-interactive forces the refuse-with-flags path
+    # Even with a TTY (the console's stdin), --non-interactive forces the refuse-with-flags path
     # instead of _confirm_yes()/input() — the console passes it so a busy `down` never blocks on
     # input() inside the prompt_toolkit REPL.
     config = make_git_config(tmp_path / "clone")
@@ -351,7 +351,7 @@ def test_cmd_stop_reports_windows_degrade(
     assert "unavailable on Windows" in capsys.readouterr().out
 
 
-# --- the parked-slot note (ADR: signpost the recovery at stop time) ---------------------
+# --- the parked-slot note (signpost the recovery at stop time) --------------------------
 
 
 def test_cmd_stop_notes_parked_slot_after_stopping_daemon(

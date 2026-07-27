@@ -128,7 +128,7 @@ def test_preflight_not_ready_when_a_binary_is_missing(
 def test_preflight_degraded_warns_when_fallback_exists(
     monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # F38: an advisory degradation (e.g. codex resume-grammar drift) is a WARNING, not fatal, when a
+    # An advisory degradation (e.g. codex resume-grammar drift) is a WARNING, not fatal, when a
     # fallback provider is allowed — the fallback covers the degraded nodes. Preflight stays ready.
     _patch_providers(
         monkeypatch,
@@ -145,7 +145,7 @@ def test_preflight_degraded_warns_when_fallback_exists(
 def test_preflight_degraded_fails_without_fallback(
     monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # F38: the same degradation is FATAL when codex is the sole allowed provider — no fallback to
+    # The same degradation is FATAL when codex is the sole allowed provider — no fallback to
     # cover the degraded resume nodes, so preflight is NOT ready.
     base = make_git_config(git_repo.clone)
     codex_only = replace(
@@ -199,7 +199,7 @@ def test_preflight_fails_on_isolation(
     assert "codex: sandbox is forbidden" in out
 
 
-# --- H7: the live no-model Codex isolation capability smoke surfaced in `worc preflight` --------
+# --- The live no-model Codex isolation capability smoke surfaced in `worc preflight` ------------
 
 
 def test_preflight_capability_smoke_ok(

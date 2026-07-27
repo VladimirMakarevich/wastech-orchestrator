@@ -1,4 +1,4 @@
-"""Structured, secret-free operator logging (coding-style.md).
+"""Structured, secret-free operator logging.
 
 A thin layer over the stdlib :mod:`logging` that gives the pipeline a clear operator-facing trace —
 keyed by ``task_id`` / ``stage`` / ``attempt`` / ``provider`` — without ever emitting a secret. The
