@@ -1,7 +1,7 @@
 """Configuration layer: schema, fail-closed loader, and validator.
 
 The loader/validator are the config-time half of the "security can't be weakened" invariant
-(.agents/rules/security.md). Loading is an explicit call — no import-time side effects.
+Loading is an explicit call — no import-time side effects.
 """
 
 from __future__ import annotations

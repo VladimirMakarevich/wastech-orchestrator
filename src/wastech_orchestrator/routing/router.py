@@ -11,7 +11,7 @@ The layer between the Orchestrator Core and the provider adapters. For each node
 * counts ``stage_attempts`` across the fallback, bounded by ``agents.max_stage_attempts``;
 * exposes the partial-change diff to the fallback without ever rolling back.
 
-Invariants (.agents/rules/architecture.md): the Router depends **only** on the ``AgentProvider``
+Invariants: the Router depends **only** on the ``AgentProvider``
 contract — no CLI syntax, no provider internals — and it changes no state-machine state. It is
 stateless beyond the :class:`StageOutcome` it returns; persistence and transitions are the Core's
 job. A quality ``AgentRunResult(status=failed)`` is never a fallback trigger; only a raised
@@ -51,7 +51,7 @@ _LOG = logging.getLogger(__name__)
 # Error classes whose fallback is CONDITIONAL, decided here (not in providers.base):
 # * authorization_failed / permission_denied — only when the fallback provider runs in the same or a
 #   stricter permission profile (never relaxing the policy);
-# * capability_unavailable (WRI-002) — only when the fallback is same-or-stricter AND can itself
+# * capability_unavailable — only when the fallback is same-or-stricter AND can itself
 #   enforce the required isolation for the node on this host (``fallback_can_isolate``), so the
 #   Router never recovers a missing-sandbox refusal by falling over to an equally-unisolable
 # provider.
@@ -177,7 +177,7 @@ class AgentRouter:
         # Set only by the watch daemon: True once an operator stop was requested. Checked before any
         # fallback/retry so a stop-killed agent is never respawned on another provider.
         self._is_cancelled = is_cancelled
-        # WRI-002: the offline ProviderId→isolation-check table (the same one composition binds), so
+        # The offline ProviderId→isolation-check table (the same one composition binds), so
         # a ``CAPABILITY_UNAVAILABLE`` fallback is allowed only to a provider that can itself
         # isolate
         # the node on this host. The router imports no concrete adapter — the table is injected.
@@ -337,7 +337,7 @@ class AgentRouter:
                     )
                     log.info("cancelled; not falling back", extra={"provider": pid.value})
                     break
-                # Resume safety net (durable sessions, P2.2): the requested session is gone
+                # Resume safety net (durable sessions): the requested session is gone
                 # (``session_unavailable``) → retry the SAME provider once with a fresh session.
                 # This is infrastructure, not a quality failure: it never falls back to another
                 # provider and never charges a fix iteration (the fix loop is engine-owned; this

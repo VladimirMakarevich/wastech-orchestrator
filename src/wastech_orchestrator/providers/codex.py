@@ -5,7 +5,7 @@ Implements the :class:`~wastech_orchestrator.providers.base.AgentProvider` contr
 Codex syntax; it composes the provider-agnostic infrastructure (process runner, env allowlist,
 redaction, artifacts, error normalization).
 
-Invariants (architecture.md / security.md): the adapter performs **no fallback** and **never**
+Invariants: the adapter performs **no fallback** and **never**
 touches the state machine; it never commits/pushes/PRs. It raises
 :class:`~wastech_orchestrator.providers.base.ProviderError` (with the right
 :class:`~wastech_orchestrator.providers.base.ErrorClass`) for infrastructure failures, and returns

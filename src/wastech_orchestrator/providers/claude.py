@@ -6,7 +6,7 @@ Claude Code syntax; it composes the provider-agnostic infrastructure (process ru
 redaction, artifacts, error normalization) introduced in Phase 2 — exactly as ``codex.py`` does, so
 the two adapters are interchangeable behind the contract.
 
-Invariants (architecture.md / security.md): the adapter performs **no fallback** and **never**
+Invariants: the adapter performs **no fallback** and **never**
 touches the state machine; it never commits/pushes/PRs (the denied-commands blacklist is enforced as
 ``--disallowedTools`` so the agent process cannot publish). It raises
 :class:`~wastech_orchestrator.providers.base.ProviderError` (with the right

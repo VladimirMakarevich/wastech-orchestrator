@@ -1,4 +1,4 @@
-"""Front-matter injection scanner (.agents/rules/security.md).
+"""Front-matter injection scanner.
 
 The structural guarantee comes first: task content reaches providers **only as file paths** in
 :class:`~wastech_orchestrator.providers.base.AgentRunRequest` (``task_path``, ``plan_path``, …). No
@@ -49,7 +49,7 @@ class InjectionFinding:
 def scan_frontmatter(frontmatter: Mapping[str, Any]) -> InjectionFinding | None:
     """Scan all front-matter values for argv-shaped tokens; return the first finding or ``None``.
 
-    The scan is uniform across **every** front-matter value (F5a decision: keep it strict, no
+    The scan is uniform across **every** front-matter value (deliberately strict, no
     per-field exemptions — the rule for authors is "front-matter values are plain text", documented
     in the task-authoring guides). Keeping display fields in scope means the belt-and-braces scan
     never has to reason about which field could reach an argv, so it cannot regress.

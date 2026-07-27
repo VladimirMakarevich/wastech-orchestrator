@@ -2,8 +2,8 @@
 
 Enforces every semantic rule so an unsafe or contradictory config never reaches the
 pipeline. This is the config-time half of the "security cannot be weakened" invariant
-(.agents/rules/security.md): ``extra_args`` that would disable the sandbox/approvals are
-rejected here. The adversarial test matrix lives in P6.
+``extra_args`` that would disable the sandbox/approvals are
+rejected here.
 
 All problems are collected and raised together via the typed :class:`ConfigError` from the loader.
 """
@@ -43,7 +43,7 @@ def _check_extra_args(pid: ProviderId, args: tuple[str, ...], issues: list[str])
 
 
 def _check_sandbox_field(pid: ProviderId, sandbox: str | None, issues: list[str]) -> None:
-    """Reject a legacy ``sandbox: read-only|workspace-write`` (WRI-003).
+    """Reject a legacy ``sandbox: read-only|workspace-write``.
 
     A Codex node's isolation is now the generated permission profile selected by
     ``permission_profile``; the ``sandbox`` field survives only as the ``danger-full-access`` escape
@@ -87,7 +87,7 @@ def _global_primary(config: OrchestratorConfig) -> ProviderId | None:
     return primaries[0] if len(primaries) == 1 else None
 
 
-# Recognized model-name prefixes per vendor, for the F39 advisory model↔provider warning ONLY. A
+# Recognized model-name prefixes per vendor, for the advisory model↔provider warning ONLY. A
 # deliberately conservative heuristic: an unrecognized model yields no vendor (no false positive),
 # matching the codebase's stance that model ids are otherwise passed through unverified.
 _MODEL_VENDOR_PREFIXES: tuple[tuple[ProviderId, tuple[str, ...]], ...] = (
@@ -228,7 +228,7 @@ def _validate_paths(config: OrchestratorConfig, issues: list[str]) -> None:
 def _validate_supervisor(
     config: OrchestratorConfig, issues: list[str], warnings: list[str]
 ) -> None:
-    """The supervisor layer is validated under the same ceiling as a flow node (P2.1).
+    """The supervisor layer is validated under the same ceiling as a flow node.
 
     ``permission_profile`` is forced ``read-only`` in code (the layer never writes). ``provider``
     (when set) must be in ``agents.allowed`` and ``reasoning`` must be supported by the resolved
@@ -237,7 +237,7 @@ def _validate_supervisor(
     that ``role_file`` has no path traversal (``..`` or an absolute path) — the flow validator's
     containment rule for a node ``role_file``.
 
-    F39: when ``provider`` is unset, ``supervisor.model`` is sent to the inherited global primary. A
+    When ``provider`` is unset, ``supervisor.model`` is sent to the inherited global primary. A
     model whose vendor plainly clashes with that primary (a ``claude-*`` model under a ``codex``
     primary, say) 400s on every supervisor turn at runtime, silently masked by the cross-provider
     fallback. We can't verify a model in general, but a recognized cross-vendor prefix is a strong
@@ -298,7 +298,7 @@ def _validate_telegram(config: OrchestratorConfig, issues: list[str]) -> None:
 
 
 def _validate_confirmation_gates(config: OrchestratorConfig, issues: list[str]) -> None:
-    """An enabled operator-confirmation gate requires a Telegram transport (idea 27 / 29).
+    """An enabled operator-confirmation gate requires a Telegram transport.
 
     Both gates resolve to STOP on silence; an enabled gate with no transport could never reach the
     operator and would be a silently-failing safety control, so it is a misconfiguration rather than

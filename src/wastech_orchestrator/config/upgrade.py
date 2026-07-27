@@ -39,7 +39,7 @@ from wastech_orchestrator.config.schema import CONFIG_SCHEMA_VERSION
 # v25: ``security.deletion_approval_exempt_paths`` is gone — replaced by the ``trust_level`` policy
 # (added from template) plus the always-ask ``security.protected_paths`` floor; the old allowlist
 # has no equivalent under the new model, so it is stripped (not migrated).
-# v31 (WRI-003): a Codex ``sandbox: read-only|workspace-write`` is not removed but *folded* into
+# v31: a Codex ``sandbox: read-only|workspace-write`` is not removed but *folded* into
 # ``permission_profile`` (a conditional value transform, see ``_migrate_codex_sandbox``);
 # ``danger-full-access`` is kept as the operator escape.
 # The parent-path may be dotted (walked segment by segment).
@@ -107,7 +107,7 @@ def upgrade_config_mapping(
 
 
 def _migrate_codex_sandbox(merged: dict[str, Any]) -> None:
-    """v31 (WRI-003): fold a Codex ``sandbox`` into the neutral ``permission_profile``, in place.
+    """v31: fold a Codex ``sandbox`` into the neutral ``permission_profile``, in place.
 
     A legacy ``agents.providers.codex.sandbox: read-only|workspace-write`` becomes
     ``permission_profile`` (an explicit operator value wins) and the ``sandbox`` key

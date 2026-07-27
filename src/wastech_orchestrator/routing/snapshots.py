@@ -1,7 +1,7 @@
 """Partial-change snapshot contract.
 
 Defines *only the data and the protocol* the Router and Core exchange around a stage run — the
-actual git/snapshot execution is the Git Manager + Core (P5). Capturing this contract now lets P5
+actual git/snapshot execution is the Git Manager + Core. Declaring the contract here lets them
 wire real git behind it without reshaping the Router.
 
 The rule it encodes: when the primary provider fails with an **infrastructure** error *after*
@@ -31,7 +31,7 @@ class PartialChange:
     """Produced after an infra failure that changed files; consumed by the fallback attempt.
 
     The Router sets the fallback request's ``diff_path`` to :attr:`diff_path`; ``note`` is the
-    "partial attempt" message P5 weaves into the fallback's prompt context.
+    "partial attempt" message the Core weaves into the fallback's prompt context.
     """
 
     before: WorkingTreeSnapshot
@@ -42,7 +42,7 @@ class PartialChange:
 
 @runtime_checkable
 class SnapshotHook(Protocol):
-    """Implemented by the Git Manager / Core (P5); the Router only ever calls it.
+    """Implemented by the Git Manager / Core; the Router only ever calls it.
 
     Intentionally has no rollback/restore method: partial changes are never undone automatically.
     """

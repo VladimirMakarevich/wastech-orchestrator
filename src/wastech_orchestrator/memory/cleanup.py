@@ -1,17 +1,17 @@
-"""CleanupJob — the bounded, model-free maintenance pass (design §5 cleanup, §7 bounded autonomy).
+"""CleanupJob — the bounded, model-free maintenance pass.
 
 Keeps memory from rotting between tasks without ever touching an active task or the repo. It runs in
 the ``watch_loop`` idle gap (the single-slot invariant guarantees no active task there) and behind
 the operator ``worc memory compact``. Hard invariants:
 
 * **Demote / expire / quarantine / merge only.** It **never** creates a new long-term lesson and
-  **never** edits code/docs/skills (AC-C3): there is no promote code path here, so the
+  **never** edits code/docs/skills: there is no promote code path here, so the
   ``cleanup_promotions_per_pass`` config knob is a documentation-only invariant (it stays 0 by
   construction; the runtime never reads it).
-* **Snapshot first, then bounded.** A snapshot of the touched tiers precedes the batch (AC-SF4), and
-  the idle pass honors the Q1 budget (``max_scanned`` / ``max_edits`` / ``max_wall_clock``); the
-  foreground ``compact`` pass (``full=True``) lifts the caps (FR6) but keeps every safety rule.
-* **Quarantine, never silent delete** (Q2). A stale target (path/symbol gone) is first remapped by
+* **Snapshot first, then bounded.** A snapshot of the touched tiers precedes the batch, and
+  the idle pass honors the configured budget (``max_scanned`` / ``max_edits`` / ``max_wall_clock``);
+  the foreground ``compact`` pass (``full=True``) lifts the caps but keeps every safety rule.
+* **Quarantine, never silent delete.** A stale target (path/symbol gone) is first remapped by
   basename; failing that it is moved to quarantine, never dropped.
 * **No network, model-free, deterministic.** Time is injected; nothing here calls a model.
 """
@@ -36,7 +36,7 @@ _QUARANTINED = "quarantined"
 
 @dataclass(frozen=True)
 class CleanupReport:
-    """A summary of one ``run_once`` pass (for logging/tests). ``promoted`` is always 0 (AC-C3)."""
+    """A summary of one ``run_once`` pass (for logging/tests). ``promoted`` is always 0."""
 
     ran: bool
     scanned: int = 0
@@ -49,7 +49,7 @@ class CleanupReport:
 
 
 class CleanupJob:
-    """One bounded maintenance pass over the canonical store (design §5/§7)."""
+    """One bounded maintenance pass over the canonical store."""
 
     def __init__(
         self,
@@ -101,7 +101,7 @@ class CleanupJob:
             snapshot=None if snapshot_dir is None else snapshot_dir.as_posix(),
         )
 
-    # --- episodic TTL expiry (design §4: short-term has a TTL; long-term never) -----------
+    # --- episodic TTL expiry (short-term has a TTL; long-term never) ----------------------
 
     def _expire_episodes(self, audit: AuditContext, budget: _Budget, *, dry_run: bool) -> int:
         rows = self._service.read_episodes()
@@ -125,7 +125,7 @@ class CleanupJob:
         budget.spend_edits(take)
         return take
 
-    # --- entity staleness: remap a moved file, else quarantine (Q2; AC-C4) ----------------
+    # --- entity staleness: remap a moved file, else quarantine ----------------------------
 
     def _reconcile_entities(
         self, audit: AuditContext, budget: _Budget, *, dry_run: bool
@@ -173,10 +173,9 @@ class CleanupJob:
 
         An entity is stale when any of its paths no longer exists. A missing path with exactly one
         same-basename tracked candidate is remapped (the file moved) — the remap rewrites both the
-        ``paths`` and the ``canonical_name`` key (F44 keys a card on ``paths[0]``), so a later
-        re-proposal at the new path merges into it instead of spawning a duplicate (memory V2 ADR,
-        move 3). Any unresolved missing path sends the whole card to quarantine — never a silent
-        delete (Q2).
+        ``paths`` and the ``canonical_name`` key (a card is keyed on ``paths[0]``), so a later
+        re-proposal at the new path merges into it instead of spawning a duplicate. Any unresolved
+        missing path sends the whole card to quarantine — never a silent delete.
         """
         paths = _str_list(row.get("paths"))
         if not paths:
@@ -197,7 +196,7 @@ class CleanupJob:
             return ("remap", {**row, "paths": remapped_paths, "canonical_name": remapped_paths[0]})
         return None
 
-    # --- lesson staleness: remap a moved scope path, else quarantine (F2; never deleted) ---------
+    # --- lesson staleness: remap a moved scope path, else quarantine (never deleted) -------------
 
     def _reconcile_lessons(
         self, audit: AuditContext, budget: _Budget, *, dry_run: bool
@@ -206,10 +205,10 @@ class CleanupJob:
         target.
 
         Mirrors :meth:`_reconcile_entities`: a missing scope path with exactly one same-basename
-        candidate is remapped in place (memory V2 ADR, move 3 — a refactor no longer quarantines a
+        candidate is remapped in place (a refactor no longer quarantines a
         durable lesson); any unresolved missing path moves the whole lesson to quarantine, never a
-        silent delete (Q2) and never a judgment-based drop. A path-less lesson has no existence
-        signal and is left fully intact. The design §5 "contradicted twice" drop stays a later item
+        silent delete and never a judgment-based drop. A path-less lesson has no existence
+        signal and is left fully intact. A "contradicted twice" drop stays a later item
         (no contradiction ledger yet). Honors the same scan/edit budget as the other passes.
         """
         remapped_total = quarantined_total = 0
@@ -244,7 +243,7 @@ class CleanupJob:
             remapped_total += remapped_here
             quarantined_total += quarantined_here
             if not dry_run:
-                # A remap re-derives the moved lesson's id (F30 keys it on scope.paths), which can
+                # A remap re-derives the moved lesson's id (keyed on scope.paths), which can
                 # collide with a row already at the new id — collapse by id before writing.
                 action = AuditAction.MERGE if remapped_here else AuditAction.QUARANTINE
                 self._service.replace_long_term(
@@ -264,10 +263,10 @@ class CleanupJob:
 
         A lesson is stale when a ``scope.paths`` entry no longer exists. A missing path with exactly
         one same-basename tracked candidate is remapped (the file moved) — the remap rewrites the
-        scope paths AND re-derives the ``memory_id`` (F30 keys it on scope paths), so a later
-        re-proposal at the new path merges into it instead of spawning a duplicate (memory V2 ADR,
-        move 3). Any unresolved missing path quarantines the whole lesson — never a silent delete
-        (Q2). A path-less lesson has no existence signal and is always fresh.
+        scope paths AND re-derives the ``memory_id`` (keyed on scope paths), so a later
+        re-proposal at the new path merges into it instead of spawning a duplicate.
+        Any unresolved missing path quarantines the whole lesson — never a silent
+        delete. A path-less lesson has no existence signal and is always fresh.
         """
         scope = row.get("scope")
         if not isinstance(scope, Mapping):
@@ -293,7 +292,7 @@ class CleanupJob:
         new_id = derive_long_term_id(kind, subject, remapped_paths)
         return ("remap", {**row, "scope": {**scope, "paths": remapped_paths}, "memory_id": new_id})
 
-    # --- duplicate long-term merge (design §5: keep oldest id, union evidence) -------------
+    # --- duplicate long-term merge (keep oldest id, union evidence) ------------------------
 
     def _merge_long_term_duplicates(
         self, audit: AuditContext, budget: _Budget, *, dry_run: bool
@@ -320,7 +319,7 @@ class CleanupJob:
 
 
 class _Budget:
-    """Bounded-autonomy accounting for one pass (§7). ``full`` lifts the caps for ``compact``."""
+    """Bounded-autonomy accounting for one pass. ``full`` lifts the caps for ``compact``."""
 
     def __init__(self, config: MemoryConfig, monotonic: Callable[[], float], *, full: bool) -> None:
         self._full = full
@@ -434,7 +433,7 @@ def _absorb(keeper: dict[str, Any], other: Mapping[str, Any]) -> None:
 
 def _collapse_by_memory_id(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collapse long-term rows sharing a ``memory_id`` — created when a lesson remap re-derives a
-    moved lesson's id onto one another row already holds (memory V2 ADR, move 3). Keeps the first,
+    moved lesson's id onto one another row already holds. Keeps the first,
     unions evidence + seen tasks onto it (:func:`_absorb`), preserves order (deterministic). The
     subject-keyed pass handles same-subject dupes; this handles the remap collision regardless of
     subject drift. Rows without a ``memory_id`` (never expected for long-term) stay distinct."""
@@ -452,7 +451,7 @@ def _collapse_by_memory_id(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _collapse_entities(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collapse entity cards sharing a ``canonical_name`` — created when an entity remap rewrites a
-    moved card's key onto a path another card already holds (memory V2 ADR, move 3). Latest content
+    moved card's key onto a path another card already holds. Latest content
     wins (mirrors the ``_ingest_entity`` upsert) while ``last_seen_task_ids`` is unioned; first
     appearance fixes the order (deterministic). Cards without a ``canonical_name`` stay distinct."""
     by_key: dict[str, dict[str, Any]] = {}

@@ -3,15 +3,14 @@
 A child process started by the orchestrator receives **only** the environment variables named in
 ``security.allowed_environment`` that are present in the parent environment — never the parent's
 full environment. No secret or token is ever forwarded implicitly; git/agent credentials are
-configured outside the orchestrator (.agents/rules/security.md).
+configured outside the orchestrator.
 
 The **default** allowlist is OS-aware: on top of a cross-platform base it adds the OS-launch
 essentials a freshly spawned process needs to start at all on the host OS (see
-:func:`default_allowed_environment`). This keeps the allowlist the single gate (security rule #4)
+:func:`default_allowed_environment`). This keeps the allowlist the single gate
 while making a fresh install work out of the box on Windows, Linux, and macOS.
 
-This module has no provider knowledge and is reused by every adapter (P2/P3) and the Check
-Runner (P5).
+This module has no provider knowledge and is reused by every adapter and the Check Runner.
 """
 
 from __future__ import annotations

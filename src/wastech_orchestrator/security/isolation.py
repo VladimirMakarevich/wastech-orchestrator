@@ -14,7 +14,7 @@ node either declares an allowed ``provider`` or defaults to the global primary, 
 configured-but-unused provider block never bricks an otherwise-valid run.
 
 Read-isolation is orthogonal to this gate. The operator escape hatch
-``security.disable_read_isolation`` (VF-6) — like the master ``strict_isolation: false`` — relaxes
+``security.disable_read_isolation`` — like the master ``strict_isolation: false`` — relaxes
 only the READ side (native discovery + the private read-deny projection); this preflight validates
 the WRITE/permission/sandbox ceiling, which stays in force regardless. So ``disable_read_isolation``
 is a sanctioned opt-out, never itself a preflight reason (the per-provider ``isolation_reasons`` do

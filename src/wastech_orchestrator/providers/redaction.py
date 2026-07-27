@@ -131,7 +131,7 @@ def secret_env_values(allowed_environment: Iterable[str]) -> tuple[str, ...]:
     allowlist (allowlisted vars are deliberately exported, not secrets to scrub), and the value is
     at least :data:`_MIN_DENIED_SECRET_LEN` chars (so short values like ``true`` are never turned
     into a redaction literal that would mangle unrelated output). Used by the provider adapters and
-    the memory write path to scrub a known secret value that matches no structural token shape (C1).
+    the memory write path to scrub a known secret value that matches no structural token shape.
     """
     allowed = set(allowed_environment)
     return tuple(

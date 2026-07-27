@@ -408,7 +408,7 @@ def check_telegram_preflight(
 
 
 # Maps a terminal status to a glanceable severity glyph for the operator-facing notification
-# (VF-22). 🛑 (a human is required; the branch is preserved) is deliberately distinct from a clean
+# 🛑 (a human is required; the branch is preserved) is deliberately distinct from a clean
 # ✅ finish, per the operator's request for a strong needs-attention marker, and from the trace
 # vocabulary's ⚠️. Mirrors the _TRACE_EMOJI pattern used for the live per-node trace.
 _STATUS_EMOJI: dict[str, str] = {
@@ -418,7 +418,7 @@ _STATUS_EMOJI: dict[str, str] = {
 }
 
 # Statuses whose terminal notification expands into the enriched body when details are available; a
-# clean `done` stays terse (VF-22 item 7 — a successful task must not become noisy).
+# clean `done` stays terse — a successful task must not become noisy.
 _ATTENTION_STATUSES = frozenset({"manual_action_required", "failed"})
 
 # One-line cap for the agent-authored blocking-finding reason echoed into the chat. Redaction still
@@ -457,7 +457,7 @@ def _format_terminal_message(
     if contacts:
         parts.append(f"contacts={' '.join(contacts)}")
     if governance_changed:
-        # VF-20: a non-blocking notice — this run edited its own governance/instruction files.
+        # A non-blocking notice — this run edited its own governance/instruction files.
         parts.append(f"governance={','.join(governance_changed)}")
     return " ".join(parts)
 
@@ -473,7 +473,7 @@ def _format_attention_message(
     governance_changed: tuple[str, ...],
     details: TerminalDetails,
 ) -> str:
-    """The enriched multi-line body for a needs-attention terminal (VF-22).
+    """The enriched multi-line body for a needs-attention terminal.
 
     Plain text + emoji (no parse_mode): id + severity glyph, then title, where it stopped, a prose
     reason, the top blocking finding + its paths, and the on-disk report to open next. Every section
@@ -523,7 +523,7 @@ def _stopped_line(details: TerminalDetails) -> str | None:
 
 
 def _one_line(text: str, *, limit: int = _FINDING_REASON_LIMIT) -> str:
-    """Collapse to a single bounded line for an agent-authored finding reason (VF-22)."""
+    """Collapse to a single bounded line for an agent-authored finding reason."""
     collapsed = " ".join(text.split())
     if len(collapsed) <= limit:
         return collapsed

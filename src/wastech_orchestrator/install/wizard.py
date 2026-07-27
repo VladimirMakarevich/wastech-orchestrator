@@ -1,4 +1,4 @@
-"""The interactive install wizard and its non-interactive resolution (backlog: installer).
+"""The interactive install wizard and its non-interactive resolution.
 
 ``run_wizard`` turns CLI flags + environment detection (and, interactively, operator answers) into a
 validated :class:`~wastech_orchestrator.install.config_writer.InstallSpec`. All console I/O goes

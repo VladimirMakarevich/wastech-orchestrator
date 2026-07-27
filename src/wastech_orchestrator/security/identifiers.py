@@ -1,4 +1,4 @@
-"""Portable artifact path-identity validators (.agents/rules/security.md #9).
+"""Portable artifact path-identity validators.
 
 Reject-not-sanitize leaf helpers shared by every layer that turns a dynamic identifier — a task id
 or a flow node id — or a relative name into an artifact path component. Kept **host-independent**: a

@@ -1,4 +1,4 @@
-"""Audit trail + snapshots for the memory store (design §7).
+"""Audit trail + snapshots for the memory store.
 
 Two day-one safety primitives, both deterministic and model-free:
 
@@ -6,10 +6,10 @@ Two day-one safety primitives, both deterministic and model-free:
   ``MemoryService`` writes exactly one row recording who/what/when, the affected memory ids, the
   pre/post content hashes of the touched file, and a rationale. Each row carries the previous row's
   hash (``prev_hash``) plus its own (``row_hash``), so tampering is detectable and the log can only
-  grow — never an in-place rewrite (AC-SF3).
+  grow — never an in-place rewrite.
 * **Snapshots + restore.** Before a batch mutation the affected tier files are copied byte-for-byte
   into ``audit/snapshots/<label>/``; :func:`restore_snapshot` puts them back exactly, making a bad
-  write cheap to undo (AC-SF4).
+  write cheap to undo.
 
 Timestamps are injected by the caller (no hidden clock) so the log is deterministic under test.
 """
@@ -31,9 +31,9 @@ from wastech_orchestrator.providers.redaction import redact_mapping
 
 _LOG = logging.getLogger(__name__)
 
-# A best-effort secondary sink (Q6): the orchestrator wires it to mirror each memory mutation
+# A best-effort secondary sink: the orchestrator wires it to mirror each memory mutation
 # into the existing ``evaluations`` decision trail. It receives the (redacted) audit row; a failure
-# is swallowed — it must never fail the memory write (FR8). No ``state.db`` schema change (C2).
+# is swallowed — it must never fail the memory write. No ``state.db`` schema change is involved.
 AuditMarker = Callable[[Mapping[str, Any]], None]
 
 
@@ -84,7 +84,7 @@ def _canonical(payload: Mapping[str, Any]) -> bytes:
 
 
 class AuditLog:
-    """The append-only, hash-chained ``audit/log.jsonl`` (design §7)."""
+    """The append-only, hash-chained ``audit/log.jsonl``."""
 
     def __init__(
         self,
@@ -142,7 +142,7 @@ class AuditLog:
         return body
 
     def _emit_marker(self, row: Mapping[str, Any]) -> None:
-        """Best-effort secondary marker (Q6): a marker failure never fails the write (FR8)."""
+        """Best-effort secondary marker: a marker failure never fails the write."""
         if self._marker is None:
             return
         try:
@@ -191,7 +191,7 @@ def take_snapshot(layout: MemoryLayout, paths: Iterable[Path], *, label: str) ->
 
 
 def restore_snapshot(layout: MemoryLayout, snapshot_dir: Path) -> list[Path]:
-    """Restore every file in ``snapshot_dir`` back under the memory root, byte-for-byte (AC-SF4).
+    """Restore every file in ``snapshot_dir`` back under the memory root, byte-for-byte.
 
     Returns the restored destination paths. The append-only audit log is never part of a snapshot,
     so a restore rewinds tier content without rewinding the trail.

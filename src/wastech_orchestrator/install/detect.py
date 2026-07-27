@@ -119,8 +119,9 @@ def has_gh() -> bool:
 def git_version() -> tuple[int, int] | None:
     """The installed git's ``(major, minor)``, or ``None`` when git is absent/unparseable.
 
-    Runs ``git --version`` through the safe runner (it needs no repo). Feeds the WRI-009 preflight
-    gate that fails fast when git is too old to honor ``-c core.hooksPath`` (< 2.9), which would
+    Runs ``git --version`` through the safe runner (it needs no repo). Feeds the git-control
+    preflight gate that fails fast when git is too old to honor ``-c core.hooksPath`` (< 2.9), which
+    would
     otherwise leave the hook-neutralization silently ineffective.
     """
     rc, out = _run_git(["--version"], Path.cwd())

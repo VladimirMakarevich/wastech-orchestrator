@@ -8,8 +8,8 @@ two adapters carry only what genuinely differs: the argv they build, their stder
 and how they parse their own event stream.
 
 **This module deliberately knows no CLI syntax.** It never names a flag, subcommand, or sandbox
-value — that is the inviolable boundary the per-provider subclasses sit on the other side of
-(architecture.md). A subclass supplies the syntax through the four hooks (``_build_argv`` /
+value — that is the inviolable boundary the per-provider subclasses sit on the other side of.
+A subclass supplies the syntax through the four hooks (``_build_argv`` /
 ``_parse`` / ``_signatures`` / ``_executable_label``); the base supplies the rest.
 """
 
@@ -563,8 +563,8 @@ class BaseCliProvider:
             raise ProviderError(error.error_class, error.message)
 
         if not parsed.succeeded and _produced_no_work(parsed, request):
-            # EXPERIMENTAL(no-work-infra) — trial block; revert this whole `if` to fall back to the
-            # plain TASK_FAILURE return below if we drop the ADR.
+            # EXPERIMENTAL(no-work-infra) — trial block; revert this whole `if` to fall back to
+            # the plain TASK_FAILURE return below if the trial is dropped.
             # The GENERIC no-work net: a parseable terminal event that did NOTHING (zero output
             # tokens, no structured output, not error_max_turns) is a no-progress INFRA failure,
             # not a quality task_failure. RAISE ``AGENT_NO_PROGRESS`` (fallback-eligible) so the

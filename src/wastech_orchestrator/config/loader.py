@@ -758,7 +758,7 @@ def _build_logging(raw: Any, issues: list[str]) -> LoggingConfig:
 def _build_memory(raw: Any, issues: list[str]) -> MemoryConfig:
     where = "memory"
     if raw is None:
-        return MemoryConfig()  # absent => disabled defaults (Q10): today's behavior exactly
+        return MemoryConfig()  # absent => disabled defaults
     m = _mapping(raw, where, issues)
     _check_keys(
         m,
@@ -800,7 +800,7 @@ def _build_memory(raw: Any, issues: list[str]) -> MemoryConfig:
 def _build_tools(raw: Any, issues: list[str]) -> ToolsConfig:
     where = "tools"
     if raw is None:
-        return ToolsConfig()  # absent => the built-in 3600s default (P5)
+        return ToolsConfig()  # absent => the built-in 3600s default
     m = _mapping(raw, where, issues)
     _check_keys(m, {"default_timeout_seconds"}, where, issues)
     return ToolsConfig(

@@ -1,17 +1,17 @@
-"""MemoryService — the deterministic, model-free owner of the canonical store (design §1).
+"""MemoryService — the deterministic, model-free owner of the canonical store.
 
 The storage core plus the **write-path funnel** (``apply_delta``). Defining invariants:
 
-* **No write bypasses redaction.** Every persisted row passes :meth:`_redact` (AC-SF1).
+* **No write bypasses redaction.** Every persisted row passes :meth:`_redact`.
 * **No mutation bypasses the audit log.** Every mutating row write appends an audit row with the
-  touched file's pre/post content hashes (AC-SF3).
+  touched file's pre/post content hashes.
 * **Pure & deterministic.** Ids and timestamps ride on the records / the injected
   :class:`AuditContext`; nothing here reads a clock or calls a model.
 
 ``apply_delta`` is the single funnel both write seams feed (success delta + deterministic failure
-record): validate → assign trust → merge/dedup → promote-or-quarantine → audit (design §2/§5/§7).
+record): validate → assign trust → merge/dedup → promote-or-quarantine → audit.
 The ``validate`` step resolves entity-card **paths** against the live repo via an injected
-:class:`DerivedIndex` (NFR2: durable entries verified against code) — an unverifiable card is
+:class:`DerivedIndex` (durable entries are verified against code) — an unverifiable card is
 downgraded off ``repo-observed`` and quarantined. Symbol-level validation and retrieval/packets are
 separate concerns.
 """
@@ -66,7 +66,7 @@ from wastech_orchestrator.memory.records import (
 from wastech_orchestrator.memory.trust import DURABLE_TRUST_LEVELS
 from wastech_orchestrator.providers.redaction import redact_mapping
 
-# Long-term lessons are split one file per kind (design §3 layout).
+# Long-term lessons are split one file per kind.
 _LONG_TERM_FILES: dict[LongTermKind, str] = {
     LongTermKind.SEMANTIC: "semantic.jsonl",
     LongTermKind.PROCEDURAL: "procedural.jsonl",
@@ -79,10 +79,10 @@ _PENDING_FILE = "pending.jsonl"
 
 
 class WriteSource(StrEnum):
-    """Which seam produced a delta — gates long-term promotion (design §2)."""
+    """Which seam produced a delta — gates long-term promotion."""
 
     SUCCESS = "success"  # supervisor finalize delta — full pipeline
-    FAILURE = "failure"  # deterministic terminal-failure/manual record — short-term only (AC-W3)
+    FAILURE = "failure"  # deterministic terminal-failure/manual record — short-term only
 
 
 @dataclass(frozen=True)
@@ -110,9 +110,9 @@ class MemoryService:
     """Owns the canonical ``.worc/memory/`` store: redacted+audited writes, reads, the write funnel.
 
     ``extra_secrets`` are literal values the caller already knows (redacted alongside the structural
-    patterns). ``config`` supplies the promotion thresholds (Q3); it defaults to ``MemoryConfig()``.
+    patterns). ``config`` supplies the promotion thresholds; it defaults to ``MemoryConfig()``.
     ``index`` is the live-repo :class:`DerivedIndex` used to validate entity-card paths at write
-    time (NFR2); when ``None`` (read-only callers) that check is skipped — see ``_ingest_entity``.
+    time; when ``None`` (read-only callers) that check is skipped — see ``_ingest_entity``.
     """
 
     def __init__(
@@ -134,7 +134,7 @@ class MemoryService:
     def audit(self) -> AuditLog:
         return self._audit
 
-    # --- write funnel (design §2/§5/§7) ---------------------------------------
+    # --- write funnel -------------------------------------------------------
 
     def apply_delta(
         self,
@@ -148,7 +148,7 @@ class MemoryService:
 
         Always appends the per-task ``episode`` (short-term). Then, for a SUCCESS delta, runs each
         lesson/failure/entity through validate → assign-trust → merge/dedup → promote-or-quarantine.
-        A FAILURE source writes only the episode and never promotes to long-term (AC-W3). The
+        A FAILURE source writes only the episode and never promotes to long-term. The
         mutation time is ``audit.timestamp`` (injected). Returns a summary of what happened.
         """
         if not audit.task_id:
@@ -209,7 +209,7 @@ class MemoryService:
         task_id: str,
         r: ApplyResult,
     ) -> ApplyResult:
-        # A failure that ships a remedy "explained a recurring failure" (§5 auto-promote).
+        # A failure that ships a remedy "explained a recurring failure" — auto-promote.
         return self._ingest_long_term(
             kind=LongTermKind.FAILURE,
             subject=cand.signature,
@@ -268,9 +268,9 @@ class MemoryService:
                 seen_task_ids=tuple(seen),
             )
 
-        # Quarantine (never long-term): a failure-seam source, missing evidence (AC-W2), or a
-        # non-durable trust level (external-untrusted / agent-inferred — AC-SF2/AC-W4). The audit
-        # rationale records *why* it was held so `worc memory show/validate` explains it (F9).
+        # Quarantine (never long-term): a failure-seam source, missing evidence, or a
+        # non-durable trust level (external-untrusted / agent-inferred). The audit
+        # rationale records *why* it was held so `worc memory show/validate` explains it.
         if source is WriteSource.FAILURE or not evidence or trust not in DURABLE_TRUST_LEVELS:
             self._put_pending(
                 pending,
@@ -279,7 +279,7 @@ class MemoryService:
             )
             return _bump(r, quarantined=1)
 
-        # Merge into an existing active record with the same stable id (kind + scope, F30) — the
+        # Merge into an existing active record with the same stable id (kind + scope) — the
         # same key that groups recurrence in pending, so subject drift can't spawn a duplicate row.
         active = self.read_long_term(kind)
         match_at = _index_by(active, "memory_id", memory_id)
@@ -289,7 +289,7 @@ class MemoryService:
             self._replace_rows(
                 self._long_term_path(kind),
                 rows,
-                # F46: only the merged record is affected; the whole-file rewrite is an
+                # Only the merged record is affected; the whole-file rewrite is an
                 # implementation detail, so the audit names just this id, not every row.
                 ids=[memory_id],
                 action=AuditAction.MERGE,
@@ -299,7 +299,7 @@ class MemoryService:
             )
             return _bump(r, merged=1)
 
-        # Promote when the §5/Q3 gate passes; otherwise hold in pending (short-term).
+        # Promote when the recurrence/trust gate passes; otherwise hold in pending (short-term).
         within = _within_window(first_seen, now, self._config.promote_window_days)
         recurrence = len(seen) if within else 1
         if should_promote(
@@ -332,11 +332,11 @@ class MemoryService:
         task_id: str,
         r: ApplyResult,
     ) -> ApplyResult:
-        # Validate the card's paths against the live repo (NFR2): a card whose target is gone is
+        # Validate the card's paths against the live repo: a card whose target is gone is
         # downgraded off repo-observed → it falls into the non-durable quarantine branch below.
         path_exists = self._index.path_exists if self._index is not None else None
         trust = assign_entity_trust(cand.paths, path_exists=path_exists)
-        # F44: key a card by its canonical path/name, not the LLM-authored `entity_id` (which drifts
+        # Key a card by its canonical path/name, not the LLM-authored `entity_id` (which drifts
         # in wording across runs and spawns a duplicate card for the same file).
         canonical = cand.paths[0] if cand.paths else cand.entity_id
         record = EntityRecord(
@@ -437,7 +437,7 @@ class MemoryService:
     ) -> None:
         self._replace_rows(self._pending_path(), rows, ids=_ids(rows), action=action, audit=audit)
 
-    # --- snapshot / restore (design §7) ---------------------------------------
+    # --- snapshot / restore --------------------------------------------------
 
     def _tier_candidates(self) -> list[Path]:
         """Every canonical tier-file path, whether or not it currently exists on disk."""
@@ -462,7 +462,7 @@ class MemoryService:
         Also **prunes** any canonical tier file created after the snapshot (so absent from it) —
         e.g. a ``quarantine/pending.jsonl`` first written by the very cleanup pass being rolled
         back — so the store returns to the *exact* pre-snapshot state, not merely a superset of it
-        (AC-SF4). Only canonical tier files are pruned; the append-only audit log, the snapshots,
+        Only canonical tier files are pruned; the append-only audit log, the snapshots,
         and the derived cache are never touched.
         """
         captured = {
@@ -646,11 +646,11 @@ def _scope_key(paths: Sequence[str]) -> str:
 
 def derive_long_term_id(kind: LongTermKind, subject: str, paths: Sequence[str]) -> str:
     """Deterministic content-derived long-term id, stable across recurrences of the SAME lesson even
-    when the LLM-authored ``subject`` drifts in wording (F30). Keys on ``kind`` + the normalized
+    when the LLM-authored ``subject`` drifts in wording. Keys on ``kind`` + the normalized
     ``paths`` (the structural anchor a real repeat shares) when the lesson names paths; else the
-    normalized ``subject`` for a path-less lesson (the pre-F30 behavior). Shared with
+    normalized ``subject`` for a path-less lesson. Shared with
     ``CleanupJob``, which re-derives the id when it remaps a moved lesson's scope so a later
-    re-proposal at the new path merges into the remapped row (memory V2 ADR, move 3)."""
+    re-proposal at the new path merges into the remapped row."""
     basis = _scope_key(paths) or normalize_subject(subject)
     digest = content_hash(f"{kind.value}:{basis}".encode())[:12]
     return f"ltm_{digest}"
@@ -659,12 +659,12 @@ def derive_long_term_id(kind: LongTermKind, subject: str, paths: Sequence[str]) 
 def _reason(audit: AuditContext, rationale: str) -> AuditContext:
     """Copy of *audit* carrying a concrete mutation *rationale* — a deterministic human-readable
     cause every audit row gets, so ``worc memory show/validate`` explains why a record was
-    appended / merged / quarantined (F9). Independent of the model's candidate ``rationale``."""
+    appended / merged / quarantined. Independent of the model's candidate ``rationale``."""
     return replace(audit, rationale=rationale)
 
 
 def _quarantine_reason(source: WriteSource, has_support: object, trust: Any) -> str:
-    """The deterministic cause a record was held in quarantine rather than promoted (F9)."""
+    """The deterministic cause a record was held in quarantine rather than promoted."""
     if source is WriteSource.FAILURE:
         return "quarantined: failure-seam source (never promoted to long-term)"
     if not has_support:
@@ -702,7 +702,7 @@ def _merge_long_term(
     now: str,
     task_id: str,
 ) -> dict[str, Any]:
-    """Merge a candidate into an active long-term row (§5): keep the oldest id, union
+    """Merge a candidate into an active long-term row: keep the oldest id, union
     evidence, take the newest wording, and record the recurrence. Dict-level (no reconstruction)."""
     merged = dict(existing)
     merged["statement"] = statement  # newest wording

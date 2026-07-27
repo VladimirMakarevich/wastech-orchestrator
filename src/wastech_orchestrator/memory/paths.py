@@ -1,4 +1,4 @@
-"""Canonical memory-store layout (design §3).
+"""Canonical memory-store layout.
 
 Resolves the **task-independent**, gitignored ``<repo>/.worc/memory/`` tree and seeds it on demand.
 Two hard constraints from the design:
@@ -43,14 +43,14 @@ under `derived/` is a rebuildable cache, not memory truth.
 
 
 class MemoryLayout:
-    """Resolves the canonical ``.worc/memory/`` tree from the ``.worc`` home (design §3).
+    """Resolves the canonical ``.worc/memory/`` tree from the ``.worc`` home.
 
     Pure path resolution — no I/O happens on construction. Call :meth:`ensure_tree` (or
     :func:`ensure_store`) to materialize the directories.
     """
 
     def __init__(self, private_home: str | Path) -> None:
-        # The resolved private runtime home (``layout.private_home``, WRI-004), injected by the
+        # The resolved private runtime home (``layout.private_home``), injected by the
         # caller — the memory store lives under ``<private_home>/memory/``. No literal ``.worc`` is
         # reconstructed here; the layout owns that name.
         self._worc_home = Path(private_home)
