@@ -18,7 +18,7 @@ Before editing, read the packaged role guide `.worc/guide/flows/roles.md` (what 
 
 1. Locate the node and its prompt. In `.worc/flows/<task_type>.yaml` find the node, read its `role_file:` value (relative to `.worc/flows/`), and open that file under `.worc/flows/<task_type>/`. Confirm the node's `kind` (`agent` vs `evaluator`) and whether it has `hitl:` or is the planning node named by `decomposition.proposed_by` — that decides the contract.
 2. Honor the node's typed output contract (the core re-validates it — a malformed result fails the node; you cannot loosen this from a prompt):
-   - **plain `agent`** — returns its final message (also exposed downstream as `{<id>_path}`).
+   - **plain `agent`** — returns its final message (also exposed downstream as `{<id>_path}`). If the node declares `output_file:` in the flow, the **file** it writes is what travels as `{<id>_path}` instead — so the prompt must name that same filename and require the file to stand alone, because no closing message goes with it.
    - **`agent` with `hitl:`** — returns `content` plus an optional question/approval object; ask a question only for a material ambiguity repository evidence cannot resolve.
    - **planning agent** (`decomposition.proposed_by`) — `content` + optional `human_input` + `decompose` + `subtasks`.
    - **`evaluator`** — must emit `{ findings: [ { severity, path, what, fix } ] }`. It is **fail-closed**: a prose-only "looks good" routes the task to `manual_action_required`. Return an **empty `findings` array** when clean, not prose. For an evaluator, also mind its `role` lens (`review` / `critic` / `verifier` / `test_quality`, or the default) and spell the findings fields out explicitly.

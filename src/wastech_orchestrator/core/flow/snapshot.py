@@ -96,6 +96,7 @@ _AGENT_FIELDS = frozenset(
         "timeout_seconds",
         "output_schema",
         "output_artifact",
+        "output_file",
         "best_effort",
         "hitl",
         "extra_args",
@@ -389,6 +390,8 @@ def _parse_agent_node(raw: dict[str, Any]) -> AgentNode:
             f"valid slots: {sorted(_OUTPUT_ARTIFACT_SLOTS)}"
         )
 
+    output_file = _parse_output_file(raw.get("output_file"), ctx, slot=output_artifact)
+
     return AgentNode(
         id=nid,
         kind="agent",
@@ -404,6 +407,7 @@ def _parse_agent_node(raw: dict[str, Any]) -> AgentNode:
         timeout_seconds=raw.get("timeout_seconds"),
         output_schema=output_schema,
         output_artifact=output_artifact,
+        output_file=output_file,
         best_effort=bool(raw.get("best_effort", False)),
         hitl=_parse_hitl_settings(raw.get("hitl")),
         extra_args=tuple(str(a) for a in raw.get("extra_args", [])),
@@ -472,6 +476,30 @@ def _parse_checks_node(raw: dict[str, Any]) -> ChecksNode:
         manifest=_parse_manifest(raw.get("manifest", DEFAULT_CITATION_MANIFEST), ctx),
         when=_parse_when(raw.get("when")),
     )
+
+
+def _parse_output_file(value: Any, ctx: str, *, slot: str | None) -> str | None:
+    """Validate an agent node's ``output_file`` as one portable filename it produces.
+
+    Resolved against a directory the orchestrator owns, so it goes through the same segment
+    validator the exchange and the citation manifest use: no separators, no ``..``, no absolute
+    path, no reserved name. Declaring it together with ``output_artifact`` is a fatal
+    contradiction — a slot node's channel *is* its slot, so the produced file is never read.
+    """
+    if value is None:
+        return None
+    name = str(value)
+    if not is_portable_path_segment(name):
+        raise FlowLoadError(
+            f"invalid 'output_file' {name!r} in {ctx}: must be a single portable filename "
+            "(no path separators, no '..', not a reserved name)"
+        )
+    if slot is not None:
+        raise FlowLoadError(
+            f"{ctx} declares both 'output_file' and 'output_artifact' {slot!r}: a slot node's "
+            "channel is its slot, so the produced file would never be read — choose one"
+        )
+    return name
 
 
 def _parse_manifest(value: Any, ctx: str) -> str:

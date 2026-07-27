@@ -1,6 +1,6 @@
 # `deep_research` post-mortem campaign (2026-07-25)
 
-Status: **in progress — steps 1-8 implemented (P0.1, P0.3, P0.2, P1.6, P1.5, P1.4, P1.7, P1.4a); P2.8 piece 2 shipped early with P1.4; next P2.8 remainder, then P2.9, P3.10** Date: 2026-07-25 Owner: Vladimir Makarevich
+Status: **all eleven items implemented (P0.1, P0.3, P0.2, P1.6, P1.5, P1.4, P1.7, P1.4a, P2.8, P2.9, P3.10); P2.8 piece 3 and P3.10's 10c are deliberately out. What remains is the checkpoint re-run, which needs a target-repo `.worc/` refresh first — see [follow_ups.md](follow_ups.md)** Date: 2026-07-25 Owner: Vladimir Makarevich
 
 Residue from the items that have landed — open decisions, watch items, the `.worc/` refresh every target repo needs, and what the `main` docs refresh must pick up — is collected in [follow_ups.md](follow_ups.md).
 
@@ -17,7 +17,7 @@ Every item here was found through `deep_research`, and none of them may be imple
 - **A flow that declares nothing still behaves sanely.** Defaults are chosen for the general case; a knob's absence is never a silent failure mode (that is the P0.1 lesson).
 - **Fixed in-code lists are a smell.** Where a set of names must exist in code (allowed prompt variables, checker kinds, severity ranks), it is a documented allowlist with an operator-visible extension story, not an incidental tuple that a user flow silently falls outside of.
 
-Item-specific traps this rules out: P1.4's subsystem taxonomy (target-only until it is expressed generically), P1.7's finalize lens (a `flow.supervisor.finalize_role_file` field, never a flow-name branch), P2.8's produced-file channel (a node-declared path, not a filename convention) and its footer slot (generic upstream-output, not a research-shaped slot), P1.6's citation statuses (checker-level, not flow-level), and the hardcoded `{repo}/docs/research/{task_id}/report.md` strings currently sitting in the packaged verifier and critic prompts — which are themselves an instance of the anti-pattern. P2.8 piece 2 (the evaluator node-output channel) has since shipped with P1.4, but removing those strings waits on P2.8 piece 1: `{synthesis_path}` still resolves to the node's chat sign-off, not the report.
+Item-specific traps this rules out: P1.4's subsystem taxonomy (target-only until it is expressed generically), P1.7's finalize lens (a `flow.supervisor.finalize_role_file` field, never a flow-name branch), P2.8's produced-file channel (a node-declared path, not a filename convention) and its footer slot (generic upstream-output, not a research-shaped slot), P1.6's citation statuses (checker-level, not flow-level), and the hardcoded `{repo}/docs/research/{task_id}/report.md` strings that sat in the packaged verifier and critic prompts — which were themselves an instance of the anti-pattern. Those are gone: the evaluators resolve the deliverable through `{synthesis_path}`, which P2.8's `output_file:` field points at the report instead of at the node's sign-off. The one remaining occurrence of the convention is in `synthesis.md`, where the writing node names its own two deliverables — a flow author naming their own output, not the engine imposing a shape.
 
 ## What the run showed
 
@@ -43,9 +43,9 @@ Plus one defect that is actively corrupting data rather than losing signal: the 
 | P1.5 | ✅ [Fix the research role prompts](p1-5-research-role-prompts.md) | Verifier rubric + full `sources.json` coverage + an under-claiming watch-item; drop the critic's false promises; class-sweep for producers | prompt edits | prompts (target + packaged) |
 | P1.6 | ✅ [Make the cited line authoritative](p1-6-citation-checker-strictness.md) | Drop the `or` fallback (or emit `weak`); a missing snippet is `uncheckable`; publish `citation.json` on the pass path too | small | orchestrator |
 | P1.7 | ✅ [Give `deep_research` its own finalize lens](p1-7-research-finalize-summary.md) | `flow.supervisor.finalize_role_file` (the document's `supervision:` key does not exist) + a no-fabrication rule + the recorded gate verdicts rendered into the finalize prompt | prompt + flow | packaged flow + orchestrator |
-| P2.8 | [Let a node's real output cross the edge](p2-8-node-output-handoff.md) | Publish the produced file, not the sign-off; ✅ give evaluators the node-output channel (shipped with P1.4); optionally an upstream footer slot | medium | orchestrator |
-| P2.9 | [Keep intermediates out of the PR](p2-9-deliverable-containment.md) | Stop instructing `architecture_design` to write notes into the deliverable dir (+ 10g); no commit allowlist — filenames stay the flow author's choice | small | prompt + flow |
-| P3.10 | [Flow and config hygiene](p3-10-flow-and-config-hygiene.md) | Unreachable `refinement`, an always-true gate, dead `resume_own_lineage`, supervisor cost, reasoning trim, target config re-sync | small | flow + config |
+| P2.8 | ✅ [Let a node's real output cross the edge](p2-8-node-output-handoff.md) | A node declares `output_file` and the flow publishes that file, not the sign-off; evaluators got the node-output channel with P1.4. The footer slot (piece 3) is **not** done — its own review | medium | orchestrator |
+| P2.9 | ✅ [Keep intermediates out of the PR](p2-9-deliverable-containment.md) | `architecture_design` writes nothing and hands on its whole blueprint (+ 10g); no commit allowlist — filenames stay the flow author's choice. The `read-only` downgrade is **declined** — it would delete P1.5's shell | small | prompt + flow |
+| P3.10 | ✅ [Flow and config hygiene](p3-10-flow-and-config-hygiene.md) | `refinement` runs unconditionally, the inert gate and the session scope are documented in place, a `command_profile` gate before the evaluators, the `when:` facts written up. `fact_verification`'s reasoning trim is **declined** | small | flow + config |
 
 ## Execution sequence
 
@@ -60,14 +60,14 @@ The order is mostly free; three dependencies are real.
 | 5 | ✅ P1.5 | P0.1, P1.6 | Needs the settled rubric (P0.1) and the settled guarantee (P1.6). |
 | 6 | ✅ P1.4 | P0.1, **P2.8 piece 2** | A coverage gate whose findings cannot gate is decorative — and one that cannot read the analysis it grades is decorative twice over, so P2.8's evaluator node-output channel shipped with it. |
 | 7 | ✅ P1.7 | P0.2 | The finalize lens needs findings to render. |
-| 8 | P1.4a | — | Spun out of P1.4 when its change 3 turned out to redefine what `read-only` means rather than add a flag. Accepted 2026-07-26, moved ahead of P2.8 because the missing history evidence is judged to have contributed to the two release-blocking false negatives, and **implemented** there. Independent of every other item. |
-| 9 | P2.8 | P0.3 | Do not inline content through a redactor that mangles benign identifiers. |
-| 10 | P2.9 | P2.8 | If the node stops writing the blueprint, the blueprint must still reach `synthesis` some other way. |
-| 11 | P3.10 | — | Independent throughout; 10d resolves itself once P0.1 ships. |
+| 8 | ✅ P1.4a | — | Spun out of P1.4 when its change 3 turned out to redefine what `read-only` means rather than add a flag. Accepted 2026-07-26, moved ahead of P2.8 because the missing history evidence is judged to have contributed to the two release-blocking false negatives, and **implemented** there. Independent of every other item. |
+| 9 | ✅ P2.8 | P0.3 | Do not inline content through a redactor that mangles benign identifiers. Pieces 1-2 shipped without inlining anything (the channel stayed a path), so the dependency never bound; piece 3, the only inlining variant, is not scheduled. |
+| 10 | ✅ P2.9 | P2.8 | If the node stops writing the blueprint, the blueprint must still reach `synthesis` some other way. It does, on the channel it already had — the node's own output — now that the prompt says the message _is_ the blueprint. |
+| 11 | ✅ P3.10 | — | Independent throughout; 10d resolved itself once P0.1 shipped. |
 
 A useful checkpoint after step 3: **re-run the same task** (`p9-09`) unchanged and diff the outcome. P0.1 + P0.2 alone should turn a silent `accept` into at least one rework round and a visible findings section, with no other change in the flow — the cheapest possible validation that the gating chain works end to end.
 
-**Steps 1-7 are implemented** (see each item's own "Implemented" section for the decisions taken and the gaps found along the way). The checkpoint re-run has **not** been done yet, and it needs one manual step first: the packaged flows are what `worc install` copies, so a target repo's existing `.worc/flows/` still carries the old `gate_severity` default — and now also the old single `repository_analysis` node — and must be refreshed or hand-edited before the re-run measures anything.
+**Every step is implemented** (see each item's own "Implemented" section for the decisions taken, the two proposals declined, and the gaps found along the way). The checkpoint re-run has **not** been done, and it needs one manual step first: the packaged flows are what `worc install` copies, so a target repo's existing `.worc/flows/` still carries the pre-campaign graph and defaults and must be refreshed before the re-run measures anything. That refresh has accumulated behind it everything the campaign changed in the packaged flow and prompts — the list is in [follow_ups.md](follow_ups.md).
 
 ## Not in this campaign
 

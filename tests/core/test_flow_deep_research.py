@@ -7,6 +7,7 @@ and fake agent / publish runners. No ``if task_type`` anywhere — the engine ju
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -17,9 +18,10 @@ from wastech_orchestrator.core.flow.engine import FlowEngine, NodeContext, NodeO
 from wastech_orchestrator.core.flow.nodes import NodeInputs, NodeServices
 from wastech_orchestrator.core.flow.nodes.checks import ChecksNodeRunner
 from wastech_orchestrator.core.flow.nodes.evaluator import EvaluatorNodeRunner
+from wastech_orchestrator.core.flow.postprocess import write_node_output
 from wastech_orchestrator.core.flow.registry import FlowRegistry
 from wastech_orchestrator.core.flow.run_state import FlowRunState
-from wastech_orchestrator.core.flow.schema import FlowNode
+from wastech_orchestrator.core.flow.schema import AgentNode, ChecksNode, FlowNode
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.providers.base import AgentRunResult, ProviderId, RunStatus
 from wastech_orchestrator.routing.router import ResolvedRoute, RouteSource, StageOutcome
@@ -125,9 +127,11 @@ class _Router:
 class _FakeAgent:
     """Agent runner stand-in: writes the research deliverable when it runs the synthesis node.
 
-    It also persists each node's ``<id>.out.md`` under ``stages/<id>/run-NNNNNN/`` the way the real
-    postprocess step does, so the generic ``{<node_id>_path}`` channel resolves — that is what the
-    coverage gate reads to judge the analysis passes it sits behind.
+    It then calls the **real** :func:`write_node_output` post-node step, so the generic
+    ``{<node_id>_path}`` channel resolves exactly as it does in a run — including the `output_file`
+    branch, where the node's channel carries the document it wrote instead of its closing message.
+    That is what the coverage gate reads to judge the analysis passes it sits behind, and what the
+    two report evaluators read to judge the deliverable.
     """
 
     def __init__(
@@ -149,27 +153,25 @@ class _FakeAgent:
         self.seen_review_path: list[tuple[str, str | None]] = []
 
     def run(self, node: FlowNode, ctx: NodeContext) -> NodeResult:
+        assert isinstance(node, AgentNode)
         self.calls.append(node.id)
         self.seen_review_path.append((node.id, self._inputs.review_path))
-        run_dir = (
-            self._artifacts_root
-            / "logs"
-            / self._task_id
-            / "stages"
-            / node.id
-            / f"run-{len(self.calls):06d}"
-        )
-        run_dir.mkdir(parents=True, exist_ok=True)
-        (run_dir / f"{node.id}.out.md").write_text(f"# {node.id}\n", encoding="utf-8")
+        report_dir = self._repo / "docs" / "research" / self._task_id
         if node.id == "synthesis":
-            import json
-
-            out = self._repo / "docs" / "research" / self._task_id
-            out.mkdir(parents=True, exist_ok=True)
-            (out / "report.md").write_text("# Report\n\nFindings.\n", encoding="utf-8")
-            (out / "sources.json").write_text(
+            report_dir.mkdir(parents=True, exist_ok=True)
+            (report_dir / "report.md").write_text(REPORT_BODY, encoding="utf-8")
+            (report_dir / "sources.json").write_text(
                 json.dumps({"sources": self._sources}), encoding="utf-8"
             )
+        write_node_output(
+            node,
+            NodeOutcome("done", final_message=f"# {node.id}\n"),
+            artifacts_root=self._artifacts_root,
+            task_id=self._task_id,
+            node_run_id=len(self.calls),
+            register=lambda *_args: None,
+            produced_dir=report_dir,
+        )
         return NodeResult(node_id=node.id, outcome=NodeOutcome("done"), node_run_id=0)
 
 
@@ -259,6 +261,10 @@ def _drive(
 
 _GOOD_SOURCE = [{"id": "s1", "claim": "exists", "path": "docs/research/t/report.md"}]
 
+#: What the fake synthesis node writes as the deliverable — deliberately unlike the `# synthesis`
+#: closing message, so a test can tell which of the two crossed the edge.
+REPORT_BODY = "# Report\n\nFindings.\n"
+
 
 # -- tests --------------------------------------------------------------------
 
@@ -289,7 +295,12 @@ def test_analysis_runs_as_three_passes_then_the_coverage_gate(tmp_path: Path) ->
     # each with its own narrow remit, and a coverage gate sits behind them — before the run's first
     # producer of prose, so a thin pass is caught before anything is written on top of it.
     _, _, agent, router = _drive(tmp_path, findings=[], sources=_GOOD_SOURCE)
-    assert agent.calls[:3] == ["analysis_core", "analysis_surfaces", "analysis_docs_tests"]
+    assert agent.calls[:4] == [
+        "refinement",  # the scoping pass, no longer gated on a task-formedness fact (P3.10 10a)
+        "analysis_core",
+        "analysis_surfaces",
+        "analysis_docs_tests",
+    ]
     gate_index = next(
         i for i, r in enumerate(router.requests) if getattr(r, "node_id", None) == "coverage_gate"
     )
@@ -337,6 +348,70 @@ def test_coverage_gate_rework_hands_its_findings_to_the_next_pass(tmp_path: Path
     assert core_passes[0] is None  # first sweep: no gate has spoken yet
     assert all(p is not None for p in core_passes[1:]), core_passes
     assert all("coverage_gate" in str(p) for p in core_passes[1:]), core_passes
+
+
+def test_refinement_runs_on_a_well_formed_task(tmp_path: Path) -> None:
+    # P3.10 10a: the scoping pass was gated on `derived.needs_refinement`, which is a *formedness*
+    # check — a description plus acceptance criteria already resolves it False — so on every
+    # properly written task the strongest prompt in the set never ran, and the analysis passes
+    # downstream lost the sub-question brief they consume. It must run with the fact False.
+    assert DEEP_RESEARCH.nodes_by_id["refinement"].when is None
+    _, _, agent, _ = _drive(
+        tmp_path,
+        findings=[],
+        sources=_GOOD_SOURCE,
+        facts={"derived.needs_refinement": False},
+    )
+    assert agent.calls[0] == "refinement"
+
+
+def test_document_gate_runs_before_the_report_evaluators(tmp_path: Path) -> None:
+    # P3.10 10g: the flow wrote Markdown, committed it and opened a pull request without running
+    # anything the repository defines, and turned the target's CI red on files the run itself had
+    # just written. A command_profile node now sits on the pass path, before the two expensive
+    # evaluators. With no command sets configured it passes vacuously — nothing to run is not a gap.
+    gate = DEEP_RESEARCH.nodes_by_id["document_checks"]
+    assert isinstance(gate, ChecksNode)
+    assert gate.checker == "command_profile"
+    fail_edge = next(
+        e
+        for e in DEEP_RESEARCH.doc.edges
+        if e.from_node == "document_checks" and e.outcome == "fail"
+    )
+    assert (fail_edge.to, fail_edge.budget) == ("synthesis", 1)
+    result, _, _, router = _drive(tmp_path, findings=[], sources=_GOOD_SOURCE)
+    assert result.status is Status.DONE
+    # It gates the deliverable, so it comes after the write and before anyone judges it.
+    judged = [getattr(r, "node_id", None) for r in router.requests]
+    assert judged.index("fact_verification") < judged.index("critical_review")
+
+
+def test_report_evaluators_are_handed_the_report_not_the_sign_off(tmp_path: Path) -> None:
+    # P2.8 piece 1 / DR-4: `{synthesis_path}` resolved to the node's closing message, so both
+    # evaluators had to name `{repo}/docs/research/{task_id}/report.md` by hand — the engine's own
+    # path convention hardcoded into a role prompt. With `output_file` the channel carries the
+    # deliverable, and both prompts resolve it by node id.
+    _, _, _, router = _drive(tmp_path, findings=[], sources=_GOOD_SOURCE)
+    published = max(
+        (tmp_path / "art" / "logs" / "t" / "stages" / "synthesis").glob("run-*/synthesis.out.md")
+    )
+    assert published.read_text("utf-8") == REPORT_BODY  # the file, not "# synthesis"
+    for node_id in ("fact_verification", "critical_review"):
+        request = next(r for r in router.requests if getattr(r, "node_id", None) == node_id)
+        assert published.as_posix() in request.prompt
+        assert "docs/research/t/report.md" not in request.prompt
+
+
+def test_citation_verdicts_name_the_manifest_they_graded(tmp_path: Path) -> None:
+    # The verdicts carry locations, never claims, so the verifier has to open the manifest for each
+    # entry's claim — and it now learns where that manifest is from the verdict file rather than
+    # from a deliverable path baked into its prompt.
+    _, _, _, router = _drive(tmp_path, findings=[], sources=_GOOD_SOURCE)
+    verifier = next(
+        r for r in router.requests if getattr(r, "node_id", None) == "fact_verification"
+    )
+    verdicts = json.loads(Path(verifier.check_artifacts_path).read_text("utf-8"))
+    assert verdicts["manifest_path"] == "docs/research/t/sources.json"
 
 
 def test_research_happy_path_produces_report_and_sources(tmp_path: Path) -> None:

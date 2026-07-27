@@ -38,6 +38,7 @@ Before drafting anything, read the packaged flow guide — `.worc/guide/flows/RE
 - Keep the graph as small as the deliverable needs — every node is a launch, a budget, and a failure mode.
 - Prefer the built-in node output contracts over a custom `output_schema`; reach for a custom schema only when you genuinely need a different shape.
 - Reuse `{<node_id>_path}` to hand one node's result to the next instead of inventing new plumbing. One node exposes exactly one output — split into several nodes to publish several results.
+- When a node's real deliverable is a file it writes, declare that file with `output_file:` so the channel carries the document instead of the node's closing summary of it. Otherwise the next node works from the smaller half.
 
 ## What not to do
 

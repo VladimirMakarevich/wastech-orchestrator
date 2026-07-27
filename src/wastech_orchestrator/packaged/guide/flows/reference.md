@@ -108,12 +108,24 @@ Every node has an `id` (unique; see reserved ids below) and a `kind`. The six ki
 | `reasoning` | string \| null | `null` | Must be valid for the resolved provider (Claude vs Codex sets differ). | Override reasoning effort. |
 | `timeout_seconds` | int \| null | `null` | — | Per-attempt CLI wall-clock ceiling. |
 | `output_artifact` | `enriched_spec` \| `plan` \| `summary` \| `report` \| null | `null` | Vocabulary is fixed to these four. | Persist the node's output into a well-known slot (see [roles.md](roles.md)). `report` (read-only node) has the orchestrator capture the node's structured output into the private report dir. |
+| `output_file` | string \| null | `null` | One portable filename — no path separators, no `..` (fatal at load). Mutually exclusive with `output_artifact` (fatal). | The file this node **produces** is what `{<node_id>_path}` carries downstream, instead of the node's closing message. Resolved inside the flow's `output_policy` report dir (the repository root for a policy without one). See [roles.md](roles.md#when-the-nodes-product-is-a-file-it-writes-output_file). |
 | `output_schema` | JSON-encoded string \| null | `null` | **Every object must set `additionalProperties: false`** (Codex 400s otherwise). | Custom structured-output shape. Prefer the built-in contract. |
 | `best_effort` | bool | `false` | — | Tolerate an infrastructure failure and continue the task (e.g. the summary node). |
 | `hitl` | `{allow_question, allow_approval}` \| null | `null` | — | Allow the agent to ask a question / request approval mid-node. |
 | `extra_args` | list[str] | `[]` | Forbidden-args scan; full-access mode is rejected under `strict_isolation`. | Raw CLI flags for this node. |
 | `skills` | list[str] | `[]` | Existence checked at task start (name or repo-relative `SKILL.md` path). | Operator-pinned repo skills for this node. |
-| `when` | `{fact, equals?}` \| null | `null` | `fact` must be namespaced `derived.*` or `config.*`. | Conditionally run the node (e.g. `derived.needs_refinement`). |
+| `when` | `{fact, equals?}` \| null | `null` | `fact` must be namespaced `derived.*` or `config.*`. | Conditionally run the node — see [Conditional nodes](#conditional-nodes-when) below. |
+
+#### Conditional nodes (`when:`)
+
+The fact resolver is core code, not an operator surface: the namespace prefix is validated at load, but the **names** are a closed set of two, and an unrecognized name resolves `false` silently — so a typo is indistinguishable from a gate that works. Read them literally before gating anything on them:
+
+| `fact` | Actually means | Watch out |
+| --- | --- | --- |
+| `derived.needs_refinement` | The task file is **not** well-formed — a non-empty description plus an `## Acceptance criteria` section already counts as complete. | This is a *formedness* check, not a "does this task need scoping" check. Every properly written task skips the node. |
+| `config.external_research` | This **flow** declares a `network_policy`. Despite the namespace it is neither a config key nor a task field. | Always `true` in a flow that sets `network_policy`, always `false` in one that does not — it can never gate at run time. |
+
+Neither is a relevance test. To make a node optional per task, disable it in the task file (`nodes: { <id>: { enabled: false } }`); that is the operator-facing switch, and it is checked before the predicate. If you keep a `when:` that cannot change the outcome, say so in a comment next to it — an inert predicate reads like a working gate.
 
 ### `evaluator` node
 
@@ -139,7 +151,7 @@ Every node has an `id` (unique; see reserved ids below) and a `kind`. The six ki
 | `manifest` | string | `sources.json` | `citation` only: the manifest filename inside the flow's report dir. One portable filename — no path separators, no `..` (fatal at load). Set it when your writing node names its manifest something else; the wrong name yields `uncheckable: <name> missing` and a gate that does nothing. Note `repository_document`'s required-files list is fixed at `report.md` + `sources.json`, so a renamed manifest is still checked but is not registered as a `report` artifact. |
 | `when` | predicate | `null` | Conditional run. |
 
-The `citation` checker classifies each entry as `verified` (the snippet is present **at the cited line**), `weak` (the snippet is in the file but not at the cited line — a real quote, a mis-attributed location), `broken` (a path/line/snippet that does not resolve), or `uncheckable` (an external `url`, an entry with no snippet to check, or a malformed entry). **Only `broken` gates.** It never judges the `claim` field: a real snippet at a real line can still carry a fabricated assertion, which is an evaluator's job — so read a pass as "every location resolves", never as "every claim holds". The per-entry verdicts are published on both outcomes and reach the next node as `{checks_path}`.
+The `citation` checker classifies each entry as `verified` (the snippet is present **at the cited line**), `weak` (the snippet is in the file but not at the cited line — a real quote, a mis-attributed location), `broken` (a path/line/snippet that does not resolve), or `uncheckable` (an external `url`, an entry with no snippet to check, or a malformed entry). **Only `broken` gates.** It never judges the `claim` field: a real snippet at a real line can still carry a fabricated assertion, which is an evaluator's job — so read a pass as "every location resolves", never as "every claim holds". The per-entry verdicts are published on both outcomes and reach the next node as `{checks_path}`; that file also carries `manifest_path` (repo-relative, `null` for a flow with no report dir), so the evaluator can open the manifest for each entry's claim without its prompt hardcoding where your deliverable lives.
 
 ### `tool` node
 

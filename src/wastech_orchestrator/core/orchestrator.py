@@ -3274,7 +3274,9 @@ class Orchestrator:
             )
             # Generic node-output channel: persist every agent node's output as {<node_id>_path}
             # (redaction-scrubbed, local/uncommitted). A node filling a special slot above writes no
-            # duplicate — write_node_output is a no-op when output_artifact is set.
+            # duplicate — write_node_output is a no-op when output_artifact is set. A node that
+            # declares `output_file` publishes that file's content instead of its closing message,
+            # read from the only directory it was allowed to write into.
             write_node_output(
                 node,
                 outcome,
@@ -3284,6 +3286,10 @@ class Orchestrator:
                 register=self._register_artifact,
                 extra_secrets=node_output_secrets,
                 exchange_root=str(self._exchange_root),
+                produced_dir=report_dir or Path(self._config.repo.local_path),
+                warn=lambda message: self._log(p.task.id).warning(
+                    message, extra={"stage": node.id}
+                ),
             )
             # Operator-authored splits are materialized at preflight (the decision comes from the
             # ``subtasks:`` manifest, not this node), so this post-hook is a no-op for them.

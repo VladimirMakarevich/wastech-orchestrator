@@ -112,6 +112,8 @@ Implement the change.{?analyze_path} Follow the analysis at {analyze_path}.{/ana
 
 One node exposes exactly one output — to publish several results, split into several nodes. A node id (agent or tool — both expose `{<id>_path}`) may not collide with a reserved core-variable prefix (`task`, `plan`, `diff`, `checks`, `review`, `repo`, `skills`, `memory`, `stage`, `subtask*`); that is a fatal load error.
 
+If the node's real product is a **file it writes** rather than what it says at the end, name that file with `output_file:` and the channel carries the file instead of the message — see [roles.md](roles.md#when-the-nodes-product-is-a-file-it-writes-output_file).
+
 An **`evaluator`** prompt reads the same names, so a gate can judge what an upstream node actually reported rather than only the file a later node wrote from it. The packaged `deep_research` flow uses this for its `coverage_gate`: three analysis passes each publish a report, and the gate opens all three (`{?analysis_core_path}` …) and compares them against the repository before the flow writes a conclusion on top of them.
 
 ## Custom tool nodes (`kind: tool`)

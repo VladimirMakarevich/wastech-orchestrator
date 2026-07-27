@@ -56,6 +56,20 @@ Besides the generic `{<id>_path}` channel, an `agent` node can fill **one** of f
 
 The vocabulary is fixed to these four; a flow only chooses which node fills each, and one node fills at most one slot.
 
+## When the node's product is a file it writes (`output_file`)
+
+A node that writes a document — a report, a translated chapter, a generated spec — has two outputs: the file, and whatever it says about the file when it finishes. By default the `{<id>_path}` channel carries the **message**, which is the smaller of the two and usually a summary of the other. Name the file with `output_file:` and the channel carries the file instead:
+
+```yaml
+- id: synthesis
+  kind: agent
+  role_file: my_flow/synthesis.md
+  permission_profile: workspace-write
+  output_file: report.md # {synthesis_path} → this file, not the closing message
+```
+
+One portable filename (no `/`, no `..`), resolved inside the flow's `output_policy` report directory — the only place the node may write anyway — or the repository root for a policy without one. It is mutually exclusive with `output_artifact` (a slot node's channel is its slot). Two things to write into the prompt when you use it: the file has to **stand alone**, since no closing message travels with it, and the filename in the prompt has to match the one in the flow. If the file never appears the channel falls back to the message and the run logs a warning — never a silent empty handoff.
+
 ## Custom output schema (the one real foot-gun)
 
 An `agent` node may set an inline `output_schema:` to return data of your own shape. If you do, **every object in the schema — top level and every nested object — must set `additionalProperties: false`.** Codex enforces `--output-schema` through OpenAI Structured Outputs and rejects a non-strict schema with a hard **400**, failing the node on every run. Claude tolerates a loose schema, but write it strict so the flow runs on both providers. Prefer the built-in contract unless you genuinely need a custom shape; keep a string `content` field if the node also fills a slot.

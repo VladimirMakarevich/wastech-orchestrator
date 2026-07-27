@@ -10,7 +10,8 @@
 #     model:     <model id>                overrides agents.providers.<provider>.model for THIS node
 #     reasoning: minimal|low|medium|high|xhigh|max  default: agents.providers.<provider>.reasoning
 #     network_access: true | false         per-node network grant/deny; default: flow network_policy (research)
-#   agent nodes also: timeout_seconds, extra_args, best_effort, permission_profile (≤ flow ceiling), when
+#   agent nodes also: timeout_seconds, extra_args, best_effort, permission_profile (≤ flow ceiling),
+#     when, output_file (the file this node produces IS its output — see `synthesis` below)
 #   evaluator nodes also: blocking, max_rework_per_stage, gate_severity (min severity that gates;
 #     built-in default high — this flow sets `medium` in `defaults.evaluator` below, see the note there)
 #     (a non-blocking evaluator that spends max_rework_per_stage with a finding still open accepts +
@@ -35,6 +36,13 @@ flow:
       { session_scope: fresh_disposable, permission_profile: read-only, gate_severity: medium }
 
   nodes:
+    # Runs on every task. It used to be gated on `derived.needs_refinement`, which is true only for
+    # an ill-formed task file — a non-empty description plus an `## Acceptance criteria` section
+    # already counts as complete — so on any well-formed task the scoping pass never ran. A complete
+    # task file and a *scoped* task are different things: this node decomposes the question into
+    # sub-questions and anchors each one to where its evidence lives, and the analysis passes
+    # downstream consume that brief. Skip it PER TASK (`nodes.refinement.enabled: false`) when the
+    # question is narrow enough not to need scoping.
     - id: refinement
       kind: agent
       role_file: deep_research/refinement.md
@@ -42,7 +50,6 @@ flow:
       permission_profile: read-only
       network_access: false
       hitl: { allow_question: true, allow_approval: false }
-      when: { fact: derived.needs_refinement }
       # optional overrides (uncomment to pin this node):
       # provider: claude
       # model: claude-opus-5
@@ -139,6 +146,11 @@ flow:
       session_scope: fresh_disposable
       permission_profile: read-only
       network_access: true
+      # Reads "this flow declares a network_policy", NOT "this question needs external grounding" —
+      # despite the `config.` namespace it is neither a config key nor a task field. This flow sets
+      # `network_policy: research`, so the predicate is ALWAYS true and gates nothing; it is kept as
+      # a statement of the node's dependency. Whether a given question needs external evidence is a
+      # per-task call: `nodes.external_research.enabled: false`.
       when: { fact: config.external_research }
       # optional overrides (uncomment to pin this node):
       # provider: claude
@@ -147,6 +159,12 @@ flow:
       # timeout_seconds: 7200
       # network_access: true
       # extra_args: []
+    # Organizes the evidence into the shape the deliverable needs and returns it as its output — it
+    # writes NO file. An intermediate blueprint written into the report directory ships in the pull
+    # request next to the deliverable, and the run that proved it shipped two documents that
+    # disagreed about coverage. Its `workspace-write` profile is kept for the shell, not for writes:
+    # this is the one pass that can settle a claim by running something (a test, an entry point, a
+    # one-liner) instead of arguing it from a citation, and `read-only` executes nothing on Claude.
     - id: architecture_design
       kind: agent
       role_file: deep_research/architecture_design.md
@@ -156,7 +174,9 @@ flow:
       # optional overrides (uncomment to pin this node):
       # provider: claude
       # model: claude-opus-5
-      # reasoning: xhigh
+      # An organizing pass over evidence three passes already gathered: measured at xhigh, every one
+      # of its repository reads was a re-read and it produced no new finding. `high` is the fit.
+      # reasoning: high
       # timeout_seconds: 7200
       # network_access: false
       # extra_args: []
@@ -166,6 +186,11 @@ flow:
       session_scope: fresh_disposable
       permission_profile: workspace-write
       network_access: false
+      # The deliverable itself is what crosses the edge, not the node's closing message:
+      # `{synthesis_path}` resolves to a redacted copy of this file, so the evaluators downstream
+      # grade the report rather than a summary of it. Keep the name in step with what the role prompt
+      # tells this node to write.
+      output_file: report.md
       # optional overrides (uncomment to pin this node):
       # provider: claude
       # model: claude-opus-5
@@ -176,6 +201,16 @@ flow:
     - id: citation_check
       kind: checks
       checker: citation
+    # The flow writes Markdown into the repository, commits it and opens a pull request, so the last
+    # thing before the expensive evaluators is the repository's OWN gate on the files about to be
+    # committed. Nothing here is hardcoded: `command_profile` runs the operator's
+    # `checks.command_sets`, diff-selected — a set whose `paths` glob the report files runs, and a
+    # repository that defines no matching set passes vacuously, so this node costs nothing until
+    # there is something to run. Name a *checking* command (`format:check`, a Markdown linter); a
+    # command that rewrites files trips the green-but-dirtying guard and parks the task.
+    - id: document_checks
+      kind: checks
+      checker: command_profile
     - id: fact_verification
       kind: evaluator
       role: verifier
@@ -194,6 +229,10 @@ flow:
       kind: evaluator
       role: critic
       role_file: deep_research/critic.md
+      # Keeps the critic's own session across rounds so a second pass can see what it already raised.
+      # Round 1 has no prior lineage and always starts fresh — which is why the role prompt makes
+      # re-review conditional on actually seeing an earlier round rather than asserting continuity.
+      # It only became reachable at all once a `medium` finding could force a second round.
       session_scope: resume_own_lineage
       permission_profile: read-only
       network_access: true
@@ -218,8 +257,10 @@ flow:
     - { from: external_research, to: architecture_design }
     - { from: architecture_design, to: synthesis }
     - { from: synthesis, to: citation_check }
-    - { from: citation_check, to: fact_verification, outcome: pass }
+    - { from: citation_check, to: document_checks, outcome: pass }
     - { from: citation_check, to: synthesis, outcome: fail, budget: 1 }
+    - { from: document_checks, to: fact_verification, outcome: pass }
+    - { from: document_checks, to: synthesis, outcome: fail, budget: 1 }
     - { from: fact_verification, to: critical_review, outcome: accept }
     - { from: fact_verification, to: synthesis, outcome: rework, budget: 2 }
     - { from: critical_review, to: publish, outcome: accept }

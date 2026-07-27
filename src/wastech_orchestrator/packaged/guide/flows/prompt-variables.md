@@ -60,6 +60,8 @@ A block whose name is not an allowlisted variable, or an unbalanced `{?a}…{/b}
 
 Every **agent** node's output is automatically persisted (as `<node_id>.out.md`), and every **`tool`** node's redacted stdout too, under that run's `logs/<task-id>/stages/<node_id>/run-<run-id>/` directory. Each is exposed to later nodes as `{<node_id>_path}` — a **path** to that file (never the inlined content). This is how you chain your own nodes: a node reads what an upstream node produced by naming it. No declaration, no config — the channel is derived from the node id. When a node re-runs (a fix loop), every pass is kept and `{<node_id>_path}` resolves to the **latest** run.
 
+For a node whose real product is a **file it writes**, what the channel carries is its own choice: by default the node's closing message, or — when the node declares `output_file:` in the flow — a redacted copy of that file. A node that writes a document and then describes it in one paragraph otherwise hands the next node the paragraph, which is the smaller half. Either way it is still a **path**, and the downstream prompt is unchanged (`{synthesis_path}` is `{synthesis_path}`).
+
 Both `agent` and `evaluator` role prompts resolve these names, so an evaluator can judge an upstream node's **work** and not only the file some later node wrote from it — that is how a coverage gate grades the analysis passes it sits behind. Only `agent` and `tool` nodes _produce_ the channel (below).
 
 ```text

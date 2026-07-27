@@ -1,6 +1,6 @@
 # P3.10 — flow and config hygiene: unreachable nodes, inert gates, dead session scope, cost trim
 
-Priority: **P3** Status: **accepted (10c dropped)** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-8, DR-9, DR-12
+Priority: **P3** Status: **implemented (10c dropped)** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-8, DR-9, DR-12
 
 A collection of small, independent items. None is individually worth a task; together they remove three pieces of configuration that cannot do anything and trim ~$0.9 per run.
 
@@ -84,3 +84,21 @@ The other half — the target's `checks.command_sets.default` listing `typecheck
 ## Depends on
 
 10d resolves itself once [P0.1](p0-1-evaluator-gate-severity.md) ships. 10b's second half is worth revisiting after [P1.4](p1-4-audit-coverage-gate.md). Everything else is independent.
+
+## Implemented
+
+2026-07-27, on the packaged flow and the shipped operator docs. Per sub-item:
+
+**10a — `refinement` runs unconditionally.** The `when:` is gone from the packaged node and the node carries a comment saying why (a formedness check is not a scoping check). The per-task escape is the node-disable switch, which is checked before any predicate anyway, so nothing was lost. The second half of the change — "stop setting `nodes.refinement.enabled: false` per task" — is a **target-repo task file**, not on this branch; it is in the follow-ups.
+
+**10b — documented, no engine change.** The `external_research` node now carries a comment stating that `config.external_research` means "this flow declares a `network_policy`", and the shipped flow reference gained a `Conditional nodes (when:)` subsection with both facts spelled out, the silent-`false`-on-unknown behavior, and the instruction to comment any predicate that cannot change the outcome. That table is the item's real deliverable: neither fact is a relevance test, and nothing in the guide said so before.
+
+**10d — closed by P0.1, plus a comment.** No engine or prompt change was needed: the field became functional the moment a `medium` finding could force a second round, and the prompt sentence had already been hedged by [P1.5](p1-5-research-role-prompts.md) item 7 ("if you can see your own earlier round(s)"). The node now carries a comment recording that round 1 always starts fresh, so the next reader does not re-derive it from the absence of `--resume` in an `argv`.
+
+**10e — half declined, and the other half is a comment.** The packaged flow pins no `reasoning` at all: every value in the item's table is a **target-repo** pin, and against the packaged default (`high`) `architecture_design` is already at the proposed value. What was changed is the commented example the operator copies (`xhigh` → `high`, with the measured reason). `fact_verification`'s `high` → `medium` was **not** made: the evidence for it ("returned `accept` with zero findings") predates [P1.5](p1-5-research-role-prompts.md) and [P1.6](p1-6-citation-checker-strictness.md), which between them made that node fetch every external source, resolve the `weak`/`uncheckable` verdicts, and run the under-claiming sweep that is the campaign's answer to the headline false negative. Cutting its effort right after widening its remit measures a node that no longer exists. So the ≈ −$0.7 estimate does not apply to this branch; the live trim is a target-config change and is in the follow-ups.
+
+**10f — already satisfied on the packaged side.** The one bullet that lives in this repository (the example suggesting Opus for the supervisor and Sonnet as primary) was corrected by [P1.7](p1-7-research-finalize-summary.md): the packaged `supervisor.model` is Sonnet and the block now carries the "spend on the PRODUCER nodes, not here" reasoning. The other three bullets — `schema_version` drift, `max_blocked_s`, the stale Codex model — are all edits to the target's own `.worc/`, tracked in the follow-ups. No file was churned to re-do what is already right.
+
+**10g — a `document_checks` node, no schema change.** The item asked to check first whether `command_profile` supports a named-set selector before proposing one. It does not — and it does not need one: selection is by **diff glob** (`select_check_sets` matches each set's `paths` against the changed paths), so a set matching the committed documents runs and a repository with no matching set selects nothing and passes vacuously. That is exactly the "reference a named set, skip cleanly when absent" behavior the item wanted, reachable from config alone. The node sits on the `citation_check → pass` edge, before the two expensive evaluators, with `fail → synthesis` (budget 1). One operator-facing caveat is now in both the flow comment and `config.example.yaml`: name a _checking_ command, because a command that rewrites files trips the core's green-but-dirtying guard and parks the task.
+
+**Not done.** Nothing in 10c (dropped by operator decision), and nothing in a target repository — every 10f bullet except the packaged example, 10a's per-task `enabled: false`, and 10e's live reasoning pins are edits to a `.worc/` tree that is not on this branch.

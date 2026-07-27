@@ -317,8 +317,37 @@ def test_packaged_verifier_prompt_watches_for_omissions() -> None:
     # rather than the report's inline prose, and fetch an external source instead of recalling it.
     text = (CODESIGN / "deep_research" / "verifier.md").read_text(encoding="utf-8")
     assert "**under**-claiming" in text
-    assert "sources.json" in text  # the manifest sets the scope, not the report's prose
+    # The manifest still sets the scope rather than the report's inline prose — but the prompt no
+    # longer names the file or its directory: the citation verdicts say which manifest they graded.
+    assert "manifest_path" in text
     assert "url" in text and "fetched" in text  # an external source is retrieved, never recalled
+
+
+@pytest.mark.parametrize("role_file", ["verifier.md", "critic.md"])
+def test_packaged_research_evaluators_read_the_deliverable_by_channel(role_file: str) -> None:
+    # P2.8: both prompts opened `{repo}/docs/research/{task_id}/report.md` — the engine's own path
+    # convention, hand-copied into a role file, which an operator flow on a different output policy
+    # would silently not have. The deliverable arrives on the node-output channel instead, which the
+    # writing node's `output_file` points at the report rather than at its closing message.
+    text = (CODESIGN / "deep_research" / role_file).read_text(encoding="utf-8")
+    assert "{synthesis_path}" in text
+    assert "docs/research" not in text
+    synthesis = load_flow(CODESIGN / "deep_research.yaml").nodes_by_id["synthesis"]
+    assert isinstance(synthesis, AgentNode)
+    assert synthesis.output_file == "report.md"
+
+
+def test_structuring_node_writes_nothing_and_hands_on_its_whole_blueprint() -> None:
+    # P2.9 / DR-11: the node was *instructed* to organize its notes inside the deliverable
+    # directory, so a 295-line intermediate blueprint shipped in the pull request beside the
+    # report — and the two documents disagreed about coverage. It must write nothing, which means
+    # its own output has to carry the blueprint in full, read by the writing node from the
+    # channel.
+    text = (CODESIGN / "deep_research" / "architecture_design.md").read_text(encoding="utf-8")
+    assert "Write no files at all" in text
+    assert "docs/research" not in text  # no deliverable-path convention left to organize notes into
+    synthesis = (CODESIGN / "deep_research" / "synthesis.md").read_text(encoding="utf-8")
+    assert "{architecture_design_path}" in synthesis
 
 
 def test_implementation_review_keeps_the_high_gate(impl_snap: FlowSnapshot) -> None:
@@ -701,6 +730,32 @@ def test_invalid_checks_manifest_rejected(tmp_path: Path, bad: str) -> None:
     # through the same portable-segment validator the exchange uses — reject, never sanitize.
     with pytest.raises(FlowLoadError, match=r"invalid 'manifest'"):
         load_flow(_write(tmp_path, _manifest_flow(bad)))
+
+
+def _output_file_flow(value: str, *, slot: str = "") -> str:
+    slot_line = f"      output_artifact: {slot}\n" if slot else ""
+    return _VALID_BODY.replace(_RF, _RF + f"      output_file: {value}\n" + slot_line)
+
+
+def test_agent_output_file_is_parsed(tmp_path: Path) -> None:
+    node = load_flow(_write(tmp_path, _output_file_flow("overview.md"))).nodes_by_id["a"]
+    assert isinstance(node, AgentNode)
+    assert node.output_file == "overview.md"
+
+
+@pytest.mark.parametrize("bad", ["../outside.md", "sub/dir.md", "'/abs.md'", "'..'", "'CON'"])
+def test_invalid_agent_output_file_rejected(tmp_path: Path, bad: str) -> None:
+    # Same reasoning as `manifest`: a flow-authored filename joined onto a directory the
+    # orchestrator resolved is a traversal surface — reject, never sanitize.
+    with pytest.raises(FlowLoadError, match=r"invalid 'output_file'"):
+        load_flow(_write(tmp_path, _output_file_flow(bad)))
+
+
+def test_output_file_with_output_artifact_rejected(tmp_path: Path) -> None:
+    # A slot node's channel IS its slot, so the produced file would be written and never read —
+    # exactly the silent-nothing failure mode that gets declared and then trusted.
+    with pytest.raises(FlowLoadError, match=r"both 'output_file' and 'output_artifact'"):
+        load_flow(_write(tmp_path, _output_file_flow("overview.md", slot="plan")))
 
 
 def test_invalid_network_policy_rejected(tmp_path: Path) -> None:

@@ -152,7 +152,7 @@ class ChecksNodeRunner:
         finished_at = self._s.clock()
         run_dir = self._run_dir(ctx.task_id, node.id, run_id)
         artifact = run_dir / "citation.json"
-        artifact.write_text(_citation_json(report), encoding="utf-8")
+        artifact.write_text(_citation_json(report, self._repo_relpath(manifest)), encoding="utf-8")
         self._record_check_run(
             ctx,
             command="citation",
@@ -225,6 +225,19 @@ class ChecksNodeRunner:
             finished_at=self._s.clock(),
         )
         return NodeResult(node_id=node.id, outcome=NodeOutcome(result_kind), node_run_id=run_id)
+
+    def _repo_relpath(self, path: Path) -> str | None:
+        """*path* relative to the clone (POSIX), or ``None`` when it lies outside it.
+
+        The manifest's own location is published with the verdicts so the evaluator that consumes
+        them can open the manifest for each entry's claim without being told a directory convention
+        in its prompt. ``None`` for a flow with no report directory, where the looked-up manifest
+        sits in the private artifact tree and no agent may read it.
+        """
+        try:
+            return path.relative_to(self._s.repo_dir).as_posix()
+        except ValueError:
+            return None
 
     def _checks_dir(self, task_id: str) -> Path:
         checks_dir = Path(task_artifact_dir(self._s.artifacts_root, task_id)) / "checks"
@@ -312,12 +325,16 @@ class ChecksNodeRunner:
         return outcome
 
 
-def _citation_json(report: CitationReport) -> str:
+def _citation_json(report: CitationReport, manifest_path: str | None) -> str:
     # `path`/`line` are echoed per entry: this file is now handed to the downstream verifier, which
     # cannot act on an entry whose location it would have to recover from the reason prose.
+    # `manifest_path` names the manifest that was validated, so that verifier can open it for each
+    # entry's claim (the verdicts carry locations, never claims) without its prompt hardcoding where
+    # a deliverable lives.
     return (
         json.dumps(
             {
+                "manifest_path": manifest_path,
                 "manifest_status": report.manifest_status,
                 "passed": report.passed,
                 "entries": [

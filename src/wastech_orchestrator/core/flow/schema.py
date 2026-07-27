@@ -77,6 +77,13 @@ class AgentNode:
     #: optional well-known artifact slot the agent's output is persisted to and threaded downstream
     #: (``enriched_spec`` / ``plan`` / ``summary``); the core writes it after the node runs (P1.4).
     output_artifact: str | None = None
+    #: the file this node *produces*, named by the flow: when set, that file's content — not the
+    #: node's closing message — is what the ``{<node_id>_path}`` channel carries downstream. One
+    #: portable filename (no separators, no ``..``), resolved inside the flow's ``output_policy``
+    #: report directory, or the repository root for a policy without one. A node whose real product
+    #: is a written document otherwise publishes only its own summary of it. Absent, or the file is
+    #: missing/unreadable after the node runs, the channel keeps carrying the message.
+    output_file: str | None = None
     #: a best-effort node tolerates an infrastructure failure (no provider could run it): the engine
     #: continues instead of failing the task (the summary stage — minimal-summary fallback).
     best_effort: bool = False

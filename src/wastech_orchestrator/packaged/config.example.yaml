@@ -198,6 +198,11 @@ checks:
   # passes the checks node). The runner runs the union of sets whose `paths` glob the task diff; a
   # set with no `paths` always runs (on any non-empty diff); an empty diff runs nothing. Each command
   # runs as an argv list (no shell) in its `cwd`. No commands are auto-discovered — you author this.
+  # These sets are the gate for EVERY flow, not just code ones: a research/documentation flow commits
+  # Markdown and opens a pull request too, so give the documents you commit a set that matches them
+  # (see the `docs` example below) — a formatter or Markdown lint the repository already enforces in
+  # CI. Name a *checking* command: one that rewrites files trips the green-but-dirtying guard and
+  # parks the task, so prefer `format:check` over `format`.
   command_sets: {}
   #
   # --- Single-root repo: one set, no `paths` (runs on any change) ---

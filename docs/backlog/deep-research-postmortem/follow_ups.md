@@ -38,6 +38,17 @@ if control_before is not None and git is not None:
 
 Making it warn-only for a read-only-with-shell attempt means branching on `self._is_workspace_write(node, ctx)` there and routing the read-only case into the same `read_only_write` signal the working-tree check already uses. Roughly ten lines including the test. Do **not** do it by dropping the fingerprint — losing detection is strictly worse than either behavior.
 
+### Does `architecture_design` keep its shell, or lose it to the profile downgrade? (P2.9)
+
+[P2.9](p2-9-deliverable-containment.md)'s option 1 asks for two things: stop telling the node to write notes into the deliverable directory (done) and drop it from `workspace-write` to `read-only`, "which also removes an unused write grant". The downgrade was **not** made, because the grant stopped being unused a day after that sentence was written: [P1.5](p1-5-research-role-prompts.md) gave this node the empirical-confirmation remit, and on Claude `read-only` grants `Read`/`Glob`/`Grep` and no shell — so `read-only` would delete the ability to settle a claim by running the project's own test suite or a one-liner. `.agents/rules/security.md` makes that trade a rule violation, not a judgment call, and the symptom the item exists to fix is already closed by the prompt edit plus the write-containment guard.
+
+What is genuinely lost by keeping the grant: a prompt-following lapse _could_ still write into the report directory, where `read-only` would make it impossible. If the operator wants that guarantee more than the reproduction capability, the change is two lines and one paragraph:
+
+- `permission_profile: workspace-write` → `read-only` on the `architecture_design` node in `packaged/flows/deep_research.yaml`, and drop the comment above it explaining why the grant is held;
+- delete the **Confirm empirically what you can** paragraph from `packaged/flows/deep_research/architecture_design.md` — leaving it would be exactly the "asserts a mechanism the node does not have" defect [P3.10](p3-10-flow-and-config-hygiene.md) and [P1.5](p1-5-research-role-prompts.md) were both about.
+
+Do not do half of it. A `read-only` node whose prompt still promises a shell is worse than either end state.
+
 ## Watch items
 
 ### `--allowedTools` allow-direction semantics are pinned by a manual probe, not by the suite (P1.4a)
@@ -48,6 +59,10 @@ If a future CLI flips that default to auto-approve, the verb allowlist becomes d
 
 Re-probe when pinning a new Claude CLI major, using the four probes in the item. If the behavior ever flips, the documented fallback is the one the item names: drop the verb allowlist and rely on the sandbox alone, exactly like Codex.
 
+### `deep_research` can now park on a host toolchain, which it never could before (P3.10 10g)
+
+The `document_checks` node is the flow's first `command_profile` node, and that checker is fail-closed in a way the `citation` checker is not: if a selected command's toolchain is absent on the host, or every selected check is skipped, it raises `manual_action_required` rather than failing quality — a fix loop cannot install toolchains. So a research run on a machine without the target's formatter now parks where it previously published. That is the intended behavior of a gate (the alternative is committing unchecked files, which is the defect the item exists to fix) and it matches how the `implementation` flow has always behaved. It is listed here because the flow's failure profile changed: a `deep_research` operator who has never configured `command_sets` sees no change at all, and one who configures them gains a new way for a long expensive run to stop at the last step. Note `skip_if_unavailable: true` only _half_ helps — it turns the launch failure into a loud skip, but a set that is the only one selected and then skipped leaves the gate with nothing run, which parks the task on the same path. Per-task `nodes.document_checks.enabled: false` is the clean escape.
+
 ### The git-evidence master switch does not gate Codex, and cannot (P1.4a)
 
 `security.allow_git_evidence: false` (the default) does **not** mean "no node can read git history anywhere". It means "no node gains a capability it did not already have". A Codex `read-only` node can run `git log` today and will keep doing so with the switch off, because Codex's `read-only` sandbox permits command execution — its mutation ban comes from the workspace being mounted `read` with the network off, not from a verb list.
@@ -56,15 +71,33 @@ So the provider asymmetry [P1.4a](p1-4a-read-only-git-evidence.md)'s Problem sec
 
 ## Operational consequences
 
-### Target repositories need a `.worc/flows/` refresh (P1.4, P1.4a, P0.1)
+### Target repositories need a `.worc/flows/` refresh (P0.1, P1.4, P1.4a, P2.8, P2.9, P3.10)
 
-A target repo that already carries `.worc/flows/deep_research.yaml` keeps running **its own** copy, so nothing the campaign changed in the packaged flow reaches it until that tree is refreshed. Three items have now accumulated behind that one refresh:
+A target repo that already carries `.worc/flows/deep_research.yaml` keeps running **its own** copy, so nothing the campaign changed in the packaged flow reaches it until that tree is refreshed. Everything the campaign touched in the flow has accumulated behind that one refresh:
 
 - **[P1.4](p1-4-audit-coverage-gate.md)** — the refresh must bring the four new role files (`analysis_core.md`, `analysis_surfaces.md`, `analysis_docs_tests.md`, `coverage.md`) and drop `repository_analysis.md`, **or the flow fails to load on a missing `role_file`**. This is the only entry here that can break a run rather than merely withhold an improvement.
 - **[P0.1](p0-1-evaluator-gate-severity.md)** — `gate_severity` on the packaged evaluators.
 - **[P1.4a](p1-4a-read-only-git-evidence.md)** — `git_evidence: true` on the three analysis nodes. Withholding it is harmless: the nodes keep behaving as they do today.
+- **[P2.8](p2-8-node-output-handoff.md)** — `output_file: report.md` on `synthesis`, plus the rewritten `verifier.md` / `critic.md`. These two go together: without the flow field, `{synthesis_path}` resolves to the node's closing message, so refreshing only the prompts would point both evaluators at a summary instead of the deliverable. Refreshing only the flow field is harmless.
+- **[P2.9](p2-9-deliverable-containment.md)** — the rewritten `architecture_design.md` / `synthesis.md`. Withholding them keeps shipping the intermediate blueprint in the pull request.
+- **[P3.10](p3-10-flow-and-config-hygiene.md)** — `refinement` without its `when:`, and the new `document_checks` node with its two edges. The gate is inert until the target also defines a `checks.command_sets` entry whose `paths` match the committed documents (below).
 
-Worth doing as one refresh with one verification pass rather than three.
+Worth doing as one refresh with one verification pass (`worc validate-flow deep_research`) rather than six.
+
+### The document gate needs a matching command set in the target's config (P3.10 10g)
+
+[P3.10](p3-10-flow-and-config-hygiene.md)'s `document_checks` node runs the operator's own `checks.command_sets`, diff-selected. A repository with no set matching the committed documents selects nothing and passes vacuously — so the node is present and does nothing until the target adds one (for the repo that produced this campaign: a `docs` set with `paths: ["**/*.md"]` running its Markdown format check). Two things to get right in that set: name a _checking_ command, because one that rewrites files trips the core's green-but-dirtying guard and parks the task; and remember a catch-all set with no `paths` runs on **any** non-empty diff, so a research run would pull the whole code gate in behind it.
+
+### Three target-config edits and one task-file habit the campaign did not make (P3.10 10a, 10e, 10f)
+
+None of these live in this repository, and all four are one-liners in the target's `.worc/`:
+
+- `config.example.yaml` at `schema_version: 24` against a packaged `31` — re-copy from the packaged file.
+- `agents.retry.max_blocked_s: 3600.0` against a current default of `21600.0` — a mid-run rate limit would fail the task ~5 h early.
+- `agents.providers.codex.model: gpt-5.4` against packaged `gpt-5.5` — inert for this flow, still stale.
+- Stop setting `nodes.refinement.enabled: false` in the task file: with the `when:` predicate gone, that switch is now the _only_ thing keeping the scoping pass from running, and the pass is where an audit-shaped question gets its per-subsystem sub-questions.
+
+The ≈ −$0.7 reasoning trim is in the same category: the packaged flow pins no `reasoning`, so the trim is a target-side edit — and only the `architecture_design` half of it, since [P3.10](p3-10-flow-and-config-hygiene.md)'s `## Implemented` declines the `fact_verification` half.
 
 ### `git_evidence` on the packaged analysis nodes was implementation initiative (P1.4a)
 
@@ -76,6 +109,9 @@ The `docs/` tree is reconstructed on `main` from the merged `dev` diff as a sepa
 
 - **[P1.4](p1-4-audit-coverage-gate.md)** — the node-output channel now spans evaluators (`configuration.md`, the flow-authoring page's prompt-variable table); `deep_research`'s graph gained three nodes and a gate (`worc_architecture.md`, `cookbook.md`).
 - **[P1.4a](p1-4a-read-only-git-evidence.md)** — a new `security.*` key and a new per-node flow field (`configuration.md`, the flow-authoring page); and the `read-only` permission profile no longer implies "no shell" (`worc_architecture.md`, `glossary.md`).
+- **[P2.8](p2-8-node-output-handoff.md)** — a new per-node flow field `output_file` (`configuration.md`, the flow-authoring page's node-field table); the node-output channel can now carry a produced document rather than the node's message (`worc_architecture.md`'s handoff description, `glossary.md` if it defines the channel); `citation.json` gained `manifest_path` (`configuration.md`'s checker section).
+- **[P2.9](p2-9-deliverable-containment.md)** — no engine change, but the `repository_document` story changes in prose: the structuring node writes nothing and the deliverable directory holds only the deliverable (`cookbook.md`, `worc_architecture.md`).
+- **[P3.10](p3-10-flow-and-config-hygiene.md)** — `deep_research`'s graph gained a `command_profile` gate and lost `refinement`'s predicate (`worc_architecture.md`, `cookbook.md`); and the two `when:` facts are now documented as what they actually resolve (`configuration.md` — this is the one an operator is most likely to misread).
 
 ## Deliberate non-goals
 
@@ -88,6 +124,8 @@ Decided against, not overlooked.
 - **`None` and `False` on the node field carry the same behavior.** Both mean "did not ask". The tri-state is the shape operator decision 1 called for and mirrors `network_access`; what would give `False` its own meaning is a flow-wide default, and no flow needs one.
 - **Codex adapter untouched.** A test pins that its profile is unchanged _and why_ — three keys, no command dimension, workspace `read`, network off, which is a stronger mutation ban than any allowlist can be.
 
-### P1.4 — coverage gate
+### P2.8 — node output handoff
 
-- **The hardcoded `{repo}/docs/research/{task_id}/report.md` in `verifier.md` / `critic.md` stays for now.** It is an instance of the anti-pattern the campaign README rules out, and [P2.8](p2-8-node-output-handoff.md) piece 2 is supposed to remove it — but doing so before **piece 1** would point both evaluators at a 4 KB chat sign-off instead of the deliverable, because `{synthesis_path}` resolves to the sign-off today. Sequenced, not forgotten: it closes with P2.8 piece 1.
+- **Piece 3 (the footer slot) is not scheduled.** The item itself asks for it to be argued separately, and its two halves have different costs: an upstream-output slot changes the shape of every rendered prompt in every flow, and the size-bounded `{<node_id>_content}` companion is the only part of the campaign that touches the documented "never inline content" doctrine. Neither is needed for the acceptance criteria — the packaged prompts name `{<node_id>_path}`, and after piece 1 that path is the artifact. Revisit if operators start hand-writing the same upstream reference into every role file.
+- **No `{report_dir}` prompt variable.** It was the obvious way to let the verifier name the deliverable directory without the `docs/research/{task_id}` convention, and it would have cleaned `synthesis.md` too. Rejected as a new core variable for one sentence: the deliverable reaches the evaluators on the node-output channel, and the manifest's location is now published in `citation.json`. Reconsider only if a role prompt needs the _directory_ for something other than reaching a file a node produced.
+- **The produced file is copied, not referenced.** `{<node_id>_path}` still points into the redacted exchange, so an evaluator grades a copy of the deliverable rather than the file the publish node will commit. That is deliberate (WRI-001 — a live repository path never enters a prompt) and the copy is byte-identical unless redaction fires, which for a research report means a secret got written into the deliverable. Worth knowing when reading a finding that quotes a line number.
