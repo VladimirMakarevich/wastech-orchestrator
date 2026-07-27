@@ -58,14 +58,14 @@ def test_short_literal_secret_is_not_redacted() -> None:
 
 
 def test_sub_floor_literal_is_ignored() -> None:
-    # F45: the literal floor is aligned with the harvest floor (8); a shorter value is not treated
+    # The literal floor is aligned with the harvest floor (8); a shorter value is not treated
     # as a redaction literal (it would mangle ordinary text without protecting a real secret).
     out = redact_text("run the code path now", extra_secrets=["code"])  # len 4 < 8
     assert out == "run the code path now"
 
 
 def test_literal_secret_redacted_only_on_word_boundary() -> None:
-    # F45: an unbounded substring replace corrupted benign text (a short harvested value was cut
+    # An unbounded substring replace corrupted benign text (a short harvested value was cut
     # from the middle of an ordinary word, e.g. a lesson subject). Redact only standalone tokens.
     out = redact_text("the taskflow runs but subtaskflows stay", extra_secrets=["taskflow"])
     assert "subtaskflows" in out  # substring inside a larger word is left intact
@@ -73,7 +73,7 @@ def test_literal_secret_redacted_only_on_word_boundary() -> None:
 
 
 def test_literal_redaction_is_deterministic() -> None:
-    # F36: identical input redacts identically (no order/randomness dependence).
+    # Identical input redacts identically (no order/randomness dependence).
     secret = "repeatable-secret-token"
     text = f"see {secret} here and {secret} there"
     first = redact_text(text, extra_secrets=[secret])
@@ -122,7 +122,7 @@ def test_access_token_key_is_redacted() -> None:
     assert out == {"access_token": REDACTED, "github_token": REDACTED}
 
 
-# -- one name policy across text and mappings (DR-10) -------------------------
+# -- one name policy across text and mappings ---------------------------------
 
 
 @pytest.mark.parametrize(
@@ -138,7 +138,7 @@ def test_access_token_key_is_redacted() -> None:
     ],
 )
 def test_benign_identifiers_survive_text_redaction(benign: str) -> None:
-    # DR-10: `_ASSIGNMENT` matched a sensitive word as a SUBSTRING of the name, so the ordinary
+    # `_ASSIGNMENT` matched a sensitive word as a SUBSTRING of the name, so the ordinary
     # identifier `tokens` was treated as secret-bearing. That contradicted the policy the same
     # module documents and `is_sensitive_key` implements (`test_usage_counter_keys_are_not_redacted`
     # is the mapping-side pin of the same rule) — and it corrupted source text in artifacts, in the
@@ -168,7 +168,7 @@ def test_secret_bearing_names_still_lose_their_value(secret_bearing: str, value:
     assert REDACTED in out
 
 
-# -- JSON-lines sinks stay parseable (DR-10 harm 1) ---------------------------
+# -- JSON-lines sinks stay parseable (harm 1) ---------------------------------
 
 # Source-shaped payloads a provider streams back as tool results: each holds an escaped quote right
 # next to a sensitive-looking name, which is what used to break the line.
@@ -183,7 +183,7 @@ _JSONL_CORPUS = (
 
 
 def test_redact_jsonl_keeps_every_line_parseable() -> None:
-    # DR-10: redaction ran on the SERIALIZED line, and the value group `[^\s"]+` ate the backslash
+    # Redaction ran on the SERIALIZED line, and the value group `[^\s"]+` ate the backslash
     # of an escaped quote — 2 of 14 events.jsonl files in the p9-09 run had an unparsable line, and
     # the payload lost was the tool result behind one of that run's own findings. Decoding first
     # makes it structurally impossible: the escape is gone before any pattern applies.
@@ -228,7 +228,7 @@ def test_redact_jsonl_preserves_line_endings(stream: str) -> None:
 
 
 def test_redact_jsonl_is_deterministic_and_order_preserving() -> None:
-    # F36: same input, same output. Key order is the provider's, not sorted, so the sink stays
+    # Same input, same output. Key order is the provider's, not sorted, so the sink stays
     # diffable against the raw stream.
     stream = json.dumps({"zeta": 1, "alpha": 2, "api_key": "abcdefghijklmnop"}) + "\n"
     first, second = redact_jsonl(stream), redact_jsonl(stream)

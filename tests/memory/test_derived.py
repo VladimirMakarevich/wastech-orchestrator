@@ -1,4 +1,4 @@
-"""DerivedIndex (04.4): path/symbol existence + rebuildable cache, no real git repo needed."""
+"""DerivedIndex: path/symbol existence + rebuildable cache, no real git repo needed."""
 
 from __future__ import annotations
 
@@ -66,7 +66,7 @@ def test_cache_is_rebuildable_and_carries_no_audit(tmp_path: Path) -> None:
 
 
 def test_tracked_paths_are_posix_normalized(tmp_path: Path) -> None:
-    # Stored/compared paths are the POSIX form (AC-X1): forward-slash paths round-trip unchanged and
+    # Stored/compared paths are the POSIX form: forward-slash paths round-trip unchanged and
     # membership is exact, so a record's POSIX scope path always matches the tracked set.
     idx = _index(tmp_path, {"src/pkg/mod.py"})
     assert "src/pkg/mod.py" in idx.tracked_paths()

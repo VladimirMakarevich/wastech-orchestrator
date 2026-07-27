@@ -1,4 +1,4 @@
-"""Core-owned node runners (agent / evaluator / checks) as thin adapters (P1.3).
+"""Core-owned node runners (agent / evaluator / checks) as thin adapters.
 
 Each runner is exercised with fake collaborators (router / store / check runner) so we can assert it
 calls the collaborator and maps the result exactly like the direct orchestrator call would.
@@ -275,7 +275,7 @@ def test_agent_node_equals_direct_router_call(tmp_path: Path) -> None:
 
 
 def test_agent_request_carries_security_preamble(tmp_path: Path) -> None:
-    # VF-7: the Core-owned preamble threaded via NodeServices reaches the agent's AgentRunRequest.
+    # The Core-owned preamble threaded via NodeServices reaches the agent's AgentRunRequest.
     (tmp_path / "roles").mkdir()
     (tmp_path / "roles" / "impl.md").write_text("Implement {task_path}", "utf-8")
     node = AgentNode(
@@ -298,7 +298,7 @@ def test_agent_request_carries_security_preamble(tmp_path: Path) -> None:
 
 def test_node_output_path_variable_resolves_downstream(tmp_path: Path) -> None:
     # The generic {<id>_path} channel: a node references an upstream agent node's persisted output
-    # by id, and it resolves to that node's <id>.out.md once the file exists (node-output ADR).
+    # by id, and it resolves to that node's <id>.out.md once the file exists.
     (tmp_path / "impl.md").write_text(
         "Build.{?scan_path} Read the scan at {scan_path}.{/scan_path}", "utf-8"
     )
@@ -439,8 +439,8 @@ def test_predecessor_context_dropped_outside_decompose_region(tmp_path: Path) ->
 
 
 def test_agent_node_builds_memory_packet_when_role_references_it(tmp_path: Path) -> None:
-    # Node-driven (FR4): a node whose role references {memory_path} gets a per-node packet built
-    # and its PATH injected — never the memory root (AC-R1). A custom node opts in, no Core change.
+    # Node-driven: a node whose role references {memory_path} gets a per-node packet built
+    # and its PATH injected — never the memory root. A custom node opts in, no Core change.
     role = "Work. {?memory_path}brief: {memory_path}{/memory_path}"
     (tmp_path / "r.md").write_text(role, "utf-8")
     node = AgentNode(id="impl", kind="agent", role_file="r.md")
@@ -479,7 +479,7 @@ def test_agent_node_skips_memory_when_role_does_not_reference_it(tmp_path: Path)
 
 
 def test_agent_node_memory_disabled_renders_empty(tmp_path: Path) -> None:
-    # Memory disabled (no packet_builder, Q10): {memory_path} renders empty, block drops cleanly.
+    # Memory disabled (no packet_builder): {memory_path} renders empty, block drops cleanly.
     role = "Work.{?memory_path} brief: {memory_path}{/memory_path}"
     (tmp_path / "r.md").write_text(role, "utf-8")
     node = AgentNode(id="impl", kind="agent", role_file="r.md")
@@ -524,7 +524,7 @@ def test_agent_node_network_access_optout_in_granting_flow(tmp_path: Path) -> No
 
 
 def test_fresh_disposable_node_does_not_inherit_or_leak_session(tmp_path: Path) -> None:
-    # F3 / MC6 (durable, P2.2): a fresh_disposable node must NOT resume the unit's editing lineage
+    # A fresh_disposable node must NOT resume the unit's editing lineage
     # and must NOT write a lineage back — otherwise it would leak into a later editing_lineage node.
     from dataclasses import replace
 
@@ -557,7 +557,7 @@ def test_fresh_disposable_node_does_not_inherit_or_leak_session(tmp_path: Path) 
 
 
 def test_editing_lineage_node_continues_and_persists_session(tmp_path: Path) -> None:
-    # F3 / MC6 (durable, P2.2): an editing_lineage node resumes the unit's durable editing session
+    # An editing_lineage node resumes the unit's durable editing session
     # (when the provider matches) and writes the new session back, so a later editing node (fixing
     # after implementation) keeps the lineage.
     from dataclasses import replace
@@ -588,7 +588,7 @@ def test_editing_lineage_node_continues_and_persists_session(tmp_path: Path) -> 
 
 
 def test_affinity_resumes_declared_node_session(tmp_path: Path) -> None:
-    # P2.2: lineage_affinity (fixing → implementation) is realized by the one editing session per
+    # lineage_affinity (fixing → implementation) is realized by the one editing session per
     # execution unit — implementation establishes it, fixing resumes that same session.
     from dataclasses import replace
 
@@ -667,7 +667,7 @@ def test_two_affinity_less_editing_nodes_keep_isolated_lineages(tmp_path: Path) 
 
 
 def test_evaluator_request_carries_security_preamble(tmp_path: Path) -> None:
-    # VF-7 parity: the evaluator's read-only request carries the same Core-owned preamble.
+    # Parity: the evaluator's read-only request carries the same Core-owned preamble.
     (tmp_path / "r.md").write_text("review", "utf-8")
     router, store = FakeRouter(_result({"findings": []})), FakeStore()
     services = _services(
@@ -683,7 +683,7 @@ def test_evaluator_request_carries_security_preamble(tmp_path: Path) -> None:
 
 
 def test_evaluator_carries_prior_rework_report_from_exchange(tmp_path: Path) -> None:
-    # VF-10: on a rework re-entry the reviewer's request carries the rework-target author node's
+    # On a rework re-entry the reviewer's request carries the rework-target author node's
     # latest exchange report, so it judges "was the finding addressed" with the implementer's
     # account (here a stated blocker) in hand, not the diff alone.
     import dataclasses
@@ -727,7 +727,7 @@ def test_evaluator_carries_prior_rework_report_from_exchange(tmp_path: Path) -> 
 
 
 def test_evaluator_first_pass_has_no_prior_rework_report(tmp_path: Path) -> None:
-    # VF-10: the first review pass (the author has not run yet) carries no prior report — the field
+    # The first review pass (the author has not run yet) carries no prior report — the field
     # is None and the context footer omits the slot.
     (tmp_path / "r.md").write_text("review {diff_path}", "utf-8")
     router = FakeRouter(_result({"findings": []}))
@@ -743,7 +743,7 @@ def test_evaluator_first_pass_has_no_prior_rework_report(tmp_path: Path) -> None
 
 
 def test_evaluator_fresh_disposable_does_not_touch_lineage(tmp_path: Path) -> None:
-    # P2.2: an in-flow evaluator (fresh_disposable) never resumes nor writes the author's editing
+    # An in-flow evaluator (fresh_disposable) never resumes nor writes the author's editing
     # lineage — it gets a fresh session and the unit's editing session is left untouched.
     (tmp_path / "r.md").write_text("review", "utf-8")
     store = FakeStore()
@@ -830,7 +830,7 @@ def test_evaluator_no_work_surfaces_infra_class_not_schema(tmp_path: Path) -> No
     # EXPERIMENTAL(no-work-infra) — remove with the feature.
     # A no-work evaluator run now arrives as an EXHAUSTED route (result None) carrying the boundary
     # AGENT_NO_PROGRESS class. The never-ran branch fires FIRST and re-surfaces it — a dead run is
-    # never mislabeled "schema not honored" (F3). This confirms there is no double-handling:
+    # never mislabeled "schema not honored". This confirms there is no double-handling:
     # the schema-not-honored path is reachable only when a run actually produced a result.
     from wastech_orchestrator.core.flow.nodes.base import EvaluatorInfraError
     from wastech_orchestrator.providers.base import ErrorClass, NormalizedError
@@ -887,7 +887,7 @@ def test_agent_workspace_write_writes_diff(tmp_path: Path) -> None:
 
 
 def test_agent_exchange_mutation_is_detected_from_parent_state(tmp_path: Path) -> None:
-    # WRI-002 detection-in-depth: a provider that mutates the curated (read-only) exchange during
+    # Detection-in-depth: a provider that mutates the curated (read-only) exchange during
     # its
     # attempt is caught from the parent-held pre/post manifest and routed to non-fallback manual
     # action, so the changed copy is never consumed downstream.
@@ -1135,7 +1135,7 @@ def test_agent_node_rendered_prompt_includes_context_footer(tmp_path: Path) -> N
 
 
 def test_rendered_prompt_includes_security_preamble(tmp_path: Path) -> None:
-    """VF-7: the preamble is written into the redacted rendered-prompt.md — the same effective
+    """The preamble is written into the redacted rendered-prompt.md — the same effective
     prompt the provider receives on stdin — in order preamble → role prompt → context footer."""
     (tmp_path / "r.md").write_text("go", "utf-8")
     node = AgentNode(
@@ -1296,7 +1296,7 @@ def test_agent_hitl_question_round_trip(tmp_path: Path) -> None:
 
 
 def test_agent_hitl_round_trip_resumes_first_run_session(tmp_path: Path) -> None:
-    # P0 (operator directive): after a HITL round-trip the node must RESUME the first run's session
+    # After a HITL round-trip the node must RESUME the first run's session
     # so the agent continues the same conversation with the operator's answer — it does not start a
     # fresh session and re-derive from scratch. A fresh_disposable node has no editing lineage, so
     # the only reason the re-run carries a session id is the explicit HITL resume.
@@ -1753,13 +1753,13 @@ def test_evaluator_non_blocking_gate_severity_self_caps(tmp_path: Path) -> None:
     assert first.outcome.rework_exhausted is False  # budget still had a round left
     second = EvaluatorNodeRunner(services, inputs).run(node, _ctx(node))
     assert second.outcome.kind == "accept"  # budget spent → accept, not manual
-    # P0.1: the terminal accept must be FLAGGED exhausted — that flag is the whole operator signal
-    # (console warning + ⚠️ telegram trace at orchestrator.py). A silent accept is the DR-1 defect.
+    # The terminal accept must be FLAGGED exhausted — that flag is the whole operator signal
+    # (console warning + ⚠️ telegram trace at orchestrator.py). A silent accept is the defect.
     assert second.outcome.rework_exhausted is True
 
 
 def test_evaluator_builds_memory_packet_when_role_references_it(tmp_path: Path) -> None:
-    # F31: an evaluator (review) whose role references {memory_path} now gets a per-node packet
+    # An evaluator (review) whose role references {memory_path} now gets a per-node packet
     # built and its PATH injected — the block was dead because the evaluator runner never wired it.
     role = "Review. {?memory_path}mem: {memory_path}{/memory_path}"
     (tmp_path / "r.md").write_text(role, "utf-8")
@@ -1821,7 +1821,7 @@ def test_evaluator_medium_finding_is_non_blocking_and_carried(tmp_path: Path) ->
 
 
 def test_evaluator_outcome_carries_the_providers_final_message(tmp_path: Path) -> None:
-    # DR-2 wire 1: the evaluator runner built its NodeOutcome without `final_message`, so the
+    # The evaluator runner built its NodeOutcome without `final_message`, so the
     # provider's own account of what it found — already written to the run dir's summary.md — was
     # dropped one layer up. The supervisor then observed a bare `Outcome: accept` and reported the
     # gate as having passed. The agent runner has always carried this; the evaluator now does too.
@@ -1843,7 +1843,7 @@ def test_evaluator_outcome_carries_the_providers_final_message(tmp_path: Path) -
 
 
 def test_evaluator_resolves_an_upstream_node_output_path(tmp_path: Path) -> None:
-    # DR-7: an evaluator that judges an upstream node's *work* (a coverage gate) has to see that
+    # An evaluator that judges an upstream node's *work* (a coverage gate) has to see that
     # work. The generic {<id>_path} channel now resolves inside an evaluator role file exactly as it
     # does for an agent; before, it rendered verbatim and such a gate could only judge the
     # repository, never the audit of it.
@@ -1949,7 +1949,7 @@ def _test_quality(max_rework_per_stage: int = 1) -> EvaluatorNode:
 
 
 def test_test_quality_rework_to_fixing(tmp_path: Path) -> None:
-    # P2.4: a non-blocking test_quality evaluator with a blocking finding and budget remaining
+    # A non-blocking test_quality evaluator with a blocking finding and budget remaining
     # routes to fixing (→ rework), exactly like a blocking evaluator — the non-blocking part only
     # governs what happens at exhaustion, not the first blocking finding.
     (tmp_path / "r.md").write_text("review", "utf-8")
@@ -1966,7 +1966,7 @@ def test_test_quality_rework_to_fixing(tmp_path: Path) -> None:
 
 
 def test_test_quality_non_blocking_exhaustion_continues(tmp_path: Path) -> None:
-    # P2.4: a non-blocking evaluator self-caps via the COUNT of its own in_flow_verdict rows. With
+    # A non-blocking evaluator self-caps via the COUNT of its own in_flow_verdict rows. With
     # budget 1, the first blocking pass reworks; the second (budget spent) ACCEPTS — flow takes the
     # accept edge (→ checks), never manual. The core never learns the role: the cap is the node's
     # declared max_rework_per_stage.
@@ -2008,7 +2008,7 @@ def test_non_blocking_clean_accept_is_not_flagged_exhausted(tmp_path: Path) -> N
 
 
 def test_test_quality_does_not_write_tests(tmp_path: Path) -> None:
-    # P2.4: the evaluator judges the tests the implementation agent wrote; it never writes tests
+    # The evaluator judges the tests the implementation agent wrote; it never writes tests
     # itself. Realized by the read-only request it issues (validator forbids any other profile).
     (tmp_path / "r.md").write_text("review", "utf-8")
     node = _test_quality()
@@ -2069,7 +2069,7 @@ def test_evaluator_reruns_preserve_each_passs_findings(tmp_path: Path) -> None:
 
 
 def test_review_is_ordinary_evaluator(tmp_path: Path) -> None:
-    # P2.3: review is just ``role=review`` on the shared evaluator runner — the same verdict path,
+    # Review is just ``role=review`` on the shared evaluator runner — the same verdict path,
     # immutable ``in_flow_verdict``, and blocking→rework mechanics as any in-flow evaluator (not a
     # special stage). A blocking finding routes to fixing via the flow's ``review_fix`` edge.
     (tmp_path / "r.md").write_text("review {diff_path}", "utf-8")
@@ -2089,7 +2089,7 @@ def test_review_is_ordinary_evaluator(tmp_path: Path) -> None:
 
 
 def test_evaluator_requests_the_mandatory_findings_schema(tmp_path: Path) -> None:
-    # F19: the shared runner requests the findings schema for every evaluator role (not just
+    # The shared runner requests the findings schema for every evaluator role (not just
     # review) — this is what makes ``structured_output`` reliably parseable on a real provider.
     (tmp_path / "r.md").write_text("review", "utf-8")
     node = _evaluator("review")
@@ -2107,7 +2107,7 @@ def test_evaluator_requests_the_mandatory_findings_schema(tmp_path: Path) -> Non
 
 
 def test_evaluator_missing_structured_output_fails_closed(tmp_path: Path) -> None:
-    # F19: a provider that ignored `output_schema` entirely (structured_output=None) must never be
+    # A provider that ignored `output_schema` entirely (structured_output=None) must never be
     # read as "no findings, accept" — it fails closed exactly like an evaluator that could not run
     # at all (EvaluatorInfraError -> the orchestrator degrades to manual, preserving the diff).
     from wastech_orchestrator.core.flow.nodes.base import EvaluatorInfraError
@@ -2306,7 +2306,7 @@ def test_checks_selects_from_committed_change_when_tree_clean(tmp_path: Path) ->
     assert len(store.check_runs) == 1  # the set ran — not a vacuous pass
 
 
-# -- checks mutation guard (P2.4) --------------------------------------------
+# -- checks mutation guard ---------------------------------------------------
 
 
 class FakeSnapshot:
@@ -2329,7 +2329,7 @@ class FakeSnapshot:
 
 
 def test_mutation_guard_active_when_checks_present(tmp_path: Path) -> None:
-    # P2.4: a passing check that mutated the working tree (commit-candidate files changed across
+    # A passing check that mutated the working tree (commit-candidate files changed across
     # the run, e.g. an auto-formatter) fails closed to manual — a green-but-dirtying check must not
     # pass silently. The guard is a checks-node property, active regardless of the rest of the flow.
     from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
@@ -2362,7 +2362,7 @@ def test_mutation_guard_clean_check_still_passes(tmp_path: Path) -> None:
 
 
 def test_flow_without_checks_has_no_mutation_guard(tmp_path: Path) -> None:
-    # P2.4: the guard belongs to the checks node — a flow without one is a valid graph shape and
+    # The guard belongs to the checks node — a flow without one is a valid graph shape and
     # simply has no guard (optional via graph shape, not by disabling a gate). Such a flow validates
     # and contains no checks node for the guard to attach to.
     from wastech_orchestrator.core.flow.validator import validate_flow
@@ -2416,7 +2416,7 @@ class FakeGit:
         return "sha-audit"
 
     def capture_git_control_state(self) -> object:
-        return object()  # WRI-009 baseline token; compare returns None (no drift) below
+        return object()  # control-state baseline token; compare returns None (no drift) below
 
     def compare_git_control_state(self, before: object) -> None:
         return None
@@ -2425,7 +2425,7 @@ class FakeGit:
         return ()
 
     def resolve_control_paths(self, exchange_root: str | None = None) -> ProviderWriteGuardPolicy:
-        # WRI-002: the node runner resolves this for every workspace-write attempt; the fake router
+        # The node runner resolves this for every workspace-write attempt; the fake router
         # never builds an argv, so dummy paths suffice.
         return ProviderWriteGuardPolicy(
             exchange_root=None,
@@ -2527,7 +2527,7 @@ def _publish_git(tmp_path: Path, **input_kw: Any) -> FakeGit:
 
 
 def test_publish_cap_commit_stops_after_commits(tmp_path: Path) -> None:
-    # A `commit` cap stops after the code/audit commits — no push, no PR (branch-mode ADR).
+    # A `commit` cap stops after the code/audit commits — no push, no PR.
     git = _publish_git(tmp_path, publish_scope=PublishScope.COMMIT)
     assert [c[0] for c in git.calls] == ["commit_code", "commit_audit"]
 
@@ -2608,9 +2608,9 @@ def test_publish_git_failure_after_finalize_raises_manual(tmp_path: Path) -> Non
     # A git failure during publishing (here: push) AFTER finalize moved the task file to done/ and
     # committed the audit trail surfaces a resumable manual stop, not a terminal failure — so a
     # done-committed task is never mislabeled and its file is never stranded in done/ while marked
-    # failed. The node run is recorded as failed for the audit trail. (F1 / MC2.)
+    # failed. The node run is recorded as failed for the audit trail.
     #
-    # F12: the git stderr must be surfaced — logged at ERROR (daemon log) and persisted as a
+    # The git stderr must be surfaced — logged at ERROR (daemon log) and persisted as a
     # `publish_error` node artifact — not swallowed behind a bare `publish_failed`.
     import logging
 
@@ -2659,7 +2659,7 @@ def test_publish_git_failure_after_finalize_raises_manual(tmp_path: Path) -> Non
     # The node run is closed as failed (not left dangling, not "published").
     assert store.completed[-1]["status"] == "failed"
     assert store.completed[-1]["error_class"] == "publish_failed"
-    # F12: the cause (git stderr) is logged at ERROR (daemon log) and persisted as an artifact —
+    # The cause (git stderr) is logged at ERROR (daemon log) and persisted as an artifact —
     # not swallowed behind a bare `publish_failed`.
     assert any(
         r.levelno == logging.ERROR and "publish git operation failed" in r.getMessage()
@@ -2670,7 +2670,7 @@ def test_publish_git_failure_after_finalize_raises_manual(tmp_path: Path) -> Non
     assert "simulated push failure" in written
 
 
-# -- max-turns gate (idea 29) -------------------------------------------------
+# -- max-turns gate ----------------------------------------------------------
 
 
 def _claude_route(node_id: str = "implementation") -> ResolvedRoute:
@@ -2897,11 +2897,11 @@ def test_max_turns_gate_restart_deny_goes_manual(tmp_path: Path) -> None:
     assert router.calls == 0  # stopped at the gate, never ran the provider
 
 
-# -- WRI-009: git control-state drift around a workspace-write attempt ---------
+# -- git control-state drift around a workspace-write attempt ------------------
 
 
 def test_workspace_write_git_control_drift_is_manual(tmp_path: Path) -> None:
-    # WRI-009: control-state drift across a workspace-write attempt is a terminal manual-action
+    # Control-state drift across a workspace-write attempt is a terminal manual-action
     # violation (not a fixing route, not fallback), raised before any post-edit git runs.
     from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
     from wastech_orchestrator.git_manager import GitControlDrift, GitControlDriftItem

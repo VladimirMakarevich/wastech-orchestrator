@@ -1,4 +1,4 @@
-"""Offline replay harness (05.5): the metric machinery + a recorded baseline (AC-O1..O4).
+"""Offline replay harness: the metric machinery + a recorded baseline.
 
 The orchestrator is greenfield — there is no corpus of historical production tasks to replay yet —
 so these fixtures are **synthetic** recorded runs that exercise the harness's aggregation, the
@@ -76,7 +76,7 @@ def test_summarize_mode_aggregates_the_metric_stack() -> None:
     summary = summarize_mode(MODE_OFF, _off())
     assert summary.tasks == 3
     assert summary.mean_tokens == (12000 + 11000 + 9000) / 3
-    assert summary.repeated_mean_tokens == (12000 + 11000) / 2  # AC-O1 subset only
+    assert summary.repeated_mean_tokens == (12000 + 11000) / 2  # efficiency subset only
     assert summary.hotspot_first_pass_rate == 0.5  # 1 of 2 hotspot tasks passed first time
     assert summary.stale_contradiction_rate == 0.0
 
@@ -84,20 +84,20 @@ def test_summarize_mode_aggregates_the_metric_stack() -> None:
 def test_comparison_meets_ac_o_targets_when_memory_helps() -> None:
     comp = compare_modes(summarize_mode(MODE_OFF, _off()), summarize_mode(MODE_ON, _on()))
     assert comp.token_reduction_pct >= 0.10  # ~17%
-    assert comp.meets_ac_o1  # token reduction clears AC-O1
+    assert comp.meets_ac_o1  # token reduction clears the efficiency bar
     assert comp.meets_ac_o2  # hotspot first-pass 50% → 100% (+50pp)
     assert comp.meets_ac_o3  # no leaks, no external promotions, 0 stale rate
-    assert comp.measured_lift  # AC-O4 gate opens for the next phase
+    assert comp.measured_lift  # the gate opens for the next phase
 
 
-def test_no_lift_keeps_the_ac_o4_gate_closed() -> None:
-    # memory-on identical to memory-off → no measured lift → V2/V3/V4 stay gated (AC-O4).
+def test_no_lift_keeps_the_roadmap_gate_closed() -> None:
+    # memory-on identical to memory-off → no measured lift → the next phase stays gated.
     flat = compare_modes(summarize_mode(MODE_OFF, _off()), summarize_mode(MODE_ON, _off()))
     assert not flat.meets_ac_o1 and not flat.meets_ac_o2
     assert not flat.measured_lift
 
 
-def test_safety_counters_fail_ac_o3() -> None:
+def test_safety_counters_fail_the_safety_gate() -> None:
     leaky = [
         TaskMetrics(
             "t1",
@@ -119,7 +119,7 @@ def test_build_baseline_and_render_report(tmp_path: Path) -> None:
     report = render_baseline_markdown(baseline)
     assert "# Memory eval baseline" in report
     assert MODE_ON_NO_ENTITY in report
-    assert "AC-O4 measured-lift gate" in report
+    assert "measured-lift gate" in report
     # The report is deterministic (same inputs → same bytes) — a recordable artifact.
     assert render_baseline_markdown(build_baseline({MODE_OFF: _off(), MODE_ON: _on()})) == (
         render_baseline_markdown(build_baseline({MODE_OFF: _off(), MODE_ON: _on()}))

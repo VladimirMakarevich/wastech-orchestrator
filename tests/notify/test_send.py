@@ -69,7 +69,7 @@ def test_send_includes_contacts_as_plain_text(fake_client: FakeTelegramClient) -
 
 
 def test_send_includes_governance_changed_as_paths(fake_client: FakeTelegramClient) -> None:
-    # VF-20: a completed run that edited governance files marks which ones on the terminal message.
+    # A completed run that edited governance files marks which ones on the terminal message.
     n = _notifier(fake_client)
     n.send_notification(
         task_id="task-gov",
@@ -105,7 +105,7 @@ def test_send_manual_action_required(fake_client: FakeTelegramClient) -> None:
 
 
 def test_send_manual_action_required_enriched(fake_client: FakeTelegramClient) -> None:
-    # VF-22: a needs-attention terminal carrying details renders the actionable multi-line body —
+    # A needs-attention terminal carrying details renders the actionable multi-line body —
     # glyph + id, title, where it stopped, a prose reason, the blocking finding + paths, the report.
     n = _notifier(fake_client)
     details = TerminalDetails(
@@ -163,7 +163,7 @@ def test_send_failed_enriched_echoes_unknown_reason_and_uses_cross_glyph(
 
 
 def test_send_done_stays_terse_with_glyph(fake_client: FakeTelegramClient) -> None:
-    # VF-22 item 7: a clean done stays a single terse line (with a ✅ glyph), never the enriched
+    # A clean done stays a single terse line (with a ✅ glyph), never the enriched
     # body — even if details were somehow supplied, `done` is not a needs-attention status.
     n = _notifier(fake_client)
     n.send_notification(

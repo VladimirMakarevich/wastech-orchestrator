@@ -1,4 +1,4 @@
-"""Unit tests for the Codex permission-profile generator (WRI-003).
+"""Unit tests for the Codex permission-profile generator.
 
 These lock the profile *shape* the adapter injects. Real OS enforcement of the rendered profile is
 proven separately by the no-model ``codex sandbox`` host smoke (test_codex_canary_smoke.py); here we
@@ -82,7 +82,7 @@ def test_workspace_write_grants_write_and_readonly_guard(tmp_path: Path) -> None
     # deny set still wins
     assert fs[str(root / ".worc")] == "deny"
     assert fs[PROVIDER_HOME_KEY] == "deny"
-    # VF-20: governance/instruction files are ordinary, editable content — no per-file guard entry.
+    # Governance/instruction files are ordinary, editable content — no per-file guard entry.
     for name in ("AGENTS.md", "AGENTS.override.md", "CLAUDE.md"):
         assert not any(name in key for key in fs)
 
@@ -108,7 +108,7 @@ def test_deny_applied_last_wins_over_read_guard(tmp_path: Path) -> None:
 
 
 def test_read_isolation_off_downgrades_deny_to_read_keeps_blacklist(tmp_path: Path) -> None:
-    # VF-6: the private set is downgraded deny→read (readable, still write-denied) while the public
+    # The private set is downgraded deny→read (readable, still write-denied) while the public
     # denied_read_paths blacklist stays fully denied and the write-guard stays read-only.
     root = tmp_path / "clone"
     profile = build_codex_permission_profile(

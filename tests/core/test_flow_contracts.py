@@ -1,4 +1,4 @@
-"""Unit tests for the provider-neutral flow execution vocabulary (flow-engine P0.1)."""
+"""Unit tests for the provider-neutral flow execution vocabulary."""
 
 from __future__ import annotations
 

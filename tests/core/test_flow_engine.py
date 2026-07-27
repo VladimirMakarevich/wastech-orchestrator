@@ -1,7 +1,7 @@
-"""Unit tests for the flow execution engine (P1.1).
+"""Unit tests for the flow execution engine.
 
 The engine is exercised with stub node runners and an in-memory recorder; real core-owned node
-wrappers (P1.3) and persistence (P1.2) are layered on top later. Snapshots are built directly from
+wrappers and persistence are layered on top later. Snapshots are built directly from
 the schema dataclasses so each test crafts an exact graph shape.
 """
 
@@ -338,7 +338,7 @@ def test_engine_single_fix_iterations_increment() -> None:
 
 
 def test_engine_budget_exhaustion_goes_manual() -> None:
-    # The named-loop case (spec P1.1). The global-cap and inline-budget cases are the two tests
+    # The named-loop case. The global-cap and inline-budget cases are the two tests
     # below. test_fix budget 2 => second consecutive fail is stuck (>= semantics).
     snap = _snapshot(
         [_agent("s"), _checks("t"), _publish("done"), _agent("fix")],
@@ -469,7 +469,7 @@ def test_engine_inline_budget_resets_after_forward_edge() -> None:
 
 
 def test_named_loop_cumulative_total_survives_forward_edge_reset() -> None:
-    # F49: the consecutive `review_fix` counter resets to 0 on accept, but the cumulative total
+    # The consecutive `review_fix` counter resets to 0 on accept, but the cumulative total
     # keeps every rework — so a converged loop is attributed N reworks in the audit trail, not 0.
     snap = _snapshot(
         [_agent("s"), _evaluator("ev"), _agent("fix"), _publish("done")],

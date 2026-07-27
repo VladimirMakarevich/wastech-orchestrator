@@ -166,7 +166,7 @@ def test_engine_loop_cap_delegates_to_loop_control() -> None:
     assert engine._global_cap() == global_cap(snapshot.doc.budgets, agents.max_total_fix_iterations)
 
 
-# -- operator-facing mirror (VF-4) ----------------------------------------------------------
+# -- operator-facing mirror -----------------------------------------------------------------
 
 
 def test_loop_counters_from_run_state_mirrors_authoritative_counters() -> None:

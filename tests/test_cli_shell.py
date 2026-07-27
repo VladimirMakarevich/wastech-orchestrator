@@ -114,7 +114,7 @@ def test_run_verb_no_longer_aliases_enqueue(
 def test_enqueue_path_with_spaces_is_not_split(
     make_git_config: _ConfigFactory, tmp_path: Path
 ) -> None:
-    # M1: the raw remainder (not POSIX-tokenized) keeps a path with an embedded space intact.
+    # The raw remainder (not POSIX-tokenized) keeps a path with an embedded space intact.
     config = make_git_config(tmp_path / "clone")
     spaced = tmp_path / "a dir" / "my task.md"
     spaced.parent.mkdir(parents=True)
@@ -209,7 +209,7 @@ def test_forward_verbs_call_run_cli_with_config(
     cli_shell.dispatch("merge-task t1", ctx)
     cli_shell.dispatch("down --force", ctx)  # down maps to stop; console forces --non-interactive
     cli_shell.dispatch("restart", ctx)
-    cli_shell.dispatch("rerun t1 --continue", ctx)  # console forces --non-interactive (H1)
+    cli_shell.dispatch("rerun t1 --continue", ctx)  # console forces --non-interactive
     assert calls == [
         ["--config", "/cfg.yaml", "status", "t1"],
         ["--config", "/cfg.yaml", "merge-task", "t1"],

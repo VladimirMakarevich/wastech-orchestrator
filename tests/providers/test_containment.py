@@ -1,8 +1,8 @@
-"""Unit tests for the WRI-012 process-containment objects.
+"""Unit tests for the process-containment objects.
 
 Fully seam-injected — no real process is launched or signalled. The POSIX containment's kill/probe/
 snapshot/clock are fakes modelling a small process world; the Windows Job Object's ``kernel32``
-surface is a fake recording the call sequence (the real calls are exercised only under the WRI-006
+surface is a fake recording the call sequence (the real calls are exercised only under the native
 native-Windows gate). These tests own the fail-closed / unprovable behaviour deterministically; the
 "real subtree is terminated" acceptance criteria live in ``test_process_quiescence_posix.py``.
 """

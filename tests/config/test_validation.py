@@ -39,7 +39,7 @@ def test_packaged_config_validates_clean(base_config: OrchestratorConfig) -> Non
 def test_legacy_codex_sandbox_value_is_rejected(
     base_config: OrchestratorConfig, value: str
 ) -> None:
-    # WRI-003: the access level lives in permission_profile; a safe legacy `sandbox` is rejected.
+    # The access level lives in permission_profile; a safe legacy `sandbox` is rejected.
     cfg = _with_codex(base_config, sandbox=value)
     with pytest.raises(ConfigError) as exc:
         validate_config(cfg)
@@ -66,7 +66,7 @@ def test_protected_paths_globs_validate_clean(base_config: OrchestratorConfig) -
 def test_read_isolation_off_formula(
     base_config: OrchestratorConfig, strict: bool, disable: bool, expected_off: bool
 ) -> None:
-    # VF-6: effective read-isolation = disable_read_isolation OR NOT strict_isolation, defined once
+    # Effective read-isolation = disable_read_isolation OR NOT strict_isolation, defined once
     # on SecurityConfig.read_isolation_off (strict_isolation always wins toward relaxation).
     cfg = _with_security(base_config, strict_isolation=strict, disable_read_isolation=disable)
     assert cfg.security.read_isolation_off is expected_off
@@ -75,7 +75,7 @@ def test_read_isolation_off_formula(
 def test_disable_read_isolation_default_and_validates(
     base_config: OrchestratorConfig,
 ) -> None:
-    # VF-6: the packaged/shipped default is now True (read-isolation OFF out of the box); both the
+    # The packaged/shipped default is now True (read-isolation OFF out of the box); both the
     # default and an explicit False validate cleanly.
     assert base_config.security.disable_read_isolation is True
     assert validate_config(_with_security(base_config, disable_read_isolation=False)) == []
@@ -146,7 +146,7 @@ def _codex_primary(config: OrchestratorConfig) -> OrchestratorConfig:
 
 
 def test_supervisor_provider_not_in_allowed_is_rejected(base_config: OrchestratorConfig) -> None:
-    # F39: an explicit supervisor.provider is validated ∈ agents.allowed, symmetric with flow nodes.
+    # An explicit supervisor.provider is validated ∈ agents.allowed, symmetric with flow nodes.
     cfg = replace(
         _with_agents(base_config, allowed=(ProviderId.CLAUDE,)),
         supervisor=replace(base_config.supervisor, provider=ProviderId.CODEX),
@@ -157,7 +157,7 @@ def test_supervisor_provider_not_in_allowed_is_rejected(base_config: Orchestrato
 
 
 def test_supervisor_reasoning_valid_for_pinned_provider(base_config: OrchestratorConfig) -> None:
-    # F39: reasoning is checked against the pinned provider (codex), not the primary (claude).
+    # Reasoning is checked against the pinned provider (codex), not the primary (claude).
     # `minimal` is codex-only, so it is valid here even though the primary is claude.
     cfg = replace(
         base_config,
@@ -169,7 +169,7 @@ def test_supervisor_reasoning_valid_for_pinned_provider(base_config: Orchestrato
 def test_supervisor_reasoning_rejected_against_pinned_provider(
     base_config: OrchestratorConfig,
 ) -> None:
-    # F39: primary=codex but the supervisor is pinned to claude; `minimal` is codex-only, so it is
+    # Primary=codex but the supervisor is pinned to claude; `minimal` is codex-only, so it is
     # rejected against the RESOLVED supervisor provider (claude) — proving reasoning no longer
     # resolves through the global primary (which would have accepted it).
     cfg = replace(
@@ -182,7 +182,7 @@ def test_supervisor_reasoning_rejected_against_pinned_provider(
 
 
 def test_inherited_supervisor_model_vendor_mismatch_warns(base_config: OrchestratorConfig) -> None:
-    # F39: a claude-looking supervisor.model with provider unset under a codex primary 400s at
+    # A claude-looking supervisor.model with provider unset under a codex primary 400s at
     # runtime (masked by fallback). validate_config WARNS (fallback exists → not fatal), catching
     # the silent mismatch that a `ready` preflight otherwise missed.
     cfg = replace(
@@ -391,7 +391,7 @@ def test_retry_disable_via_zero_attempts_validates_clean(base_config: Orchestrat
     assert validate_config(cfg) == []
 
 
-# --- operator confirmation gates (idea 27 / 29): on requires telegram (fail-closed) ----------
+# --- operator confirmation gates: on requires telegram (fail-closed) -------------------------
 
 
 def _with_auto_mode(config: OrchestratorConfig, **changes: object) -> OrchestratorConfig:

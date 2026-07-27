@@ -1,7 +1,7 @@
 """Stop-hook docs-sync gate: the branch-aware notion of "documentation".
 
-The repository has two documentation shapes (see BRANCHING_MODEL.md / .agents/rules/git-workflow.md
-§A): ``main``/``release`` carry the derived ``docs/`` tree, ``dev`` does not. The gate therefore
+The repository has two documentation shapes: ``main``/``release`` carry the derived ``docs/`` tree,
+``dev`` does not. The gate therefore
 decides what counts as a docs change from the presence of a marker file, and ``_should_block`` is
 pure, so both shapes are testable without a real branch.
 """

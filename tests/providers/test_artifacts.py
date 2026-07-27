@@ -197,7 +197,7 @@ def test_node_run_dir_is_parent_of_attempt_dirs(tmp_path: Path) -> None:
 def test_per_run_payloads_survive_minimal_pruning(tmp_path: Path) -> None:
     # Retention-by-placement: payloads live at the run-<id>/ level, outside the leaf
     # <attempt>-<provider>/ dir that prune_attempt_artifacts iterates — so minimal never deletes
-    # run history. This is why the ADR needs no change to prune_attempt_artifacts.
+    # run history. This is why prune_attempt_artifacts needs no change.
     paths = _seed_attempt(tmp_path)  # creates .../run-000001/1-codex/ with the full file set
     run_dir = Path(paths.attempt_dir).parent
     findings = run_dir / "findings.json"
@@ -234,7 +234,7 @@ def test_latest_run_file_none_when_absent(tmp_path: Path) -> None:
 
 
 def test_task_artifact_relpath_is_repo_relative_posix(tmp_path: Path) -> None:
-    # F36: a memory episode stores .worc/logs/<task-id>, not the absolute host path — no /Users/…
+    # A memory episode stores .worc/logs/<task-id>, not the absolute host path — no /Users/…
     # prefix to leak or to collide with a run-harvested redaction literal.
     repo = tmp_path / "repo"
     artifacts_root = repo / ".worc"
@@ -251,7 +251,7 @@ def test_task_artifact_relpath_falls_back_to_absolute_when_outside_repo(tmp_path
     assert rel == task_artifact_dir(artifacts_root, "t-1").resolve().as_posix()
 
 
-# -- containment belt (WRI-008) ----------------------------------------------
+# -- containment belt --------------------------------------------------------
 
 
 def test_assert_contained_path_returns_a_child_path(tmp_path: Path) -> None:

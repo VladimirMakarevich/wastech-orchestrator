@@ -75,7 +75,7 @@ def test_update_branch_with_base_clean_stages_without_committing(
     conflicted = gm.update_branch_with_base("worc/t1", "main")
 
     assert conflicted is False
-    # WRI-009: `--no-commit` leaves a clean 3-way merge STAGED with MERGE_HEAD live (not
+    # `--no-commit` leaves a clean 3-way merge STAGED with MERGE_HEAD live (not
     # auto-committed), so the orchestrator finalizes it through the gated commit_merge_resolution.
     assert gm.merge_in_progress() is True
     head = git_run(["rev-parse", "--abbrev-ref", "HEAD"], git_repo.clone)

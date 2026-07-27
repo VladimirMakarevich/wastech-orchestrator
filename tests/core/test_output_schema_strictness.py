@@ -1,22 +1,24 @@
-"""F24/F41 regression guard: every provider ``output_schema`` constant must be OpenAI-strict.
+"""Regression guard: every provider ``output_schema`` constant must be OpenAI-strict.
 
 codex CLI passes ``--output-schema`` to OpenAI Structured Outputs in **strict** mode, whose schema
 validator rejects a request with a 400 unless every ``object`` node — top-level and nested —
 satisfies **both** invariants:
 
 * ``additionalProperties: false`` (else ``'additionalProperties' is required to be supplied and to
-  be false``). F19 introduced ``_FINDINGS_SCHEMA`` without it and every codex evaluator turn crashed
-  deterministically (F24).
+  be false``). ``_FINDINGS_SCHEMA`` shipped without it once and every codex evaluator turn crashed
+  deterministically.
 * ``required`` lists **every** key in ``properties`` (else ``'required' is required to be an array
   including every key in properties``). ``DELTA_OUTPUT_SCHEMA``'s ``scope`` object had no
-  ``required`` at all, so the supervisor finalize turn crashed on codex (F41) and only survived via
+  ``required`` at all, so the supervisor finalize turn crashed on codex and only survived via
   the silent claude fallback. Optionality is preserved by making the previously-optional fields
   nullable (``["string", "null"]`` etc.), not by dropping them from ``required``.
 
-The F19 smoke test validated its own simplified example schema, not the real constant, so it missed
+The original smoke test validated its own simplified example schema, not the real constant, so it
+missed
 the regress. This test walks the literal battle constants that reach a provider as ``output_schema``
 and fails if any object node breaks either invariant — so a future schema addition cannot repeat
-F24/F41. Nullability itself is not checked here: it is how we keep fields optional, not part of the
+both crashes. Nullability itself is not checked here: it is how we keep fields optional, not part
+of the
 strict contract. Flow-authored ``node.output_schema`` (operator-supplied YAML, parsed in
 ``agent.py``) is not a Python literal and so is out of this guard's reach.
 """
@@ -83,7 +85,7 @@ def test_output_schema_object_nodes_are_strict(name: str) -> None:
     problems = _nonstrict_object_paths(_OUTPUT_SCHEMAS[name])
     assert not problems, (
         f"{name}: object nodes missing additionalProperties:false at {problems} — codex CLI "
-        "rejects such a schema with a 400 (F24)"
+        "rejects such a schema with a 400"
     )
 
 
@@ -129,7 +131,7 @@ def test_output_schema_required_lists_every_property(name: str) -> None:
     problems = _required_incomplete_object_paths(_OUTPUT_SCHEMAS[name])
     assert not problems, (
         f"{name}: object nodes whose 'required' omits a property key at {problems} — codex CLI "
-        "rejects such a schema with a 400 (F41). Add the key to 'required' and make it nullable to "
+        "rejects such a schema with a 400. Add the key to 'required' and make it nullable to "
         "keep it optional."
     )
 

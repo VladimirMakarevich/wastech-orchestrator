@@ -109,7 +109,7 @@ def test_safe_security_defaults_are_written(tmp_path: Path) -> None:
     assert "gh pr create" in cfg.security.denied_commands
     assert "gh pr merge" in cfg.security.denied_commands
     assert cfg.agents.providers[ProviderId.CODEX].permission_profile == "workspace-write"
-    # WRI-003: the installer no longer writes the legacy `sandbox` field — codex isolation is the
+    # The installer no longer writes the legacy `sandbox` field — codex isolation is the
     # generated permission profile driven by `permission_profile` above.
     assert cfg.agents.providers[ProviderId.CODEX].sandbox is None
     assert cfg.agents.providers[ProviderId.CODEX].extra_args == ()
@@ -155,17 +155,17 @@ def test_generated_config_includes_optional_sections(tmp_path: Path) -> None:
     text = build_and_validate(_spec(tmp_path, (ProviderId.CLAUDE,)))
     cfg = loads_config(text).config
     assert cfg.supervisor.role_file == "roles/supervisor.md"
-    # F2: the delivered supervisor block carries concrete, visible model/reasoning (the global
+    # The delivered supervisor block carries concrete, visible model/reasoning (the global
     # primary's model + a non-max reasoning), not an implicit inherit-from-primary null.
     assert cfg.supervisor.model == "claude-sonnet-5"
     assert cfg.supervisor.reasoning == "high"
-    assert cfg.supervisor.reasoning not in ("xhigh", "max")  # F7b: default must not be fragile
-    # F39: provider is pinned to the primary so it stays aligned with `model` (also the primary's).
+    assert cfg.supervisor.reasoning not in ("xhigh", "max")  # default must not be fragile
+    # Provider is pinned to the primary so it stays aligned with `model` (also the primary's).
     assert cfg.supervisor.provider == ProviderId.CLAUDE
-    # F1: the dynamic skill layer is off out of the box (opt-in).
+    # The dynamic skill layer is off out of the box (opt-in).
     assert cfg.skills.dynamic is False
     assert cfg.skills.strict is False
-    # F3: the documented telegram.trace knob is present in the delivered config.
+    # The documented telegram.trace knob is present in the delivered config.
     assert cfg.telegram.trace is False
     assert "trace:" in text
     assert cfg.prompt_audit is False
@@ -177,11 +177,11 @@ def test_generated_config_includes_optional_sections(tmp_path: Path) -> None:
 
 
 def test_supervisor_model_tracks_the_global_primary(tmp_path: Path) -> None:
-    # F2: a Codex-primary install resolves the supervisor model to Codex's model, not Claude's.
+    # A Codex-primary install resolves the supervisor model to Codex's model, not Claude's.
     cfg = loads_config(build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))).config
     assert cfg.supervisor.model == "gpt-5.4"
     assert cfg.supervisor.reasoning == "high"
-    # F39: a codex-primary install pins supervisor.provider to codex, aligned with the codex model.
+    # A codex-primary install pins supervisor.provider to codex, aligned with the codex model.
     assert cfg.supervisor.provider == ProviderId.CODEX
 
 

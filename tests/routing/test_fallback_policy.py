@@ -37,7 +37,7 @@ def test_infra_classes_always_fall_back(error_class: ErrorClass) -> None:
         ErrorClass.TASK_FAILURE,
         ErrorClass.INVALID_INVOCATION,
         ErrorClass.MODEL_REQUEST_INVALID,
-        # WRI-012: an unproven process-tree quiescence is a security/manual-action condition — never
+        # An unproven process-tree quiescence is a security/manual-action condition — never
         # respawn a fresh agent on the other provider while an unknown writer may still be live.
         ErrorClass.CONTAINMENT_UNVERIFIED,
     ],
@@ -52,7 +52,7 @@ def test_containment_unverified_raised_does_not_fall_back(
     make_fake_provider: Callable[..., object],
     make_request: Callable[..., AgentRunRequest],
 ) -> None:
-    # WRI-012 end-to-end through the router: a raised CONTAINMENT_UNVERIFIED is terminal for the
+    # End-to-end through the router: a raised CONTAINMENT_UNVERIFIED is terminal for the
     # stage — the other provider is never invoked, so no fresh agent races the unproven subtree.
     primary = make_fake_provider(ProviderId.CODEX, raises=ErrorClass.CONTAINMENT_UNVERIFIED)
     fallback = make_fake_provider(ProviderId.CLAUDE)  # would succeed if (wrongly) invoked
@@ -91,7 +91,7 @@ def test_conditional_auth_permission_rule(
     )
 
 
-# --- WRI-002: CAPABILITY_UNAVAILABLE host-verified fallback
+# --- CAPABILITY_UNAVAILABLE host-verified fallback
 # ----------------------------------------
 
 

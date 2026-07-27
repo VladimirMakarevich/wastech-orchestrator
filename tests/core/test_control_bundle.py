@@ -1,4 +1,4 @@
-"""Unit tests for the WRI-010 frozen control bundle.
+"""Unit tests for the frozen control bundle.
 
 The freeze copies the exact control inputs a flow references (flow YAML, role files, tool
 executables) into a private immutable bundle, records a manifest + digest, binds later consumers to

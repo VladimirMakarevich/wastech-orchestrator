@@ -68,7 +68,7 @@ def _schema_output(cli_name: str, cli_args: list[str]) -> dict[str, object]:
             "decompose": False,
             "subtasks": [],
         }
-    # F19: every in-flow evaluator (review/verifier/critic) requests the mandatory findings
+    # Every in-flow evaluator (review/verifier/critic) requests the mandatory findings
     # schema — a well-formed empty array is a clean, accepting verdict.
     if isinstance(required, list) and "findings" in required:
         return {"findings": []}
@@ -284,11 +284,11 @@ def _run_claude(scenario: str, cli_args: list[str]) -> int:
 
 
 def _run_codex_sandbox(cli_args: list[str]) -> int:
-    """Model ``codex sandbox -P`` for the WRI-003 no-model canary.
+    """Model ``codex sandbox -P`` for the no-model canary.
 
     Faithfully simulates the orchestrator's generated permission profile: a read of the exchange
     (``.worc-io``) is allowed and any write is denied; a read of the private home (``.worc``) is
-    denied under read-isolation but ALLOWED when the profile downgrades it to ``read`` (VF-6
+    denied under read-isolation but ALLOWED when the profile downgrades it to ``read`` (the
     ``read_isolation_off`` — the shipped default), so the canary's private-read positive control
     succeeds under both postures. Deliberately **scenario-independent** — the canary must pass so
     the real ``exec`` scenario below plays out; genuine OS enforcement is proven by the host smoke,
@@ -301,7 +301,7 @@ def _run_codex_sandbox(cli_args: list[str]) -> int:
     is_write = ">>" in probe_str
     reads_exchange = ".worc-io" in probe_str  # exchange subtree (not a substring of `.worc/…`)
     reads_private = ".worc" in probe_str and not reads_exchange  # private-home subtree
-    # VF-6: with read-isolation OFF the generated profile downgrades the private home from ``deny``
+    # With read-isolation OFF the generated profile downgrades the private home from ``deny``
     # to ``read``, so a private-home read becomes a positive control the canary expects to SUCCEED.
     # Detect that posture from the profile the canary passed (``.worc" = "read"`` — the quote after
     # ``.worc`` excludes the ``.worc-io`` exchange entry).
@@ -361,7 +361,7 @@ def main() -> int:
     with contextlib.suppress(OSError):
         sys.stdin.read()
 
-    # WRI-003: the Codex adapter runs a no-model ``codex sandbox -P`` canary BEFORE ``exec``. Model
+    # The Codex adapter runs a no-model ``codex sandbox -P`` canary BEFORE ``exec``. Model
     # it scenario-independently (exchange readable, private/writes denied) so the canary passes and
     # the ``exec`` scenario below is what the test actually exercises.
     if cli_name == "codex" and cli_args and cli_args[0] == "sandbox":

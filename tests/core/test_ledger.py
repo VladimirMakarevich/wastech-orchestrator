@@ -29,7 +29,7 @@ def test_append_is_append_only(tmp_path: Path) -> None:
 
 
 def test_governance_changed_field_round_trips(tmp_path: Path) -> None:
-    # VF-20: the completed-ledger record carries the governance/instruction paths a run edited.
+    # The completed-ledger record carries the governance/instruction paths a run edited.
     ledger = Ledger(tmp_path)
     ledger.append(
         LedgerRecord(
@@ -56,7 +56,7 @@ def test_has_task_id(tmp_path: Path) -> None:
 
 
 def test_only_validation_rejects(tmp_path: Path) -> None:
-    # F6: an id whose only record carries a validation_reason is a gate reject, not a real attempt.
+    # An id whose only record carries a validation_reason is a gate reject, not a real attempt.
     ledger = Ledger(tmp_path)
     assert ledger.only_validation_rejects("a") is False  # absent → not a reject-only id
     ledger.append(

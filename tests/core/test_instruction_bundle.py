@@ -1,8 +1,8 @@
-"""Unit tests for the WRI-011 frozen instruction bundle (task / skills / repository instructions).
+"""Unit tests for the frozen instruction bundle (task / skills / repository instructions).
 
 Covers the freeze/manifest/verify primitives and their fail-closed identity, cap, collision, and
 secret gates directly (the orchestrator-level wiring is covered separately in
-tests/core/test_orchestrator.py and tests/providers/). The identity refusals reuse the WRI-001
+tests/core/test_orchestrator.py and tests/providers/). The identity refusals reuse the exchange's
 no-follow inspector seam via an injected ``FileInspector`` (same pattern as test_control_bundle).
 """
 
@@ -69,7 +69,7 @@ def test_discover_repository_instructions_root_only_and_tracked(tmp_path: Path) 
     assert found == [tmp_path / "AGENTS.md"]
 
 
-# -- governance-path detection (VF-20) ------------------------------------------------------------
+# -- governance-path detection --------------------------------------------------------------------
 
 
 def test_governance_changed_paths_matches_root_instruction_files() -> None:
@@ -106,7 +106,7 @@ def test_freeze_repository_instructions_copies_and_digests_each_source(tmp_path:
     agents = _write(tmp_path / "AGENTS.md", "AGENTS body\n")
     claude = _write(tmp_path / "CLAUDE.md", "CLAUDE body\n")
     entries = freeze_repository_instructions(bundle, [agents, claude])
-    # VF-5: each source is frozen under instructions/src/<name> for the manifest digest; NO
+    # Each source is frozen under instructions/src/<name> for the manifest digest; NO
     # concatenated payload is produced (the agent reads the live root files itself).
     keys = {k for k, _ in entries}
     assert keys == {"instructions/src/AGENTS.md", "instructions/src/CLAUDE.md"}
@@ -228,8 +228,8 @@ def test_manifest_roundtrip_verifies(tmp_path: Path) -> None:
 
 
 def test_load_returns_file_entries_for_resume(tmp_path: Path) -> None:
-    # H3: a resumed run repopulates ``instruction_entries`` from the verified manifest so the
-    # WRI-009 lifecycle-vs-packet audit check runs on resume. ``load`` must therefore surface the
+    # A resumed run repopulates ``instruction_entries`` from the verified manifest so the
+    # lifecycle-vs-packet audit check runs on resume. ``load`` must therefore surface the
     # real (key, sha256) file entries — including the task packet — and exclude the synthetic
     # control-digest entry (which is not a file under the bundle).
     import hashlib

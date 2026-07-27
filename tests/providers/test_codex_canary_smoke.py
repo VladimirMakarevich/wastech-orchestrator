@@ -1,4 +1,4 @@
-"""Real-host, no-model canary smoke for the Codex permission profile (WRI-003).
+"""Real-host, no-model canary smoke for the Codex permission profile.
 
 Runs the actual generator output under the actual ``codex sandbox`` (credential-free, no model, no
 network) and asserts the deny/read-only boundary is OS-enforced on this host. This is the only test
@@ -9,7 +9,7 @@ cross-platform wiring. Records the Codex version and platform in the assertion c
 Skipped only when the host *cannot enforce the tested read-isolation profile* — no ``codex`` on
 PATH, or a sandbox backend that refuses to start (native Windows requires an **elevated** backend
 for restricted reads: "Restricted read-only access requires the elevated Windows sandbox
-backend"). Never skipped merely for being Windows: WRI-006 requires the native-Windows sandbox be
+backend"). Never skipped merely for being Windows: the native-Windows sandbox must be
 proven wherever it can run, so an elevated Windows host runs all of this in full. See
 :func:`_cannot_enforce` for why that gate cannot mask a leak.
 
@@ -118,7 +118,7 @@ def _cannot_enforce() -> str:
     ("Restricted read-only access requires the elevated Windows sandbox backend"), so an unelevated
     host lands here.
 
-    The gate is deliberately keyed on the probed capability and never on "is Windows": WRI-006
+    The gate is deliberately keyed on the probed capability and never on "is Windows": the release
     requires the native-Windows read-isolation sandbox be proven where it *can* run, so an elevated
     Windows host still executes these tests in full. It also cannot mask a leak — a host that
     enforces the tested profile passes this control and then runs every deny probe for real.
@@ -205,7 +205,7 @@ def test_generated_profile_is_os_enforced(clone: Path, profile: str) -> None:
 
 @pytest.mark.parametrize("profile", ["read-only", "workspace-write"])
 def test_capability_smoke_passes_on_real_host(profile: str) -> None:
-    # WRI-006 / H7: the self-contained no-model capability smoke `worc preflight` runs — it builds
+    # The self-contained no-model capability smoke `worc preflight` runs — it builds
     # its own throwaway fixture (private denied incl. a workspace symlink alias, repo-read positive
     # control, repo-write per profile, exchange read-only) and records the MCP inventory — must be
     # OS-enforced (`passed`) on a host with the real codex CLI.

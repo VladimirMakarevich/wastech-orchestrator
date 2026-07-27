@@ -146,7 +146,7 @@ def test_finalize_failed_reconciles(git_repo, git_run, tmp_path: Path) -> None:
 
 
 def test_finalize_syncs_loop_counters_from_checkpoint(git_repo, tmp_path: Path) -> None:
-    # VF-4: a task stopped mid-flow and finished by hand keeps stale operator-facing counter
+    # A task stopped mid-flow and finished by hand keeps stale operator-facing counter
     # columns — they mirror only at a clean terminal transition, which a killed run never reaches.
     # finalize must re-sync them from the authoritative flow checkpoint so status/ledger report the
     # real fix-loop churn (here: 3 review_fix reworks) rather than the last synced value.
@@ -169,7 +169,7 @@ def test_finalize_syncs_loop_counters_from_checkpoint(git_repo, tmp_path: Path) 
         fix_iterations=3,
     )
     # Stale mirror: the totals lag the checkpoint (fix_iterations stays current — it is mirrored on
-    # every checkpoint, so only the *_total / *_cycles columns drift, exactly as in VF-4).
+    # every checkpoint, so only the *_total / *_cycles columns drift).
     store.save_counters("task-1", LoopCounters(review_fix_total=1, fix_iterations=3))
     store.close()
 
@@ -185,7 +185,7 @@ def test_finalize_syncs_loop_counters_from_checkpoint(git_repo, tmp_path: Path) 
 
 
 def test_finalize_reconciles_orphan_node_runs(git_repo, tmp_path: Path) -> None:
-    # VF-13: a --force-full stop SIGKILLs the daemon mid-node, leaving a node run stranded 'running'
+    # A --force-full stop SIGKILLs the daemon mid-node, leaving a node run stranded 'running'
     # and its provider attempt unbilled. The hand-finish path must close the orphan to 'aborted' and
     # record a provider_attempts row (usage 'unknown') so the aborted run is auditable, not free.
     project = tmp_path / "p"

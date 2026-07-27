@@ -1,4 +1,4 @@
-"""Safety drill 05.1 — planted secrets never reach `.worc/memory/` (AC-SF1, leak count 0).
+"""Safety drill — planted secrets never reach `.worc/memory/` (leak count 0).
 
 Adversarial end-to-end: plant secret-shaped strings in every free-text field a candidate delta and
 episode carry, run the real write funnel (``apply_delta``), then scan **every** file the store wrote
@@ -31,7 +31,7 @@ from wastech_orchestrator.memory import (
 from wastech_orchestrator.memory.records import LongTermKind
 from wastech_orchestrator.providers.redaction import REDACTED, secret_env_values
 
-# A repo-specific secret value that matches NO structural token pattern (the F3 gap): only the
+# A repo-specific secret value that matches NO structural token pattern: only the
 # orchestrator's env-secret harvesting (fed into ``extra_secrets``) can catch it.
 ENV_SECRET_VALUE = "pla1n-repo-value-not-a-token-shape"
 
@@ -130,7 +130,7 @@ def _episode_naming(secret: str) -> EpisodeRecord:
 
 
 def test_env_secret_leaks_without_harvesting(tmp_path: Path) -> None:
-    # F3 baseline: a repo-specific secret that matches no token shape is NOT caught by the
+    # Baseline: a repo-specific secret that matches no token shape is NOT caught by the
     # structural patterns alone — proving the gap the orchestrator's extra_secrets wiring closes.
     layout = MemoryLayout(tmp_path / ".worc")
     service = MemoryService(layout, config=MemoryConfig(enabled=True))  # extra_secrets=() (old)
@@ -144,7 +144,7 @@ def test_env_secret_leaks_without_harvesting(tmp_path: Path) -> None:
 def test_orchestrator_style_env_secret_is_scrubbed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # F3 fix: built the way the orchestrator now does — extra_secrets harvested from secret-named
+    # Fixed: built the way the orchestrator now does — extra_secrets harvested from secret-named
     # env vars — the same non-pattern value is scrubbed from every memory file.
     monkeypatch.setenv("REPO_DB_SECRET", ENV_SECRET_VALUE)  # secret name, not allowlisted
     layout = MemoryLayout(tmp_path / ".worc")

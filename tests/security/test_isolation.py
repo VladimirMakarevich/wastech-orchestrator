@@ -102,7 +102,7 @@ def test_codex_bypass_extra_arg_is_flagged(codex_config: ProviderConfig) -> None
 
 
 def test_codex_reserved_extra_arg_is_flagged(codex_config: ProviderConfig) -> None:
-    # WRI-003: an authority-bearing flag that would select/replace the owned profile/config surface
+    # An authority-bearing flag that would select/replace the owned profile/config surface
     # (here ``-c``, which could inject a competing permissions override) is flagged at preflight.
     reasons = codex_mod.isolation_reasons(replace(codex_config, extra_args=("-c", "x=1")))
     assert reasons and any("reserved" in r for r in reasons)
@@ -112,13 +112,13 @@ def test_codex_reserved_extra_arg_is_flagged(codex_config: ProviderConfig) -> No
 def test_codex_reserved_approval_extra_arg_is_flagged(
     codex_config: ProviderConfig, flag: str
 ) -> None:
-    # C2 (WRI-003 AC6): the approval/sandbox-mode selectors are reserved, so the OFFLINE preflight
+    # The approval/sandbox-mode selectors are reserved, so the OFFLINE preflight
     # (strict_isolation gate) reports them before any launch — not only the run-time argv builder.
     reasons = codex_mod.isolation_reasons(replace(codex_config, extra_args=(flag, "on-failure")))
     assert reasons and any("reserved" in r for r in reasons)
 
 
-# --- WRI-002: host-aware sandbox availability + reserved Claude extra_args
+# --- host-aware sandbox availability + reserved Claude extra_args
 # -------------------------
 
 
@@ -166,7 +166,7 @@ def test_default_config_passes(base_config: OrchestratorConfig) -> None:
 
 
 def test_disable_read_isolation_not_flagged_under_strict(base_config: OrchestratorConfig) -> None:
-    # VF-6: the sanctioned read-isolation opt-out is never a strict_isolation preflight reason — it
+    # The sanctioned read-isolation opt-out is never a strict_isolation preflight reason — it
     # relaxes only the read side; the write/permission/sandbox ceiling this gate validates stays.
     cfg = replace(
         base_config,

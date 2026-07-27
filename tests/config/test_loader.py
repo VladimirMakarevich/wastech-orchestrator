@@ -551,7 +551,7 @@ def test_unknown_retry_subkey_is_rejected() -> None:
     assert any("agents.retry" in i and "nonsense" in i for i in exc.value.issues)
 
 
-# --- repo.branch_mode (branch-mode ADR) ---
+# --- repo.branch_mode ---------------------
 
 _REPO_WITH_MODE = (
     'repo:\n  url: "git@example.com:o/r.git"\n  branch_mode: {mode}\n'
@@ -575,7 +575,7 @@ def test_repo_branch_mode_invalid_is_rejected() -> None:
     assert any("branch_mode" in issue for issue in exc.value.issues)
 
 
-# --- repo.checkout_base_on_cleanup (branch-mode ADR) ---
+# --- repo.checkout_base_on_cleanup ---------------------
 
 _REPO_WITH_CLEANUP = (
     'repo:\n  url: "git@example.com:o/r.git"\n  checkout_base_on_cleanup: {flag}\n'

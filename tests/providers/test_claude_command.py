@@ -63,9 +63,9 @@ def test_argv_is_claude_print_with_stream_json(
 def test_disables_project_setting_sources(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # Security lockdown (WRI-002): no user/project/local setting sources are loaded, so project
+    # Security lockdown: no user/project/local setting sources are loaded, so project
     # settings / skills / plugins / hooks / MCP are never discovered. The empty value = load none.
-    # (VF-5: this also turns off native CLAUDE.md auto-load — the agent reads root files itself.)
+    # (this also turns off native CLAUDE.md auto-load — the agent reads root files itself.)
     argv = _argv(claude_config, make_request())
     assert argv[argv.index("--setting-sources") + 1] == ""
 
@@ -73,7 +73,7 @@ def test_disables_project_setting_sources(
 def test_no_repository_instruction_injection(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # VF-5: Claude no longer injects repository instructions. --setting-sources "" stays (security:
+    # Claude no longer injects repository instructions. --setting-sources "" stays (security:
     # no hooks/MCP/skills), so native CLAUDE.md auto-load is off too — the agent reads the repo's
     # root instruction files itself (role-prompt-directed), and they are write-denied for the run.
     argv = _argv(claude_config, make_request())
@@ -91,7 +91,7 @@ def test_workspace_write_maps_to_accept_edits(
 def test_read_only_maps_to_dontask_with_readonly_allowlist(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # WRI-002/F21: `dontAsk` (the documented headless read-only mode, replacing the legacy `default`
+    # `dontAsk` (the documented headless read-only mode, replacing the legacy `default`
     # alias) so a clarification goes through the role's structured `human_input` field, not the
     # CLI's
     # plan-mode UX; Edit/Write/Bash absent from `--tools`/`--allowedTools` is the actual mutation
@@ -151,7 +151,7 @@ def test_native_memory_paths_denied_for_custom_config_dir(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    # F37: the spawned agent must not read/inject/leak Claude Code's native project memory, which
+    # The spawned agent must not read/inject/leak Claude Code's native project memory, which
     # lives under the config dir OUTSIDE the target working tree. Write/Edit/Read are denied there,
     # honoring a custom CLAUDE_CONFIG_DIR. No denied_commands passed — the deny applies on its own,
     # by default (allow_native_memory off).
@@ -183,7 +183,7 @@ def test_allow_native_memory_drops_the_deny_but_keeps_command_denies(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    # agent-native-memory-opt-in: with the Claude-only opt-in on, the F37 native-memory deny is
+    # With the Claude-only opt-in on, the native-memory deny is
     # dropped so the agent may use its own auto-memory — but the command/read denies are untouched.
     config_dir = tmp_path / "isolated-claude"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
@@ -315,7 +315,7 @@ def test_reserved_extra_args_are_rejected(
     make_request: Callable[..., AgentRunRequest],
     reserved: tuple[str, ...],
 ) -> None:
-    # WRI-002: an authority-bearing Claude flag in extra_args (tools/settings/MCP/plugins/agents/
+    # An authority-bearing Claude flag in extra_args (tools/settings/MCP/plugins/agents/
     # add-dir/Chrome/worktree/system-prompt/session) is hard-rejected regardless of strict_isolation
     # —
     # it would re-open a surface the adapter deliberately closed. Distinct from the gated
@@ -354,7 +354,7 @@ def test_effective_prompt_appends_footer(make_request: Callable[..., AgentRunReq
 def test_effective_prompt_prepends_security_preamble(
     make_request: Callable[..., AgentRunRequest],
 ) -> None:
-    # VF-7: order at the single neutral seam is preamble → prompt → footer.
+    # Order at the single neutral seam is preamble → prompt → footer.
     request = make_request(
         prompt="Do the thing.",
         task_path="/logs/t/task.md",
@@ -429,7 +429,7 @@ def test_effort_before_max_turns(
     assert argv.index("--effort") < argv.index("--max-turns")
 
 
-# --- WRI-002: platform branching, tool policy, internal denies, sandbox settings ------------------
+# --- platform branching, tool policy, internal denies, sandbox settings --------------------------
 
 _INTERNAL_DENY = (
     Path("/repo/.worc"),
@@ -561,21 +561,21 @@ def test_write_guard_denies_write_edit_but_keeps_exchange_readable(
     # The exchange stays READABLE — no Read deny on it (only Write/Edit).
     assert "Read(//repo/.worc-io/**)" not in disallowed
     assert "Read(//repo/.worc-io)" not in disallowed
-    # VF-20: governance/instruction files are ordinary, editable content — never in the deny set.
+    # Governance/instruction files are ordinary, editable content — never in the deny set.
     for name in ("AGENTS.md", "AGENTS.override.md", "CLAUDE.md"):
         assert name not in disallowed
 
 
-def test_claude_config_home_left_to_f37_not_re_denied_by_internal(
+def test_claude_config_home_left_to_memory_rule_not_re_denied_by_internal(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # ~/.claude is owned by the F37 native-memory rule (gated by allow_native_memory); the internal
+    # ~/.claude is owned by the native-memory rule (gated by allow_native_memory); the internal
     # deny projection must exclude it so the opt-in is not broken.
     home = claude_config_home()
     argv = _argv(claude_config, make_request(), internal_deny=(Path("/repo/.worc"), home))
     disallowed = argv[argv.index("--disallowedTools") + 1]
     home_glob = "//" + home.as_posix().lstrip("/")
-    assert f"Read({home_glob}/**)" in disallowed  # F37 rule present
+    assert f"Read({home_glob}/**)" in disallowed  # native-memory rule present
     assert f"Read({home_glob})" not in disallowed  # internal projection did NOT re-add the node
 
 
@@ -660,10 +660,10 @@ def test_build_sandbox_settings_network_grant_allows_domains() -> None:
     assert "credentials" not in settings  # no env-file → no credentials block
 
 
-# --- VF-6: read-isolation escape hatch (security.disable_read_isolation) ---------------
+# --- read-isolation escape hatch (security.disable_read_isolation) --------------------
 
 
-def _vf6_deny() -> InternalDenyPolicy:
+def _read_isolation_off_deny() -> InternalDenyPolicy:
     return InternalDenyPolicy(
         control_home=Path("/repo/.worc"),
         private_home=Path("/repo/.worc"),
@@ -677,8 +677,8 @@ def _vf6_deny() -> InternalDenyPolicy:
 def test_read_isolation_off_uses_project_setting_sources_and_drops_strict_mcp(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # VF-6: native project discovery restored — --setting-sources project (not "") and no
-    # --strict-mcp-config, so CLAUDE.md + project settings/hooks/MCP/skills load. The VF-5
+    # Native project discovery restored — --setting-sources project (not "") and no
+    # --strict-mcp-config, so CLAUDE.md + project settings/hooks/MCP/skills load. The
     # injection stays retired regardless.
     argv = _argv(claude_config, make_request(), read_isolation_off=True)
     assert argv[argv.index("--setting-sources") + 1] == "project"
@@ -689,7 +689,7 @@ def test_read_isolation_off_uses_project_setting_sources_and_drops_strict_mcp(
 def test_read_isolation_off_lifts_internal_reads_keeps_writes_and_blacklist(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # VF-6: the private set becomes READABLE (no Read deny) but stays Write/Edit-denied; the public
+    # The private set becomes READABLE (no Read deny) but stays Write/Edit-denied; the public
     # denied_read_paths blacklist (.env/secrets) keeps its Read deny; command + write-guard denies
     # stay (write side).
     argv = _argv(
@@ -713,7 +713,7 @@ def test_read_isolation_off_lifts_internal_reads_keeps_writes_and_blacklist(
 def test_read_isolation_off_drops_native_memory_deny(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # VF-6: native Claude memory (~/.claude) is restored, so the F37 deny is not emitted.
+    # Native Claude memory (~/.claude) is restored, so the native-memory deny is not emitted.
     home_glob = "//" + claude_config_home().as_posix().lstrip("/")
     argv = _argv(claude_config, make_request(), denied=DENIED, read_isolation_off=True)
     disallowed = argv[argv.index("--disallowedTools") + 1]
@@ -723,7 +723,7 @@ def test_read_isolation_off_drops_native_memory_deny(
 
 def test_read_isolation_off_sandbox_lifts_denyread_keeps_denywrite() -> None:
     settings = build_sandbox_settings(
-        _vf6_deny(), _write_guard(), network_access=False, read_isolation_off=True
+        _read_isolation_off_deny(), _write_guard(), network_access=False, read_isolation_off=True
     )["sandbox"]
     assert settings["filesystem"]["denyRead"] == []  # read side lifted
     # Write side intact: internal set + exchange/git/tasks still write-denied.

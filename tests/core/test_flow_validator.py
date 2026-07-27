@@ -1,4 +1,4 @@
-"""Unit tests for the fatal load-time flow validator (flow-engine P0.3).
+"""Unit tests for the fatal load-time flow validator.
 
 Each test covers exactly one violation class so regressions are easy to localise. "Valid flow"
 tests confirm that all three co-design flows pass the validator without violations.
@@ -402,7 +402,7 @@ flow:
 
 
 def test_conflicting_provider_override_rejected_under_affinity(tmp_path: Path) -> None:
-    # Durable sessions (P2.2): a node cannot resume another provider's editing session, so an
+    # Durable sessions: a node cannot resume another provider's editing session, so an
     # explicit provider that differs from its lineage_affinity target's provider is rejected.
     yaml = """\
 flow:

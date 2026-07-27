@@ -1,4 +1,4 @@
-"""Per-node observability writers (P1.4): rendered-prompt, prompt-audit, provider_attempts.
+"""Per-node observability writers: rendered-prompt, prompt-audit, provider_attempts.
 
 Exercised directly with a hand-built StageOutcome (primary + fallback attempt) so the audit
 record's who-metadata, redaction, and the per-attempt rows are pinned independently of the runner.
@@ -116,7 +116,7 @@ def test_write_prompt_audit_step_timeline_who_metadata_and_redaction(tmp_path: P
     record = json.loads(step.read_text("utf-8"))
     assert record["provider_used"] == "claude"
     assert record["model"] == "gpt-x"
-    # The effective reasoning (post-override) is auditable alongside the model (ADR Q#4).
+    # The effective reasoning (post-override) is auditable alongside the model.
     assert record["reasoning"] == "high"
     # who-metadata: primary codex marked fallback=False, claude fallback=True.
     by_provider = {a["provider"]: a for a in record["agents"]}
@@ -154,14 +154,14 @@ def test_record_provider_attempts_writes_one_row_per_attempt() -> None:
     )
     assert [r.provider for r in store.rows] == ["codex", "claude"]
     assert [r.node_run_id for r in store.rows] == [7, 7]
-    # VF-8: every row carries the owning task so a roll-up needs no ``node_runs`` join.
+    # Every row carries the owning task so a roll-up needs no ``node_runs`` join.
     assert [r.task_id for r in store.rows] == ["task-1", "task-1"]
     assert store.rows[0].error_class == "rate_limited"
     assert store.rows[0].exit_code == 1
 
 
 def test_record_provider_attempts_stamps_result_interval_not_clock() -> None:
-    # VF-12: the row carries the attempt's real measured interval (taken from the result), not two
+    # The row carries the attempt's real measured interval (taken from the result), not two
     # identical clock reads at row-write time — so ``SUM(finished_at - started_at)`` is a duration.
     store = _FakeStore()
     record_provider_attempts(
@@ -175,7 +175,7 @@ def test_record_provider_attempts_stamps_result_interval_not_clock() -> None:
 
 
 def test_record_provider_attempts_resultless_attempt_falls_back_to_clock() -> None:
-    # VF-12: a fallback attempt that never produced a result has no interval to read — fall back to
+    # A fallback attempt that never produced a result has no interval to read — fall back to
     # the clock (both stamps equal is honest here: there is no measured duration).
     store = _FakeStore()
     outcome = StageOutcome(
@@ -202,7 +202,7 @@ def test_record_provider_attempts_resultless_attempt_falls_back_to_clock() -> No
 
 
 def test_record_provider_attempts_supervisor_layer_has_null_node_run() -> None:
-    # VF-8: the constant supervisor layer records with node_run_id None (it is not a graph node).
+    # The constant supervisor layer records with node_run_id None (it is not a graph node).
     store = _FakeStore()
     record_provider_attempts(
         store, lambda: "ts", task_id="task-1", node_run_id=None, outcome=_outcome()

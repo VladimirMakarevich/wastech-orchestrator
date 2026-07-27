@@ -1,4 +1,4 @@
-"""P3.3 — the packaged ``deep_research`` flow executes on the generic engine.
+"""The packaged ``deep_research`` flow executes on the generic engine.
 
 Drives the real packaged snapshot through the :class:`FlowEngine` with the **real** checks /
 evaluator node runners (citation validation, the non-blocking critic self-cap, resume_own_lineage)
@@ -290,13 +290,13 @@ def test_research_external_research_optional_skip(tmp_path: Path) -> None:
 
 
 def test_analysis_runs_as_three_passes_then_the_coverage_gate(tmp_path: Path) -> None:
-    # P1.4 / DR-7: one node asked to walk everything self-triaged (18% of the in-scope files, 93% of
+    # One node asked to walk everything self-triaged (18% of the in-scope files, 93% of
     # its turn budget unused). The analysis is now three sequential passes over disjoint surfaces,
     # each with its own narrow remit, and a coverage gate sits behind them — before the run's first
     # producer of prose, so a thin pass is caught before anything is written on top of it.
     _, _, agent, router = _drive(tmp_path, findings=[], sources=_GOOD_SOURCE)
     assert agent.calls[:4] == [
-        "refinement",  # the scoping pass, no longer gated on a task-formedness fact (P3.10 10a)
+        "refinement",  # the scoping pass, no longer gated on a task-formedness fact
         "analysis_core",
         "analysis_surfaces",
         "analysis_docs_tests",
@@ -323,7 +323,7 @@ def test_coverage_gate_reads_each_analysis_pass_report(tmp_path: Path) -> None:
 
 
 def test_coverage_gate_finding_reworks_the_whole_analysis_chain(tmp_path: Path) -> None:
-    # A subsystem with no traced property is a `medium` finding, which gates (P0.1) and re-enters at
+    # A subsystem with no traced property is a `medium` finding, which gates and re-enters at
     # analysis_core — a gap can sit in any of the three remits and only the pass that owns it can
     # close it. Non-blocking with max_rework_per_stage 2, so it self-caps and the flow still
     # publishes rather than parking the task.
@@ -351,7 +351,7 @@ def test_coverage_gate_rework_hands_its_findings_to_the_next_pass(tmp_path: Path
 
 
 def test_refinement_runs_on_a_well_formed_task(tmp_path: Path) -> None:
-    # P3.10 10a: the scoping pass was gated on `derived.needs_refinement`, which is a *formedness*
+    # The scoping pass was gated on `derived.needs_refinement`, which is a *formedness*
     # check — a description plus acceptance criteria already resolves it False — so on every
     # properly written task the strongest prompt in the set never ran, and the analysis passes
     # downstream lost the sub-question brief they consume. It must run with the fact False.
@@ -366,7 +366,7 @@ def test_refinement_runs_on_a_well_formed_task(tmp_path: Path) -> None:
 
 
 def test_document_gate_runs_before_the_report_evaluators(tmp_path: Path) -> None:
-    # P3.10 10g: the flow wrote Markdown, committed it and opened a pull request without running
+    # The flow wrote Markdown, committed it and opened a pull request without running
     # anything the repository defines, and turned the target's CI red on files the run itself had
     # just written. A command_profile node now sits on the pass path, before the two expensive
     # evaluators. With no command sets configured it passes vacuously — nothing to run is not a gap.
@@ -387,7 +387,7 @@ def test_document_gate_runs_before_the_report_evaluators(tmp_path: Path) -> None
 
 
 def test_report_evaluators_are_handed_the_report_not_the_sign_off(tmp_path: Path) -> None:
-    # P2.8 piece 1 / DR-4: `{synthesis_path}` resolved to the node's closing message, so both
+    # `{synthesis_path}` resolved to the node's closing message, so both
     # evaluators had to name `{repo}/docs/research/{task_id}/report.md` by hand — the engine's own
     # path convention hardcoded into a role prompt. With `output_file` the channel carries the
     # deliverable, and both prompts resolve it by node id.
@@ -437,7 +437,7 @@ def test_research_non_blocking_exhaustion_publishes_with_open_questions(tmp_path
 
 
 def test_research_medium_finding_gates_and_self_caps(tmp_path: Path) -> None:
-    # P0.1/DR-1 end to end: the run this campaign came from had `critical_review` file a correct
+    # End to end: the run this came from had `critical_review` file a correct
     # `medium` finding and the engine returned `accept` on the spot, because gate_severity defaulted
     # to `high`. With the flow pinning `medium` the same finding drives rework rounds up to the
     # critic's max_rework_per_stage (3) and only then accepts — reaching publish, never manual.
@@ -461,7 +461,7 @@ def test_research_low_finding_stays_advisory(tmp_path: Path) -> None:
 
 
 def test_passing_citation_check_routes_its_report_to_the_verifier(tmp_path: Path) -> None:
-    # P1.6 / DR-5: `checks_path` was set only on the command-profile FAILURE path, so on a passing
+    # `checks_path` was set only on the command-profile FAILURE path, so on a passing
     # citation check the 5 KB verdict file reached nobody — while the verifier's own prompt asserted
     # a guarantee based on it. The next evaluator must now receive the pointer, and its rendered
     # prompt must carry it (the packaged verifier.md addresses `{checks_path}`).

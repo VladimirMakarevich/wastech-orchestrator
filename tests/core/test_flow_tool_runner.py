@@ -1,4 +1,4 @@
-"""Custom tool node runner — execution under the process ceiling + outcome contract (P5.3).
+"""Custom tool node runner — execution under the process ceiling + outcome contract.
 
 Exercises the runner with a fake ``run_process`` and a fake tool registry so we can assert the
 security ceiling (argv-no-shell, allowlisted env, no secrets on stdin, redacted artifacts), the

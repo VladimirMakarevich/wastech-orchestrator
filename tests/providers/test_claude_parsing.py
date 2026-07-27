@@ -89,7 +89,7 @@ def test_normalized_usage_sums_three_input_fields_per_invocation() -> None:
 
 
 def test_normalized_usage_captures_total_cost_usd() -> None:
-    # VF-8: the terminal ``result`` event carries ``total_cost_usd`` as a SIBLING of ``usage`` (not
+    # The terminal ``result`` event carries ``total_cost_usd`` as a SIBLING of ``usage`` (not
     # inside it); it maps onto the per-invocation ``cost`` so provider_attempts.usage_cost fills.
     stream = _stream(
         {

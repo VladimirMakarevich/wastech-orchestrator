@@ -1,4 +1,4 @@
-"""Tests for the VF-7 Core-owned orchestrator security preamble (defense-in-depth)."""
+"""Tests for the Core-owned orchestrator security preamble (defense-in-depth)."""
 
 from __future__ import annotations
 
@@ -39,7 +39,7 @@ def test_path_tokens_are_emitted_from_layout_constants() -> None:
 
 
 def test_governance_files_declared_editable_not_read_only() -> None:
-    # VF-20: the preamble must no longer call the instruction files "read-only this run"; it states
+    # The preamble must no longer call the instruction files "read-only this run"; it states
     # they are ordinary, editable repository files (a change is reported, not blocked).
     for off in (True, False):
         text = build_orchestrator_security_preamble(read_isolation_off=off)

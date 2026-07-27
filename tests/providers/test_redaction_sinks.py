@@ -129,7 +129,7 @@ def test_event_log_stays_parseable_when_a_tool_result_holds_escaped_quotes(
     make_request: Callable[..., AgentRunRequest],
     tmp_path: Path,
 ) -> None:
-    # DR-10 harm 1: the sinks were redacted as raw serialized text, so a source payload holding an
+    # The sinks were redacted as raw serialized text, so a source payload holding an
     # escaped quote next to a sensitive-looking name (`  tokens: "tokens",` — a real read of a real
     # file) lost the escape's backslash and the whole line stopped parsing. The orchestrator itself
     # was unaffected (parsing uses the in-memory stream), so nothing failed loudly; the audit trail
@@ -174,7 +174,8 @@ def test_session_id_scrub_does_not_shred_the_sinks(
     tmp_path: Path,
 ) -> None:
     # The raw session id is scrubbed from the on-disk sinks with a word-bounded replace. It used to
-    # be a bare `str.replace`, which is the F45 defect on a path F45 did not cover: a short id
+    # be a bare `str.replace`, which is the unbounded-substring defect on a path it did not
+    # originally cover: a short id
     # rewrites every occurrence of those characters INSIDE other words, so the sinks it rewrites
     # stop being JSON. Harmless for a UUID, fatal for a short id — pin the short one.
     clone = _clone_with_env(tmp_path)

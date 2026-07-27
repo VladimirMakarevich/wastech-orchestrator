@@ -1,4 +1,4 @@
-# Parity fixture for the flow-engine golden harness (P1.4 step B). NOT a packaged flow.
+# Parity fixture for the flow-engine golden harness. NOT a packaged flow.
 #
 # Reproduces the CURRENT implementation pipeline 1:1 — refinement -> planning -> implementation ->
 # testing(checks) -> review(evaluator) -> fixing -> summary -> publish, with the two fix loops and

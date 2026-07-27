@@ -1,4 +1,4 @@
-"""Guard: no module rebuilds a ``.worc`` / ``.worc-io`` path from a bare string literal (WRI-004).
+"""Guard: no module rebuilds a ``.worc`` / ``.worc-io`` path from a bare string literal.
 
 Path construction for the runtime homes must go through :mod:`wastech_orchestrator.runtime_layout`
 (the ``RuntimeLayout`` factory / the ``*_HOME_DIRNAME`` constants), never a hand-joined literal such

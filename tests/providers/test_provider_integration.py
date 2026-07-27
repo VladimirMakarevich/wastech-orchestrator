@@ -192,7 +192,7 @@ def test_session_limit_raises_rate_limited(
     # The subscription/session-limit terminal must be RAISED as RATE_LIMITED (so the Router can fall
     # over / the orchestrator can park), NOT returned as a quality TASK_FAILURE. Claude surfaces it
     # structurally on stdout (HTTP 429 / rate_limit_event / banner, empty stderr); codex only on
-    # stderr. Both must classify identically — the exact failure that both post-mortems mis-labeled.
+    # stderr. Both must classify identically — the exact failure that was mis-labeled in the field.
     provider = _build(
         provider_name, fake_cli("session_limit", provider_name), integration_security, tmp_path
     )

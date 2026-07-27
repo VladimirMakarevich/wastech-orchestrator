@@ -1,4 +1,4 @@
-"""Unit tests for the Codex permission-profile canary classifier (WRI-003).
+"""Unit tests for the Codex permission-profile canary classifier.
 
 Deterministic: an injected runner returns scripted ``(rc, output)`` per probe (in the fixed probe
 order), so no real ``codex sandbox`` is launched. The real-host proof lives in
@@ -60,7 +60,7 @@ def test_canary_passes_when_denies_hold_and_exchange_read_only() -> None:
 
 
 def test_canary_without_positive_control_is_capability_unavailable() -> None:
-    # H4: with no exchange probe (and no repo probe), only deny probes run — there is no positive
+    # With no exchange probe (and no repo probe), only deny probes run — there is no positive
     # control, so a broken probe harness would make every denial look enforced. The canary must
     # refuse to certify (CAPABILITY_UNAVAILABLE), never silently pass.
     outcome = _run(_seq_runner(_ALL_DENY), exchange=None)
@@ -70,7 +70,7 @@ def test_canary_without_positive_control_is_capability_unavailable() -> None:
 
 
 def test_repo_read_positive_control_satisfies_selective_enforcement() -> None:
-    # H4: a repo-read positive control (rc=0) is enough to prove selective enforcement even without
+    # A repo-read positive control (rc=0) is enough to prove selective enforcement even without
     # an exchange probe. Probe order: private-read, private-shell-read, repo-read.
     outcome = run_codex_canary(
         command="codex",
@@ -92,7 +92,7 @@ def test_repo_read_positive_control_satisfies_selective_enforcement() -> None:
 
 
 def test_alias_read_that_succeeds_is_a_leak() -> None:
-    # H4: a workspace symlink resolving to the private file that READS successfully is a leak.
+    # A workspace symlink resolving to the private file that READS successfully is a leak.
     outcome = run_codex_canary(
         command="codex",
         profile_arg="permissions.worc={ }",
@@ -242,7 +242,7 @@ def test_windows_write_probe_redirects_with_a_bare_operator() -> None:
 
 
 def test_private_readable_flips_reads_and_adds_write_deny() -> None:
-    # VF-6: read-isolation OFF → private reads become positive controls (allowed) and a private
+    # Read-isolation OFF → private reads become positive controls (allowed) and a private
     # WRITE-denied probe is added to prove the control plane stays immutable.
     default = {
         p.label: p.expect_denied
@@ -261,7 +261,7 @@ def test_private_readable_flips_reads_and_adds_write_deny() -> None:
     assert "private-read-denied" not in readable
 
 
-# --- H4/H7/WRI-006: the no-model capability smoke (deterministic; scripted sandbox + inventory) ---
+# --- the no-model capability smoke (deterministic; scripted sandbox + inventory) -----------------
 
 
 def _smoke_runner(*, writable: bool):

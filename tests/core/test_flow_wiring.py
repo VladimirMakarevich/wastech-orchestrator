@@ -1,4 +1,4 @@
-"""Wiring builders (P1.4) — turn the orchestrator's collaborators + ``_Pipeline`` into the node
+"""Wiring builders — turn the orchestrator's collaborators + ``_Pipeline`` into the node
 data bundles. The mapping is exercised with the parity fixture + a duck-typed pipeline so it stays
 verifiable without standing up the whole orchestrator.
 """
@@ -80,7 +80,7 @@ def test_build_node_inputs_maps_pipeline_paths(tmp_path: Path) -> None:
     assert inputs.summary_body_path == "/s/summary.md"
     assert inputs.commit_message == "feat: x"
     assert inputs.contacts == ("@me",)
-    # Editing-session continuity is durable now (the editing_lineage store, P2.2), not an in-memory
+    # Editing-session continuity is durable now (the editing_lineage store), not an in-memory
     # map threaded through NodeInputs.
 
 

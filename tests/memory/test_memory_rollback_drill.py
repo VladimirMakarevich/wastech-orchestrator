@@ -1,4 +1,4 @@
-"""Safety drill 05.4 — snapshot → bad cleanup → restore returns byte-identical pre-state (AC-SF4).
+"""Safety drill — snapshot → bad cleanup → restore returns byte-identical pre-state.
 
 Adversarial: populate memory, let the cleanup take its automatic pre-batch snapshot and mutate the
 store, then restore from that snapshot and assert the tier files are byte-for-byte the pre-cleanup
@@ -69,7 +69,7 @@ def test_restore_returns_byte_identical_pre_cleanup_state(tmp_path: Path) -> Non
     # Byte-identical for every file present before the cleanup (UTF-8 + explicit \n → stable bytes).
     for name, content in before.items():
         assert after[name] == content, f"{name} not restored byte-identically"
-    # F4: a tier file the cleanup first-created (pending.jsonl) is pruned on restore — the store is
+    # A tier file the cleanup first-created (pending.jsonl) is pruned on restore — the store is
     # the exact pre-cleanup set, not a superset with an inert leftover quarantine file.
     assert set(after) == set(before)
     assert not (layout.quarantine / "pending.jsonl").exists()

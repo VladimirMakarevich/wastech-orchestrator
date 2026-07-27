@@ -57,7 +57,7 @@ class FakeRun:
     exit_code: int = 0
     timed_out: bool = False
     launch_error: str | None = None
-    # WRI-012: the containment quiescence result the runner reports. Default proven so existing
+    # The containment quiescence result the runner reports. Default proven so existing
     # tests are unaffected; a test sets an unproven result to exercise the fail-closed gate.
     quiescence: QuiescenceResult | None = field(
         default_factory=lambda: QuiescenceResult(proven=True, detail="fake")
@@ -188,7 +188,7 @@ def test_unproven_quiescence_fails_closed_before_parsing_output(
     tmp_path: Path,
     make_request: Callable[..., AgentRunRequest],
 ) -> None:
-    # WRI-012: even with a perfectly valid success stream and exit 0, an unproven process-tree
+    # Even with a perfectly valid success stream and exit 0, an unproven process-tree
     # quiescence result makes run() fail closed with the non-fallback CONTAINMENT_UNVERIFIED BEFORE
     # the output is parsed or trusted — an unknown descendant may still be writing.
     fake = FakeRun(
@@ -302,7 +302,7 @@ def test_capability_unavailable_raises_before_launch(
     tmp_path: Path,
     make_request: Callable[..., AgentRunRequest],
 ) -> None:
-    # WRI-002: a strict workspace-write attempt on a supported host whose Bash sandbox deps are
+    # A strict workspace-write attempt on a supported host whose Bash sandbox deps are
     # missing raises CAPABILITY_UNAVAILABLE PRE-MODEL — nothing is launched, the request artifact is
     # still written, and it is deliberately not an unconditional fallback (the Router gates it).
     fake = FakeRun(stdout=_success_stream())
@@ -418,7 +418,7 @@ def test_request_json_redacts_prompt_secret(
 def test_workspace_write_run_with_deny_policy_writes_sandbox_settings(
     claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
 ) -> None:
-    # M8: the other run tests use deny_policy=None (an UNISOLATED config). Prove the isolated path
+    # The other run tests use deny_policy=None (an UNISOLATED config). Prove the isolated path
     # end-to-end: with an InternalDenyPolicy on a sandbox-capable host, a workspace-write run writes
     # the OS Bash-sandbox settings file and passes `--settings`, with the private home in denyRead.
     deny = InternalDenyPolicy(
@@ -481,7 +481,7 @@ def test_preflight_missing_binary(
     assert health.version is None
 
 
-# --- H2: Claude capability/degraded preflight (claude --help flag-drift guard) -----------------
+# --- Claude capability/degraded preflight (claude --help flag-drift guard) ---------------------
 
 # The isolation-critical + resume flags a healthy Claude CLI advertises (2.1.x surface).
 _FULL_CLAUDE_HELP = (
@@ -495,7 +495,7 @@ _FULL_CLAUDE_HELP = (
 
 
 class _ProbingClaudeRun:
-    """A fake runner answering ``claude --version`` and ``claude --help`` by argv (H2 preflight)."""
+    """A fake runner answering ``claude --version`` and ``claude --help`` by argv (preflight)."""
 
     def __init__(self, *, help_text: str) -> None:
         self._help_text = help_text

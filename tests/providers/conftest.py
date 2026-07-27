@@ -38,7 +38,7 @@ def claude_config() -> ProviderConfig:
 def security_config() -> SecurityConfig:
     return SecurityConfig(
         strict_isolation=True,
-        # VF-6: pin read-isolation ON for the provider tests (shipped default is now OFF) so the
+        # Pin read-isolation ON for the provider tests (shipped default is now OFF) so the
         # isolation machinery — setting-sources/MCP lockdown, internal read-denies, Codex profile
         # denies + canary — stays covered. The read-isolation-OFF path has its own tests.
         disable_read_isolation=False,
@@ -68,7 +68,7 @@ def integration_security() -> SecurityConfig:
     )
     return SecurityConfig(
         strict_isolation=True,
-        disable_read_isolation=False,  # VF-6: pin read-isolation ON for integration coverage
+        disable_read_isolation=False,  # pin read-isolation ON for integration coverage
         allowed_environment=(
             "PATH",
             "HOME",

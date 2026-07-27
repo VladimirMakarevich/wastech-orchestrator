@@ -1,4 +1,4 @@
-"""Unit tests for the flow YAML loader and snapshot resolver (flow-engine P0.2)."""
+"""Unit tests for the flow YAML loader and snapshot resolver."""
 
 from __future__ import annotations
 
@@ -265,7 +265,7 @@ def _gate_flow(defaults_gate: str | None, node_gate: str | None) -> str:
 def test_packaged_quality_flows_gate_on_medium(
     flow_file: str, evaluator_ids: tuple[str, ...]
 ) -> None:
-    # P0.1/DR-1: a quality evaluator judges "is this GOOD ENOUGH", which it has no natural way to
+    # A quality evaluator judges "is this GOOD ENOUGH", which it has no natural way to
     # express as high/critical, so at the built-in `high` gate its findings were recorded and then
     # dropped. Every packaged flow whose evaluators are quality lenses must pin `medium` — whether
     # via defaults.evaluator (deep_research) or per node.
@@ -278,7 +278,7 @@ def test_packaged_quality_flows_gate_on_medium(
 
 @pytest.mark.parametrize("role_file", ["coverage.md", "verifier.md", "critic.md"])
 def test_packaged_research_evaluator_prompts_state_the_verdict_mechanism(role_file: str) -> None:
-    # P1.5 item 5 / DR-6: `verifier.md` contained no occurrence of `verdict`, `accept` or `rework` —
+    # `verifier.md` contained no occurrence of `verdict`, `accept` or `rework` —
     # the engine derived a verdict from severities the prompt never defined. Each research evaluator
     # prompt must state the *mechanism* instead of a threshold: the flow decides which severities
     # gate, findings are filed at their true severity, and a sub-threshold one still reaches the
@@ -292,7 +292,7 @@ def test_packaged_research_evaluator_prompts_state_the_verdict_mechanism(role_fi
 
 
 def test_deep_research_declares_its_own_finalize_lens() -> None:
-    # P1.7 / DR-3: with no `supervisor:` block the finalize turn fell through to the built-in
+    # With no `supervisor:` block the finalize turn fell through to the built-in
     # code-flow lens ("grounded in the actual committed change") and, applied to a research
     # deliverable, produced a summary with two false claims. The flow must declare its own lens, the
     # file must exist, and that lens must forbid first-person verification claims — the summary is
@@ -306,12 +306,12 @@ def test_deep_research_declares_its_own_finalize_lens() -> None:
     assert "third person" in text
     assert "No number, verdict or count you were not given." in text
     # `emit_follow_ups` is a code-oriented capability; a research flow leaves it off and still gets
-    # its evaluators' findings in the summary (VF-18).
+    # its evaluators' findings in the summary.
     assert snap.doc.supervisor.emit_follow_ups is False
 
 
 def test_packaged_verifier_prompt_watches_for_omissions() -> None:
-    # P1.5 items 2-4 / DR-6: the watch-list was four variants of "the report claims too much", so a
+    # The watch-list was four variants of "the report claims too much", so a
     # conservatively written report was unfalsifiable against it and `fact_verification` returned
     # zero findings. It must now also look for what is *absent*, own the whole citation manifest
     # rather than the report's inline prose, and fetch an external source instead of recalling it.
@@ -325,7 +325,7 @@ def test_packaged_verifier_prompt_watches_for_omissions() -> None:
 
 @pytest.mark.parametrize("role_file", ["verifier.md", "critic.md"])
 def test_packaged_research_evaluators_read_the_deliverable_by_channel(role_file: str) -> None:
-    # P2.8: both prompts opened `{repo}/docs/research/{task_id}/report.md` — the engine's own path
+    # Both prompts opened `{repo}/docs/research/{task_id}/report.md` — the engine's own path
     # convention, hand-copied into a role file, which an operator flow on a different output policy
     # would silently not have. The deliverable arrives on the node-output channel instead, which the
     # writing node's `output_file` points at the report rather than at its closing message.
@@ -338,7 +338,7 @@ def test_packaged_research_evaluators_read_the_deliverable_by_channel(role_file:
 
 
 def test_structuring_node_writes_nothing_and_hands_on_its_whole_blueprint() -> None:
-    # P2.9 / DR-11: the node was *instructed* to organize its notes inside the deliverable
+    # The node was *instructed* to organize its notes inside the deliverable
     # directory, so a 295-line intermediate blueprint shipped in the pull request beside the
     # report — and the two documents disagreed about coverage. It must write nothing, which means
     # its own output has to carry the blueprint in full, read by the writing node from the
@@ -353,7 +353,7 @@ def test_structuring_node_writes_nothing_and_hands_on_its_whole_blueprint() -> N
 def test_implementation_review_keeps_the_high_gate(impl_snap: FlowSnapshot) -> None:
     # The counterpart: `review` is a correctness lens on a *blocking* node, so it stays at the
     # built-in `high`. Lowering a blocking evaluator's gate changes its exhaustion landing to
-    # manual_action_required, which is not a change P0.1 makes.
+    # manual_action_required, which this change does not make.
     ev = impl_snap.nodes_by_id["review"]
     assert isinstance(ev, EvaluatorNode)
     assert ev.gate_severity == "high"
@@ -409,7 +409,7 @@ def test_checks_node_has_checker(impl_snap: FlowSnapshot) -> None:
 
 
 def test_checks_node_manifest_defaults_to_sources_json() -> None:
-    # P1.6: a flow that declares nothing keeps today's behavior — the knob's absence is not a
+    # A flow that declares nothing keeps today's behavior — the knob's absence is not a
     # silent failure mode.
     node = load_flow(CODESIGN / "deep_research.yaml").nodes_by_id["citation_check"]
     assert isinstance(node, ChecksNode)
@@ -484,7 +484,7 @@ def test_unknown_node_kind_raises(tmp_path: Path) -> None:
         load_flow(p)
 
 
-# -- fail-closed hardening (P0.5) ---------------------------------------------
+# -- fail-closed hardening ----------------------------------------------------
 
 
 def _write(tmp_path: Path, flow_body: str) -> Path:
@@ -570,7 +570,7 @@ def test_invalid_output_artifact_slot_rejected(tmp_path: Path) -> None:
 
 def test_agent_node_id_colliding_with_reserved_prefix_rejected(tmp_path: Path) -> None:
     # An agent id equal to a reserved core-variable prefix would make {plan_path} ambiguous with the
-    # fixed core variable — fatal at load (node-output ADR).
+    # fixed core variable — fatal at load.
     body = _VALID_BODY.replace("    - id: a\n", "    - id: plan\n")
     with pytest.raises(FlowLoadError, match=r"reserved core-variable prefix"):
         load_flow(_write(tmp_path, body))
@@ -589,7 +589,7 @@ def test_agent_node_id_near_reserved_name_accepted(tmp_path: Path) -> None:
     assert "reviewer" in load_flow(_write(tmp_path, body)).nodes_by_id
 
 
-# -- portable node-id identities (WRI-008) ------------------------------------
+# -- portable node-id identities ----------------------------------------------
 
 
 @pytest.mark.parametrize(

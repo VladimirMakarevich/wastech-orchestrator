@@ -1,4 +1,4 @@
-"""P3.1 — the core ``checks`` checkers: citation (deterministic, gating) + dependency_scan.
+"""The core ``checks`` checkers: citation (deterministic, gating) + dependency_scan.
 
 Two layers: the pure checker functions (``validate_citations`` / ``run_dependency_scan``) and the
 ``ChecksNodeRunner`` dispatch that maps each to the engine ``pass`` / ``fail`` outcome.
@@ -194,10 +194,10 @@ def test_citation_path_traversal_is_broken(tmp_path: Path) -> None:
     assert report.entries[0].status is CitationStatus.BROKEN
 
 
-# -- citation: the fabrication battery (P1.6 / DR-5) --------------------------
+# -- citation: the fabrication battery ----------------------------------------
 
 
-# The post-mortem ran these shapes through the real validator. Two of them came back `verified`
+# These shapes were run through the real validator. Two of them came back `verified`
 # because the cited line was only bounds-checked and a snippet-less entry short-circuited to pass —
 # so the gate promised far more than it delivered. Pinned here as a table so the promise and the
 # implementation cannot drift apart again. `claim` is deliberately never validated: a real snippet
@@ -212,7 +212,7 @@ def test_citation_path_traversal_is_broken(tmp_path: Path) -> None:
             False,
         ),
         (
-            "correct snippet, wrong in-range line",  # was `verified` — the DR-5 headline
+            "correct snippet, wrong in-range line",  # was `verified` — the headline case
             {"path": "a.py", "line": 1, "snippet": "target = 1"},
             CitationStatus.WEAK,
             False,
@@ -352,7 +352,7 @@ def test_citation_node_fails_for_hallucinated_manifest(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("passing", [True, False])
 def test_citation_node_sets_checks_path_on_both_outcomes(tmp_path: Path, passing: bool) -> None:
-    # P1.6 / DR-5: `checks_path` was set only by the command-profile FAILURE path, so on a passing
+    # `checks_path` was set only by the command-profile FAILURE path, so on a passing
     # citation check the per-entry verdicts reached nobody — while the downstream verifier's prompt
     # asserted a guarantee based on them and could not audit that claim.
     repo, art = tmp_path / "repo", tmp_path / "art"
@@ -454,7 +454,7 @@ def test_dependency_scan_argv_with_timeout(tmp_path: Path) -> None:
 
 
 def test_dependency_scan_records_real_wall_clock_interval(tmp_path: Path) -> None:
-    # VF-12: each scanner carries the wall-clock bracket around its subprocess, not two identical
+    # Each scanner carries the wall-clock bracket around its subprocess, not two identical
     # row-write stamps — so its check_runs row has a measurable duration.
     runner = _fake_runner({})
     ticks = iter([f"2026-07-25T00:00:{s:02d}+00:00" for s in range(60)])

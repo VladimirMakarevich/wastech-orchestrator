@@ -1,4 +1,4 @@
-"""Unit tests for the constant supervisor layer + evaluator primitive (flow-engine P2.1).
+"""Unit tests for the constant supervisor layer + evaluator primitive.
 
 The supervisor is the orchestrator-level oversight layer above any flow: per-step read-only
 observation in its own resume_own_lineage session, advisory-only (never reworks/routes), and a
@@ -146,7 +146,7 @@ def _supervisor(
 
 
 def test_supervisor_request_carries_security_preamble(tmp_path: Path) -> None:
-    # VF-7: the supervisor's own read-only turn carries the Core-owned preamble too.
+    # The supervisor's own read-only turn carries the Core-owned preamble too.
     router, store = FakeRouter(), _store(tmp_path)
     sup = _supervisor(
         tmp_path, router, store, security_preamble="[Orchestrator security contract] baseline"
@@ -177,7 +177,7 @@ def test_supervisor_observes_each_completed_step(tmp_path: Path) -> None:
 
 
 def test_observe_prompt_carries_the_evaluator_findings_digest(tmp_path: Path) -> None:
-    # DR-2 wire 3: `_step_prompt` had no slot for findings, so the observation for the critic step
+    # `_step_prompt` had no slot for findings, so the observation for the critic step
     # was a bare `## Step observed / Outcome: accept` with nothing to react to — and the observer
     # made zero tool calls on every evaluator step of the run this came from. Severity + reason +
     # paths now reach the prompt, which is what the observer is being asked to acknowledge.
@@ -264,7 +264,7 @@ def test_supervisor_observability_write_failure_does_not_break_turn(tmp_path: Pa
 
 
 def test_supervisor_pins_its_provider_at_route(tmp_path: Path) -> None:
-    # F39: the supervisor resolves the route with its own `provider` (here claude), not an implicit
+    # The supervisor resolves the route with its own `provider` (here claude), not an implicit
     # None-inherits-primary — so its claude model reaches claude even under a codex primary.
     router, store = FakeRouter(), _store(tmp_path)
     sup = _supervisor(tmp_path, router, store, provider=ProviderId.CLAUDE)
@@ -475,7 +475,7 @@ def test_supervisor_finalize_best_effort_when_llm_unavailable(tmp_path: Path) ->
 
 
 def test_finalize_sanitizes_leaked_structured_dump(tmp_path: Path) -> None:
-    # F16: a model that emits its structured output as a `<summary>…</summary><follow_ups>[JSON]
+    # A model that emits its structured output as a `<summary>…</summary><follow_ups>[JSON]
     # </follow_ups><memory_delta>…` text dump must never let those machine sections ride into
     # summary.md (the PR body). Only the human prose survives.
     leaked = (
@@ -519,7 +519,7 @@ def test_finalize_writes_prompt_audit_when_enabled(tmp_path: Path) -> None:
 
 
 def test_finalize_prefixes_h1_when_missing(tmp_path: Path) -> None:
-    # F10: a headless paragraph-slab summary gets a deterministic `# {task_title}` H1 prefix.
+    # A headless paragraph-slab summary gets a deterministic `# {task_title}` H1 prefix.
     router, store = FakeRouter([_ok("s1", "One flat line of synthesis.")]), _store(tmp_path)
     sup = _supervisor(tmp_path, router, store)
     path = sup.finalize(task_id=_TASK, task_title="My Task").summary_path
@@ -528,7 +528,7 @@ def test_finalize_prefixes_h1_when_missing(tmp_path: Path) -> None:
 
 
 def test_finalize_keeps_model_h1_without_double_prefix(tmp_path: Path) -> None:
-    # F10: when the model already opened with its own top-level heading, don't double-prefix.
+    # When the model already opened with its own top-level heading, don't double-prefix.
     router, store = FakeRouter([_ok("s1", "# Model heading\n\nBody.")]), _store(tmp_path)
     sup = _supervisor(tmp_path, router, store)
     path = sup.finalize(task_id=_TASK, task_title="T").summary_path
@@ -617,7 +617,7 @@ def test_finalize_digest_none_when_no_usable_observations(tmp_path: Path) -> Non
 
 
 def test_finalize_failed_does_not_clobber_existing_summary_json(tmp_path: Path) -> None:
-    # F16: a failed finalize (no provider result) must NOT overwrite an existing non-empty
+    # A failed finalize (no provider result) must NOT overwrite an existing non-empty
     # summary.json with a blank one (symmetric to leaving summary.md untouched on failure).
     store = _store(tmp_path)
     # First finalize succeeds and writes a non-empty summary.json.
@@ -633,7 +633,7 @@ def test_finalize_failed_does_not_clobber_existing_summary_json(tmp_path: Path) 
 
 
 def test_schema_turn_caps_max_reasoning_but_free_text_keeps_it(tmp_path: Path) -> None:
-    # F7b: a structured-output turn is capped to `high` when configured at a max tier (xhigh/max) so
+    # A structured-output turn is capped to `high` when configured at a max tier (xhigh/max) so
     # the schema turn is not fragile; a free-text turn keeps the configured tier.
     schema_router, store = FakeRouter([_structured("Sum.", {})]), _store(tmp_path)
     sup_schema = _supervisor(tmp_path, schema_router, store, reasoning="xhigh")
@@ -649,7 +649,7 @@ def test_schema_turn_caps_max_reasoning_but_free_text_keeps_it(tmp_path: Path) -
 
 
 def test_observe_turn_caps_max_reasoning(tmp_path: Path) -> None:
-    # F50: per-step observation is advisory and runs once per node-run, so a deep fix loop drives
+    # Per-step observation is advisory and runs once per node-run, so a deep fix loop drives
     # many observe turns; it never needs a max tier — cap it to `high` (like a schema turn), while
     # the free-text finalize above keeps the configured tier.
     router, store = FakeRouter(), _store(tmp_path)
@@ -674,7 +674,7 @@ def _structured(summary: str, memory_delta: dict[str, Any]) -> AgentRunResult:
 
 
 def test_finalize_emits_delta_on_the_same_turn(tmp_path: Path) -> None:
-    # AC-W1: with memory enabled, the SAME finalize turn yields the summary + the candidate delta.
+    # With memory enabled, the SAME finalize turn yields the summary + the candidate delta.
     memory_delta = {
         "lessons": [
             {
@@ -696,7 +696,7 @@ def test_finalize_emits_delta_on_the_same_turn(tmp_path: Path) -> None:
 
 
 def test_finalize_call_count_identical_with_memory_on_or_off(tmp_path: Path) -> None:
-    # AC-W1: enabling memory adds no provider turns.
+    # Enabling memory adds no provider turns.
     counts: list[int] = []
     cases = (("off", FakeRouter([_ok("s", "sum")])), ("on", FakeRouter([_structured("sum", {})])))
     for name, router in cases:
@@ -784,7 +784,7 @@ def test_finalize_lens_fallback_flow_then_builtin(tmp_path: Path) -> None:
 
 
 def test_finalize_free_text_when_no_follow_ups_no_delta(tmp_path: Path) -> None:
-    # AC-S4: absent/false emit_follow_ups and memory off -> the finalize turn stays free-text (no
+    # Absent/false emit_follow_ups and memory off -> the finalize turn stays free-text (no
     # output_schema forced), exactly today's behavior.
     router = FakeRouter([_ok("s", "plain summary")])
     sup = _supervisor(tmp_path, router, _store(tmp_path))  # no flow block => emit_follow_ups False
@@ -860,7 +860,7 @@ def test_emit_follow_ups_malformed_still_writes_summary(tmp_path: Path) -> None:
     assert "## Technical debt" not in result.summary_path.read_text("utf-8")
 
 
-# -- VF-18: surface sub-threshold evaluator findings --------------------------
+# -- surface sub-threshold evaluator findings ---------------------------------
 
 
 def _verdict(
@@ -933,7 +933,7 @@ def test_merge_follow_ups_exact_match_dedup() -> None:
 
 
 def test_finalize_surfaces_accepted_evaluator_findings(tmp_path: Path) -> None:
-    # VF-18: a sub-threshold finding an evaluator accepted reaches summary.json + the PR body even
+    # A sub-threshold finding an evaluator accepted reaches summary.json + the PR body even
     # when the flow did NOT opt into supervisor-authored follow-ups.
     store = _store(tmp_path)
     store.record_evaluation(
@@ -963,7 +963,7 @@ def test_finalize_surfaces_accepted_evaluator_findings(tmp_path: Path) -> None:
 
 
 def test_finalize_dedups_evaluator_findings_against_supervisor(tmp_path: Path) -> None:
-    # VF-18: when the supervisor already reported the same item, the evaluator finding is not
+    # When the supervisor already reported the same item, the evaluator finding is not
     # duplicated in the operator surface (exact-match dedup).
     store = _store(tmp_path)
     reason = "resolve_route mixes fallback and retry"
@@ -991,7 +991,7 @@ def test_finalize_dedups_evaluator_findings_against_supervisor(tmp_path: Path) -
 
 
 def test_finalize_prompt_carries_the_recorded_gate_verdicts(tmp_path: Path) -> None:
-    # P1.7 / DR-3: the finalize turn described the gates from session memory and wrote "three
+    # The finalize turn described the gates from session memory and wrote "three
     # independent verification gates … all of which passed" while four critic findings sat in
     # state.db. The recorded verdicts now ride the prompt, so "passed" is not writable about a gate
     # that emitted findings.
@@ -1269,12 +1269,12 @@ def test_evaluation_immutable_and_counted(tmp_path: Path) -> None:
     assert not hasattr(store, "delete_evaluation")
 
 
-# -- provider-attempt audit for the supervisor layer (VF-8) -------------------
+# -- provider-attempt audit for the supervisor layer --------------------------
 
 
 class _AttemptsRouter:
     """Like ``FakeRouter`` but surfaces one provider ATTEMPT per call (the base returns none), so
-    the supervisor's own ``provider_attempts`` recording (VF-8) has attempts to persist. Resolves to
+    the supervisor's own ``provider_attempts`` recording has attempts to persist. Resolves to
     the given primary so a resumed cumulative (codex) session can be exercised."""
 
     def __init__(
@@ -1345,7 +1345,7 @@ def _codex_turn(session_id: str, input_total: int, output_total: int) -> AgentRu
 
 
 def test_supervisor_records_provider_attempt_with_cost(tmp_path: Path) -> None:
-    # VF-8: a supervisor turn's billable provider call earns a ``provider_attempts`` row with
+    # A supervisor turn's billable provider call earns a ``provider_attempts`` row with
     # ``node_run_id`` NULL and its cost, so a whole-task roll-up includes the supervisor spend.
     router = _AttemptsRouter([_claude_turn(cost=0.05, output_total=42)])
     store = _store(tmp_path)
@@ -1364,7 +1364,7 @@ def test_supervisor_records_provider_attempt_with_cost(tmp_path: Path) -> None:
 
 
 def test_supervisor_provider_attempt_usage_is_summation_safe_delta(tmp_path: Path) -> None:
-    # VF-8 (full): the supervisor resumes its OWN session, so a cumulative (codex) provider counts
+    # The supervisor resumes its OWN session, so a cumulative (codex) provider counts
     # cumulatively; the recorded per-turn usage is the summation-safe delta, not the raw cumulative.
     router = _AttemptsRouter(
         [_codex_turn("s1", 100, 10), _codex_turn("s1", 150, 25)], primary=ProviderId.CODEX

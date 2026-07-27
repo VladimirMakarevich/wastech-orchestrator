@@ -1,4 +1,4 @@
-"""Unit tests for the flow registry (flow-engine P0.4).
+"""Unit tests for the flow registry.
 
 Covers: built-in resolution (from a delivered ``.worc/flows/``), default task_type, unknown/missing
 raises (no packaged fallback), operator custom flows, task_type mismatch, and validate_flow
@@ -248,7 +248,7 @@ flow:
         FlowRegistry(operator_flows_dir=flows_dir).resolve("bad")
 
 
-# -- P4.1: operator flows on the live path ------------------------------------
+# -- operator flows on the live path -----------------------------------------
 
 
 def test_operator_flow_resolves_and_executes(tmp_path: Path) -> None:

@@ -4,7 +4,7 @@ The lint scans each flow's role files for ``{name}`` / ``{?name}`` tokens outsid
 valid-set (core allowlist ∪ node-output names) and reports each as rendering verbatim. It is a
 warning, never fatal — a verbatim render is the safe-renderer fallback (code/JSON braces must pass
 through). The valid-set is a *function of the flow graph*, so it grows as nodes are added (the seam
-the node-output ADR extends without reworking the lint).
+the node-output channel extends without reworking the lint).
 """
 
 from __future__ import annotations
@@ -97,7 +97,7 @@ flow:
 
 
 def test_lint_evaluator_may_read_a_node_output_var(tmp_path: Path) -> None:
-    # DR-7: an evaluator resolves the {<id>_path} channel too (it judges an upstream node's work,
+    # An evaluator resolves the {<id>_path} channel too (it judges an upstream node's work,
     # so it must be able to open it), so {scan_path} in an evaluator role is NOT flagged — while an
     # id naming no node still is.
     flow_dir = tmp_path / "flows"

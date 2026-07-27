@@ -1,4 +1,4 @@
-"""P3.4 — the packaged ``security_audit`` flow executes, and the co-design abstraction gate.
+"""The packaged ``security_audit`` flow executes, and the co-design abstraction gate.
 
 The audit flow drives through the generic engine with the real dependency_scan checker, the real
 non-blocking finding-verification evaluator, and the real private-report publish (git untouched).
@@ -141,7 +141,7 @@ class _FakeAgent:
     def run(self, node: FlowNode, ctx: NodeContext) -> NodeResult:
         self.calls.append(node.id)
         if node.id == "report":
-            # WRI-001: the report node is read-only — it returns the report as structured output
+            # The report node is read-only — it returns the report as structured output
             # and the orchestrator captures it privately (the report-slot capture is guarded by
             # tests/core/test_flow_postprocess.py). This FlowEngine harness wires no post-node hook,
             # so the node writes nothing itself; the old agent-written .worc/security-reports/
@@ -223,7 +223,7 @@ def _drive_audit(
 
 
 def test_audit_happy_path_reaches_private_storage(tmp_path: Path) -> None:
-    # WRI-001: the read-only report node returns its report as structured output; the orchestrator
+    # The read-only report node returns its report as structured output; the orchestrator
     # captures it into the private report dir (that capture is guarded by test_flow_postprocess).
     # This flow-level test proves the graph routes to the private_storage terminal and that the
     # read-only report node ran — it drives no post-node capture hook, so it asserts no file.
@@ -248,7 +248,7 @@ def test_finding_verification_marks_false_positives_non_blocking(tmp_path: Path)
     assert store.count_rework_verdicts("t", node_id="finding_verification") == 2
 
 
-# -- the co-design abstraction gate (P3.4) ------------------------------------
+# -- the co-design abstraction gate -------------------------------------------
 
 
 class _GenericRunner:

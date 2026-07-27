@@ -1,4 +1,4 @@
-"""CleanupJob (04.2): bounded, snapshotted, audited maintenance — never promotes, never edits code.
+"""CleanupJob: bounded, snapshotted, audited maintenance — never promotes, never edits code.
 
 Model-free throughout: a fake tracked-paths provider feeds DerivedIndex; time is injected.
 """
@@ -95,7 +95,7 @@ def test_expires_episodes_past_ttl_only(layout: MemoryLayout) -> None:
     assert ids == {"fresh"}
 
 
-# -- entity staleness (AC-C4) -------------------------------------------------
+# -- entity staleness ---------------------------------------------------------
 
 
 def test_stale_entity_is_quarantined_never_deleted(tmp_path: Path) -> None:
@@ -119,7 +119,7 @@ def test_moved_entity_is_remapped_by_basename(tmp_path: Path) -> None:
     assert report.remapped == 1 and report.quarantined == 0
     entities = service.read_entities()
     assert entities[0]["paths"] == ["src/new/foo.py"]  # remapped, stays active
-    # Memory V2 (move 3): the remap rewrites the canonical_name key too, so a re-proposal at the new
+    # The remap rewrites the canonical_name key too, so a re-proposal at the new
     # path merges instead of spawning a duplicate.
     assert entities[0]["canonical_name"] == "src/new/foo.py"
     assert service.read_quarantine() == []
@@ -127,7 +127,7 @@ def test_moved_entity_is_remapped_by_basename(tmp_path: Path) -> None:
 
 def test_moved_entity_merges_into_existing_new_path_card(tmp_path: Path) -> None:
     # The supervisor may propose a fresh card at the new path before cleanup runs; the remap then
-    # rewrites the moved card's key onto that path — collapse to one card (memory V2 ADR, move 3).
+    # rewrites the moved card's key onto that path — collapse to one card.
     layout = MemoryLayout(tmp_path / ".worc")
     service = _service(layout)
     _entity(service, "old", ("src/old/foo.py",))  # canonical=src/old/foo.py (the moved file)
@@ -161,7 +161,7 @@ def test_duplicate_long_term_lessons_are_merged(layout: MemoryLayout) -> None:
     assert len(service.read_long_term(LongTermKind.SEMANTIC)) == 1
 
 
-# -- lesson staleness: remap a moved scope path, else quarantine (memory V2, move 3) ----------
+# -- lesson staleness: remap a moved scope path, else quarantine -----------------------------
 
 
 def _scoped_lesson(service: MemoryService, subject: str, path: str) -> str:
@@ -182,7 +182,7 @@ def _scoped_lesson(service: MemoryService, subject: str, path: str) -> str:
 
 def test_moved_lesson_is_remapped_not_quarantined(tmp_path: Path) -> None:
     # A lesson scoped to a moved file is remapped in place (scope + re-derived id), not quarantined
-    # — a refactor no longer loses durable knowledge (memory V2 ADR, move 3).
+    # — a refactor no longer loses durable knowledge.
     layout = MemoryLayout(tmp_path / ".worc")
     service = _service(layout)
     _scoped_lesson(service, "keep pathlib", "src/old/foo.py")
@@ -197,7 +197,7 @@ def test_moved_lesson_is_remapped_not_quarantined(tmp_path: Path) -> None:
 
 def test_stale_lesson_with_ambiguous_path_is_quarantined(tmp_path: Path) -> None:
     # No unique basename candidate (deleted, or two matches) → the whole lesson quarantines, never a
-    # silent delete (Q2).
+    # silent delete.
     layout = MemoryLayout(tmp_path / ".worc")
     service = _service(layout)
     _scoped_lesson(service, "gone lesson", "src/gone.py")
@@ -211,7 +211,7 @@ def test_stale_lesson_with_ambiguous_path_is_quarantined(tmp_path: Path) -> None
 def test_moved_lesson_merges_into_existing_new_id(tmp_path: Path) -> None:
     # A lesson re-proposed at the new path (different wording, same path-derived id) before cleanup
     # collides on that id when the moved lesson is remapped — collapse by id, never two rows.
-    # Distinct subjects prove it is the id collapse, not the subject-keyed pass (memory V2, move 3).
+    # Distinct subjects prove it is the id collapse, not the subject-keyed pass.
     layout = MemoryLayout(tmp_path / ".worc")
     service = _service(layout)
     _scoped_lesson(service, "old wording", "src/old/foo.py")
@@ -221,7 +221,7 @@ def test_moved_lesson_merges_into_existing_new_id(tmp_path: Path) -> None:
     assert len(rows) == 1 and rows[0]["memory_id"] == new_id
 
 
-# -- bounded autonomy (AC-C3, §7) ---------------------------------------------
+# -- bounded autonomy ---------------------------------------------------------
 
 
 def test_never_promotes_and_keeps_promoted_zero(tmp_path: Path) -> None:
@@ -252,7 +252,7 @@ def test_snapshot_precedes_the_batch(tmp_path: Path) -> None:
     _entity(service, "e1", ("src/gone.py",))
     report = _job(service, _index(tmp_path, set())).run_once(audit=_AUDIT)
     assert report.snapshot is not None
-    assert Path(report.snapshot).is_dir()  # the pre-batch snapshot exists (AC-SF4 groundwork)
+    assert Path(report.snapshot).is_dir()  # the pre-batch snapshot exists (groundwork)
 
 
 def test_empty_store_is_a_noop(tmp_path: Path) -> None:

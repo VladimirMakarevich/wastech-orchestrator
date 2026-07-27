@@ -1,4 +1,4 @@
-"""Data-driven post-processing mechanics (P1.4): output_artifact slots + decomposition contract.
+"""Data-driven post-processing mechanics: output_artifact slots + decomposition contract.
 
 Both are exercised directly (no engine) so the slot write and the decomposition gate are pinned as
 flow-neutral functions before the driver wires them into the engine's post-node hook.
@@ -106,7 +106,7 @@ def test_node_output_noop_when_empty(tmp_path: Path) -> None:
 
 
 def test_node_output_carries_the_declared_produced_file(tmp_path: Path) -> None:
-    # P2.8 piece 1 / DR-4: the writing node published its closing message, so a 19 821-byte
+    # The writing node published its closing message, so a 19 821-byte
     # blueprint reached the next node as a 4 042-byte pointer to a summary of itself. With
     # `output_file` the file crosses the edge instead.
     produced = tmp_path / "report-dir"
@@ -307,7 +307,7 @@ def test_enriched_slot_is_audit_only_no_inputs_field(tmp_path: Path) -> None:
 
 
 def test_report_slot_writes_redacted_into_private_report_dir(tmp_path: Path) -> None:
-    # WRI-001: the security_audit report node is read-only — the agent returns the report as its
+    # The security_audit report node is read-only — the agent returns the report as its
     # structured output and the orchestrator captures it (redacted) into the flow's PRIVATE
     # output_policy report dir. It is never written to the task artifact dir and never published to
     # the agent-readable exchange (the slot is inputs_field=None, exchange=False).
