@@ -24,6 +24,8 @@ from typing import Any, Protocol
 
 from wastech_orchestrator.config.schema import TelegramConfig
 from wastech_orchestrator.notify.interface import (
+    TRACE_READ_ONLY_GIT_DRIFT,
+    TRACE_READ_ONLY_WRITE,
     TRACE_REWORK_EXHAUSTED,
     AskHandle,
     AskKind,
@@ -530,9 +532,11 @@ def _one_line(text: str, *, limit: int = _FINDING_REASON_LIMIT) -> str:
 
 # Maps a node's edge-selecting outcome (NodeOutcome.kind) to a glanceable emoji. The distinct
 # leading glyph also keeps a trace line visually separable from HITL gate prompts in the same chat.
-# TRACE_REWORK_EXHAUSTED is the one synthetic label (not a raw NodeOutcome.kind): a non-blocking
-# evaluator that accepted only because its max_rework_per_stage budget ran out, rendered ⚠️ so it
-# reads as "moved on, may need follow-up" rather than a clean pass.
+# Three labels here are synthetic (not raw NodeOutcome.kinds), all rendered ⚠️ so they read as
+# "moved on, may need follow-up" rather than a clean pass: TRACE_REWORK_EXHAUSTED is a non-blocking
+# evaluator that accepted only because its max_rework_per_stage budget ran out,
+# TRACE_READ_ONLY_WRITE is a read-only node with a granted shell that changed the working tree, and
+# TRACE_READ_ONLY_GIT_DRIFT is the same node class changing git control state.
 _TRACE_EMOJI: dict[str, str] = {
     "done": "✅",
     "accept": "✅",
@@ -540,6 +544,8 @@ _TRACE_EMOJI: dict[str, str] = {
     "rework": "🔁",
     "fail": "❌",
     TRACE_REWORK_EXHAUSTED: "⚠️",
+    TRACE_READ_ONLY_WRITE: "⚠️",
+    TRACE_READ_ONLY_GIT_DRIFT: "⚠️",
 }
 
 

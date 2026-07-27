@@ -251,6 +251,115 @@ def _gate_flow(defaults_gate: str | None, node_gate: str | None) -> str:
     )
 
 
+@pytest.mark.parametrize(
+    ("flow_file", "evaluator_ids"),
+    [
+        ("deep_research.yaml", ("coverage_gate", "fact_verification", "critical_review")),
+        ("security_audit.yaml", ("finding_verification",)),
+        ("blog_article.yaml", ("tone_style",)),
+        ("blog_article_revise.yaml", ("tone_style",)),
+        ("content_chapter.yaml", ("story_critic",)),
+        ("content_translate.yaml", ("en_critic",)),
+    ],
+)
+def test_packaged_quality_flows_gate_on_medium(
+    flow_file: str, evaluator_ids: tuple[str, ...]
+) -> None:
+    # P0.1/DR-1: a quality evaluator judges "is this GOOD ENOUGH", which it has no natural way to
+    # express as high/critical, so at the built-in `high` gate its findings were recorded and then
+    # dropped. Every packaged flow whose evaluators are quality lenses must pin `medium` — whether
+    # via defaults.evaluator (deep_research) or per node.
+    snap = load_flow(CODESIGN / flow_file)
+    for node_id in evaluator_ids:
+        ev = snap.nodes_by_id[node_id]
+        assert isinstance(ev, EvaluatorNode)
+        assert ev.gate_severity == "medium", f"{flow_file}:{node_id}"
+
+
+@pytest.mark.parametrize("role_file", ["coverage.md", "verifier.md", "critic.md"])
+def test_packaged_research_evaluator_prompts_state_the_verdict_mechanism(role_file: str) -> None:
+    # P1.5 item 5 / DR-6: `verifier.md` contained no occurrence of `verdict`, `accept` or `rework` —
+    # the engine derived a verdict from severities the prompt never defined. Each research evaluator
+    # prompt must state the *mechanism* instead of a threshold: the flow decides which severities
+    # gate, findings are filed at their true severity, and a sub-threshold one still reaches the
+    # operator. A prompt that restated the configured gate (`medium`) would go stale the moment the
+    # YAML changed, which is why the number lives only in the flow.
+    text = (CODESIGN / "deep_research" / role_file).read_text(encoding="utf-8").lower()
+    assert "you do not author the verdict" in text
+    assert "the flow decides which severities force another round" in text
+    assert "carried to the operator" in text
+    assert "gate_severity" not in text
+
+
+def test_deep_research_declares_its_own_finalize_lens() -> None:
+    # P1.7 / DR-3: with no `supervisor:` block the finalize turn fell through to the built-in
+    # code-flow lens ("grounded in the actual committed change") and, applied to a research
+    # deliverable, produced a summary with two false claims. The flow must declare its own lens, the
+    # file must exist, and that lens must forbid first-person verification claims — the summary is
+    # written by a read-only observer that opened 9 files while claiming to have spot-checked more.
+    snap = load_flow(CODESIGN / "deep_research.yaml")
+    assert snap.doc.supervisor is not None
+    role_file = snap.doc.supervisor.finalize_role_file
+    assert role_file == "deep_research/summary.md"
+    text = (CODESIGN / role_file).read_text(encoding="utf-8")
+    assert "Claim nothing you did not do." in text
+    assert "third person" in text
+    assert "No number, verdict or count you were not given." in text
+    # `emit_follow_ups` is a code-oriented capability; a research flow leaves it off and still gets
+    # its evaluators' findings in the summary (VF-18).
+    assert snap.doc.supervisor.emit_follow_ups is False
+
+
+def test_packaged_verifier_prompt_watches_for_omissions() -> None:
+    # P1.5 items 2-4 / DR-6: the watch-list was four variants of "the report claims too much", so a
+    # conservatively written report was unfalsifiable against it and `fact_verification` returned
+    # zero findings. It must now also look for what is *absent*, own the whole citation manifest
+    # rather than the report's inline prose, and fetch an external source instead of recalling it.
+    text = (CODESIGN / "deep_research" / "verifier.md").read_text(encoding="utf-8")
+    assert "**under**-claiming" in text
+    # The manifest still sets the scope rather than the report's inline prose — but the prompt no
+    # longer names the file or its directory: the citation verdicts say which manifest they graded.
+    assert "manifest_path" in text
+    assert "url" in text and "fetched" in text  # an external source is retrieved, never recalled
+
+
+@pytest.mark.parametrize("role_file", ["verifier.md", "critic.md"])
+def test_packaged_research_evaluators_read_the_deliverable_by_channel(role_file: str) -> None:
+    # P2.8: both prompts opened `{repo}/docs/research/{task_id}/report.md` — the engine's own path
+    # convention, hand-copied into a role file, which an operator flow on a different output policy
+    # would silently not have. The deliverable arrives on the node-output channel instead, which the
+    # writing node's `output_file` points at the report rather than at its closing message.
+    text = (CODESIGN / "deep_research" / role_file).read_text(encoding="utf-8")
+    assert "{synthesis_path}" in text
+    assert "docs/research" not in text
+    synthesis = load_flow(CODESIGN / "deep_research.yaml").nodes_by_id["synthesis"]
+    assert isinstance(synthesis, AgentNode)
+    assert synthesis.output_file == "report.md"
+
+
+def test_structuring_node_writes_nothing_and_hands_on_its_whole_blueprint() -> None:
+    # P2.9 / DR-11: the node was *instructed* to organize its notes inside the deliverable
+    # directory, so a 295-line intermediate blueprint shipped in the pull request beside the
+    # report — and the two documents disagreed about coverage. It must write nothing, which means
+    # its own output has to carry the blueprint in full, read by the writing node from the
+    # channel.
+    text = (CODESIGN / "deep_research" / "architecture_design.md").read_text(encoding="utf-8")
+    assert "Write no files at all" in text
+    assert "docs/research" not in text  # no deliverable-path convention left to organize notes into
+    synthesis = (CODESIGN / "deep_research" / "synthesis.md").read_text(encoding="utf-8")
+    assert "{architecture_design_path}" in synthesis
+
+
+def test_implementation_review_keeps_the_high_gate(impl_snap: FlowSnapshot) -> None:
+    # The counterpart: `review` is a correctness lens on a *blocking* node, so it stays at the
+    # built-in `high`. Lowering a blocking evaluator's gate changes its exhaustion landing to
+    # manual_action_required, which is not a change P0.1 makes.
+    ev = impl_snap.nodes_by_id["review"]
+    assert isinstance(ev, EvaluatorNode)
+    assert ev.gate_severity == "high"
+    assert ev.blocking is True
+
+
 def test_evaluator_gate_severity_defaults_to_high(tmp_path: Path) -> None:
     ev = load_flow(_write(tmp_path, _gate_flow(None, None))).nodes_by_id["check"]
     assert isinstance(ev, EvaluatorNode)
@@ -297,6 +406,14 @@ def test_checks_node_has_checker(impl_snap: FlowSnapshot) -> None:
     testing = impl_snap.nodes_by_id["testing"]
     assert isinstance(testing, ChecksNode)
     assert testing.checker == "command_profile"
+
+
+def test_checks_node_manifest_defaults_to_sources_json() -> None:
+    # P1.6: a flow that declares nothing keeps today's behavior — the knob's absence is not a
+    # silent failure mode.
+    node = load_flow(CODESIGN / "deep_research.yaml").nodes_by_id["citation_check"]
+    assert isinstance(node, ChecksNode)
+    assert node.manifest == "sources.json"
 
 
 # -- budgets and decomposition ------------------------------------------------
@@ -593,6 +710,54 @@ def test_invalid_checker_rejected(tmp_path: Path) -> None:
         load_flow(_write(tmp_path, body))
 
 
+def _manifest_flow(manifest: str) -> str:
+    return _VALID_BODY.replace(
+        "  edges: []\n",
+        f"    - {{ id: c, kind: checks, checker: citation, manifest: {manifest} }}\n"
+        "  edges:\n    - { from: a, to: c }\n",
+    )
+
+
+def test_checks_manifest_is_parsed(tmp_path: Path) -> None:
+    node = load_flow(_write(tmp_path, _manifest_flow("citations.json"))).nodes_by_id["c"]
+    assert isinstance(node, ChecksNode)
+    assert node.manifest == "citations.json"
+
+
+@pytest.mark.parametrize("bad", ["../outside.json", "sub/dir.json", "'/abs.json'", "'..'", "'CON'"])
+def test_invalid_checks_manifest_rejected(tmp_path: Path, bad: str) -> None:
+    # A flow-authored filename resolved against the report dir is a traversal surface, so it goes
+    # through the same portable-segment validator the exchange uses — reject, never sanitize.
+    with pytest.raises(FlowLoadError, match=r"invalid 'manifest'"):
+        load_flow(_write(tmp_path, _manifest_flow(bad)))
+
+
+def _output_file_flow(value: str, *, slot: str = "") -> str:
+    slot_line = f"      output_artifact: {slot}\n" if slot else ""
+    return _VALID_BODY.replace(_RF, _RF + f"      output_file: {value}\n" + slot_line)
+
+
+def test_agent_output_file_is_parsed(tmp_path: Path) -> None:
+    node = load_flow(_write(tmp_path, _output_file_flow("overview.md"))).nodes_by_id["a"]
+    assert isinstance(node, AgentNode)
+    assert node.output_file == "overview.md"
+
+
+@pytest.mark.parametrize("bad", ["../outside.md", "sub/dir.md", "'/abs.md'", "'..'", "'CON'"])
+def test_invalid_agent_output_file_rejected(tmp_path: Path, bad: str) -> None:
+    # Same reasoning as `manifest`: a flow-authored filename joined onto a directory the
+    # orchestrator resolved is a traversal surface — reject, never sanitize.
+    with pytest.raises(FlowLoadError, match=r"invalid 'output_file'"):
+        load_flow(_write(tmp_path, _output_file_flow(bad)))
+
+
+def test_output_file_with_output_artifact_rejected(tmp_path: Path) -> None:
+    # A slot node's channel IS its slot, so the produced file would be written and never read —
+    # exactly the silent-nothing failure mode that gets declared and then trusted.
+    with pytest.raises(FlowLoadError, match=r"both 'output_file' and 'output_artifact'"):
+        load_flow(_write(tmp_path, _output_file_flow("overview.md", slot="plan")))
+
+
 def test_invalid_network_policy_rejected(tmp_path: Path) -> None:
     body = _VALID_BODY.replace(_PUB, _PUB + "  network_policy: firehose\n")
     with pytest.raises(FlowLoadError, match=r"invalid NetworkPolicy 'firehose'"):
@@ -661,3 +826,49 @@ def test_nodes_by_id_is_readonly(impl_snap: FlowSnapshot) -> None:
 def test_source_path_recorded(impl_snap: FlowSnapshot) -> None:
     assert impl_snap.source_path is not None
     assert impl_snap.source_path.name == "implementation.yaml"
+
+
+def test_agent_git_evidence_tristate(tmp_path: Path) -> None:
+    # Same tri-state parse as network_access: an omitted field must stay None rather than being
+    # coerced to False, so "did not ask" and "explicitly declined" remain distinguishable.
+    def _ge(value: str) -> str:
+        return _VALID_BODY.replace(_RF, _RF + f"      git_evidence: {value}\n")
+
+    for body, expected in ((_ge("true"), True), (_ge("false"), False), (_VALID_BODY, None)):
+        node = load_flow(_write(tmp_path, body)).nodes_by_id["a"]
+        assert isinstance(node, AgentNode)
+        assert node.git_evidence is expected
+
+
+def test_evaluator_git_evidence_tristate(tmp_path: Path) -> None:
+    def _ev_flow(line: str) -> str:
+        return (
+            "flow:\n"
+            "  name: t\n"
+            "  task_type: t\n"
+            "  permission_ceiling: workspace-write\n"
+            "  output_policy: code_change\n"
+            "  publishing: pull_request\n"
+            "  nodes:\n"
+            "    - id: work\n"
+            "      kind: agent\n"
+            "      role_file: roles/work.md\n"
+            "    - id: check\n"
+            "      kind: evaluator\n"
+            "      role: review\n"
+            "      role_file: roles/review.md\n"
+            f"{line}"
+            "  edges:\n"
+            "    - { from: work, to: check }\n"
+        )
+
+    for line, expected in (
+        ("      git_evidence: true\n", True),
+        ("      git_evidence: false\n", False),
+        ("", None),
+    ):
+        p = tmp_path / "ev_ge.yaml"
+        p.write_text(_ev_flow(line))
+        ev = load_flow(p).nodes_by_id["check"]
+        assert isinstance(ev, EvaluatorNode)
+        assert ev.git_evidence is expected

@@ -147,6 +147,10 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             # the schema dataclass default stays "strict" as the absent-block safe fallback.
             "trust_level": "auto",
             "protected_paths": [],
+            # Seeded off, and seeded *explicitly*: the read-only git-evidence grant is an opt-in the
+            # operator should find in their own config rather than discover as a hidden default. Off
+            # means a flow node asking for it runs exactly as it does without the declaration.
+            "allow_git_evidence": False,
         },
         "validation": {
             "max_task_bytes": 262144,

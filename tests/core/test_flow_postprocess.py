@@ -18,8 +18,16 @@ from wastech_orchestrator.core.flow.postprocess import (
 from wastech_orchestrator.core.flow.schema import AgentNode
 
 
-def _agent(node_id: str, *, output_artifact: str | None = None) -> AgentNode:
-    return AgentNode(id=node_id, kind="agent", role_file="r.md", output_artifact=output_artifact)
+def _agent(
+    node_id: str, *, output_artifact: str | None = None, output_file: str | None = None
+) -> AgentNode:
+    return AgentNode(
+        id=node_id,
+        kind="agent",
+        role_file="r.md",
+        output_artifact=output_artifact,
+        output_file=output_file,
+    )
 
 
 def _recorder() -> tuple[list[tuple[str, str, str]], object]:
@@ -92,6 +100,157 @@ def test_node_output_noop_when_empty(tmp_path: Path) -> None:
         is None
     )
     assert calls == []
+
+
+# -- output_file: the produced file is the channel -----------------------------
+
+
+def test_node_output_carries_the_declared_produced_file(tmp_path: Path) -> None:
+    # P2.8 piece 1 / DR-4: the writing node published its closing message, so a 19 821-byte
+    # blueprint reached the next node as a 4 042-byte pointer to a summary of itself. With
+    # `output_file` the file crosses the edge instead.
+    produced = tmp_path / "report-dir"
+    produced.mkdir()
+    (produced / "report.md").write_text("THE WHOLE REPORT\n", encoding="utf-8")
+    node = _agent("synthesis", output_file="report.md")
+    outcome = NodeOutcome("done", final_message="Wrote the report; see the file.")
+    calls, register = _recorder()
+
+    path = write_node_output(
+        node,
+        outcome,
+        artifacts_root=tmp_path,
+        task_id="t",
+        node_run_id=1,
+        register=register,
+        produced_dir=produced,
+    )
+
+    assert path is not None
+    # Still the same channel filename, so {<node_id>_path} resolution is untouched.
+    assert path.endswith("synthesis.out.md")
+    assert Path(path).read_text("utf-8") == "THE WHOLE REPORT\n"
+    assert calls == [("t", "node_output", path)]
+
+
+def test_produced_file_is_redaction_scrubbed(tmp_path: Path) -> None:
+    # The agent wrote this file, so it is no more trusted than structured output: a secret echoed
+    # into the deliverable must not reach the exchange copy unredacted.
+    produced = tmp_path / "report-dir"
+    produced.mkdir()
+    (produced / "report.md").write_text("leaked ghp_" + "a" * 36 + "\n", encoding="utf-8")
+    node = _agent("synthesis", output_file="report.md")
+    _, register = _recorder()
+
+    path = write_node_output(
+        node,
+        outcome=NodeOutcome("done", final_message="done"),
+        artifacts_root=tmp_path,
+        task_id="t",
+        node_run_id=1,
+        register=register,
+        produced_dir=produced,
+    )
+
+    assert path is not None
+    body = Path(path).read_text("utf-8")
+    assert "ghp_" not in body and "[REDACTED]" in body
+
+
+def test_missing_produced_file_falls_back_to_the_message_and_warns(tmp_path: Path) -> None:
+    # Losing the channel entirely would be worse than carrying the message — but a silent
+    # fallback is how a declared handoff becomes a phantom one, so it is warned about.
+    produced = tmp_path / "report-dir"
+    produced.mkdir()
+    node = _agent("synthesis", output_file="report.md")
+    outcome = NodeOutcome("done", final_message="I could not write it.")
+    _, register = _recorder()
+    warnings: list[str] = []
+
+    path = write_node_output(
+        node,
+        outcome,
+        artifacts_root=tmp_path,
+        task_id="t",
+        node_run_id=1,
+        register=register,
+        produced_dir=produced,
+        warn=warnings.append,
+    )
+
+    assert path is not None
+    assert Path(path).read_text("utf-8") == "I could not write it."
+    assert len(warnings) == 1
+    assert "output_file" in warnings[0] and "report.md" in warnings[0]
+
+
+def test_empty_produced_file_falls_back_to_the_message_and_warns(tmp_path: Path) -> None:
+    # An empty file is "not produced" as far as the handoff goes, and gets the same warning.
+    produced = tmp_path / "report-dir"
+    produced.mkdir()
+    (produced / "report.md").write_text("", encoding="utf-8")
+    node = _agent("synthesis", output_file="report.md")
+    _, register = _recorder()
+    warnings: list[str] = []
+
+    path = write_node_output(
+        node,
+        outcome=NodeOutcome("done", final_message="fallback body"),
+        artifacts_root=tmp_path,
+        task_id="t",
+        node_run_id=1,
+        register=register,
+        produced_dir=produced,
+        warn=warnings.append,
+    )
+
+    assert path is not None
+    assert Path(path).read_text("utf-8") == "fallback body"
+    assert "it is empty" in warnings[0]
+
+
+def test_unreadable_produced_file_falls_back_to_the_message(tmp_path: Path) -> None:
+    # A binary or otherwise non-text product cannot be published as a redacted text copy.
+    produced = tmp_path / "report-dir"
+    produced.mkdir()
+    (produced / "report.md").write_bytes(b"\xff\xfe\x00binary")
+    node = _agent("synthesis", output_file="report.md")
+    _, register = _recorder()
+    warnings: list[str] = []
+
+    path = write_node_output(
+        node,
+        outcome=NodeOutcome("done", final_message="fallback body"),
+        artifacts_root=tmp_path,
+        task_id="t",
+        node_run_id=1,
+        register=register,
+        produced_dir=produced,
+        warn=warnings.append,
+    )
+
+    assert path is not None
+    assert Path(path).read_text("utf-8") == "fallback body"
+    assert "could not be read as text" in warnings[0]
+
+
+def test_produced_file_ignored_without_a_resolved_directory(tmp_path: Path) -> None:
+    # No report dir and no repo root resolved (a unit harness): the declaration is inert, never a
+    # crash and never a read relative to the process cwd.
+    node = _agent("synthesis", output_file="report.md")
+    _, register = _recorder()
+
+    path = write_node_output(
+        node,
+        outcome=NodeOutcome("done", final_message="message"),
+        artifacts_root=tmp_path,
+        task_id="t",
+        node_run_id=1,
+        register=register,
+    )
+
+    assert path is not None
+    assert Path(path).read_text("utf-8") == "message"
 
 
 # -- output_artifact slots ----------------------------------------------------

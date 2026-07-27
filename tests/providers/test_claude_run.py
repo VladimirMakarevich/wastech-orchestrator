@@ -489,6 +489,7 @@ _FULL_CLAUDE_HELP = (
     "  --setting-sources <sources>    Comma-separated list of setting sources\n"
     "  --strict-mcp-config            Only use MCP servers from --mcp-config\n"
     "  --tools <tools...>             Specify the list of available tools\n"
+    "  --allowedTools <tools...>      Tools allowed without prompting\n"
     "  -r, --resume [value]           Resume a conversation by session ID\n"
 )
 

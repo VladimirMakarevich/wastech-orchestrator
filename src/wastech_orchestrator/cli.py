@@ -2644,6 +2644,15 @@ def run_preflight(
             "commit/staging gates, PR control, and denied_read_paths blacklist stay in force"
         )
 
+    # Same principle for the git-evidence grant: an operator reading preflight should see which
+    # optional capabilities are live, not have to infer them from the config file.
+    if config.security.allow_git_evidence:
+        lines.append(
+            "git-evidence: ON (security.allow_git_evidence=true) — a flow node declaring "
+            "git_evidence may run the read-only git verbs to inspect delivery history; the "
+            "repository stays unwritable (sandbox) and commit/push/PR stay the orchestrator's"
+        )
+
     lines.extend(_summarize_command_sets(config))
 
     # Preflight is a run-surface health gate — it deliberately does not validate flows. Flow

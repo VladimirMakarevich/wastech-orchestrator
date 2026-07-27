@@ -60,6 +60,7 @@ Treat this block as a guardrail, not a convenience area:
 - Keep `strict_isolation: true` unless the operator consciously accepts full-access runs.
 - Pass only names in `allowed_environment`; secret **values** never belong in the file.
 - Keep `denied_commands` complete; it replaces the default list rather than extending it.
+- `allow_git_evidence` (default `false`) is the master switch for the read-only git-evidence grant: only with it on does a flow node's `git_evidence: true` actually give that node the read-only git verbs. It never makes a node writable — the sandbox still denies every write and `denied_commands` still applies — but leave it off unless a flow you run genuinely audits delivery history.
 - Do not add `extra_args` that disable sandboxing, approvals, or rule enforcement.
 - `trust_level` sets the approval threshold for the mid-task dangerous-diff gate: `auto` (default) lets routine in-repo deletions/edits proceed; `strict` gates every deletion or dependency-manifest edit. It never lowers the hard ceiling — only which diffs raise the gate.
 - `protected_paths` is the always-ask floor: repo-relative globs (same dialect as `checks.command_sets[].paths`) that require approval on **any** change regardless of `trust_level`. Default `[]` (no floor); add sensitive surfaces here (e.g. `.github/workflows/**`, `src/security/**`).

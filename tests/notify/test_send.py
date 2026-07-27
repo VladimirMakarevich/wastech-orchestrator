@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 
 from wastech_orchestrator.notify.interface import (
+    TRACE_READ_ONLY_GIT_DRIFT,
+    TRACE_READ_ONLY_WRITE,
     TRACE_REWORK_EXHAUSTED,
     NullNotifier,
     TerminalDetails,
@@ -250,6 +252,24 @@ def test_send_trace_rework_exhausted_renders_warning(fake_client: FakeTelegramCl
     n.send_trace(task_id="t", node_id="review", outcome=TRACE_REWORK_EXHAUSTED)
     text = fake_client.sent[0]["text"]
     assert "⚠️" in text and TRACE_REWORK_EXHAUSTED in text
+
+
+def test_send_trace_read_only_write_renders_warning(fake_client: FakeTelegramClient) -> None:
+    # A read-only node that wrote to the workspace renders ⚠️ too: the node finished, but the
+    # read-only guarantee did not hold and the tree needs a look.
+    n = _notifier(fake_client)
+    n.send_trace(task_id="t", node_id="audit", outcome=TRACE_READ_ONLY_WRITE)
+    text = fake_client.sent[0]["text"]
+    assert "⚠️" in text and TRACE_READ_ONLY_WRITE in text
+
+
+def test_send_trace_read_only_git_drift_renders_warning(fake_client: FakeTelegramClient) -> None:
+    # Same ⚠️, sharper event: the node finished and the run continues, but git control state drifted,
+    # so a human has to stop the run before the clone is committed or pushed.
+    n = _notifier(fake_client)
+    n.send_trace(task_id="t", node_id="audit", outcome=TRACE_READ_ONLY_GIT_DRIFT)
+    text = fake_client.sent[0]["text"]
+    assert "⚠️" in text and TRACE_READ_ONLY_GIT_DRIFT in text
 
 
 def test_send_trace_failure_is_swallowed(fake_client: FakeTelegramClient) -> None:

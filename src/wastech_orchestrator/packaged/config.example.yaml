@@ -120,6 +120,19 @@ security:
                                       #   effect — never a silent weakening. Native Windows Codex
                                       #   needs the elevated sandbox backend when read-isolation is
                                       #   ON; without it preflight/the pre-launch canary fails closed.
+  allow_git_evidence: false           # DEFAULT false. Master switch for the read-only git-evidence
+                                      #   grant: a flow node that declares `git_evidence: true` may
+                                      #   run the read-only git verbs (log, show, diff, blame,
+                                      #   status, rev-list, rev-parse, ls-files, shortlog, describe,
+                                      #   cat-file, for-each-ref) so an audit node can cite a commit
+                                      #   instead of grepping a changelog for delivery history.
+                                      #   While this is false a declaring flow still loads and
+                                      #   validates — it just runs exactly as it does today, with no
+                                      #   shell. Turning it on does NOT make the node writable: the
+                                      #   sandbox write-denies the whole clone (Claude) / forbids
+                                      #   every mutation outright (Codex), denied_commands stays the
+                                      #   floor, and commit/push/PR remain the orchestrator's alone.
+                                      #   Operator-config ONLY (never a task/flow/extra_args key).
   allowed_environment:                  # REPLACES (does not extend) the default — keep the OS-launch
                                         # essentials for YOUR OS or the spawned CLI may fail to start.
                                         # A name absent from the host OS is simply skipped, so this
@@ -187,6 +200,11 @@ checks:
   # passes the checks node). The runner runs the union of sets whose `paths` glob the task diff; a
   # set with no `paths` always runs (on any non-empty diff); an empty diff runs nothing. Each command
   # runs as an argv list (no shell) in its `cwd`. No commands are auto-discovered — you author this.
+  # These sets are the gate for EVERY flow, not just code ones: a research/documentation flow commits
+  # Markdown and opens a pull request too, so give the documents you commit a set that matches them
+  # (see the `docs` example below) — a formatter or Markdown lint the repository already enforces in
+  # CI. Name a *checking* command: one that rewrites files trips the green-but-dirtying guard and
+  # parks the task, so prefer `format:check` over `format`.
   command_sets: {}
   #
   # --- Single-root repo: one set, no `paths` (runs on any change) ---
@@ -267,9 +285,19 @@ skills:                             # repo skill selection (optional, §2.1)
 
 supervisor:                          # constant oversight layer above any flow — always active (§P2.1)
   role_file: "roles/supervisor.md"  # role prompt for the supervisor; path-contained under roles/
-  model: "claude-opus-5"          # null = use the global primary provider's default model
+  model: "claude-sonnet-5"        # null = use the global primary provider's default model
   reasoning: medium                 # null = use the global primary provider's default reasoning
   provider: claude                  # null = inherit the global primary; pin (∈ agents.allowed) to keep aligned with model's vendor
+  # Spend on the PRODUCER nodes, not here. This layer is advisory — it never routes, reworks, or
+  # blocks — and it runs one observation per step, so a stronger model than `agents.providers`
+  # inverts the budget: the reasoning that decides the deliverable gets the weaker one. Keep it at
+  # or below the producers' tier.
+  # Caveat worth knowing: this single `model`/`reasoning` pair covers BOTH the cheap per-step
+  # observations and the whole-task finalize turn — and that finalize turn writes `summary.md`,
+  # which becomes the pull-request body and is the only part of a long run most readers see. So you
+  # cannot yet upgrade the summary alone; splitting the two is a backlog item. Until then, a flow
+  # whose summary matters (`deep_research`) constrains what the turn may claim through its
+  # `supervisor.finalize_role_file` lens instead of through a bigger model.
 
 logging:                            # operator log verbosity + on-disk artifact retention (optional)
   level: info                       # debug | info | warning | error. Persists the structured operator

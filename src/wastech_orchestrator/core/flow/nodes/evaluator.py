@@ -3,8 +3,11 @@
 Runs the evaluator's ``role_file`` prompt (read-only) through the router and maps its structured
 verdict to an engine outcome: a gating finding -> ``rework``, an otherwise-clean verdict ->
 ``accept``. A finding gates when its severity is at least as severe as the node's ``gate_severity``
-(default ``high`` — blocks on ``high``/``critical``/``blocking``, leaving ``medium``/``low``
-advisory; lower it to make a content critic block on any finding). The findings schema
+(built-in default ``high`` — blocks ``high``/``critical``/``blocking``, leaving ``medium``/``low``
+advisory; the packaged flows whose evaluators are *quality* lenses set ``medium``, since "is this
+good enough" has no natural way to emit ``high``). A finding that does not gate is not discarded:
+it rides ``NodeOutcome.findings`` to the operator surface via the supervisor's follow-ups. The
+findings schema
 (``output_schema``, F19) is mandatory: a run whose ``structured_output`` does not carry a parseable
 ``findings`` array never silently accepts — it degrades straight to ``manual`` (fail-closed), the
 same as a provider that could not run the node at all. A **blocking** evaluator gates
@@ -30,8 +33,15 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
-from wastech_orchestrator.core.flow.context_paths import build_path_context
-from wastech_orchestrator.core.flow.contracts import SessionScope, resolve_network_access
+from wastech_orchestrator.core.flow.context_paths import (
+    build_node_output_paths,
+    build_path_context,
+)
+from wastech_orchestrator.core.flow.contracts import (
+    SessionScope,
+    resolve_git_evidence,
+    resolve_network_access,
+)
 from wastech_orchestrator.core.flow.engine import Finding, NodeContext, NodeOutcome, NodeResult
 from wastech_orchestrator.core.flow.nodes.base import (
     EvaluatorInfraError,
@@ -47,6 +57,7 @@ from wastech_orchestrator.core.flow.nodes.exchange_publish import (
 )
 from wastech_orchestrator.core.flow.observability import record_run_observability
 from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file, render_role_prompt
+from wastech_orchestrator.core.flow.prompt_vars import valid_prompt_vars
 from wastech_orchestrator.core.flow.schema import SEVERITY_ORDER, EvaluatorNode, FlowNode
 from wastech_orchestrator.core.flow.usage_accounting import (
     deserialize_usage,
@@ -213,7 +224,16 @@ class EvaluatorNodeRunner:
         )
         return NodeResult(
             node_id=node.id,
-            outcome=NodeOutcome(kind, findings=findings, rework_exhausted=rework_exhausted),
+            outcome=NodeOutcome(
+                kind,
+                findings=findings,
+                rework_exhausted=rework_exhausted,
+                # DR-2: carry the provider's own prose, not just the typed findings. Without it the
+                # supervisor observed a bare `Outcome: accept` and its whole-task summary described
+                # an evaluator that emitted findings as a gate that "passed". The agent runner has
+                # always passed this; the evaluator runner dropped it one layer up.
+                final_message=outcome.result.final_message,
+            ),
             node_run_id=run_id,
         )
 
@@ -296,8 +316,14 @@ class EvaluatorNodeRunner:
         session_id: str | None = None,
         resume_baseline_output_tokens: int | None = None,
     ) -> AgentRunRequest:
+        # The renderer stays the fixed security core; the caller widens *which names* it may
+        # substitute to the flow-derived set (core allowlist ∪ each agent/tool node's {<id>_path}),
+        # exactly as the agent runner does, and only ever places path values in the dict.
         prompt = render_role_prompt(
-            self._in.flow_dir, node.role_file, self._prompt_variables(ctx, node)
+            self._in.flow_dir,
+            node.role_file,
+            self._prompt_variables(ctx, node),
+            allowed=valid_prompt_vars(ctx.snapshot),
         )
         return AgentRunRequest(
             task_id=ctx.task_id,
@@ -334,6 +360,9 @@ class EvaluatorNodeRunner:
             network_access=resolve_network_access(
                 node.network_access, ctx.snapshot.doc.network_policy
             ),
+            # The read-only git verbs, when this evaluator asked for them AND the operator enabled
+            # the grant. Reading only: the evaluator stays read-only on the filesystem either way.
+            git_evidence=resolve_git_evidence(node.git_evidence, self._s.allow_git_evidence),
             # VF-7 defense-in-depth: the Core-owned advisory security contract, threaded via
             # NodeServices; the neutral seam prepends it to the effective prompt.
             security_preamble=self._s.security_preamble,
@@ -407,13 +436,26 @@ class EvaluatorNodeRunner:
 
     def _prompt_variables(self, ctx: NodeContext, node: EvaluatorNode) -> dict[str, object | None]:
         paths = build_path_context(self._in, self._s.repo_dir)
-        return {
+        variables: dict[str, object | None] = {
             "task_id": ctx.task_id,
             "stage": node.id,
             "repo_path": paths["repo"],
             **paths,
             "memory_path": self._memory_path(node, ctx),
         }
+        # DR-7: an evaluator judging the *work* (a coverage gate, a critic) needs the upstream
+        # node's output, not only the report a later node wrote from it. Same channel the agent
+        # runner reads, same rule — a path to a Core-written redacted artifact, never inlined
+        # content, and empty (block drops) for a node that has not run.
+        variables.update(
+            build_node_output_paths(
+                ctx.snapshot.doc.nodes,
+                ctx.task_id,
+                exchange_root=self._s.exchange_root,
+                artifacts_root=self._s.artifacts_root,
+            )
+        )
+        return variables
 
     def _memory_path(self, node: EvaluatorNode, ctx: NodeContext) -> str | None:
         """Build this evaluator's memory packet and return its path — node-driven (F31).

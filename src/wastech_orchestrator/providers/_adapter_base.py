@@ -57,6 +57,7 @@ from wastech_orchestrator.providers.redaction import (
     REDACTED,
     normalized_session_id,
     read_denied_secrets,
+    redact_jsonl,
     redact_mapping,
     redact_text,
     secret_env_values,
@@ -478,9 +479,13 @@ class BaseCliProvider:
 
         # Redact every captured sink before it is written: a leaked secret must never land
         # in stdout.log or events.jsonl. Parsing uses the in-memory raw stream for correctness.
+        # Both stdout sinks are JSON-lines streams, so they are redacted per DECODED line
+        # (``redact_jsonl``): scrubbing the serialized characters instead used to consume the
+        # backslash of an escaped quote and leave a line that no longer parses, which silently cost
+        # the audit trail whole tool results. stderr is plain text and stays on ``redact_text``.
         extra_secrets = self._extra_secrets(request)
         raw_stdout = read_text(paths.stdout_path)
-        redacted_stdout = redact_text(raw_stdout, extra_secrets=extra_secrets)
+        redacted_stdout = redact_jsonl(raw_stdout, extra_secrets=extra_secrets)
         Path(paths.stdout_path).write_text(redacted_stdout, encoding="utf-8")
         Path(paths.stderr_path).write_text(
             redact_text(proc.stderr_text, extra_secrets=extra_secrets), encoding="utf-8"
@@ -624,11 +629,20 @@ class BaseCliProvider:
     # --- shared internals ----------------------------------------------------------------------
 
     def _scrub_raw_session(self, paths: ArtifactPaths, raw_session_id: str) -> None:
-        """Replace a raw session id with :data:`REDACTED` in the on-disk stdout/events streams."""
+        """Replace a raw session id with :data:`REDACTED` in the on-disk stdout/events streams.
+
+        Word-bounded, like the literal path in ``redact_text``: an unbounded substring replace is
+        the F45 defect, and here it would rewrite every occurrence of a short session id *inside*
+        other words — shredding the JSON structure of the very sinks this method rewrites.
+        """
+        if not raw_session_id:
+            return
+        pattern = re.compile(rf"(?<!\w){re.escape(raw_session_id)}(?!\w)")
         for path in (paths.stdout_path, paths.events_path):
             existing = read_text(path)
-            if raw_session_id and raw_session_id in existing:
-                Path(path).write_text(existing.replace(raw_session_id, REDACTED), encoding="utf-8")
+            scrubbed = pattern.sub(REDACTED, existing)
+            if scrubbed != existing:
+                Path(path).write_text(scrubbed, encoding="utf-8")
 
     def _write_request(
         self, paths: ArtifactPaths, request: AgentRunRequest, *, argv: list[str] | None

@@ -328,6 +328,11 @@ class NodeServices:
     #: operator allowlist (repo-relative globs) of paths that ALWAYS require approval on any change,
     #: regardless of ``trust_level`` (``config.security.protected_paths``). Empty = no floor.
     protected_paths: tuple[str, ...] = ()
+    #: whether the operator enabled the read-only git-evidence grant
+    #: (``config.security.allow_git_evidence``). A node's own ``git_evidence: true`` is only honored
+    #: when this is on, so a flow can ask for the capability but never grant it to itself. ``False``
+    #: everywhere it is not wired (unit harnesses), which is also the production default.
+    allow_git_evidence: bool = False
     #: VF-7 defense-in-depth: the Core-owned orchestrator security contract prepended to every
     #: provider prompt (advisory, NOT enforcement). Resolved once by the orchestrator
     #: (``build_orchestrator_security_preamble``) and set on each request's ``security_preamble``.

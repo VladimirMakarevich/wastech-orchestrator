@@ -102,8 +102,11 @@ from wastech_orchestrator.providers.base import ProviderId
 # v20 (2026-06-27, transient-provider-failure-recovery): a *format* add of the optional
 # `agents.retry` block — `{max_attempts, base_delay_s, max_delay_s, max_blocked_s}` — the bounded
 # same-provider transient-retry policy (Option A) plus the B-lite soft-pause ceiling. Absent => safe
-# defaults (max_attempts=2, base_delay_s=2.0, max_delay_s=30.0, max_blocked_s=3600.0); old configs
-# load fail-open and `upgrade-config` adds it from the template.
+# defaults; old configs load fail-open and `upgrade-config` adds it from the template. The values
+# v20 shipped were `max_attempts=2, base_delay_s=2.0, max_delay_s=30.0, max_blocked_s=3600.0`;
+# `max_blocked_s` was later raised to 21600.0 (6h > a provider's ~5h usage window, so a
+# rate-limited task waits out the reset instead of failing an hour in) — `RetryConfig` below is the
+# live source for all four.
 # v21 (2026-06-27, telegram-step-trace): a *format* add of the optional `telegram.trace` bool
 # (default false) — a one-way, best-effort live progress feed that pushes one message per flow node
 # finish (`<emoji> <node-id> → <outcome>`, node id + outcome only, no secrets). A no-op when
@@ -361,6 +364,17 @@ class SecurityConfig:
     # read-isolation on. ``strict_isolation`` is still the master switch and always wins toward
     # relaxation (see :attr:`read_isolation_off`).
     disable_read_isolation: bool = True
+    # Operator master switch for the read-only git-evidence grant. A flow node may declare
+    # ``git_evidence: true`` to ask for the read-only git verbs (``log``/``show``/``diff``/… — every
+    # one of them reports, none mutates or publishes) so an audit node can cite a commit instead of
+    # substituting a changelog grep for delivery history. The declaration alone grants nothing: with
+    # this switch off — the default — a declaring flow loads, validates and runs exactly as it does
+    # today. That split is what keeps the envelope un-weakenable through a flow: the capability is
+    # reachable declaratively, but only the operator can turn it on. Operator-config ONLY (never a
+    # task / ``extra_args`` / flow-node key). Enabling it does not make the node writable: Claude
+    # confines the shell to those verbs and write-denies the whole clone in its OS sandbox, Codex's
+    # read-only sandbox already forbids every mutation, and ``denied_commands`` stays the floor.
+    allow_git_evidence: bool = False
 
     @property
     def read_isolation_off(self) -> bool:

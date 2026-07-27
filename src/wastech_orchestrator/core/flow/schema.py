@@ -59,6 +59,14 @@ class AgentNode:
     #: this node alone; ``None`` (default) inherits the flow's ``network_policy`` default. Toggles
     #: only the network dimension — never the filesystem permission ceiling.
     network_access: bool | None = None
+    #: ask for the read-only git verbs so this node can inspect delivery history (an audit node
+    #: citing a commit rather than grepping a changelog). ``True`` requests the grant; ``False`` and
+    #: ``None`` (default) do not. The request is only ever honored when the operator's
+    #: ``security.allow_git_evidence`` is on — with it off a declaring node is accepted and inert,
+    #: which is what keeps a flow from widening the envelope on its own. Grants reading only: the
+    #: verbs cannot mutate, the sandbox write-denies the clone, and publishing stays the
+    #: orchestrator's.
+    git_evidence: bool | None = None
     #: which provider runs this node; None → the config's global primary (PRE.1). Validated against
     #: ``agents.allowed`` at preflight; never relaxes the security ceiling.
     provider: ProviderId | None = None
@@ -69,6 +77,13 @@ class AgentNode:
     #: optional well-known artifact slot the agent's output is persisted to and threaded downstream
     #: (``enriched_spec`` / ``plan`` / ``summary``); the core writes it after the node runs (P1.4).
     output_artifact: str | None = None
+    #: the file this node *produces*, named by the flow: when set, that file's content — not the
+    #: node's closing message — is what the ``{<node_id>_path}`` channel carries downstream. One
+    #: portable filename (no separators, no ``..``), resolved inside the flow's ``output_policy``
+    #: report directory, or the repository root for a policy without one. A node whose real product
+    #: is a written document otherwise publishes only its own summary of it. Absent, or the file is
+    #: missing/unreadable after the node runs, the channel keeps carrying the message.
+    output_file: str | None = None
     #: a best-effort node tolerates an infrastructure failure (no provider could run it): the engine
     #: continues instead of failing the task (the summary stage — minimal-summary fallback).
     best_effort: bool = False
@@ -94,6 +109,9 @@ class EvaluatorNode:
     #: per-node override of the flow-wide network grant (see :class:`AgentNode`); ``None`` inherits
     #: the flow's ``network_policy`` default. Toggles only the network dimension.
     network_access: bool | None = None
+    #: ask for the read-only git verbs (see :class:`AgentNode`); honored only when the operator's
+    #: ``security.allow_git_evidence`` is on. An evaluator stays read-only either way.
+    git_evidence: bool | None = None
     blocking: bool = True
     #: Per-instance rework ceiling for a NON-blocking evaluator (e.g. ``test_quality``): after this
     #: many rework verdicts it accepts (→ continue) instead of looping. Ignored when ``blocking`` is
@@ -113,11 +131,20 @@ class EvaluatorNode:
     when: WhenPredicate | None = None
 
 
+#: Filename the ``citation`` checker looks for in the flow's report dir when the node does not name
+#: one. A flow whose writing node names its manifest anything else used to get a silent
+#: ``uncheckable: missing`` and a gate that did nothing, because the name was a literal in the node.
+DEFAULT_CITATION_MANIFEST = "sources.json"
+
+
 @dataclass(frozen=True, slots=True)
 class ChecksNode:
     id: str
     kind: Literal["checks"]
     checker: Literal["command_profile", "citation", "dependency_scan"]
+    #: ``citation`` only: the manifest filename inside the flow's report dir. A single path segment
+    #: (no separators, no ``..``) — it names a file the flow's own writing node produced.
+    manifest: str = DEFAULT_CITATION_MANIFEST
     when: WhenPredicate | None = None
 
 

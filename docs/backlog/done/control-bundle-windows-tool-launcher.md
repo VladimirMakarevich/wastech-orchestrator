@@ -36,8 +36,8 @@ python "%~dp0check_journey" %*
 [`_referenced_inputs`](../../../src/wastech_orchestrator/core/flow/control_bundle.py#L126) collects the tool names used by the snapshot, resolves each through the live registry, and appends **exactly the resolved path**:
 
 ```python
-resolved = tools.resolve(name)          # control_bundle.py:129
-refs.append(_Ref(f"{_TOOLS_SUBDIR}/{resolved.name}", resolved))   # :132
+resolved = tools.resolve(name)  # control_bundle.py:129
+refs.append(_Ref(f"{_TOOLS_SUBDIR}/{resolved.name}", resolved))  # :132
 ```
 
 [`ToolRegistry.resolve`](../../../src/wastech_orchestrator/core/flow/tools_registry.py#L51) is explicitly suffix-aware on Windows — it walks [`_candidate_names`](../../../src/wastech_orchestrator/core/flow/tools_registry.py#L92) (`check_journey` → `check_journey.cmd`) and returns the first _launchable_ candidate. Freezing only that one file is correct on POSIX, where a tool is a single `+x` script, and wrong on Windows, where the launchable file is a shim over a sibling.

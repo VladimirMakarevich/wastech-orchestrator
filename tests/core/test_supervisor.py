@@ -17,6 +17,7 @@ import pytest
 from wastech_orchestrator.config.loader import ConfigError, loads_config
 from wastech_orchestrator.config.schema import SupervisorConfig
 from wastech_orchestrator.config.validation import validate_config
+from wastech_orchestrator.core.flow.engine import Finding
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import SupervisorBlock
 from wastech_orchestrator.core.loop_control import record_rework
@@ -173,6 +174,58 @@ def test_supervisor_observes_each_completed_step(tmp_path: Path) -> None:
     assert [e.kind for e in evals] == ["supervisor_step", "supervisor_step"]
     assert [e.source_node_run_id for e in evals] == [5, 7]
     assert all(e.verdict == "advisory" and e.node_id is None for e in evals)
+
+
+def test_observe_prompt_carries_the_evaluator_findings_digest(tmp_path: Path) -> None:
+    # DR-2 wire 3: `_step_prompt` had no slot for findings, so the observation for the critic step
+    # was a bare `## Step observed / Outcome: accept` with nothing to react to — and the observer
+    # made zero tool calls on every evaluator step of the run this came from. Severity + reason +
+    # paths now reach the prompt, which is what the observer is being asked to acknowledge.
+    router, store = FakeRouter(), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store)
+    sup.observe(
+        task_id=_TASK,
+        node_id="critical_review",
+        node_run_id=82,
+        outcome_kind="accept",
+        findings=(
+            Finding(severity="medium", reason="Uneven audit depth", paths=("report.md",)),
+            Finding(severity="low", reason="Wording nit"),
+        ),
+    )
+    prompt = router.requests[0].prompt
+    assert "## Step observed" in prompt
+    assert "Node: critical_review" in prompt
+    assert "Outcome: accept" in prompt
+    assert "- [medium] Uneven audit depth (report.md)" in prompt
+    assert "- [low] Wording nit" in prompt
+
+
+def test_observe_prompt_has_no_findings_section_when_there_are_none(tmp_path: Path) -> None:
+    # An agent step, or a clean evaluator: no heading, no empty list.
+    router, store = FakeRouter(), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store)
+    sup.observe(task_id=_TASK, node_id="implementation", node_run_id=5, outcome_kind="done")
+    assert "Findings it recorded" not in router.requests[0].prompt
+
+
+def test_observe_prompt_bounds_a_long_finding_reason(tmp_path: Path) -> None:
+    # A chatty evaluator must not inflate every per-step turn: the digest line is capped at the same
+    # bound the follow-up titles use, and newlines are folded so one finding stays one line.
+    router, store = FakeRouter(), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store)
+    sup.observe(
+        task_id=_TASK,
+        node_id="review",
+        node_run_id=9,
+        outcome_kind="accept",
+        findings=(Finding(severity="high", reason="y\n" * 200),),
+    )
+    digest = next(
+        line for line in router.requests[0].prompt.splitlines() if line.startswith("- [high]")
+    )
+    assert len(digest) <= _FINDING_TITLE_MAX + len("- [high] ") + 1
+    assert digest.endswith("…")
 
 
 def test_supervisor_observe_writes_rendered_prompt_when_registered(tmp_path: Path) -> None:
@@ -810,13 +863,20 @@ def test_emit_follow_ups_malformed_still_writes_summary(tmp_path: Path) -> None:
 # -- VF-18: surface sub-threshold evaluator findings --------------------------
 
 
-def _verdict(findings: list[dict[str, Any]], *, verdict: str = "accept", node_id: str = "review"):
+def _verdict(
+    findings: list[dict[str, Any]],
+    *,
+    verdict: str = "accept",
+    node_id: str = "review",
+    subtask_order: int | None = None,
+):
     return EvaluationRow(
         task_id=_TASK,
         kind="in_flow_verdict",
         verdict=verdict,
         findings_json=json.dumps(findings),
         node_id=node_id,
+        subtask_order=subtask_order,
     )
 
 
@@ -833,6 +893,22 @@ def test_evaluator_finding_follow_ups_uses_last_verdict_per_node() -> None:
     assert fus[0].title == "minor nit remains"
     assert fus[0].severity == "low" and fus[0].paths == ("a.py",)
     assert "review" in fus[0].evidence[0]
+
+
+def test_evaluator_finding_follow_ups_keeps_each_subtask(tmp_path: Path) -> None:
+    # A decomposed task runs the same evaluator once per subtask, so the "last verdict per node" key
+    # has to include the subtask: keyed on node_id alone, subtask 3's verdict evicted subtasks 1 and
+    # 2, and their accepted findings reached no operator surface at all — silently, and worse the
+    # more the task was decomposed.
+    rows = [
+        _verdict([{"severity": "low", "reason": "nit in subtask 1", "paths": []}], subtask_order=1),
+        _verdict([{"severity": "low", "reason": "nit in subtask 2", "paths": []}], subtask_order=2),
+        _verdict([{"severity": "low", "reason": "superseded", "paths": []}], subtask_order=3),
+        _verdict([{"severity": "low", "reason": "nit in subtask 3", "paths": []}], subtask_order=3),
+    ]
+    titles = [fu.title for fu in _evaluator_finding_follow_ups(rows)]
+    assert titles == ["nit in subtask 1", "nit in subtask 2", "nit in subtask 3"]
+    assert "superseded" not in titles  # the per-(node, subtask) last-verdict rule still holds
 
 
 def test_finding_to_follow_up_truncates_long_reason_and_drops_empty() -> None:
@@ -912,6 +988,61 @@ def test_finalize_dedups_evaluator_findings_against_supervisor(tmp_path: Path) -
     assert len(result.follow_ups) == 1  # the evaluator duplicate merged away
     md = result.summary_path.read_text("utf-8")  # type: ignore[union-attr]
     assert md.count(reason) == 1
+
+
+def test_finalize_prompt_carries_the_recorded_gate_verdicts(tmp_path: Path) -> None:
+    # P1.7 / DR-3: the finalize turn described the gates from session memory and wrote "three
+    # independent verification gates … all of which passed" while four critic findings sat in
+    # state.db. The recorded verdicts now ride the prompt, so "passed" is not writable about a gate
+    # that emitted findings.
+    store = _store(tmp_path)
+    store.record_evaluation(_verdict([], node_id="fact_verification"))
+    store.record_evaluation(
+        _verdict(
+            [{"severity": "medium", "reason": "uneven audit depth", "paths": ["report.md"]}],
+            node_id="critical_review",
+        )
+    )
+    router = FakeRouter([_ok("s1", "Summary.")])
+    sup = _supervisor(tmp_path, router, store)
+    sup.finalize(task_id=_TASK, task_title="T")
+
+    prompt = router.requests[-1].prompt
+    assert "## Gate verdicts recorded for this task" in prompt
+    assert "- fact_verification: verdict `accept`, no findings recorded" in prompt
+    assert "- critical_review: verdict `accept`, 1 finding(s) recorded:" in prompt
+    assert "  - [medium] uneven audit depth (report.md)" in prompt
+    assert "did **not** simply pass" in prompt  # the instruction that makes it binding
+
+
+def test_finalize_gate_section_absent_when_the_flow_has_no_evaluator(tmp_path: Path) -> None:
+    # A flow with no in-flow evaluator gets no empty heading — the section is simply absent.
+    router, store = FakeRouter([_ok("s1", "Summary.")]), _store(tmp_path)
+    _record_step(store, 1, node="implementation", outcome="done", note="wired it")
+    sup = _supervisor(tmp_path, router, store)
+    sup.finalize(task_id=_TASK, task_title="T")
+    assert "Gate verdicts" not in router.requests[-1].prompt
+
+
+def test_finalize_gate_digest_keeps_only_each_nodes_final_verdict(tmp_path: Path) -> None:
+    # A rework round is superseded, exactly as the follow-up derivation treats it: the operator sees
+    # what the gate concluded, not every intermediate round it spent.
+    store = _store(tmp_path)
+    store.record_evaluation(
+        _verdict(
+            [{"severity": "medium", "reason": "round one", "paths": []}],
+            verdict="rework",
+            node_id="critical_review",
+        )
+    )
+    store.record_evaluation(_verdict([], node_id="critical_review"))
+    router = FakeRouter([_ok("s1", "Summary.")])
+    sup = _supervisor(tmp_path, router, store)
+    sup.finalize(task_id=_TASK, task_title="T")
+
+    prompt = router.requests[-1].prompt
+    assert "- critical_review: verdict `accept`, no findings recorded" in prompt
+    assert "round one" not in prompt
 
 
 def test_finalize_no_findings_leaves_no_section(tmp_path: Path) -> None:

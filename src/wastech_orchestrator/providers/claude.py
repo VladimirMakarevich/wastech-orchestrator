@@ -110,6 +110,27 @@ _PROFILE_MAP: dict[str, tuple[str, tuple[str, ...]]] = {
 # (request.network_access); omitted otherwise so a headless run cannot reach the network (P3.2).
 _NETWORK_TOOLS: tuple[str, ...] = ("WebFetch", "WebSearch")
 
+# The read-only git verbs a node may execute when the operator enabled the git-evidence grant and
+# the node declared it. Every verb reports; none mutates the repository and none publishes, so the
+# grant buys history inspection without a second path to commit/push/PR. Rendered as scoped
+# ``Bash(git <verb>:*)`` auto-approve patterns — the OS sandbox, not this list, is what makes such
+# a node read-only, and ``security.denied_commands`` stays the floor beneath it (a deny always
+# beats an allow).
+_GIT_EVIDENCE_VERBS: tuple[str, ...] = (
+    "log",
+    "show",
+    "diff",
+    "blame",
+    "status",
+    "rev-list",
+    "rev-parse",
+    "ls-files",
+    "shortlog",
+    "describe",
+    "cat-file",
+    "for-each-ref",
+)
+
 
 class SandboxCapability(StrEnum):
     """Whether Claude's OS-enforced Bash sandbox can be used on the host (WRI-002).
@@ -162,15 +183,30 @@ def _bash_sandbox_available(capability: SandboxCapability) -> bool:
 class ClaudeToolPlan:
     """The resolved per-attempt Claude tool posture (WRI-002).
 
-    ``mode`` is the ``--permission-mode`` value; ``tools`` is the exact built-in tool set (both the
-    hard ``--tools`` existence gate and the ``--allowedTools`` auto-approve list); ``needs_sandbox``
-    is True only when a workspace-write attempt keeps ``Bash`` on a host that can OS-sandbox it (so
-    the adapter emits the private ``--settings`` sandbox file).
+    ``mode`` is the ``--permission-mode`` value; ``tools`` is the exact built-in tool set behind
+    the hard ``--tools`` existence gate; ``allow_patterns`` holds the scoped ``Tool(arg:*)`` entries
+    that replace a bare name in the ``--allowedTools`` auto-approve list (see
+    :attr:`allowed_tools`); ``needs_sandbox`` is True only when the resolved set keeps ``Bash`` on a
+    host that can OS-sandbox it (so the adapter emits the private ``--settings`` sandbox file).
     """
 
     mode: str
     tools: tuple[str, ...]
     needs_sandbox: bool
+    allow_patterns: tuple[str, ...] = ()
+
+    @property
+    def allowed_tools(self) -> tuple[str, ...]:
+        """The ``--allowedTools`` entries: bare names, except where a pattern scopes the tool.
+
+        A bare tool name in this list auto-approves **every** invocation of that tool and wins over
+        a narrower pattern for the same tool in the same list, so a scoped tool must appear as its
+        patterns *only* — listing both would hand back the unrestricted shell the patterns exist to
+        prevent. Verified against the CLI, not assumed. With no patterns this is exactly ``tools``,
+        so a plan that scopes nothing produces today's argv byte for byte.
+        """
+        scoped = {pattern.split("(", 1)[0] for pattern in self.allow_patterns}
+        return (*(t for t in self.tools if t not in scoped), *self.allow_patterns)
 
 
 def resolve_claude_tools(
@@ -179,32 +215,49 @@ def resolve_claude_tools(
     network_access: bool,
     *,
     strict_isolation: bool = True,
+    git_evidence: bool = False,
 ) -> ClaudeToolPlan:
     """Resolve the mode + built-in tool set + sandbox need for a profile on a host (WRI-002).
 
     The single source of the platform decision (used by both :func:`build_claude_argv` and the
-    settings-file write so they never disagree). Raises :class:`ProviderError`
-    (``CAPABILITY_UNAVAILABLE``) — a deterministic *pre-model* infrastructure error — when a strict
-    workspace-write attempt needs the Bash sandbox on a supported host (Linux/WSL2) whose sandbox
-    dependencies are missing: the adapter refuses to run Bash unsandboxed rather than silently
-    weakening isolation. Under ``strict_isolation: false`` the operator has accepted the risk, so
-    Bash stays (unsandboxed) and the run is reported as unisolated by the existing preflight
-    verdict.
+    settings-file write so they never disagree). ``git_evidence`` is the resolved per-node grant:
+    it adds a shell to a shell-less profile and scopes it to the read-only git verbs, so an audit
+    node can read delivery history instead of substituting a changelog grep for it.
+
+    The platform arm is keyed on **"does the resolved set keep Bash"**, not on the profile name: a
+    read-only attempt that was granted a shell needs exactly the protection a workspace-write one
+    does. Raises :class:`ProviderError` (``CAPABILITY_UNAVAILABLE``) — a deterministic *pre-model*
+    infrastructure error — when such an attempt needs the Bash sandbox on a supported host
+    (Linux/WSL2) whose sandbox dependencies are missing: the adapter refuses to run Bash
+    unsandboxed rather than silently weakening isolation. Under ``strict_isolation: false`` the
+    operator has accepted the risk, so Bash stays (unsandboxed) and the run is reported as
+    unisolated by the existing preflight verdict.
     """
     mode, tools = map_permission(profile)
+    allow_patterns: tuple[str, ...] = ()
+    if git_evidence and "Bash" not in tools:
+        # Grant the shell and scope it to the read-only verbs. Guarded on Bash being absent so the
+        # grant only ever adds reach: on a profile that already carries an unscoped shell, scoping
+        # it here would be a silent restriction wearing the name of a capability.
+        tools = (*tools, "Bash")
+        allow_patterns = tuple(f"Bash(git {verb}:*)" for verb in _GIT_EVIDENCE_VERBS)
     needs_sandbox = False
-    if profile == "workspace-write":
+    if "Bash" in tools:
         if capability is SandboxCapability.NATIVE_WINDOWS:
             if strict_isolation:
                 # No supported Bash sandbox on native Windows: drop Bash (restricted mode). Read
                 # isolation rides ``--tools`` + the Read/Write/Edit tool denies; Edit/Write remain.
+                # A granted read-only shell drops with it — the capability-conditional wording in
+                # the role prompt then applies — rather than becoming an unsandboxed shell here.
                 tools = tuple(t for t in tools if t != "Bash")
+                allow_patterns = ()
             # Under strict_isolation: false the operator keeps unsandboxed Bash (owns the risk).
         elif capability is SandboxCapability.LINUX_MISSING_DEPS and strict_isolation:
             raise ProviderError(
                 ErrorClass.CAPABILITY_UNAVAILABLE,
-                "Claude's Bash sandbox for a workspace-write node requires bubblewrap+socat on "
-                "PATH (Linux/WSL2); refusing to run Bash unsandboxed under strict_isolation",
+                f"Claude's Bash sandbox for a {profile} node that keeps a shell requires "
+                "bubblewrap+socat on PATH (Linux/WSL2); refusing to run Bash unsandboxed under "
+                "strict_isolation",
             )
         elif _bash_sandbox_available(capability):
             needs_sandbox = True
@@ -212,7 +265,9 @@ def resolve_claude_tools(
         # unsandboxed.
     if network_access:
         tools = (*tools, *_NETWORK_TOOLS)
-    return ClaudeToolPlan(mode=mode, tools=tools, needs_sandbox=needs_sandbox)
+    return ClaudeToolPlan(
+        mode=mode, tools=tools, needs_sandbox=needs_sandbox, allow_patterns=allow_patterns
+    )
 
 
 # Statuses on the terminal ``result`` event that mark the turn as NOT having satisfied the task. Any
@@ -411,14 +466,17 @@ _RESERVED_CLAUDE_FLAGS: frozenset[str] = frozenset(
 # dropped any of them would otherwise reach a paid model call and only then fail at runtime with
 # "unknown option": ``--permission-mode`` (the strict headless mode), ``--setting-sources`` (closes
 # user/project/local + skill/plugin/hook discovery), ``--strict-mcp-config`` (no stray MCP server),
-# ``--tools`` (the hard built-in-tool existence gate). Probed at preflight so enum/flag drift is
-# caught before the model runs (WRI-002 / final-review H2 — the Claude counterpart to Codex's
+# ``--tools`` (the hard built-in-tool existence gate), ``--allowedTools`` (the auto-approve list,
+# and the only place a scoped tool pattern is expressed — a granted read-only shell is confined to
+# its verbs by that list plus the OS sandbox). Probed at preflight so enum/flag drift is caught
+# before the model runs (WRI-002 / final-review H2 — the Claude counterpart to Codex's
 # ``exec --help`` ``-c/--config`` probe).
 _REQUIRED_CLAUDE_FLAGS: tuple[str, ...] = (
     "--permission-mode",
     "--setting-sources",
     "--strict-mcp-config",
     "--tools",
+    "--allowedTools",
 )
 
 # Claude flags whose loss degrades — but does not break — a run: ``--resume`` backs every
@@ -477,6 +535,7 @@ def build_sandbox_settings(
     *,
     network_access: bool,
     read_isolation_off: bool = False,
+    deny_write_root: Path | None = None,
 ) -> dict[str, Any]:
     """Build the adapter-owned Claude OS Bash-sandbox settings (WRI-002).
 
@@ -491,6 +550,11 @@ def build_sandbox_settings(
     ``excludedCommands``, a credential ``mask``, or ``tlsTerminate``. ``credentials.files`` denies
     the
     resolved internal env-file (the purpose-built surface) with ``mode: "deny"`` only.
+
+    ``deny_write_root`` write-denies one whole subtree on top of the sets above. The adapter passes
+    the workspace root for a read-only attempt that was granted a shell: what keeps such a node
+    read-only is then the OS sandbox — the same mechanism Codex relies on — and not the goodwill of
+    a verb allowlist.
     """
     internal = [_sandbox_path(p) for p in deny_policy.denied_paths]
     # VF-6: with read-isolation OFF the private set stays WRITE-denied (control plane immutable) but
@@ -500,6 +564,8 @@ def build_sandbox_settings(
     deny_write = list(internal)
     if write_guard is not None:
         deny_write.extend(_sandbox_path(p) for p in write_guard.denied_write_paths)
+    if deny_write_root is not None:
+        deny_write.append(_sandbox_path(deny_write_root))
     deny_write = list(dict.fromkeys(deny_write))  # order-preserving de-dup
     sandbox: dict[str, Any] = {
         "enabled": True,
@@ -619,7 +685,11 @@ def build_claude_argv(
     profile = request.permission_profile or config.permission_profile or _DEFAULT_PROFILE
     probe = sandbox_probe if sandbox_probe is not None else default_sandbox_probe
     plan = resolve_claude_tools(
-        profile, probe(), request.network_access, strict_isolation=strict_isolation
+        profile,
+        probe(),
+        request.network_access,
+        strict_isolation=strict_isolation,
+        git_evidence=request.git_evidence,
     )
 
     argv = [
@@ -650,10 +720,13 @@ def build_claude_argv(
         argv += ["--setting-sources", "", "--strict-mcp-config"]
     argv += [_PERMISSION_MODE_FLAG, plan.mode]
     if plan.tools:
-        # ``--tools`` is the hard existence gate (tools not listed do not exist for the session);
-        # ``--allowedTools`` marks the same set auto-approved so a headless run never blocks.
-        joined_tools = ",".join(plan.tools)
-        argv += ["--tools", joined_tools, "--allowedTools", joined_tools]
+        # ``--tools`` is the hard existence gate (tools not listed do not exist for the session)
+        # and takes bare names only; ``--allowedTools`` marks them auto-approved so a headless run
+        # never blocks, and is the one that also accepts scoped patterns. A tool the plan scopes is
+        # auto-approved by its patterns alone (:attr:`ClaudeToolPlan.allowed_tools`), so it still
+        # exists for the session but only the matching invocations run.
+        argv += ["--tools", ",".join(plan.tools)]
+        argv += ["--allowedTools", ",".join(plan.allowed_tools)]
     denied_tools = _deny_tools_for(denied_commands) + _deny_read_tools_for(denied_read_paths)
     # F37: confine native project memory out of the spawn — unless the operator has opted in to the
     # agent's own native memory (agents.providers.claude.allow_native_memory) OR read-isolation is
@@ -944,6 +1017,7 @@ class ClaudeCodeProvider(BaseCliProvider):
             probe(),
             request.network_access,
             strict_isolation=self._security.strict_isolation,
+            git_evidence=request.git_evidence,
         )
         settings_path: str | None = None
         if plan.needs_sandbox and self._deny_policy is not None:
@@ -952,6 +1026,12 @@ class ClaudeCodeProvider(BaseCliProvider):
                 request.write_guard,
                 network_access=request.network_access,
                 read_isolation_off=self._security.read_isolation_off,
+                # A read-only attempt only reaches a sandbox when it was granted a shell, and then
+                # the whole clone is write-denied: the sandbox is what holds it to reading, so a
+                # command outside the allowlist still cannot change the repository.
+                deny_write_root=(
+                    Path(request.working_directory) if profile == "read-only" else None
+                ),
             )
             settings_path = self._write_sandbox_settings(paths, settings)
         argv = build_claude_argv(

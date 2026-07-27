@@ -52,10 +52,10 @@ polish     ─▶ 🧠 observe   92 198 ток ┘
 ### После (ПОСЛЕ — когда сделаны P0 + P1 + P2)
 
 - **Факты о каждом шаге пишутся детерминированно, без LLM** (StepRecorder → ledger): нода, исход, изменённые пути, diff-fingerprint, checks, вердикт эвалюатора. Это «источник правды».
-- **LLM-наблюдение — только когда есть что сказать человеку** (`observation_mode`): для content-flow — `none` (ни одного промежуточного вызова), для implementation — `events` (только `rework`/`failure`/`hitl`/`dangerous_diff`/`fallback`/`subtask_boundary`). Обычные `done`/`pass`/`accept` → только детерминированная запись.
+- **LLM-наблюдение — только когда есть что сказать человеку** (`observe.mode`): для content-flow — `none` (ни одного промежуточного вызова), для implementation — `events` (только `rework`/`failure`/`fallback` — закрытый список, решение P1-D7). Обычные `done`/`pass`/`accept` → только детерминированная запись.
 - **`tool`/`checks` вообще не наблюдаются** (P0.3) — `length` перестаёт стоить 44k.
-- **`finalize` всегда стартует свежим** и получает компактный `SupervisorPacket` (собран из ledger + diff + findings; передаётся **по пути как frozen-артефакт**, паттерн WRI-011) — он больше не тащит разросшуюся сессию.
-- **Раздельные бюджеты**: дешёвая модель + low для заметок, сильнее + medium для summary; жёсткие потолки `max_calls` + `max_digest_tokens` (в реальных токенах).
+- **`finalize` всегда стартует свежим** и получает компактный `SupervisorPacket` (собран из ledger + diff + findings; передаётся **по пути** — редактированная read-only копия в `.worc-io/<task-id>/supervisor/packet.json`, решение P0-D1) — он больше не тащит разросшуюся сессию.
+- **Раздельные настройки observe и finalize**: дешёвая модель + low для заметок, сильнее + medium для summary. Отдельных потолков нет (решение P1-D6, 2026-07-26) — ограничителем служит сам режим наблюдений, а digest ограничен детерминированно (8 000 симв., решение P0-D3).
 
 ```text
 context    ─▶ 📝 запись (без LLM) ┐
@@ -67,7 +67,7 @@ polish     ─▶ 📝 запись (без LLM) ┘
                                │
                     ┌──────────────────────┐
                     │   SupervisorPacket    │ ◀── собран из ledger + diff + findings,
-                    │  (frozen, по пути)    │     bounded-выжимка, без тёплой сессии
+                    │  (read-only, по пути) │     bounded-выжимка, без тёплой сессии
                     └──────────────────────┘
                                │
                🧠 finalize (fresh)  ~20–40k ток  ◀── ОДИН свежий вызов
@@ -77,7 +77,7 @@ polish     ─▶ 📝 запись (без LLM) ┘
         ИТОГО: 1 LLM-вызов · < 60 000 input-токенов · ~$0.15–0.30 · заметно быстрее
 ```
 
-Для **implementation-flow** картина та же, но при событии (`rework`/`HITL`/`fallback`/опасный diff) в нужной точке появляется один 🧠-note — расход растёт вместе с реальными отклонениями, а не с числом обычных шагов.
+Для **implementation-flow** картина та же, но при событии (`rework`/`failure`/`fallback`) в нужной точке появляется один 🧠-note — расход растёт вместе с реальными отклонениями, а не с числом обычных шагов.
 
 ## Цифры на исследованном прогоне (наглядно)
 
@@ -108,15 +108,15 @@ polish     ─▶ 📝 запись (без LLM) ┘
 | Фаза | Что добавляет | Наглядный эффект |
 | --- | --- | --- |
 | [P0](supervisor-finalize-packet-and-cadence.md) | детерминированный `SupervisorPacket` → fresh finalize → skip `tool`/`checks` | finalize перестаёт тащить тёплую сессию; `length` перестаёт стоить 44k |
-| [P1](supervisor-observation-cadence-p1.md) | `observation_mode` + event-триггеры + раздельные observe/finalize + бюджеты | убираются все 6 промежуточных наблюдений (исторические 375 726 токенов) |
-| [P2](supervisor-responsibility-split-p2.md) | вынос `StepRecorder` + раздельные бюджеты handoff/skill + per-function telemetry | видно, сколько стоила каждая функция; предупреждение, если supervisor снова доминирует |
+| [P1](supervisor-observation-cadence-p1.md) | `observe.mode` + event-триггеры + раздельные observe/finalize | убираются все 6 промежуточных наблюдений (исторические 375 726 токенов) |
+| [P2](supervisor-responsibility-split-p2.md) | вынос детерминированной step-записи + per-function telemetry + supervisor-отчёт в summary | видно, сколько стоила каждая функция (раздельные бюджеты и предупреждение о доминировании исключены решением P2-D1) |
 
 ## Дефолты по типам flow (после P1)
 
-| Тип flow | `observation_mode` | Почему |
+| Тип flow | `observe.mode` | Почему |
 | --- | --- | --- |
 | content (`blog_article*`) | `none` | качество держит блокирующий `tone_style`; finalize получает всё пакетом |
-| implementation | `events` | нужны заметки на `rework`/`HITL`/`fallback`; там включён `emit_follow_ups` |
+| implementation | `events` | нужны заметки на `rework`/`failure`/`fallback`; там включён `emit_follow_ups` |
 
 ## Сквозные утверждения (как это проверяется)
 
@@ -126,6 +126,6 @@ polish     ─▶ 📝 запись (без LLM) ┘
 - `SupervisorPacket` передаётся по пути к frozen-артефакту (context-footer, паттерн WRI-011), а не инлайн-JSON; секреты/сырой diff в промпт не попадают.
 - `follow_ups` (когда flow включил `emit_follow_ups`) и `memory_delta` (когда `memory.enabled`) производятся тем же одним finalize-turn.
 - `none` не создаёт ни одного наблюдения, но finalize и summary сохраняются; `events` создаёт заметку только на событии, а `done`/`pass`/`accept` — только детерминированную запись.
-- Бюджеты `max_calls`/`max_digest_tokens` соблюдаются; при исчерпании observer переключается в deterministic-only, задача не падает.
-- Supervisor остаётся read-only и advisory; handoff и skill-proposal работают независимо от `observation_mode`.
+- Детерминированная step-запись пишется всегда, даже когда LLM-наблюдения выключены, — поэтому пакет полон при любом режиме.
+- Supervisor остаётся read-only и advisory; handoff и skill-proposal работают независимо от `observe.mode`.
 - 0 пропущенных blocking-issue — их держит `tone_style`; полнота summary не хуже baseline.

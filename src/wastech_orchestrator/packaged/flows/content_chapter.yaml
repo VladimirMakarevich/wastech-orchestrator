@@ -31,12 +31,13 @@
 # omitted (a code-oriented capability). The blocking evaluator is capped by its named-loop budget
 # (`critic_fix`), not by `max_rework_per_stage` (a non-blocking-only knob).
 #
-# gate_severity (per evaluator, default `high`) sets the minimum finding severity that gates: `high`
-# blocks on high/critical/blocking and lets medium/low advise; lower it to raise the quality bar. For
-# detail-critical content you can set `gate_severity: low` on the critic below so ANY finding forces a
-# rework — but a stricter gate means more rework rounds, so raise `critic_fix` to give it headroom, or
-# the loop may exhaust the budget and park the task to `manual`. Shipped at the default `high`;
-# uncomment the line below to opt in.
+# gate_severity (per evaluator, built-in default `high`) sets the minimum finding severity that gates:
+# `high` blocks on high/critical/blocking and lets medium/low advise; lower it to raise the quality
+# bar. This flow ships `gate_severity: medium` on the critic below — a taste critic has no natural way
+# to emit `high`, so at the built-in default its findings were recorded and then dropped. For
+# detail-critical content you can go further to `low` so ANY finding forces a rework — but a stricter
+# gate means more rework rounds, so raise `critic_fix` to give it headroom, or the loop may exhaust the
+# budget and park the task to `manual`.
 #
 # ----------------------------------------------------------------------------------------------------
 # Per-node tuning (ALL fields below are OPTIONAL — omit one to inherit the default). Field use on a
@@ -92,7 +93,12 @@ flow:
       role: critic
       role_file: content_chapter/story_critic.md
       blocking: true
-      # gate_severity: low  # block on ANY finding (default high); raise `critic_fix` to match
+      # A narrative critic judges whether the chapter is GOOD ENOUGH, so it has no natural way to
+      # emit `high`/`critical`; at the built-in default (`high`) its findings are recorded and
+      # dropped. This node is `blocking: true`, so a gating finding loops `critic_fix` until that
+      # budget is spent and then parks the task in manual_action_required — `critic_fix` is already
+      # raised to 6 for this reason; raise it further if you lower this to `low` (block on ANY).
+      gate_severity: medium
       # Narrative taste, voice, and emotional resonance are subjective — judgment quality matters
       # most here (uncomment to pin):
       # model: claude-opus-5

@@ -11,6 +11,8 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
+import pytest
+
 from wastech_orchestrator.core.flow.checkers.citation import (
     CitationStatus,
     validate_citations,
@@ -80,6 +82,7 @@ def _run_checks_node(
     output_policy: OutputPolicy,
     run_process: Any = None,
     task_id: str = "t",
+    inputs: NodeInputs | None = None,
 ) -> tuple[Any, _Store]:
     store = _Store()
     services = NodeServices(
@@ -97,7 +100,7 @@ def _run_checks_node(
         node=node,
         task_id=task_id,
     )
-    result = ChecksNodeRunner(services, NodeInputs(flow_dir=repo_dir)).run(node, ctx)
+    result = ChecksNodeRunner(services, inputs or NodeInputs(flow_dir=repo_dir)).run(node, ctx)
     return result, store
 
 
@@ -191,6 +194,131 @@ def test_citation_path_traversal_is_broken(tmp_path: Path) -> None:
     assert report.entries[0].status is CitationStatus.BROKEN
 
 
+# -- citation: the fabrication battery (P1.6 / DR-5) --------------------------
+
+
+# The post-mortem ran these shapes through the real validator. Two of them came back `verified`
+# because the cited line was only bounds-checked and a snippet-less entry short-circuited to pass —
+# so the gate promised far more than it delivered. Pinned here as a table so the promise and the
+# implementation cannot drift apart again. `claim` is deliberately never validated: a real snippet
+# at a real line can still carry a fabricated assertion, and that is the verifier's job.
+@pytest.mark.parametrize(
+    ("case", "entry", "expected", "gates"),
+    [
+        (
+            "snippet at the cited line",
+            {"path": "a.py", "line": 3, "snippet": "target = 1"},
+            CitationStatus.VERIFIED,
+            False,
+        ),
+        (
+            "correct snippet, wrong in-range line",  # was `verified` — the DR-5 headline
+            {"path": "a.py", "line": 1, "snippet": "target = 1"},
+            CitationStatus.WEAK,
+            False,
+        ),
+        (
+            "path + line, no snippet",  # was `verified` without checking anything
+            {"path": "a.py", "line": 3},
+            CitationStatus.UNCHECKABLE,
+            False,
+        ),
+        (
+            "snippet, no line cited",  # nothing claimed about where → the file match is the claim
+            {"path": "a.py", "snippet": "target = 1"},
+            CitationStatus.VERIFIED,
+            False,
+        ),
+        (
+            "snippet from a different file than the cited path",
+            {"path": "a.py", "line": 1, "snippet": "elsewhere = 9"},
+            CitationStatus.BROKEN,
+            True,
+        ),
+        (
+            "line number out of range",
+            {"path": "a.py", "line": 999, "snippet": "target = 1"},
+            CitationStatus.BROKEN,
+            True,
+        ),
+        (
+            "external url",
+            {"url": "https://developer.mozilla.org/nope"},
+            CitationStatus.UNCHECKABLE,
+            False,
+        ),
+    ],
+)
+def test_citation_fabrication_battery(
+    tmp_path: Path, case: str, entry: dict[str, Any], expected: CitationStatus, gates: bool
+) -> None:
+    (tmp_path / "a.py").write_text("first = 0\nsecond = 0\ntarget = 1\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("elsewhere = 9\n", encoding="utf-8")
+    manifest = tmp_path / "sources.json"
+    manifest.write_text(
+        json.dumps({"sources": [{"id": "s", "claim": "totally made up", **entry}]}),
+        encoding="utf-8",
+    )
+    report = validate_citations(tmp_path, manifest)
+    assert report.entries[0].status is expected, case
+    # Only BROKEN gates: `weak` surfaces a mis-attribution without failing a run whose quote is
+    # genuine.
+    assert report.passed is not gates, case
+
+
+def test_citation_weak_names_the_real_line(tmp_path: Path) -> None:
+    # The reason has to be actionable: synthesis gets one rework round on the fail edge, and a
+    # "snippet not found" with no location cannot be repaired in one pass.
+    (tmp_path / "a.py").write_text("x = 0\ny = 0\nneedle = 1\n", encoding="utf-8")
+    manifest = tmp_path / "sources.json"
+    manifest.write_text(
+        json.dumps({"sources": [{"id": "s", "path": "a.py", "line": 1, "snippet": "needle = 1"}]}),
+        encoding="utf-8",
+    )
+    entry = validate_citations(tmp_path, manifest).entries[0]
+    assert entry.status is CitationStatus.WEAK
+    assert "line 3" in entry.reason and "not at line 1" in entry.reason
+    # The location is echoed as data too, so a consumer need not parse the prose.
+    assert (entry.path, entry.line) == ("a.py", 1)
+
+
+def test_citation_multiline_snippet_at_the_cited_line_is_verified(tmp_path: Path) -> None:
+    # Quoting more than one line is ordinary citation craft. Matching only `lines[line-1]` would
+    # make every multi-line quote a mis-attribution, so the window is as tall as the snippet.
+    (tmp_path / "a.py").write_text("def f():\n    return 1\n\n", encoding="utf-8")
+    manifest = tmp_path / "sources.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "sources": [
+                    {"id": "s", "path": "a.py", "line": 1, "snippet": "def f():\n    return 1"}
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    report = validate_citations(tmp_path, manifest)
+    assert report.entries[0].status is CitationStatus.VERIFIED
+
+
+def test_citation_non_int_line_is_not_silently_skipped(tmp_path: Path) -> None:
+    # A string `line` fails `isinstance(..., int)`, so it used to skip the bounds check AND the
+    # on-line check, then pass via the whole-file fallback. Now it reads as "no line cited": the
+    # snippet still has to resolve, but no location is credited.
+    (tmp_path / "a.py").write_text("x = 0\nneedle = 1\n", encoding="utf-8")
+    manifest = tmp_path / "sources.json"
+    manifest.write_text(
+        json.dumps(
+            {"sources": [{"id": "s", "path": "a.py", "line": "2", "snippet": "needle = 1"}]}
+        ),
+        encoding="utf-8",
+    )
+    entry = validate_citations(tmp_path, manifest).entries[0]
+    assert entry.status is CitationStatus.VERIFIED
+    assert entry.line is None  # not credited as a cited location
+    assert "no line cited" in entry.reason
+
+
 # -- citation: node dispatch --------------------------------------------------
 
 
@@ -220,6 +348,75 @@ def test_citation_node_fails_for_hallucinated_manifest(tmp_path: Path) -> None:
         node, repo_dir=repo, artifacts_root=art, output_policy=OutputPolicy.REPOSITORY_DOCUMENT
     )
     assert result.outcome.kind == "fail"
+
+
+@pytest.mark.parametrize("passing", [True, False])
+def test_citation_node_sets_checks_path_on_both_outcomes(tmp_path: Path, passing: bool) -> None:
+    # P1.6 / DR-5: `checks_path` was set only by the command-profile FAILURE path, so on a passing
+    # citation check the per-entry verdicts reached nobody — while the downstream verifier's prompt
+    # asserted a guarantee based on them and could not audit that claim.
+    repo, art = tmp_path / "repo", tmp_path / "art"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "m.py").write_text("CONST = 7\n", encoding="utf-8")
+    entry = (
+        {"id": "s", "path": "src/m.py", "snippet": "CONST = 7"}
+        if passing
+        else {"id": "s", "path": "src/ghost.py"}
+    )
+    _write_sources(repo / "docs" / "research" / "t", [entry])
+    node = ChecksNode(id="citation_check", kind="checks", checker="citation")
+    inputs = NodeInputs(flow_dir=repo)
+    result, _ = _run_checks_node(
+        node,
+        repo_dir=repo,
+        artifacts_root=art,
+        output_policy=OutputPolicy.REPOSITORY_DOCUMENT,
+        inputs=inputs,
+    )
+    assert result.outcome.kind == ("pass" if passing else "fail")
+    assert inputs.checks_path is not None
+    assert Path(inputs.checks_path).name == "citation.json"
+    # The published report carries the location per entry, not just a reason string.
+    published = json.loads(Path(inputs.checks_path).read_text("utf-8"))
+    assert published["passed"] is passing
+    assert "path" in published["entries"][0] and "line" in published["entries"][0]
+
+
+def test_citation_node_reads_the_manifest_the_flow_named(tmp_path: Path) -> None:
+    # The filename was a literal in the node, so a flow whose writing node names its manifest
+    # anything else got `uncheckable: missing` and a gate that silently did nothing.
+    repo, art = tmp_path / "repo", tmp_path / "art"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "m.py").write_text("CONST = 7\n", encoding="utf-8")
+    report_dir = repo / "docs" / "research" / "t"
+    report_dir.mkdir(parents=True)
+    (report_dir / "citations.json").write_text(
+        json.dumps({"sources": [{"id": "s", "path": "src/ghost.py"}]}), encoding="utf-8"
+    )
+    node = ChecksNode(
+        id="citation_check", kind="checks", checker="citation", manifest="citations.json"
+    )
+    result, _ = _run_checks_node(
+        node, repo_dir=repo, artifacts_root=art, output_policy=OutputPolicy.REPOSITORY_DOCUMENT
+    )
+    assert (
+        result.outcome.kind == "fail"
+    )  # the renamed manifest WAS read, and its citation is broken
+
+
+def test_citation_node_reports_the_named_manifest_when_absent(tmp_path: Path) -> None:
+    repo, art = tmp_path / "repo", tmp_path / "art"
+    repo.mkdir()
+    node = ChecksNode(
+        id="citation_check", kind="checks", checker="citation", manifest="citations.json"
+    )
+    result, _ = _run_checks_node(
+        node, repo_dir=repo, artifacts_root=art, output_policy=OutputPolicy.REPOSITORY_DOCUMENT
+    )
+    assert result.outcome.kind == "pass"  # an unreadable manifest never gates
+    report = json.loads((node_run_dir(art, "t", "citation_check", 1) / "citation.json").read_text())
+    assert report["manifest_status"] == "missing"
+    assert report["entries"][0]["reason"] == "citations.json missing"  # names the real file
 
 
 # -- dependency_scan: pure runner ---------------------------------------------

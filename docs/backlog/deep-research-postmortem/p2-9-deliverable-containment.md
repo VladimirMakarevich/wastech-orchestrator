@@ -1,6 +1,6 @@
 # P2.9 — keep intermediates out of the documentation PR
 
-Priority: **P2** Status: **accepted (option 1 + 10g; option 2 withdrawn)** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-11
+Priority: **P2** Status: **implemented (option 1 + 10g; option 2 withdrawn; the profile downgrade declined)** Date: 2026-07-25 Source: [postmortem.md](postmortem.md) DR-11
 
 ## Problem
 
@@ -63,3 +63,19 @@ Note that the containment guard itself is not at fault and should not be loosene
 ## Depends on
 
 [P2.8](p2-8-node-output-handoff.md) if option 1 is chosen — otherwise removing the write removes the blueprint entirely.
+
+## Implemented
+
+2026-07-27, option 1 as a prompt change, plus 10g from [P3.10](p3-10-flow-and-config-hygiene.md). One part of option 1 was declined.
+
+**The instruction is gone.** `architecture_design.md` no longer tells the node that the deliverable directory is its writable path; it tells it to write nothing at all, and says why in the terms that matter to a model: everything in that directory is committed and opened as a pull request, so a working file ships as if it were part of the answer, and two documents that disagree are worse than one. `synthesis.md`'s adjacent phrasing ("write nothing anywhere else", which still permitted a third file _inside_ the directory) is now "exactly these two files, and no third file — not there, not anywhere else".
+
+**Where the blueprint goes instead.** The node's channel is its closing message, so the prompt now says that in one line and at length: the message _is_ the blueprint, at full size, and nothing left out of it survives the step. This is the part option 1 understated — it says "return its structure through the output schema only", but a plain author node has **no** output schema (its typed contract is `none`), so there was never a structured field to return it in. `synthesis` reads it through `{architecture_design_path}`, which it already did. Two prompts also stopped asserting "the typed structured result required by the output schema", which neither node has — that is [P3.10](p3-10-flow-and-config-hygiene.md)'s "no role prompt asserts a mechanism the node does not have", found while editing these two files.
+
+**Declined: the `read-only` downgrade.** Option 1's premise is that the write grant is "an unused write grant". It is not, any more: [P1.5](p1-5-research-role-prompts.md) (accepted and implemented the day _after_ this item was written) gave this node an empirical-confirmation remit — "unlike the analysis passes upstream you have a shell, so a claim that a command exits non-zero can be settled in one command instead of argued from a citation" — and on Claude the `read-only` profile's tool set is `Read`/`Glob`/`Grep`, i.e. no shell. Downgrading would silently delete the capability the later item deliberately added, which `.agents/rules/security.md` forbids as a first-class rule: restrictions only where a real risk requires them, and then the least restrictive one. The risk here is already closed by the prompt edit plus the containment guard, which confined every write correctly in the run that produced this item. The node keeps `workspace-write`, and the flow now carries a comment saying it is held for the shell and not for writes. `git_evidence` is not an alternative: it is rejected on a `workspace-write` node and grants only the git verbs.
+
+**The operator confirmed the decline on 2026-07-27**, so this is settled and the node keeps `workspace-write`. Two facts, checked rather than assumed, decided it: Claude is `primary` in the packaged config, so the node really does run where `read-only` means no shell at all; and `commit_code` stages `changed_code_paths()` with no filename filter, so a stray file really would ship — the risk is real, it is just the hypothetical half of the trade. What settled it is which failure is visible: a stray file is legible in the pull request and now passes the target's own gate (10g) before it lands, while a claim left unverified because the shell was removed looks exactly like a verified one. `.agents/rules/security.md` points the same way — a real risk gets the least restrictive fix, not a capability removed for a lapse that the prompt now forbids in terms.
+
+Recorded for a Codex-based instance, since it is not obvious: on **Codex** the `read-only` profile keeps the shell (workspace mounted `read`, network off), so there the downgrade would give both properties at once. It is not right for a _packaged_ flow — pinning a node to a provider that may not be in `agents.allowed` — but an operator running Codex can take it in their own `.worc/flows/deep_research.yaml`.
+
+**Acceptance, honestly.** Criterion 1's `read-only` clause is **retired**, not outstanding: the node writes nothing (the part that mattered) and keeps the profile by operator decision. Criteria 2 and 3 are met — 10g's gate is in the graph, and no engine path filters a commit by name (nothing on the publish path was touched). Criterion 4 (the citation checker's declared manifest field) was already closed by [P1.6](p1-6-citation-checker-strictness.md). The end-to-end "commits its report and no intermediate" cannot be observed from a unit suite: it is the campaign's pending checkpoint re-run. The `## Test` line above still names a `read-only` fixture; that half of it is retired with the clause.

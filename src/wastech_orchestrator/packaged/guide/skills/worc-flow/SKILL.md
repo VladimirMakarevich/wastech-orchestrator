@@ -38,12 +38,13 @@ Before drafting anything, read the packaged flow guide — `.worc/guide/flows/RE
 - Keep the graph as small as the deliverable needs — every node is a launch, a budget, and a failure mode.
 - Prefer the built-in node output contracts over a custom `output_schema`; reach for a custom schema only when you genuinely need a different shape.
 - Reuse `{<node_id>_path}` to hand one node's result to the next instead of inventing new plumbing. One node exposes exactly one output — split into several nodes to publish several results.
+- When a node's real deliverable is a file it writes, declare that file with `output_file:` so the channel carries the document instead of the node's closing summary of it. Otherwise the next node works from the smaller half.
 
 ## What not to do
 
 - Do not pick `output_policy` by what the deliverable "sounds like". A brand-new document that is not a `docs/research/*` sources bundle (e.g. a blog post under `blog/`) is a `code_change`, **not** a `repository_document` — choosing `repository_document` confines every write to `docs/research/<task_id>/` and the flow hard-stops at `manual_action_required` on the first real write.
 - Do not set a custom `output_schema` without making **every** object in it (top level and nested) `additionalProperties: false` — Codex rejects a non-strict schema with a hard 400 and the node fails on every run.
 - Do not leave an `evaluator` node with a prose-only "looks good" prompt — an evaluator is **fail-closed**: it must emit the findings result or the task routes to `manual_action_required`.
-- Do not raise `permission_ceiling` above what the flow needs, and do not grant `workspace-write` to a node that only reads. A Codex `workspace-write` node with network access is rejected — split external fetches into a `read-only` node.
+- Do not raise `permission_ceiling` above what the flow needs, and do not grant `workspace-write` to a node that only reads. A read-only node that needs to read git history takes `git_evidence: true`, not `workspace-write`. A Codex `workspace-write` node with network access is rejected — split external fetches into a `read-only` node.
 - Do not point a `role_file` outside the flow's own `<task_type>/` folder, and never use `..`.
 - Do not leave a `fail`/`rework` loop unbounded — every loop needs a `budget` or validation fails.

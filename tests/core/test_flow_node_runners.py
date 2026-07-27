@@ -144,7 +144,9 @@ class FakeStore:
         self.editing_lineage[(row.task_id, row.subtask_order, row.lineage_key)] = row
 
 
-def _result(structured: dict[str, Any] | None = None) -> AgentRunResult:
+def _result(
+    structured: dict[str, Any] | None = None, *, final_message: str | None = None
+) -> AgentRunResult:
     return AgentRunResult(
         status=RunStatus.SUCCEEDED,
         provider="codex",
@@ -154,6 +156,7 @@ def _result(structured: dict[str, Any] | None = None) -> AgentRunResult:
         started_at="t0",
         finished_at="t1",
         structured_output=structured,
+        final_message=final_message,
     )
 
 
@@ -185,6 +188,7 @@ def _services(
     snapshot: Any = None,
     packet_builder: Any = None,
     security_preamble: str | None = None,
+    allow_git_evidence: bool = False,
 ) -> Any:
     return NodeServices(
         router=router,
@@ -198,6 +202,7 @@ def _services(
         snapshot=snapshot,
         packet_builder=packet_builder,
         security_preamble=security_preamble,
+        allow_git_evidence=allow_git_evidence,
     )
 
 
@@ -1745,8 +1750,12 @@ def test_evaluator_non_blocking_gate_severity_self_caps(tmp_path: Path) -> None:
     inputs = _inputs(tmp_path)
     first = EvaluatorNodeRunner(services, inputs).run(node, _ctx(node))
     assert first.outcome.kind == "rework"  # medium gates under the lowered gate
+    assert first.outcome.rework_exhausted is False  # budget still had a round left
     second = EvaluatorNodeRunner(services, inputs).run(node, _ctx(node))
     assert second.outcome.kind == "accept"  # budget spent → accept, not manual
+    # P0.1: the terminal accept must be FLAGGED exhausted — that flag is the whole operator signal
+    # (console warning + ⚠️ telegram trace at orchestrator.py). A silent accept is the DR-1 defect.
+    assert second.outcome.rework_exhausted is True
 
 
 def test_evaluator_builds_memory_packet_when_role_references_it(tmp_path: Path) -> None:
@@ -1809,6 +1818,122 @@ def test_evaluator_medium_finding_is_non_blocking_and_carried(tmp_path: Path) ->
     finding = result.outcome.findings[0]
     assert finding.severity == "medium"
     assert finding.blocking is False
+
+
+def test_evaluator_outcome_carries_the_providers_final_message(tmp_path: Path) -> None:
+    # DR-2 wire 1: the evaluator runner built its NodeOutcome without `final_message`, so the
+    # provider's own account of what it found — already written to the run dir's summary.md — was
+    # dropped one layer up. The supervisor then observed a bare `Outcome: accept` and reported the
+    # gate as having passed. The agent runner has always carried this; the evaluator now does too.
+    (tmp_path / "r.md").write_text("review {diff_path}", "utf-8")
+    node = _evaluator("review")
+    prose = "Uneven audit depth: the headline verdict rests on subsystems only spot-checked."
+    router = FakeRouter(
+        _result({"findings": [{"what": "uneven depth", "severity": "medium"}]}, final_message=prose)
+    )
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "accept"
+    assert result.outcome.final_message == prose
+
+
+def test_evaluator_resolves_an_upstream_node_output_path(tmp_path: Path) -> None:
+    # DR-7: an evaluator that judges an upstream node's *work* (a coverage gate) has to see that
+    # work. The generic {<id>_path} channel now resolves inside an evaluator role file exactly as it
+    # does for an agent; before, it rendered verbatim and such a gate could only judge the
+    # repository, never the audit of it.
+    (tmp_path / "gate.md").write_text(
+        "Gate.{?scan_path} Read the scan at {scan_path}.{/scan_path}", "utf-8"
+    )
+    scan = AgentNode(id="scan", kind="agent", role_file="scan.md")
+    gate = EvaluatorNode(
+        id="gate",
+        kind="evaluator",
+        role="verifier",
+        role_file="gate.md",
+        permission_profile=PermissionProfile.READ_ONLY,
+    )
+    doc = FlowDoc(
+        name="t",
+        task_type="t",
+        permission_ceiling=PermissionProfile.WORKSPACE_WRITE,
+        output_policy=OutputPolicy.CODE_CHANGE,
+        publishing=PublishingPolicy.PULL_REQUEST,
+        nodes=(scan, gate),
+        edges=(),
+        budgets=MappingProxyType({}),
+    )
+    snap = FlowSnapshot(
+        doc=doc,
+        nodes_by_id=MappingProxyType({"scan": scan, "gate": gate}),
+        adjacency=MappingProxyType({}),
+        flow_fingerprint="fp",
+    )
+    scan_out = tmp_path / "logs" / "task-1" / "stages" / "scan" / "run-000001" / "scan.out.md"
+    scan_out.parent.mkdir(parents=True, exist_ok=True)
+    scan_out.write_text("SCAN RESULT", "utf-8")
+
+    router = FakeRouter(_result({"findings": []}))
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    ctx = NodeContext(
+        snapshot=snap, run_state=FlowRunState(flow_fingerprint="fp"), node=gate, task_id="task-1"
+    )
+    EvaluatorNodeRunner(services, _inputs(tmp_path)).run(gate, ctx)
+    assert f"Read the scan at {scan_out.as_posix()}." in router.requests[0].prompt
+
+
+def test_evaluator_node_output_var_empty_before_upstream_runs(tmp_path: Path) -> None:
+    # The other half: an upstream node that has not produced output leaves the block dropped, so a
+    # gate placed before its inputs exist renders no dangling pointer.
+    (tmp_path / "gate.md").write_text(
+        "Gate.{?scan_path} Read the scan at {scan_path}.{/scan_path}", "utf-8"
+    )
+    scan = AgentNode(id="scan", kind="agent", role_file="scan.md")
+    gate = EvaluatorNode(
+        id="gate",
+        kind="evaluator",
+        role="verifier",
+        role_file="gate.md",
+        permission_profile=PermissionProfile.READ_ONLY,
+    )
+    doc = FlowDoc(
+        name="t",
+        task_type="t",
+        permission_ceiling=PermissionProfile.WORKSPACE_WRITE,
+        output_policy=OutputPolicy.CODE_CHANGE,
+        publishing=PublishingPolicy.PULL_REQUEST,
+        nodes=(scan, gate),
+        edges=(),
+        budgets=MappingProxyType({}),
+    )
+    snap = FlowSnapshot(
+        doc=doc,
+        nodes_by_id=MappingProxyType({"scan": scan, "gate": gate}),
+        adjacency=MappingProxyType({}),
+        flow_fingerprint="fp",
+    )
+    router = FakeRouter(_result({"findings": []}))
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    ctx = NodeContext(
+        snapshot=snap, run_state=FlowRunState(flow_fingerprint="fp"), node=gate, task_id="task-1"
+    )
+    EvaluatorNodeRunner(services, _inputs(tmp_path)).run(gate, ctx)
+    assert router.requests[0].prompt == "Gate."
 
 
 def _test_quality(max_rework_per_stage: int = 1) -> EvaluatorNode:
@@ -2806,8 +2931,9 @@ def test_workspace_write_git_control_drift_is_manual(tmp_path: Path) -> None:
 
 
 def test_read_only_node_skips_git_control_capture(tmp_path: Path) -> None:
-    # A read-only attempt cannot mutate git, so it is neither captured nor compared — a git whose
-    # capture would explode is never called.
+    # A read-only attempt without the git-evidence grant has no shell at all, so it is neither
+    # captured nor compared — a git whose capture would explode is never called. (A *granted*
+    # read-only node does get fingerprinted, from the reporting bracket — see the section below.)
     class _ExplodingGit(FakeGit):
         def capture_git_control_state(self) -> object:
             raise AssertionError("a read-only node must not capture git control state")
@@ -2829,3 +2955,142 @@ def test_read_only_node_skips_git_control_capture(tmp_path: Path) -> None:
     )
     result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "done"  # completed; the git control capture was skipped
+
+
+# -- read-only git evidence ----------------------------------------------------
+
+
+def _audit_node() -> AgentNode:
+    return AgentNode(
+        id="audit",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.READ_ONLY,
+        git_evidence=True,
+    )
+
+
+def test_git_evidence_needs_both_the_declaration_and_the_operator_switch(tmp_path: Path) -> None:
+    # The two halves are what keep the envelope un-weakenable through a flow: a declaring node is
+    # accepted and completely inert while the operator's switch is off (the default), and a node
+    # that declares nothing gets nothing even when the switch is on.
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    declaring, silent = (
+        _audit_node(),
+        AgentNode(
+            id="audit",
+            kind="agent",
+            role_file="r.md",
+            permission_profile=PermissionProfile.READ_ONLY,
+        ),
+    )
+    for node, allowed, expected in (
+        (declaring, False, False),  # declared, not allowed → inert
+        (declaring, True, True),  # declared and allowed → granted
+        (silent, True, False),  # allowed but never asked → nothing
+        (silent, False, False),
+    ):
+        router, store = FakeRouter(_result()), FakeStore()
+        services = _services(
+            router,
+            store,
+            FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+            allow_git_evidence=allowed,
+        )
+        AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+        assert router.requests[0].git_evidence is expected
+
+
+def test_a_write_by_a_granted_read_only_node_warns_and_still_finishes(tmp_path: Path) -> None:
+    # The sandbox write-denies the whole clone for such a node, so a change means that enforcement
+    # did not hold. It is reported, not acted on: the outcome stays `done` and the task is never
+    # parked — the grant exists so an audit node can read history, and a stray file is not worth
+    # trading that capability for. `read_only_write` is what the post-node hook turns into the
+    # operator's console warning + ⚠️ trace.
+    from wastech_orchestrator.git_manager import ChangedPath
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = _audit_node()
+    git = FakeGit(changed_seq=[(), (ChangedPath(status="??", path="stray.txt"),)])
+    services = _services(
+        FakeRouter(_result()),
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=git,
+        allow_git_evidence=True,
+    )
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "done"
+    assert result.outcome.read_only_write is True
+    # The post-edit guard stays off for a read-only node: no diff is captured, so nothing downstream
+    # is ever handed the stray change.
+    assert not any(c[0] == "write_current_diff" for c in git.calls)
+
+
+def test_git_control_drift_by_a_granted_read_only_node_warns_and_still_finishes(
+    tmp_path: Path,
+) -> None:
+    # Operator decision 2 (2026-07-26) is read literally: a read-only node holding the grant never
+    # parks the task — not even for the sharper of the two events. Control-state drift (a poisoned
+    # hook, `.git/config`, the index) therefore reports where a workspace-write attempt raises
+    # NodeManualRequired. The outcome carries the redacted aspect-level summary rather than a bare
+    # flag because continuing means the orchestrator's own next git command runs in that clone: the
+    # warning is the whole mitigation, so it has to say *what* changed.
+    from wastech_orchestrator.git_manager import GitControlDrift, GitControlDriftItem
+
+    class _DriftGit(FakeGit):
+        def compare_git_control_state(self, before: object) -> GitControlDrift:
+            return GitControlDrift((GitControlDriftItem("hooks", "hook 'post-commit' added"),))
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = _audit_node()
+    services = _services(
+        FakeRouter(_result()),
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=_DriftGit(),
+        allow_git_evidence=True,
+    )
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "done"  # warned, not parked
+    assert result.outcome.read_only_git_drift == "hooks: hook 'post-commit' added"
+
+
+def test_a_clean_granted_read_only_node_raises_no_warning(tmp_path: Path) -> None:
+    # The comparison is before-vs-after, not "is the tree dirty": a pre-existing change left by an
+    # earlier workspace-write node must not be blamed on this one.
+    from wastech_orchestrator.git_manager import ChangedPath
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    dirty = (ChangedPath(status="M", path="already.txt"),)
+    services = _services(
+        FakeRouter(_result()),
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=FakeGit(changed=dirty),
+        allow_git_evidence=True,
+    )
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(_audit_node(), _ctx(_audit_node()))
+    assert result.outcome.read_only_write is False
+    assert result.outcome.read_only_git_drift is None
+
+
+def test_the_write_check_is_skipped_for_a_node_without_the_grant(tmp_path: Path) -> None:
+    # No node pays for a check that cannot apply to it: without the grant there is no shell, so the
+    # tree is never inspected.
+    from wastech_orchestrator.git_manager import ChangedPath
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(
+        id="audit", kind="agent", role_file="r.md", permission_profile=PermissionProfile.READ_ONLY
+    )
+    git = FakeGit(changed_seq=[(), (ChangedPath(status="??", path="stray.txt"),)])
+    services = _services(
+        FakeRouter(_result()),
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=git,
+        allow_git_evidence=True,
+    )
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.read_only_write is False

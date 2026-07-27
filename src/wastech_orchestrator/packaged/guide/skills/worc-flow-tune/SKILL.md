@@ -1,6 +1,6 @@
 ---
 name: worc-flow-tune
-description: Tune an existing wastech-orchestrator flow's per-node execution knobs — which `provider`/`model`/`reasoning` a step runs on, plus `timeout_seconds`, `network_access`, `extra_args`, and the flow's loop `budgets` — without changing the graph or the prompts. Use when a step should run on a different provider or effort; author a new flow with worc-flow, or reword a step with worc-flow-role.
+description: Tune an existing wastech-orchestrator flow's per-node execution knobs — which `provider`/`model`/`reasoning` a step runs on, plus `timeout_seconds`, `network_access`, `git_evidence`, `extra_args`, and the flow's loop `budgets` — without changing the graph or the prompts. Use when a step should run on a different provider or effort; author a new flow with worc-flow, or reword a step with worc-flow-role.
 ---
 
 # worc-flow-tune
@@ -23,6 +23,7 @@ Before editing, read the packaged flow reference `.worc/guide/flows/reference.md
    - `reasoning` — overrides effort; **must be valid for the resolved provider** (Claude and Codex effort sets differ) — this one _is_ validated.
    - `timeout_seconds` — per-attempt CLI wall-clock ceiling.
    - `network_access` — tri-state per-node override of the flow's `network_policy` (`true`/`false`/omit).
+   - `git_evidence` — tri-state; `true` asks for the read-only git verbs so the node can inspect delivery history. Honored only while the operator's `security.allow_git_evidence` is on (default off, so the declaration is otherwise inert), and **rejected on a `workspace-write` node** — it already has an unrestricted shell.
    - `extra_args` — raw CLI flags for this node (subject to the forbidden-args scan).
    - `best_effort` — tolerate an infrastructure failure and continue (e.g. a summary node).
 3. For loop iteration caps, edit the flow-level `budgets:` mapping (each named `fail`/`rework` loop; the engine clamps to `min(flow, config cap)`), not a node field.

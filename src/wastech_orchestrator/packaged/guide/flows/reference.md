@@ -53,9 +53,24 @@ A task's `publish` front-matter field can only **downgrade** this (`min(flow_pol
 
 A node's `network_access` overrides this for that node alone (`true` grants even with no flow policy; `false` forces one node offline). **A Codex `workspace-write` node with network is rejected** — split external fetches into a `read-only` node.
 
+### Read-only git evidence
+
+An audit node that treats delivery history as prime evidence needs to be able to read it. `git_evidence: true` on an agent or evaluator node asks for that; the operator's `security.allow_git_evidence` decides whether the request is honored. Both halves are required — a flow can express the need but cannot grant itself the capability, and turning the switch on hands the verbs only to the nodes that asked, never to every read-only node in the run. With the switch off (the default) a declaring flow still loads and validates; it simply runs as it does today.
+
+**What you get is stated as an observable contract, not as a list of flags: history is readable, the repository cannot be changed, and nothing is published.** The two providers reach it by different means, and it is worth knowing which, because the guarantees have different shapes:
+
+- **Claude** has no shell at all under `read-only`, so the grant adds one and scopes it to the read-only verbs (`log`, `show`, `diff`, `blame`, `status`, `rev-list`, `rev-parse`, `ls-files`, `shortlog`, `describe`, `cat-file`, `for-each-ref`). A command matching none of them is refused by the CLI before it runs. Underneath that allowlist the OS sandbox write-denies the whole clone, so the allowlist is the convenience and the sandbox is the guarantee. **If you pin a new `claude` major, re-verify that refusal.** That the CLI *denies* a `Bash` call matching no `--allowedTools` pattern (rather than approving it) is behavior no offline test can assert and no `--help` grep can answer — preflight checks that the flag exists, not what it means. It was verified by hand against `claude` 2.1.217: under the argv this adapter builds, `--allowedTools "…,Bash(git log:*)"` plus a request to run `echo x > f.txt` must come back an error tagged `"non_execution_kind": "permission-rule"` with no file created, while `git log --oneline -1` must run clean. If a future CLI approves the first one instead, the verb allowlist is decorative and only the sandbox confines the shell — history stays readable and the repository still cannot be changed, but the node is no longer held to *reading git*. The documented fallback in that case is Codex's shape: drop the allowlist and rely on the sandbox alone. On a host where a shell cannot be sandboxed the adapter refuses the attempt rather than running it unsandboxed — on Linux/WSL2 missing `bubblewrap`+`socat` that is a hard preflight-class failure, and on native Windows (no supported Bash sandbox) the shell is simply dropped and the node runs as an ordinary read-only node.
+- **Codex** needs nothing added: its `read-only` sandbox already permits commands, so `git log` works there today. What forbids mutation is not a verb list but the sandbox — the workspace is mounted `read` and the network is off, so `git commit` has nothing to write to and `git push` has nowhere to go. That is the stronger guarantee of the two, and no prompt, task or flow can argue with it.
+
+So do not expect a symmetric verb allowlist across providers; expect the same observable contract. `security.denied_commands` (`git commit`, `git push`, `gh pr create`, `gh pr merge`) stays the floor beneath both — a deny always beats an allow — and publishing remains the orchestrator's alone.
+
+If a write from such a node ever does land, the run does **not** park: the orchestrator emits a console warning plus a ⚠️ Telegram trace (`done (read-only node wrote to the workspace)`) and continues, and the change is not published or handed to any downstream node. The reasoning is the same as for a non-blocking evaluator's exhausted budget — the capability is real and worth keeping, so a stray file is reported rather than traded for it.
+
+The same holds if such a node changes **Git control state** — a hook, `.git/config`, the index: warning plus a ⚠️ `done (read-only node changed git control state)` trace, naming the drifted aspect, and the run continues. **Treat that one as a stop-the-run signal, not a note.** The two events differ in what they cost you: a stray file is inert (nothing stages it, nothing downstream reads it), while a planted `.git/hooks/post-commit` is executed by the next git command in that clone — and the next one is the orchestrator's own commit or push. Do not let the run finish; kill it, discard the clone, and look at what was planted. A `workspace-write` node doing the same still parks the task in `manual_action_required` — this never-park rule covers the read-only class alone.
+
 ### `defaults.evaluator`
 
-Applied to any evaluator node that omits the field. Keys: `session_scope` (default `fresh_disposable`), `permission_profile` (default `read-only`), `max_rework_per_stage` (default `1`), `gate_severity` (default `high`). Use it to avoid repeating the same evaluator settings across many evaluator nodes (e.g. set a stricter `gate_severity` once for a content flow's critics).
+Applied to any evaluator node that omits the field. Keys: `session_scope` (default `fresh_disposable`), `permission_profile` (default `read-only`), `max_rework_per_stage` (default `1`), `gate_severity` (built-in default `high`). Use it to avoid repeating the same evaluator settings across many evaluator nodes — `deep_research` sets `gate_severity: medium` here, which covers both of its evaluators at once.
 
 ### `decomposition`
 
@@ -89,17 +104,30 @@ Every node has an `id` (unique; see reserved ids below) and a `kind`. The six ki
 | `lineage_affinity` | string \| null | `null` | Target must be an `editing_lineage` owner with no affinity of its own (one hop; no cross-provider). | Join another editing node's session (e.g. `fixing` joins `implementation`). |
 | `permission_profile` | `read-only` \| `workspace-write` \| null | `null` → resolved from the flow ceiling | Must be `<= permission_ceiling`. | This node's filesystem access. Grant `workspace-write` only to nodes that edit. |
 | `network_access` | bool \| null (tri-state) | `null` (inherit `network_policy`) | Codex `workspace-write` + network is rejected. | Per-node network override. |
+| `git_evidence` | bool \| null (tri-state) | `null` (does not ask) | Rejected on a `workspace-write` node (it already has an unrestricted shell). Honored only while the operator's `security.allow_git_evidence` is on. | Ask for the **read-only git verbs** so this node can inspect delivery history — see [Read-only git evidence](#read-only-git-evidence) below. |
 | `provider` | `codex` \| `claude` \| null | `null` → global primary | Must be in `agents.allowed`. | Which provider runs this node. |
 | `model` | string \| null | `null` | Passed through unverified. | Override the provider's default model. |
 | `reasoning` | string \| null | `null` | Must be valid for the resolved provider (Claude vs Codex sets differ). | Override reasoning effort. |
 | `timeout_seconds` | int \| null | `null` | — | Per-attempt CLI wall-clock ceiling. |
 | `output_artifact` | `enriched_spec` \| `plan` \| `summary` \| `report` \| null | `null` | Vocabulary is fixed to these four. | Persist the node's output into a well-known slot (see [roles.md](roles.md)). `report` (read-only node) has the orchestrator capture the node's structured output into the private report dir. |
+| `output_file` | string \| null | `null` | One portable filename — no path separators, no `..` (fatal at load). Mutually exclusive with `output_artifact` (fatal). | The file this node **produces** is what `{<node_id>_path}` carries downstream, instead of the node's closing message. Resolved inside the flow's `output_policy` report dir (the repository root for a policy without one). See [roles.md](roles.md#when-the-nodes-product-is-a-file-it-writes-output_file). |
 | `output_schema` | JSON-encoded string \| null | `null` | **Every object must set `additionalProperties: false`** (Codex 400s otherwise). | Custom structured-output shape. Prefer the built-in contract. |
 | `best_effort` | bool | `false` | — | Tolerate an infrastructure failure and continue the task (e.g. the summary node). |
 | `hitl` | `{allow_question, allow_approval}` \| null | `null` | — | Allow the agent to ask a question / request approval mid-node. |
 | `extra_args` | list[str] | `[]` | Forbidden-args scan; full-access mode is rejected under `strict_isolation`. | Raw CLI flags for this node. |
 | `skills` | list[str] | `[]` | Existence checked at task start (name or repo-relative `SKILL.md` path). | Operator-pinned repo skills for this node. |
-| `when` | `{fact, equals?}` \| null | `null` | `fact` must be namespaced `derived.*` or `config.*`. | Conditionally run the node (e.g. `derived.needs_refinement`). |
+| `when` | `{fact, equals?}` \| null | `null` | `fact` must be namespaced `derived.*` or `config.*`. | Conditionally run the node — see [Conditional nodes](#conditional-nodes-when) below. |
+
+#### Conditional nodes (`when:`)
+
+The fact resolver is core code, not an operator surface: the namespace prefix is validated at load, but the **names** are a closed set of two, and an unrecognized name resolves `false` silently — so a typo is indistinguishable from a gate that works. Read them literally before gating anything on them:
+
+| `fact` | Actually means | Watch out |
+| --- | --- | --- |
+| `derived.needs_refinement` | The task file is **not** well-formed — a non-empty description plus an `## Acceptance criteria` section already counts as complete. | This is a *formedness* check, not a "does this task need scoping" check. Every properly written task skips the node. |
+| `config.external_research` | This **flow** declares a `network_policy`. Despite the namespace it is neither a config key nor a task field. | Always `true` in a flow that sets `network_policy`, always `false` in one that does not — it can never gate at run time. |
+
+Neither is a relevance test. To make a node optional per task, disable it in the task file (`nodes: { <id>: { enabled: false } }`); that is the operator-facing switch, and it is checked before the predicate. If you keep a `when:` that cannot change the outcome, say so in a comment next to it — an inert predicate reads like a working gate.
 
 ### `evaluator` node
 
@@ -110,9 +138,10 @@ Every node has an `id` (unique; see reserved ids below) and a `kind`. The six ki
 | `session_scope` | `fresh_disposable` \| `resume_own_lineage` | `fresh_disposable` (or `defaults.evaluator`) | **Never `editing_lineage`** (fatal). | An evaluator never joins an author's editing session. |
 | `permission_profile` | `read-only` | `read-only` | **Forced read-only** (fatal otherwise). | Evaluators never write. |
 | `network_access` | bool \| null | `null` (inherit) | — | Per-node network override. |
+| `git_evidence` | bool \| null | `null` (does not ask) | Honored only while `security.allow_git_evidence` is on. | Ask for the read-only git verbs (see [Read-only git evidence](#read-only-git-evidence)). The evaluator stays read-only either way. |
 | `blocking` | bool | `true` | — | `true` = a `rework` verdict loops until the named-loop budget is spent, then parks to manual. `false` = advisory. |
 | `max_rework_per_stage` | int | `1` | **Only used when `blocking: false`.** | A non-blocking evaluator accepts after this many rework verdicts instead of looping. When the budget is spent with a finding still open it accepts and continues (never `manual`) — and the orchestrator emits a **console warning + a ⚠️ Telegram trace** (`accept (rework budget exhausted)`) so you know the stage moved on and may need follow-up. |
-| `gate_severity` | `blocking` \| `critical` \| `high` \| `medium` \| `low` | `high` | Must be one of the five severities. | Minimum finding severity that gates: a finding at least this severe drives `rework`, less-severe ones are advisory. Default `high` blocks high/critical/blocking. Lower it (e.g. `low`) to make a critic block on any finding — pair with a larger fix budget so the extra rework rounds have headroom. Orthogonal to `blocking` (that decides whether the node gates at all; this decides which severities count). |
+| `gate_severity` | `blocking` \| `critical` \| `high` \| `medium` \| `low` | `high` | Must be one of the five severities. | Minimum finding severity that gates: a finding at least this severe drives `rework`, less-severe ones are advisory (still reported — see below). The built-in default `high` blocks high/critical/blocking; **every packaged flow whose evaluator is a quality lens sets `medium`**, because "is this good enough" has no natural way to emit `high`. Lower it to `low` to block on any finding. Orthogonal to `blocking` (that decides whether the node gates at all; this decides which severities count) — but read them together: on a **`blocking: true`** node a gating finding loops the named-loop budget and then parks the task in `manual_action_required`, so lowering the gate there means raising that budget too. On a non-blocking node the same change costs at most `max_rework_per_stage` extra rounds and lands on accept + a ⚠️ warning. |
 | `provider` / `model` / `reasoning` | as agent | `null` | as agent | Per-node provider overrides. |
 | `when` | predicate | `null` | as agent | Conditional run. |
 
@@ -120,8 +149,11 @@ Every node has an `id` (unique; see reserved ids below) and a `kind`. The six ki
 
 | Field | Type / values | Default | Meaning |
 | --- | --- | --- | --- |
-| `checker` | `command_profile` \| `citation` \| `dependency_scan` | required | The built-in checker to run. `command_profile` runs the repo's configured `checks.command_sets`; `citation` verifies a research report's `sources.json`; `dependency_scan` runs a dependency vulnerability scan. |
+| `checker` | `command_profile` \| `citation` \| `dependency_scan` | required | The built-in checker to run. `command_profile` runs the repo's configured `checks.command_sets`; `citation` verifies a research report's citation manifest; `dependency_scan` runs a dependency vulnerability scan. |
+| `manifest` | string | `sources.json` | `citation` only: the manifest filename inside the flow's report dir. One portable filename — no path separators, no `..` (fatal at load). Set it when your writing node names its manifest something else; the wrong name yields `uncheckable: <name> missing` and a gate that does nothing. Note `repository_document`'s required-files list is fixed at `report.md` + `sources.json`, so a renamed manifest is still checked but is not registered as a `report` artifact. |
 | `when` | predicate | `null` | Conditional run. |
+
+The `citation` checker classifies each entry as `verified` (the snippet is present **at the cited line**), `weak` (the snippet is in the file but not at the cited line — a real quote, a mis-attributed location), `broken` (a path/line/snippet that does not resolve), or `uncheckable` (an external `url`, an entry with no snippet to check, or a malformed entry). **Only `broken` gates.** It never judges the `claim` field: a real snippet at a real line can still carry a fabricated assertion, which is an evaluator's job — so read a pass as "every location resolves", never as "every claim holds". The per-entry verdicts are published on both outcomes and reach the next node as `{checks_path}`; that file also carries `manifest_path` (repo-relative, `null` for a flow with no report dir), so the evaluator can open the manifest for each entry's claim without its prompt hardcoding where your deliverable lives.
 
 ### `tool` node
 

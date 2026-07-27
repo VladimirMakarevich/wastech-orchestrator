@@ -203,3 +203,15 @@ def test_allowed_provider_is_checked(base_config: OrchestratorConfig) -> None:
     assert ProviderId.CODEX in base_config.agents.allowed
     cfg = _with_provider(base_config, ProviderId.CODEX, sandbox="danger-full-access")
     assert any(r.startswith("codex:") for r in check_isolation(cfg, ISOLATION_CHECKS))
+
+
+def test_allow_git_evidence_not_flagged_under_strict(base_config: OrchestratorConfig) -> None:
+    # The grant does not relax the ceiling, so it is never a strict_isolation preflight reason. The
+    # host check that matters for it is per-attempt and lives in the adapter: a granted shell on a
+    # host that cannot sandbox it is refused there (CAPABILITY_UNAVAILABLE), with the node's
+    # declaration in hand. This gate sees only provider config and would over-flag every run.
+    cfg = replace(
+        base_config,
+        security=replace(base_config.security, strict_isolation=True, allow_git_evidence=True),
+    )
+    assert check_isolation(cfg, ISOLATION_CHECKS) == []

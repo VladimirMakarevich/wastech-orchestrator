@@ -176,6 +176,7 @@ def build_git_config(
     tasks_dir: str = "tasks",
     telegram_trace: bool = False,
     memory_enabled: bool = False,
+    allow_git_evidence: bool = False,
     checkout_base_on_cleanup: bool | None = None,
 ) -> OrchestratorConfig:
     """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks."""
@@ -218,6 +219,7 @@ repo:
     codex:
       command: "codex"
 security:
+  allow_git_evidence: {str(allow_git_evidence).lower()}
   allowed_environment:
 {env_lines}
 {validation_block}{telegram_block}checks:

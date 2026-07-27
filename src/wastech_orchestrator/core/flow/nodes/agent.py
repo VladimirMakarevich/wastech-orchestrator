@@ -22,17 +22,21 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Any
 
 from wastech_orchestrator.core.dangerous_diff import (
     DangerousDiff,
     evaluate_diff_gate,
 )
-from wastech_orchestrator.core.flow.context_paths import build_path_context
+from wastech_orchestrator.core.flow.context_paths import (
+    build_node_output_paths,
+    build_path_context,
+)
 from wastech_orchestrator.core.flow.contracts import (
     PermissionProfile,
     SessionScope,
+    resolve_git_evidence,
     resolve_network_access,
 )
 from wastech_orchestrator.core.flow.engine import NodeContext, NodeOutcome, NodeResult
@@ -54,7 +58,7 @@ from wastech_orchestrator.core.flow.observability import record_run_observabilit
 from wastech_orchestrator.core.flow.output_policy import resolve_output_policy, within_subdir
 from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file, render_role_prompt
 from wastech_orchestrator.core.flow.prompt_vars import valid_prompt_vars
-from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode, ToolNode
+from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode
 from wastech_orchestrator.core.flow.usage_accounting import (
     deserialize_usage,
     guard_output_baseline,
@@ -76,13 +80,9 @@ from wastech_orchestrator.core.hitl import (
     turn_gate_interaction_path,
     typed_output_schema,
 )
+from wastech_orchestrator.git_manager import ChangedPath, GitControlState
 from wastech_orchestrator.notify import AskKind, AskResult
-from wastech_orchestrator.providers.artifacts import (
-    TOOL_STDOUT_FILENAME,
-    exchange_latest_run_file,
-    latest_run_file,
-    task_artifact_dir,
-)
+from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.providers.base import (
     MAX_TURNS_SUBTYPE,
     AgentRunRequest,
@@ -92,6 +92,18 @@ from wastech_orchestrator.providers.base import (
 )
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import EditingLineageRow, NodeRunRow
+
+
+@dataclass(frozen=True, slots=True)
+class _GrantedShellBefore:
+    """WRI-009 state captured before a read-only node with a granted shell runs, for reporting.
+
+    Both fields exist to be compared against after the attempt: ``control`` catches a poisoned
+    hook / ``.git/config`` / index, ``tree`` catches a stray working-tree write. Neither parks.
+    """
+
+    control: GitControlState
+    tree: tuple[ChangedPath, ...]
 
 
 class AgentNodeRunner:
@@ -118,9 +130,10 @@ class AgentNodeRunner:
     # -- simple (non-HITL) agent run ------------------------------------------
 
     def _run_simple(self, node: AgentNode, ctx: NodeContext, route: ResolvedRoute) -> NodeResult:
+        before = self._granted_shell_before(node, ctx)
         run_id, outcome = self._invoke_with_turn_gate(node, ctx, route, human_input_path=None)
         self._apply_post_edit_guard(node, ctx, route)
-        return NodeResult(node_id=node.id, outcome=_agent_outcome(outcome), node_run_id=run_id)
+        return self._result(node, ctx, outcome, run_id, before)
 
     # -- embedded HITL (refinement / planning) --------------------------------
 
@@ -134,6 +147,7 @@ class AgentNodeRunner:
         if persisted is not None:
             human_input_path = self._resume_interaction(node, ctx, path, persisted)
 
+        before = self._granted_shell_before(node, ctx)
         run_id, outcome = self._invoke_with_turn_gate(
             node, ctx, route, human_input_path=human_input_path
         )
@@ -141,7 +155,7 @@ class AgentNodeRunner:
         if typed.human_input is None:
             if had_interaction:
                 mark_consumed(path)
-            return NodeResult(node_id=node.id, outcome=_agent_outcome(outcome), node_run_id=run_id)
+            return self._result(node, ctx, outcome, run_id, before)
         if had_interaction:
             raise NodeManualRequired(f"agent node {node.id!r}: unexpected repeated HITL request")
 
@@ -170,7 +184,7 @@ class AgentNodeRunner:
         if self._typed(node, ctx, outcome2).human_input is not None:
             raise NodeManualRequired(f"agent node {node.id!r}: second HITL request after an answer")
         mark_consumed(path)
-        return NodeResult(node_id=node.id, outcome=_agent_outcome(outcome2), node_run_id=run_id2)
+        return self._result(node, ctx, outcome2, run_id2, before)
 
     def _resume_interaction(
         self, node: AgentNode, ctx: NodeContext, path: Any, persisted: Mapping[str, Any]
@@ -346,12 +360,80 @@ class AgentNodeRunner:
     def _is_workspace_write(self, node: AgentNode, ctx: NodeContext) -> bool:
         """True iff this node's resolved permission profile is workspace-write (WRI-009).
 
-        Only workspace-write attempts can mutate the clone, so only they are bracketed by the Git
-        control-state capture/compare and get the post-edit diff guard; a read-only agent/evaluator
-        attempt cannot mutate git, so it is neither captured nor compared.
+        Only a workspace-write attempt is *meant* to mutate the clone, so only it gets the post-edit
+        diff guard (diff capture, output containment, the dangerous-diff approval). Whether an
+        attempt *can* execute commands at all is a wider question — see :meth:`_can_run_commands`.
         """
         resolved = node.permission_profile or ctx.snapshot.doc.permission_ceiling
         return resolved == PermissionProfile.WORKSPACE_WRITE
+
+    def _has_git_evidence(self, node: AgentNode) -> bool:
+        """True iff this node asked for the read-only git verbs and the operator enabled them."""
+        return resolve_git_evidence(node.git_evidence, self._s.allow_git_evidence)
+
+    def _granted_shell_before(
+        self, node: AgentNode, ctx: NodeContext
+    ) -> _GrantedShellBefore | None:
+        """The WRI-009 fingerprints taken before a *read-only* node with a granted shell runs.
+
+        ``None`` for every other node — that is the signal to skip both comparisons entirely, so no
+        node pays for a check that cannot apply to it. This bracket, not the profile-keyed one in
+        :meth:`_invoke`, is what watches the node class the git-evidence grant just handed a shell:
+        what makes a working-tree write or ``.git`` drift possible is the shell, so keying on the
+        profile alone would leave exactly that class unwatched. Both are *reported*, never acted on
+        (operator decision 2), which is why they live out here on the reporting path rather than at
+        the compare site that parks a workspace-write attempt.
+
+        Snapshotting before rather than reading state once afterwards is what keeps an earlier
+        writer's diff — or the orchestrator's own branch prep — from being blamed on this node in a
+        flow that mixes the two profiles. One bracket spans every attempt of the node, so a HITL
+        re-run is covered without accumulating anything.
+        """
+        git = self._s.git
+        if git is None or self._is_workspace_write(node, ctx) or not self._has_git_evidence(node):
+            return None
+        return _GrantedShellBefore(
+            control=git.capture_git_control_state(), tree=git.changed_code_entries()
+        )
+
+    def _result(
+        self,
+        node: AgentNode,
+        ctx: NodeContext,
+        outcome: StageOutcome,
+        run_id: int,
+        before: _GrantedShellBefore | None,
+    ) -> NodeResult:
+        """The node's result, flagged when a read-only node with a shell changed what it could not.
+
+        The provider's sandbox write-denies the whole clone for such an attempt, so a change here —
+        in the working tree or in Git control state — means that enforcement did not hold. Both are
+        reported rather than acted on: the outcome stays ``done``, the run continues, and the
+        operator gets a warning from the post-node hook. Per operator decision 2 a read-only node
+        never parks the task, so control-state drift warns here where a ``workspace-write`` attempt
+        would raise :class:`~.base.NodeManualRequired` in :meth:`_invoke`. That is a real trade: the
+        warning is the only thing standing between a poisoned hook and the orchestrator's next git
+        command, which is why it carries the drift's aspect-level summary and not just a flag.
+
+        A working-tree change is additionally never *consumed* — no diff is published and nothing
+        downstream is handed it, since the post-edit guard that would do that stays off for a
+        read-only node. Control state is compared first, so the ``git status`` behind the tree
+        comparison cannot land between the attempt and the fingerprint that judges it.
+        """
+        git = self._s.git
+        drift = None
+        wrote = False
+        if before is not None and git is not None:
+            control_drift = git.compare_git_control_state(before.control)
+            drift = control_drift.summary() if control_drift is not None else None
+            wrote = git.changed_code_entries() != before.tree
+        return NodeResult(
+            node_id=node.id,
+            outcome=replace(
+                _agent_outcome(outcome), read_only_write=wrote, read_only_git_drift=drift
+            ),
+            node_run_id=run_id,
+        )
 
     def _invoke(
         self,
@@ -386,10 +468,14 @@ class AgentNodeRunner:
         assert_request_contained(request, self._s.exchange_root)
         # WRI-009: fingerprint the Git control state before a workspace-write attempt; the compare
         # after `run_stage` (below) runs before any orchestrator git touches the possibly-poisoned
-        # clone. A read-only attempt cannot mutate git, so it is not captured. WRI-002: a
-        # workspace-write attempt also gets its Write/Edit-deny roots (exchange/gitdir/common/hooks/
-        # tasks) resolved fresh here (they are only final after branch prep) and threaded onto the
-        # request; a read-only attempt carries no write tools, so ``write_guard`` stays ``None``.
+        # clone, and drift there parks the task. A read-only attempt holding the git-evidence grant
+        # also has a shell and so can also reach `.git` — it is fingerprinted too, but from the
+        # outer reporting bracket (`_granted_shell_before`), because decision 2 says such a node
+        # warns instead of parking. WRI-002: a workspace-write attempt also gets its Write/Edit-deny
+        # roots (exchange/gitdir/common/hooks/tasks) resolved fresh here (only final after branch
+        # prep) and threaded onto the request; a read-only attempt carries no write tools, so
+        # ``write_guard`` stays ``None`` and its whole clone is instead write-denied in the
+        # provider's sandbox.
         git = self._s.git
         control_before = None
         if git is not None and self._is_workspace_write(node, ctx):
@@ -431,9 +517,9 @@ class AgentNodeRunner:
             )
         # WRI-009/002: the result is trusted (WRI-012 proved provider-tree quiescence inside the
         # adapter), so compare now — before `_apply_post_edit_guard`'s `git diff`/commit touch the
-        # clone and before any downstream node reads the exchange. Git control-state drift or an
-        # exchange mutation is a non-fallback policy violation → manual action; the changed copy is
-        # never consumed downstream.
+        # clone and before any downstream node reads the exchange. Git control-state drift on a
+        # workspace-write attempt or an exchange mutation is a non-fallback policy violation →
+        # manual action; the changed copy is never consumed downstream.
         if control_before is not None and git is not None:
             drift = git.compare_git_control_state(control_before)
             if drift is not None:
@@ -644,6 +730,10 @@ class AgentNodeRunner:
             network_access=resolve_network_access(
                 node.network_access, ctx.snapshot.doc.network_policy
             ),
+            # The read-only git verbs, when this node asked for them AND the operator enabled the
+            # grant. Like network, it toggles one capability dimension and never the filesystem
+            # ceiling — the node stays read-only, enforced by the provider's sandbox.
+            git_evidence=self._has_git_evidence(node),
             # VF-7 defense-in-depth: the Core-owned advisory security contract, threaded via
             # NodeServices; the neutral seam prepends it to the effective prompt.
             security_preamble=self._s.security_preamble,
@@ -690,35 +780,13 @@ class AgentNodeRunner:
         return path
 
     def _node_output_paths(self, ctx: NodeContext) -> dict[str, object | None]:
-        """The generic ``{<node_id>_path}`` variables for every agent + tool node in the flow.
-
-        A value resolves to the node's **latest** persisted output (an agent's ``<node_id>.out.md``
-        or a tool's redacted ``stdout.txt``) — now kept per-run under
-        ``stages/<node_id>/run-<id>/`` — so a re-running upstream node exposes its most recent pass
-        while every earlier pass stays on disk. A not-yet-run or special-slot node's variable is
-        empty (``None``) and a ``{?<id>_path}…{/<id>_path}`` block drops cleanly. Fan-in is free: a
-        node names each upstream output it wants (``{scan_path}``, ``{md-check_path}``). The stored
-        value is a POSIX path string (cross-platform). Only agent and tool nodes get this channel
-        (node-output ADR + P5)."""
-        paths: dict[str, object | None] = {}
-        for other in ctx.snapshot.doc.nodes:
-            if isinstance(other, AgentNode):
-                filename = f"{other.id}.out.md"
-            elif isinstance(other, ToolNode):
-                filename = TOOL_STDOUT_FILENAME
-            else:
-                continue
-            # Fan-in resolves the upstream node's newest published output. With an exchange wired,
-            # outputs are published there (postprocess/tool), so resolve from it; a harness without
-            # one keeps resolving the private tree (today's behavior).
-            if self._s.exchange_root:
-                found = exchange_latest_run_file(
-                    self._s.exchange_root, ctx.task_id, other.id, filename
-                )
-            else:
-                found = latest_run_file(self._s.artifacts_root, ctx.task_id, other.id, filename)
-            paths[f"{other.id}_path"] = found.as_posix() if found is not None else None
-        return paths
+        """The generic ``{<node_id>_path}`` variables for this flow (shared with the evaluator)."""
+        return build_node_output_paths(
+            ctx.snapshot.doc.nodes,
+            ctx.task_id,
+            exchange_root=self._s.exchange_root,
+            artifacts_root=self._s.artifacts_root,
+        )
 
     def _memory_path(self, node: AgentNode, ctx: NodeContext) -> str | None:
         """Build this node's memory packet and return its path — node-driven (FR4/D5).

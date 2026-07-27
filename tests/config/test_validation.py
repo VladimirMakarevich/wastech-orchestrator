@@ -429,3 +429,19 @@ def test_confirmation_gates_with_telegram_validate_clean(base_config: Orchestrat
     cfg = _with_auto_mode(cfg, confirm_next_task=True)
     cfg = _with_claude_gate(cfg, on=True)
     assert validate_config(cfg) == []
+
+
+def test_allow_git_evidence_defaults_off_and_validates(base_config: OrchestratorConfig) -> None:
+    # The git-evidence grant is opt-in: absent the key, a flow that declares git_evidence gets
+    # nothing. Both the default and an explicit True validate cleanly.
+    assert base_config.security.allow_git_evidence is False
+    assert validate_config(_with_security(base_config, allow_git_evidence=True)) == []
+
+
+def test_loader_parses_allow_git_evidence(packaged_config_text: str) -> None:
+    # A key the loader does not know is a key that is silently ignored, so parse it from the
+    # packaged security block explicitly: shipped `false`, and an explicit `true` honored.
+    assert loads_config(packaged_config_text).config.security.allow_git_evidence is False
+    text = packaged_config_text.replace("allow_git_evidence: false", "allow_git_evidence: true")
+    assert "allow_git_evidence: true" in text  # guard: the packaged key still exists
+    assert loads_config(text).config.security.allow_git_evidence is True

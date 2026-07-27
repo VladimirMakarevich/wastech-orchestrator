@@ -162,6 +162,8 @@ from wastech_orchestrator.memory import (
     ensure_store,
 )
 from wastech_orchestrator.notify import (
+    TRACE_READ_ONLY_GIT_DRIFT,
+    TRACE_READ_ONLY_WRITE,
     TRACE_REWORK_EXHAUSTED,
     Notifier,
     NullNotifier,
@@ -2247,6 +2249,9 @@ class Orchestrator:
             # "auto"). protected_paths is global-only (no per-task override).
             trust_level=(p.task.trust_level or self._config.security.trust_level),
             protected_paths=self._config.security.protected_paths,
+            # Operator-only, like protected_paths: a task cannot turn the git-evidence grant on, and
+            # neither can a flow — a node's declaration is honored only while this is true.
+            allow_git_evidence=self._config.security.allow_git_evidence,
             # VF-7 defense-in-depth: the Core-owned advisory security contract, resolved once from
             # config; the neutral seam prepends it to every agent/evaluator prompt.
             security_preamble=self._security_preamble(),
@@ -2453,6 +2458,14 @@ class Orchestrator:
                     "disable_read_isolation": self._config.security.disable_read_isolation,
                     "strict_isolation": self._config.security.strict_isolation,
                 },
+            )
+        if self._config.security.allow_git_evidence:
+            # Same reasoning as the read-isolation announce above: an optional capability that
+            # widens what a node may execute is stated in the run log rather than left implicit.
+            self._log(p.task.id).info(
+                "git-evidence ON — a node declaring git_evidence may run the read-only git verbs "
+                "to inspect delivery history; the repository stays unwritable (the sandbox denies "
+                "writes) and commit/push/PR stay the orchestrator's alone"
             )
         if self._config.security.strict_isolation:
             reasons = check_isolation(self._config, self._isolation_checks)
@@ -3180,6 +3193,11 @@ class Orchestrator:
                     node_run_id=node_run_id,
                     outcome_kind=outcome.kind,
                     final_message=outcome.final_message,
+                    # DR-2: an evaluator's findings are the substance of the step it just observed.
+                    # Passing only the outcome label had the supervisor acknowledge `accept` for a
+                    # node that had filed a substantive finding, and then describe the gate as
+                    # having passed in the whole-task summary.
+                    findings=outcome.findings,
                 )
             # A non-blocking evaluator that spent its whole `max_rework_per_stage` budget and
             # accepted with findings still open: warn the operator (console, always — independent of
@@ -3196,12 +3214,44 @@ class Orchestrator:
                         "findings": len(outcome.findings),
                     },
                 )
+            # A read-only node holding the git-evidence grant that changed the working tree: its
+            # sandbox write-denies the whole clone, so this means that enforcement did not hold.
+            # Warn and keep going — the node's own outcome stays `done` and the task is never parked
+            # over it, because the grant exists so an audit node can read history and a stray file
+            # is not worth trading that for. The change is not consumed by anything downstream.
+            if outcome.read_only_write:
+                self._log(p.task.id).warning(
+                    "a read-only node with the git-evidence grant changed the working tree — "
+                    "continuing; inspect the tree, the sandbox should have denied this",
+                    extra={"stage": node.id},
+                )
+            # The sharper half of the same never-park rule (operator decision 2): the same node
+            # class changed git control state — a hook, `.git/config`, the index. Continuing means
+            # the orchestrator's own next git command (commit / branch switch / push) runs in that
+            # clone, so this warning names the drifted aspect and says to stop the run rather than
+            # merely "inspect". A workspace-write node doing the same still parks the task.
+            if outcome.read_only_git_drift is not None:
+                self._log(p.task.id).warning(
+                    "a read-only node with the git-evidence grant changed git control state — "
+                    "continuing per policy, but stop the run and discard the clone before it is "
+                    "committed or pushed",
+                    extra={"stage": node.id, "drift": outcome.read_only_git_drift},
+                )
             # Best-effort live progress trace: one message per executed node finish (never on a
             # skip). Gated on the flag alone — when Telegram is off the notifier is a NullNotifier
             # and this is a no-op. Carries only node id + outcome (no secrets); never raises. A
-            # budget-exhausted accept traces as the ⚠️ TRACE_REWORK_EXHAUSTED label, not a clean ✅.
+            # budget-exhausted accept traces as the ⚠️ TRACE_REWORK_EXHAUSTED label, not a clean ✅;
+            # so does a read-only node that wrote (TRACE_READ_ONLY_WRITE) or drifted git control
+            # state (TRACE_READ_ONLY_GIT_DRIFT — checked first of the two, it is the one that
+            # needs a human now).
             if self._config.telegram.trace:
-                trace_outcome = TRACE_REWORK_EXHAUSTED if rework_exhausted else outcome.kind
+                trace_outcome = outcome.kind
+                if rework_exhausted:
+                    trace_outcome = TRACE_REWORK_EXHAUSTED
+                elif outcome.read_only_git_drift is not None:
+                    trace_outcome = TRACE_READ_ONLY_GIT_DRIFT
+                elif outcome.read_only_write:
+                    trace_outcome = TRACE_READ_ONLY_WRITE
                 self._notifier.send_trace(task_id=p.task.id, node_id=node.id, outcome=trace_outcome)
             # Chronological per-run index: one line per executed node run of every kind, so an
             # operator can read a re-running node's sequence without listing run-*/ dirs. Runs that
@@ -3241,7 +3291,9 @@ class Orchestrator:
             )
             # Generic node-output channel: persist every agent node's output as {<node_id>_path}
             # (redaction-scrubbed, local/uncommitted). A node filling a special slot above writes no
-            # duplicate — write_node_output is a no-op when output_artifact is set.
+            # duplicate — write_node_output is a no-op when output_artifact is set. A node that
+            # declares `output_file` publishes that file's content instead of its closing message,
+            # read from the only directory it was allowed to write into.
             write_node_output(
                 node,
                 outcome,
@@ -3251,6 +3303,10 @@ class Orchestrator:
                 register=self._register_artifact,
                 extra_secrets=node_output_secrets,
                 exchange_root=str(self._exchange_root),
+                produced_dir=report_dir or Path(self._config.repo.local_path),
+                warn=lambda message: self._log(p.task.id).warning(
+                    message, extra={"stage": node.id}
+                ),
             )
             # Operator-authored splits are materialized at preflight (the decision comes from the
             # ``subtasks:`` manifest, not this node), so this post-hook is a no-op for them.
