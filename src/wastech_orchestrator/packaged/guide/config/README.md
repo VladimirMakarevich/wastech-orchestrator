@@ -133,4 +133,4 @@ After editing the config:
 2. Fix every reported provider, isolation, flow, or Telegram issue.
 3. If the package was upgraded, run `worc upgrade-config` first so the file has the current schema shape.
 
-[reference.md](reference.md) is the complete field reference — you should not need anything outside this guide to configure the orchestrator. The orchestrator repository's `docs/configuration.md` and `docs/operations.md` carry the same material with extra contributor-facing detail (design rationale, internals); reach for them only if you are working on the orchestrator itself.
+[reference.md](reference.md) is the complete field reference — it documents every key, so this guide is all you need to configure the orchestrator. The orchestrator's own repository adds contributor-facing material on top of the same fields (design rationale, internals); that is only worth reading if you are working on the orchestrator itself.

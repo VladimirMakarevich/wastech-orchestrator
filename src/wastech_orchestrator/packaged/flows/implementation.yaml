@@ -6,12 +6,13 @@
 # match the change just shipped (workspace-write, resuming the implementation editing lineage), and
 # its edits join the same diff the orchestrator commits. Refinement is skipped deterministically
 # (`when: derived.needs_refinement`); any other node can be disabled per task via
-# `nodes.<id>.enabled: false` (driven by node id, not a `when` fact — the bounded per-task exception,
-# PRE.3).
+# `nodes.<id>.enabled: false` — the one place a task may name a node id instead of stating a `when`
+# fact, deliberately bounded to this on/off switch.
 #
-# Layered on across P2: durable sessions (P2.2 `editing_lineage`), review-as-evaluator (P2.3), and
-# the core-owned commit-candidate mutation guard on `checks` (P2.4 — active whenever a `checks` node
-# is present, not declared here). An optional non-blocking `testing_quality` evaluator (the shared
+# Three behaviors here are not visible in the YAML: `implement`/`fixing` share one durable session
+# (`editing_lineage`), `review` is an evaluator (findings gate the graph, they are not advisory), and
+# the core enforces the commit-candidate mutation guard whenever a `checks` node is present — it is
+# not declared here. An optional non-blocking `testing_quality` evaluator (the shared
 # evaluator runner already supports its self-cap) is NOT shipped in this default flow: it is a pure
 # graph-shape choice — an operator who wants it adds the node to their own flow YAML.
 #
@@ -165,7 +166,7 @@ flow:
     test_fix: 15
     review_fix: 15
 
-  # Flow-local supervisor prompts + the tech-debt/follow-ups opt-in (prompt-and-supervisor ADR). The
+  # Flow-local supervisor prompts + the tech-debt/follow-ups opt-in. The
   # supervisor is a constant layer above the flow, not a node; this block only reshapes ITS wording
   # (the structured-output schemas stay in code). `role_file` overrides the global observe lens;
   # `finalize_role_file` is the final-summary emphasis; `emit_follow_ups` opts the finalize turn into

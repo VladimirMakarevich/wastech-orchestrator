@@ -94,7 +94,7 @@ flow:
       kind: agent
       role_file: security_audit/report.md
       session_scope: fresh_disposable
-      # Read-only (WRI-001): the agent no longer writes report.md. It returns the report as its
+      # Read-only on purpose: the agent does not write report.md. It returns the report as its
       # structured output and the orchestrator captures it into the private report dir via the
       # `report` output_artifact slot — no agent-writable path remains in either root.
       permission_profile: read-only

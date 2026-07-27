@@ -48,7 +48,7 @@ agents:
   max_fix_cycles: 15                # max iterations of ONE fix loop (e.g. review/test -> fixing -> back)
   max_total_fix_iterations: 30      # hard global cap across all fix loops (and all subtasks); >= max_fix_cycles
 
-  decomposition:                    # optional task decomposition (§5.1); OFF by default
+  decomposition:                    # optional task decomposition; OFF by default
     enabled: false
     max_subtasks: 8                 # a split with n > this (or n < 2) is rejected; runs as a single task
 
@@ -173,7 +173,7 @@ security:
     - "git push"
     - "gh pr create"
     - "gh pr merge"
-  trust_level: "auto"                 # approval policy for the mid-task dangerous-diff gate (rule #14):
+  trust_level: "auto"                 # approval policy for the mid-task dangerous-diff gate:
                                       #   strict = gate every tracked-file deletion/rename OR dependency
                                       #            manifest/lock edit (ask before continuing)
                                       #   auto   = (default) routine in-repo deletions/renames/edits do
@@ -186,7 +186,7 @@ security:
                                       # dirs, "*" stays within one segment (e.g. "src/security/**",
                                       # ".github/workflows/**"). Default [] = no floor.
 
-validation:                         # input hardening gate (§19); rejects broken tasks before any branch
+validation:                         # input hardening gate; rejects broken tasks before any branch
   max_task_bytes: 262144            # reject a task file larger than this (bytes)
   max_task_lines: 5000              # reject a task file with more lines than this
   max_line_bytes: 8192              # reject any single line longer than this (bytes)
@@ -248,13 +248,13 @@ git:
   auto_merge: false                 # true: merge every published PR to pr_base automatically
   auto_merge_strategy: squash       # merge | squash | rebase  (used when a merge fires)
   auto_merge_wait_for_checks: false # true: arm GitHub-native auto-merge (--auto) — merge only after required checks pass
-  # NOTE: a per-task `auto_merge: true|false` wins outright over this default (PRE.2). Auto-merge
+  # NOTE: a per-task `auto_merge: true|false` wins outright over this default. Auto-merge
   # skips the human PR review — the operator (the task author) owns that call, not the orchestrator's
   # to police.
   merge_flow: merge                 # flow `worc merge-task` runs to resolve base-merge conflicts
                                     #   (seeded editable at .worc/flows/merge.yaml). Clean merges are
                                     #   mechanical (no flow); only a conflicting base-merge runs it.
-  footprint:                        # audit-trail policy (§21). Runtime files always live under the
+  footprint:                        # audit-trail policy. Runtime files always live under the
                                     # gitignored <repo>/.worc/ home; only the task file and its
                                     # <id>.summary.md are committed, at the repo root under tasks/.
                                     # This is a separate audit commit, not a second code commit.
@@ -275,7 +275,7 @@ telegram:                           # human-in-the-loop + notifications (optiona
 # {memory_path} {subtask_order} {subtask_count} {subtask_spec_path}) — never task bodies, diffs,
 # env, or secrets.
 
-skills:                             # repo skill selection (optional, §2.1)
+skills:                             # repo skill selection (optional)
   dynamic: false                    # supervisor proposes a node->skills map once per task; opt in (adds one turn)
   strict: false                     # false = warn+skip an unresolved operator pin; true = stop the task
   # At task start the orchestrator discovers every tracked SKILL.md in the clone (git ls-files,
@@ -283,7 +283,7 @@ skills:                             # repo skill selection (optional, §2.1)
   # when `dynamic`, the supervisor's proposed ones — the Core decides. Chosen SKILL.md files reach the
   # node as read-only reference paths (never executed, never the Claude Skill tool — Codex has none).
 
-supervisor:                          # constant oversight layer above any flow — always active (§P2.1)
+supervisor:                          # constant oversight layer above any flow — always active
   role_file: "roles/supervisor.md"  # role prompt for the supervisor; path-contained under roles/
   model: "claude-sonnet-5"        # null = use the global primary provider's default model
   reasoning: medium                 # null = use the global primary provider's default reasoning
@@ -295,7 +295,7 @@ supervisor:                          # constant oversight layer above any flow �
   # Caveat worth knowing: this single `model`/`reasoning` pair covers BOTH the cheap per-step
   # observations and the whole-task finalize turn — and that finalize turn writes `summary.md`,
   # which becomes the pull-request body and is the only part of a long run most readers see. So you
-  # cannot yet upgrade the summary alone; splitting the two is a backlog item. Until then, a flow
+  # cannot yet upgrade the summary alone; splitting the two is not implemented. Until then, a flow
   # whose summary matters (`deep_research`) constrains what the turn may claim through its
   # `supervisor.finalize_role_file` lens instead of through a bigger model.
 

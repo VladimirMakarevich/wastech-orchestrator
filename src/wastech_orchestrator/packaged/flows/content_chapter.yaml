@@ -10,8 +10,8 @@
 # This flow — together with `check_chapter` — is deliberately opinionated for one kind of project: a
 # reflective, multi-voice long-form book (with `content_translate` adapting each chapter into a
 # second language). If your project's structure differs, fork the delivered copies under
-# `.worc/flows/content_chapter/` and `.worc/tools/check_chapter` and tune them — see
-# docs/flow-authoring.md.
+# `.worc/flows/content_chapter/` and `.worc/tools/check_chapter` and tune them — the authoring
+# contract is in `.worc/guide/flows/`.
 #
 # output_policy: code_change — the chapter `.md` files are edited in place; the diff IS the
 # deliverable. publishing: pull_request is the ceiling; run the content repo with
@@ -24,8 +24,8 @@
 #
 # A fact/accuracy check against some external source of truth is deliberately NOT a node here — field
 # use found it didn't generalize (most content projects have no such source, and where one exists it
-# overlapped with the story critic below). Add it back as your own evaluator node per
-# docs/flow-authoring.md if your project needs one.
+# overlapped with the story critic below). Add it back as your own evaluator node (see
+# `.worc/guide/flows/`) if your project needs one.
 #
 # The supervisor is a constant layer above the flow (not a node); `emit_follow_ups` is deliberately
 # omitted (a code-oriented capability). The blocking evaluator is capped by its named-loop budget

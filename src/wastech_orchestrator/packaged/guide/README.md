@@ -111,4 +111,4 @@ For machine-generated input, a `.json` object works too. Every front-matter fiel
 
 ## Where this fits
 
-These docs are distilled for authoring. The operator-facing references with full detail are `docs/task-authoring.md` and `docs/configuration.md` in the orchestrator's own repository; you do not need them to write a task.
+These docs are distilled for authoring, and they are complete for that purpose: you do not need anything outside this guide to write a task. The orchestrator's own repository carries the same material with extra contributor-facing detail, which matters only if you are working on the orchestrator itself.

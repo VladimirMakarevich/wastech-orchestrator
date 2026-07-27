@@ -100,7 +100,7 @@ Every node has an `id` (unique; see reserved ids below) and a `kind`. The six ki
 | Field | Type / values | Default | Constraint | Meaning |
 | --- | --- | --- | --- | --- |
 | `role_file` | string | required | Flow-dir-relative; no `..`/absolute. | The node's prompt file, under this flow's own folder. |
-| `session_scope` | `fresh_disposable` \| `editing_lineage` \| `resume_own_lineage` | `fresh_disposable` | — | Session intent: fresh each pass, a durable editing session, or its own resumable session. Resuming re-sends the session's full history each turn (input tokens grow), so prefer `fresh_disposable` between unrelated stages — see `docs/flow-authoring.md`. |
+| `session_scope` | `fresh_disposable` \| `editing_lineage` \| `resume_own_lineage` | `fresh_disposable` | — | Session intent: fresh each pass, a durable editing session, or its own resumable session. Resuming re-sends the session's full history each turn (input tokens grow), so prefer `fresh_disposable` between unrelated stages. |
 | `lineage_affinity` | string \| null | `null` | Target must be an `editing_lineage` owner with no affinity of its own (one hop; no cross-provider). | Join another editing node's session (e.g. `fixing` joins `implementation`). |
 | `permission_profile` | `read-only` \| `workspace-write` \| null | `null` → resolved from the flow ceiling | Must be `<= permission_ceiling`. | This node's filesystem access. Grant `workspace-write` only to nodes that edit. |
 | `network_access` | bool \| null (tri-state) | `null` (inherit `network_policy`) | Codex `workspace-write` + network is rejected. | Per-node network override. |

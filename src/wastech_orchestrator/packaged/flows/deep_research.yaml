@@ -276,7 +276,7 @@ flow:
   budgets:
     global_fix_iterations: 12
 
-  # Flow-local supervisor wording (prompt-and-supervisor ADR). Only `finalize_role_file` is set: the
+  # Flow-local supervisor wording. Only `finalize_role_file` is set: the
   # whole-task summary is the operator's ONLY view of an expensive research run and it becomes the
   # pull-request body, and the built-in finalize lens is written for a code change ("grounded in the
   # actual committed change") — applied to a deliverable that is two new Markdown files it produced a
