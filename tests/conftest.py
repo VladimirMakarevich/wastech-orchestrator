@@ -178,8 +178,14 @@ def build_git_config(
     memory_enabled: bool = False,
     allow_git_evidence: bool = False,
     checkout_base_on_cleanup: bool | None = None,
+    clean_runs_on_success: bool = True,
 ) -> OrchestratorConfig:
-    """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks."""
+    """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks.
+
+    ``clean_runs_on_success`` mirrors the shipped default (a successful task evicts its own
+    ``.worc/runs/`` subtree). Pass ``False`` in a test that inspects a finished task's frozen
+    bundles or sealed exchange — the same switch an operator flips to analyze runs.
+    """
     env_lines = "\n".join(f"    - {e}" for e in _TEST_ALLOWED_ENV)
     cleanup_line = (
         f"  checkout_base_on_cleanup: {str(checkout_base_on_cleanup).lower()}\n"
@@ -196,6 +202,9 @@ def build_git_config(
     validation_block = f"validation:\n  quarantine_folder: {quarantine!r}\n" if quarantine else ""
     telegram_block = "telegram:\n  trace: true\n" if telegram_trace else ""
     memory_block = "memory:\n  enabled: true\n" if memory_enabled else ""
+    logging_block = (
+        "logging:\n  clean_runs_on_success: false\n" if not clean_runs_on_success else ""
+    )
     text = f"""
 orchestrator:
   auto_mode:
@@ -234,7 +243,7 @@ git:
     audit_commit_message: "chore(orchestrator): audit trail for {{task_id}}"
     audit_on_branch: {audit_on_branch}
 prompt_audit: {str(prompt_audit).lower()}
-{memory_block}"""
+{memory_block}{logging_block}"""
     return loads_config(text).config
 
 

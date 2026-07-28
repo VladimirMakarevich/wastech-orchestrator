@@ -6,8 +6,8 @@ Two invariants are pinned here:
   the control and private homes, ``<repo>/.worc-io`` for the exchange), path-for-path, on POSIX and
   Windows path shapes.
 * :class:`InternalDenyPolicy` carries the control/private homes, the resolved env-file (which may
-  live outside the private home), and provider auth homes — de-duplicated — without touching the
-  public ``security.denied_read_paths`` list.
+  live outside the private home), provider auth homes, and the per-task ``runs/`` root —
+  de-duplicated — without touching the public ``security.denied_read_paths`` list.
 """
 
 from __future__ import annotations
@@ -21,8 +21,10 @@ from wastech_orchestrator.runtime_layout import (
     CONTROL_HOME_DIRNAME,
     EXCHANGE_HOME_DIRNAME,
     PRIVATE_HOME_DIRNAME,
+    RUNS_DIRNAME,
     InternalDenyPolicy,
     RuntimeLayout,
+    runs_root,
 )
 
 
@@ -73,6 +75,40 @@ def test_default_on_native_windows_drive(tmp_path: Path) -> None:
     layout = RuntimeLayout.default(r"C:\repo")
     assert layout.control_home.as_posix() == "C:/repo/.worc"
     assert layout.exchange_root.as_posix() == "C:/repo/.worc-io"
+
+
+def test_runs_home_follows_the_private_home(tmp_path: Path) -> None:
+    # Derived, never a stored field: relocating the private home must carry the per-task state with
+    # it, or the named deny entry would stop covering the roots it exists for.
+    relocated = RuntimeLayout(
+        repo_root=tmp_path,
+        control_home=tmp_path / "ctrl",
+        private_home=tmp_path / "elsewhere" / "priv",
+        exchange_root=tmp_path / ".worc-io",
+    )
+    assert relocated.runs_home == tmp_path / "elsewhere" / "priv" / RUNS_DIRNAME
+    assert RuntimeLayout.default(tmp_path).runs_home == tmp_path / ".worc" / RUNS_DIRNAME
+
+
+def test_runs_root_join_is_os_independent() -> None:
+    # Pure-path check so the Windows drive/UNC join is covered on any host.
+    assert runs_root("/srv/repo/.worc").as_posix() == "/srv/repo/.worc/runs"
+    assert (PureWindowsPath(r"C:\repo\.worc") / RUNS_DIRNAME).as_posix() == "C:/repo/.worc/runs"
+    assert (
+        PureWindowsPath(r"\\server\share\repo\.worc") / RUNS_DIRNAME
+    ).as_posix() == "//server/share/repo/.worc/runs"
+
+
+def test_runs_home_is_a_named_deny_entry(tmp_path: Path) -> None:
+    layout = RuntimeLayout.default(tmp_path)
+    policy = InternalDenyPolicy(
+        control_home=layout.control_home,
+        private_home=layout.private_home,
+        env_file=None,
+        provider_homes=(),
+        runs_home=layout.runs_home,
+    )
+    assert layout.runs_home in policy.denied_paths
 
 
 def test_layout_is_immutable(tmp_path: Path) -> None:

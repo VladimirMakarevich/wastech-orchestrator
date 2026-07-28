@@ -738,7 +738,7 @@ def _build_logging(raw: Any, issues: list[str]) -> LoggingConfig:
     if raw is None:
         return LoggingConfig()
     m = _mapping(raw, where, issues)
-    _check_keys(m, {"level", "artifacts"}, where, issues)
+    _check_keys(m, {"level", "artifacts", "clean_runs_on_success"}, where, issues)
     level = _str(m, "level", "info", where, issues)
     if level not in _LOG_LEVELS:
         issues.append(
@@ -752,7 +752,11 @@ def _build_logging(raw: Any, issues: list[str]) -> LoggingConfig:
             f"expected one of {sorted(_ARTIFACT_LEVELS)}"
         )
         artifacts = "standard"
-    return LoggingConfig(level=level, artifacts=artifacts)
+    return LoggingConfig(
+        level=level,
+        artifacts=artifacts,
+        clean_runs_on_success=_bool(m, "clean_runs_on_success", True, where, issues),
+    )
 
 
 def _build_memory(raw: Any, issues: list[str]) -> MemoryConfig:

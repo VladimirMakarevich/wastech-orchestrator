@@ -26,7 +26,7 @@ from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import NamedTuple, TextIO
 
-from wastech_orchestrator import __version__, preflight, process_control
+from wastech_orchestrator import __version__, preflight, process_control, runs_retention
 from wastech_orchestrator.composition import (
     ISOLATION_CHECKS,
     build_orchestrator,
@@ -79,7 +79,7 @@ from wastech_orchestrator.observability.logging import configure_logging, set_lo
 from wastech_orchestrator.preflight import preflight_gh
 from wastech_orchestrator.providers import process as agent_process
 from wastech_orchestrator.providers.base import ProviderId
-from wastech_orchestrator.runtime_layout import CONTROL_HOME_DIRNAME, RuntimeLayout
+from wastech_orchestrator.runtime_layout import CONTROL_HOME_DIRNAME, RuntimeLayout, runs_root
 from wastech_orchestrator.security.isolation import check_isolation
 from wastech_orchestrator.state_store import IncompatibleStateError, StateStore, TaskRow
 from wastech_orchestrator.task.model import DEFAULT_QUEUE, priority_rank
@@ -631,20 +631,46 @@ def build_parser() -> argparse.ArgumentParser:
     logs_sub = logs_cmd.add_subparsers(dest="logs_action", required=True)
     logs_clean = logs_sub.add_parser(
         "clean",
-        help="remove task artifact directories under .worc/logs/ (the ledger is kept by default)",
+        help="sweep .worc/logs/: task artifact dirs + the daemon logs (the ledger is kept by "
+        "default). Refuses while a task is active; keeps the daemon logs while a daemon runs",
     )
     logs_clean.add_argument(
         "--keep",
         type=int,
         metavar="N",
-        help="keep the N most recently modified task dirs, remove the rest (no prompt unless N=0)",
+        help="keep the N most recently modified task dirs, remove the rest (no prompt unless N=0); "
+        "the daemon logs are removed either way",
     )
     logs_clean.add_argument(
         "--all",
         action="store_true",
-        help="also remove the ledger (completed.jsonl); always confirms unless --yes",
+        help="also remove the ledger (completed.jsonl); combines with --keep N",
     )
     logs_clean.add_argument("-y", "--yes", action="store_true", help="skip the confirmation prompt")
+
+    runs_cmd = sub.add_parser(
+        "runs", help="manage per-task runtime state under .worc/runs/ (frozen bundles + seals)"
+    )
+    runs_sub = runs_cmd.add_subparsers(dest="runs_action", required=True)
+    runs_clean = runs_sub.add_parser(
+        "clean",
+        help="remove per-task frozen bundles and sealed exchanges under .worc/runs/. Refuses while "
+        "a task is active; quarantined evidence is kept unless --include-quarantine",
+    )
+    runs_clean.add_argument(
+        "--keep",
+        type=int,
+        metavar="N",
+        help="keep the N most recently touched tasks, remove the rest (no prompt unless N=0)",
+    )
+    runs_clean.add_argument(
+        "--include-quarantine",
+        dest="include_quarantine",
+        action="store_true",
+        help="also remove quarantined exchange evidence (written only when mutation detection "
+        "caught an agent-side write to the read-only exchange — read it before deleting it)",
+    )
+    runs_clean.add_argument("-y", "--yes", action="store_true", help="skip the confirmation prompt")
 
     memory_cmd = sub.add_parser(
         "memory", help="inspect and curate the persistent memory store (.worc/memory/)"
@@ -753,6 +779,35 @@ def _flows_root() -> Traversable:
     return resources.files("wastech_orchestrator").joinpath("packaged", "flows")
 
 
+# How many of the orchestrator's own `--reconfigure` snapshots survive per kind. What the
+# orchestrator writes, it also reclaims: `flows.bak-*` / `tools.bak-*` are whole-directory copies
+# taken on every refresh, so an unbounded series is the one that actually costs disk. Three is
+# enough to undo a bad refresh and still notice it a few runs later. Not a config knob.
+_INSTALL_BACKUP_KEEP = 3
+
+# The exact shape `_install_backup_config` / `_backup_flows_dir` / `_backup_tools_dir` stamp:
+# `%Y%m%dT%H%M%SZ`. Matching the stamp rather than a bare `bak-*` keeps the prune to what the
+# orchestrator itself wrote — an operator's hand-named `config.yaml.bak-before-upgrade` (and
+# anything under `state.db*.bak*`) is not ours to delete.
+_INSTALL_BACKUP_STAMP_GLOB = "????????T??????Z"
+
+
+def _prune_install_backups(worc_home: Path, prefix: str) -> None:
+    """Keep only the newest :data:`_INSTALL_BACKUP_KEEP` ``<prefix>.bak-<UTC>`` snapshots.
+
+    The UTC stamp is fixed-width, so the name sorts chronologically without a single ``stat`` — and
+    ordering by name means the prune matches the order the operator sees the directory listed in.
+    Files and whole-directory snapshots are both handled; a failure to remove one is ignored, since
+    a locked stale backup must never turn an ``install --reconfigure`` into an error.
+    """
+    pattern = f"{prefix}.bak-{_INSTALL_BACKUP_STAMP_GLOB}"
+    for stale in sorted(worc_home.glob(pattern), reverse=True)[_INSTALL_BACKUP_KEEP:]:
+        if stale.is_dir():
+            shutil.rmtree(stale, ignore_errors=True)
+        else:
+            stale.unlink(missing_ok=True)
+
+
 def _copy_packaged_flows(
     dest_root: Path, *, overwrite: bool, dry: bool
 ) -> tuple[list[str], list[str]]:
@@ -781,7 +836,7 @@ def _backup_flows_dir(worc_home: Path) -> Path | None:
     """Snapshot an existing ``.worc/flows/`` to a timestamped sibling before ``--reconfigure``
     refreshes it, so operator edits (and any custom flows) stay recoverable. Returns the backup
     path, or ``None`` when there is nothing to back up. The backup lives under the gitignored
-    ``.worc/`` home, so it never shows up in ``git status``.
+    ``.worc/`` home, so it never shows up in ``git status``, and only the newest few are kept.
     """
     flows = worc_home / "flows"
     if not flows.is_dir() or not any(flows.iterdir()):
@@ -789,6 +844,7 @@ def _backup_flows_dir(worc_home: Path) -> Path | None:
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     backup = flows.with_name(f"flows.bak-{stamp}")
     shutil.copytree(flows, backup)
+    _prune_install_backups(worc_home, "flows")
     return backup
 
 
@@ -837,8 +893,8 @@ def _copy_packaged_tools(
 def _backup_tools_dir(worc_home: Path) -> Path | None:
     """Snapshot an existing ``.worc/tools/`` to a timestamped sibling before ``--reconfigure``
     refreshes it (mirror of _backup_flows_dir), so any operator-added tools stay recoverable. The
-    backup lives under the gitignored ``.worc/`` home. Returns the backup path, or ``None`` when
-    there is nothing to back up.
+    backup lives under the gitignored ``.worc/`` home and only the newest few are kept. Returns the
+    backup path, or ``None`` when there is nothing to back up.
     """
     tools = worc_home / "tools"
     if not tools.is_dir() or not any(tools.iterdir()):
@@ -846,6 +902,7 @@ def _backup_tools_dir(worc_home: Path) -> Path | None:
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     backup = tools.with_name(f"tools.bak-{stamp}")
     shutil.copytree(tools, backup)
+    _prune_install_backups(worc_home, "tools")
     return backup
 
 
@@ -1209,6 +1266,11 @@ def _configure_runtime_logging(args: argparse.Namespace) -> None:
         level=level,
         fmt=getattr(args, "log_format", "logfmt"),
         file_path=getattr(args, "log_file", None),
+        # A detached daemon's raw stderr is captured into a startup log that nothing rotates or
+        # caps, so keeping the terminal handler once the rotating --log-file exists would grow that
+        # file forever as a byte-for-byte duplicate. Everything written before this point (argparse
+        # errors, import failures, a preflight abort) still lands there, which is what it is for.
+        console=os.environ.get(agent_process.STARTUP_CAPTURE_ENV) != "1",
     )
 
 
@@ -2261,13 +2323,26 @@ def cmd_tasks(args: argparse.Namespace) -> int:
 def _task_log_dirs(logs_root: Path) -> list[Path]:
     """Per-task artifact dirs under ``.worc/logs/`` (direct subdirectories), newest first.
 
-    ``completed.jsonl`` is a file, so it is naturally excluded. Sorted by mtime descending so
-    ``--keep N`` retains the most recently modified runs.
+    Sorted by mtime descending so ``--keep N`` retains the most recently modified runs.
     """
     if not logs_root.is_dir():
         return []
     dirs = [p for p in logs_root.iterdir() if p.is_dir()]
     return sorted(dirs, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def _daemon_log_files(logs_root: Path, *, ledger_path: Path) -> list[Path]:
+    """Every non-directory entry at the root of ``.worc/logs/`` except the ledger.
+
+    These are the daemon's own runtime noise — the rotating operator log, its numbered backups, and
+    the startup capture of a console-spawned daemon — which sit beside the per-task dirs rather than
+    inside one. Selected by *shape* (anything that is not a task dir and not the ledger) rather than
+    by filename, so a rotated backup or a future daemon-written file is reclaimable the day it
+    appears instead of surviving a command whose name promises a clean logs root.
+    """
+    if not logs_root.is_dir():
+        return []
+    return sorted(p for p in logs_root.iterdir() if not p.is_dir() and p != ledger_path)
 
 
 def cmd_logs(args: argparse.Namespace) -> int:
@@ -2282,53 +2357,174 @@ def cmd_logs(args: argparse.Namespace) -> int:
 
 
 def _cmd_logs_clean(args: argparse.Namespace, config: OrchestratorConfig) -> int:
-    """Remove task artifact dirs under ``.worc/logs/`` to reclaim disk.
+    """Sweep the whole ``.worc/logs/`` root: per-task artifact dirs plus the daemon's own logs.
 
     ``--keep N`` retains the N newest task dirs (no prompt unless N=0); bare ``clean`` removes every
-    task dir; ``--all`` additionally removes the ledger. The ledger (``completed.jsonl``) is the
-    audit trail and is preserved unless ``--all``. Running this while a task is active is
-    unsupported.
+    task dir. Either way the daemon logs beside them go too — they are runtime noise, and leaving
+    them behind is what made "clean" fail to mean a clean logs root. The ledger
+    (``completed.jsonl``) is the audit trail: it survives unless ``--all``, and the output names the
+    flag that takes it rather than reporting a bare "kept".
+
+    Refuses outright while a task is active, and holds the daemon logs back while a watch daemon is
+    live — both refusals are reported distinctly, because an active task and a live daemon are
+    different things for the operator to clear.
     """
+    if has_active_task(config):
+        print("logs clean: a task is active — refusing; run when the orchestrator is idle")
+        return 1
     logs_root = worc_home_for(config) / "logs"
     ledger_path = Ledger(logs_root).path
     task_dirs = _task_log_dirs(logs_root)
-    if not task_dirs and not (args.all and ledger_path.exists()):
+    if args.keep is not None and args.keep < 0:
+        print("logs clean: --keep must be >= 0")
+        return 2
+    kept_dirs, doomed_dirs = (
+        (task_dirs[: args.keep], task_dirs[args.keep :])
+        if args.keep is not None
+        else ([], task_dirs)
+    )
+    # The daemon's rotating handler keeps daemon.log open, and its startup capture is the child's
+    # own stdout descriptor: on Windows both unlinks fail while POSIX unlinks them happily, and a
+    # cleanup command whose result depends on the host OS is not acceptable. So the daemon logs wait
+    # for the daemon to stop, on every platform.
+    daemon_alive = _daemon_alive(config)
+    doomed_files = [] if daemon_alive else _daemon_log_files(logs_root, ledger_path=ledger_path)
+    take_ledger = bool(args.all) and ledger_path.exists()
+
+    notes: list[str] = []
+    if daemon_alive:
+        notes.append(
+            "logs clean: kept the daemon logs — a watch daemon is running; stop it and re-run"
+        )
+    if not args.all and ledger_path.exists():
+        notes.append(
+            f"logs clean: kept the ledger ({ledger_path.name}) — 'logs clean --all' removes it too"
+        )
+
+    if not doomed_dirs and not doomed_files and not take_ledger:
         print("logs clean: nothing to remove")
+        for note in notes:
+            print(note)
         return 0
 
-    if args.keep is not None:
-        if args.keep < 0:
-            print("logs clean: --keep must be >= 0")
-            return 2
-        kept, doomed = task_dirs[: args.keep], task_dirs[args.keep :]
-        # N=0 is equivalent to delete-all → confirm like the bare form.
-        if (
-            args.keep == 0
-            and not args.yes
-            and not _confirm(
-                f"Remove all {len(doomed)} task log dir(s) under {logs_root.as_posix()}? [y/N] "
-            )
-        ):
-            print("logs clean: aborted")
-            return 0
-        for path in doomed:
-            shutil.rmtree(path, ignore_errors=True)
-        print(f"logs clean: removed {len(doomed)} task dir(s); kept {len(kept)}")
-        return 0
-
-    # Bare clean (optionally --all): a full sweep — always confirm unless --yes.
-    target = "all task logs and the ledger" if args.all else "all task logs"
-    if not args.yes and not _confirm(f"Remove {target} under {logs_root.as_posix()}? [y/N] "):
+    # A bounded --keep N>0 is a routine prune; anything that empties the root confirms first.
+    bounded_prune = args.keep is not None and args.keep > 0
+    confirmed = (
+        bounded_prune
+        or args.yes
+        or _confirm(
+            f"Remove {_clean_plan_phrase(doomed_dirs, doomed_files, ledger=take_ledger)} "
+            f"under {logs_root.as_posix()}? [y/N] "
+        )
+    )
+    if not confirmed:
         print("logs clean: aborted")
         return 0
-    for path in task_dirs:
+
+    for path in doomed_dirs:
         shutil.rmtree(path, ignore_errors=True)
-    removed_ledger = False
-    if args.all and ledger_path.exists():
-        ledger_path.unlink()
-        removed_ledger = True
-    suffix = " and the ledger" if removed_ledger else " (ledger kept)"
-    print(f"logs clean: removed {len(task_dirs)} task dir(s){suffix}")
+    for path in doomed_files:
+        path.unlink(missing_ok=True)
+    if take_ledger:
+        ledger_path.unlink(missing_ok=True)
+    removed = _clean_plan_phrase(doomed_dirs, doomed_files, ledger=take_ledger)
+    kept = f"; kept {len(kept_dirs)} task dir(s)" if args.keep is not None else ""
+    print(f"logs clean: removed {removed}{kept}")
+    for note in notes:
+        print(note)
+    return 0
+
+
+def _clean_plan_phrase(dirs: Sequence[Path], files: Sequence[Path], *, ledger: bool) -> str:
+    """Operator-facing description of a ``logs clean`` target set (shared by prompt and report).
+
+    The counts are always both named, even at zero: "0 daemon log file(s)" is how the operator sees
+    that the sweep did cover them, which is the whole point of the wider default.
+    """
+    parts = [f"{len(dirs)} task dir(s)", f"{len(files)} daemon log file(s)"]
+    if ledger:
+        parts.append("the ledger")
+    return ", ".join(parts[:-1]) + f" and {parts[-1]}"
+
+
+def cmd_runs(args: argparse.Namespace) -> int:
+    """Dispatch the ``runs`` subcommands (currently only ``clean``)."""
+    _configure_runtime_logging(args)
+    config = load_config_for(args)
+    if config is None:
+        return 2
+    if args.runs_action == "clean":
+        return _cmd_runs_clean(args, config)
+    raise SystemExit(f"Unknown runs action '{args.runs_action}'.")
+
+
+def _cmd_runs_clean(args: argparse.Namespace, config: OrchestratorConfig) -> int:
+    """Reclaim per-task frozen bundles and sealed exchanges under ``.worc/runs/``.
+
+    The manual half of run retention: with ``logging.clean_runs_on_success`` on, a successful task
+    already evicts its own subtree and this verb rarely finds anything; with it off every run keeps
+    its frozen inputs and seals for analysis, and this is how they are reclaimed. ``--keep N``
+    retains the N most recently touched tasks.
+
+    Quarantined exchange evidence needs ``--include-quarantine``: it exists only when an agent wrote
+    the read-only exchange, so it is never swept up by a routine cleanup. Refuses while a task is
+    active — the same guard, and the same reason, as ``logs clean``.
+    """
+    if has_active_task(config):
+        print("runs clean: a task is active — refusing; run when the orchestrator is idle")
+        return 1
+    if args.keep is not None and args.keep < 0:
+        print("runs clean: --keep must be >= 0")
+        return 2
+    private_home = worc_home_for(config)
+    include_quarantine = bool(args.include_quarantine)
+    task_ids = runs_retention.run_task_ids(private_home, include_quarantine=include_quarantine)
+    kept, doomed = (
+        (task_ids[: args.keep], task_ids[args.keep :]) if args.keep is not None else ((), task_ids)
+    )
+    runs_home = runs_root(private_home)
+    # Only worth mentioning when there is evidence sitting there to keep.
+    quarantine_note = (
+        not include_quarantine and (runs_home / runs_retention.QUARANTINE_ROOT).is_dir()
+    )
+
+    def report_kept_quarantine() -> None:
+        if quarantine_note:
+            print(
+                "runs clean: quarantined exchange evidence is kept — "
+                "'runs clean --include-quarantine' removes it too"
+            )
+
+    if not doomed:
+        print("runs clean: nothing to remove")
+        report_kept_quarantine()
+        return 0
+
+    # A bounded --keep N>0 is a routine prune of caches and skips the prompt. Quarantined evidence
+    # is not a cache — it exists only because an agent wrote a surface it was told not to — so
+    # touching it always confirms, whatever the scope, unless the operator says --yes.
+    bounded_prune = args.keep is not None and args.keep > 0 and not include_quarantine
+    target = f"the run artifacts of {len(doomed)} task(s)" + (
+        " including quarantined evidence" if include_quarantine else ""
+    )
+    if (
+        not bounded_prune
+        and not args.yes
+        and not _confirm(f"Remove {target} under {runs_home.as_posix()}? [y/N] ")
+    ):
+        print("runs clean: aborted")
+        return 0
+    removed_dirs = sum(
+        len(
+            runs_retention.remove_task_runs(
+                private_home, task_id, include_quarantine=include_quarantine
+            )
+        )
+        for task_id in doomed
+    )
+    kept_note = f"; kept {len(kept)} task(s)" if args.keep is not None else ""
+    print(f"runs clean: removed {removed_dirs} dir(s) across {len(doomed)} task(s){kept_note}")
+    report_kept_quarantine()
     return 0
 
 
@@ -3859,10 +4055,15 @@ def _install_atomic_write(path: Path, text: str) -> None:
 
 
 def _install_backup_config(path: Path) -> Path:
-    """Copy an existing config to a timestamped ``.bak-<UTC>`` sibling and return that path."""
+    """Copy an existing config to a timestamped ``.bak-<UTC>`` sibling and return that path.
+
+    Only the newest few snapshots of this config are kept — the series is written by the
+    orchestrator, so bounding it is the orchestrator's job.
+    """
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     backup = path.with_name(f"{path.name}.bak-{stamp}")
     backup.write_bytes(path.read_bytes())
+    _prune_install_backups(path.parent, path.name)
     return backup
 
 
@@ -4074,6 +4275,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_tasks(args)
         if args.command == "logs":
             return cmd_logs(args)
+        if args.command == "runs":
+            return cmd_runs(args)
         if args.command == "memory":
             return cmd_memory(args)
     except (ConfigError, IncompatibleStateError, preflight.GhNotAvailableError) as exc:

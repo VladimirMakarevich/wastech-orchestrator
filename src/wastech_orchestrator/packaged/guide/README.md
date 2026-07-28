@@ -4,6 +4,7 @@
 
 - **[best-practices.md](best-practices.md)** — how to write a _good_ task (testable criteria, scoping, constraints, the project's own working rules).
 - **[decision-guide.md](decision-guide.md)** — _when to use what_ (run vs watch, disabling nodes, auto-merge, where task files live, Telegram).
+- **[footprint.md](footprint.md)** — what the orchestrator leaves in the repository: every directory under `.worc/`, whether its presence is normal, what is safe to delete, and how retention works.
 - **[tasks/task-minimal.md](tasks/task-minimal.md)** — the smallest valid task (just `id`, `title`, and a body) and **[tasks/task-rich.md](tasks/task-rich.md)** — a maximal task that exercises _every_ front-matter field with inline rule notes. Copy one and fill it in.
 - **[skills/worc-task/SKILL.md](skills/worc-task/SKILL.md)** — a copy-ready task-authoring skill that turns raw work into one valid orchestrator task file.
 - **[skills/worc-deco-task/SKILL.md](skills/worc-deco-task/SKILL.md)** — a copy-ready task-authoring skill for operator-authored decomposition (root task + subtask specs).

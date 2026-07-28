@@ -47,22 +47,31 @@ def configure_logging(
     file_path: str | Path | None = None,
     max_bytes: int = 10 * 1024 * 1024,
     backup_count: int = 5,
+    console: bool = True,
 ) -> None:
     """Idempotently install terminal and optional rotating-file handlers.
 
     ``fmt`` is ``"logfmt"`` (default, ``key=value``) or ``"json"``. Safe to call more than once
     (``watch`` may re-enter): the second call is a no-op. Both sinks use the same redaction filter.
+
+    ``console=False`` suppresses the terminal handler, for a process whose stderr is redirected into
+    a file that nothing rotates or caps — a detached child whose stream is captured for crash
+    recovery. Keeping the handler there duplicates the whole run into an uncapped file beside the
+    capped one. It is honored only when ``file_path`` gives the trace somewhere else to go; without
+    a file sink the terminal handler is installed regardless, because a logger with no handler at
+    all would silently discard every record.
     """
     global _configured
     if _configured:
         return
     formatter: logging.Formatter = _JsonFormatter() if fmt == "json" else _LogfmtFormatter()
-    handler = logging.StreamHandler(stream if stream is not None else sys.stderr)
-    handler.setFormatter(formatter)
-    handler.addFilter(RedactionFilter())
     logger = logging.getLogger(LOGGER_NAME)
     logger.handlers.clear()
-    logger.addHandler(handler)
+    if console or file_path is None:
+        handler = logging.StreamHandler(stream if stream is not None else sys.stderr)
+        handler.setFormatter(formatter)
+        handler.addFilter(RedactionFilter())
+        logger.addHandler(handler)
     if file_path is not None:
         path = Path(file_path)
         path.parent.mkdir(parents=True, exist_ok=True)

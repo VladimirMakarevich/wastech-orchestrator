@@ -136,6 +136,8 @@ worc shell              interactive daemon console; nested verbs keep the REPL l
 worc stop / restart     stop or restart the watch daemon
 worc rerun <task-id>    re-attempt a failed task
 worc merge-task <id>    update, resolve conflicts, and merge a reviewed PR
+worc logs clean         reclaim task artifacts and daemon logs under .worc/logs/
+worc runs clean         reclaim per-task frozen bundles and sealed exchanges
 worc --version          installed version
 ```
 

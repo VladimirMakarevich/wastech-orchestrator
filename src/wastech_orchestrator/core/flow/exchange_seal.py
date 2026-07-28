@@ -12,7 +12,8 @@ Four operations, owned by the artifact/lifecycle layer:
 * :func:`seal_exchange` — after the quiescence barrier has proven the provider tree empty, build
   and verify a
   checksum manifest of the active exchange, copy it into a fresh versioned private snapshot
-  (``<private_home>/exchange-seals/<task-id>/seal-<NNNNNN>/`` + ``manifest.json``), re-verify, then
+  (``<private_home>/runs/exchange-seals/<task-id>/seal-<NNNNNN>/`` + ``manifest.json``), re-verify,
+  then
   remove the active in-repo directory. Cross-volume safe (copy → verify → atomic rename → remove).
 * :func:`restore_for_continue` — restore the latest verified sealed snapshot into a clean active
   exchange for an authorized ``rerun --continue`` of a terminal resumable task.
@@ -62,6 +63,7 @@ from wastech_orchestrator.providers.exchange import (
 from wastech_orchestrator.runtime_layout import (
     EXCHANGE_QUARANTINE_DIRNAME,
     EXCHANGE_SEAL_DIRNAME,
+    runs_root,
 )
 
 #: Bump when the on-disk snapshot layout / manifest schema changes (an older snapshot then fails to
@@ -119,12 +121,12 @@ class RestoreResult:
 
 def exchange_seal_root(private_home: str | Path, task_id: str) -> Path:
     """The per-task private root holding every sealed snapshot (a provider deny target)."""
-    return Path(private_home) / EXCHANGE_SEAL_DIRNAME / task_id
+    return runs_root(private_home) / EXCHANGE_SEAL_DIRNAME / task_id
 
 
 def exchange_quarantine_root(private_home: str | Path, task_id: str) -> Path:
     """The per-task private root holding quarantined contaminated exchange evidence."""
-    return Path(private_home) / EXCHANGE_QUARANTINE_DIRNAME / task_id
+    return runs_root(private_home) / EXCHANGE_QUARANTINE_DIRNAME / task_id
 
 
 def _next_index(root: Path, prefix: str) -> int:
