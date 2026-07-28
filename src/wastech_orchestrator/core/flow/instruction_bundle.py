@@ -10,8 +10,8 @@ resumed / fallback call would receive different instructions than were validated
 agent silently rewriting its own rules.
 
 At task start the orchestrator freezes these inputs into a private, immutable bundle under
-``<private_home>/instruction-bundles/<task-id>/`` (a provider deny target — see
-:class:`~wastech_orchestrator.runtime_layout.InternalDenyPolicy.frozen_instruction_bundle`), records
+``<private_home>/runs/instruction-bundles/<task-id>/`` (a provider deny target — see
+:class:`~wastech_orchestrator.runtime_layout.InternalDenyPolicy.runs_home`), records
 one composite ``instruction_manifest_digest``, and publishes **redacted** agent-readable copies to
 the exchange. Providers read only the frozen exchange copies (never the live files), native project
 instruction discovery is disabled by the adapters, and continue/resume verifies the manifest digest
@@ -48,7 +48,7 @@ from wastech_orchestrator.globmatch import path_matches_any
 from wastech_orchestrator.providers.artifacts import assert_contained_path, sha256_file
 from wastech_orchestrator.providers.exchange import FileInspector, default_file_inspector
 
-#: Bundle layout (all under ``<private_home>/instruction-bundles/<task-id>/``).
+#: Bundle layout (all under ``<private_home>/runs/instruction-bundles/<task-id>/``).
 _TASK_SUBDIR = "task"
 _SKILLS_SUBDIR = "skills"
 _INSTRUCTIONS_SUBDIR = "instructions"
@@ -126,9 +126,9 @@ class LoadedInstructionBundle:
 
 def instruction_bundle_dir(private_home: Path, task_id: str) -> Path:
     """The private per-task frozen-instruction-bundle dir (a provider deny target)."""
-    from wastech_orchestrator.runtime_layout import INSTRUCTION_BUNDLE_DIRNAME
+    from wastech_orchestrator.runtime_layout import INSTRUCTION_BUNDLE_DIRNAME, runs_root
 
-    return private_home / INSTRUCTION_BUNDLE_DIRNAME / task_id
+    return runs_root(private_home) / INSTRUCTION_BUNDLE_DIRNAME / task_id
 
 
 def assert_no_required_secret(text: str, *, extra_secrets: tuple[str, ...], label: str) -> None:

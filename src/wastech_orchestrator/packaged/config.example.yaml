@@ -2,7 +2,7 @@
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 # This is the packaged copy used by `wastech-orchestrator init` (the only example config; nothing else to sync).
 
-schema_version: 31                  # config format version; the orchestrator refuses newer configs
+schema_version: 32                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -308,6 +308,15 @@ logging:                            # operator log verbosity + on-disk artifact 
                                     #   full     = all (request.json, events.jsonl, output-schema.json, ...)
                                     # Prompt-audit is independent (see prompt_audit). Reclaim disk with
                                     # `worc logs clean [--keep N | --all]`.
+  clean_runs_on_success: true       # a task that finishes SUCCESSFULLY evicts its own per-task state under
+                                    #   .worc/runs/ (frozen control + instruction bundles, sealed exchanges).
+                                    #   Failed / parked / manual-action tasks are NEVER cleaned automatically,
+                                    #   and quarantined exchange evidence is never cleaned in either mode.
+                                    # false = keep every run's frozen inputs and seals for analysis; reclaim
+                                    #   on demand with `worc runs clean [--keep N] [--include-quarantine]`
+                                    #   (that command works either way — this only decides whether the
+                                    #   orchestrator also does it itself). Per-task log dirs are separate:
+                                    #   they stay with `worc logs clean`. See guide/footprint.md.
 
 memory:                             # persistent, repo-scoped memory (optional)
   enabled: true                     # false / omit the whole block = today's behavior: no store, no

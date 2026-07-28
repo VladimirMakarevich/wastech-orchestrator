@@ -1,6 +1,6 @@
 # Remote operator agent over Telegram (`worc listen`) — future vision
 
-Status: **proposed** (exploratory — future vision / «кол на берегу») Date: 2026-06-26 Owner: Vladimir Makarevich
+Status: **proposed** (exploratory — future vision) Date: 2026-06-26 Owner: Vladimir Makarevich
 
 A stake-in-the-ground for a remote, conversational way to run the orchestrator. `worc listen` starts a long-running process that lets the operator drive and interrogate the orchestrator from a Telegram chat — by tagging the bot — instead of being limited to a terminal next to the machine. The **centerpiece is a small "navigator" agent**: the operator talks to it in natural language ("what's queued right now?", "rerun the ion-list task", "why did review fail?"), and it answers from the orchestrator's own redacted state and minimally drives it. The natural-language agent is the front door; underneath it sits a deterministic, bounded command surface that is also the agent's entire tool surface — so the LLM-in-the-loop can never do more than a safe command parser could. This is exploratory: it records the direction and its constraints, not a build-ready spec.
 

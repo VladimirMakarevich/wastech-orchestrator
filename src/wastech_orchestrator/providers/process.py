@@ -54,6 +54,13 @@ _QUIESCENCE_POLL_SECONDS = 0.1
 # before it can reparent to init and become unattributable by a parent-PID walk after root exit.
 _TRACKER_POLL_SECONDS = 2.0
 
+# Set on a child spawned with a ``capture_path`` (see :func:`spawn_detached`): its raw stdout/stderr
+# land in an uncapped, unrotated startup log for its whole lifetime. A child that reads this must
+# keep its own terminal logging out of that file once it has a rotating file sink, or the startup
+# log grows without bound as a duplicate of the capped one. Public because the child (the CLI entry
+# point) reads it; the value is a flag, never data.
+STARTUP_CAPTURE_ENV = "WORC_STARTUP_LOG_CAPTURE"
+
 
 @dataclass(frozen=True)
 class QuiescenceResult:
@@ -696,6 +703,13 @@ def spawn_detached(
     its own rotating ``--log-file``, not this stream. The startup log holds only the daemon's own
     output (no secrets beyond what the daemon already logs, which passes the same redaction filter).
 
+    A captured child is told so through :data:`STARTUP_CAPTURE_ENV`, because nothing bounds the
+    startup log for the child's whole lifetime: it is truncated per spawn but never rotated, so a
+    long-lived child that also logs to stderr fills it with a byte-for-byte duplicate of its own
+    capped ``--log-file``. Only the child can prevent that — it owns the descriptor — so it drops
+    its terminal handler once the file sink is configured, and the startup log keeps just the
+    pre-configuration output it exists for.
+
     On POSIX the daemon launches with ``start_new_session=True`` so it **leads its own process
     group**: a ``stop --force-full`` can ``killpg`` that group (daemon + any checks child) without
     touching the console that spawned it. The agent runs in its **own** session/group (see
@@ -704,16 +718,21 @@ def spawn_detached(
     no group flag needed), so no ``creationflags`` are set here.
     """
     sink: Any = subprocess.DEVNULL
+    child_env = dict(env) if env is not None else None
     if capture_path is not None:
         Path(capture_path).parent.mkdir(parents=True, exist_ok=True)
         # Truncate per spawn so the file holds only the current daemon's stream (never grows across
         # restarts). Handed to the child; the parent keeps no reference — the child owns/closes it.
         sink = Path(capture_path).open("wb")  # noqa: SIM115 — owned by the spawned child, not this frame
+        child_env = {
+            **(child_env if child_env is not None else os.environ),
+            STARTUP_CAPTURE_ENV: "1",
+        }
     try:
         return subprocess.Popen(
             list(argv),
             cwd=os.fspath(cwd) if cwd is not None else None,
-            env=dict(env) if env is not None else None,
+            env=child_env,
             stdin=subprocess.DEVNULL,
             stdout=sink,
             stderr=subprocess.STDOUT if capture_path is not None else subprocess.DEVNULL,

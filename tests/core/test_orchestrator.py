@@ -50,12 +50,17 @@ from wastech_orchestrator.providers.base import (
     RunStatus,
 )
 from wastech_orchestrator.providers.exchange import build_exchange_manifest
-from wastech_orchestrator.runtime_layout import RuntimeLayout
+from wastech_orchestrator.runtime_layout import RUNS_DIRNAME, RuntimeLayout
 from wastech_orchestrator.state_store import PublishOpRow, StateStore, TaskRow
 from wastech_orchestrator.task.validation_gate import ValidationGate
 
 # Every test here is a slow integration test (real git / subprocess / process tree).
 pytestmark = pytest.mark.slow
+
+# The shipped default evicts a successful task's own `runs/` subtree at its terminal transition. A
+# test that inspects a finished task's frozen bundles or sealed exchange must therefore switch that
+# off — the same switch an operator flips to analyze runs.
+_KEEP_RUN_ARTIFACTS = {"clean_runs_on_success": False}
 
 
 class FakeProvider:
@@ -3971,7 +3976,12 @@ def test_instruction_inputs_are_frozen_end_to_end(
     _commit_agents_md(git_repo, git_run, "ORIGINAL REPO RULES\n")
     providers = _both()
     orch, store, _, art = _build(
-        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs=_KEEP_RUN_ARTIFACTS,
     )
     orig = providers[ProviderId.CLAUDE].run
 
@@ -3986,7 +3996,7 @@ def test_instruction_inputs_are_frozen_end_to_end(
     assert result.final_status is Status.DONE
 
     assert store.get_instruction_manifest_digest("task-frz")  # composite digest persisted
-    bundle = art / "instruction-bundles" / "task-frz"
+    bundle = art / RUNS_DIRNAME / "instruction-bundles" / "task-frz"
     assert (bundle / "task" / "task.md").is_file()  # frozen (private) task packet
     # The per-source file is frozen for the digest — no concatenated repository.md payload.
     src = bundle / "instructions" / "src" / "AGENTS.md"
@@ -4019,7 +4029,12 @@ def test_resume_repopulates_task_packet_digest(
     _commit_agents_md(git_repo, git_run, "REPO RULES\n")
     providers = _both()
     orch, store, _, art = _build(
-        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs=_KEEP_RUN_ARTIFACTS,
     )
     orig = providers[ProviderId.CLAUDE].run
 
@@ -4044,7 +4059,7 @@ def test_resume_repopulates_task_packet_digest(
     # And it is the sha256 of the frozen private task packet, so commit_audit verifies against it.
     import hashlib
 
-    frozen_packet = art / "instruction-bundles" / tid / "task" / "task.md"
+    frozen_packet = art / RUNS_DIRNAME / "instruction-bundles" / tid / "task" / "task.md"
     assert packet_digest == hashlib.sha256(frozen_packet.read_bytes()).hexdigest()
 
 
@@ -4061,7 +4076,12 @@ def test_resume_after_live_governance_edit_does_not_fail_closed(
     agents = _commit_agents_md(git_repo, git_run, "ORIGINAL REPO RULES\n")
     providers = _both()
     orch, store, _, _ = _build(
-        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs=_KEEP_RUN_ARTIFACTS,
     )
     orig = providers[ProviderId.CLAUDE].run
 
@@ -4095,7 +4115,12 @@ def test_frozen_instruction_copy_is_task_start_snapshot(
     agents = _commit_agents_md(git_repo, git_run, "ORIGINAL REPO RULES\n")
     providers = _both()
     orch, _, _, art = _build(
-        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs=_KEEP_RUN_ARTIFACTS,
     )
     orig = providers[ProviderId.CLAUDE].run
 
@@ -4110,9 +4135,10 @@ def test_frozen_instruction_copy_is_task_start_snapshot(
 
     orch.run_task(_complete_task(tmp_path, "task-imm"))
 
-    frozen = (
-        art / "instruction-bundles" / "task-imm" / "instructions" / "src" / "AGENTS.md"
-    ).read_text(encoding="utf-8")
+    bundles = art / RUNS_DIRNAME / "instruction-bundles"
+    frozen = (bundles / "task-imm" / "instructions" / "src" / "AGENTS.md").read_text(
+        encoding="utf-8"
+    )
     assert "ORIGINAL REPO RULES" in frozen  # the task-start freeze (digest record) is unchanged
     assert "TAMPERED" not in frozen
 
@@ -4256,9 +4282,16 @@ def test_terminal_seals_and_removes_active_exchange(
 ) -> None:
     # A DONE task leaves no active exchange dir for the next task and retains a verified private
     # snapshot; the guard flags stay clean (a clean seal, not an unsafe/contaminated teardown).
+    # Retention off, which is what an operator sets to analyze finished runs — the default evicts
+    # the seal at the same terminal (see the next test).
     providers = _both()
     orch, store, _, art = _build(
-        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs=_KEEP_RUN_ARTIFACTS,
     )
     _patch_impl_edit(providers, git_repo)
 
@@ -4272,6 +4305,28 @@ def test_terminal_seals_and_removes_active_exchange(
     seals = exchange_seal_root(art, "task-seal")
     latest = sorted(seals.glob("seal-*"))
     assert latest and (latest[-1] / "manifest.json").is_file()
+
+
+def test_successful_terminal_evicts_run_artifacts_by_default(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The shipped default, end to end: a task that finishes cleanly leaves nothing behind under
+    # runs/, so the operator never accumulates one directory per task per root. The committed audit
+    # trail (ledger record, task file + summary) is what survives — not these caches.
+    providers = _both()
+    orch, store, ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-evict"))
+
+    assert result.final_status is Status.DONE
+    runs = art / RUNS_DIRNAME
+    for root in ("control-bundles", "instruction-bundles", "exchange-seals"):
+        assert not (runs / root / "task-evict").exists()
+    assert [rec["id"] for rec in ledger.records()] == ["task-evict"]  # the audit trail is intact
+    assert store.get_task("task-evict") is not None
 
 
 def test_seal_terminal_exchange_quarantines_on_mutation(

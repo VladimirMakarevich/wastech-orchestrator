@@ -180,9 +180,26 @@ def test_adds_logging_block_from_packaged_template() -> None:
     template = packaged_template_mapping()
     operator = {"schema_version": 22, "prompt_audit": True}
     merged, added, _ = upgrade_config_mapping(template, operator)
-    assert merged["logging"] == {"level": "info", "artifacts": "standard"}
+    assert merged["logging"] == {
+        "level": "info",
+        "artifacts": "standard",
+        "clean_runs_on_success": True,
+    }
     assert merged["prompt_audit"] is True  # operator value preserved
     assert "logging" in added
+
+
+def test_adds_run_cleanup_key_into_an_existing_logging_block() -> None:
+    # v32 add: the new sub-key must reach a config that already HAS a `logging` block, or the switch
+    # is undiscoverable for every existing install (the loader defaults it either way, so this is
+    # about the operator being able to see and flip it).
+    template = packaged_template_mapping()
+    operator = {"schema_version": 31, "logging": {"level": "debug", "artifacts": "full"}}
+    merged, added, _ = upgrade_config_mapping(template, operator)
+    assert merged["logging"]["clean_runs_on_success"] is True
+    assert merged["logging"]["level"] == "debug"  # operator values untouched
+    assert merged["logging"]["artifacts"] == "full"
+    assert "logging.clean_runs_on_success" in added
 
 
 def test_adds_memory_block_from_packaged_template() -> None:

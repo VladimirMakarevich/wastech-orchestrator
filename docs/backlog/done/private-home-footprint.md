@@ -4,7 +4,7 @@ Status: **accepted 2026-07-27** (every fork closed in [Acceptance decisions](#ac
 
 Two operator-observation items about what the orchestrator leaves in the target repo's `.worc/`. Both were reported after operating against `wastech-mdlint` and both are about **comprehension of the private-home layout**, not about correctness: the first is a layout/naming change, the second turns out to be correct-by-design behavior whose only real defect is that nothing tells the operator so.
 
-Neither part changes read isolation. All four per-task roots sit under `private_home` and two of them are named explicitly in [`InternalDenyPolicy`](../../src/wastech_orchestrator/runtime_layout.py#L100) — the agent must never read them, and that stays true whatever they are called.
+Neither part changes read isolation. All four per-task roots sit under `private_home` and two of them are named explicitly in [`InternalDenyPolicy`](../../../src/wastech_orchestrator/runtime_layout.py#L100) — the agent must never read them, and that stays true whatever they are called.
 
 ## Evidence base (`wastech-mdlint`, verified 2026-07-27)
 
@@ -28,7 +28,7 @@ Every one of the eight `manifest.json` files records `"final_status": "done"`. F
 
 ### Current behavior (verified)
 
-Each frozen bundle root is a separate top-level directory of `private_home`, named by its own constant in [`runtime_layout.py`](../../src/wastech_orchestrator/runtime_layout.py):
+Each frozen bundle root is a separate top-level directory of `private_home`, named by its own constant in [`runtime_layout.py`](../../../src/wastech_orchestrator/runtime_layout.py):
 
 ```python
 CONTROL_BUNDLE_DIRNAME = "control-bundles"  # runtime_layout.py:46
@@ -41,9 +41,9 @@ Because every path is already resolved through these four constants, the change 
 
 | What | Where | Size |
 | --- | --- | --- |
-| The two (or four) dirname constants | [`runtime_layout.py:46`](../../src/wastech_orchestrator/runtime_layout.py#L46), [`:54`](../../src/wastech_orchestrator/runtime_layout.py#L54) | the whole change |
-| Deny-policy construction | [`composition.py:81-82`](../../src/wastech_orchestrator/composition.py#L81) | 2 lines (may collapse to 1 — see below) |
-| Bundle-dir resolution | [`orchestrator.py:2084`](../../src/wastech_orchestrator/core/orchestrator.py#L2084), [`instruction_bundle.py:131`](../../src/wastech_orchestrator/core/flow/instruction_bundle.py#L131), [`exchange_seal.py:122`](../../src/wastech_orchestrator/core/flow/exchange_seal.py#L122) and [`:127`](../../src/wastech_orchestrator/core/flow/exchange_seal.py#L127) | already constant-driven, 0 lines |
+| The two (or four) dirname constants | [`runtime_layout.py:46`](../../../src/wastech_orchestrator/runtime_layout.py#L46), [`:54`](../../../src/wastech_orchestrator/runtime_layout.py#L54) | the whole change |
+| Deny-policy construction | [`composition.py:81-82`](../../../src/wastech_orchestrator/composition.py#L81) | 2 lines (may collapse to 1 — see below) |
+| Bundle-dir resolution | [`orchestrator.py:2084`](../../../src/wastech_orchestrator/core/orchestrator.py#L2084), [`instruction_bundle.py:131`](../../../src/wastech_orchestrator/core/flow/instruction_bundle.py#L131), [`exchange_seal.py:122`](../../../src/wastech_orchestrator/core/flow/exchange_seal.py#L122) and [`:127`](../../../src/wastech_orchestrator/core/flow/exchange_seal.py#L127) | already constant-driven, 0 lines |
 | Hardcoded literals in tests | 11 lines: `tests/providers/test_claude_command.py` (5), `tests/core/test_orchestrator.py` (3), `tests/providers/test_codex_profile.py` (2), `tests/core/test_composition_layout.py` (1). Only the two _bundle_ literals appear — no test hardcodes `exchange-seals`/`exchange-quarantine`, so option (B) below costs no extra test churn | 11 lines |
 | Operator docs | see Part 2 — there is nothing to update yet, which is itself the finding | — |
 
@@ -56,13 +56,13 @@ Because every path is already resolved through these four constants, the change 
 
 **Decided: (B) under `runs/`** — see PH-D1 and PH-D2 in [Acceptance decisions](#acceptance-decisions-2026-07-27). Grouping does not force a uniform retention policy: per-root policy still applies, and `exchange-quarantine/` is exempt from automatic deletion ([runtime-artifact-retention.md](runtime-artifact-retention.md) RA-D6).
 
-**Be precise about what the deny-set collapse buys, because it is not "more secure".** Everything under `private_home` is already denied transitively; the bundle roots are named explicitly so the provider projection denies them **by name rather than by coincidence of location**, and so they stay denied once `private_home` moves out of tree ([`runtime_layout.py:110-118`](../../src/wastech_orchestrator/runtime_layout.py#L110)). Grouping preserves that property with one entry instead of two — a legibility and maintenance win, not a coverage win. It follows that the acceptance test must assert the named parent appears in `denied_paths`; a test that passes only because the parent happens to sit under `private_home` proves nothing.
+**Be precise about what the deny-set collapse buys, because it is not "more secure".** Everything under `private_home` is already denied transitively; the bundle roots are named explicitly so the provider projection denies them **by name rather than by coincidence of location**, and so they stay denied once `private_home` moves out of tree ([`runtime_layout.py:110-118`](../../../src/wastech_orchestrator/runtime_layout.py#L110)). Grouping preserves that property with one entry instead of two — a legibility and maintenance win, not a coverage win. It follows that the acceptance test must assert the named parent appears in `denied_paths`; a test that passes only because the parent happens to sit under `private_home` proves nothing.
 
 Whichever wins, three constraints hold:
 
 - The parent must not be confusable with the repo's committed `tasks/` lifecycle tree (so **not** `tasks/`, which `.worc/` already uses for `tasks/rejected/` besides).
 - It must not collide with an existing `.worc/` child: `config.yaml`, `flows/`, `git-null-hooks/`, `guide/`, `logs/`, `memory/`, `state.db*`, `tasks/`, `workspace/`, `.env*`. Both `runs/` and `bundles/` are free.
-- The grouping must stay a pure path change — the deny semantics, the manifest digests, and the quiescence precondition on sealing (`get_exchange_guard` → `exchange_active_unsafe`, [`orchestrator.py:4014`](../../src/wastech_orchestrator/core/orchestrator.py#L4014)) are all untouched.
+- The grouping must stay a pure path change — the deny semantics, the manifest digests, and the quiescence precondition on sealing (`get_exchange_guard` → `exchange_active_unsafe`, [`orchestrator.py:4014`](../../../src/wastech_orchestrator/core/orchestrator.py#L4014)) are all untouched.
 
 ## Part 2 — `exchange-seals/` is non-empty after a fully successful run
 
@@ -72,14 +72,14 @@ Whichever wins, three constraints hold:
 
 ### What actually happens (verified — this is by design)
 
-`exchange-seals/` is non-empty **precisely because** the run succeeded. [`_seal_terminal_exchange`](../../src/wastech_orchestrator/core/orchestrator.py#L4000) runs at **every** terminal transition, and `done` is a terminal status like any other: [`seal_exchange`](../../src/wastech_orchestrator/core/flow/exchange_seal.py#L299) builds a checksum manifest of the live `.worc-io/<task-id>/`, copies it into `exchange-seals/<task-id>/seal-<NNNNNN>/`, re-verifies it, and then removes the in-repo exchange. The eight manifests in `wastech-mdlint` all read `"final_status": "done"` — the seal is the **archive of what the agent last saw** (`task.md`, `plan.md`, `current.diff`, `stages/<stage>/…`), not a record that something went wrong.
+`exchange-seals/` is non-empty **precisely because** the run succeeded. [`_seal_terminal_exchange`](../../../src/wastech_orchestrator/core/orchestrator.py#L4000) runs at **every** terminal transition, and `done` is a terminal status like any other: [`seal_exchange`](../../../src/wastech_orchestrator/core/flow/exchange_seal.py#L299) builds a checksum manifest of the live `.worc-io/<task-id>/`, copies it into `exchange-seals/<task-id>/seal-<NNNNNN>/`, re-verifies it, and then removes the in-repo exchange. The eight manifests in `wastech-mdlint` all read `"final_status": "done"` — the seal is the **archive of what the agent last saw** (`task.md`, `plan.md`, `current.diff`, `stages/<stage>/…`), not a record that something went wrong.
 
-The failure-side artifact is the _other_ directory: `exchange-quarantine/`, written by [`quarantine_contaminated`](../../src/wastech_orchestrator/core/flow/exchange_seal.py#L454) only when mutation detection reports an agent-side change to the exchange (`exchange_contaminated`, or a before/after manifest pair diffed by `diff_exchange_manifests`). In `wastech-mdlint` it does not exist at all — the correct signal for eight clean runs.
+The failure-side artifact is the _other_ directory: `exchange-quarantine/`, written by [`quarantine_contaminated`](../../../src/wastech_orchestrator/core/flow/exchange_seal.py#L454) only when mutation detection reports an agent-side change to the exchange (`exchange_contaminated`, or a before/after manifest pair diffed by `diff_exchange_manifests`). In `wastech-mdlint` it does not exist at all — the correct signal for eight clean runs.
 
 So there is no defect in the sealing behavior. There are three real gaps behind the confusion:
 
 1. **The name and its neighbor mislead.** "Seal" reads as forensics, and it sits directly beside `exchange-quarantine/` — a genuine incident artifact. An operator scanning `.worc/` reasonably concludes something was quarantined-adjacent. A success-path archive should not be shelved next to the tainted-evidence root, or should not be named like one.
-2. **Zero operator-facing documentation — in the source of truth, not just in the installed copy.** `grep` over `src/wastech_orchestrator/packaged/` (the whole shipped tree: `guide/`, `flows/`, `config.example.yaml`) returns **no match** for any of `control-bundles`, `instruction-bundles`, `exchange-seals`, `exchange-quarantine` — so every future `worc install` reproduces the same silence. The only place these roots are explained is orchestrator source docstrings and [`.claude/skills/analyze-task-run/SKILL.md:65`](../../.claude/skills/analyze-task-run/SKILL.md#L65) — neither of which is in the operator's tree. Four directories appear in the operator's own control home with no reachable explanation of what they are, whether they are safe to delete, or which one means trouble. There is also no page in `guide/` that owns the `.worc/` footprint at all (`README.md`, `best-practices.md`, `decision-guide.md`, `config/`, `flows/`, `skills/`, `tasks/`), so where this lands is itself a decision.
+2. **Zero operator-facing documentation — in the source of truth, not just in the installed copy.** `grep` over `src/wastech_orchestrator/packaged/` (the whole shipped tree: `guide/`, `flows/`, `config.example.yaml`) returns **no match** for any of `control-bundles`, `instruction-bundles`, `exchange-seals`, `exchange-quarantine` — so every future `worc install` reproduces the same silence. The only place these roots are explained is orchestrator source docstrings and [`.claude/skills/analyze-task-run/SKILL.md:65`](../../../.claude/skills/analyze-task-run/SKILL.md#L65) — neither of which is in the operator's tree. Four directories appear in the operator's own control home with no reachable explanation of what they are, whether they are safe to delete, or which one means trouble. There is also no page in `guide/` that owns the `.worc/` footprint at all (`README.md`, `best-practices.md`, `decision-guide.md`, `config/`, `flows/`, `skills/`, `tasks/`), so where this lands is itself a decision.
 3. **No retention, so "non-empty" only ever grows.** One `seal-<NNNNNN>` per terminal transition, per task, forever. Already covered as an open question in [runtime-artifact-retention.md](runtime-artifact-retention.md) Part 2 — not re-opened here.
 
 ### Direction

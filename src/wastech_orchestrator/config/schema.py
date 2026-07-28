@@ -167,7 +167,10 @@ from wastech_orchestrator.providers.base import ProviderId
 # `permission_profile`; the legacy `agents.providers.codex.sandbox: read-only|workspace-write` is
 # rejected by the validator and folded into `permission_profile` by `upgrade-config`. `sandbox`
 # survives only as the `danger-full-access` escape (gated by `strict_isolation: false`).
-CONFIG_SCHEMA_VERSION = 31
+# v32: adds the optional `logging.clean_runs_on_success` (bool, default true) — a successful task
+# evicts its own per-task `runs/` subtree (frozen bundles + sealed exchanges). Old (absent) configs
+# take the default, so cleanup is on out of the box; set false to retain every run for analysis.
+CONFIG_SCHEMA_VERSION = 32
 
 
 class AuditBranch(StrEnum):
@@ -544,10 +547,19 @@ class LoggingConfig:
     (even on failure — ``result.json`` records the exit code + error class), ``standard`` adds
     ``stdout.log``/``stderr.log``, ``full`` keeps everything. Prompt-audit is independent (governed
     by ``prompt_audit``); ``rendered-prompt.md`` and task-level artifacts are out of scope.
+
+    ``clean_runs_on_success`` governs the per-task ``runs/`` roots (frozen control/instruction
+    bundles and sealed terminal exchanges): on by default, so a task that finishes **successfully**
+    evicts its own subtree and the ordinary operator never has to learn those directories exist.
+    Turn it off to keep every run's frozen inputs and seals for analysis — ``worc runs clean`` then
+    reclaims them on demand, and is available either way. A task that failed, parked, or needs
+    manual action is never cleaned automatically, nor is quarantined exchange evidence; per-task log
+    dirs are not in scope here (they belong to ``worc logs clean``).
     """
 
     level: str = "info"
     artifacts: str = "standard"
+    clean_runs_on_success: bool = True
 
 
 @dataclass(frozen=True)

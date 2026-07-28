@@ -19,6 +19,7 @@ from wastech_orchestrator.task.validation_gate import ValidationGate
 def test_worc_packaged_data_discoverable() -> None:
     # Packaged via importlib.resources, so `init`/`install` work from an installed wheel too.
     assert _worc_root().joinpath("README.md").is_file()
+    assert _worc_root().joinpath("footprint.md").is_file()
     assert _worc_root().joinpath("tasks", "task-minimal.md").is_file()
     assert _worc_root().joinpath("tasks", "task-rich.md").is_file()
     assert _worc_root().joinpath("skills", "worc-task", "SKILL.md").is_file()

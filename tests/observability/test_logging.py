@@ -102,6 +102,29 @@ def test_seeded_secret_never_reaches_the_sink() -> None:
     assert _GH_TOKEN not in stream.getvalue()
 
 
+def test_console_off_sends_the_trace_only_to_the_file(tmp_path) -> None:
+    # A detached daemon's stderr is captured into an uncapped startup log; with a rotating file sink
+    # configured, the terminal handler would fill that file with a duplicate of the capped one.
+    stream = io.StringIO()
+    log_path = tmp_path / "daemon.log"
+    obslog.configure_logging(stream=stream, file_path=log_path, console=False)
+    log = obslog.bind(logging.getLogger(obslog.LOGGER_NAME), task_id="t")
+    log.info("serving the queue")
+    for handler in logging.getLogger(obslog.LOGGER_NAME).handlers:
+        handler.flush()
+    assert stream.getvalue() == ""
+    assert "serving the queue" in log_path.read_text(encoding="utf-8")
+
+
+def test_console_off_without_a_file_sink_still_logs_to_the_terminal() -> None:
+    # Honoring console=False with nowhere else to write would leave the logger handler-less and
+    # discard every record — the guard keeps the terminal handler in that case.
+    stream = io.StringIO()
+    obslog.configure_logging(stream=stream, file_path=None, console=False)
+    obslog.bind(logging.getLogger(obslog.LOGGER_NAME), task_id="t").info("still visible")
+    assert "still visible" in stream.getvalue()
+
+
 def test_json_file_handler_writes_redacted_records(tmp_path) -> None:
     stream = io.StringIO()
     log_path = tmp_path / "operator" / "orchestrator.jsonl"

@@ -267,6 +267,20 @@ def test_rerun_refuses_non_recoverable_status(
     assert "is preparing" in capsys.readouterr().out
 
 
+def test_rerun_refuses_a_done_task(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Load-bearing beyond `rerun` itself: because a successful task can never be re-entered, the
+    # orchestrator evicts its frozen bundles and sealed exchange at the terminal transition. If this
+    # ever starts succeeding, that eviction begins deleting restore data a rerun would need.
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _seed(project, git_repo.clone, TaskRow("task-1", "T", Status.DONE))
+    code = cli.main(["--config", str(config), "rerun", "task-1"])
+    assert code == 1
+    assert "is done" in capsys.readouterr().out
+
+
 def test_rerun_recovers_stale_running_task(
     git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
