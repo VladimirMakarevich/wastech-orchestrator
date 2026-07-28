@@ -15,13 +15,15 @@ There are two levels of git here: (A) how the orchestrator **itself** is develop
 ### Two hard rules
 
 1. **Never merge `main → dev`** (nor `release → dev`). It puts the derived documentation back on `dev` and the whole arrangement has to be rebuilt. If a fix ever lands on `main` or `release` first, port it to `dev` with `git cherry-pick`, never with a merge. A CI guard rejects any PR into `dev` whose source is `main` or `release`.
-2. **`dev → main` must be a real merge commit.** A squash merge creates no merge commit, so the merge base never advances and every later merge re-proposes deleting the documentation; rebase-merge is likewise wrong for a long-lived branch pair. On GitHub choose "Create a merge commit" (squash is disabled on `main` in branch protection).
+2. **`dev → main` must be a real merge commit.** A squash merge creates no merge commit, so the merge base never advances and every later merge re-proposes deleting the documentation; rebase-merge is likewise wrong for a long-lived branch pair. On GitHub choose "Create a merge commit" — a ruleset on `main` allows no other method, so the squash and rebase buttons are absent by design.
 
 Both rules exist because the two branches diverge by one recorded seal commit (`git merge -s ours dev` on `main`); anything that resets the merge base or copies docs back into `dev` destroys it. The seal is already in history — `dev` is an ancestor of `main`, so an ordinary `dev → main` merge proposes no deletions. Do not create a second seal.
 
+Neither rule is self-announcing when broken, which is why both are machine-enforced. Breaking rule 2 is worse than it looks: the squashed content still lands, the merge is clean, and the only symptom is that `dev` quietly falls behind `main` while the merge base stays put — every later `dev → main` merge then re-proposes the same content forever. If it happens anyway, the repair is to land the same change on `dev` through its normal PR and then merge `dev → main` with a merge commit; verify with `git merge-tree --write-tree origin/main origin/dev` first, and expect `git diff origin/main <result-tree>` to be empty (that merge is a content no-op whose only job is to re-advance the merge base).
+
 ### Where the branches touch
 
-Every legal transition, and the one illegal one. The mechanism column is the part that matters: picking the wrong one is how the model breaks.
+Every legal transition, and the two illegal ones. The mechanism column is the part that matters: picking the wrong one is how the model breaks.
 
 | From → To | Mechanism | Why this one |
 | --- | --- | --- |
@@ -32,12 +34,27 @@ Every legal transition, and the one illegal one. The mechanism column is the par
 | `hotfix/…` → `release` | squash or merge (PR) | Published-version fix; tag afterwards. |
 | `release` → `main` | merge commit | Safe — both have docs. This is how a hotfix gets back into integration. |
 | `main`/`release` → `dev` | **FORBIDDEN** — use `git cherry-pick` | A merge restores the derived docs on `dev`. The CI guard rejects it on PRs; a local push would not be caught, so do not do it. |
+| `feat/…`/`fix/…`/`chore/…` → `main` | **FORBIDDEN** — retarget at `dev` | Bypasses `dev`, so `dev` falls behind `main`. It merges cleanly and raises no conflict, so only the `main-guard` check catches it. |
 
 Three more contact surfaces that are not merges:
 
 - **Shared files** — `AGENTS.md`, `CLAUDE.md`, `README.md`, `.agents/rules/`, `.claude/`, everything under `src/`, and `docs/backlog/` exist on **both** branches. Edit them **only on `dev`**. Editing one on `main` makes the content diverge, and a divergent shared file conflicts on every subsequent merge — the seal only makes _deletions_ conflict-free, never divergent content.
 - **Links to `main`-only documents** — from any shared file, link them by absolute URL (`https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/<file>`), never by a relative path: the relative path is dangling on `dev`.
 - **New paths under `docs/` on `dev`** — only `backlog/` and `research/` (the latter produced by a `deep_research` run). A CI guard rejects anything else, so the partition cannot erode one file at a time.
+
+### What is machine-enforced
+
+Everything above that a mistake would break silently is checked. Know which half catches what, because the two halves fail differently.
+
+| Mechanism | Catches | Where |
+| --- | --- | --- |
+| `dev-guard` — job `dev branch invariants` | a PR into `dev` sourced from `main`/`release`; any new path under `docs/` outside `backlog/`/`research/` | [.github/workflows/dev-guard.yml](../../.github/workflows/dev-guard.yml) |
+| `main-guard` — job `main branch invariants` | a PR into `main` sourced from anything but `dev`, `release`, or `docs/…` | [.github/workflows/main-guard.yml](../../.github/workflows/main-guard.yml) |
+| Ruleset on `main` | the merge _method_ — only "Create a merge commit" is offered; `main` is pull-request-only | repository settings → Rules |
+
+The ruleset is the one that cannot be a workflow: the merge method is chosen after every check has reported, so no pull-request check can observe it. Conversely the guards cannot be settings — GitHub has no notion of a legal source branch.
+
+Two limits worth knowing. A **local push** bypasses both guards (they run on pull requests), which is why `main` is pull-request-only in the ruleset — the ruleset does cover pushes. And the ruleset has **no bypass actors on purpose**: the mistake it prevents is an admin clicking the wrong merge button, so an admin exemption would defeat it. If you genuinely need a direct push to `main`, set that ruleset to `Disabled` in repository settings, do the push, and switch it back — a deliberate two-step act, not a silent default.
 
 ### Command recipes
 
@@ -63,14 +80,13 @@ gh pr create --base main --head dev --title "Integrate dev" --body "<what dev br
 gh pr merge --merge                        # --merge = merge commit. NEVER --squash / --rebase
 ```
 
-Locally, if direct pushes to `main` are allowed:
+`main` is pull-request-only, so there is no local variant — but do run the safety check the local recipe used to carry, before you merge rather than after. It costs nothing and needs no worktree:
 
 ```bash
-git checkout main && git pull
-git merge --no-ff --no-edit dev
-git diff --name-status --diff-filter=D HEAD^1 HEAD   # MUST be empty — no doc deletions
-git push origin main
+git fetch origin && git merge-tree --write-tree --messages origin/main origin/dev
 ```
+
+The first line of output is the resulting tree; anything after it is a conflict. `git diff --stat origin/main <that-tree>` shows exactly what the merge will do to `main` — no doc deletions may appear, and if it is empty the merge is a pure merge-base advance.
 
 **Refresh the derived docs on `main`** (its own task, after an integration merge).
 
@@ -104,7 +120,9 @@ git checkout -b hotfix/<slug>
 # … fix + the gate … then PR into release and tag:
 gh pr create --base release && gh pr merge --squash --delete-branch
 git checkout release && git pull && git tag vX.Y.Z+1 && git push origin vX.Y.Z+1
-git checkout main && git pull && git merge --no-ff --no-edit release && git push origin main
+# then propagate release → main, which is pull-request-only:
+gh pr create --base main --head release --title "Propagate hotfix vX.Y.Z+1" --body "<the fix>"
+gh pr merge --merge                        # merge commit, as for dev → main
 ```
 
 **Port a fix from `main`/`release` into `dev`** — cherry-pick, never a merge.
