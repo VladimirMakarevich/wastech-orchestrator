@@ -14,10 +14,11 @@ What actually landed:
 | 4 — create `release` | cut from `main` at `8587cbe`, full history inherited |
 | 5 — round trip on the live branches | not yet run; the full merge matrix was verified on clones of the sealed history |
 
-Two corrections to the text below, found while implementing:
+Corrections to the text below, found while implementing and afterwards in use:
 
 - The link audit ("only three files need it") was incomplete — `docs/backlog/` stays on `dev` and linked out to the derived docs 11 times across 7 files. Fixed in PR #41. The file counts in the [concrete partition](#concrete-partition) and [acceptance criteria](#acceptance-criteria) are also stale: 20 tracked files were removed (16 markdown + 3 site assets + the LikeC4 model), leaving 30 markdown files under `docs/backlog/` out of 46 on `main` — not 18/35/49.
 - "hotfix on `main` → `git cherry-pick` into `dev` → clean" holds only for a **code-only** commit. One that also touches a `main`-only document conflicts on that path as `DU`; resolve with `git rm <path>` then `git cherry-pick --continue`.
+- **"Accidental `feat/… → main` pull requests are not dangerous" was too reassuring, and none of the [repository settings](#github-repository-settings) below were ever applied** — `main`/`dev`/`release` carried no branch protection at all and squash merge stayed enabled, so nothing but review stood between the UI and a mis-targeted merge. On 2026-07-28 PR #48 (`feat/runs-retention-and-footprint`) was squash-merged into `main` instead of `dev`: harmless to the docs exactly as predicted, but it left `dev` behind `main` with the merge base stuck, and the CI guard cited below could not catch it because that guard only runs on pull requests into `dev`. Repaired by landing the same change on `dev` (PR #49) and merging `dev → main` (PR #50, a content no-op that re-advanced the merge base). The gap is now closed by the `main-guard` workflow plus a ruleset on `main` — see [.agents/rules/git-workflow.md](.agents/rules/git-workflow.md) §A "What is machine-enforced", which is the operative text; the settings section below is superseded by it.
 
 ## Goal
 
@@ -314,7 +315,9 @@ and have `_should_block` use `_doc_prefixes()` in place of the literal `("docs/"
 
 ## GitHub repository settings
 
-- **Default branch: keep `main`.** It is the branch whose `README` and docs GitHub renders. Accidental `feat/… → main` pull requests are not dangerous (verified: the merge base is already docs-less, so no deletion is proposed) — they merely bypass `dev`, which the CI guard above will catch by target branch.
+**Superseded — do not implement from here.** This section was never applied as written, and the reasoning in its first bullet is what let PR #48 through (see the corrections at the top). What is actually in force, and why each half exists, is [.agents/rules/git-workflow.md](.agents/rules/git-workflow.md) §A "What is machine-enforced". Kept below as the original intent.
+
+- **Default branch: keep `main`.** It is the branch whose `README` and docs GitHub renders. Accidental `feat/… → main` pull requests are not dangerous (verified: the merge base is already docs-less, so no deletion is proposed) — they merely bypass `dev`, which the CI guard above will catch by target branch. _(Wrong on the last clause: that guard only runs on pull requests into `dev`. The `main-guard` workflow was added for this.)_
 - **Branch protection on `main`:** require the `ci` checks; allow merge commits and **disable squash merge** for this branch, so rule 2 cannot be violated through the UI.
 - **Branch protection on `dev`:** require the `ci` checks and the new guard job. Squash merge allowed (preferred for feature branches).
 - **Branch protection on `release`:** require the `ci` checks; restrict who can push and tag.
