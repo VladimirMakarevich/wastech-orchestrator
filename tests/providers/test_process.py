@@ -424,6 +424,33 @@ def test_spawn_detached_capture_path_redirects_stdout_and_stderr(
     assert kwargs["stdin"] is subprocess.DEVNULL
     assert kwargs["stderr"] is subprocess.STDOUT  # stderr merged into the captured stdout stream
     assert kwargs["stdout"] is not subprocess.DEVNULL  # a real file handle
+    # The child is told its stream is captured into a file nothing rotates, so it can keep its own
+    # terminal logging out of it; without capture the parent env is inherited untouched.
+    child_env = kwargs["env"]
+    assert isinstance(child_env, dict)
+    assert child_env[proc_mod.STARTUP_CAPTURE_ENV] == "1"
+    assert "PATH" in child_env  # the rest of the parent environment is still inherited
+
+
+def test_spawn_detached_without_capture_does_not_mark_the_child(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import subprocess
+
+    from wastech_orchestrator.providers import process as proc_mod
+
+    captured: dict[str, object] = {}
+
+    class _Popen:
+        def __init__(self, argv: object, **kwargs: object) -> None:
+            captured["kwargs"] = kwargs
+            self.pid = 11
+
+    monkeypatch.setattr(subprocess, "Popen", _Popen)
+    proc_mod.spawn_detached(["worc", "watch"])
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["env"] is None  # inherit implicitly — no marker, so the terminal handler stays
 
 
 def test_hard_kill_tree_builds_taskkill_argv_and_swallows_missing_process(

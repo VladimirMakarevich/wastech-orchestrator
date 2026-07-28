@@ -13,7 +13,7 @@ Blocks appear below in the packaged order. Every block except `schema_version`, 
 
 | Field | Type | Default | Constraint | Meaning |
 | --- | --- | --- | --- | --- |
-| `schema_version` | int | current is `31` | A value **greater** than the orchestrator's supported version fails closed ("upgrade wastech-orchestrator"); equal or lower is accepted, absent is accepted. | The config format version. `worc upgrade-config` re-emits the file at the current version. |
+| `schema_version` | int | current is `32` | A value **greater** than the orchestrator's supported version fails closed ("upgrade wastech-orchestrator"); equal or lower is accepted, absent is accepted. | The config format version. `worc upgrade-config` re-emits the file at the current version. |
 
 ## `orchestrator` — the watch loop and task queue
 
@@ -190,6 +190,7 @@ One pair covers **both** supervisor roles: the cheap per-step observations and t
 | --- | --- | --- | --- |
 | `logging.level` | `debug` \| `info` \| `warning` \| `error` | `info` | Operator trace verbosity. The `--log-level` CLI flag overrides it. |
 | `logging.artifacts` | `minimal` \| `standard` \| `full` | `standard` | Per-attempt provider files kept: `minimal` = `result.json` only; `standard` = + stdout/stderr; `full` = everything. Reclaim disk with `worc logs clean`. |
+| `logging.clean_runs_on_success` | boolean | `true` | A task that finishes **successfully** evicts its own per-task state under `.worc/runs/` (frozen control + instruction bundles, sealed exchanges). Failed / parked / manual-action tasks and quarantined exchange evidence are never cleaned automatically. Set `false` to keep every run for analysis and reclaim on demand with `worc runs clean` (available either way). Per-task log dirs are out of scope — those stay with `worc logs clean`. See [footprint.md](../footprint.md). |
 
 ## `memory` — persistent, repo-scoped memory
 

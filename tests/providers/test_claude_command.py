@@ -434,7 +434,7 @@ def test_effort_before_max_turns(
 _INTERNAL_DENY = (
     Path("/repo/.worc"),
     Path("/repo/.worc/.env"),
-    Path("/repo/.worc/control-bundles"),
+    Path("/repo/.worc/runs"),
 )
 
 
@@ -627,8 +627,7 @@ def test_build_sandbox_settings_shape_is_hardened() -> None:
         private_home=Path("/repo/.worc"),
         env_file=Path("/repo/.worc/.env"),
         provider_homes=(Path("/home/me/.claude"),),
-        frozen_control_bundle=Path("/repo/.worc/control-bundles"),
-        frozen_instruction_bundle=Path("/repo/.worc/instruction-bundles"),
+        runs_home=Path("/repo/.worc/runs"),
     )
     settings = build_sandbox_settings(deny, _write_guard(), network_access=False)["sandbox"]
     assert settings["enabled"] is True
@@ -669,8 +668,7 @@ def _read_isolation_off_deny() -> InternalDenyPolicy:
         private_home=Path("/repo/.worc"),
         env_file=Path("/repo/.worc/.env"),
         provider_homes=(Path("/home/me/.codex"),),
-        frozen_control_bundle=Path("/repo/.worc/control-bundles"),
-        frozen_instruction_bundle=Path("/repo/.worc/instruction-bundles"),
+        runs_home=Path("/repo/.worc/runs"),
     )
 
 

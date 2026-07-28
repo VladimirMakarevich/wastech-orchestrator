@@ -32,8 +32,7 @@ def _deny(root: Path) -> InternalDenyPolicy:
         private_home=root / ".worc",
         env_file=root / ".worc" / ".env",
         provider_homes=(PROVIDER_HOME,),
-        frozen_control_bundle=root / ".worc" / "control-bundles",
-        frozen_instruction_bundle=root / ".worc" / "instruction-bundles",
+        runs_home=root / ".worc" / "runs",
     )
 
 
@@ -60,6 +59,9 @@ def test_read_only_extends_readonly_and_grants_workspace_read(tmp_path: Path) ->
     assert profile["extends"] == ":read-only"
     assert fs[str(root)] == "read"
     assert fs[str(root / ".worc")] == "deny"
+    # The per-task runtime root is denied by NAME, not by sitting under the private home — so it
+    # stays denied if the private home is ever relocated out of tree.
+    assert fs[str(root / ".worc" / "runs")] == "deny"
     assert profile["network"] == {"enabled": False}
 
 
@@ -229,6 +231,8 @@ def test_windows_paths_escaped_via_native_seam(tmp_path: Path) -> None:
     arg = render_permission_profile_arg(profile)
     assert "\\\\" in arg  # backslashes doubled for a valid TOML basic string
     assert "C:\\\\" in arg
+    # Every deny entry survives the Windows shape, including the per-task runtime root.
+    assert to_win(root / ".worc" / "runs").replace("\\", "\\\\") in arg
 
 
 def test_git_evidence_does_not_change_the_codex_profile(tmp_path: Path) -> None:

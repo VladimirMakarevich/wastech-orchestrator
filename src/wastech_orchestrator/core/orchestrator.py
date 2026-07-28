@@ -172,6 +172,7 @@ from wastech_orchestrator.notify import (
 )
 from wastech_orchestrator.observability.logging import bind
 from wastech_orchestrator.providers.artifacts import (
+    PathIdentityError,
     append_node_history,
     archive_task_artifacts,
     node_run_dir,
@@ -195,6 +196,7 @@ from wastech_orchestrator.providers.redaction import (
     secret_env_values,
 )
 from wastech_orchestrator.routing.router import AgentRouter
+from wastech_orchestrator.runs_retention import remove_task_runs
 from wastech_orchestrator.runtime_layout import (
     CONTROL_BUNDLE_DIRNAME,
     InternalDenyPolicy,
@@ -240,6 +242,17 @@ _LIFECYCLE_FOLDERS = ("pending", "done", "failed")
 # diff — the error-class dispatch checks this before the evaluator-vs-node split.
 _CONTAINMENT_MANUAL_CLASSES = frozenset(
     {ErrorClass.CONTAINMENT_UNVERIFIED, ErrorClass.CAPABILITY_UNAVAILABLE}
+)
+
+# The statuses ``rerun`` will re-enter: an unrecoverable failure, an operator-action park, and a
+# stale ``running`` row (a killed/crashed task, daemon-less by the time it reaches the plan).
+#
+# ``DONE`` is deliberately absent, and something else depends on that: a successful task's frozen
+# bundles and sealed exchange are evicted at its terminal transition, which is only safe because
+# nothing can ever ask to resume from them. Admitting ``DONE`` here would silently start deleting
+# restore data a rerun needs.
+RERUN_ELIGIBLE_STATUSES: frozenset[Status] = frozenset(
+    {Status.FAILED, Status.MANUAL_ACTION_REQUIRED, Status.RUNNING}
 )
 
 
@@ -1096,7 +1109,7 @@ class Orchestrator:
         # already refused if a live watch daemon owned the slot, so a ``running`` row reaching here
         # is daemon-less (the "parked (no daemon)" state) — no ``finalize --as failed`` dance. The
         # active-slot check below excludes this task's own id, so it never self-blocks.
-        if row.status not in (Status.FAILED, Status.MANUAL_ACTION_REQUIRED, Status.RUNNING):
+        if row.status not in RERUN_ELIGIBLE_STATUSES:
             refusals.append(
                 f"task '{task_id}' is {row.status.value}; rerun is for failed / "
                 "manual_action_required / stale-running tasks (use `run` for a new task)"
@@ -1559,6 +1572,7 @@ class Orchestrator:
         # ``_go_terminal``, so they must seal the exchange too. Idempotent — a no-op when the
         # pipeline terminal already sealed and removed the active exchange for this task.
         self._seal_terminal_exchange(task_id, final=declared)
+        self._evict_run_artifacts(task_id, final=declared)
         self._relocate_task_file(row.source_path, task_id, declared)
         consume_pending_interactions(self._artifacts_root, task_id)
         if delete_branch and row.branch:
@@ -2081,7 +2095,7 @@ class Orchestrator:
 
     def _control_bundle_dir(self, task_id: str) -> Path:
         """The private per-task frozen-control-bundle dir (a provider deny target)."""
-        return self._layout.private_home / CONTROL_BUNDLE_DIRNAME / task_id
+        return self._layout.runs_home / CONTROL_BUNDLE_DIRNAME / task_id
 
     def _freeze_live_control_bundle(
         self, p: _Pipeline, bundle_dir: Path
@@ -3998,6 +4012,7 @@ class Orchestrator:
         # set ``exchange_active_unsafe`` and blocks the seal). Never raises — the terminal status is
         # already recorded and must stay stable.
         self._seal_terminal_exchange(p.task.id, final=final, mutation=mutation)
+        self._evict_run_artifacts(p.task.id, final=final)
         return PipelineResult(task_id=p.task.id, final_status=final, pr_url=pr_url)
 
     def _seal_terminal_exchange(
@@ -4090,6 +4105,43 @@ class Orchestrator:
             log.error(
                 "terminal exchange seal failed (unexpected OS error)", extra={"error": str(exc)}
             )
+
+    def _evict_run_artifacts(self, task_id: str, *, final: Status) -> None:
+        """Drop a successful task's own per-task ``runs/`` subtree (opt-out via config).
+
+        A finished task's frozen inputs and sealed exchanges are a rerun/analysis cache, and a
+        ``done`` task can never be a ``rerun`` target — so nothing consumes them and one directory
+        per task per root would otherwise accumulate forever. Restricted to a *successful* terminal
+        in both modes: for any other outcome these directories are the evidence, and deleting them
+        at the moment the operator needs them is the one failure this must never have. Quarantined
+        exchange evidence is out of reach here by construction.
+
+        Never raises: the terminal status and its ledger record are already written, so a cleanup
+        that cannot finish is logged and left for the operator's own ``runs clean``.
+        """
+        if final is not Status.DONE or not self._config.logging.clean_runs_on_success:
+            return
+        log = self._log(task_id)
+        try:
+            contaminated, active_unsafe = self._store.get_exchange_guard(task_id)
+        except KeyError:
+            return
+        if contaminated or active_unsafe:
+            # The seal or the teardown did not complete cleanly. The seal may be the only verified
+            # copy of a tree still sitting in the repo, and later launches are already blocked
+            # pending an operator — so keep everything and say why.
+            log.warning(
+                "run artifacts kept: exchange not cleanly sealed at terminal",
+                extra={"contaminated": bool(contaminated), "active_unsafe": bool(active_unsafe)},
+            )
+            return
+        try:
+            removed = remove_task_runs(self._artifacts_root, task_id)
+        except (OSError, PathIdentityError) as exc:
+            log.error("run artifact eviction failed", extra={"error": str(exc)})
+            return
+        if removed:
+            log.info("run artifacts evicted", extra={"roots": len(removed)})
 
     def _move_task_file(self, p: _Pipeline, final: Status) -> Path | None:
         """Move the task file to its lifecycle folder; see _relocate_task_file."""

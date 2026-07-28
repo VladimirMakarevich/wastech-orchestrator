@@ -213,6 +213,7 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
         "logging": {
             "level": "info",
             "artifacts": "standard",
+            "clean_runs_on_success": True,
         },
         # Persistent repo-scoped memory is on out of the box. Omit the block (or set enabled: false)
         # for the pre-memory behavior. The tunable knobs default per the schema — the annotated

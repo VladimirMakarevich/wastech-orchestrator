@@ -7,7 +7,8 @@ prompt or a tool executable mid-run and a *later* orchestrator node would then r
 provider-chosen bytes outside the provider sandbox with the orchestrator's own authority.
 
 At task start the orchestrator freezes the exact effective control inputs referenced by the task's
-flow into a private, immutable bundle under ``<private_home>/control-bundles/<task-id>/`` and binds
+flow into a private, immutable bundle under ``<private_home>/runs/control-bundles/<task-id>/`` and
+binds
 all later flow/supervisor/tool consumers to it. The bundle is never written to the exchange and is a
 provider deny target (:class:`~wastech_orchestrator.runtime_layout.InternalDenyPolicy`).
 

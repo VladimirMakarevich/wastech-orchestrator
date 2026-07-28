@@ -16,6 +16,11 @@ from wastech_orchestrator.composition import (
     build_orchestrator,
     build_providers,
 )
+from wastech_orchestrator.core.flow.exchange_seal import (
+    exchange_quarantine_root,
+    exchange_seal_root,
+)
+from wastech_orchestrator.core.flow.instruction_bundle import instruction_bundle_dir
 from wastech_orchestrator.runtime_layout import RuntimeLayout
 
 
@@ -123,18 +128,28 @@ def test_deny_policy_includes_configured_provider_homes(
     )
 
 
-def test_deny_policy_includes_frozen_control_bundle_root(
+def test_deny_policy_names_the_per_task_runs_root(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # The frozen-control-bundle root under private_home
-    # is a named deny target so the provider projection denies it by name, not by coincidence of
-    # location — and it survives a later relocation of private_home.
+    # The per-task runtime root under private_home is a *named* deny target so the provider
+    # projection denies it by name, not by coincidence of location — and it survives a later
+    # relocation of private_home. Asserting the entry itself (not merely that it sits under
+    # private_home) is what makes this fail if the entry is ever dropped.
     config = make_git_config(git_repo.clone, checks=["pytest"])
     layout = _distinct_layout(git_repo.clone, tmp_path)
     policy = build_internal_deny_policy(config, layout, env_file=None)
-    bundle_root = layout.private_home / "control-bundles"
-    assert policy.frozen_control_bundle == bundle_root
-    assert bundle_root in policy.denied_paths
+    runs_home = layout.private_home / "runs"
+    assert policy.runs_home == runs_home
+    assert runs_home in policy.denied_paths
+    # One named entry covers all four per-task roots because each resolver puts its root *under*
+    # it — a resolver that drifted back to a private_home sibling would escape the named deny.
+    resolved = (
+        exchange_seal_root(layout.private_home, "t1"),
+        exchange_quarantine_root(layout.private_home, "t1"),
+        instruction_bundle_dir(layout.private_home, "t1"),
+    )
+    for path in resolved:
+        assert path.is_relative_to(runs_home), path.as_posix()
 
 
 def test_cli_layout_for_reproduces_default_paths(git_repo, make_git_config) -> None:

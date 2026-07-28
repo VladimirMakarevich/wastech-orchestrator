@@ -27,7 +27,8 @@ Cover pure logic without external processes:
 - the validation gate: each Phase-A reason code, required/optional fields, duplicate-id, the injection-token scan, and Phase-B classification;
 - `init` idempotency (a second run is all-skipped; never overwrites `config.yaml`; `--dry-run` is a no-op);
 - the git footprint: scoped staging excludes `tasks/`/`logs/`/`workspace/` (and, under in-repo, the root runtime files `state.db`/`config.yaml`), the `.git/info/exclude` append is idempotent, the audit commit is orchestrator-only, the preflight rejects tracked artifacts under `external`/`exclude_local` but is **skipped** under `commit`, and the validator rejects illegal mode pairings;
-- the `summary` stage: the handoff artifact is produced, and a provider failure falls back to a deterministic minimal summary without blocking publishing.
+- the `summary` stage: the handoff artifact is produced, and a provider failure falls back to a deterministic minimal summary without blocking publishing;
+- on-disk retention: `logs clean` reaches every entry of the logs root (task dirs **and** the daemon logs) while keeping the ledger unless `--all`, accepts no flag it then ignores, refuses while a task is active, and holds the daemon logs back while a daemon is live; automatic run-artifact eviction fires only on a successful terminal with the switch on and a cleanly sealed exchange, never touches quarantined evidence, and the `rerun` status precondition that makes it safe is pinned so widening it fails loudly; `install --reconfigure` bounds its own `config.yaml.bak-*` / `flows.bak-*` / `tools.bak-*` series and never matches the operator's `state.db*.bak*`.
 
 ### Integration
 

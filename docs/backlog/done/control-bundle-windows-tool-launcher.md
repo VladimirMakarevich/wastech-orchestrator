@@ -79,5 +79,5 @@ A tool that produced **no stdout at all**, a non-zero exit, and a non-empty stde
 ## Out of scope
 
 - The `check_journey` → `check_chapter` rename upstream and the operator's local copy of the tool — a separate migration noted in the flows-sync work; this item must work for whatever tool name a flow references.
-- Retention/cleanup of `control-bundles/<task-id>/`, covered by [runtime-artifact-retention](../runtime-artifact-retention.md).
+- Retention/cleanup of `control-bundles/<task-id>/`, covered by [runtime-artifact-retention](runtime-artifact-retention.md).
 - The fix-budget policy itself (`constraint_fix`, `max_total_fix_iterations`); item 3 above is a stop condition for a degenerate loop, not a change to the budgets.
