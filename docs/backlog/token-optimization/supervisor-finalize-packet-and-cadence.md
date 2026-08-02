@@ -22,7 +22,7 @@ Supervisor — самый тяжёлый потребитель Claude-конт�
 
 - **P0.1 — сначала пакет.** `finalize` всегда собирает `SupervisorPacket` из уже имеющихся фактов (`node_runs`, `evaluations`, `current.diff`, findings, checks) + компактный digest материальных наблюдений (`_finalize_digest`). Новых данных собирать не нужно — всё уже лежит на диске и в `state.db`.
 - **P0.2 — затем fresh finalize по умолчанию.** Убираем ветку «тёплый resume vs digest»: и normal, и revive идут одним путём — fresh-сессия (`resume_session=False`), засеянная пакетом. Механизм fresh-из-digest уже существует как recovery (`_finalize_digest` + `resume=False`), делаем его основным.
-- **P0.3 — затем пропуск наблюдений `tool`/`checks`.** Правка одного условия в post-node hook (`core/orchestrator.py:3176`, текущее условие `node.kind != "publish"`): `node.kind not in {"tool", "checks", "publish"}`. Безопасно: пропущенные/недетерминированные ноды и так не наблюдаются, а на стейт-машину cadence не влияет (advisory). Этот пропуск сам по себе НЕ обесточивает finalize даже без пакета — содержательные наблюдения (`revise`/`tone_style`/`polish`) продолжают идти, — поэтому он и не подпадает под требование «сначала пакет»; но по решению P0-D5 он едет в том же изменении, а не отдельным PR. В packaged-флоу таких нод ровно по одной на flow (`blog_article_revise` → `length`, `implementation` → `checks`), то есть минус один наблюдательный вызов за прогон (исторически ~44k input-токенов на `length`).
+- **P0.3 — затем пропуск наблюдений `tool`/`checks`.** Правка одного условия в post-node hook (`core/orchestrator.py:3204`, текущее условие `node.kind != "publish"`): `node.kind not in {"tool", "checks", "publish"}`. Безопасно: пропущенные/недетерминированные ноды и так не наблюдаются, а на стейт-машину cadence не влияет (advisory). Этот пропуск сам по себе НЕ обесточивает finalize даже без пакета — содержательные наблюдения (`revise`/`tone_style`/`polish`) продолжают идти, — поэтому он и не подпадает под требование «сначала пакет»; но по решению P0-D5 он едет в том же изменении, а не отдельным PR. В packaged-флоу таких нод ровно по одной на flow (`blog_article_revise` → `length`, `implementation` → `checks`), то есть минус один наблюдательный вызов за прогон (исторически ~44k input-токенов на `length`).
 
 Дополнительно:
 
@@ -157,7 +157,7 @@ WHERE task_id = ? AND node_run_id IS NULL;
 ## Вероятные области реализации
 
 - `src/wastech_orchestrator/core/supervisor.py` — `SupervisorPacket`, всегда-fresh finalize, сборка пакета из `_finalize_digest` + durable-фактов.
-- `src/wastech_orchestrator/core/orchestrator.py` — условие пропуска `tool`/`checks` в post-node hook (`:3176`, текущее `node.kind != "publish"`); прокидывание фактов задачи (changed paths / diff / findings / checks) в `finalize`.
+- `src/wastech_orchestrator/core/orchestrator.py` — условие пропуска `tool`/`checks` в post-node hook (`:3204`, текущее `node.kind != "publish"`); прокидывание фактов задачи (changed paths / diff / findings / checks) в `finalize`.
 - `src/wastech_orchestrator/providers/base.py` — поле `supervisor_packet_path` в `AgentRunRequest` + строка `packet` в `build_context_footer` (P0-D1).
 - `src/wastech_orchestrator/providers/exchange.py` (`:398`) и `providers/_adapter_base.py` (`:658`) — два места, где поля контекста перечислены явно (containment + audit): новое поле нужно добавить в оба, иначе путь либо не пройдёт проверку содержания, либо не попадёт в аудит.
 - `src/wastech_orchestrator/core/flow/nodes/exchange_publish.py` — используется как есть (`publish_artifact`), менять не нужно.
