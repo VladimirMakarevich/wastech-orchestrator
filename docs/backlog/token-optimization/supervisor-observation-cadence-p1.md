@@ -11,7 +11,7 @@
 
 ## Проблема
 
-После P0 finalize дешёвый и воспроизводимый, но per-step наблюдения по-прежнему запускаются на **каждой** executed non-`tool`/`checks` ноде и по-прежнему на тёплой растущей сессии. На исследованном прогоне шесть наблюдений стоили 375 726 input-токенов и $0.44, не влияя на исход задачи (supervisor advisory-only). Один общий `SupervisorConfig` (`role_file, model, reasoning, provider` — `config/schema.py:501`) применяется и к дешёвому наблюдению, и к сложному finalize: нельзя задать low для заметок и medium для синтеза, нельзя выключить наблюдения, сохранив summary. Flow-local блок (`SupervisorBlock`: `role_file, finalize_role_file, handoff_role_file, emit_follow_ups` — `core/flow/schema.py:204`) умеет менять только формулировки, не cadence.
+После P0 finalize дешёвый и воспроизводимый, но per-step наблюдения по-прежнему запускаются на **каждой** executed non-`tool`/`checks` ноде и по-прежнему на тёплой растущей сессии. На исследованном прогоне шесть наблюдений стоили 375 726 input-токенов и $0.44, не влияя на исход задачи (supervisor advisory-only). Один общий `SupervisorConfig` (`role_file, model, reasoning, provider` — `config/schema.py:518`) применяется и к дешёвому наблюдению, и к сложному finalize: нельзя задать low для заметок и medium для синтеза, нельзя выключить наблюдения, сохранив summary. Flow-local блок (`SupervisorBlock`: `role_file, finalize_role_file, handoff_role_file, emit_follow_ups` — `core/flow/schema.py:222`) умеет менять только формулировки, не cadence.
 
 ## Требуемый результат
 
@@ -88,7 +88,7 @@ flow:
       mode: none # content-flow: только finalize
 ```
 
-Цена — вложенный подблок в flow-парсере (`_parse_supervisor`, `core/flow/snapshot.py:608`) со своим `_reject_unknown`, ровно как у существующего `defaults.evaluator` (`:626-640`). Взамен: одна форма в документации, скилле `worc-flow-role` и примерах, и место для будущего `include_nodes` без второго переименования.
+Цена — вложенный подблок в flow-парсере (`_parse_supervisor`, `core/flow/snapshot.py:642`) со своим `_reject_unknown`, ровно как у существующего `defaults.evaluator` (`:656-675`). Взамен: одна форма в документации, скилле `worc-flow-role` и примерах, и место для будущего `include_nodes` без второго переименования.
 
 ### P1-D3 — номер версии схемы не фиксируем, пересчитываем при реализации
 
