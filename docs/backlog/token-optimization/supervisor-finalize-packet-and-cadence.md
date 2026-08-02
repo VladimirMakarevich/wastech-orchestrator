@@ -38,7 +38,7 @@ Supervisor — самый тяжёлый потребитель Claude-конт�
 
 1. Оркестратор пишет приватный авторитетный `packet.json` в supervisor-артефакты задачи (`node_run_dir(artifacts_root, task_id, "supervisor", 0)` — тот же namespacing, что у остальных supervisor-артефактов, где `0` — finalize-сентинел).
 2. Публикует редактированную копию готовым сеамом: `publish_artifact(exchange_root, task_id, "supervisor/packet.json", content, extra_secrets=…, private_path=…)` (`core/flow/nodes/exchange_publish.py:117`) → `.worc-io/<task-id>/supervisor/packet.json`. `extra_secrets` передавать обязательно — тот же набор литералов, что использует редакция сохранённых промптов.
-3. Новое поле `AgentRunRequest.supervisor_packet_path` + строка `packet` в `build_context_footer` (`providers/base.py:172-231`). Поля контекста перечислены явно ещё в двух местах, оба нужно дополнить: containment-проверка `providers/exchange.py:398` и audit-дикт `providers/_adapter_base.py:658`.
+3. Новое поле `AgentRunRequest.supervisor_packet_path` + строка `packet` в `build_context_footer` (`providers/base.py:229-250`). Поля контекста перечислены явно ещё в двух местах, оба нужно дополнить: containment-проверка `providers/exchange.py:398` и audit-дикт `providers/_adapter_base.py:658`.
 4. Путь передаётся в POSIX-форме (`as_posix()`), как и остальные exchange-пути.
 
 **Почему не frozen instruction bundle.** `instruction-bundles/<task-id>/` (WRI-011) — снимок _входов_, замороженный на старте задачи, с composite `instruction_manifest_digest`, который сверяется перед переиспользованием provider-сессии (`core/flow/instruction_bundle.py:1-31`). Пакет рождается в конце прогона, поэтому попал бы туда только через исключение в manifest-контракте — цена выше, чем одно новое поле запроса.
@@ -49,7 +49,7 @@ Supervisor — самый тяжёлый потребитель Claude-конт�
 
 ### P0-D2 — детерминизм = чистая функция durable-состояния
 
-«Пакет детерминирован» означает: **сборка пакета — чистая функция `state.db` + артефактов задачи**, без каких-либо иных входов. Ни системных часов, ни env, ни абсолютных путей, ни порядка обхода файловой системы: все пути в пакете — repo-relative POSIX, шаги упорядочены по `node_runs.id`, сериализация каноническая (`json.dumps(..., sort_keys=True)`, запись с `newline=""` — тот же домашний паттерн, что у manifest'ов, `core/flow/exchange_seal.py:182`).
+«Пакет детерминирован» означает: **сборка пакета — чистая функция `state.db` + артефактов задачи**, без каких-либо иных входов. Ни системных часов, ни env, ни абсолютных путей, ни порядка обхода файловой системы: все пути в пакете — repo-relative POSIX, шаги упорядочены по `node_runs.id`, сериализация каноническая (`json.dumps(..., sort_keys=True)`, запись с `newline=""` — тот же домашний паттерн, что у manifest'ов, `core/flow/exchange_seal.py:189`).
 
 Что это даёт в терминах проверки — два утверждения вместо одного непроверяемого:
 
