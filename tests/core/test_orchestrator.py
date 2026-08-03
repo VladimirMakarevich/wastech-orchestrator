@@ -4871,7 +4871,10 @@ def test_disabled_layer_makes_no_calls_and_still_writes_the_pr_body(
     # as a global `mode: none` fails validation AFTER the task is claimed, so the task lands in a
     # terminal `failed` to re-queue by hand (and `watch` would grind the whole queue). With
     # `enabled: false` the narrowing check is skipped, the flow runs, and nothing calls the layer.
-    providers = _both()
+    finding_text = "docstring drift in the new helper"
+    providers = _both(
+        outputs={"review": ("advisory", {"findings": [{"severity": "low", "what": finding_text}]})}
+    )
     orch, store, _, art = _build(
         git_repo,
         make_git_config,
@@ -4898,9 +4901,15 @@ def test_disabled_layer_makes_no_calls_and_still_writes_the_pr_body(
     summary = (task_dir / "summary.md").read_text("utf-8")
     assert "## Changes" in summary and "## Steps" in summary
     assert "Fallback summary" not in summary
+    # The third and last mode for the p0-2 criterion: a finding the gate let past reaches the PR
+    # body with the layer ON (test_accepted_evaluator_findings_reach_the_pr_body), on a DEGRADED
+    # finalize (test_degraded_summary_is_loud_on_done_path), and here with the layer gone entirely.
+    assert "## Technical debt / follow-ups" in summary
+    assert finding_text in summary
     # No spend block either, which is how an operator tells this apart from a degraded run.
     metadata = json.loads((task_dir / "summary.json").read_text("utf-8"))
     assert "supervisor_usage" not in metadata and "degraded" not in metadata
+    assert [fu["title"] for fu in metadata["follow_ups"]] == [finding_text]
 
 
 def test_absent_enabled_key_matches_an_explicit_true(
