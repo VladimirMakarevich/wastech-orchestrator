@@ -624,7 +624,8 @@ def test_rework_budget_exhausted_warns_operator_and_marks_trace(
 ) -> None:
     # When a non-blocking evaluator spends its whole max_rework_per_stage budget and accepts with a
     # gating finding still open, the flow continues (DONE) but the orchestrator warns the operator
-    # (console) and marks the live Telegram trace with the ⚠️ rework-exhausted label so a human knows
+    # (console) and marks the live Telegram trace with the ⚠️ rework-exhausted label so a human
+    # knows
     # the stage may need follow-up.
     from wastech_orchestrator.core.flow.registry import FlowRegistry
     from wastech_orchestrator.notify import TRACE_REWORK_EXHAUSTED
@@ -639,7 +640,7 @@ def test_rework_budget_exhausted_warns_operator_and_marks_trace(
     gating = {"findings": [{"severity": "high", "path": None, "what": "boom", "fix": None}]}
     providers = _both(outputs={"review": ("needs work", gating)})
     notifier = RecordingNotifier()
-    orch, _store, _, _ = _build(
+    orch, store, _, art = _build(
         git_repo,
         make_git_config,
         tmp_path,
@@ -681,6 +682,21 @@ def test_rework_budget_exhausted_warns_operator_and_marks_trace(
     assert "rework" in review_traces
     assert TRACE_REWORK_EXHAUSTED in review_traces
     assert any("exhausting its rework budget" in m for m in messages)
+
+    # The finding gated on every pass, so the evaluator recorded it as gating — and because the
+    # terminal verdict is an `accept`, the follow-up derivation keeps it (losing a finding that is
+    # still open above the gate is the worst outcome) and labels it apart from an ordinary
+    # sub-threshold nit. End to end: the flag the evaluator wrote is the flag the wording keys on.
+    rows = [r for r in store.get_evaluations("task-rbx") if r.kind == "in_flow_verdict"]
+    assert [json.loads(r.findings_json)[0]["gating"] for r in rows] == [True, True]
+    assert rows[-1].verdict == "accept"
+    follow_ups = json.loads(
+        (task_artifact_dir(art, "task-rbx") / "summary.json").read_text("utf-8")
+    )["follow_ups"]
+    assert [fu["title"] for fu in follow_ups] == ["boom"]
+    assert follow_ups[0]["evidence"] == [
+        "review evaluator finding still open — rework budget exhausted"
+    ]
 
 
 def _run_complete_task_store_dir(
@@ -825,11 +841,31 @@ def _evaluations(store: StateStore, task_id: str) -> list:
     ).fetchall()
 
 
-def test_supervisor_layer_observes_each_step_and_writes_one_summary(
+def _observed_nodes(store: StateStore, task_id: str) -> list[str]:
+    """Node ids the supervisor layer actually observed (the payload of its supervisor_step rows)."""
+    return [
+        json.loads(row.findings_json)["node"]
+        for row in store.get_evaluations(task_id)
+        if row.kind == "supervisor_step"
+    ]
+
+
+def _supervisor_attempts(store: StateStore, task_id: str) -> list:
+    """The supervisor layer's own provider calls — its rows are the ``node_run_id IS NULL`` ones."""
+    return store._conn.execute(
+        "SELECT id FROM provider_attempts WHERE task_id = ? AND node_run_id IS NULL ORDER BY id",
+        (task_id,),
+    ).fetchall()
+
+
+def test_supervisor_layer_costs_one_call_on_a_clean_run_and_still_writes_the_summary(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # The constant supervisor layer runs above any flow — it observes every executed
-    # (non-publish) node read-only (advisory), and synthesizes the summary once at whole-task close.
+    # The headline saving. The packaged `implementation` flow ships `observe.mode: events`, so a run
+    # where nothing deviated — no rework, no failed step, no provider fallback — spends the layer's
+    # ONLY call on the whole-task finalize. The summary is unaffected because that turn is seeded by
+    # the deterministic packet (node_runs + each node's own output file), never by observations, so
+    # switching the notes off cannot cost the operator their PR body.
     providers = _both()
     orch, store, _, art = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
@@ -844,27 +880,192 @@ def test_supervisor_layer_observes_each_step_and_writes_one_summary(
     # Every supervisor record is advisory and carries no node_id (it is a layer, not a node).
     assert {r["verdict"] for r in supervisor_rows} == {"advisory"}
     assert all(r["node_id"] is None for r in supervisor_rows)
-    steps = [r for r in rows if r["kind"] == "supervisor_step"]
-    finals = [r for r in rows if r["kind"] == "supervisor_final"]
-    # One observation per executed non-publish node (planning, implementation, testing, review,
-    # documentation).
-    assert len(steps) >= 4
-    assert len(finals) == 1  # the summary synthesis is once per whole task
+    assert _observed_nodes(store, "task-sup") == []  # no deviation → no observation
+    assert len([r for r in rows if r["kind"] == "supervisor_final"]) == 1
+    # The structural invariant behind the saving: exactly one provider call, the finalize. Under the
+    # pre-P1 cadence this was 1 + one per executed observable node.
+    assert len(_supervisor_attempts(store, "task-sup")) == 1
     # The in-flow review evaluator also recorded an immutable verdict (a separate kind).
     assert any(r["kind"] == "in_flow_verdict" and r["node_id"] == "review" for r in rows)
     # The summary is always written (no config.summary_enabled gate) and committed as the PR body.
     assert (task_artifact_dir(art, "task-sup") / "summary.md").exists()
     # There is no summary graph node anymore — the layer owns it.
     assert "summary" not in _ran_nodes(store, "task-sup")
+    # That one call is labelled with the job it did, so the layer's spend is readable per phase and
+    # not as one lump; a graph node's attempts stay unlabelled and out of the layer's report.
+    labels = store._conn.execute(
+        "SELECT supervisor_function AS fn, node_run_id FROM provider_attempts "
+        "WHERE task_id = ? ORDER BY id",
+        ("task-sup",),
+    ).fetchall()
+    assert [r["fn"] for r in labels if r["node_run_id"] is None] == ["finalize"]
+    assert {r["fn"] for r in labels if r["node_run_id"] is not None} == {None}
 
 
-def test_accepted_evaluator_findings_reach_the_observer_and_the_pr_body(
+def test_packaged_flow_cadence_narrows_a_broader_global_mode(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # A flow's own cadence wins over a broader global one: `implementation.yaml` declares `events`,
+    # so an operator running with the debugging-wide `all` still gets deviations-only for this flow.
+    # The flow is the narrower authority, and the engine reaches it as data — never by flow name.
+    providers = _both()
+    orch, store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"supervisor_observe": "all"},
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    assert orch.run_task(_complete_task(tmp_path, "task-narrow")).final_status is Status.DONE
+    assert _observed_nodes(store, "task-narrow") == []
+    assert len(_supervisor_attempts(store, "task-narrow")) == 1  # finalize only
+
+
+# A flow with no `supervisor:` block at all: it inherits the operator's global cadence, which is
+# what
+# makes it the vehicle for driving each mode end to end (a packaged flow's own mode would narrow
+# it).
+_NO_SUPERVISOR_BLOCK_FLOW = """
+flow:
+  name: implementation
+  task_type: implementation
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: pull_request
+  nodes:
+    - id: implementation
+      kind: agent
+      role_file: roles/implementation.md
+      session_scope: editing_lineage
+      permission_profile: workspace-write
+    - id: review
+      kind: evaluator
+      role: review
+      role_file: roles/review.md
+    - id: publish
+      kind: publish
+      policy: pull_request
+  edges:
+    - { from: implementation, to: review }
+    - { from: review, to: publish, outcome: accept }
+"""
+
+
+def _run_with_cadence(
+    git_repo,
+    make_git_config,
+    tmp_path: Path,
+    task_id: str,
+    *,
+    flow_text: str = _NO_SUPERVISOR_BLOCK_FLOW,
+    outputs: dict | None = None,
+    **config_kwargs: object,
+) -> StateStore:
+    """Run one task on an operator flow under an explicit global cadence; return the store."""
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+
+    flows = tmp_path / "flows"
+    (flows / "roles").mkdir(parents=True, exist_ok=True)
+    (flows / "roles" / "implementation.md").write_text("Implement {task_path}.", "utf-8")
+    (flows / "roles" / "review.md").write_text("Review the change.", "utf-8")
+    (flows / "roles" / "fixing.md").write_text("Fix the issue.", "utf-8")
+    (flows / "implementation.yaml").write_text(flow_text, "utf-8")
+
+    providers = _both(outputs=outputs) if outputs else _both()
+    orch, store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs=config_kwargs,
+    )
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
+    _patch_impl_edit(providers, git_repo)
+    assert orch.run_task(_complete_task(tmp_path, task_id)).final_status is Status.DONE
+    return store
+
+
+def test_observe_mode_all_observes_every_executed_observable_step(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # `all` is the pre-P1 behavior, kept as an explicit debugging choice: one observation per
+    # executed
+    # node whose kind is observable, plus the finalize.
+    store = _run_with_cadence(
+        git_repo, make_git_config, tmp_path, "task-all", supervisor_observe="all"
+    )
+    observed = _observed_nodes(store, "task-all")
+    assert observed == ["implementation", "review"]  # `publish` is never observable
+    assert len(_supervisor_attempts(store, "task-all")) == len(observed) + 1
+
+
+def test_observe_mode_none_observes_nothing_but_keeps_the_summary(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    store = _run_with_cadence(
+        git_repo, make_git_config, tmp_path, "task-none", supervisor_observe="none"
+    )
+    assert _observed_nodes(store, "task-none") == []
+    assert len(_supervisor_attempts(store, "task-none")) == 1  # the finalize turn survives
+    finals = [r for r in _evaluations(store, "task-none") if r["kind"] == "supervisor_final"]
+    assert len(finals) == 1
+
+
+def test_observe_mode_selected_observes_exactly_the_listed_nodes(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    store = _run_with_cadence(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        "task-sel",
+        supervisor_observe="selected",
+        # `documentation` is not in this flow at all — a listed id that never runs is simply not
+        # observed, it is not an error.
+        supervisor_include_nodes=["review", "documentation"],
+    )
+    assert _observed_nodes(store, "task-sel") == ["review"]
+
+
+def test_observe_mode_events_observes_a_rework_deviation_only(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The `events` cadence in action: the review evaluator spends its rework budget and then accepts
+    # with the finding still open (`rework_exhausted`), which is the `rework` trigger — so `review`
+    # is
+    # observed while `implementation` and `fixing`, which did nothing unusual, are not.
+    gating = {"findings": [{"severity": "high", "path": None, "what": "boom", "fix": None}]}
+    store = _run_with_cadence(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        "task-ev",
+        flow_text=_NON_BLOCKING_REVIEW_FLOW,
+        outputs={"review": ("needs work", gating)},
+        supervisor_observe="events",
+    )
+    # review ran twice: pass 1 reworked, pass 2 accepted with the budget spent — both are
+    # deviations.
+    assert set(_observed_nodes(store, "task-ev")) == {"review"}
+    assert "implementation" not in _observed_nodes(store, "task-ev")
+    assert "fixing" not in _observed_nodes(store, "task-ev")
+
+
+def test_accepted_evaluator_findings_reach_the_pr_body(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
     # End to end: `review` accepts (the finding is below its `high` gate) but still recorded a
-    # finding. Before this, that finding existed only in findings.json and the evaluations table —
-    # the observer saw a bare `Outcome: accept`, and the PR body told the operator the gate passed.
-    # Both surfaces must now carry it.
+    # finding. Before this, that finding existed only in findings.json and the evaluations table,
+    # and
+    # the PR body told the operator the gate simply passed. The finalize turn is handed every
+    # evaluator's recorded verdict, so the accepted finding reaches the summary — and it does so
+    # from
+    # durable state, independently of whether the step was ever observed (this run's cadence is the
+    # packaged `events`, and a plain accept is not a deviation, so no observation runs at all).
     finding_text = "docstring drift in the new helper"
     providers = _both(
         outputs={
@@ -877,31 +1078,47 @@ def test_accepted_evaluator_findings_reach_the_observer_and_the_pr_body(
             "supervisor": ("noted", {"summary": "Added the helper and its tests."}),
         }
     )
-    orch, _store, _, art = _build(
+    orch, store, _, art = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
     )
     _patch_impl_edit(providers, git_repo)
 
     result = orch.run_task(_complete_task(tmp_path, "task-findings"))
     assert result.final_status is Status.DONE
+    assert _observed_nodes(store, "task-findings") == []  # accept is not a deviation
 
-    # Wire 2+3: the observation of the review step carries the findings digest, not just the label.
-    prompts = [
-        path.read_text("utf-8")
-        for path in (task_artifact_dir(art, "task-findings") / "stages" / "supervisor").glob(
-            "run-*/rendered-prompt.md"
-        )
-    ]
-    review_observation = [p for p in prompts if "Node: review" in p]
-    assert review_observation, "the review step was observed"
-    assert any(f"- [low] {finding_text}" in p for p in review_observation)
-    # Wire 1: the provider's own prose reached the observer too.
-    assert any("I found one advisory issue" in p for p in review_observation)
-
-    # And the operator surface: the accepted finding lands in the summary that becomes the PR body.
+    # The operator surface: the accepted finding lands in the summary that becomes the PR body.
     summary = (task_artifact_dir(art, "task-findings") / "summary.md").read_text("utf-8")
     assert "## Technical debt / follow-ups" in summary
     assert finding_text in summary
+
+
+def test_an_observed_step_carries_the_evaluator_findings_not_just_the_label(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # When an observation *does* run, it gets the step's substance. Here review exhausts its rework
+    # budget and accepts with the finding still open — an accept that is also a deviation, so it is
+    # observed. Passing only the outcome label had the observer acknowledge `accept` for a node that
+    # had filed a substantive finding, and then describe the gate as having passed.
+    finding_text = "docstring drift in the new helper"
+    gating = {"findings": [{"severity": "high", "path": None, "what": finding_text, "fix": None}]}
+    store = _run_with_cadence(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        "task-obs-findings",
+        flow_text=_NON_BLOCKING_REVIEW_FLOW,
+        outputs={"review": ("I found one advisory issue", gating)},
+        supervisor_observe="events",
+    )
+    assert set(_observed_nodes(store, "task-obs-findings")) == {"review"}
+    supervisor_dir = task_artifact_dir(tmp_path / "art", "task-obs-findings") / "stages/supervisor"
+    prompts = [path.read_text("utf-8") for path in supervisor_dir.glob("run-*/rendered-prompt.md")]
+    review_observation = [p for p in prompts if "Node: review" in p]
+    assert review_observation, "the deviating review step was observed"
+    assert any(f"- [high] {finding_text}" in p for p in review_observation)
+    # The provider's own prose reached the observer too, not only the typed findings.
+    assert any("I found one advisory issue" in p for p in review_observation)
 
 
 def test_supervisor_turns_write_rendered_prompt_and_prompt_audit(
@@ -1327,6 +1544,12 @@ def test_review_infra_failure_degrades_to_manual_not_failed(
     # Review was reached; publish never ran (the diff is preserved on the branch, not published).
     ran = _ran_nodes(store, "task-rev-infra")
     assert "review" in ran and "publish" not in ran
+    # The third terminal with no prose by design gets the same deterministic report — one renderer
+    # writes the body on every terminal — and no degradation callout, because none was expected.
+    summary = (art / "logs" / "task-rev-infra" / "summary.md").read_text(encoding="utf-8")
+    assert "## Changes" in summary and "## Steps" in summary
+    assert "- `implementation` (agent):" in summary
+    assert "Fallback summary" not in summary
 
 
 def test_review_infra_empty_diff_annotates_reason(
@@ -1773,8 +1996,8 @@ def test_minimal_flow_implement_only(git_repo, make_git_config, tmp_path: Path) 
 
 
 def test_summary_fallback_when_provider_fails(git_repo, make_git_config, tmp_path: Path) -> None:
-    # Both providers fail the supervisor's summary synthesis with an infra error → minimal summary,
-    # still DONE. The supervisor layer runs under its own "supervisor" node id (not a stage).
+    # Both providers fail the supervisor's summary synthesis with an infra error → the
+    # deterministic report, still DONE. The layer runs under its own "supervisor" node id.
     providers = _both(infra_fail={"supervisor"})
     orch, store, _, art = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
@@ -1792,14 +2015,28 @@ def test_summary_fallback_when_provider_fails(git_repo, make_git_config, tmp_pat
     result = orch.run_task(task_file)
     assert result.final_status is Status.DONE  # summary failure never blocks
     summary = (art / "logs" / "task-006" / "summary.md").read_text(encoding="utf-8")
-    assert "## What" in summary
+    # A real report of what the run did, not the four-field stub whose `## How` read "No
+    # provider-authored summary was available".
+    assert "## Changes" in summary and "## Steps" in summary
+    assert "- `implementation` (agent):" in summary
+    assert "- `s.py`" in summary  # the changed path, derived from the durable current.diff
+    for dead in ("## How", "## Integration", "No provider-authored summary was available"):
+        assert dead not in summary
+    # The layer ran and could not finish, so its spend is still recorded beside the degradation.
+    metadata = json.loads((art / "logs" / "task-006" / "summary.json").read_text(encoding="utf-8"))
+    assert metadata["degraded"] is True
+    assert metadata["supervisor_usage"]["total"]["calls"] >= 1
 
 
 def test_degraded_summary_is_loud_on_done_path(git_repo, make_git_config, tmp_path: Path) -> None:
     # Decision A (a): when a provider-authored synthesis was expected on the publish path but
     # failed, the deterministic fallback is marked loud — a WARNING plus a visible callout in the
     # PR body — so a stub is never mistaken for the full synthesis.
-    providers = _both(infra_fail={"supervisor"})
+    finding_text = "docstring drift in the new helper"
+    providers = _both(
+        infra_fail={"supervisor"},
+        outputs={"review": ("advisory", {"findings": [{"severity": "low", "what": finding_text}]})},
+    )
     orch, _, _, art = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
     )
@@ -1834,6 +2071,11 @@ def test_degraded_summary_is_loud_on_done_path(git_repo, make_git_config, tmp_pa
     summary = (art / "logs" / "task-degraded" / "summary.md").read_text(encoding="utf-8")
     assert "Fallback summary" in summary  # visible degradation callout in the PR body
     assert any("summary degraded to deterministic fallback" in m for m in messages)
+    # The p0-2 hole, closed: a finding the gate let past used to land in summary.json and vanish
+    # from the PR body on exactly this path, because the derivation lived inside the turn that
+    # failed. It is deterministic, so it survives the failure.
+    assert "## Technical debt / follow-ups" in summary
+    assert finding_text in summary
 
 
 def test_decomposed_task_commits_each_subtask(
@@ -2473,12 +2715,16 @@ def test_failed_with_branch_commits_and_pushes_task_and_summary(
     tracked = git_run(["ls-tree", "-r", "--name-only", branch], git_repo.clone)
     assert "tasks/failed/task-fail.md" in tracked  # task moved to failed/ and committed
     assert "tasks/failed/task-fail.summary.md" in tracked  # summary committed beside it
-    # A failed terminal legitimately has no synthesis — its minimal summary is the expected
+    # A failed terminal legitimately has no synthesis — the deterministic report is the expected
     # artifact, not a degradation, so it carries no "Fallback summary" callout (Decision A (a)).
     failed_summary = git_run(
         ["show", f"{branch}:tasks/failed/task-fail.summary.md"], git_repo.clone
     )
     assert "Fallback summary" not in failed_summary
+    # And it is a real report: which steps ran and what the run changed is exactly what an operator
+    # needs on a failed attempt, and it is the half the four-field stub never carried.
+    assert "## Changes" in failed_summary and "## Steps" in failed_summary
+    assert "_Task file: `task-fail.md`. Flow: `implementation`._" in failed_summary
     assert ".worc/" not in tracked  # working artifacts never enter git
     # The failed branch was pushed for inspection; the working copy is back on base.
     assert git_run(["ls-remote", "--heads", "origin", branch], git_repo.clone) != ""
@@ -3598,15 +3844,17 @@ def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path
     stages = [r["node_id"] for r in node_records]
     assert stages == ["planning", "implementation", "review", "documentation"]
 
-    # The constant supervisor layer is itself part of the audit trail now: it observes
-    # every completed step (reusing that step's node_run_id — including non-agent steps like
-    # checks, which write no prompt-audit record of their own) and writes the once-per-task
-    # finalize turn under the reserved node_run_id=0 sentinel (it runs last but is namespaced
-    # first, since it is not a graph node).
+    # The constant supervisor layer is itself part of the audit trail: an observation reuses the
+    # observed step's node_run_id, and the once-per-task finalize turn is namespaced under the
+    # reserved node_run_id=0 sentinel (it runs last but is namespaced first, since it is not a graph
+    # node). Which steps are observed is the cadence's call — this run's is the packaged `events`
+    # and
+    # nothing deviated, so finalize is the only turn. The invariant that holds under every cadence:
+    # a supervisor turn's id is the finalize sentinel or some real step's id, never anything else.
     assert supervisor_records, "supervisor turns are part of the prompt-audit trail"
     supervisor_ids = {r["node_run_id"] for r in supervisor_records}
     assert 0 in supervisor_ids
-    assert set(node_ids) <= supervisor_ids
+    assert supervisor_ids <= set(node_ids) | {0}
 
     # The combined timeline has one line per step, in the same chronological order. Real
     # graph-node entries stay chronological by node_run_id; the supervisor's synthetic ids (a
@@ -4610,3 +4858,189 @@ def test_read_only_node_that_poisons_a_git_hook_warns_operator_and_never_parks_t
     audit_traces = [c["outcome"] for c in notifier.trace_calls if c["node_id"] == "audit"]
     assert audit_traces == [TRACE_READ_ONLY_GIT_DRIFT]
     assert any("changed git control state" in m for m in messages)
+
+
+# --- supervisor.enabled: false — the whole layer removed (P3) -------------------------------
+
+
+def test_disabled_layer_makes_no_calls_and_still_writes_the_pr_body(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The switch, end to end on the PACKAGED implementation flow — which declares `observe.mode:
+    # events`. That declaration is the trap the switch had to be designed around: expressing "off"
+    # as a global `mode: none` fails validation AFTER the task is claimed, so the task lands in a
+    # terminal `failed` to re-queue by hand (and `watch` would grind the whole queue). With
+    # `enabled: false` the narrowing check is skipped, the flow runs, and nothing calls the layer.
+    finding_text = "docstring drift in the new helper"
+    providers = _both(
+        outputs={"review": ("advisory", {"findings": [{"severity": "low", "what": finding_text}]})}
+    )
+    orch, store, _, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"supervisor_enabled": False},
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-nosup"))
+    assert result.final_status is Status.DONE
+    assert orch._supervisor is None  # the object is never built — that is the whole mechanism
+
+    # Not one provider call, not one row, not one artifact belonging to the layer.
+    assert _supervisor_attempts(store, "task-nosup") == []
+    kinds = {row["kind"] for row in _evaluations(store, "task-nosup")}
+    assert not kinds & {"supervisor_step", "supervisor_final", "supervisor_skill_proposal"}
+    task_dir = task_artifact_dir(art, "task-nosup")
+    assert not (task_dir / "packet.json").exists()
+
+    # The PR body is still there, and it is the deterministic report — with no degradation callout,
+    # because nothing degraded: this is the artifact the mode is supposed to produce.
+    summary = (task_dir / "summary.md").read_text("utf-8")
+    assert "## Changes" in summary and "## Steps" in summary
+    assert "Fallback summary" not in summary
+    # The third and last mode for the p0-2 criterion: a finding the gate let past reaches the PR
+    # body with the layer ON (test_accepted_evaluator_findings_reach_the_pr_body), on a DEGRADED
+    # finalize (test_degraded_summary_is_loud_on_done_path), and here with the layer gone entirely.
+    assert "## Technical debt / follow-ups" in summary
+    assert finding_text in summary
+    # No spend block either, which is how an operator tells this apart from a degraded run.
+    metadata = json.loads((task_dir / "summary.json").read_text("utf-8"))
+    assert "supervisor_usage" not in metadata and "degraded" not in metadata
+    assert [fu["title"] for fu in metadata["follow_ups"]] == [finding_text]
+
+
+def test_absent_enabled_key_matches_an_explicit_true(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The default-parity regression: the new key must change nothing when absent. Compared on what
+    # the layer actually did — its provider calls and the evaluation kinds it recorded — not merely
+    # on "the object was built".
+    def run(task_id: str, **config_kwargs: object):
+        providers = _both()
+        orch, store, _, _ = _build(
+            git_repo,
+            make_git_config,
+            tmp_path / task_id,
+            providers=providers,
+            check_verdicts=[0],
+            config_kwargs=config_kwargs,
+        )
+        _patch_impl_edit(providers, git_repo)
+        assert (
+            orch.run_task(_complete_task(tmp_path / task_id, task_id)).final_status is Status.DONE
+        )
+        return len(_supervisor_attempts(store, task_id)), sorted(
+            {row["kind"] for row in _evaluations(store, task_id)}
+        )
+
+    assert run("task-default") == run("task-explicit", supervisor_enabled=True)
+
+
+def test_disabled_layer_leaves_only_the_operators_skill_pins(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # `skills.dynamic: true` with no layer degrades to "only what the flow pins", which is correct
+    # (the dynamic layer is fail-open by design) but silent — hence the config warning. Here: the
+    # inventory is non-empty and dynamic is on, yet nothing is proposed, so the map stays empty.
+    skill_dir = git_repo.clone / ".claude" / "skills" / "safe-change"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: safe-change\ndescription: review your change\n---\n\n# Body\nguidance\n",
+        encoding="utf-8",
+    )
+    git_run(["add", ".claude/skills/safe-change/SKILL.md"], git_repo.clone)
+    git_run(["commit", "-m", "add safe-change skill"], git_repo.clone)
+
+    providers = _both()
+    orch, store, _, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"supervisor_enabled": False, "skills_dynamic": True},
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    assert orch.run_task(_complete_task(tmp_path, "task-nosup-skills")).final_status is Status.DONE
+    skill_map = json.loads(
+        (task_artifact_dir(art, "task-nosup-skills") / "skill_map.json").read_text("utf-8")
+    )
+    # The packaged flow pins nothing, so with no proposal the effective set is empty for every node.
+    assert all(not refs for refs in skill_map.values())
+    assert not any(
+        row["kind"] == "supervisor_skill_proposal"
+        for row in _evaluations(store, "task-nosup-skills")
+    )
+    impl = next(r for p in providers.values() for r in p.requests if r.node_id == "implementation")
+    assert impl.skill_reference_paths == ()
+
+
+def test_disabled_layer_still_writes_the_deterministic_handoff_floor(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The handoff phase disappears with the layer, but the FLOOR it decorated does not: the
+    # predecessor brief (spec pointer + acceptance criteria + changed files) is assembled from
+    # artifacts, so a decomposed run keeps its subtask context with zero LLM calls.
+    subtasks = {
+        "decompose": True,
+        "subtasks": [
+            {
+                "order": 1,
+                "title": "First",
+                "slug": "first",
+                "acceptance_criteria": ["crit-one"],
+                "depends_on": [],
+            },
+            {
+                "order": 2,
+                "title": "Second",
+                "slug": "second",
+                "acceptance_criteria": ["crit-two"],
+                "depends_on": [1],
+            },
+        ],
+    }
+    state = {"n": 0}
+
+    class DecompProvider(FakeProvider):
+        def run(self, request: AgentRunRequest) -> AgentRunResult:
+            if request.node_id == "planning":
+                return AgentRunResult(
+                    status=RunStatus.SUCCEEDED,
+                    provider=self.id,
+                    node_id=request.node_id,
+                    attempt=request.attempt,
+                    exit_code=0,
+                    started_at="t",
+                    finished_at="t",
+                    final_message="plan",
+                    structured_output={"content": "plan", "human_input": None, **subtasks},
+                )
+            if request.node_id == "implementation":
+                (git_repo.clone / f"impl-{state['n']}.py").write_text("x\n", encoding="utf-8")
+                state["n"] += 1
+            return super().run(request)
+
+    providers = {
+        ProviderId.CLAUDE: DecompProvider("claude"),
+        ProviderId.CODEX: DecompProvider("codex"),
+    }
+    orch, store, _, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"decomposition": True, "supervisor_enabled": False},
+    )
+    assert orch.run_task(_complete_task(tmp_path, "task-nosup-hnd")).final_status is Status.DONE
+    assert _supervisor_attempts(store, "task-nosup-hnd") == []
+
+    brief = task_artifact_dir(art, "task-nosup-hnd") / "subtasks" / "02-second.handoff.md"
+    assert brief.exists() and brief.read_text("utf-8").strip()
+    body = brief.read_text("utf-8")
+    assert "01-first.md" in body and "crit-one" in body and "Changed files" in body

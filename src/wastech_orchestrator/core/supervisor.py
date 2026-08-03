@@ -2,9 +2,17 @@
 
 The supervisor is **not** a graph node — it is an orchestrator-level oversight layer that exists for
 every task under any flow shape (even a single implement agent with no checks/review). It starts at
-task start, lives the whole cycle, observes each completed step read-only through its **own**
-``resume_own_lineage`` session (≈one LLM call/step, accumulating context across steps), and at
-whole-task close synthesizes the ``summary`` + advisory caveats.
+task start, lives the whole cycle, observes completed steps read-only through its **own**
+``resume_own_lineage`` session (≈one LLM call per observed step, accumulating context across steps),
+and at whole-task close synthesizes the ``summary`` + advisory caveats.
+
+Two things bound that cost. The deterministic ``tool`` / ``checks`` nodes are **not** observed —
+their result is already a durable fact (``node_runs`` / ``check_runs``), so an LLM note about it
+buys nothing. And the whole-task ``finalize`` no longer depends on the warm session at all: it runs
+on a **fresh** session seeded by the :mod:`~wastech_orchestrator.core.supervisor_packet`
+``SupervisorPacket`` — a small deterministic artifact built from durable state and handed over as a
+path. So a normal run and a revive follow one reproducible path, and the finalize call's input stops
+growing with the run's rework cycles.
 
 It is **advisory by construction**: it never reworks, reopens, or routes. Each observation is
 recorded as an immutable ``evaluations`` row (``supervisor_step`` / ``supervisor_final``,
@@ -33,6 +41,7 @@ from typing import Any, Protocol
 from wastech_orchestrator.config.schema import SupervisorConfig
 from wastech_orchestrator.core.flow.engine import Finding
 from wastech_orchestrator.core.flow.nodes.base import RegisterArtifact, RouterPort
+from wastech_orchestrator.core.flow.nodes.exchange_publish import publish_artifact
 from wastech_orchestrator.core.flow.observability import (
     record_provider_attempts,
     write_prompt_audit,
@@ -44,9 +53,28 @@ from wastech_orchestrator.core.flow.usage_accounting import (
     deserialize_usage,
     snapshot_for_lineage,
 )
+from wastech_orchestrator.core.follow_ups import (
+    FINDING_TITLE_MAX,
+    FollowUp,
+    evaluator_finding_follow_ups,
+    follow_up_json,
+    merge_follow_ups,
+    parse_follow_ups,
+    render_follow_ups_section,
+    render_gate_digest,
+)
 from wastech_orchestrator.core.skills import SkillInventory
+from wastech_orchestrator.core.supervisor_packet import (
+    bound_step_message,
+    build_packet_facts,
+    render_packet,
+)
+from wastech_orchestrator.core.supervisor_usage import SupervisorFunction, summarize_spend
 from wastech_orchestrator.memory.delta import DELTA_OUTPUT_SCHEMA, CandidateDelta, parse_delta
-from wastech_orchestrator.providers.artifacts import task_artifact_dir
+from wastech_orchestrator.providers.artifacts import (
+    node_run_dir,
+    task_artifact_dir,
+)
 from wastech_orchestrator.providers.base import (
     AgentRunRequest,
     AgentRunResult,
@@ -56,7 +84,13 @@ from wastech_orchestrator.providers.base import (
 )
 from wastech_orchestrator.providers.exchange import assert_orchestration_paths_contained
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
-from wastech_orchestrator.state_store import EvaluationRow, NodeLineageRow, ProviderAttemptRow
+from wastech_orchestrator.state_store import (
+    CheckRunRow,
+    EvaluationRow,
+    NodeLineageRow,
+    NodeRunRow,
+    ProviderAttemptRow,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -74,6 +108,11 @@ _SUPERVISOR_IDENTITY = "supervisor"
 # double-underscore sentinel, distinct from the routing identity above, so it can never collide with
 # a real flow node id (an operator could legally name an evaluator node ``supervisor``).
 _SUPERVISOR_LINEAGE_NODE_ID = "__supervisor__"
+
+# The finalize packet's filename, identical in the private artifact dir and in the exchange
+# (``.worc-io/<task-id>/supervisor/packet.json``), so the audit copy and the copy the provider read
+# are trivially comparable.
+_PACKET_FILENAME = "packet.json"
 
 # The ``node_run_id`` namespacing the upfront skill-map proposal's artifact dir
 # (``stages/supervisor/run-NNNNNN/``). Distinct from finalize's ``0`` and from any real (positive,
@@ -244,232 +283,22 @@ def _finalize_schema(*, with_delta: bool, with_follow_ups: bool) -> dict[str, An
     }
 
 
-@dataclass(frozen=True)
-class FollowUp:
-    """One evidence-gated technical-debt / follow-up record (task 1). Minimal and grounded."""
-
-    title: str
-    rationale: str
-    severity: str
-    evidence: tuple[str, ...]
-    paths: tuple[str, ...] = ()
-    action_hint: str | None = None
-
-
-def parse_follow_ups(raw: Any) -> tuple[FollowUp, ...]:
-    """Parse the finalize turn's ``follow_ups`` array defensively — **evidence-gated**.
-
-    Best-effort, mirroring :func:`_parse_skill_map`: a non-list yields ``()`` and any record without
-    a non-empty ``title`` or ``evidence`` is dropped (never raised), so an ungrounded "refactor
-    idea" the model invented cannot reach ``summary.{json,md}``.
-    """
-    if not isinstance(raw, list):
-        return ()
-    out: list[FollowUp] = []
-    for item in raw:
-        if not isinstance(item, Mapping):
-            continue
-        title = item.get("title")
-        evidence = item.get("evidence")
-        if not isinstance(title, str) or not title.strip():
-            continue
-        if not isinstance(evidence, list):
-            continue
-        ev = tuple(e.strip() for e in evidence if isinstance(e, str) and e.strip())
-        if not ev:  # evidence-gated: no evidence → dropped
-            continue
-        rationale = item.get("rationale")
-        severity = item.get("severity")
-        paths = item.get("paths")
-        action_hint = item.get("action_hint")
-        out.append(
-            FollowUp(
-                title=title.strip(),
-                rationale=rationale if isinstance(rationale, str) else "",
-                severity=severity if severity in ("low", "medium", "high") else "medium",
-                evidence=ev,
-                paths=tuple(p.strip() for p in paths if isinstance(p, str) and p.strip())
-                if isinstance(paths, list)
-                else (),
-                action_hint=action_hint.strip()
-                if isinstance(action_hint, str) and action_hint.strip()
-                else None,
-            )
-        )
-    return tuple(out)
-
-
-def _render_follow_ups_section(follow_ups: tuple[FollowUp, ...]) -> str:
-    """Render the ``## Technical debt / follow-ups`` section appended to ``summary.md``."""
-    lines = ["## Technical debt / follow-ups", ""]
-    for fu in follow_ups:
-        parts = [f"- **[{fu.severity}] {fu.title}**"]
-        if fu.rationale:
-            parts.append(f" — {fu.rationale}")
-        if fu.paths:
-            parts.append(f" Paths: {', '.join(fu.paths)}.")
-        if fu.action_hint:
-            parts.append(f" Suggested: {fu.action_hint}")
-        lines.append("".join(parts))
-    return "\n".join(lines) + "\n"
-
-
-# Longest a finding's reason may be before it is used verbatim as a follow-up title; longer reasons
-# become a truncated title with the full text carried in the rationale. The same bound caps
-# a finding line in the observation prompt, so a chatty evaluator cannot inflate every step turn.
-_FINDING_TITLE_MAX = 120
-
-
 def _render_findings_digest(findings: Sequence[Finding]) -> str:
     """Render an evaluator's findings as bounded lines for the observation prompt.
 
     Severity + reason + paths only: enough for the observer to react to what the step actually said,
     without pulling a full review's prose into every per-step turn. Long reasons are cut at
-    :data:`_FINDING_TITLE_MAX`, the same bound the follow-up titles use.
+    :data:`~wastech_orchestrator.core.follow_ups.FINDING_TITLE_MAX`, the same bound the follow-up
+    titles use.
     """
     lines = []
     for finding in findings:
         reason = " ".join(finding.reason.split())
-        if len(reason) > _FINDING_TITLE_MAX:
-            reason = reason[:_FINDING_TITLE_MAX].rstrip() + "…"
+        if len(reason) > FINDING_TITLE_MAX:
+            reason = reason[:FINDING_TITLE_MAX].rstrip() + "…"
         paths = f" ({', '.join(finding.paths)})" if finding.paths else ""
         lines.append(f"- [{finding.severity}] {reason}{paths}")
     return "\n".join(lines) + "\n"
-
-
-def _finding_to_follow_up(finding: Any, node_id: str | None) -> FollowUp | None:
-    """Map one persisted evaluator finding (``{severity, reason, paths}``) to a :class:`FollowUp`,
-    or ``None`` when it carries no usable ``reason``."""
-    if not isinstance(finding, Mapping):
-        return None
-    reason = str(finding.get("reason") or "").strip()
-    if not reason:
-        return None
-    severity = finding.get("severity")
-    paths_raw = finding.get("paths")
-    paths = (
-        tuple(str(p).strip() for p in paths_raw if str(p).strip())
-        if isinstance(paths_raw, list)
-        else ()
-    )
-    if len(reason) <= _FINDING_TITLE_MAX:
-        title, rationale = reason, ""
-    else:  # keep the bold title a label; the full text still reaches the operator via the rationale
-        title, rationale = reason[:_FINDING_TITLE_MAX].rstrip() + "…", reason
-    return FollowUp(
-        title=title,
-        rationale=rationale,
-        severity=severity if severity in ("low", "medium", "high") else "medium",
-        evidence=(f"{node_id or 'review'} evaluator finding (accepted with findings)",),
-        paths=paths,
-    )
-
-
-def _last_verdict_per_node(
-    evaluations: list[EvaluationRow],
-) -> dict[tuple[str | None, int | None], EvaluationRow]:
-    """Each evaluator node's FINAL in-flow verdict row (earlier rework rounds are superseded).
-
-    ``get_evaluations`` is insertion-ordered, so the last row seen per key is that node's final
-    verdict. Keyed by ``(node_id, subtask_order)``, not by node alone: a decomposed task runs the
-    same evaluator once per subtask, so keying on the node id let subtask N's verdict evict every
-    earlier subtask's — silently, and worse the more the task was decomposed.
-    """
-    last_by_node: dict[tuple[str | None, int | None], EvaluationRow] = {}
-    for row in evaluations:
-        if row.kind == "in_flow_verdict":
-            last_by_node[(row.node_id, row.subtask_order)] = row
-    return last_by_node
-
-
-def _row_findings(row: EvaluationRow) -> list[Mapping[str, Any]]:
-    """The persisted ``{severity, reason, paths}`` findings of one verdict row (``[]`` if unusable).
-
-    Defensive on purpose: this is an advisory layer, so a malformed row is skipped, never raised.
-    """
-    try:
-        findings = json.loads(row.findings_json)
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(findings, list):
-        return []
-    return [f for f in findings if isinstance(f, Mapping)]
-
-
-def _evaluator_finding_follow_ups(evaluations: list[EvaluationRow]) -> tuple[FollowUp, ...]:
-    """Derive follow-ups from the LAST in-flow verdict per evaluator node.
-
-    An evaluator that accepts *with* findings persists them to the ``evaluations`` table and they
-    otherwise reach no operator surface. Take each evaluator node's final verdict only and convert
-    its findings so they land in ``summary.{json,md}`` and the PR body.
-    """
-    out: list[FollowUp] = []
-    for (node_id, _subtask), row in _last_verdict_per_node(evaluations).items():
-        for finding in _row_findings(row):
-            follow_up = _finding_to_follow_up(finding, node_id)
-            if follow_up is not None:
-                out.append(follow_up)
-    return tuple(out)
-
-
-def _render_gate_digest(evaluations: list[EvaluationRow]) -> str | None:
-    """Render every evaluator node's final verdict + findings for the finalize turn.
-
-    Without it the finalize turn writes about the gates from session memory: the run this came from
-    produced "three independent verification gates … all of which passed" with four critic findings
-    sitting in ``state.db``. Each line states the node, its verdict, and how many findings it
-    recorded, so "passed" is not writable about a gate that emitted any. Finding reasons are cut at
-    :data:`_FINDING_TITLE_MAX`, the same bound the observation digest and the follow-up titles use.
-
-    ``None`` when the task ran no in-flow evaluator (a flow with no gates), so the section is simply
-    absent rather than an empty heading.
-    """
-    lines: list[str] = []
-    for (node_id, subtask), row in _last_verdict_per_node(evaluations).items():
-        findings = _row_findings(row)
-        subtask_label = f" (subtask {subtask})" if subtask is not None else ""
-        where = f"{node_id or 'evaluator'}{subtask_label}"
-        if not findings:
-            lines.append(f"- {where}: verdict `{row.verdict}`, no findings recorded")
-            continue
-        lines.append(f"- {where}: verdict `{row.verdict}`, {len(findings)} finding(s) recorded:")
-        for finding in findings:
-            reason = " ".join(str(finding.get("reason") or "").split())
-            if len(reason) > _FINDING_TITLE_MAX:
-                reason = reason[:_FINDING_TITLE_MAX].rstrip() + "…"
-            paths_raw = finding.get("paths")
-            paths = (
-                f" ({', '.join(str(p) for p in paths_raw)})"
-                if isinstance(paths_raw, list) and paths_raw
-                else ""
-            )
-            lines.append(f"  - [{finding.get('severity') or 'unknown'}] {reason}{paths}")
-    return "\n".join(lines) if lines else None
-
-
-def _follow_up_key(follow_up: FollowUp) -> tuple[str, tuple[str, ...]]:
-    """Exact-match dedup key for a follow-up: its normalized text plus its paths."""
-    text = " ".join(f"{follow_up.title} {follow_up.rationale}".lower().split())
-    return (text, tuple(sorted(follow_up.paths)))
-
-
-def _merge_follow_ups(
-    primary: tuple[FollowUp, ...], extra: tuple[FollowUp, ...]
-) -> tuple[FollowUp, ...]:
-    """Append *extra* follow-ups whose exact-match key is not already in *primary*.
-
-    *primary* (the supervisor's own list) wins on a collision, so an evaluator finding the
-    supervisor already reported is not duplicated; *extra* is also deduped against itself.
-    """
-    seen = {_follow_up_key(fu) for fu in primary}
-    merged = list(primary)
-    for follow_up in extra:
-        key = _follow_up_key(follow_up)
-        if key in seen:
-            continue
-        seen.add(key)
-        merged.append(follow_up)
-    return tuple(merged)
 
 
 # Pseudo-tags a model sometimes emits instead of a clean tool call — the whole
@@ -567,14 +396,35 @@ def _parse_skill_map(structured: Mapping[str, Any] | None) -> dict[str, tuple[st
     return out
 
 
+class SupervisorTurnSettings(Protocol):
+    """The model + effort of one supervisor phase, structurally.
+
+    Satisfied by both ``SupervisorObserveConfig`` (which carries the cadence too) and
+    ``SupervisorTurnConfig``, so the shared turn runner takes either without the two config shapes
+    having to be related by inheritance.
+    """
+
+    @property
+    def model(self) -> str | None: ...
+
+    @property
+    def reasoning(self) -> str | None: ...
+
+
 class SupervisorStorePort(Protocol):
     """The slice of the state store the supervisor needs: the immutable evaluation row, the durable
-    own-session lineage (read on first use, written after each turn), and the per-turn
-    provider-attempt audit row (the supervisor's own billable calls)."""
+    own-session lineage (read on first use, written after each turn), the per-turn provider-attempt
+    audit row (the supervisor's own billable calls) plus the task-wide read-back of those rows for
+    the summary's spend report, and the two read-only tables the finalize packet is assembled from
+    (``node_runs`` / ``check_runs``)."""
 
     def record_evaluation(self, row: EvaluationRow) -> int: ...
 
     def get_evaluations(self, task_id: str) -> list[EvaluationRow]: ...
+
+    def get_node_runs(self, task_id: str) -> list[NodeRunRow]: ...
+
+    def get_check_runs(self, task_id: str) -> list[CheckRunRow]: ...
 
     def get_node_lineage(
         self, task_id: str, node_id: str, subtask_order: int | None = None
@@ -583,6 +433,8 @@ class SupervisorStorePort(Protocol):
     def upsert_node_lineage(self, row: NodeLineageRow) -> None: ...
 
     def record_provider_attempt(self, attempt: ProviderAttemptRow) -> None: ...
+
+    def get_provider_attempts_for_task(self, task_id: str) -> list[ProviderAttemptRow]: ...
 
 
 class Supervisor:
@@ -599,6 +451,8 @@ class Supervisor:
         flow_dir: Path,
         exchange_root: str | Path = "",
         flow_supervisor: SupervisorBlock | None = None,
+        flow_name: str | None = None,
+        task_type: str | None = None,
         register_artifact: RegisterArtifact | None = None,
         prompt_audit: bool = False,
         prompt_secrets: tuple[str, ...] = (),
@@ -628,6 +482,10 @@ class Supervisor:
             flow_supervisor.handoff_role_file if flow_supervisor else None
         )
         self._emit_follow_ups = flow_supervisor.emit_follow_ups if flow_supervisor else False
+        # Flow name + task type, recorded in the finalize packet's header so the synthesis knows
+        # what shape of work it closes out. Both are per-task constants the orchestrator resolves.
+        self._flow_name = flow_name
+        self._task_type = task_type
         self._register_artifact = register_artifact
         self._prompt_audit = prompt_audit
         self._prompt_secrets = prompt_secrets
@@ -640,12 +498,6 @@ class Supervisor:
         # persisted to / hydrated from ``node_lineage`` so it survives a restart (independent of the
         # editing-lineage authors). ``None`` until the first turn runs or the persisted row is read.
         self._own_session_id: str | None = None
-        # Whether a supervisor turn actually *succeeded this process* (distinct from
-        # ``_own_session_id``, which ``_resume_session`` sets to the stale persisted id *before* the
-        # turn — so it is non-None even after a failed resume). Gates finalize's session-vs-digest
-        # choice: a warm live session synthesizes normally; otherwise finalize reseeds from the
-        # recorded ``supervisor_step`` observations rather than resuming a possibly-dead session.
-        self._session_live: bool = False
 
     # -- per-step observation --------------------------------------------------
 
@@ -662,6 +514,8 @@ class Supervisor:
     ) -> None:
         """Observe one completed step read-only and record an advisory ``supervisor_step`` row.
 
+        Called for the executed nodes the orchestrator's post-node hook selects — every kind
+        except the deterministic ``tool`` / ``checks`` nodes and the terminal ``publish`` node.
         Best-effort: a failed observation is logged and swallowed — it is advisory and must never
         fail or reroute the task. Namespaced by ``source_node_run_id`` (the step), so a resumed run
         does not duplicate observations.
@@ -675,7 +529,13 @@ class Supervisor:
         # observe turns; it never needs a max reasoning tier, so cap it to `high` (the whole-task
         # finalize keeps the configured tier).
         note = self._run(
-            task_id, prompt, node_run_id=node_run_id, subtask=subtask_order, cap_reasoning=True
+            task_id,
+            prompt,
+            node_run_id=node_run_id,
+            turn=self._settings.observe,
+            function=SupervisorFunction.OBSERVE,
+            subtask=subtask_order,
+            cap_reasoning=True,
         )
         self._record(
             task_id,
@@ -714,40 +574,36 @@ class Supervisor:
         deterministic minimal summary then applies), a ``None`` delta, and no follow-ups.
         ``summary.json`` is always written. Returns the summary path + the delta + the follow-ups.
 
-        On a revived task where no supervisor turn succeeded this process (the durable session is
-        gone / unresumable), we do **not** gamble on resuming that dead session: finalize reseeds a
-        single fresh turn from the ``supervisor_step`` observations already recorded in
-        ``state.db``. Same one finalize turn, different input — the budget contract is unchanged.
+        The turn **always** runs on a fresh session seeded by the ``SupervisorPacket``, on a normal
+        run exactly as on a revive: the warm session it used to resume was the reason a revived
+        task got a thinner summary and the reason this call's input grew with every rework cycle.
+        There is no warm auto-fallback if the packet cannot be built — that would put
+        non-determinism back into the one path this makes reproducible and hide the build failure;
+        the fallback stays what it was, the orchestrator's deterministic minimal summary after a
+        turn that produced nothing.
         """
         # ``node_run_id=0`` is the once-per-task finalize sentinel; per-step observations use the
         # observed step's id, so each supervisor turn writes a distinct artifact dir (no collision).
         # Read the evaluation rows ONCE: the same list feeds the gate digest the turn is grounded in
         # and the finding-derived follow-ups merged after it.
         evaluations = self._store.get_evaluations(task_id)
-        warm = self._session_live
-        digest = None if warm else self._finalize_digest(task_id)
-        if not warm:
-            _LOG.info(
-                "finalize re-synthesized from recorded observations (session unavailable)",
-                extra={"task_id": task_id, "have_digest": digest is not None},
-            )
+        packet_path = self._publish_packet(task_id, task_title, evaluations)
         # ``task_title`` is used only for the orchestrator-side PR-body H1 / summary.json below (not
         # a provider prompt surface); the finalize *prompt* reads the task from the frozen exchange
         # packet path (no inline task body/title reaches the provider).
         summary_text, delta, follow_ups = self._finalize_turn(
             task_id,
             emit_delta,
-            digest=digest,
-            resume=warm,
+            packet_path=packet_path,
             task_path=task_path,
-            gates=_render_gate_digest(evaluations),
+            gates=render_gate_digest(evaluations),
         )
         # An evaluator that accepts *with* findings (sub-threshold, non-gating) persists them
         # to the evaluations table and they otherwise reach no operator surface. Merge them into the
         # follow-ups — deduped against the supervisor's own list — so they land in summary.{json,md}
         # and the PR body. Runs independent of ``emit_follow_ups`` (a distinct, evidence-bearing
         # source from the supervisor's LLM-authored follow-ups).
-        follow_ups = _merge_follow_ups(follow_ups, _evaluator_finding_follow_ups(evaluations))
+        follow_ups = merge_follow_ups(follow_ups, evaluator_finding_follow_ups(evaluations))
         self._record(
             task_id,
             kind="supervisor_final",
@@ -757,7 +613,10 @@ class Supervisor:
                 "summary_written": summary_text is not None,
                 "memory_delta": delta is not None,
                 "follow_ups": len(follow_ups),
-                "recovered_from_digest": not warm,
+                # Whether the turn was actually seeded by the packet. Always true on a healthy run;
+                # false records a build/publish failure, which would otherwise be invisible in a
+                # thin-but-present summary.
+                "packet_built": packet_path is not None,
             },
         )
         # A model sometimes emits its structured output as a `<summary>…</summary>
@@ -778,8 +637,10 @@ class Supervisor:
             body = f"# {task_title}\n\n{clean_summary}"
         body = body.rstrip("\n") + "\n"
         if follow_ups:  # surface the evidence-gated debt/follow-ups as a section in the PR body
-            body += "\n" + _render_follow_ups_section(follow_ups)
-        md_path.write_text(body, encoding="utf-8")
+            body += "\n" + render_follow_ups_section(follow_ups)
+        # ``newline=""``: this body is committed as the pull-request description, and the
+        # deterministic report writes the same file, so both must land as LF on every host.
+        md_path.write_text(body, encoding="utf-8", newline="")
         self._register(task_id, "summary_md", str(md_path))
         return FinalizeResult(summary_path=md_path, candidate_delta=delta, follow_ups=follow_ups)
 
@@ -788,8 +649,7 @@ class Supervisor:
         task_id: str,
         emit_delta: bool,
         *,
-        digest: str | None = None,
-        resume: bool = True,
+        packet_path: str | None = None,
         task_path: str | None = None,
         gates: str | None = None,
     ) -> tuple[str | None, CandidateDelta | None, tuple[FollowUp, ...]]:
@@ -797,17 +657,22 @@ class Supervisor:
         (the default); otherwise a structured ``{summary, ...}`` turn, so every enabled
         output (``memory_delta`` / ``follow_ups``) rides one turn (no extra LLM call).
 
-        ``digest`` (recovered ``supervisor_step`` observations) and ``resume=False`` are set
-        together on the revive path: the turn synthesizes from the digest on a fresh session rather
-        than resuming a dead one. ``gates`` is the rendered evaluator-verdict digest."""
+        Always ``resume_session=False``: the turn is grounded in the ``SupervisorPacket`` at
+        ``packet_path``, not in session memory. ``gates`` is the rendered evaluator-verdict digest,
+        which stays inline in the prompt — it is bounded by the number of evaluator nodes (not by
+        the rework count) and it is the guard that keeps "the gates passed" from being written over
+        findings that are actually open."""
         with_follow_ups = self._emit_follow_ups
         if not emit_delta and not with_follow_ups:
             text = self._run(
                 task_id,
-                self._finalize_prompt(task_id, digest=digest, gates=gates),
+                self._finalize_prompt(task_id, packet=packet_path is not None, gates=gates),
                 node_run_id=0,
-                resume_session=resume,
+                turn=self._settings.finalize,
+                function=SupervisorFunction.FINALIZE,
+                resume_session=False,
                 task_path=task_path,
+                supervisor_packet_path=packet_path,
             )
             return text, None, ()
         result = self._run_result(
@@ -816,13 +681,16 @@ class Supervisor:
                 task_id,
                 with_delta=emit_delta,
                 with_follow_ups=with_follow_ups,
-                digest=digest,
+                packet=packet_path is not None,
                 gates=gates,
             ),
             node_run_id=0,
+            turn=self._settings.finalize,
+            function=SupervisorFunction.FINALIZE,
             output_schema=_finalize_schema(with_delta=emit_delta, with_follow_ups=with_follow_ups),
-            resume_session=resume,
+            resume_session=False,
             task_path=task_path,
+            supervisor_packet_path=packet_path,
         )
         if result is None or result.structured_output is None:
             return None, None, ()
@@ -834,16 +702,18 @@ class Supervisor:
         )
         return summary_text, delta, follow_ups
 
-    def _finalize_digest(self, task_id: str) -> str | None:
-        """Reconstruct the finalize input from recorded ``supervisor_step`` observations.
+    @staticmethod
+    def _finalize_digest(evaluations: Sequence[EvaluationRow]) -> str | None:
+        """Render the recorded ``supervisor_step`` observations as the packet's material digest.
 
         The per-step notes are immutable append-only rows in ``evaluations`` (``state.db``) — always
         present on a revived task, independent of the durable session and of logging config. Renders
-        the usable notes as compact ``- [node → outcome] note`` lines, skipping the ones that failed
-        to run or added nothing (empty note). Returns ``None`` when nothing usable was recorded (the
-        turn then runs unseeded — same as today's fresh-session finalize)."""
+        the usable notes as compact ``- [node → outcome] note`` lines, skipping the ones that
+        failed to run or added nothing (empty note). Returns ``None`` when nothing usable was
+        recorded, in which case the packet's other blocks (changes / steps / checks) carry it
+        alone."""
         lines: list[str] = []
-        for row in self._store.get_evaluations(task_id):
+        for row in evaluations:
             if row.kind != "supervisor_step":
                 continue
             try:
@@ -859,6 +729,74 @@ class Supervisor:
             outcome = str(payload.get("outcome") or "?")
             lines.append(f"- [{node} → {outcome}] {note}")
         return "\n".join(lines) if lines else None
+
+    # -- the finalize packet ---------------------------------------------------
+
+    def _publish_packet(
+        self, task_id: str, task_title: str, evaluations: Sequence[EvaluationRow]
+    ) -> str | None:
+        """Write the packet privately, publish a redacted copy, return the provider-readable path.
+
+        The private ``packet.json`` under the finalize sentinel's artifact dir is the authoritative
+        audit copy; the provider only ever sees the copy published through the exchange seam, which
+        redacts on the way in — so the packet needs no redaction mechanism of its own, only the
+        per-attempt secret literals passed here.
+
+        Best-effort like every other part of this advisory layer: a failure is logged and yields
+        ``None``, and finalize runs unseeded rather than raising. It deliberately does **not** fall
+        back to resuming the warm session — that would restore the non-determinism this replaced and
+        mask the build failure.
+        """
+        try:
+            content = self._build_packet(task_id, task_title, evaluations)
+            private = (
+                node_run_dir(self._artifacts_root, task_id, _SUPERVISOR_IDENTITY, 0)
+                / _PACKET_FILENAME
+            )
+            private.parent.mkdir(parents=True, exist_ok=True)
+            # ``newline=""`` keeps the canonical LF bytes on Windows too — the same house pattern
+            # the exchange manifests are written with; a CRLF rewrite would break byte-identity.
+            private.write_text(content, encoding="utf-8", newline="")
+            self._register(task_id, "supervisor_packet", str(private))
+            published = publish_artifact(
+                str(self._exchange_root),
+                task_id,
+                f"{_SUPERVISOR_IDENTITY}/{_PACKET_FILENAME}",
+                content,
+                extra_secrets=self._prompt_secrets,
+                private_path=str(private),
+            )
+            return Path(published).as_posix()
+        except Exception as exc:
+            _LOG.warning(
+                "supervisor packet could not be built (finalize runs unseeded)",
+                extra={"task_id": task_id, "error_type": type(exc).__name__},
+            )
+            return None
+
+    def _build_packet(
+        self, task_id: str, task_title: str, evaluations: Sequence[EvaluationRow]
+    ) -> str:
+        """Render the packet from the run's durable facts — no live inputs.
+
+        The assembly itself deliberately lives outside this class: nothing in it depends on this
+        layer, so it stays reachable when the layer does not run at all. The observation digest is
+        the one field this layer contributes.
+        """
+        return render_packet(
+            build_packet_facts(
+                self._store,
+                task_id=task_id,
+                task_title=task_title,
+                task_type=self._task_type,
+                flow_name=self._flow_name,
+                evaluations=evaluations,
+                artifacts_root=self._artifacts_root,
+                exchange_root=self._exchange_root,
+                repo_dir=self._repo_dir,
+                material_observations=self._finalize_digest(evaluations),
+            )
+        )
 
     # -- intra-task subtask handoff --------------------------------------------
 
@@ -879,6 +817,8 @@ class Supervisor:
             task_id,
             self._handoff_prompt(task_id, subtask_order, floor_context),
             node_run_id=_HANDOFF_RUN_ID_BASE + subtask_order,
+            turn=self._settings.handoff,
+            function=SupervisorFunction.HANDOFF,
             subtask=subtask_order,
             output_schema=_HANDOFF_SCHEMA,
         )
@@ -916,6 +856,12 @@ class Supervisor:
             task_id,
             prompt,
             node_run_id=_PROPOSAL_RUN_ID,
+            # The cheap pair: a once-per-task, schema-bound proposal has the observe phase's cost
+            # profile, not the whole-task synthesis's. Independent of ``observe.mode``, which gates
+            # per-step observations only — this turn runs whenever ``skills.dynamic`` is on. Sharing
+            # the settings is exactly why the spend label has to be passed separately.
+            turn=self._settings.observe,
+            function=SupervisorFunction.SKILL,
             output_schema=_SKILL_MAP_SCHEMA,
             task_path=task_path,
         )
@@ -940,20 +886,26 @@ class Supervisor:
         prompt: str,
         *,
         node_run_id: int,
+        turn: SupervisorTurnSettings,
+        function: SupervisorFunction,
         subtask: int | None = None,
         resume_session: bool = True,
         cap_reasoning: bool = False,
         task_path: str | None = None,
+        supervisor_packet_path: str | None = None,
     ) -> str | None:
         """Run one read-only supervisor turn and return its final message (``None`` on failure)."""
         result = self._run_result(
             task_id,
             prompt,
             node_run_id=node_run_id,
+            turn=turn,
+            function=function,
             subtask=subtask,
             resume_session=resume_session,
             cap_reasoning=cap_reasoning,
             task_path=task_path,
+            supervisor_packet_path=supervisor_packet_path,
         )
         return result.final_message if result is not None else None
 
@@ -963,11 +915,14 @@ class Supervisor:
         prompt: str,
         *,
         node_run_id: int,
+        turn: SupervisorTurnSettings,
+        function: SupervisorFunction,
         subtask: int | None = None,
         output_schema: dict[str, Any] | None = None,
         resume_session: bool = True,
         cap_reasoning: bool = False,
         task_path: str | None = None,
+        supervisor_packet_path: str | None = None,
     ) -> AgentRunResult | None:
         """Run one read-only supervisor LLM turn on its own session; return the full result.
 
@@ -981,15 +936,24 @@ class Supervisor:
         turns never collide on the same path (the artifact writer never overwrites). A non-None
         ``output_schema`` forces structured output (the proposal); ``None`` leaves it free-text.
 
-        ``resume_session=False`` starts a fresh session (no ``session_id``): finalize uses it on a
-        revived task, where resuming the possibly-dead persisted session is the exact failure mode —
-        it reseeds from the recorded observations instead (the digest rides in the prompt).
+        ``resume_session=False`` starts a fresh session (no ``session_id``): finalize always uses
+        it, because it is grounded in the ``SupervisorPacket`` at ``supervisor_packet_path`` rather
+        than in session memory — which also removes the failure mode of resuming a dead session.
+
+        ``turn`` is the calling phase's own model + effort (``config.supervisor.observe`` /
+        ``.finalize`` / ``.handoff``). Required, not defaulted: a cheap note and the whole-task
+        synthesis want opposite tiers, so a phase that forgot to say which it is should not compile
+        rather than silently inherit the wrong one. The provider stays one per layer.
+
+        ``function`` is what that phase *is*, recorded on the attempt rows so the layer's spend is
+        readable per job. It cannot be inferred from ``turn``: two different jobs deliberately share
+        the observe phase's cheap model + effort, so the settings object does not identify either.
         """
         try:
             route = self._router.resolve_route(_SUPERVISOR_IDENTITY, self._settings.provider)
             # Cap to `high` for a schema turn (fragile at max) OR an advisory observe turn
-            # (cost-heavy in a deep loop); a free-text finalize keeps the configured tier.
-            reasoning = _schema_safe_reasoning(self._settings.reasoning, output_schema)
+            # (cost-heavy in a deep loop); a free-text finalize keeps its configured tier.
+            reasoning = _schema_safe_reasoning(turn.reasoning, output_schema)
             if cap_reasoning and reasoning in _MAX_REASONING_TIERS:
                 reasoning = _SCHEMA_REASONING_CAP
             # The session to resume + its persisted cumulative usage baseline: a resumed
@@ -1008,7 +972,7 @@ class Supervisor:
                 timeout_seconds=self._default_timeout_seconds,
                 attempt=1,
                 node_run_id=node_run_id,  # not a graph node; audit lives in ``evaluations``
-                model=self._settings.model,
+                model=turn.model,
                 reasoning=reasoning,
                 output_schema=output_schema,
                 session_id=resume_id,
@@ -1016,6 +980,9 @@ class Supervisor:
                 # inline title/description). Repository instructions are NOT injected — the
                 # supervisor's read-only turn reads the repo's root files itself, like graph nodes.
                 task_path=task_path,
+                # The whole-task facts for a finalize turn, likewise by path — inlining the JSON
+                # would put back exactly the bytes this replaced, and bypass the redaction seam.
+                supervisor_packet_path=supervisor_packet_path,
                 # Defense-in-depth: the Core-owned orchestrator security contract (advisory).
                 security_preamble=self._security_preamble,
             )
@@ -1035,13 +1002,14 @@ class Supervisor:
         # ``provider_attempts`` (``node_run_id`` NULL — it is not a graph node), so a task-level
         # cost/usage roll-up is complete. Recorded for every outcome (including a failed turn's
         # attempts) and BEFORE the result-None early return, so no billable call is dropped.
-        self._record_provider_attempts(task_id, outcome, usage_baseline, baseline_session_id)
+        self._record_provider_attempts(
+            task_id, outcome, function, usage_baseline, baseline_session_id
+        )
         result = outcome.result
         if result is None:
             return None
         if result.session_id:
             self._own_session_id = result.session_id  # resume_own_lineage continuity (in-memory)
-            self._session_live = True  # a turn succeeded this process — the session is usable
             self._persist_session(
                 task_id, result.session_id, outcome.provider_used, result.normalized_usage
             )
@@ -1101,7 +1069,9 @@ class Supervisor:
                     prompt=effective_prompt,
                     route=route,
                     outcome=outcome,
-                    model=self._settings.model,
+                    # The phase's model as actually sent — read off the request rather than
+                    # re-resolving it, so the audit cannot disagree with the launch.
+                    model=request.model,
                     reasoning=reasoning,
                     started_at=outcome.result.started_at,
                     secrets=self._prompt_secrets,
@@ -1121,15 +1091,17 @@ class Supervisor:
         self,
         task_id: str,
         outcome: StageOutcome,
+        function: SupervisorFunction,
         usage_baseline: NormalizedUsage | None,
         baseline_session_id: str | None,
     ) -> None:
         """Persist the supervisor's own ``provider_attempts`` rows — ``node_run_id`` NULL.
 
         Reuses the shared node-path recorder, so the supervisor's per-run usage delta is computed
-        exactly like a graph node's (against its own resumed-session baseline). Best-effort like the
-        rest of this advisory layer: any store error is logged and swallowed so an audit-write
-        failure can never surface as a broken turn.
+        exactly like a graph node's (against its own resumed-session baseline). ``function`` is what
+        makes the layer's spend readable per job rather than as one lump. Best-effort like the rest
+        of this advisory layer: any store error is logged and swallowed so an audit-write failure
+        can never surface as a broken turn.
         """
         try:
             record_provider_attempts(
@@ -1138,6 +1110,7 @@ class Supervisor:
                 task_id=task_id,
                 node_run_id=None,  # the supervisor is a constant layer, not a graph node
                 outcome=outcome,
+                supervisor_function=function.value,
                 usage_baseline=usage_baseline,
                 baseline_session_id=baseline_session_id,
             )
@@ -1232,7 +1205,9 @@ class Supervisor:
         if findings:
             observed += "\nFindings it recorded:\n" + _render_findings_digest(findings)
         if final_message:
-            observed += f"\nThe step reported:\n{final_message}\n"
+            # Bounded by the same per-step cap the packet uses: unbounded, a chatty node's closing
+            # message inflated every observation turn, and each rework round paid for it again.
+            observed += f"\nThe step reported:\n{bound_step_message(final_message)}\n"
         return self._base_prompt(task_id) + "\n\n" + observed
 
     def _proposal_prompt(
@@ -1272,7 +1247,7 @@ class Supervisor:
         *,
         with_delta: bool = False,
         with_follow_ups: bool = False,
-        digest: str | None = None,
+        packet: bool = False,
         gates: str | None = None,
     ) -> str:
         # The finalize lens (flow ``finalize_role_file`` → built-in) carries the summary emphasis;
@@ -1298,15 +1273,21 @@ class Supervisor:
                 "and do not describe a check as something you performed yourself.\n\n"
                 f"{gates}\n"
             )
-        if digest:
-            # Revive path: the working session that accumulated per-step context is gone, so seed
-            # the synthesis from the recorded observations instead of relying on session memory.
+        if packet:
+            # The turn runs on a fresh session by design, so there IS no session memory to lean on:
+            # say where the facts are and that they are the ground truth. Pointing at the packet
+            # instead of inlining it is the whole point — the JSON is read once as a file rather
+            # than re-sent as prompt input on every turn of the run.
             prompt += (
-                "\n## Recovered step observations\n"
-                "Your own working session for this task is unavailable (the task was resumed from "
-                "a checkpoint), so synthesize the summary from these recorded per-step "
-                "observations rather than from session memory:\n\n"
-                f"{digest}\n"
+                "\n## Run facts (the packet)\n"
+                "This is a fresh session: you are NOT continuing an earlier conversation about "
+                "this task, so do not write from memory of one. Read the `packet` file referenced "
+                "in the context below — it is the deterministic record of this run (the changed "
+                "paths and diff stat with a pointer to the full diff, every executed step with its "
+                "outcome and what it reported, the checks that ran, and your own recorded per-step "
+                "observations) — and ground every statement you make in it. Open the artifacts it "
+                "points at when you need more detail than it carries. If something is absent from "
+                "the packet, say so plainly rather than inferring it.\n"
             )
         if with_follow_ups:
             prompt += (
@@ -1399,7 +1380,14 @@ class Supervisor:
         """Write the local-only ``summary.json`` metadata (never committed).
 
         Carries the evidence-gated ``follow_ups`` (empty unless the flow opted in) so the debt
-        signal is machine-readable beside the prose summary.
+        signal is machine-readable beside the prose summary, and ``supervisor_usage`` — what this
+        oversight layer cost, in total and per job. The spend belongs here rather than in
+        ``summary.md`` because that file becomes the pull-request body: telemetry is for the
+        operator who owns the bill, not for the reviewer reading the change, and it should not
+        travel to the remote alongside it.
+
+        Written late in the finalize sequence, so the report already includes the finalize turn's
+        own attempt rows rather than every call but the most expensive one.
 
         A *failed* finalize (empty ``summary_text``) must NOT clobber an existing non-empty
         ``summary.json`` with a blank one — symmetric to leaving ``summary.md`` untouched on a
@@ -1409,18 +1397,11 @@ class Supervisor:
         if not summary_text and self._existing_summary_nonempty(path):
             return
         payload: dict[str, Any] = {"what": task_title, "summary": summary_text or ""}
+        usage = self._supervisor_usage(task_id)
+        if usage is not None:
+            payload["supervisor_usage"] = usage
         if follow_ups:
-            payload["follow_ups"] = [
-                {
-                    "title": fu.title,
-                    "rationale": fu.rationale,
-                    "severity": fu.severity,
-                    "paths": list(fu.paths),
-                    "evidence": list(fu.evidence),
-                    "action_hint": fu.action_hint,
-                }
-                for fu in follow_ups
-            ]
+            payload["follow_ups"] = [follow_up_json(fu) for fu in follow_ups]
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
@@ -1429,6 +1410,20 @@ class Supervisor:
         except OSError:
             return
         self._register(task_id, "summary_json", str(path))
+
+    def _supervisor_usage(self, task_id: str) -> dict[str, Any] | None:
+        """This layer's own spend for the task, or ``None`` when it made no provider calls.
+
+        Best-effort like the rest of the layer: a store error costs the report, never the summary.
+        """
+        try:
+            return summarize_spend(self._store.get_provider_attempts_for_task(task_id))
+        except Exception as exc:
+            _LOG.warning(
+                "supervisor usage report could not be built (advisory, ignored)",
+                extra={"task_id": task_id, "error_type": type(exc).__name__},
+            )
+            return None
 
     @staticmethod
     def _existing_summary_nonempty(path: Path) -> bool:

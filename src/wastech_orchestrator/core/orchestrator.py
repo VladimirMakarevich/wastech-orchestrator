@@ -24,7 +24,13 @@ from typing import Any
 from wastech_orchestrator.check_runner import CheckRunner
 from wastech_orchestrator.checks.model import ResolvedCheckSet
 from wastech_orchestrator.checks.resolver import CheckResolver
-from wastech_orchestrator.config.schema import BranchMode, MergeStrategy, OrchestratorConfig
+from wastech_orchestrator.config.schema import (
+    BranchMode,
+    MergeStrategy,
+    ObserveMode,
+    OrchestratorConfig,
+)
+from wastech_orchestrator.core import observe_cadence
 from wastech_orchestrator.core.decomposition import (
     REASON_N_OUT_OF_RANGE,
     DecompositionDecision,
@@ -95,6 +101,7 @@ from wastech_orchestrator.core.flow.postprocess import (
 )
 from wastech_orchestrator.core.flow.recorder import (
     StateStoreRunRecorder,
+    fell_back_from,
     hydrate_run_state,
     read_final_diff,
     read_last_findings,
@@ -110,6 +117,10 @@ from wastech_orchestrator.core.flow.validator import (
     validate_disabled_nodes,
 )
 from wastech_orchestrator.core.flow.wiring import build_node_inputs, build_node_services
+from wastech_orchestrator.core.follow_ups import (
+    evaluator_finding_follow_ups,
+    render_gate_digest,
+)
 from wastech_orchestrator.core.hitl import (
     consume_pending_interactions,
     reset_pending_interactions,
@@ -134,7 +145,15 @@ from wastech_orchestrator.core.skills import (
     resolve_skills,
 )
 from wastech_orchestrator.core.state_machine import Status, assert_transition
+from wastech_orchestrator.core.summary_report import (
+    SKIPPED_NODES_HEADING,
+    SUMMARY_MD_FILENAME,
+    render_skipped_nodes_section,
+    write_summary_report,
+)
 from wastech_orchestrator.core.supervisor import Supervisor
+from wastech_orchestrator.core.supervisor_packet import build_packet_facts
+from wastech_orchestrator.core.supervisor_usage import summarize_spend
 from wastech_orchestrator.git_manager import (
     CleanupOutcome,
     GitCommandError,
@@ -146,7 +165,6 @@ from wastech_orchestrator.ledger import (
     Ledger,
     LedgerRecord,
     write_failure_report,
-    write_minimal_summary,
 )
 from wastech_orchestrator.memory import (
     AuditActor,
@@ -243,6 +261,13 @@ _LIFECYCLE_FOLDERS = ("pending", "done", "failed")
 _CONTAINMENT_MANUAL_CLASSES = frozenset(
     {ErrorClass.CONTAINMENT_UNVERIFIED, ErrorClass.CAPABILITY_UNAVAILABLE}
 )
+
+# Node kinds the constant supervisor layer does NOT observe. ``publish`` is terminal (its finalize
+# hook already wrote the summary); ``tool`` and ``checks`` are deterministic, so their result is
+# already a durable fact the finalize packet carries verbatim (``node_runs.outcome`` /
+# ``check_runs``) and an advisory LLM note about a pass/fail adds nothing to the summary for a full
+# turn's cost. Keyed on the engine's node *kind*, never on a node id or a flow name — flow-agnostic.
+_UNOBSERVED_NODE_KINDS = frozenset({"tool", "checks", "publish"})
 
 # The statuses ``rerun`` will re-enter: an unrecoverable failure, an operator-action park, and a
 # stale ``running`` row (a killed/crashed task, daemon-less by the time it reaches the plan).
@@ -504,6 +529,10 @@ class _Pipeline:
     # Per-task disabled flow node ids (``nodes.<id>.enabled: false``). Re-derived every run/resume
     # from front-matter, so a restart recovers it without persistence (node-disable control).
     skip: frozenset[str] = frozenset()
+    # The resolved flow's name, captured when the control bundle is bound, so the deterministic
+    # report can name the pipeline that produced the change. ``None`` before the bundle exists (a
+    # resume that goes terminal on the park ceiling), where the report omits that line.
+    flow_name: str | None = None
     # Operator-authored decomposition built + validated pre-slot from the task's ``subtasks:``
     # manifest (fresh run only). When set, it is materialized at preflight (before branch) and the
     # planning ``proposed_by`` post-hook does not re-read the agent's proposal. ``None`` on resume —
@@ -2562,9 +2591,18 @@ class Orchestrator:
                 Status.MANUAL_ACTION_REQUIRED,
                 manual_reason="control plane: frozen flow does not match checkpoint; rerun fresh",
             )
-        # The constant supervisor layer starts at task start and lives the whole cycle; it
-        # carries this task's own resume_own_lineage session. It reads the frozen prompts.
-        self._supervisor = self._build_supervisor(p, snapshot, flow_dir=bundle.flow_dir)
+        p.flow_name = snapshot.doc.name
+        # The supervisor layer starts at task start and lives the whole cycle; it carries this
+        # task's own resume_own_lineage session. It reads the frozen prompts. Switched off, it is
+        # simply not built: all four consumers already tolerate its absence, so "do not construct
+        # the object" is the whole mechanism. The assignment stays unconditional (not an `if` that
+        # skips
+        # it) so no layer from a previous task in a `watch` loop can survive into this one.
+        self._supervisor = (
+            self._build_supervisor(p, snapshot, flow_dir=bundle.flow_dir)
+            if self._config.supervisor.enabled
+            else None
+        )
         inputs = build_node_inputs(
             p,
             flow_dir=bundle.flow_dir,
@@ -2968,6 +3006,9 @@ class Orchestrator:
             # Flow-local supervisor prompts + the follow-ups opt-in;
             # ``None`` when the flow declares no ``supervisor:`` block (global config + built-ins).
             flow_supervisor=snapshot.doc.supervisor,
+            # Header facts for the finalize packet — the shape of work being closed out.
+            flow_name=snapshot.doc.name,
+            task_type=p.task.task_type,
             register_artifact=self._register_artifact,
             # Same per-task gate/secrets the engine's own NodeServices uses
             # (_build_engine_services), so a supervisor turn's audit artifacts honor the same
@@ -3016,8 +3057,11 @@ class Orchestrator:
             # finalize (the turn produced nothing and no prior good summary was preserved), the
             # deterministic minimal summary will silently replace it — make that degradation loud
             # (WARNING + a visible callout in the fallback body) instead of shipping a stub as if
-            # it were the full synthesis. Covers the revived-task / unresumable-session case.
-            summary_md_path = task_artifact_dir(self._artifacts_root, p.task.id) / "summary.md"
+            # it were the full synthesis. This is now the ONLY fallback: finalize runs fresh from
+            # the packet, so there is no warm-session path left to degrade to.
+            summary_md_path = (
+                task_artifact_dir(self._artifacts_root, p.task.id) / SUMMARY_MD_FILENAME
+            )
             degraded = not summary_md_path.exists()
             if degraded:
                 log.warning(
@@ -3167,6 +3211,37 @@ class Orchestrator:
 
         return facts
 
+    def _observes_step(
+        self, mode: ObserveMode, node: FlowNode, outcome: NodeOutcome, node_run_id: int
+    ) -> bool:
+        """Whether the cadence in force spends an observation turn on this completed step.
+
+        The ``events`` mode is the only one that needs facts beyond the node id, so it is the
+        only one that reads the step's ``node_runs`` row — a single primary-key lookup, and none at
+        all under ``all`` / ``selected`` / ``none``. ``include_nodes`` and ``triggers`` are
+        global-only (a flow narrows the *mode*, nothing else), so they come straight from config.
+
+        The fallback fact comes from the flow recorder, the same derivation the finalize packet's
+        step record uses, so this gate and the summary cannot disagree on whether a step deviated.
+        """
+        observe = self._config.supervisor.observe
+        triggers: frozenset[str] = frozenset()
+        if mode is ObserveMode.EVENTS:
+            row = self._store.get_node_run(node_run_id)
+            triggers = observe_cadence.triggers_for(
+                outcome_kind=outcome.kind,
+                rework_exhausted=outcome.rework_exhausted,
+                status=row.status if row is not None else None,
+                fell_back=row is not None and fell_back_from(row) is not None,
+            )
+        return observe_cadence.should_observe(
+            mode=mode,
+            node_id=node.id,
+            include_nodes=observe.include_nodes,
+            enabled_triggers=observe.triggers,
+            triggers=triggers,
+        )
+
     def _engine_post_node(
         self,
         p: _Pipeline,
@@ -3177,10 +3252,20 @@ class Orchestrator:
         control_digest: str | None = None,
     ) -> Callable[[FlowNode, NodeOutcome, int], None]:
         """Engine post-node hook: verify the live control plane is unchanged, let the
-        supervisor layer observe the completed step, persist a node's output_artifact slot + its
+        supervisor layer observe the completed step (when the kind is observable at all and the
+        cadence in force selects it), persist a node's output_artifact slot + its
         generic ``<node_id>.out.md``, resolve plan skills, and — for the decomposition
         ``proposed_by`` node — decide + materialize the decomposition."""
         decomp = snapshot.doc.decomposition
+        # The observation cadence for this run: the flow's own mode when it declares one, else the
+        # operator's global mode (the validator has already refused a flow that widens it). Resolved
+        # once per run from data — the engine never maps a flow name or a node id to a mode.
+        flow_supervisor = snapshot.doc.supervisor
+        flow_observe = flow_supervisor.observe if flow_supervisor is not None else None
+        observe_mode = observe_cadence.resolve_mode(
+            self._config.supervisor.observe.mode,
+            flow_observe.mode if flow_observe is not None else None,
+        )
         # Redaction literals for the node-output writer, harvested once per run (same set the memory
         # write path uses): raw structured output is not adapter-redacted, so scrub it at write.
         node_output_secrets = self._memory_extra_secrets()
@@ -3199,9 +3284,20 @@ class Orchestrator:
             # mutated under the running task — a non-fallback manual-action security violation.
             if live_flow_dir is not None and control_digest is not None:
                 self._verify_control_plane_unchanged(snapshot, live_flow_dir, control_digest)
-            # The constant supervisor layer observes every completed step read-only (advisory) —
-            # except the terminal publish node, whose finalize hook already wrote the summary.
-            if self._supervisor is not None and node.kind != "publish":
+            # The constant supervisor layer observes the completed step read-only (advisory),
+            # subject
+            # to two independent gates. First the kind: the three in `_UNOBSERVED_NODE_KINDS` are
+            # never observable — the terminal `publish` node (its finalize hook already wrote the
+            # summary) and the deterministic `tool` / `checks` nodes, whose result is already a
+            # durable fact the finalize packet carries. Then the operator's cadence: `all` observes
+            # every observable step, `selected` the listed ids, `events` only a deviation, `none`
+            # nothing at all. The whole-task summary is unaffected by any of it — finalize is seeded
+            # by the deterministic packet, not by these notes.
+            if (
+                self._supervisor is not None
+                and node.kind not in _UNOBSERVED_NODE_KINDS
+                and self._observes_step(observe_mode, node, outcome, node_run_id)
+            ):
                 self._supervisor.observe(
                     task_id=p.task.id,
                     node_id=node.id,
@@ -3632,25 +3728,25 @@ class Orchestrator:
         )
         self._store.update_task(p.task.id, branch=p.branch, slug=p.slug)
 
-    def _skip_section_md(self, p: _Pipeline) -> str:
-        """A ``## Pipeline nodes skipped`` markdown block, or ``""`` when nothing was skipped."""
-        if not p.skip:
-            return ""
-        lines = "\n".join(f"- `{node_id}`" for node_id in sorted(p.skip))
-        return f"\n## Pipeline nodes skipped\n\n{lines}\n"
-
     def _append_skip_section(self, p: _Pipeline) -> None:
-        """Append the skipped-nodes section to ``summary.md`` (idempotent within a run)."""
-        section = self._skip_section_md(p)
-        if not section:
+        """Append the skipped-nodes section to ``summary.md`` (idempotent within a run).
+
+        Only a provider-authored body needs this: the deterministic report renders the same section
+        from the same renderer, so the heading — which is also the idempotency key — exists once.
+        """
+        if not p.skip:
             return
-        md_path = task_artifact_dir(self._artifacts_root, p.task.id) / "summary.md"
+        md_path = task_artifact_dir(self._artifacts_root, p.task.id) / SUMMARY_MD_FILENAME
         if not md_path.exists():
             return
         existing = md_path.read_text(encoding="utf-8")
-        if "## Pipeline nodes skipped" in existing:
+        if SKIPPED_NODES_HEADING in existing:
             return
-        md_path.write_text(existing.rstrip("\n") + "\n" + section, encoding="utf-8")
+        md_path.write_text(
+            existing.rstrip("\n") + "\n\n" + render_skipped_nodes_section(p.skip),
+            encoding="utf-8",
+            newline="",
+        )
 
     def _auto_merge(self, p: _Pipeline, pr_url: str) -> PipelineResult:
         """Merge the just-created PR, bypassing human review. Audited, idempotent, non-destructive.
@@ -3687,26 +3783,49 @@ class Orchestrator:
 
     def _fallback_summary_path(self, p: _Pipeline) -> str:
         """The logs/ working copy of summary.md — PR body fallback when no task file is on disk."""
-        return str(task_artifact_dir(self._artifacts_root, p.task.id) / "summary.md")
+        return str(task_artifact_dir(self._artifacts_root, p.task.id) / SUMMARY_MD_FILENAME)
 
     def _summary_md_body(self, p: _Pipeline, *, degraded: bool = False) -> str:
-        """The human-readable summary text; falls back to a deterministic minimal summary.
+        """The human-readable summary text; falls back to the deterministic report.
 
         ``degraded`` marks the DONE-path case where a provider-authored synthesis was expected but
-        failed (see ``_engine_finalize``); it flows into the minimal summary as a visible callout.
+        failed (see ``_engine_finalize``); it reaches the report as a visible callout.
         """
-        md_path = task_artifact_dir(self._artifacts_root, p.task.id) / "summary.md"
+        md_path = task_artifact_dir(self._artifacts_root, p.task.id) / SUMMARY_MD_FILENAME
         if not md_path.exists():
-            write_minimal_summary(
-                self._artifacts_root,
-                p.task.id,
-                title=p.task.title,
-                diff_stat=self._git.diff_stat(),
-                task_ref=self._task_ref(p),
-                degraded=degraded,
-            )
-            self._append_skip_section(p)
+            self._write_deterministic_summary(p, degraded=degraded)
         return md_path.read_text(encoding="utf-8") if md_path.exists() else (p.task.title + "\n")
+
+    def _write_deterministic_summary(self, p: _Pipeline, *, degraded: bool) -> None:
+        """Write the deterministic ``summary.{md,json}`` report from the run's recorded facts.
+
+        Reads the same durable facts the oversight layer's own close-out is grounded in, so the two
+        bodies cannot disagree about what the run did — and the evaluator findings a gate let past,
+        which used to reach only the local metadata, reach the pull-request body on every path.
+        """
+        evaluations = self._store.get_evaluations(p.task.id)
+        write_summary_report(
+            self._artifacts_root,
+            build_packet_facts(
+                self._store,
+                task_id=p.task.id,
+                task_title=p.task.title,
+                task_type=p.task.task_type,
+                flow_name=p.flow_name,
+                evaluations=evaluations,
+                artifacts_root=self._artifacts_root,
+                exchange_root=self._exchange_root,
+                repo_dir=self._config.repo.local_path,
+            ),
+            follow_ups=evaluator_finding_follow_ups(evaluations),
+            gates=render_gate_digest(evaluations),
+            skipped_nodes=p.skip,
+            task_ref=self._task_ref(p),
+            degraded=degraded,
+            # Present exactly when the layer made calls, so an operator can tell "the layer never
+            # ran" from "it ran and could not finish" without a second marker.
+            supervisor_usage=summarize_spend(self._store.get_provider_attempts_for_task(p.task.id)),
+        )
 
     def _task_ref(self, p: _Pipeline) -> str | None:
         """A short sibling-relative pointer to the task file for the committed summary.
@@ -3756,7 +3875,9 @@ class Orchestrator:
             return None
         summary_path = dest.with_name(f"{p.task.id}.summary.md")
         try:
-            summary_path.write_text(body, encoding="utf-8")
+            # ``newline=""``: this copy is committed into the operator's repository, so the host's
+            # line separator must not decide what lands in their history.
+            summary_path.write_text(body, encoding="utf-8", newline="")
         except OSError:
             return None
         self._register_artifact(p.task.id, "summary_md", str(summary_path))

@@ -17,6 +17,7 @@ from typing import Any
 
 import yaml
 
+from wastech_orchestrator.config.schema import ObserveMode
 from wastech_orchestrator.core.flow.contracts import (
     NetworkPolicy,
     OutputPolicy,
@@ -42,6 +43,7 @@ from wastech_orchestrator.core.flow.schema import (
     HitlSettings,
     PublishNode,
     SupervisorBlock,
+    SupervisorObserveBlock,
     ToolNode,
     WhenPredicate,
 )
@@ -143,8 +145,10 @@ _SUPERVISOR_FIELDS = frozenset(
         "finalize_role_file",
         "handoff_role_file",
         "emit_follow_ups",
+        "observe",
     }
 )
+_SUPERVISOR_OBSERVE_FIELDS = frozenset({"mode"})
 _DEFAULTS_FIELDS = frozenset({"evaluator"})
 _EVALUATOR_DEFAULTS_FIELDS = frozenset(
     {
@@ -650,7 +654,25 @@ def _parse_supervisor(raw: Any) -> SupervisorBlock | None:
         finalize_role_file=raw.get("finalize_role_file") or None,
         handoff_role_file=raw.get("handoff_role_file") or None,
         emit_follow_ups=bool(raw.get("emit_follow_ups", False)),
+        observe=_parse_supervisor_observe(raw.get("observe")),
     )
+
+
+def _parse_supervisor_observe(raw: Any) -> SupervisorObserveBlock | None:
+    """Parse the flow-local ``supervisor.observe`` sub-block (cadence narrowing only).
+
+    Whether the declared mode is *allowed* under the operator's global mode is the config-aware
+    validator's call — this layer is config-free and only proves the value is a real mode.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise FlowLoadError(f"'supervisor.observe' must be a mapping, got {type(raw).__name__}")
+    _reject_unknown(raw, _SUPERVISOR_OBSERVE_FIELDS, "supervisor.observe")
+    mode = raw.get("mode")
+    if mode is None:
+        return SupervisorObserveBlock()
+    return SupervisorObserveBlock(mode=_enum(ObserveMode, mode, "supervisor.observe"))
 
 
 def _parse_defaults(raw: Any) -> FlowDefaults:

@@ -933,10 +933,17 @@ def _install_write_config_example(worc_home: Path, *, overwrite: bool) -> bool:
 
 def _load_config(path: str) -> OrchestratorConfig:
     """Load and semantically validate the config (fail-closed; non-fatal findings are logged)."""
-    config = load_config(path).config
-    for warning in validate_config(config):
+    loaded = load_config(path)
+    # Two channels, one voice: the loader's warnings say what the file resolved TO (a key whose
+    # value another key overrode), the validator's say what it MEANS. Two loops, not one
+    # concatenation:
+    # `validate_config` raises on a fatal issue, and a config with both problems must still report
+    # the resolution rather than dying before it is printed.
+    for warning in loaded.warnings:
         _LOG.warning("config warning: %s", warning)
-    return config
+    for warning in validate_config(loaded.config):
+        _LOG.warning("config warning: %s", warning)
+    return loaded.config
 
 
 def resolve_config_path(args: argparse.Namespace) -> str | None:
@@ -1029,8 +1036,20 @@ def cmd_upgrade_config(args: argparse.Namespace) -> int:
     path = Path(path_str).resolve()
     text = path.read_text(encoding="utf-8")
     # Fail-closed: a structural problem or a newer-than-supported schema_version raises ConfigError
-    # (handled in main with a clean message + exit 2) — never upgrade a config we cannot read.
-    load_config(path)
+    # (handled in main with a clean message + exit 2) — never upgrade a config we cannot read. The
+    # read-back runs against a throwaway copy with the removed keys already stripped: a key this
+    # command exists to drop is rejected by the current loader (v33's flat `supervisor.model`, say),
+    # and refusing on it would leave the operator no automated path off the old schema. Every other
+    # problem still refuses here, and the regenerated file is validated again below before we write.
+    probe = config_upgrade.parse_mapping(text)
+    config_upgrade.strip_removed_keys(probe)
+    probed = loads_config(config_upgrade.render(probe), source=str(path))
+    # This is the command that REWRITES the config, so an operator who never reads `run`'s log
+    # has to see it here. Printed like every other line this command emits (a log record
+    # would be filtered by `logging.level`), and taken from the probe rather than the merged copy
+    # because the "already up to date" path below returns before the merge is rendered.
+    for warning in probed.warnings:
+        print(f"upgrade-config: warning: {warning}")
 
     operator = config_upgrade.parse_mapping(text)
     template = config_upgrade.packaged_template_mapping()

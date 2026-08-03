@@ -9,7 +9,7 @@ import pytest
 import yaml
 
 from wastech_orchestrator.config.loader import loads_config
-from wastech_orchestrator.config.schema import AuditBranch
+from wastech_orchestrator.config.schema import AuditBranch, ObserveMode
 from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.install import config_writer
 from wastech_orchestrator.install.config_writer import InstallSpec, build_and_validate
@@ -155,12 +155,23 @@ def test_generated_config_includes_optional_sections(tmp_path: Path) -> None:
     text = build_and_validate(_spec(tmp_path, (ProviderId.CLAUDE,)))
     cfg = loads_config(text).config
     assert cfg.supervisor.role_file == "roles/supervisor.md"
-    # The delivered supervisor block carries concrete, visible model/reasoning (the global
+    # The whole-layer switch is written explicitly at its default, so an operator finds it in their
+    # own config rather than only in the reference.
+    assert cfg.supervisor.enabled is True
+    assert "enabled: true" in text.split("supervisor:", 1)[1].split("logging:", 1)[0]
+    # Each delivered supervisor phase carries a concrete, visible model/reasoning (the global
     # primary's model + a non-max reasoning), not an implicit inherit-from-primary null.
-    assert cfg.supervisor.model == "claude-sonnet-5"
-    assert cfg.supervisor.reasoning == "high"
-    assert cfg.supervisor.reasoning not in ("xhigh", "max")  # default must not be fragile
-    # Provider is pinned to the primary so it stays aligned with `model` (also the primary's).
+    for phase in (cfg.supervisor.observe, cfg.supervisor.finalize, cfg.supervisor.handoff):
+        assert phase.model == "claude-sonnet-5"
+        assert phase.reasoning not in ("xhigh", "max")  # default must not be fragile
+    # Effort is split by what the phase costs: advisory notes can fire on every step of a fix loop,
+    # while finalize writes the PR body and handoff briefs the next subtask.
+    assert cfg.supervisor.observe.reasoning == "low"
+    assert cfg.supervisor.finalize.reasoning == "high"
+    assert cfg.supervisor.handoff.reasoning == "high"
+    # Cadence is delivered explicitly at the global default: deviations only, never every step.
+    assert cfg.supervisor.observe.mode is ObserveMode.EVENTS
+    # Provider is pinned to the primary so it stays aligned with the models (also the primary's).
     assert cfg.supervisor.provider == ProviderId.CLAUDE
     # The dynamic skill layer is off out of the box (opt-in).
     assert cfg.skills.dynamic is False
@@ -179,8 +190,9 @@ def test_generated_config_includes_optional_sections(tmp_path: Path) -> None:
 def test_supervisor_model_tracks_the_global_primary(tmp_path: Path) -> None:
     # A Codex-primary install resolves the supervisor model to Codex's model, not Claude's.
     cfg = loads_config(build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))).config
-    assert cfg.supervisor.model == "gpt-5.4"
-    assert cfg.supervisor.reasoning == "high"
+    for phase in (cfg.supervisor.observe, cfg.supervisor.finalize, cfg.supervisor.handoff):
+        assert phase.model == "gpt-5.4"
+    assert cfg.supervisor.finalize.reasoning == "high"
     # A codex-primary install pins supervisor.provider to codex, aligned with the codex model.
     assert cfg.supervisor.provider == ProviderId.CODEX
 

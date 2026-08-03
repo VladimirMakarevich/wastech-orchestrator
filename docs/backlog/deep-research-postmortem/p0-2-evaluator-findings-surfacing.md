@@ -13,7 +13,7 @@ What this change added is the part that let the summary _prose_ contradict that 
 3. A bounded findings digest in `_step_prompt` (`- [severity] reason (paths)`, reason capped at the existing `_FINDING_TITLE_MAX`), so the observer reacts to what the step said rather than to a label.
 4. `_evaluator_finding_follow_ups` keyed its last-verdict map on `node_id` alone. A decomposed task runs the same evaluator once per subtask, so subtask N's verdict evicted every earlier subtask's findings — this item's own failure mode, reintroduced for any task that decomposes. Now keyed on `(node_id, subtask_order)`.
 
-Known gap, deliberately not fixed here: when the finalize turn produces no prose, `finalize` returns early and the orchestrator's deterministic `write_minimal_summary` fallback has no follow-ups parameter, so a degraded finalize keeps the findings in `summary.json` but loses them from the PR body. Pre-existing, and already tracked as "revive-finalize durability" in [../README.md](../README.md).
+Known gap, deliberately not fixed here: when the finalize turn produces no prose, `finalize` returns early and the orchestrator's deterministic `write_minimal_summary` fallback has no follow-ups parameter, so a degraded finalize keeps the findings in `summary.json` but loses them from the PR body. Pre-existing, and already tracked as "revive-finalize durability" in [../README.md](../README.md). **Scheduled to close in [token-optimization/P3](../token-optimization/supervisor-disable-switch-p3.md)** (2026-08-03), where the deterministic summary becomes a real report and the follow-up derivation moves out from under the supervisor layer so it survives both a degraded finalize and a layer that is switched off.
 
 ## Problem
 

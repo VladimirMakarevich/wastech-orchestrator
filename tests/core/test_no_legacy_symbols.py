@@ -24,6 +24,9 @@ _FORBIDDEN = (
     r"\bPromptTemplateStore\b",  # stage-indexed prompt store (role_file is the template now)
     r"\bLoopController\b",  # the engine owns loop budgets in FlowRunState
     r"\brecord_stage_run\b",  # the engine writes node_runs
+    # The four-field summary stub. One renderer writes the PR body on every terminal now, so a
+    # second writer reappearing is the defect: two formats for one committed artifact.
+    r"\bwrite_minimal_summary\b",
 )
 _SRC_ROOT = Path(wastech_orchestrator.__file__).parent
 

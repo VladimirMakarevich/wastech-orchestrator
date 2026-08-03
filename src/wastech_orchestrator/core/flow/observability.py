@@ -108,6 +108,7 @@ def record_provider_attempts(
     task_id: str,
     node_run_id: int | None,
     outcome: StageOutcome,
+    supervisor_function: str | None = None,
     usage_baseline: NormalizedUsage | None = None,
     baseline_session_id: str | None = None,
 ) -> None:
@@ -115,10 +116,12 @@ def record_provider_attempts(
 
     Every row carries the owning ``task_id`` so a cost/usage roll-up sums by task without a
     ``node_runs`` join. ``node_run_id`` is the ``node_runs`` id for a graph node, or ``None``
-    for the constant supervisor layer (not a graph node). The result-bearing attempt (the router
-    leaves at most one) also carries its normalized token usage as a summation-safe per-run delta
-    against the resumed session's baseline. Takes the store + clock explicitly (not a full
-    ``NodeServices``) so the supervisor, which has no ``NodeServices``, reuses the same recorder.
+    for the constant supervisor layer (not a graph node), which passes its phase as
+    ``supervisor_function`` instead so its own spend is readable per phase. The result-bearing
+    attempt (the router leaves at most one) also carries its normalized token usage as a
+    summation-safe per-run delta against the resumed session's baseline. Takes the store + clock
+    explicitly (not a full ``NodeServices``) so the supervisor, which has no ``NodeServices``,
+    reuses the same recorder.
     """
     for attempt in outcome.attempts:
         result = attempt.result
@@ -130,6 +133,7 @@ def record_provider_attempts(
             ProviderAttemptRow(
                 task_id=task_id,
                 node_run_id=node_run_id,
+                supervisor_function=supervisor_function,
                 provider=attempt.provider.value,
                 attempt=attempt.attempt,
                 status=attempt.status.value if attempt.status else None,

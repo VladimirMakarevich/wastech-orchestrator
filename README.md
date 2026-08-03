@@ -48,7 +48,7 @@ Only then do you write tasks. Each task names a flow, and the orchestrator drive
    4. You get the result     →   scoped commit → push → Pull Request (summary as the body)
 ```
 
-One task at a time, end to end. A read-only supervisor watches every step and writes the summary that becomes your PR description.
+One task at a time, end to end. A read-only supervisor watches the steps that deviate and writes the summary that becomes your PR description — and when you switch that layer off, the summary is rendered from the run's own recorded facts instead.
 
 ## Requirements
 

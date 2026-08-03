@@ -1700,6 +1700,12 @@ def test_evaluator_maps_blocking_findings(
         ("high", "high", "rework"),
         ("high", "medium", "accept"),
         ("high", "low", "accept"),
+        # Gates above high: the raw token decides, and `high` is now BELOW the gate.
+        ("critical", "blocking", "rework"),
+        ("critical", "critical", "rework"),
+        ("critical", "high", "accept"),
+        ("blocking", "blocking", "rework"),
+        ("blocking", "critical", "accept"),
     ],
 )
 def test_evaluator_gate_severity_threshold(
@@ -1722,6 +1728,98 @@ def test_evaluator_gate_severity_threshold(
     )
     result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == expected
+    # The persisted flag is the SAME decision the verdict came from, not a second derivation.
+    persisted = json.loads(store.evaluations[-1].findings_json)
+    assert [f["gating"] for f in persisted] == [expected == "rework"]
+
+
+def test_evaluator_gating_flag_survives_the_severity_projection(tmp_path: Path) -> None:
+    # The reason the flag is persisted rather than derived on read (P3-Q4): `_to_finding` collapses
+    # `blocking`/`critical`/`high` into one `high`, so under a `critical` gate these two findings
+    # are stored IDENTICALLY while one sent work back and the other was let past. Comparing
+    # severities after the fact cannot tell them apart; the flag can.
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    node = _evaluator("review", gate_severity="critical")
+    stored = {}
+    for severity in ("critical", "high"):
+        store = FakeStore()
+        services = _services(
+            FakeRouter(_result({"findings": [{"what": "x", "severity": severity}]})),
+            store,
+            FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+            artifacts_root=str(tmp_path),
+        )
+        EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+        stored[severity] = json.loads(store.evaluations[-1].findings_json)[0]
+    # Identical in the column a reader would compare, opposite in the one that records the decision.
+    assert stored["critical"]["severity"] == stored["high"]["severity"] == "high"
+    assert stored["critical"]["gating"] is True and stored["high"]["gating"] is False
+
+
+def test_evaluator_blocking_flag_on_a_low_severity_persists_as_gating(tmp_path: Path) -> None:
+    # The `blocking: true` escape hatch gates regardless of severity, and the flag has to say so:
+    # the row stores `severity: high` (the projection) plus `gating: true` (the decision).
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    node = _evaluator("review")  # default high gate
+    store = FakeStore()
+    router = FakeRouter(_result({"findings": [{"what": "x", "severity": "low", "blocking": True}]}))
+    services = _services(
+        router,
+        store,
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "rework"
+    assert json.loads(store.evaluations[-1].findings_json) == [
+        {"severity": "high", "reason": "x", "paths": [], "gating": True}
+    ]
+
+
+def test_evaluator_flags_every_finding_not_just_up_to_the_first_gating_one(tmp_path: Path) -> None:
+    # `any()` short-circuits, so a lazily-computed flag list would stop at the `high` finding and
+    # leave the `medium` after it unflagged — the audit would then disagree with its own verdict.
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    node = _evaluator("review")  # default high gate
+    store = FakeStore()
+    router = FakeRouter(
+        _result(
+            {
+                "findings": [
+                    {"what": "a", "severity": "low"},
+                    {"what": "b", "severity": "high"},
+                    {"what": "c", "severity": "medium"},
+                ]
+            }
+        )
+    )
+    services = _services(
+        router,
+        store,
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "rework"
+    persisted = json.loads(store.evaluations[-1].findings_json)
+    assert [f["reason"] for f in persisted] == ["a", "b", "c"]  # order preserved for the zip
+    assert [f["gating"] for f in persisted] == [False, True, False]
+
+
+def test_evaluator_clean_verdict_persists_an_empty_findings_array(tmp_path: Path) -> None:
+    # `{"findings": []}` is well-formed and genuinely clean; the strict zip must tolerate it.
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    node = _evaluator("review")
+    store = FakeStore()
+    services = _services(
+        FakeRouter(_result({"findings": []})),
+        store,
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "accept"
+    assert store.evaluations[-1].findings_json == "[]"
 
 
 def test_evaluator_non_blocking_gate_severity_self_caps(tmp_path: Path) -> None:
@@ -1756,6 +1854,10 @@ def test_evaluator_non_blocking_gate_severity_self_caps(tmp_path: Path) -> None:
     # The terminal accept must be FLAGGED exhausted — that flag is the whole operator signal
     # (console warning + ⚠️ telegram trace at orchestrator.py). A silent accept is the defect.
     assert second.outcome.rework_exhausted is True
+    # And the row it wrote is the shape the PR body keys on: a GATING finding inside an `accept`.
+    # That pair is what makes "still open, budget exhausted" detectable without a second column.
+    assert json.loads(store.evaluations[-1].findings_json)[0]["gating"] is True
+    assert store.evaluations[-1].verdict == "accept"
 
 
 def test_evaluator_builds_memory_packet_when_role_references_it(tmp_path: Path) -> None:
@@ -2043,6 +2145,10 @@ def test_evaluator_review_writes_findings_artifact(tmp_path: Path) -> None:
     assert json.loads(findings_file.read_text("utf-8")) == {
         "findings": [{"title": "x", "severity": "low"}]
     }
+    # The artifact and the audit row diverge on purpose: `fixing` reads the provider's raw finding
+    # verbatim, so the gate decision is added only to the row that records the verdict.
+    assert "gating" not in json.loads(findings_file.read_text("utf-8"))["findings"][0]
+    assert json.loads(store.evaluations[-1].findings_json)[0]["gating"] is False
 
 
 def test_evaluator_reruns_preserve_each_passs_findings(tmp_path: Path) -> None:

@@ -15,24 +15,21 @@ from typing import Any
 import pytest
 
 from wastech_orchestrator.config.loader import ConfigError, loads_config
-from wastech_orchestrator.config.schema import SupervisorConfig
+from wastech_orchestrator.config.schema import (
+    ObserveMode,
+    SupervisorConfig,
+    SupervisorObserveConfig,
+    SupervisorTurnConfig,
+)
 from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.core.flow.engine import Finding
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import SupervisorBlock
+from wastech_orchestrator.core.follow_ups import FINDING_TITLE_MAX
 from wastech_orchestrator.core.loop_control import record_rework
 from wastech_orchestrator.core.skills import SkillInventory, SkillRef
 from wastech_orchestrator.core.state_machine import Status
-from wastech_orchestrator.core.supervisor import (
-    _FINDING_TITLE_MAX,
-    _HANDOFF_RUN_ID_BASE,
-    FollowUp,
-    Supervisor,
-    _evaluator_finding_follow_ups,
-    _finding_to_follow_up,
-    _merge_follow_ups,
-    parse_follow_ups,
-)
+from wastech_orchestrator.core.supervisor import _HANDOFF_RUN_ID_BASE, Supervisor
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
 from wastech_orchestrator.providers.base import (
     AgentRunResult,
@@ -48,8 +45,10 @@ from wastech_orchestrator.routing.router import (
     StageOutcome,
 )
 from wastech_orchestrator.state_store import (
+    CheckRunRow,
     EditingLineageRow,
     EvaluationRow,
+    NodeRunRow,
     StateStore,
     TaskRow,
 )
@@ -117,28 +116,64 @@ def _supervisor(
     model: str | None = None,
     reasoning: str | None = None,
     provider: ProviderId | None = None,
+    observe: SupervisorObserveConfig | None = None,
+    finalize: SupervisorTurnConfig | None = None,
     flow_supervisor: SupervisorBlock | None = None,
+    flow_name: str | None = None,
+    task_type: str | None = None,
     register_artifact: Any = None,
     prompt_audit: bool = False,
     prompt_secrets: tuple[str, ...] = (),
     security_preamble: str | None = None,
+    repo_dir: str = "/repo",
+    exchange_root: str = "",
 ) -> Supervisor:
     (tmp_path / "roles").mkdir(exist_ok=True)
     (tmp_path / "roles" / "supervisor.md").write_text("Observe {task_id} in {repo}.", "utf-8")
     return Supervisor(
         settings=SupervisorConfig(
-            role_file="roles/supervisor.md", model=model, reasoning=reasoning, provider=provider
+            role_file="roles/supervisor.md",
+            provider=provider,
+            # `model`/`reasoning` are the "same pair on every phase" shorthand, which is what a test
+            # about anything other than the split wants; a test about the split itself passes an
+            # explicit `observe=` / `finalize=` block.
+            observe=observe or SupervisorObserveConfig(model=model, reasoning=reasoning),
+            finalize=finalize or SupervisorTurnConfig(model=model, reasoning=reasoning),
+            handoff=SupervisorTurnConfig(model=model, reasoning=reasoning),
         ),
         router=router,
         store=store,
-        repo_dir="/repo",
+        repo_dir=repo_dir,
         artifacts_root=str(tmp_path / "art"),
+        exchange_root=exchange_root,
         flow_dir=tmp_path,
         flow_supervisor=flow_supervisor,
+        flow_name=flow_name,
+        task_type=task_type,
         register_artifact=register_artifact,
         prompt_audit=prompt_audit,
         prompt_secrets=prompt_secrets,
         security_preamble=security_preamble,
+    )
+
+
+def _wired(tmp_path: Path, router: Any, store: StateStore, **kwargs: Any) -> Supervisor:
+    """A supervisor whose exchange lives inside a real repo dir, so packet paths are resolvable.
+
+    The default :func:`_supervisor` keeps the historical unit-harness wiring (a fake ``/repo``, no
+    exchange), where publication is skipped and the private path is used — fine for the turns that
+    do not care. The packet tests need the real seam: an exchange under the repo, so the published
+    copy exists and the repo-relative paths inside the packet can be asserted.
+    """
+    repo = tmp_path / "repo"
+    (repo / ".worc-io").mkdir(parents=True, exist_ok=True)
+    return _supervisor(
+        tmp_path,
+        router,
+        store,
+        repo_dir=str(repo),
+        exchange_root=str(repo / ".worc-io"),
+        **kwargs,
     )
 
 
@@ -155,7 +190,10 @@ def test_supervisor_request_carries_security_preamble(tmp_path: Path) -> None:
     assert router.requests[0].security_preamble == "[Orchestrator security contract] baseline"
 
 
-def test_supervisor_observes_each_completed_step(tmp_path: Path) -> None:
+def test_supervisor_records_one_advisory_row_per_observed_step(tmp_path: Path) -> None:
+    # Which steps reach `observe` at all is the orchestrator hook's decision (`tool`/`checks`/
+    # `publish` never do — see tests/core/test_orchestrator.py); this pins what one observation
+    # costs and records: one read-only turn on the layer's own session, one advisory row.
     router, store = FakeRouter(), _store(tmp_path)
     sup = _supervisor(tmp_path, router, store)
 
@@ -224,8 +262,24 @@ def test_observe_prompt_bounds_a_long_finding_reason(tmp_path: Path) -> None:
     digest = next(
         line for line in router.requests[0].prompt.splitlines() if line.startswith("- [high]")
     )
-    assert len(digest) <= _FINDING_TITLE_MAX + len("- [high] ") + 1
+    assert len(digest) <= FINDING_TITLE_MAX + len("- [high] ") + 1
     assert digest.endswith("…")
+
+
+def test_observe_prompt_bounds_a_long_step_message(tmp_path: Path) -> None:
+    # The node's own closing message reached this prompt unbounded, so one chatty node inflated
+    # every observation of the run — and each rework round paid again. Same cap as the packet's.
+    router, store = FakeRouter(), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store)
+    sup.observe(
+        task_id=_TASK,
+        node_id="revise",
+        node_run_id=5,
+        outcome_kind="done",
+        final_message="z" * 900,
+    )
+    reported = router.requests[0].prompt.split("The step reported:\n")[1].strip()
+    assert len(reported) == 500 and reported.endswith("…")
 
 
 def test_supervisor_observe_writes_rendered_prompt_when_registered(tmp_path: Path) -> None:
@@ -538,7 +592,7 @@ def test_finalize_keeps_model_h1_without_double_prefix(tmp_path: Path) -> None:
     assert "# T" not in body
 
 
-# -- revive-durable finalize (post-p0 Decision A (b)) --------------------------
+# -- packet-first finalize (P0) ------------------------------------------------
 
 
 def _record_step(
@@ -559,42 +613,48 @@ def _record_step(
     )
 
 
-def test_finalize_reseeds_from_digest_when_session_not_live(tmp_path: Path) -> None:
-    # Revive: no supervisor turn succeeded this process (session gone). Finalize must NOT resume the
-    # dead session — it seeds a fresh turn from the recorded supervisor_step observations instead.
-    router, store = FakeRouter([_ok("s1", "Synthesis from recovered notes.")]), _store(tmp_path)
+def _packet(sup: Supervisor, tmp_path: Path) -> dict[str, Any]:
+    """The published packet JSON for the task (the copy the provider actually read)."""
+    published = tmp_path / "repo" / ".worc-io" / _TASK / "supervisor" / "packet.json"
+    return dict(json.loads(published.read_text("utf-8")))
+
+
+def test_finalize_runs_fresh_from_the_packet_even_with_a_live_session(tmp_path: Path) -> None:
+    # Inverted from the old contract: an in-process session that just succeeded is NOT resumed. The
+    # warm resume was why a revived task got a thinner summary and why this call's input grew with
+    # every rework cycle — finalize is now grounded in the packet, on a fresh session, always.
+    router, store = FakeRouter([_ok(), _ok("sess-super", "Packet synthesis.")]), _store(tmp_path)
+    sup = _wired(tmp_path, router, store)
+    sup.observe(task_id=_TASK, node_id="implementation", node_run_id=5, outcome_kind="done")
+    assert router.requests[0].session_id is None  # the observe turn opened the session
+
+    path = sup.finalize(task_id=_TASK, task_title="T").summary_path
+
+    assert path is not None and "Packet synthesis." in path.read_text("utf-8")
+    finalize_req = router.requests[-1]
+    assert finalize_req.session_id is None  # NOT resumed, though the session is alive
+    assert "## Run facts (the packet)" in finalize_req.prompt
+    # The packet travels as a path in its own request field, never as inline JSON in the prompt.
+    assert finalize_req.supervisor_packet_path.endswith("/supervisor/packet.json")
+    assert "material_observations" not in finalize_req.prompt
+    final = next(e for e in store.get_evaluations(_TASK) if e.kind == "supervisor_final")
+    assert json.loads(final.findings_json)["packet_built"] is True
+
+
+def test_finalize_packet_carries_the_observation_digest(tmp_path: Path) -> None:
+    # The digest that used to be inlined in the revive prompt is now a packet field, so the same
+    # material reaches the turn without being re-sent as prompt input.
+    router, store = FakeRouter([_ok("s1", "Synthesis.")]), _store(tmp_path)
     _record_step(store, 5, node="implementation", outcome="done", note="wired the parser")
     _record_step(store, 7, node="review", outcome="accept", note="tests cover the edge case")
-    sup = _supervisor(tmp_path, router, store)
-    assert sup._session_live is False  # nothing ran this process
+    sup = _wired(tmp_path, router, store)
 
-    path = sup.finalize(task_id=_TASK, task_title="T").summary_path
+    sup.finalize(task_id=_TASK, task_title="T")
 
-    assert path is not None and "Synthesis from recovered notes." in path.read_text("utf-8")
+    observations = _packet(sup, tmp_path)["material_observations"]
+    assert "wired the parser" in observations and "tests cover the edge case" in observations
     (req,) = router.requests
-    assert req.session_id is None  # the possibly-dead session is never resumed
-    assert "## Recovered step observations" in req.prompt
-    assert "wired the parser" in req.prompt and "tests cover the edge case" in req.prompt
-    final = next(e for e in store.get_evaluations(_TASK) if e.kind == "supervisor_final")
-    assert json.loads(final.findings_json)["recovered_from_digest"] is True
-
-
-def test_finalize_warm_session_resumes_without_digest(tmp_path: Path) -> None:
-    # A live in-process session (an observe turn succeeded) synthesizes normally: it resumes the
-    # session id and injects no recovered-observations section.
-    router, store = FakeRouter([_ok(), _ok("sess-super", "Warm synthesis.")]), _store(tmp_path)
-    sup = _supervisor(tmp_path, router, store)
-    sup.observe(task_id=_TASK, node_id="implementation", node_run_id=5, outcome_kind="done")
-    assert sup._session_live is True
-
-    path = sup.finalize(task_id=_TASK, task_title="T").summary_path
-
-    assert path is not None
-    finalize_req = router.requests[-1]
-    assert finalize_req.session_id == "sess-super"  # resumed the warm session
-    assert "## Recovered step observations" not in finalize_req.prompt
-    final = next(e for e in store.get_evaluations(_TASK) if e.kind == "supervisor_final")
-    assert json.loads(final.findings_json)["recovered_from_digest"] is False
+    assert "wired the parser" not in req.prompt  # material rides the packet, not the prompt
 
 
 def test_finalize_digest_skips_failed_and_empty_notes(tmp_path: Path) -> None:
@@ -604,7 +664,7 @@ def test_finalize_digest_skips_failed_and_empty_notes(tmp_path: Path) -> None:
     _record_step(store, 3, node="review", outcome="accept", note="looks solid")
     sup = _supervisor(tmp_path, router, store)
 
-    digest = sup._finalize_digest(_TASK)
+    digest = sup._finalize_digest(store.get_evaluations(_TASK))
 
     assert digest == "- [review → accept] looks solid"  # only the substantive note survives
 
@@ -613,7 +673,323 @@ def test_finalize_digest_none_when_no_usable_observations(tmp_path: Path) -> Non
     router, store = FakeRouter(), _store(tmp_path)
     _record_step(store, 1, node="planning", outcome="done", note="", failed=True)
     sup = _supervisor(tmp_path, router, store)
-    assert sup._finalize_digest(_TASK) is None
+    assert sup._finalize_digest(store.get_evaluations(_TASK)) is None
+
+
+def test_finalize_still_runs_when_the_packet_cannot_be_built(tmp_path: Path) -> None:
+    # Best-effort by contract: a packet that cannot be built is logged and the turn runs unseeded.
+    # There is deliberately NO warm-session fallback — that would put the non-determinism back.
+    router, store = FakeRouter([_ok("s1", "Thin but present.")]), _store(tmp_path)
+    sup = _wired(tmp_path, router, store)
+
+    def _boom(task_id: str) -> list:
+        raise OSError("state.db unreadable")
+
+    sup._store.get_node_runs = _boom  # type: ignore[method-assign]
+
+    path = sup.finalize(task_id=_TASK, task_title="T").summary_path
+
+    assert path is not None and "Thin but present." in path.read_text("utf-8")
+    (req,) = router.requests
+    assert req.supervisor_packet_path is None
+    assert "## Run facts (the packet)" not in req.prompt
+    final = next(e for e in store.get_evaluations(_TASK) if e.kind == "supervisor_final")
+    assert json.loads(final.findings_json)["packet_built"] is False
+
+
+# -- the SupervisorPacket itself (P0-D2 / P0-D3) -------------------------------
+
+_DIFF = (
+    "diff --git a/src/parser.py b/src/parser.py\n"
+    "index 1111111..2222222 100644\n"
+    "--- a/src/parser.py\n"
+    "+++ b/src/parser.py\n"
+    "@@ -1,2 +1,3 @@\n"
+    " keep\n"
+    "-gone\n"
+    "+added\n"
+    "+also added\n"
+)
+
+
+def _run_row(store: StateStore, node: str, kind: str, **kwargs: Any) -> int:
+    """Insert a completed node run and return its id (which names its artifact dir)."""
+    return store.record_node_run(
+        NodeRunRow(
+            task_id=_TASK,
+            node_id=node,
+            node_kind=kind,
+            status=kwargs.pop("status", "completed"),
+            outcome=kwargs.pop("outcome", "done"),
+            started_at="2026-01-01T00:00:00+00:00",
+            finished_at="2026-01-01T00:01:00+00:00",
+            **kwargs,
+        )
+    )
+
+
+def _node_output(tmp_path: Path, node: str, run_id: int, text: str) -> None:
+    """Write the per-run ``<node_id>.out.md`` the orchestrator writes for an agent node."""
+    run_dir = node_run_dir(tmp_path / "art", _TASK, node, run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / f"{node}.out.md").write_text(text, encoding="utf-8")
+
+
+def _seed_diff(tmp_path: Path, text: str = _DIFF) -> None:
+    """Write both copies of ``current.diff``: the private artifact and the exchange copy."""
+    task_dir = task_artifact_dir(tmp_path / "art", _TASK)
+    task_dir.mkdir(parents=True, exist_ok=True)
+    (task_dir / "current.diff").write_text(text, encoding="utf-8")
+    exchange_task = tmp_path / "repo" / ".worc-io" / _TASK
+    exchange_task.mkdir(parents=True, exist_ok=True)
+    (exchange_task / "current.diff").write_text(text, encoding="utf-8")
+
+
+def test_packet_is_a_pure_function_of_durable_state(tmp_path: Path) -> None:
+    # The reproducibility contract (P0-D2): two builds off the same state.db are byte-identical, so
+    # the summary a revive synthesizes is grounded in exactly the same input as the first run's.
+    store = _store(tmp_path)
+    run_id = _run_row(store, "implementation", "agent", provider_used="claude")
+    _node_output(tmp_path, "implementation", run_id, "wired the parser")
+    _seed_diff(tmp_path)
+    sup = _wired(tmp_path, FakeRouter(), store)
+
+    first = sup._build_packet(_TASK, "T", store.get_evaluations(_TASK))
+    second = sup._build_packet(_TASK, "T", store.get_evaluations(_TASK))
+
+    assert first == second  # byte-identical, not merely equivalent
+    assert first == json.dumps(json.loads(first), indent=2, sort_keys=True) + "\n"  # canonical
+
+
+def test_packet_paths_are_repo_relative_posix(tmp_path: Path) -> None:
+    # An absolute path would make the bytes machine-dependent; a Windows separator would make them
+    # platform-dependent. Both break the byte-identity the criterion above rests on.
+    store = _store(tmp_path)
+    _seed_diff(tmp_path)
+    sup = _wired(tmp_path, FakeRouter(), store)
+
+    packet = json.loads(sup._build_packet(_TASK, "T", []))
+
+    assert packet["changes"]["diff_path"] == f".worc-io/{_TASK}/current.diff"
+    # Every path the packet names is relative and POSIX (the inlined diff body is exempt — it is
+    # verbatim artifact content, not a path the packet authored).
+    for path in [*packet["changes"]["paths"], packet["changes"]["diff_path"]]:
+        assert "\\" not in path
+        assert not Path(path).is_absolute()
+    assert str(tmp_path) not in json.dumps({k: v for k, v in packet.items() if k != "changes"})
+
+
+def test_packet_revive_without_reexecution_is_unchanged(tmp_path: Path) -> None:
+    # A revive that re-executed nothing must reproduce the packet exactly; one that re-executed a
+    # node must differ by exactly that step and nothing else.
+    store = _store(tmp_path)
+    _run_row(store, "implementation", "agent")
+    sup = _wired(tmp_path, FakeRouter(), store)
+    before = json.loads(sup._build_packet(_TASK, "T", []))
+
+    assert json.loads(sup._build_packet(_TASK, "T", [])) == before  # nothing re-executed
+
+    _run_row(store, "polish", "agent")  # the revive re-entered one more node
+    after = json.loads(sup._build_packet(_TASK, "T", []))
+
+    assert after["steps"][:-1] == before["steps"]
+    assert after["steps"][-1]["node"] == "polish"
+    assert {k: v for k, v in after.items() if k != "steps"} == {
+        k: v for k, v in before.items() if k != "steps"
+    }
+
+
+def test_packet_inlines_a_small_diff_but_only_references_a_large_one(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    sup = _wired(tmp_path, FakeRouter(), store)
+
+    _seed_diff(tmp_path)
+    small = json.loads(sup._build_packet(_TASK, "T", []))["changes"]
+    assert small["diff"] == _DIFF  # a small diff rides along: skipping it costs an extra tool round
+    assert small["paths"] == ["src/parser.py"]
+    assert small["diff_stats"] == {"files": 1, "insertions": 2, "deletions": 1}
+
+    _seed_diff(tmp_path, _DIFF + "".join(f"+filler line {i}\n" for i in range(400)))
+    large = json.loads(sup._build_packet(_TASK, "T", []))["changes"]
+    assert "diff" not in large  # above the bound only the stats + the artifact path remain
+    assert large["paths"] == ["src/parser.py"]
+    assert large["diff_path"] == f".worc-io/{_TASK}/current.diff"
+
+
+def test_packet_bounds_a_long_step_message(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    run_id = _run_row(store, "revise", "agent")
+    _node_output(tmp_path, "revise", run_id, "x" * 900)
+    sup = _wired(tmp_path, FakeRouter(), store)
+
+    message = json.loads(sup._build_packet(_TASK, "T", []))["steps"][0]["message"]
+
+    assert len(message) == 500 and message.endswith("…")
+
+
+def test_packet_bounds_the_observation_digest(tmp_path: Path) -> None:
+    # The oldest lines are dropped (the newest observations matter most) and the cut is marked, so a
+    # truncated digest never reads as "that was all there was".
+    store = _store(tmp_path)
+    for i in range(300):
+        _record_step(store, i + 1, node=f"n{i}", outcome="done", note="y" * 60)
+    sup = _wired(tmp_path, FakeRouter(), store)
+
+    observations = json.loads(sup._build_packet(_TASK, "T", store.get_evaluations(_TASK)))[
+        "material_observations"
+    ]
+
+    assert len(observations) <= 8_000
+    assert observations.startswith("(older observations dropped")
+    assert "[n299 → done]" in observations and "[n0 → done]" not in observations
+
+
+def test_packet_splits_checks_by_result(tmp_path: Path) -> None:
+    # A skipped check (toolchain absent) is never folded into `failed`: the summary must not
+    # report a failure where the gate simply did not run. These rows are the only record left of
+    # the `checks` node, which is no longer observed.
+    store = _store(tmp_path)
+    for command, passed, skipped in (("pytest", True, False), ("mypy", False, False)):
+        store.record_check_run(
+            CheckRunRow(
+                task_id=_TASK, command=command, passed=passed, log_path="l", skipped=skipped
+            )
+        )
+    store.record_check_run(
+        CheckRunRow(task_id=_TASK, command="cargo", passed=False, log_path="l", skipped=True)
+    )
+    sup = _wired(tmp_path, FakeRouter(), store)
+
+    checks = json.loads(sup._build_packet(_TASK, "T", []))["checks"]
+
+    assert checks == {"passed": ["pytest"], "failed": ["mypy"], "skipped": ["cargo"]}
+
+
+def test_packet_records_fallback_and_retry_facts(tmp_path: Path) -> None:
+    # Kept, not scrubbed (P0-D2): an attempt that landed on the other provider after two tries is
+    # exactly the material a summary caveat is written from.
+    store = _store(tmp_path)
+    _run_row(
+        store,
+        "implementation",
+        "agent",
+        route_primary="codex",
+        provider_used="claude",
+        stage_attempts=2,
+        error_class="rate_limited",
+    )
+    sup = _wired(tmp_path, FakeRouter(), store)
+
+    step = json.loads(sup._build_packet(_TASK, "T", []))["steps"][0]
+
+    assert step["fallback_from"] == "codex" and step["provider_used"] == "claude"
+    assert step["stage_attempts"] == 2 and step["error_class"] == "rate_limited"
+
+
+def test_packet_step_emits_only_the_facts_a_clean_run_has(tmp_path: Path) -> None:
+    # The exact key set matters, not just the values: a blanket `null` per absent fact would inflate
+    # every packet and read as a *recorded* absence ("this step has no error_class" vs "no error").
+    store = _store(tmp_path)
+    run_id = _run_row(store, "implementation", "agent", provider_used="claude")
+    _node_output(tmp_path, "implementation", run_id, "wired the parser")
+    sup = _wired(tmp_path, FakeRouter(), store)
+
+    (step,) = json.loads(sup._build_packet(_TASK, "T", []))["steps"]
+
+    assert set(step) == {
+        "node",
+        "kind",
+        "status",
+        "outcome",
+        "stage_attempts",
+        "started_at",
+        "finished_at",
+        "provider_used",
+        "message",
+    }
+    assert step["node"] == "implementation" and step["kind"] == "agent"
+    assert step["status"] == "completed" and step["outcome"] == "done"
+    assert step["started_at"] == "2026-01-01T00:00:00+00:00"
+    assert step["finished_at"] == "2026-01-01T00:01:00+00:00"
+    assert step["stage_attempts"] == 0  # a plain int, never normalized away to null
+
+
+def test_packet_step_records_a_skip_and_a_subtask_boundary(tmp_path: Path) -> None:
+    # A skipped node reaches the packet (its row is in `node_runs`) but is never observed, so these
+    # keys are the only record that a branch was not taken.
+    store = _store(tmp_path)
+    store.record_node_skip(_TASK, "refinement", "agent", reason="when false", subtask_order=None)
+    _run_row(store, "implementation", "agent", subtask_order=2)
+    sup = _wired(tmp_path, FakeRouter(), store)
+
+    skipped, subtask = json.loads(sup._build_packet(_TASK, "T", []))["steps"]
+
+    assert skipped["skipped"] is True and skipped["skip_reason"] == "when false"
+    assert subtask["subtask"] == 2
+    assert "skipped" not in subtask and "subtask" not in skipped
+
+
+def test_packet_omits_a_whitespace_only_step_message(tmp_path: Path) -> None:
+    # The node-output writer only skips falsy content, so a blank-but-present `.out.md` is real. An
+    # empty `message` would be a fact the node never stated.
+    store = _store(tmp_path)
+    run_id = _run_row(store, "implementation", "agent")
+    _node_output(tmp_path, "implementation", run_id, "  \n ")
+    sup = _wired(tmp_path, FakeRouter(), store)
+
+    (step,) = json.loads(sup._build_packet(_TASK, "T", []))["steps"]
+
+    assert "message" not in step
+
+
+def test_packet_names_the_latest_evaluator_findings(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.record_evaluation(
+        EvaluationRow(
+            task_id=_TASK,
+            node_id="review",
+            source_node_run_id=12,
+            kind="in_flow_verdict",
+            verdict="accept",
+            findings_json="[]",
+        )
+    )
+    findings = tmp_path / "repo" / ".worc-io" / _TASK / "stages" / "review" / "run-000012"
+    findings.mkdir(parents=True, exist_ok=True)
+    (findings / "findings.json").write_text('{"findings": []}\n', encoding="utf-8")
+    sup = _wired(tmp_path, FakeRouter(), store)
+
+    packet = json.loads(sup._build_packet(_TASK, "T", store.get_evaluations(_TASK)))
+
+    assert packet["findings_path"] == f".worc-io/{_TASK}/stages/review/run-000012/findings.json"
+
+
+def test_packet_publication_redacts_and_keeps_a_private_copy(tmp_path: Path) -> None:
+    # Publication goes through the exchange seam, which redacts on the way in, so the packet
+    # needs no redaction mechanism of its own — only the per-attempt secret literals (P0-D6).
+    store = _store(tmp_path)
+    run_id = _run_row(store, "implementation", "agent")
+    _node_output(tmp_path, "implementation", run_id, "used token hunter2-secret to call the API")
+    sup = _wired(tmp_path, FakeRouter([_ok()]), store, prompt_secrets=("hunter2-secret",))
+
+    sup.finalize(task_id=_TASK, task_title="T")
+
+    published = (tmp_path / "repo" / ".worc-io" / _TASK / "supervisor" / "packet.json").read_text(
+        "utf-8"
+    )
+    assert "hunter2-secret" not in published
+    private = node_run_dir(tmp_path / "art", _TASK, "supervisor", 0) / "packet.json"
+    assert private.is_file()  # the unredacted authoritative copy stays in the audit dir
+
+
+def test_packet_carries_the_flow_and_task_header(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    sup = _wired(tmp_path, FakeRouter(), store, flow_name="blog_article_revise", task_type="blog")
+
+    packet = json.loads(sup._build_packet(_TASK, "Rewrite the intro", []))
+
+    assert packet["task"] == {"id": _TASK, "title": "Rewrite the intro", "type": "blog"}
+    assert packet["flow"] == {"name": "blog_article_revise"}
 
 
 def test_finalize_failed_does_not_clobber_existing_summary_json(tmp_path: Path) -> None:
@@ -646,6 +1022,64 @@ def test_schema_turn_caps_max_reasoning_but_free_text_keeps_it(tmp_path: Path) -
     sup_free = _supervisor(free_dir, free_router, _store(free_dir), reasoning="xhigh")
     sup_free.finalize(task_id=_TASK, task_title="T")  # free-text turn (no delta/follow-ups)
     assert free_router.requests[0].reasoning == "xhigh"
+
+
+def test_observe_and_finalize_use_their_own_model_and_reasoning(tmp_path: Path) -> None:
+    # The point of the split: a cheap note and the whole-task synthesis are configured separately,
+    # so
+    # an operator can make the notes cheap without weakening the summary that becomes the PR body.
+    router, store = FakeRouter([_ok("s", "note"), _ok("s", "# Summary\n\nDone.")]), _store(tmp_path)
+    sup = _supervisor(
+        tmp_path,
+        router,
+        store,
+        observe=SupervisorObserveConfig(model="haiku", reasoning="low"),
+        finalize=SupervisorTurnConfig(model="opus", reasoning="high"),
+    )
+
+    sup.observe(task_id=_TASK, node_id="implementation", node_run_id=1, outcome_kind="rework")
+    sup.finalize(task_id=_TASK, task_title="T")
+
+    observe_request, finalize_request = router.requests
+    assert (observe_request.model, observe_request.reasoning) == ("haiku", "low")
+    assert (finalize_request.model, finalize_request.reasoning) == ("opus", "high")
+
+
+def test_handoff_and_skill_proposal_run_independently_of_the_observation_cadence(
+    tmp_path: Path,
+) -> None:
+    # Both are unaffected by `observe.mode`: they are not per-step observations. With observations
+    # off
+    # entirely they still run — and the skill proposal rides the cheap `observe` model/effort, since
+    # it is a one-shot schema-bound turn rather than the whole-task synthesis.
+    router, store = (
+        FakeRouter(
+            [
+                _structured_handoff(
+                    {"new_surface_area": "a", "locked_decisions": "", "open_edges": ""}
+                ),
+                _proposal_result([{"node": "implementation", "skills": ["safe-change"]}]),
+            ]
+        ),
+        _store(tmp_path),
+    )
+    sup = _supervisor(
+        tmp_path,
+        router,
+        store,
+        observe=SupervisorObserveConfig(mode=ObserveMode.NONE, model="haiku", reasoning="low"),
+        finalize=SupervisorTurnConfig(model="opus", reasoning="high"),
+    )
+
+    assert sup.handoff(task_id=_TASK, subtask_order=1, floor_context="floor") is not None
+    assert sup.propose_skill_map(
+        task_id=_TASK, agent_node_ids=["implementation"], inventory=_INV
+    ) == {"implementation": ("safe-change",)}
+
+    handoff_request, proposal_request = router.requests
+    # `handoff` takes neither observe's nor finalize's pair — it has its own block (unset here).
+    assert handoff_request.model is None
+    assert (proposal_request.model, proposal_request.reasoning) == ("haiku", "low")
 
 
 def test_observe_turn_caps_max_reasoning(tmp_path: Path) -> None:
@@ -880,58 +1314,6 @@ def _verdict(
     )
 
 
-def test_evaluator_finding_follow_ups_uses_last_verdict_per_node() -> None:
-    rows = [
-        _verdict([{"severity": "high", "reason": "blocking issue", "paths": []}], verdict="rework"),
-        _verdict([{"severity": "low", "reason": "minor nit remains", "paths": ["a.py"]}]),
-        EvaluationRow(task_id=_TASK, kind="supervisor_step", verdict="advisory", node_id=None),
-    ]
-    fus = _evaluator_finding_follow_ups(rows)
-    # Only the LAST review verdict's findings — the rework-superseded round is ignored, and the
-    # supervisor_step row is not an evaluator verdict.
-    assert len(fus) == 1
-    assert fus[0].title == "minor nit remains"
-    assert fus[0].severity == "low" and fus[0].paths == ("a.py",)
-    assert "review" in fus[0].evidence[0]
-
-
-def test_evaluator_finding_follow_ups_keeps_each_subtask(tmp_path: Path) -> None:
-    # A decomposed task runs the same evaluator once per subtask, so the "last verdict per node" key
-    # has to include the subtask: keyed on node_id alone, subtask 3's verdict evicted subtasks 1 and
-    # 2, and their accepted findings reached no operator surface at all — silently, and worse the
-    # more the task was decomposed.
-    rows = [
-        _verdict([{"severity": "low", "reason": "nit in subtask 1", "paths": []}], subtask_order=1),
-        _verdict([{"severity": "low", "reason": "nit in subtask 2", "paths": []}], subtask_order=2),
-        _verdict([{"severity": "low", "reason": "superseded", "paths": []}], subtask_order=3),
-        _verdict([{"severity": "low", "reason": "nit in subtask 3", "paths": []}], subtask_order=3),
-    ]
-    titles = [fu.title for fu in _evaluator_finding_follow_ups(rows)]
-    assert titles == ["nit in subtask 1", "nit in subtask 2", "nit in subtask 3"]
-    assert "superseded" not in titles  # the per-(node, subtask) last-verdict rule still holds
-
-
-def test_finding_to_follow_up_truncates_long_reason_and_drops_empty() -> None:
-    long_reason = "x" * 200
-    fu = _finding_to_follow_up({"severity": "medium", "reason": long_reason, "paths": []}, "review")
-    assert fu is not None
-    assert fu.title.endswith("…") and len(fu.title) <= _FINDING_TITLE_MAX + 1
-    assert fu.rationale == long_reason  # full text preserved when the title is truncated
-    # No usable reason, or a non-mapping, yields nothing.
-    assert _finding_to_follow_up({"severity": "low", "reason": "", "paths": []}, "review") is None
-    assert _finding_to_follow_up("not-a-mapping", "review") is None
-
-
-def test_merge_follow_ups_exact_match_dedup() -> None:
-    primary = FollowUp("Same issue", "", "medium", evidence=("e",), paths=("p.py",))
-    dup = FollowUp("same   ISSUE", "", "low", evidence=("x",), paths=("p.py",))  # normalizes equal
-    fresh = FollowUp("Different", "", "low", evidence=("y",), paths=())
-    merged = _merge_follow_ups((primary,), (dup, fresh))
-    assert len(merged) == 2  # the duplicate is dropped, the new one kept
-    assert merged[0] is primary  # the supervisor's own list wins on a collision
-    assert merged[1].title == "Different"
-
-
 def test_finalize_surfaces_accepted_evaluator_findings(tmp_path: Path) -> None:
     # A sub-threshold finding an evaluator accepted reaches summary.json + the PR body even
     # when the flow did NOT opt into supervisor-authored follow-ups.
@@ -1149,19 +1531,6 @@ def test_handoff_uses_flow_handoff_role_file(tmp_path: Path) -> None:
     assert "HANDOFF-LENS" in router.requests[0].prompt
 
 
-def test_parse_follow_ups_is_evidence_gated() -> None:
-    raw = [
-        {"title": "keep", "rationale": "r", "evidence": ["e1"], "severity": "high"},
-        {"title": "drop-no-evidence", "rationale": "r", "evidence": [], "severity": "low"},
-        {"title": "", "rationale": "r", "evidence": ["e"], "severity": "low"},  # blank title
-        "not-a-mapping",
-    ]
-    parsed = parse_follow_ups(raw)
-    assert [f.title for f in parsed] == ["keep"]
-    assert parsed[0].evidence == ("e1",)
-    assert parse_follow_ups("not-a-list") == ()
-
-
 # -- config (validated under the node ceiling) --------------------------------
 
 
@@ -1191,17 +1560,54 @@ def _without_supervisor_section(text: str) -> str:
 
 
 def test_supervisor_config_from_config_yaml(packaged_config_text: str) -> None:
-    block = "supervisor:\n  model: sonnet\n  reasoning: high\n  role_file: roles/supervisor.md\n"
+    # Model and effort are per phase; `role_file` and `provider` stay one-per-layer at the top.
+    block = (
+        "supervisor:\n"
+        "  role_file: roles/supervisor.md\n"
+        "  observe:\n    model: sonnet\n    reasoning: low\n"
+        "  finalize:\n    model: opus\n    reasoning: high\n"
+        "  handoff:\n    reasoning: medium\n"
+    )
     config = _config_with_supervisor(packaged_config_text, block)
-    assert config.supervisor.model == "sonnet"
-    assert config.supervisor.reasoning == "high"
+    assert (config.supervisor.observe.model, config.supervisor.observe.reasoning) == (
+        "sonnet",
+        "low",
+    )
+    assert (config.supervisor.finalize.model, config.supervisor.finalize.reasoning) == (
+        "opus",
+        "high",
+    )
+    assert config.supervisor.handoff.reasoning == "medium"
+    assert config.supervisor.handoff.model is None  # absent key => the provider default
     assert config.supervisor.role_file == "roles/supervisor.md"
     assert config.supervisor.provider is None  # absent key => inherit the global primary
     validate_config(config)  # passes the ceiling (read-only forced in code, allowlist, containment)
 
 
+def test_supervisor_observe_cadence_from_config_yaml(packaged_config_text: str) -> None:
+    block = (
+        "supervisor:\n"
+        "  observe:\n"
+        "    mode: selected\n"
+        "    triggers: [failure]\n"
+        "    include_nodes: [implementation, review]\n"
+    )
+    observe = _config_with_supervisor(packaged_config_text, block).supervisor.observe
+    assert observe.mode is ObserveMode.SELECTED
+    assert observe.triggers == ("failure",)
+    assert observe.include_nodes == ("implementation", "review")
+
+
+def test_supervisor_observe_mode_defaults_to_events(packaged_config_text: str) -> None:
+    # The global default is the saving: a flow that declares no cadence of its own — including every
+    # user-authored one — pays for deviations only, not for `all`.
+    observe = _config_with_supervisor(packaged_config_text, "supervisor:\n  role_file: r.md\n")
+    assert observe.supervisor.observe.mode is ObserveMode.EVENTS
+    assert SupervisorObserveConfig().mode is ObserveMode.EVENTS
+
+
 def test_supervisor_config_provider_parsed(packaged_config_text: str) -> None:
-    block = "supervisor:\n  provider: codex\n  model: gpt-5.4\n  reasoning: high\n"
+    block = "supervisor:\n  provider: codex\n  finalize:\n    model: gpt-5.4\n"
     config = _config_with_supervisor(packaged_config_text, block)
     assert config.supervisor.provider == ProviderId.CODEX
 
@@ -1218,8 +1624,49 @@ def test_supervisor_absent_section_defaults(packaged_config_text: str) -> None:
 
 
 def test_supervisor_bad_reasoning_rejected(packaged_config_text: str) -> None:
-    with pytest.raises(ConfigError):
-        _config_with_supervisor(packaged_config_text, "supervisor:\n  reasoning: turbo\n")
+    with pytest.raises(ConfigError, match=r"supervisor\.observe\.reasoning"):
+        _config_with_supervisor(
+            packaged_config_text, "supervisor:\n  observe:\n    reasoning: turbo\n"
+        )
+
+
+def test_supervisor_unknown_observe_mode_rejected(packaged_config_text: str) -> None:
+    with pytest.raises(ConfigError, match=r"supervisor\.observe\.mode"):
+        _config_with_supervisor(
+            packaged_config_text, "supervisor:\n  observe:\n    mode: sometimes\n"
+        )
+
+
+def test_supervisor_unknown_observe_trigger_rejected(packaged_config_text: str) -> None:
+    # The trigger list is closed: a new trigger needs the facts that detect it, so an unknown name
+    # is a typo, not an extension point.
+    with pytest.raises(ConfigError, match="triggers"):
+        _config_with_supervisor(
+            packaged_config_text, "supervisor:\n  observe:\n    triggers: [hitl]\n"
+        )
+
+
+def test_supervisor_unknown_nested_key_rejected(packaged_config_text: str) -> None:
+    with pytest.raises(ConfigError, match=r"supervisor\.finalize"):
+        _config_with_supervisor(
+            packaged_config_text, "supervisor:\n  finalize:\n    session: fresh\n"
+        )
+
+
+@pytest.mark.parametrize("key", ["model", "reasoning"])
+def test_flat_supervisor_model_and_reasoning_are_rejected_by_name(
+    packaged_config_text: str, key: str
+) -> None:
+    # v33 removed the flat pair. Rejected fail-closed rather than tolerated, and the message names
+    # the two places the value can go — the operator has to choose, because copying one value into
+    # both would put the expensive model back on the cheap per-step notes.
+    with pytest.raises(ConfigError) as exc:
+        _config_with_supervisor(packaged_config_text, f"supervisor:\n  {key}: sonnet\n")
+    issue = next(i for i in exc.value.issues if f"supervisor.{key}" in i)
+    assert f"supervisor.observe.{key}" in issue and f"supervisor.finalize.{key}" in issue
+    assert "upgrade-config" in issue  # points at the command that strips it
+    # Exactly one issue for the key: the named rejection, not also a vaguer "unknown key".
+    assert len([i for i in exc.value.issues if f"supervisor.{key}" in i]) == 1
 
 
 def test_supervisor_role_file_traversal_rejected(packaged_config_text: str) -> None:
@@ -1383,3 +1830,68 @@ def test_supervisor_provider_attempt_usage_is_summation_safe_delta(tmp_path: Pat
     assert rows[1].usage_output_total == 15
     assert rows[1].usage_input_total == 50
     assert rows[1].usage_delta_status == "ok"
+
+
+def test_each_phase_labels_its_own_provider_calls(tmp_path: Path) -> None:
+    # The phase cannot be inferred from the turn settings — the skill proposal deliberately shares
+    # the observe phase's cheap model + effort — so each call site states which job it is.
+    store = _store(tmp_path)
+    router = _AttemptsRouter([_claude_turn(cost=0.01, output_total=1) for _ in range(4)])
+    sup = _supervisor(tmp_path, router, store)
+    sup.propose_skill_map(task_id=_TASK, agent_node_ids=["implementation"], inventory=_INV)
+    sup.observe(task_id=_TASK, node_id="implementation", node_run_id=5, outcome_kind="done")
+    sup.handoff(task_id=_TASK, subtask_order=1, floor_context="floor")
+    sup.finalize(task_id=_TASK, task_title="T")
+
+    labels = [r.supervisor_function for r in store.get_provider_attempts_for_task(_TASK)]
+    assert labels == ["skill", "observe", "handoff", "finalize"]
+
+
+def test_summary_json_reports_what_the_layer_spent_per_phase(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    router = _AttemptsRouter(
+        [_claude_turn(cost=0.02, output_total=5), _claude_turn(cost=0.30, output_total=80)]
+    )
+    sup = _supervisor(tmp_path, router, store)
+    sup.observe(task_id=_TASK, node_id="implementation", node_run_id=5, outcome_kind="done")
+
+    sup.finalize(task_id=_TASK, task_title="T")
+
+    payload = json.loads(
+        (Path(task_artifact_dir(tmp_path / "art", _TASK)) / "summary.json").read_text("utf-8")
+    )
+    usage = payload["supervisor_usage"]
+    # Written after the finalize turn, so the most expensive call is in its own report.
+    assert list(usage["by_function"]) == ["observe", "finalize"]
+    assert usage["by_function"]["finalize"]["calls"] == 1
+    assert usage["by_function"]["finalize"]["cost"] == 0.30
+    assert usage["total"]["calls"] == 2
+    assert usage["total"]["cost"] == 0.32
+
+
+def test_summary_json_omits_the_spend_report_when_the_layer_made_no_calls(tmp_path: Path) -> None:
+    # A cadence of `none` on a run whose finalize could not start: no row, so no report — rather
+    # than a block of zeros that would read as "the layer ran and was free".
+    store = _store(tmp_path)
+    sup = _supervisor(tmp_path, FakeRouter([None]), store)
+
+    sup.finalize(task_id=_TASK, task_title="T")
+
+    payload = json.loads(
+        (Path(task_artifact_dir(tmp_path / "art", _TASK)) / "summary.json").read_text("utf-8")
+    )
+    assert "supervisor_usage" not in payload
+
+
+def test_summary_md_carries_no_spend_telemetry(tmp_path: Path) -> None:
+    # summary.md becomes the pull-request body: the spend is the operator's, not the reviewer's, and
+    # it must not travel to the remote with the change.
+    store = _store(tmp_path)
+    sup = _supervisor(tmp_path, _AttemptsRouter([_claude_turn(cost=0.30, output_total=80)]), store)
+
+    result = sup.finalize(task_id=_TASK, task_title="T")
+
+    assert result.summary_path is not None
+    body = result.summary_path.read_text("utf-8")
+    for token in ("supervisor_usage", "cost", "duration_seconds", "0.30"):
+        assert token not in body

@@ -339,6 +339,86 @@ def test_provider_attempts_for_task_includes_supervisor_layer(store: StateStore)
     assert [r.node_run_id for r in store.get_provider_attempts(run_id)] == [run_id]
 
 
+def test_supervisor_function_round_trips_and_is_null_for_a_graph_node(store: StateStore) -> None:
+    store.insert_task(_new_task())
+    run_id = store.record_node_run(
+        NodeRunRow(task_id="task-001", node_id="implement", node_kind="agent", status="running")
+    )
+    store.record_provider_attempt(
+        ProviderAttemptRow(task_id="task-001", node_run_id=run_id, provider="claude", attempt=1)
+    )
+    for function in ("observe", "finalize", "handoff", "skill"):
+        store.record_provider_attempt(
+            ProviderAttemptRow(
+                task_id="task-001",
+                node_run_id=None,
+                supervisor_function=function,
+                provider="claude",
+                attempt=1,
+            )
+        )
+    rows = store.get_provider_attempts_for_task("task-001")
+    # The label and the NULL ``node_run_id`` are two views of the same fact, so they must never
+    # disagree: a labelled row is the supervisor layer's, an unlabelled one is a graph node's.
+    for row in rows:
+        assert (row.supervisor_function is not None) is (row.node_run_id is None)
+    assert [r.supervisor_function for r in rows] == [
+        None,
+        "observe",
+        "finalize",
+        "handoff",
+        "skill",
+    ]
+
+
+def test_per_function_usage_reconciles_with_the_task_total_in_one_query(store: StateStore) -> None:
+    # The point of one nullable column instead of a side table: the phases and the graph nodes are
+    # buckets of the SAME rows, so a single GROUP BY sums back to the task total with no join.
+    store.insert_task(_new_task())
+    run_id = store.record_node_run(
+        NodeRunRow(task_id="task-001", node_id="implement", node_kind="agent", status="running")
+    )
+    store.record_provider_attempt(
+        ProviderAttemptRow(
+            task_id="task-001",
+            node_run_id=run_id,
+            provider="claude",
+            attempt=1,
+            usage_input_total=200_000,
+        )
+    )
+    for function, tokens in (("observe", 30_000), ("observe", 40_000), ("finalize", 20_000)):
+        store.record_provider_attempt(
+            ProviderAttemptRow(
+                task_id="task-001",
+                node_run_id=None,
+                supervisor_function=function,
+                provider="claude",
+                attempt=1,
+                usage_input_total=tokens,
+            )
+        )
+    buckets = store._conn.execute(
+        "SELECT COALESCE(supervisor_function, 'node') AS fn, COUNT(*) AS calls, "
+        "SUM(usage_input_total) AS input FROM provider_attempts WHERE task_id = ? "
+        "GROUP BY fn ORDER BY fn",
+        ("task-001",),
+    ).fetchall()
+
+    assert {r["fn"]: (r["calls"], r["input"]) for r in buckets} == {
+        "finalize": (1, 20_000),
+        "node": (1, 200_000),
+        "observe": (2, 70_000),
+    }
+    total = store._conn.execute(
+        "SELECT COUNT(*) AS calls, SUM(usage_input_total) AS input FROM provider_attempts "
+        "WHERE task_id = ?",
+        ("task-001",),
+    ).fetchone()
+    assert sum(r["calls"] for r in buckets) == total["calls"]
+    assert sum(r["input"] for r in buckets) == total["input"]
+
+
 def test_check_run_and_artifact(store: StateStore) -> None:
     store.insert_task(_new_task())
     store.record_check_run(

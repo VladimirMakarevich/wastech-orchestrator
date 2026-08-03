@@ -389,6 +389,27 @@ def test_paths_contained_rejects_a_path_outside_the_exchange(tmp_path: Path) -> 
         assert_orchestration_paths_contained(req, exchange_root)
 
 
+def test_paths_contained_covers_the_supervisor_packet(tmp_path: Path) -> None:
+    # A context field absent from the containment tuple is silently unchecked, which is how a
+    # private path leaks to a provider. The finalize packet is a context field like any other.
+    exchange_root = tmp_path / EXCHANGE_HOME_DIRNAME
+    td = exchange_task_dir(exchange_root, "t")
+    contained = _request(
+        exchange_root,
+        tmp_path / "repo",
+        supervisor_packet_path=str(td / "supervisor" / "packet.json"),
+    )
+    assert_orchestration_paths_contained(contained, exchange_root)  # does not raise
+
+    private = _request(
+        exchange_root,
+        tmp_path / "repo",
+        supervisor_packet_path=str(tmp_path / ".worc" / "logs" / "t" / "packet.json"),
+    )
+    with pytest.raises(ExchangeError):
+        assert_orchestration_paths_contained(private, exchange_root)
+
+
 def test_paths_contained_ignores_working_directory(tmp_path: Path) -> None:
     exchange_root = tmp_path / EXCHANGE_HOME_DIRNAME
     req = _request(exchange_root, tmp_path / "repo")  # only working_directory set

@@ -145,6 +145,13 @@ flow:
     # narrative critic (especially at gate_severity: low) needs more headroom than a mechanical gate.
     critic_fix: 6
 
+  # `observe.mode: none` — this flow's quality is held by its own blocking gates, not by advisory
+  # notes: nothing downstream reads them, so a per-step observation was a full LLM turn per step for
+  # no effect on the deliverable. The whole-task summary is unaffected (`finalize` is seeded by a
+  # deterministic packet of the run's facts), which is what makes `none` safe here. Consequence worth
+  # knowing: at `none` the observe lens above is never loaded — only `finalize_role_file` is in force.
   supervisor:
     role_file: content_chapter/supervisor.md
     finalize_role_file: content_chapter/summary.md
+    observe:
+      mode: none

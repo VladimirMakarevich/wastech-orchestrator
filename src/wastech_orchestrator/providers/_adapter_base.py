@@ -662,6 +662,7 @@ class BaseCliProvider:
             "check_artifacts_path": request.check_artifacts_path,
             "review_artifacts_path": request.review_artifacts_path,
             "human_input_path": request.human_input_path,
+            "supervisor_packet_path": request.supervisor_packet_path,
             "skill_reference_paths": list(request.skill_reference_paths) or None,
         }
         representation: dict[str, Any] = {

@@ -497,20 +497,6 @@ def test_append_runtime_excludes_respects_operators_flows_tracking_scheme(
     git_run(["check-ignore", "-q", ".worc-io/probe"], git_repo.clone)
 
 
-def test_diff_stat_returns_stat_only(
-    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
-) -> None:
-    # diff_stat() feeds the compact minimal summary: files + counts, never the patch body.
-    _task(store)
-    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
-    (git_repo.clone / "mod.py").write_text("a = 1\nb = 2\n", encoding="utf-8")
-    gm.commit_code("task-001", "feat: mod")
-    stat = gm.diff_stat()
-    assert "mod.py" in stat and "changed" in stat
-    assert "diff --git" not in stat and "@@" not in stat
-
-
 def test_changed_code_paths_since_base_includes_committed_change(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:

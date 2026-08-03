@@ -15,7 +15,7 @@ Two rules hold for the whole `.worc/` home:
 | `config.example.yaml` | Commented reference copy, never read at runtime. | Yes (`worc install --reconfigure` restores it). |
 | `flows/`, `tools/` | Editable copies of the built-in flows, their role prompts, and the executables `tool` nodes resolve against. Yours to edit. | No — a flow a task names must exist here. |
 | `guide/` | This documentation, copied in by `install`. | Yes (`worc upgrade-docs` restores it). |
-| `logs/<task-id>/` | Per-task artifacts: the rendered prompts, per-attempt provider output, `current.diff`, `summary.md`, check logs, HITL records. The biggest thing here by far — megabytes per task. | Yes — `worc logs clean`. |
+| `logs/<task-id>/` | Per-task artifacts: the rendered prompts, per-attempt provider output, `current.diff`, `summary.md`, the local-only `summary.json` (the same summary plus follow-ups and what the supervisor layer spent), check logs, HITL records. The biggest thing here by far — megabytes per task. | Yes — `worc logs clean`. |
 | `logs/daemon.log`, `logs/daemon-startup.log` | The `watch` daemon's operator trace (rotating, 10 MB × 5 backups) and the raw stream of a console-spawned daemon, kept so a startup crash is recoverable. | Yes — `worc logs clean` takes them, once no daemon is running. |
 | `logs/completed.jsonl` | The **ledger**: one append-only JSON record per terminal task. The audit index of everything that has run. | Only with `worc logs clean --all`. See below. |
 | `runs/` | Per-task private runtime state, keyed by task id. Four roots — the section below explains each. | Automatically, or with `worc runs clean`. |
@@ -49,7 +49,7 @@ Each of these is a directory of `<task-id>/` subdirectories. They exist so a tas
 
 **What writes it:** the orchestrator, at every terminal transition — including a successful one.
 
-**A `seal-*` on a task that finished `done` is the expected outcome, not a sign of trouble.** When a task ends, the orchestrator archives a checksum-verified copy of the agent-facing exchange (`task.md`, `plan.md`, `current.diff`, per-stage findings) and then removes the live `.worc-io/<task-id>/` directory so the next task cannot see it. The seal is that archive — a record of *what the agent last saw*. `manifest.json` inside it names the outcome it was sealed at (`"final_status": "done"` for a clean run).
+**A `seal-*` on a task that finished `done` is the expected outcome, not a sign of trouble.** When a task ends, the orchestrator archives a checksum-verified copy of the agent-facing exchange (`task.md`, `plan.md`, `current.diff`, per-stage findings, the supervisor's `supervisor/packet.json`) and then removes the live `.worc-io/<task-id>/` directory so the next task cannot see it. The seal is that archive — a record of *what the agent last saw*. `manifest.json` inside it names the outcome it was sealed at (`"final_status": "done"` for a clean run).
 
 Because the in-repository exchange is removed at the end, the newest seal is the only surviving copy of a finished task's agent-facing plan and diff. That is what makes it worth keeping when you are analyzing runs, and it is what automatic cleanup removes when you are not.
 

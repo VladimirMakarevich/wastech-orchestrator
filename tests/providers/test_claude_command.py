@@ -344,6 +344,17 @@ def test_context_footer_includes_human_input_path(
     assert "human_input: /logs/t/hitl/planning.json" in footer
 
 
+def test_context_footer_names_the_supervisor_packet_as_a_packet(
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # Its own label, not a reused plan/checks field: the footer, the rendered prompt, and the prompt
+    # audit all read from this, so a reused field would make the packet undiagnosable.
+    footer = build_context_footer(
+        make_request(supervisor_packet_path="/io/t/supervisor/packet.json")
+    )
+    assert "packet: /io/t/supervisor/packet.json" in footer
+
+
 def test_effective_prompt_appends_footer(make_request: Callable[..., AgentRunRequest]) -> None:
     request = make_request(prompt="Do the thing.", task_path="/logs/t/task.md")
     effective = build_effective_prompt(request)
