@@ -1300,6 +1300,18 @@ class StateStore:
                 ),
             )
 
+    def get_check_runs(self, task_id: str) -> list[CheckRunRow]:
+        """All check runs for a task in execution order (ascending id).
+
+        Read by the supervisor's finalize packet: the ``checks`` node is no longer observed
+        step-by-step, so these rows are the only durable record of which commands ran and how they
+        ended — the material behind the summary's "which checks passed".
+        """
+        cur = self._conn.execute(
+            "SELECT * FROM check_runs WHERE task_id = ? ORDER BY id ASC", (task_id,)
+        )
+        return [_check_run_from_row(row) for row in cur.fetchall()]
+
     def latest_failed_check_log(self, task_id: str, subtask_order: int | None = None) -> str | None:
         """Return the newest *quality*-failed check log for recovery of a fixing stage.
 
@@ -1702,6 +1714,21 @@ def _node_run_from_row(row: sqlite3.Row) -> NodeRunRow:
         skipped=bool(row["skipped"]),
         skip_reason=row["skip_reason"],
         id=row["id"],
+    )
+
+
+def _check_run_from_row(row: sqlite3.Row) -> CheckRunRow:
+    return CheckRunRow(
+        task_id=row["task_id"],
+        command=row["command"],
+        passed=bool(row["passed"]),
+        log_path=row["log_path"],
+        subtask_order=row["subtask_order"],
+        exit_code=row["exit_code"],
+        timed_out=bool(row["timed_out"]),
+        skipped=bool(row["skipped"]),
+        started_at=row["started_at"],
+        finished_at=row["finished_at"],
     )
 
 

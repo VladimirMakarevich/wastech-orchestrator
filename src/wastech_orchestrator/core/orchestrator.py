@@ -244,6 +244,13 @@ _CONTAINMENT_MANUAL_CLASSES = frozenset(
     {ErrorClass.CONTAINMENT_UNVERIFIED, ErrorClass.CAPABILITY_UNAVAILABLE}
 )
 
+# Node kinds the constant supervisor layer does NOT observe. ``publish`` is terminal (its finalize
+# hook already wrote the summary); ``tool`` and ``checks`` are deterministic, so their result is
+# already a durable fact the finalize packet carries verbatim (``node_runs.outcome`` /
+# ``check_runs``) and an advisory LLM note about a pass/fail adds nothing to the summary for a full
+# turn's cost. Keyed on the engine's node *kind*, never on a node id or a flow name — flow-agnostic.
+_UNOBSERVED_NODE_KINDS = frozenset({"tool", "checks", "publish"})
+
 # The statuses ``rerun`` will re-enter: an unrecoverable failure, an operator-action park, and a
 # stale ``running`` row (a killed/crashed task, daemon-less by the time it reaches the plan).
 #
@@ -2968,6 +2975,9 @@ class Orchestrator:
             # Flow-local supervisor prompts + the follow-ups opt-in;
             # ``None`` when the flow declares no ``supervisor:`` block (global config + built-ins).
             flow_supervisor=snapshot.doc.supervisor,
+            # Header facts for the finalize packet — the shape of work being closed out.
+            flow_name=snapshot.doc.name,
+            task_type=p.task.task_type,
             register_artifact=self._register_artifact,
             # Same per-task gate/secrets the engine's own NodeServices uses
             # (_build_engine_services), so a supervisor turn's audit artifacts honor the same
@@ -3016,7 +3026,8 @@ class Orchestrator:
             # finalize (the turn produced nothing and no prior good summary was preserved), the
             # deterministic minimal summary will silently replace it — make that degradation loud
             # (WARNING + a visible callout in the fallback body) instead of shipping a stub as if
-            # it were the full synthesis. Covers the revived-task / unresumable-session case.
+            # it were the full synthesis. This is now the ONLY fallback: finalize runs fresh from
+            # the packet, so there is no warm-session path left to degrade to.
             summary_md_path = task_artifact_dir(self._artifacts_root, p.task.id) / "summary.md"
             degraded = not summary_md_path.exists()
             if degraded:
@@ -3177,7 +3188,8 @@ class Orchestrator:
         control_digest: str | None = None,
     ) -> Callable[[FlowNode, NodeOutcome, int], None]:
         """Engine post-node hook: verify the live control plane is unchanged, let the
-        supervisor layer observe the completed step, persist a node's output_artifact slot + its
+        supervisor layer observe the completed step (except the kinds in
+        :data:`_UNOBSERVED_NODE_KINDS`), persist a node's output_artifact slot + its
         generic ``<node_id>.out.md``, resolve plan skills, and — for the decomposition
         ``proposed_by`` node — decide + materialize the decomposition."""
         decomp = snapshot.doc.decomposition
@@ -3199,9 +3211,12 @@ class Orchestrator:
             # mutated under the running task — a non-fallback manual-action security violation.
             if live_flow_dir is not None and control_digest is not None:
                 self._verify_control_plane_unchanged(snapshot, live_flow_dir, control_digest)
-            # The constant supervisor layer observes every completed step read-only (advisory) —
-            # except the terminal publish node, whose finalize hook already wrote the summary.
-            if self._supervisor is not None and node.kind != "publish":
+            # The constant supervisor layer observes the completed step read-only (advisory), except
+            # for the three kinds in `_UNOBSERVED_NODE_KINDS`: the terminal `publish` node (its
+            # finalize hook already wrote the summary) and the deterministic `tool` / `checks`
+            # nodes, whose result is already a durable fact the finalize packet carries — a note
+            # about a pass/fail bought nothing and cost a full turn on every run.
+            if self._supervisor is not None and node.kind not in _UNOBSERVED_NODE_KINDS:
                 self._supervisor.observe(
                     task_id=p.task.id,
                     node_id=node.id,

@@ -2,9 +2,17 @@
 
 The supervisor is **not** a graph node — it is an orchestrator-level oversight layer that exists for
 every task under any flow shape (even a single implement agent with no checks/review). It starts at
-task start, lives the whole cycle, observes each completed step read-only through its **own**
-``resume_own_lineage`` session (≈one LLM call/step, accumulating context across steps), and at
-whole-task close synthesizes the ``summary`` + advisory caveats.
+task start, lives the whole cycle, observes completed steps read-only through its **own**
+``resume_own_lineage`` session (≈one LLM call per observed step, accumulating context across steps),
+and at whole-task close synthesizes the ``summary`` + advisory caveats.
+
+Two things bound that cost. The deterministic ``tool`` / ``checks`` nodes are **not** observed —
+their result is already a durable fact (``node_runs`` / ``check_runs``), so an LLM note about it
+buys nothing. And the whole-task ``finalize`` no longer depends on the warm session at all: it runs
+on a **fresh** session seeded by the :mod:`~wastech_orchestrator.core.supervisor_packet`
+``SupervisorPacket`` — a small deterministic artifact built from durable state and handed over as a
+path. So a normal run and a revive follow one reproducible path, and the finalize call's input stops
+growing with the run's rework cycles.
 
 It is **advisory by construction**: it never reworks, reopens, or routes. Each observation is
 recorded as an immutable ``evaluations`` row (``supervisor_step`` / ``supervisor_final``,
@@ -33,20 +41,32 @@ from typing import Any, Protocol
 from wastech_orchestrator.config.schema import SupervisorConfig
 from wastech_orchestrator.core.flow.engine import Finding
 from wastech_orchestrator.core.flow.nodes.base import RegisterArtifact, RouterPort
+from wastech_orchestrator.core.flow.nodes.exchange_publish import publish_artifact
 from wastech_orchestrator.core.flow.observability import (
     record_provider_attempts,
     write_prompt_audit,
     write_rendered_prompt,
 )
 from wastech_orchestrator.core.flow.prompt import RoleFileError, render_role_prompt
+from wastech_orchestrator.core.flow.recorder import read_final_diff
 from wastech_orchestrator.core.flow.schema import SupervisorBlock
 from wastech_orchestrator.core.flow.usage_accounting import (
     deserialize_usage,
     snapshot_for_lineage,
 )
 from wastech_orchestrator.core.skills import SkillInventory
+from wastech_orchestrator.core.supervisor_packet import (
+    PacketFacts,
+    bound_step_message,
+    render_packet,
+)
 from wastech_orchestrator.memory.delta import DELTA_OUTPUT_SCHEMA, CandidateDelta, parse_delta
-from wastech_orchestrator.providers.artifacts import task_artifact_dir
+from wastech_orchestrator.providers.artifacts import (
+    exchange_node_run_dir,
+    exchange_task_dir,
+    node_run_dir,
+    task_artifact_dir,
+)
 from wastech_orchestrator.providers.base import (
     AgentRunRequest,
     AgentRunResult,
@@ -56,7 +76,13 @@ from wastech_orchestrator.providers.base import (
 )
 from wastech_orchestrator.providers.exchange import assert_orchestration_paths_contained
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
-from wastech_orchestrator.state_store import EvaluationRow, NodeLineageRow, ProviderAttemptRow
+from wastech_orchestrator.state_store import (
+    CheckRunRow,
+    EvaluationRow,
+    NodeLineageRow,
+    NodeRunRow,
+    ProviderAttemptRow,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -74,6 +100,11 @@ _SUPERVISOR_IDENTITY = "supervisor"
 # double-underscore sentinel, distinct from the routing identity above, so it can never collide with
 # a real flow node id (an operator could legally name an evaluator node ``supervisor``).
 _SUPERVISOR_LINEAGE_NODE_ID = "__supervisor__"
+
+# The finalize packet's filename, identical in the private artifact dir and in the exchange
+# (``.worc-io/<task-id>/supervisor/packet.json``), so the audit copy and the copy the provider read
+# are trivially comparable.
+_PACKET_FILENAME = "packet.json"
 
 # The ``node_run_id`` namespacing the upfront skill-map proposal's artifact dir
 # (``stages/supervisor/run-NNNNNN/``). Distinct from finalize's ``0`` and from any real (positive,
@@ -569,12 +600,17 @@ def _parse_skill_map(structured: Mapping[str, Any] | None) -> dict[str, tuple[st
 
 class SupervisorStorePort(Protocol):
     """The slice of the state store the supervisor needs: the immutable evaluation row, the durable
-    own-session lineage (read on first use, written after each turn), and the per-turn
-    provider-attempt audit row (the supervisor's own billable calls)."""
+    own-session lineage (read on first use, written after each turn), the per-turn provider-attempt
+    audit row (the supervisor's own billable calls), and the two read-only tables the finalize
+    packet is assembled from (``node_runs`` / ``check_runs``)."""
 
     def record_evaluation(self, row: EvaluationRow) -> int: ...
 
     def get_evaluations(self, task_id: str) -> list[EvaluationRow]: ...
+
+    def get_node_runs(self, task_id: str) -> list[NodeRunRow]: ...
+
+    def get_check_runs(self, task_id: str) -> list[CheckRunRow]: ...
 
     def get_node_lineage(
         self, task_id: str, node_id: str, subtask_order: int | None = None
@@ -599,6 +635,8 @@ class Supervisor:
         flow_dir: Path,
         exchange_root: str | Path = "",
         flow_supervisor: SupervisorBlock | None = None,
+        flow_name: str | None = None,
+        task_type: str | None = None,
         register_artifact: RegisterArtifact | None = None,
         prompt_audit: bool = False,
         prompt_secrets: tuple[str, ...] = (),
@@ -628,6 +666,10 @@ class Supervisor:
             flow_supervisor.handoff_role_file if flow_supervisor else None
         )
         self._emit_follow_ups = flow_supervisor.emit_follow_ups if flow_supervisor else False
+        # Flow name + task type, recorded in the finalize packet's header so the synthesis knows
+        # what shape of work it closes out. Both are per-task constants the orchestrator resolves.
+        self._flow_name = flow_name
+        self._task_type = task_type
         self._register_artifact = register_artifact
         self._prompt_audit = prompt_audit
         self._prompt_secrets = prompt_secrets
@@ -640,12 +682,6 @@ class Supervisor:
         # persisted to / hydrated from ``node_lineage`` so it survives a restart (independent of the
         # editing-lineage authors). ``None`` until the first turn runs or the persisted row is read.
         self._own_session_id: str | None = None
-        # Whether a supervisor turn actually *succeeded this process* (distinct from
-        # ``_own_session_id``, which ``_resume_session`` sets to the stale persisted id *before* the
-        # turn — so it is non-None even after a failed resume). Gates finalize's session-vs-digest
-        # choice: a warm live session synthesizes normally; otherwise finalize reseeds from the
-        # recorded ``supervisor_step`` observations rather than resuming a possibly-dead session.
-        self._session_live: bool = False
 
     # -- per-step observation --------------------------------------------------
 
@@ -662,6 +698,8 @@ class Supervisor:
     ) -> None:
         """Observe one completed step read-only and record an advisory ``supervisor_step`` row.
 
+        Called for the executed nodes the orchestrator's post-node hook selects — every kind
+        except the deterministic ``tool`` / ``checks`` nodes and the terminal ``publish`` node.
         Best-effort: a failed observation is logged and swallowed — it is advisory and must never
         fail or reroute the task. Namespaced by ``source_node_run_id`` (the step), so a resumed run
         does not duplicate observations.
@@ -714,31 +752,27 @@ class Supervisor:
         deterministic minimal summary then applies), a ``None`` delta, and no follow-ups.
         ``summary.json`` is always written. Returns the summary path + the delta + the follow-ups.
 
-        On a revived task where no supervisor turn succeeded this process (the durable session is
-        gone / unresumable), we do **not** gamble on resuming that dead session: finalize reseeds a
-        single fresh turn from the ``supervisor_step`` observations already recorded in
-        ``state.db``. Same one finalize turn, different input — the budget contract is unchanged.
+        The turn **always** runs on a fresh session seeded by the ``SupervisorPacket``, on a normal
+        run exactly as on a revive: the warm session it used to resume was the reason a revived
+        task got a thinner summary and the reason this call's input grew with every rework cycle.
+        There is no warm auto-fallback if the packet cannot be built — that would put
+        non-determinism back into the one path this makes reproducible and hide the build failure;
+        the fallback stays what it was, the orchestrator's deterministic minimal summary after a
+        turn that produced nothing.
         """
         # ``node_run_id=0`` is the once-per-task finalize sentinel; per-step observations use the
         # observed step's id, so each supervisor turn writes a distinct artifact dir (no collision).
         # Read the evaluation rows ONCE: the same list feeds the gate digest the turn is grounded in
         # and the finding-derived follow-ups merged after it.
         evaluations = self._store.get_evaluations(task_id)
-        warm = self._session_live
-        digest = None if warm else self._finalize_digest(task_id)
-        if not warm:
-            _LOG.info(
-                "finalize re-synthesized from recorded observations (session unavailable)",
-                extra={"task_id": task_id, "have_digest": digest is not None},
-            )
+        packet_path = self._publish_packet(task_id, task_title, evaluations)
         # ``task_title`` is used only for the orchestrator-side PR-body H1 / summary.json below (not
         # a provider prompt surface); the finalize *prompt* reads the task from the frozen exchange
         # packet path (no inline task body/title reaches the provider).
         summary_text, delta, follow_ups = self._finalize_turn(
             task_id,
             emit_delta,
-            digest=digest,
-            resume=warm,
+            packet_path=packet_path,
             task_path=task_path,
             gates=_render_gate_digest(evaluations),
         )
@@ -757,7 +791,10 @@ class Supervisor:
                 "summary_written": summary_text is not None,
                 "memory_delta": delta is not None,
                 "follow_ups": len(follow_ups),
-                "recovered_from_digest": not warm,
+                # Whether the turn was actually seeded by the packet. Always true on a healthy run;
+                # false records a build/publish failure, which would otherwise be invisible in a
+                # thin-but-present summary.
+                "packet_built": packet_path is not None,
             },
         )
         # A model sometimes emits its structured output as a `<summary>…</summary>
@@ -788,8 +825,7 @@ class Supervisor:
         task_id: str,
         emit_delta: bool,
         *,
-        digest: str | None = None,
-        resume: bool = True,
+        packet_path: str | None = None,
         task_path: str | None = None,
         gates: str | None = None,
     ) -> tuple[str | None, CandidateDelta | None, tuple[FollowUp, ...]]:
@@ -797,17 +833,20 @@ class Supervisor:
         (the default); otherwise a structured ``{summary, ...}`` turn, so every enabled
         output (``memory_delta`` / ``follow_ups``) rides one turn (no extra LLM call).
 
-        ``digest`` (recovered ``supervisor_step`` observations) and ``resume=False`` are set
-        together on the revive path: the turn synthesizes from the digest on a fresh session rather
-        than resuming a dead one. ``gates`` is the rendered evaluator-verdict digest."""
+        Always ``resume_session=False``: the turn is grounded in the ``SupervisorPacket`` at
+        ``packet_path``, not in session memory. ``gates`` is the rendered evaluator-verdict digest,
+        which stays inline in the prompt — it is bounded by the number of evaluator nodes (not by
+        the rework count) and it is the guard that keeps "the gates passed" from being written over
+        findings that are actually open."""
         with_follow_ups = self._emit_follow_ups
         if not emit_delta and not with_follow_ups:
             text = self._run(
                 task_id,
-                self._finalize_prompt(task_id, digest=digest, gates=gates),
+                self._finalize_prompt(task_id, packet=packet_path is not None, gates=gates),
                 node_run_id=0,
-                resume_session=resume,
+                resume_session=False,
                 task_path=task_path,
+                supervisor_packet_path=packet_path,
             )
             return text, None, ()
         result = self._run_result(
@@ -816,13 +855,14 @@ class Supervisor:
                 task_id,
                 with_delta=emit_delta,
                 with_follow_ups=with_follow_ups,
-                digest=digest,
+                packet=packet_path is not None,
                 gates=gates,
             ),
             node_run_id=0,
             output_schema=_finalize_schema(with_delta=emit_delta, with_follow_ups=with_follow_ups),
-            resume_session=resume,
+            resume_session=False,
             task_path=task_path,
+            supervisor_packet_path=packet_path,
         )
         if result is None or result.structured_output is None:
             return None, None, ()
@@ -834,16 +874,18 @@ class Supervisor:
         )
         return summary_text, delta, follow_ups
 
-    def _finalize_digest(self, task_id: str) -> str | None:
-        """Reconstruct the finalize input from recorded ``supervisor_step`` observations.
+    @staticmethod
+    def _finalize_digest(evaluations: Sequence[EvaluationRow]) -> str | None:
+        """Render the recorded ``supervisor_step`` observations as the packet's material digest.
 
         The per-step notes are immutable append-only rows in ``evaluations`` (``state.db``) — always
         present on a revived task, independent of the durable session and of logging config. Renders
-        the usable notes as compact ``- [node → outcome] note`` lines, skipping the ones that failed
-        to run or added nothing (empty note). Returns ``None`` when nothing usable was recorded (the
-        turn then runs unseeded — same as today's fresh-session finalize)."""
+        the usable notes as compact ``- [node → outcome] note`` lines, skipping the ones that
+        failed to run or added nothing (empty note). Returns ``None`` when nothing usable was
+        recorded, in which case the packet's other blocks (changes / steps / checks) carry it
+        alone."""
         lines: list[str] = []
-        for row in self._store.get_evaluations(task_id):
+        for row in evaluations:
             if row.kind != "supervisor_step":
                 continue
             try:
@@ -859,6 +901,135 @@ class Supervisor:
             outcome = str(payload.get("outcome") or "?")
             lines.append(f"- [{node} → {outcome}] {note}")
         return "\n".join(lines) if lines else None
+
+    # -- the finalize packet ---------------------------------------------------
+
+    def _publish_packet(
+        self, task_id: str, task_title: str, evaluations: Sequence[EvaluationRow]
+    ) -> str | None:
+        """Write the packet privately, publish a redacted copy, return the provider-readable path.
+
+        The private ``packet.json`` under the finalize sentinel's artifact dir is the authoritative
+        audit copy; the provider only ever sees the copy published through the exchange seam, which
+        redacts on the way in — so the packet needs no redaction mechanism of its own, only the
+        per-attempt secret literals passed here.
+
+        Best-effort like every other part of this advisory layer: a failure is logged and yields
+        ``None``, and finalize runs unseeded rather than raising. It deliberately does **not** fall
+        back to resuming the warm session — that would restore the non-determinism this replaced and
+        mask the build failure.
+        """
+        try:
+            content = self._build_packet(task_id, task_title, evaluations)
+            private = (
+                node_run_dir(self._artifacts_root, task_id, _SUPERVISOR_IDENTITY, 0)
+                / _PACKET_FILENAME
+            )
+            private.parent.mkdir(parents=True, exist_ok=True)
+            # ``newline=""`` keeps the canonical LF bytes on Windows too — the same house pattern
+            # the exchange manifests are written with; a CRLF rewrite would break byte-identity.
+            private.write_text(content, encoding="utf-8", newline="")
+            self._register(task_id, "supervisor_packet", str(private))
+            published = publish_artifact(
+                str(self._exchange_root),
+                task_id,
+                f"{_SUPERVISOR_IDENTITY}/{_PACKET_FILENAME}",
+                content,
+                extra_secrets=self._prompt_secrets,
+                private_path=str(private),
+            )
+            return Path(published).as_posix()
+        except Exception as exc:
+            _LOG.warning(
+                "supervisor packet could not be built (finalize runs unseeded)",
+                extra={"task_id": task_id, "error_type": type(exc).__name__},
+            )
+            return None
+
+    def _build_packet(
+        self, task_id: str, task_title: str, evaluations: Sequence[EvaluationRow]
+    ) -> str:
+        """Assemble the packet JSON from durable state — no live inputs (decision P0-D2).
+
+        Every source here is either a ``state.db`` table or an already-written task artifact, which
+        is what makes two builds from the same state byte-identical and a revive that re-executed
+        nothing reproduce the same summary input.
+        """
+        node_runs = tuple(self._store.get_node_runs(task_id))
+        return render_packet(
+            PacketFacts(
+                task_id=task_id,
+                task_title=task_title,
+                task_type=self._task_type,
+                flow_name=self._flow_name,
+                node_runs=node_runs,
+                check_runs=tuple(self._store.get_check_runs(task_id)),
+                step_messages=self._step_messages(task_id, node_runs),
+                diff_text=read_final_diff(self._artifacts_root, task_id),
+                diff_path=self._exchange_relpath(task_id, "current.diff"),
+                findings_path=self._findings_relpath(task_id, evaluations),
+                material_observations=self._finalize_digest(evaluations),
+            )
+        )
+
+    def _step_messages(self, task_id: str, node_runs: Sequence[NodeRunRow]) -> dict[int, str]:
+        """Each node run's own closing message, read from the ``<node_id>.out.md`` it already wrote.
+
+        Keyed by ``node_runs.id`` (which *is* the run id the artifact dir is named after). Read from
+        the node's durable output rather than from an observation on purpose: the packet must stay
+        complete when the observation cadence is turned down. A run with no ``.out.md`` (a slot node
+        whose product is a file, a ``tool``/``checks`` node, a run that produced nothing) is simply
+        absent from the map.
+        """
+        messages: dict[int, str] = {}
+        for row in node_runs:
+            if row.id is None:
+                continue
+            path = (
+                node_run_dir(self._artifacts_root, task_id, row.node_id, row.id)
+                / f"{row.node_id}.out.md"
+            )
+            try:
+                messages[row.id] = path.read_text(encoding="utf-8")
+            except OSError:
+                continue  # no output for this run — the step record simply carries no message
+        return messages
+
+    def _exchange_relpath(self, task_id: str, relname: str) -> str | None:
+        """A repo-relative POSIX path to an existing exchange artifact, or ``None``.
+
+        Repo-relative because the provider's working directory *is* the repository, and because an
+        absolute path inside the packet would make the bytes machine-dependent (decision P0-D2).
+        Only the exchange copy is ever named — it is the only copy the provider may read.
+        """
+        if not self._exchange_root:
+            return None
+        path = exchange_task_dir(self._exchange_root, task_id) / relname
+        if not path.is_file():
+            return None
+        try:
+            return path.resolve().relative_to(Path(self._repo_dir).resolve()).as_posix()
+        except (OSError, ValueError):
+            return None
+
+    def _findings_relpath(self, task_id: str, evaluations: Sequence[EvaluationRow]) -> str | None:
+        """The latest in-flow evaluator verdict's published ``findings.json``, or ``None``.
+
+        The verdict rows are insertion-ordered, so the last one is the most recent; its
+        ``(node_id, source_node_run_id)`` rebuilds the per-run path the evaluator published under.
+        """
+        verdicts = [row for row in evaluations if row.kind == "in_flow_verdict"]
+        if not verdicts or not self._exchange_root:
+            return None
+        last = verdicts[-1]
+        if last.node_id is None or last.source_node_run_id is None:
+            return None
+        run_dir = exchange_node_run_dir(
+            self._exchange_root, task_id, last.node_id, last.source_node_run_id
+        )
+        task_dir = exchange_task_dir(self._exchange_root, task_id)
+        relname = (run_dir.relative_to(task_dir) / "findings.json").as_posix()
+        return self._exchange_relpath(task_id, relname)
 
     # -- intra-task subtask handoff --------------------------------------------
 
@@ -944,6 +1115,7 @@ class Supervisor:
         resume_session: bool = True,
         cap_reasoning: bool = False,
         task_path: str | None = None,
+        supervisor_packet_path: str | None = None,
     ) -> str | None:
         """Run one read-only supervisor turn and return its final message (``None`` on failure)."""
         result = self._run_result(
@@ -954,6 +1126,7 @@ class Supervisor:
             resume_session=resume_session,
             cap_reasoning=cap_reasoning,
             task_path=task_path,
+            supervisor_packet_path=supervisor_packet_path,
         )
         return result.final_message if result is not None else None
 
@@ -968,6 +1141,7 @@ class Supervisor:
         resume_session: bool = True,
         cap_reasoning: bool = False,
         task_path: str | None = None,
+        supervisor_packet_path: str | None = None,
     ) -> AgentRunResult | None:
         """Run one read-only supervisor LLM turn on its own session; return the full result.
 
@@ -981,9 +1155,9 @@ class Supervisor:
         turns never collide on the same path (the artifact writer never overwrites). A non-None
         ``output_schema`` forces structured output (the proposal); ``None`` leaves it free-text.
 
-        ``resume_session=False`` starts a fresh session (no ``session_id``): finalize uses it on a
-        revived task, where resuming the possibly-dead persisted session is the exact failure mode —
-        it reseeds from the recorded observations instead (the digest rides in the prompt).
+        ``resume_session=False`` starts a fresh session (no ``session_id``): finalize always uses
+        it, because it is grounded in the ``SupervisorPacket`` at ``supervisor_packet_path`` rather
+        than in session memory — which also removes the failure mode of resuming a dead session.
         """
         try:
             route = self._router.resolve_route(_SUPERVISOR_IDENTITY, self._settings.provider)
@@ -1016,6 +1190,9 @@ class Supervisor:
                 # inline title/description). Repository instructions are NOT injected — the
                 # supervisor's read-only turn reads the repo's root files itself, like graph nodes.
                 task_path=task_path,
+                # The whole-task facts for a finalize turn, likewise by path — inlining the JSON
+                # would put back exactly the bytes this replaced, and bypass the redaction seam.
+                supervisor_packet_path=supervisor_packet_path,
                 # Defense-in-depth: the Core-owned orchestrator security contract (advisory).
                 security_preamble=self._security_preamble,
             )
@@ -1041,7 +1218,6 @@ class Supervisor:
             return None
         if result.session_id:
             self._own_session_id = result.session_id  # resume_own_lineage continuity (in-memory)
-            self._session_live = True  # a turn succeeded this process — the session is usable
             self._persist_session(
                 task_id, result.session_id, outcome.provider_used, result.normalized_usage
             )
@@ -1232,7 +1408,9 @@ class Supervisor:
         if findings:
             observed += "\nFindings it recorded:\n" + _render_findings_digest(findings)
         if final_message:
-            observed += f"\nThe step reported:\n{final_message}\n"
+            # Bounded by the same per-step cap the packet uses: unbounded, a chatty node's closing
+            # message inflated every observation turn, and each rework round paid for it again.
+            observed += f"\nThe step reported:\n{bound_step_message(final_message)}\n"
         return self._base_prompt(task_id) + "\n\n" + observed
 
     def _proposal_prompt(
@@ -1272,7 +1450,7 @@ class Supervisor:
         *,
         with_delta: bool = False,
         with_follow_ups: bool = False,
-        digest: str | None = None,
+        packet: bool = False,
         gates: str | None = None,
     ) -> str:
         # The finalize lens (flow ``finalize_role_file`` → built-in) carries the summary emphasis;
@@ -1298,15 +1476,21 @@ class Supervisor:
                 "and do not describe a check as something you performed yourself.\n\n"
                 f"{gates}\n"
             )
-        if digest:
-            # Revive path: the working session that accumulated per-step context is gone, so seed
-            # the synthesis from the recorded observations instead of relying on session memory.
+        if packet:
+            # The turn runs on a fresh session by design, so there IS no session memory to lean on:
+            # say where the facts are and that they are the ground truth. Pointing at the packet
+            # instead of inlining it is the whole point — the JSON is read once as a file rather
+            # than re-sent as prompt input on every turn of the run.
             prompt += (
-                "\n## Recovered step observations\n"
-                "Your own working session for this task is unavailable (the task was resumed from "
-                "a checkpoint), so synthesize the summary from these recorded per-step "
-                "observations rather than from session memory:\n\n"
-                f"{digest}\n"
+                "\n## Run facts (the packet)\n"
+                "This is a fresh session: you are NOT continuing an earlier conversation about "
+                "this task, so do not write from memory of one. Read the `packet` file referenced "
+                "in the context below — it is the deterministic record of this run (the changed "
+                "paths and diff stat with a pointer to the full diff, every executed step with its "
+                "outcome and what it reported, the checks that ran, and your own recorded per-step "
+                "observations) — and ground every statement you make in it. Open the artifacts it "
+                "points at when you need more detail than it carries. If something is absent from "
+                "the packet, say so plainly rather than inferring it.\n"
             )
         if with_follow_ups:
             prompt += (

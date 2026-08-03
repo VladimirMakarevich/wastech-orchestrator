@@ -173,7 +173,7 @@ At task start the orchestrator discovers every tracked `SKILL.md` in the clone; 
 
 ## `supervisor` — the constant oversight layer
 
-A read-only layer above every flow that observes each step and writes the final summary. Its `permission_profile` is forced `read-only` in code.
+A read-only layer above every flow that observes the executed nodes and writes the final summary. Its `permission_profile` is forced `read-only` in code.
 
 | Field | Type / values | Default (dataclass / install) | Constraint | When to use |
 | --- | --- | --- | --- | --- |
@@ -183,6 +183,8 @@ A read-only layer above every flow that observes each step and writes the final 
 | `supervisor.reasoning` | string \| null | `null` / install: `high` | Per-provider set (as providers, above). | `null` = the resolved provider's default. |
 
 One pair covers **both** supervisor roles: the cheap per-step observations and the whole-task finalize turn that writes `summary.md` — the pull-request body, and the only part of a long run most readers see. So you cannot currently upgrade the summary alone. A flow whose summary matters constrains what that turn may claim through its own `supervisor.finalize_role_file` lens instead (the packaged `deep_research` does exactly this: a research-shaped summary that is forbidden from asserting verification it did not perform). The finalize turn is also handed every in-flow evaluator's recorded verdict and findings, so a gate that accepted **with** findings cannot be summarized as one that simply passed.
+
+Two things bound what this layer costs, neither of them configurable. `tool` and `checks` nodes are **not** observed — their result is already recorded, so an advisory note about a pass/fail bought nothing and cost a full call per run. And the finalize turn runs on a **fresh** session seeded by a deterministic packet of the run's facts (`.worc-io/<task-id>/supervisor/packet.json`) rather than by resuming the observation session, so its input is a few kilobytes regardless of how long the run was or how many rework rounds it took — and a resumed task's summary is as complete as a first run's.
 
 ## `logging` — operator verbosity and artifact retention
 

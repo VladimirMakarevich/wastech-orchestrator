@@ -140,7 +140,7 @@ Bump обязателен (плоские ключи удаляются — ст
 5. Packaged-дефолты — правкой YAML соответствующих флоу (их flow-local блок `supervisor:`), без какого-либо сопоставления имени flow в коде: content-флоу → `none`, `implementation` → `events` (решение P1-D4).
 6. Тесты (см. ниже) и синхронизация доков, которые физически есть на `dev` (решение X2, 2026-07-26): `packaged/config.example.yaml` (новый вложенный блок supervisor), `packaged/guide/config/reference.md:173-182` (таблица плоских ключей `supervisor.{role_file,provider,model,reasoning}` перестаёт соответствовать схеме), `packaged/guide/flows/reference.md:22` (состав `SupervisorBlock` + режим наблюдений), `packaged/guide/flows/roles.md` (cadence) и packaged-flows. Derived `docs/` на `dev` нет — вместо правки строка doc-impact в описании PR.
 
-Ожидаемый эффект (числа исторические, 2026-07-16): finalize-only убирает 375 726 observation input-токенов, общий supervisor input падал бы с ~480 тыс. до ~30–60 тыс. Для приёмки порог относительный и мерится тем же способом и против того же свежего baseline, что зафиксированы в [P0 §A/B и baseline](supervisor-finalize-packet-and-cadence.md#ab-и-baseline-решение-x1-2026-07-26) (решение X1) — отдельный прогон-baseline для P1 не нужен.
+Ожидаемый эффект (числа исторические, 2026-07-16): finalize-only убирает 375 726 observation input-токенов, общий supervisor input падал бы с ~480 тыс. до ~30–60 тыс. Для приёмки метрики те же, что зафиксированы в [P0 §A/B и метрики](supervisor-finalize-packet-and-cadence.md#ab-и-метрики-решение-x1-пересмотрено-2026-08-03) (решение X1, пересмотрено 2026-08-03): нормированная доля плюс структурный инвариант, читаемые с одного прогона после P1. Отдельного baseline-прогона нет ни у P0, ни у P1.
 
 ## Критерии приёмки
 
@@ -154,7 +154,7 @@ Bump обязателен (плоские ключи удаляются — ст
 - [ ] Handoff и skill-proposal работают независимо от `observe.mode`.
 - [ ] Движок нигде не ветвится по имени flow: режим приходит из flow-local блока или из глобального конфига, packaged-дефолты заданы в YAML самих флоу (решение P1-D4).
 - [ ] Плоские `supervisor.model` / `supervisor.reasoning` отвергаются загрузчиком fail-closed, и сообщение называет новое место ключа (решение P1-D1); `worc upgrade-config` стрипает их с отчётом и доливает новый блок; значения не переносятся молча.
-- [ ] A/B (метод — [P0 §A/B и baseline](supervisor-finalize-packet-and-cadence.md#ab-и-baseline-решение-x1-2026-07-26)): на content-flow после P1 ровно один supervisor-вызов (finalize), supervisor input падает минимум на 85% против до-P0 baseline, blocking-issue не пропущены.
+- [ ] Метрики (метод — [P0 §A/B и метрики](supervisor-finalize-packet-and-cadence.md#ab-и-метрики-решение-x1-пересмотрено-2026-08-03)): на content-flow после P1 **ровно один** supervisor-вызов (finalize) — структурный инвариант, baseline не нужен; доля supervisor в Claude-input прогона **≤ 20%** (исторические ~70%; на тех же числах один finalize даёт 20–40 тыс. при не-supervisor части ~206 тыс., то есть 9–16% — 20% оставляет запас на дисперсию); blocking-issue не пропущены.
 
 ## Тесты под замену/добавление
 

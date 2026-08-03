@@ -76,12 +76,17 @@ An `agent` node may set an inline `output_schema:` to return data of your own sh
 
 ## The supervisor role (the constant layer)
 
-The supervisor is not a node — it is a read-only layer above every flow that observes each step and writes the final summary (the PR body). Its prompts receive **only** `{task_id}` and `{repo}`/`{repo_path}` — no node/path variables. Its wording is:
+The supervisor is not a node — it is a read-only layer above every flow that observes the executed nodes and writes the final summary (the PR body). Its prompts receive **only** `{task_id}` and `{repo}`/`{repo_path}` — no node/path variables. Its wording is:
 
 - the global default `.worc/flows/roles/supervisor.md`, or
 - a flow-local override via the flow's `supervisor:` block (`role_file` / `finalize_role_file` / `handoff_role_file`), resolved inside the flow's own folder.
 
 Only the **wording** moves into files. The structured-output schemas (the memory delta, and the `follow_ups` array when `emit_follow_ups: true`) stay in the orchestrator — your prompt can change tone and emphasis but can never break what the orchestrator parses. `handoff_role_file` is used only by decompose flows (it writes the `{predecessor_context}` handoff brief between subtasks). Set `emit_follow_ups: true` on a code flow to have the finalize turn emit an evidence-gated technical-debt list; leave it off for research/prose flows.
+
+**Which nodes it observes, and what the finalize turn actually reads.** Two things about its cadence are worth knowing, because both change what your prompts should say:
+
+- It observes each executed node **except** `tool` and `checks` nodes (their result is already a recorded fact — the node's outcome and, for checks, the per-command pass/fail — so an LLM note about it bought nothing and cost a full call per run) and except the terminal `publish` node. So an observe lens should not promise to comment on every step of the flow.
+- The finalize turn runs on a **fresh** session, not as a continuation of those observations. It is seeded by a small deterministic **packet** — a JSON file reachable as `packet` in its context footer, published at `.worc-io/<task-id>/supervisor/packet.json` — holding the changed paths and diff stat (with the full diff inlined only while it is small, otherwise a pointer to `current.diff`), every executed node with its outcome and what it reported, which check commands passed/failed/were skipped, a pointer to the latest evaluator findings, and the observations it did record. A finalize lens should therefore tell the turn to ground itself in that packet and to open the artifacts it points at — never to write from memory of the run, which it does not have. The packet is what makes the summary the same on a first run and on a resumed one.
 
 **Set `finalize_role_file` whenever your deliverable is not a diff.** The built-in finalize lens summarizes "the actual committed change", which reads wrong for a document, a report, or a translation — and that summary becomes the pull-request body. Two things a good finalize lens says, both learned the hard way: the turn is a read-only observer, so it must describe what the _pipeline_ did rather than assert that it re-opened or spot-checked anything itself; and it must not state a count or a verdict it was not given ("all citations passed", "all gates passed"). It does not have to guess at the latter — the orchestrator appends every in-flow evaluator's recorded verdict and findings to that turn's prompt, so a gate that accepted **with** findings open cannot honestly be summarized as one that passed. The packaged `deep_research/summary.md` is the worked example.
 

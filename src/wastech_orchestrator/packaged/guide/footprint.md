@@ -49,7 +49,7 @@ Each of these is a directory of `<task-id>/` subdirectories. They exist so a tas
 
 **What writes it:** the orchestrator, at every terminal transition — including a successful one.
 
-**A `seal-*` on a task that finished `done` is the expected outcome, not a sign of trouble.** When a task ends, the orchestrator archives a checksum-verified copy of the agent-facing exchange (`task.md`, `plan.md`, `current.diff`, per-stage findings) and then removes the live `.worc-io/<task-id>/` directory so the next task cannot see it. The seal is that archive — a record of *what the agent last saw*. `manifest.json` inside it names the outcome it was sealed at (`"final_status": "done"` for a clean run).
+**A `seal-*` on a task that finished `done` is the expected outcome, not a sign of trouble.** When a task ends, the orchestrator archives a checksum-verified copy of the agent-facing exchange (`task.md`, `plan.md`, `current.diff`, per-stage findings, the supervisor's `supervisor/packet.json`) and then removes the live `.worc-io/<task-id>/` directory so the next task cannot see it. The seal is that archive — a record of *what the agent last saw*. `manifest.json` inside it names the outcome it was sealed at (`"final_status": "done"` for a clean run).
 
 Because the in-repository exchange is removed at the end, the newest seal is the only surviving copy of a finished task's agent-facing plan and diff. That is what makes it worth keeping when you are analyzing runs, and it is what automatic cleanup removes when you are not.
 

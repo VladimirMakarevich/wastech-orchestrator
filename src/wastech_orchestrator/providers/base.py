@@ -182,6 +182,12 @@ class AgentRunRequest:
     # reviewer judges "was the finding addressed" with the implementer's account in hand instead of
     # re-diagnosing from the diff alone.
     rework_report_path: str | None = None
+    # The supervisor's whole-task facts packet, for its finalize turn only: a small deterministic
+    # JSON assembled from durable state (node runs, checks, diff stat, observation digest) that
+    # replaced the finalize turn's dependence on a warm session. Its own named field rather than a
+    # reused one, so the packet is called a packet in the context footer, the rendered prompt, and
+    # the prompt audit instead of masquerading as a plan or a checks report.
+    supervisor_packet_path: str | None = None
     # Planning-selected SKILL.md paths — read-only advisory references, never executed.
     skill_reference_paths: tuple[str, ...] = ()
     output_schema: dict[str, Any] | None = None
@@ -236,6 +242,7 @@ def build_context_footer(request: AgentRunRequest) -> str:
         ("review", request.review_artifacts_path),
         ("prior_fix", request.rework_report_path),
         ("human_input", request.human_input_path),
+        ("packet", request.supervisor_packet_path),
     )
     present = [(label, path) for label, path in fields if path]
     skill_lines = [

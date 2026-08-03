@@ -825,11 +825,29 @@ def _evaluations(store: StateStore, task_id: str) -> list:
     ).fetchall()
 
 
-def test_supervisor_layer_observes_each_step_and_writes_one_summary(
+def _observed_nodes(store: StateStore, task_id: str) -> list[str]:
+    """Node ids the supervisor layer actually observed (the payload of its supervisor_step rows)."""
+    return [
+        json.loads(row.findings_json)["node"]
+        for row in store.get_evaluations(task_id)
+        if row.kind == "supervisor_step"
+    ]
+
+
+def _supervisor_attempts(store: StateStore, task_id: str) -> list:
+    """The supervisor layer's own provider calls — its rows are the ``node_run_id IS NULL`` ones."""
+    return store._conn.execute(
+        "SELECT id FROM provider_attempts WHERE task_id = ? AND node_run_id IS NULL ORDER BY id",
+        (task_id,),
+    ).fetchall()
+
+
+def test_supervisor_layer_observes_the_interpretive_steps_and_writes_one_summary(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # The constant supervisor layer runs above any flow — it observes every executed
-    # (non-publish) node read-only (advisory), and synthesizes the summary once at whole-task close.
+    # The constant supervisor layer runs above any flow — it observes each executed node read-only
+    # (advisory) EXCEPT the deterministic `tool`/`checks` kinds and the terminal `publish` node, and
+    # synthesizes the summary once at whole-task close.
     providers = _both()
     orch, store, _, art = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
@@ -846,10 +864,26 @@ def test_supervisor_layer_observes_each_step_and_writes_one_summary(
     assert all(r["node_id"] is None for r in supervisor_rows)
     steps = [r for r in rows if r["kind"] == "supervisor_step"]
     finals = [r for r in rows if r["kind"] == "supervisor_final"]
-    # One observation per executed non-publish node (planning, implementation, testing, review,
-    # documentation).
+    # One observation per executed interpretive node (planning, implementation, review,
+    # documentation) — `testing` is a `checks` node and is deliberately not among them.
     assert len(steps) >= 4
     assert len(finals) == 1  # the summary synthesis is once per whole task
+    observed = _observed_nodes(store, "task-sup")
+    assert "implementation" in observed and "review" in observed
+    assert "testing" not in observed  # the checks node costs no observation turn
+    assert "publish" not in observed
+    # The structural invariant behind the saving: the layer's provider calls are exactly one per
+    # executed observable node plus one finalize. A mismatch means the post-node hook's condition
+    # drifted. Keyed on `skipped`, not on a status literal — `node_runs.status` is per-kind
+    # (`succeeded` / `passed` / `published` / …), so there is no single "completed" value to match.
+    expected = 1 + len(
+        [
+            r
+            for r in store.get_node_runs("task-sup")
+            if not r.skipped and r.node_kind not in {"tool", "checks", "publish"}
+        ]
+    )
+    assert len(_supervisor_attempts(store, "task-sup")) == expected
     # The in-flow review evaluator also recorded an immutable verdict (a separate kind).
     assert any(r["kind"] == "in_flow_verdict" and r["node_id"] == "review" for r in rows)
     # The summary is always written (no config.summary_enabled gate) and committed as the PR body.
