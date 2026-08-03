@@ -12,8 +12,10 @@ from pathlib import Path
 import pytest
 
 from wastech_orchestrator.config.schema import BranchMode, MergeStrategy
+from wastech_orchestrator.core.follow_ups import FOLLOW_UPS_HEADING
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import (
+    _FOLLOW_UPS_HEADING,
     _PR_BODY_MAX_CHARS,
     _PUSH_RETRY_BACKOFF_SECONDS,
     _SECTION_SEPARATOR,
@@ -1408,7 +1410,40 @@ def test_bound_pr_body_compacts_oldest_over_cap() -> None:
     assert out.startswith(head)  # the PR-creating task's body is never touched
     assert out.count(_TASK_MARKER_PREFIX) == 18  # no marker dropped → count stays exact
     assert ("x" * 5_000) in out  # the newest section(s) remain full
-    assert "logs/t2/summary.md" in out  # the oldest was compacted to a stub pointing at its log
+    assert ".worc/logs/t2/summary.md" in out  # the oldest was compacted to a stub
+    # The stub names the run host, not a repository-relative path: `logs/<id>/` lives under the
+    # git-excluded `.worc/`, so the old spelling read as an openable repo link and was a dead one.
+    assert "see `logs/t2/summary.md`" not in out
+
+
+def test_bound_pr_body_surrenders_follow_ups_last() -> None:
+    # Follow-ups are the actionable half of a summary. Compacting prose and follow-ups together took
+    # ~65 of 98 follow-ups out of a 20-task chain PR, so pass 1 keeps the section and only a second
+    # pass — when the body STILL does not fit — gives it up.
+    head = "Task 1 body."
+
+    def section(i: int, filler: int) -> str:
+        return (
+            f"{_TASK_MARKER_PREFIX}t{i} -->\n\n## Title {i}\n\n"
+            + ("x" * filler)
+            + f"\n\n{_FOLLOW_UPS_HEADING}\n\n- **[low] Follow-up {i}** — worth doing.\n"
+        )
+
+    body = _SECTION_SEPARATOR.join([head, *(section(i, 5_000) for i in range(2, 20))])
+    out = _bound_pr_body(body)
+    assert len(out) <= _PR_BODY_MAX_CHARS
+    assert "Follow-up 2" in out and out.count(_FOLLOW_UPS_HEADING) == 18  # every one survives
+    assert ("x" * 5_000) not in out.split(_SECTION_SEPARATOR)[1]  # …because the prose went instead
+
+    # Follow-ups so bulky that pass 1 cannot fit the body: pass 2 drops them, oldest first.
+    fat = _SECTION_SEPARATOR.join([head, *(section(i, 100) for i in range(2, 20))]).replace(
+        "worth doing.", "worth doing. " + ("z" * 5_000)
+    )
+    assert len(fat) > _PR_BODY_MAX_CHARS
+    tightened = _bound_pr_body(fat)
+    assert len(tightened) <= _PR_BODY_MAX_CHARS
+    assert tightened.count(_TASK_MARKER_PREFIX) == 18  # markers still never dropped
+    assert tightened.count(_FOLLOW_UPS_HEADING) < 18  # the oldest gave theirs up
 
 
 def test_compact_pr_section_keeps_marker_and_title_and_is_idempotent() -> None:
@@ -1416,8 +1451,21 @@ def test_compact_pr_section_keeps_marker_and_title_and_is_idempotent() -> None:
     out = _compact_pr_section(sec)
     assert f"{_TASK_MARKER_PREFIX}t5 -->" in out and "## Big change" in out
     assert "y" * 9_000 not in out  # the bulky summary is gone
-    assert "logs/t5/summary.md" in out  # replaced by a pointer to the on-disk summary
+    assert ".worc/logs/t5/summary.md" in out  # replaced by a pointer to the on-disk summary
     assert _compact_pr_section(out) == out  # re-compacting a stub changes nothing
+    # Preserving mode is idempotent too, and a second pass can still tighten it.
+    kept = _compact_pr_section(
+        f"{sec}\n\n{_FOLLOW_UPS_HEADING}\n\n- **[low] Do the thing**\n", keep_follow_ups=True
+    )
+    assert "Do the thing" in kept and "y" * 9_000 not in kept
+    assert _compact_pr_section(kept, keep_follow_ups=True) == kept
+    assert _FOLLOW_UPS_HEADING not in _compact_pr_section(kept)
+
+
+def test_pr_body_follow_ups_heading_mirrors_the_core_constant() -> None:
+    # git_manager is an adapter the Core imports, so it cannot import the Core back to share this
+    # string. Pinned here instead: a drifted spelling would silently stop preserving the section.
+    assert _FOLLOW_UPS_HEADING == FOLLOW_UPS_HEADING
 
 
 def test_create_pr_reuse_body_edit_failure_is_surfaced_not_fatal(
