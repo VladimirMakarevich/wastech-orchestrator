@@ -23,11 +23,12 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
-from wastech_orchestrator.state_store import CheckRunRow, NodeRunRow
+from wastech_orchestrator.core.flow.recorder import StepFacts
+from wastech_orchestrator.state_store import CheckRunRow
 
 # --- Bounds (P0-D3) ------------------------------------------------------------------------------
 # Named constants, not config — nobody asked for a knob, and a packet whose size an operator can
@@ -69,10 +70,9 @@ def bound_step_message(text: str) -> str:
 class PacketFacts:
     """Everything :func:`render_packet` needs — every field a durable fact, nothing live.
 
-    ``step_messages`` maps a ``node_runs.id`` to that run's own closing message (the
-    ``<node_id>.out.md`` the orchestrator already writes per run). It is deliberately keyed off the
-    node run rather than off an observation: a packet must stay complete when the observation
-    cadence is turned down, which is exactly what the next phase does.
+    ``steps`` is the run's deterministic step record, stated once by the flow recorder and only
+    formatted here. It is built from the node runs and their own output files rather than from
+    observations, so a packet stays complete when the observation cadence is turned down or off.
 
     ``diff_path`` / ``findings_path`` are repo-relative POSIX paths to the **exchange** copies — the
     only copies the provider may read. ``None`` when the run produced no such artifact.
@@ -82,9 +82,8 @@ class PacketFacts:
     task_title: str
     task_type: str | None
     flow_name: str | None
-    node_runs: tuple[NodeRunRow, ...]
+    steps: tuple[StepFacts, ...]
     check_runs: tuple[CheckRunRow, ...]
-    step_messages: Mapping[int, str]
     diff_text: str
     diff_path: str | None
     findings_path: str | None
@@ -101,7 +100,7 @@ def render_packet(facts: PacketFacts) -> str:
         "task": {"id": facts.task_id, "title": facts.task_title, "type": facts.task_type},
         "flow": {"name": facts.flow_name},
         "changes": _changes(facts.diff_text, facts.diff_path),
-        "steps": _steps(facts.node_runs, facts.step_messages),
+        "steps": _steps(facts.steps),
         "checks": _checks(facts.check_runs),
         "findings_path": facts.findings_path,
         "material_observations": _observations(facts.material_observations),
@@ -152,44 +151,44 @@ def _changes(diff_text: str, diff_path: str | None) -> dict[str, Any]:
     return changes
 
 
-def _steps(
-    node_runs: Sequence[NodeRunRow], step_messages: Mapping[int, str]
-) -> list[dict[str, Any]]:
-    """One record per flow node run, in execution order, with its closing message when it has one.
+def _steps(steps: Sequence[StepFacts]) -> list[dict[str, Any]]:
+    """The step record rendered in execution order, each run with its closing message if it has one.
 
     Timestamps, ``stage_attempts``, the provider actually used, and the fallback/retry facts are
-    kept, not scrubbed (P0-D2): they are durable, and they are the material the summary's caveats
-    are written from. Only the keys a run actually has are emitted, so a clean step stays short.
+    kept, not scrubbed: they are durable, and they are the material the summary's caveats are
+    written from. Only the keys a run actually has are emitted, so a clean step stays short — a
+    blanket ``null`` per absent fact would inflate every packet and read as a recorded absence.
+
+    The message cap is applied here rather than in the record because it is a property of this
+    surface's size budget, not of what the node said.
     """
-    steps: list[dict[str, Any]] = []
-    for row in node_runs:
+    rendered: list[dict[str, Any]] = []
+    for facts in steps:
         step: dict[str, Any] = {
-            "node": row.node_id,
-            "kind": row.node_kind,
-            "status": row.status,
-            "outcome": row.outcome,
-            "stage_attempts": row.stage_attempts,
-            "started_at": row.started_at,
-            "finished_at": row.finished_at,
+            "node": facts.node_id,
+            "kind": facts.node_kind,
+            "status": facts.status,
+            "outcome": facts.outcome,
+            "stage_attempts": facts.stage_attempts,
+            "started_at": facts.started_at,
+            "finished_at": facts.finished_at,
         }
-        if row.subtask_order is not None:
-            step["subtask"] = row.subtask_order
-        if row.provider_used:
-            step["provider_used"] = row.provider_used
-            if row.route_primary and row.provider_used != row.route_primary:
-                # The attempt landed on a provider other than the resolved primary — a fallback.
-                step["fallback_from"] = row.route_primary
-        if row.error_class:
-            step["error_class"] = row.error_class
-        if row.skipped:
+        if facts.subtask_order is not None:
+            step["subtask"] = facts.subtask_order
+        if facts.provider_used:
+            step["provider_used"] = facts.provider_used
+            if facts.fallback_from:
+                step["fallback_from"] = facts.fallback_from
+        if facts.error_class:
+            step["error_class"] = facts.error_class
+        if facts.skipped:
             step["skipped"] = True
-            if row.skip_reason:
-                step["skip_reason"] = row.skip_reason
-        message = step_messages.get(row.id) if row.id is not None else None
-        if message and message.strip():
-            step["message"] = bound_step_message(message)
-        steps.append(step)
-    return steps
+            if facts.skip_reason:
+                step["skip_reason"] = facts.skip_reason
+        if facts.message and facts.message.strip():
+            step["message"] = bound_step_message(facts.message)
+        rendered.append(step)
+    return rendered
 
 
 def _checks(check_runs: Sequence[CheckRunRow]) -> dict[str, list[str]]:

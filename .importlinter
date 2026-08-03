@@ -36,6 +36,16 @@ forbidden_modules =
     wastech_orchestrator.providers.codex
     wastech_orchestrator.providers._adapter_base
 
+[importlinter:contract:step-record-below-supervisor]
+name = The step record does not depend on the supervisor layer that reads it
+type = forbidden
+source_modules =
+    wastech_orchestrator.core.flow.recorder
+forbidden_modules =
+    wastech_orchestrator.core.supervisor
+    wastech_orchestrator.core.supervisor_packet
+    wastech_orchestrator.core.supervisor_usage
+
 [importlinter:contract:adapters-independent]
 name = The Claude and Codex adapters are independent
 type = independence

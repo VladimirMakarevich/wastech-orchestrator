@@ -101,6 +101,7 @@ from wastech_orchestrator.core.flow.postprocess import (
 )
 from wastech_orchestrator.core.flow.recorder import (
     StateStoreRunRecorder,
+    fell_back_from,
     hydrate_run_state,
     read_final_diff,
     read_last_findings,
@@ -3193,6 +3194,9 @@ class Orchestrator:
         only one that reads the step's ``node_runs`` row — a single primary-key lookup, and none at
         all under ``all`` / ``selected`` / ``none``. ``include_nodes`` and ``triggers`` are
         global-only (a flow narrows the *mode*, nothing else), so they come straight from config.
+
+        The fallback fact comes from the flow recorder, the same derivation the finalize packet's
+        step record uses, so this gate and the summary cannot disagree on whether a step deviated.
         """
         observe = self._config.supervisor.observe
         triggers: frozenset[str] = frozenset()
@@ -3202,8 +3206,7 @@ class Orchestrator:
                 outcome_kind=outcome.kind,
                 rework_exhausted=outcome.rework_exhausted,
                 status=row.status if row is not None else None,
-                provider_used=row.provider_used if row is not None else None,
-                route_primary=row.route_primary if row is not None else None,
+                fell_back=row is not None and fell_back_from(row) is not None,
             )
         return observe_cadence.should_observe(
             mode=mode,

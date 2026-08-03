@@ -59,8 +59,7 @@ def _triggers(**overrides: object) -> frozenset[str]:
         "outcome_kind": "done",
         "rework_exhausted": False,
         "status": "succeeded",
-        "provider_used": "claude",
-        "route_primary": "claude",
+        "fell_back": False,
     }
     facts.update(overrides)
     return triggers_for(**facts)  # type: ignore[arg-type]
@@ -86,16 +85,15 @@ def test_failure_is_read_from_the_run_row_not_the_outcome_kind() -> None:
     assert _triggers(status=None) == frozenset()  # a row that could not be read is not a failure
 
 
-def test_fallback_fires_only_on_a_real_route_divergence() -> None:
-    assert _triggers(provider_used="codex", route_primary="claude") == {"fallback"}
-    assert _triggers(provider_used="claude", route_primary="claude") == frozenset()
-    # Non-agent kinds leave both route columns NULL — that is not a fallback.
-    assert _triggers(provider_used=None, route_primary=None) == frozenset()
-    assert _triggers(provider_used="codex", route_primary=None) == frozenset()
+def test_fallback_is_taken_as_a_decided_fact() -> None:
+    # Which route columns amount to a fallback is the step record's call (`fell_back_from`), so that
+    # the finalize packet and this gate cannot disagree; this policy only names the answer.
+    assert _triggers(fell_back=True) == {"fallback"}
+    assert _triggers(fell_back=False) == frozenset()
 
 
 def test_a_step_can_exhibit_several_deviations_at_once() -> None:
-    assert _triggers(outcome_kind="rework", status="failed", provider_used="codex") == {
+    assert _triggers(outcome_kind="rework", status="failed", fell_back=True) == {
         "rework",
         "failure",
         "fallback",
@@ -104,9 +102,7 @@ def test_a_step_can_exhibit_several_deviations_at_once() -> None:
 
 def test_detected_triggers_stay_within_the_closed_set() -> None:
     # The set is closed by decision: a new trigger arrives with the facts that detect it.
-    assert _triggers(outcome_kind="rework", status="failed", provider_used="codex") <= (
-        OBSERVE_TRIGGERS
-    )
+    assert _triggers(outcome_kind="rework", status="failed", fell_back=True) <= OBSERVE_TRIGGERS
 
 
 # -- the per-mode decision ---------------------------------------------------------------------

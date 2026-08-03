@@ -894,6 +894,62 @@ def test_packet_records_fallback_and_retry_facts(tmp_path: Path) -> None:
     assert step["stage_attempts"] == 2 and step["error_class"] == "rate_limited"
 
 
+def test_packet_step_emits_only_the_facts_a_clean_run_has(tmp_path: Path) -> None:
+    # The exact key set matters, not just the values: a blanket `null` per absent fact would inflate
+    # every packet and read as a *recorded* absence ("this step has no error_class" vs "no error").
+    store = _store(tmp_path)
+    run_id = _run_row(store, "implementation", "agent", provider_used="claude")
+    _node_output(tmp_path, "implementation", run_id, "wired the parser")
+    sup = _wired(tmp_path, FakeRouter(), store)
+
+    (step,) = json.loads(sup._build_packet(_TASK, "T", []))["steps"]
+
+    assert set(step) == {
+        "node",
+        "kind",
+        "status",
+        "outcome",
+        "stage_attempts",
+        "started_at",
+        "finished_at",
+        "provider_used",
+        "message",
+    }
+    assert step["node"] == "implementation" and step["kind"] == "agent"
+    assert step["status"] == "completed" and step["outcome"] == "done"
+    assert step["started_at"] == "2026-01-01T00:00:00+00:00"
+    assert step["finished_at"] == "2026-01-01T00:01:00+00:00"
+    assert step["stage_attempts"] == 0  # a plain int, never normalized away to null
+
+
+def test_packet_step_records_a_skip_and_a_subtask_boundary(tmp_path: Path) -> None:
+    # A skipped node reaches the packet (its row is in `node_runs`) but is never observed, so these
+    # keys are the only record that a branch was not taken.
+    store = _store(tmp_path)
+    store.record_node_skip(_TASK, "refinement", "agent", reason="when false", subtask_order=None)
+    _run_row(store, "implementation", "agent", subtask_order=2)
+    sup = _wired(tmp_path, FakeRouter(), store)
+
+    skipped, subtask = json.loads(sup._build_packet(_TASK, "T", []))["steps"]
+
+    assert skipped["skipped"] is True and skipped["skip_reason"] == "when false"
+    assert subtask["subtask"] == 2
+    assert "skipped" not in subtask and "subtask" not in skipped
+
+
+def test_packet_omits_a_whitespace_only_step_message(tmp_path: Path) -> None:
+    # The node-output writer only skips falsy content, so a blank-but-present `.out.md` is real. An
+    # empty `message` would be a fact the node never stated.
+    store = _store(tmp_path)
+    run_id = _run_row(store, "implementation", "agent")
+    _node_output(tmp_path, "implementation", run_id, "  \n ")
+    sup = _wired(tmp_path, FakeRouter(), store)
+
+    (step,) = json.loads(sup._build_packet(_TASK, "T", []))["steps"]
+
+    assert "message" not in step
+
+
 def test_packet_names_the_latest_evaluator_findings(tmp_path: Path) -> None:
     store = _store(tmp_path)
     store.record_evaluation(
@@ -1847,3 +1903,68 @@ def test_supervisor_provider_attempt_usage_is_summation_safe_delta(tmp_path: Pat
     assert rows[1].usage_output_total == 15
     assert rows[1].usage_input_total == 50
     assert rows[1].usage_delta_status == "ok"
+
+
+def test_each_phase_labels_its_own_provider_calls(tmp_path: Path) -> None:
+    # The phase cannot be inferred from the turn settings — the skill proposal deliberately shares
+    # the observe phase's cheap model + effort — so each call site states which job it is.
+    store = _store(tmp_path)
+    router = _AttemptsRouter([_claude_turn(cost=0.01, output_total=1) for _ in range(4)])
+    sup = _supervisor(tmp_path, router, store)
+    sup.propose_skill_map(task_id=_TASK, agent_node_ids=["implementation"], inventory=_INV)
+    sup.observe(task_id=_TASK, node_id="implementation", node_run_id=5, outcome_kind="done")
+    sup.handoff(task_id=_TASK, subtask_order=1, floor_context="floor")
+    sup.finalize(task_id=_TASK, task_title="T")
+
+    labels = [r.supervisor_function for r in store.get_provider_attempts_for_task(_TASK)]
+    assert labels == ["skill", "observe", "handoff", "finalize"]
+
+
+def test_summary_json_reports_what_the_layer_spent_per_phase(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    router = _AttemptsRouter(
+        [_claude_turn(cost=0.02, output_total=5), _claude_turn(cost=0.30, output_total=80)]
+    )
+    sup = _supervisor(tmp_path, router, store)
+    sup.observe(task_id=_TASK, node_id="implementation", node_run_id=5, outcome_kind="done")
+
+    sup.finalize(task_id=_TASK, task_title="T")
+
+    payload = json.loads(
+        (Path(task_artifact_dir(tmp_path / "art", _TASK)) / "summary.json").read_text("utf-8")
+    )
+    usage = payload["supervisor_usage"]
+    # Written after the finalize turn, so the most expensive call is in its own report.
+    assert list(usage["by_function"]) == ["observe", "finalize"]
+    assert usage["by_function"]["finalize"]["calls"] == 1
+    assert usage["by_function"]["finalize"]["cost"] == 0.30
+    assert usage["total"]["calls"] == 2
+    assert usage["total"]["cost"] == 0.32
+
+
+def test_summary_json_omits_the_spend_report_when_the_layer_made_no_calls(tmp_path: Path) -> None:
+    # A cadence of `none` on a run whose finalize could not start: no row, so no report — rather
+    # than a block of zeros that would read as "the layer ran and was free".
+    store = _store(tmp_path)
+    sup = _supervisor(tmp_path, FakeRouter([None]), store)
+
+    sup.finalize(task_id=_TASK, task_title="T")
+
+    payload = json.loads(
+        (Path(task_artifact_dir(tmp_path / "art", _TASK)) / "summary.json").read_text("utf-8")
+    )
+    assert "supervisor_usage" not in payload
+
+
+def test_summary_md_carries_no_spend_telemetry(tmp_path: Path) -> None:
+    # summary.md becomes the pull-request body: the spend is the operator's, not the reviewer's, and
+    # it must not travel to the remote with the change.
+    store = _store(tmp_path)
+    sup = _supervisor(tmp_path, _AttemptsRouter([_claude_turn(cost=0.30, output_total=80)]), store)
+
+    result = sup.finalize(task_id=_TASK, task_title="T")
+
+    assert result.summary_path is not None
+    body = result.summary_path.read_text("utf-8")
+    for token in ("supervisor_usage", "cost", "duration_seconds", "0.30"):
+        assert token not in body

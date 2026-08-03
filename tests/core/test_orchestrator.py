@@ -876,6 +876,15 @@ def test_supervisor_layer_costs_one_call_on_a_clean_run_and_still_writes_the_sum
     assert (task_artifact_dir(art, "task-sup") / "summary.md").exists()
     # There is no summary graph node anymore — the layer owns it.
     assert "summary" not in _ran_nodes(store, "task-sup")
+    # That one call is labelled with the job it did, so the layer's spend is readable per phase and
+    # not as one lump; a graph node's attempts stay unlabelled and out of the layer's report.
+    labels = store._conn.execute(
+        "SELECT supervisor_function AS fn, node_run_id FROM provider_attempts "
+        "WHERE task_id = ? ORDER BY id",
+        ("task-sup",),
+    ).fetchall()
+    assert [r["fn"] for r in labels if r["node_run_id"] is None] == ["finalize"]
+    assert {r["fn"] for r in labels if r["node_run_id"] is not None} == {None}
 
 
 def test_packaged_flow_cadence_narrows_a_broader_global_mode(

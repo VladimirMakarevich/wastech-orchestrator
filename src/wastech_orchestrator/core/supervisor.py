@@ -48,7 +48,7 @@ from wastech_orchestrator.core.flow.observability import (
     write_rendered_prompt,
 )
 from wastech_orchestrator.core.flow.prompt import RoleFileError, render_role_prompt
-from wastech_orchestrator.core.flow.recorder import read_final_diff
+from wastech_orchestrator.core.flow.recorder import collect_step_facts, read_final_diff
 from wastech_orchestrator.core.flow.schema import SupervisorBlock
 from wastech_orchestrator.core.flow.usage_accounting import (
     deserialize_usage,
@@ -60,6 +60,7 @@ from wastech_orchestrator.core.supervisor_packet import (
     bound_step_message,
     render_packet,
 )
+from wastech_orchestrator.core.supervisor_usage import SupervisorFunction, summarize_spend
 from wastech_orchestrator.memory.delta import DELTA_OUTPUT_SCHEMA, CandidateDelta, parse_delta
 from wastech_orchestrator.providers.artifacts import (
     exchange_node_run_dir,
@@ -616,8 +617,9 @@ class SupervisorTurnSettings(Protocol):
 class SupervisorStorePort(Protocol):
     """The slice of the state store the supervisor needs: the immutable evaluation row, the durable
     own-session lineage (read on first use, written after each turn), the per-turn provider-attempt
-    audit row (the supervisor's own billable calls), and the two read-only tables the finalize
-    packet is assembled from (``node_runs`` / ``check_runs``)."""
+    audit row (the supervisor's own billable calls) plus the task-wide read-back of those rows for
+    the summary's spend report, and the two read-only tables the finalize packet is assembled from
+    (``node_runs`` / ``check_runs``)."""
 
     def record_evaluation(self, row: EvaluationRow) -> int: ...
 
@@ -634,6 +636,8 @@ class SupervisorStorePort(Protocol):
     def upsert_node_lineage(self, row: NodeLineageRow) -> None: ...
 
     def record_provider_attempt(self, attempt: ProviderAttemptRow) -> None: ...
+
+    def get_provider_attempts_for_task(self, task_id: str) -> list[ProviderAttemptRow]: ...
 
 
 class Supervisor:
@@ -732,6 +736,7 @@ class Supervisor:
             prompt,
             node_run_id=node_run_id,
             turn=self._settings.observe,
+            function=SupervisorFunction.OBSERVE,
             subtask=subtask_order,
             cap_reasoning=True,
         )
@@ -865,6 +870,7 @@ class Supervisor:
                 self._finalize_prompt(task_id, packet=packet_path is not None, gates=gates),
                 node_run_id=0,
                 turn=self._settings.finalize,
+                function=SupervisorFunction.FINALIZE,
                 resume_session=False,
                 task_path=task_path,
                 supervisor_packet_path=packet_path,
@@ -881,6 +887,7 @@ class Supervisor:
             ),
             node_run_id=0,
             turn=self._settings.finalize,
+            function=SupervisorFunction.FINALIZE,
             output_schema=_finalize_schema(with_delta=emit_delta, with_follow_ups=with_follow_ups),
             resume_session=False,
             task_path=task_path,
@@ -971,11 +978,13 @@ class Supervisor:
     def _build_packet(
         self, task_id: str, task_title: str, evaluations: Sequence[EvaluationRow]
     ) -> str:
-        """Assemble the packet JSON from durable state — no live inputs (decision P0-D2).
+        """Assemble the packet JSON from durable state — no live inputs.
 
         Every source here is either a ``state.db`` table or an already-written task artifact, which
         is what makes two builds from the same state byte-identical and a revive that re-executed
-        nothing reproduce the same summary input.
+        nothing reproduce the same summary input. The per-step facts are not assembled here: this
+        advisory layer *reads* the run's step record from the flow recorder, so the facts a summary
+        is written from do not depend on the layer that writes prose about them.
         """
         node_runs = tuple(self._store.get_node_runs(task_id))
         return render_packet(
@@ -984,38 +993,14 @@ class Supervisor:
                 task_title=task_title,
                 task_type=self._task_type,
                 flow_name=self._flow_name,
-                node_runs=node_runs,
+                steps=collect_step_facts(node_runs, self._artifacts_root, task_id),
                 check_runs=tuple(self._store.get_check_runs(task_id)),
-                step_messages=self._step_messages(task_id, node_runs),
                 diff_text=read_final_diff(self._artifacts_root, task_id),
                 diff_path=self._exchange_relpath(task_id, "current.diff"),
                 findings_path=self._findings_relpath(task_id, evaluations),
                 material_observations=self._finalize_digest(evaluations),
             )
         )
-
-    def _step_messages(self, task_id: str, node_runs: Sequence[NodeRunRow]) -> dict[int, str]:
-        """Each node run's own closing message, read from the ``<node_id>.out.md`` it already wrote.
-
-        Keyed by ``node_runs.id`` (which *is* the run id the artifact dir is named after). Read from
-        the node's durable output rather than from an observation on purpose: the packet must stay
-        complete when the observation cadence is turned down. A run with no ``.out.md`` (a slot node
-        whose product is a file, a ``tool``/``checks`` node, a run that produced nothing) is simply
-        absent from the map.
-        """
-        messages: dict[int, str] = {}
-        for row in node_runs:
-            if row.id is None:
-                continue
-            path = (
-                node_run_dir(self._artifacts_root, task_id, row.node_id, row.id)
-                / f"{row.node_id}.out.md"
-            )
-            try:
-                messages[row.id] = path.read_text(encoding="utf-8")
-            except OSError:
-                continue  # no output for this run — the step record simply carries no message
-        return messages
 
     def _exchange_relpath(self, task_id: str, relname: str) -> str | None:
         """A repo-relative POSIX path to an existing exchange artifact, or ``None``.
@@ -1073,6 +1058,7 @@ class Supervisor:
             self._handoff_prompt(task_id, subtask_order, floor_context),
             node_run_id=_HANDOFF_RUN_ID_BASE + subtask_order,
             turn=self._settings.handoff,
+            function=SupervisorFunction.HANDOFF,
             subtask=subtask_order,
             output_schema=_HANDOFF_SCHEMA,
         )
@@ -1112,8 +1098,10 @@ class Supervisor:
             node_run_id=_PROPOSAL_RUN_ID,
             # The cheap pair: a once-per-task, schema-bound proposal has the observe phase's cost
             # profile, not the whole-task synthesis's. Independent of ``observe.mode``, which gates
-            # per-step observations only — this turn runs whenever ``skills.dynamic`` is on.
+            # per-step observations only — this turn runs whenever ``skills.dynamic`` is on. Sharing
+            # the settings is exactly why the spend label has to be passed separately.
             turn=self._settings.observe,
+            function=SupervisorFunction.SKILL,
             output_schema=_SKILL_MAP_SCHEMA,
             task_path=task_path,
         )
@@ -1139,6 +1127,7 @@ class Supervisor:
         *,
         node_run_id: int,
         turn: SupervisorTurnSettings,
+        function: SupervisorFunction,
         subtask: int | None = None,
         resume_session: bool = True,
         cap_reasoning: bool = False,
@@ -1151,6 +1140,7 @@ class Supervisor:
             prompt,
             node_run_id=node_run_id,
             turn=turn,
+            function=function,
             subtask=subtask,
             resume_session=resume_session,
             cap_reasoning=cap_reasoning,
@@ -1166,6 +1156,7 @@ class Supervisor:
         *,
         node_run_id: int,
         turn: SupervisorTurnSettings,
+        function: SupervisorFunction,
         subtask: int | None = None,
         output_schema: dict[str, Any] | None = None,
         resume_session: bool = True,
@@ -1193,6 +1184,10 @@ class Supervisor:
         ``.finalize`` / ``.handoff``). Required, not defaulted: a cheap note and the whole-task
         synthesis want opposite tiers, so a phase that forgot to say which it is should not compile
         rather than silently inherit the wrong one. The provider stays one per layer.
+
+        ``function`` is what that phase *is*, recorded on the attempt rows so the layer's spend is
+        readable per job. It cannot be inferred from ``turn``: two different jobs deliberately share
+        the observe phase's cheap model + effort, so the settings object does not identify either.
         """
         try:
             route = self._router.resolve_route(_SUPERVISOR_IDENTITY, self._settings.provider)
@@ -1247,7 +1242,9 @@ class Supervisor:
         # ``provider_attempts`` (``node_run_id`` NULL — it is not a graph node), so a task-level
         # cost/usage roll-up is complete. Recorded for every outcome (including a failed turn's
         # attempts) and BEFORE the result-None early return, so no billable call is dropped.
-        self._record_provider_attempts(task_id, outcome, usage_baseline, baseline_session_id)
+        self._record_provider_attempts(
+            task_id, outcome, function, usage_baseline, baseline_session_id
+        )
         result = outcome.result
         if result is None:
             return None
@@ -1334,15 +1331,17 @@ class Supervisor:
         self,
         task_id: str,
         outcome: StageOutcome,
+        function: SupervisorFunction,
         usage_baseline: NormalizedUsage | None,
         baseline_session_id: str | None,
     ) -> None:
         """Persist the supervisor's own ``provider_attempts`` rows — ``node_run_id`` NULL.
 
         Reuses the shared node-path recorder, so the supervisor's per-run usage delta is computed
-        exactly like a graph node's (against its own resumed-session baseline). Best-effort like the
-        rest of this advisory layer: any store error is logged and swallowed so an audit-write
-        failure can never surface as a broken turn.
+        exactly like a graph node's (against its own resumed-session baseline). ``function`` is what
+        makes the layer's spend readable per job rather than as one lump. Best-effort like the rest
+        of this advisory layer: any store error is logged and swallowed so an audit-write failure
+        can never surface as a broken turn.
         """
         try:
             record_provider_attempts(
@@ -1351,6 +1350,7 @@ class Supervisor:
                 task_id=task_id,
                 node_run_id=None,  # the supervisor is a constant layer, not a graph node
                 outcome=outcome,
+                supervisor_function=function.value,
                 usage_baseline=usage_baseline,
                 baseline_session_id=baseline_session_id,
             )
@@ -1620,7 +1620,14 @@ class Supervisor:
         """Write the local-only ``summary.json`` metadata (never committed).
 
         Carries the evidence-gated ``follow_ups`` (empty unless the flow opted in) so the debt
-        signal is machine-readable beside the prose summary.
+        signal is machine-readable beside the prose summary, and ``supervisor_usage`` — what this
+        oversight layer cost, in total and per job. The spend belongs here rather than in
+        ``summary.md`` because that file becomes the pull-request body: telemetry is for the
+        operator who owns the bill, not for the reviewer reading the change, and it should not
+        travel to the remote alongside it.
+
+        Written late in the finalize sequence, so the report already includes the finalize turn's
+        own attempt rows rather than every call but the most expensive one.
 
         A *failed* finalize (empty ``summary_text``) must NOT clobber an existing non-empty
         ``summary.json`` with a blank one — symmetric to leaving ``summary.md`` untouched on a
@@ -1630,6 +1637,9 @@ class Supervisor:
         if not summary_text and self._existing_summary_nonempty(path):
             return
         payload: dict[str, Any] = {"what": task_title, "summary": summary_text or ""}
+        usage = self._supervisor_usage(task_id)
+        if usage is not None:
+            payload["supervisor_usage"] = usage
         if follow_ups:
             payload["follow_ups"] = [
                 {
@@ -1650,6 +1660,20 @@ class Supervisor:
         except OSError:
             return
         self._register(task_id, "summary_json", str(path))
+
+    def _supervisor_usage(self, task_id: str) -> dict[str, Any] | None:
+        """This layer's own spend for the task, or ``None`` when it made no provider calls.
+
+        Best-effort like the rest of the layer: a store error costs the report, never the summary.
+        """
+        try:
+            return summarize_spend(self._store.get_provider_attempts_for_task(task_id))
+        except Exception as exc:
+            _LOG.warning(
+                "supervisor usage report could not be built (advisory, ignored)",
+                extra={"task_id": task_id, "error_type": type(exc).__name__},
+            )
+            return None
 
     @staticmethod
     def _existing_summary_nonempty(path: Path) -> bool:

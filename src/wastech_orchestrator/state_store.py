@@ -107,7 +107,15 @@ def _utc_now_iso() -> str:
 # A task-level roll-up is now ``WHERE task_id = ?`` and includes the supervisor spend; the
 # supervisor's rows are exactly the ``node_run_id IS NULL`` ones. Additive; an older versioned DB is
 # refused fail-closed and recreated (greenfield — no production data to migrate).
-DB_SCHEMA_VERSION = 19
+# v20 (per-function supervisor spend): ``provider_attempts`` gains the nullable
+# ``supervisor_function`` (``observe`` / ``finalize`` / ``handoff`` / ``skill``; NULL for an
+# ordinary graph node). ``node_run_id IS NULL`` already separated the supervisor layer's calls from
+# the graph's, but not the layer's own phases from each other — so "what did the observations cost
+# against the summary" needed the label. One column rather than a side table keeps the
+# reconciliation a single ``GROUP BY``: no row is filtered out, so the buckets always sum to the
+# task's total.
+# Additive; an older versioned DB is refused fail-closed and recreated (greenfield).
+DB_SCHEMA_VERSION = 20
 
 
 class IncompatibleStateError(Exception):
@@ -164,7 +172,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_usage_columns(conn: sqlite3.Connection) -> None:
-    """Additive usage columns (v16 normalized-usage + the v19 task anchor).
+    """Additive usage columns (v16 normalized-usage, the v19 task anchor, the v20 phase label).
 
     v16 added the per-run delta on ``provider_attempts`` and the running cumulative snapshot on the
     two lineage tables — all nullable, so no defaults. v19 added the ``task_id`` anchor to
@@ -172,12 +180,14 @@ def _migrate_usage_columns(conn: sqlite3.Connection) -> None:
     writer supplies the real id, and this path is only reachable by a pre-versioning ``0`` database
     that predates the column — none exist in greenfield). The coupled ``node_run_id`` NULLABILITY
     change is fresh-schema-only (SQLite cannot drop a column's NOT NULL in place) — unreachable here
-    for the same greenfield reason.
+    for the same greenfield reason. v20 added ``supervisor_function``, nullable like the v16 block
+    because NULL is its real meaning for a graph node, not a placeholder.
     """
     attempt_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(provider_attempts)")}
     if "task_id" not in attempt_cols:
         conn.execute("ALTER TABLE provider_attempts ADD COLUMN task_id TEXT NOT NULL DEFAULT ''")
     for column, decl in (
+        ("supervisor_function", "TEXT"),
         ("usage_scope", "TEXT"),
         ("usage_input_total", "INTEGER"),
         ("usage_cache_read", "INTEGER"),
@@ -304,6 +314,11 @@ CREATE TABLE IF NOT EXISTS provider_attempts (
     -- the ``node_runs`` id this attempt belongs to (a plain monotonic id, not an FK), or NULL for
     -- the constant supervisor layer, which is not a graph node and has no ``node_runs`` row.
     node_run_id INTEGER,
+    -- which supervisor phase made this call (``observe`` / ``finalize`` / ``handoff`` / ``skill``),
+    -- or NULL for an ordinary graph node. Passed in explicitly by the calling phase: the synthetic
+    -- run ids and attempt-dir names that namespace the layer's artifacts are not semantics, and
+    -- reading a phase out of them would make a path string load-bearing.
+    supervisor_function TEXT,
     provider TEXT NOT NULL,
     attempt INTEGER NOT NULL,
     status TEXT,
@@ -502,6 +517,9 @@ class ProviderAttemptRow:
     node_run_id: int | None
     provider: str
     attempt: int
+    # Which supervisor phase made the call, or ``None`` for a graph node. A plain string, like the
+    # usage block below, so this storage layer stays free of the supervisor's own vocabulary.
+    supervisor_function: str | None = None
     status: str | None = None
     error_class: str | None = None
     exit_code: int | None = None
@@ -1219,16 +1237,17 @@ class StateStore:
             c.execute(
                 """
                 INSERT INTO provider_attempts (
-                    task_id, node_run_id, provider, attempt, status, error_class, exit_code,
-                    attempt_dir, started_at, finished_at,
+                    task_id, node_run_id, supervisor_function, provider, attempt, status,
+                    error_class, exit_code, attempt_dir, started_at, finished_at,
                     usage_scope, usage_input_total, usage_cache_read, usage_cache_write,
                     usage_uncached_input, usage_output_total, usage_reasoning_output, usage_cost,
                     usage_delta_status, provider_usage_raw
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     attempt.task_id,
                     attempt.node_run_id,
+                    attempt.supervisor_function,
                     attempt.provider,
                     attempt.attempt,
                     attempt.status,
@@ -1252,7 +1271,8 @@ class StateStore:
 
     # Shared SELECT columns for provider_attempts (mirrored by _provider_attempt_from_row).
     _PROVIDER_ATTEMPT_COLUMNS = (
-        "task_id, node_run_id, provider, attempt, status, error_class, exit_code, attempt_dir, "
+        "task_id, node_run_id, supervisor_function, provider, attempt, status, error_class, "
+        "exit_code, attempt_dir, "
         "started_at, finished_at, usage_scope, usage_input_total, usage_cache_read, "
         "usage_cache_write, usage_uncached_input, usage_output_total, usage_reasoning_output, "
         "usage_cost, usage_delta_status, provider_usage_raw"
@@ -1683,6 +1703,7 @@ def _provider_attempt_from_row(row: sqlite3.Row) -> ProviderAttemptRow:
     return ProviderAttemptRow(
         task_id=row["task_id"],
         node_run_id=row["node_run_id"],
+        supervisor_function=row["supervisor_function"],
         provider=row["provider"],
         attempt=row["attempt"],
         status=row["status"],

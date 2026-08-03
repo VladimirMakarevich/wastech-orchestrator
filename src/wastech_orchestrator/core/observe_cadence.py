@@ -59,29 +59,29 @@ def triggers_for(
     outcome_kind: str,
     rework_exhausted: bool,
     status: str | None,
-    provider_used: str | None,
-    route_primary: str | None,
+    fell_back: bool,
 ) -> frozenset[str]:
     """The deviations this completed step exhibits, as a subset of ``OBSERVE_TRIGGERS``.
 
     Everything here is already in the post-node hook's hands: ``outcome_kind`` /
-    ``rework_exhausted`` come from the node outcome, the other three from the step's own
-    ``node_runs`` row. Nothing is inferred and no extra provider call is made.
+    ``rework_exhausted`` come from the node outcome, ``status`` and ``fell_back`` from the step's
+    own ``node_runs`` row. Nothing is inferred and no extra provider call is made.
 
     * ``rework`` — an evaluator sent the stage back, or accepted only after spending its whole
       rework budget (``rework_exhausted``): the run is looping, which is the case worth a note.
     * ``failure`` — the run row's ``status`` is ``failed``. Read from the row, not the outcome,
       because an agent node's outcome kind is unconditionally ``done`` even when its provider result
       failed on quality (a hard infra failure raises before this hook ever runs).
-    * ``fallback`` — the attempt landed on a provider other than the resolved primary.
+    * ``fallback`` — the attempt landed on a provider other than the resolved primary. Taken as an
+      already-decided fact, because the step record answers it for the finalize packet too, and one
+      deviation must not be able to read two ways.
     """
     triggers: set[str] = set()
     if outcome_kind == "rework" or rework_exhausted:
         triggers.add("rework")
     if status == "failed":
         triggers.add("failure")
-    # Guard order matters: non-agent kinds leave both route columns NULL.
-    if provider_used and route_primary and provider_used != route_primary:
+    if fell_back:
         triggers.add("fallback")
     return frozenset(triggers)
 
