@@ -181,6 +181,8 @@ def build_git_config(
     clean_runs_on_success: bool = True,
     supervisor_observe: str | None = None,
     supervisor_include_nodes: Sequence[str] = (),
+    supervisor_enabled: bool | None = None,
+    skills_dynamic: bool | None = None,
 ) -> OrchestratorConfig:
     """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks.
 
@@ -192,6 +194,12 @@ def build_git_config(
     ``events``). Note that it only reaches a run whose flow declares no cadence of its own: a
     flow's own ``supervisor.observe.mode`` narrows this, so a test driving a specific mode end to
     end should use a flow with no ``supervisor:`` block.
+
+    ``supervisor_enabled=False`` removes the whole layer. Two consequences a test must expect: a
+    flow's own cadence is no longer checked against the global one (there is nothing to widen), and
+    ``memory_enabled=True`` is quenched by the loader to ``False`` for the run — so the config this
+    returns has ``memory.enabled is False``. The warning that says so is on
+    ``loads_config(...).warnings``, which this helper drops; assert it through ``loads_config``.
     """
     env_lines = "\n".join(f"    - {e}" for e in _TEST_ALLOWED_ENV)
     cleanup_line = (
@@ -212,12 +220,17 @@ def build_git_config(
     logging_block = (
         "logging:\n  clean_runs_on_success: false\n" if not clean_runs_on_success else ""
     )
-    if supervisor_observe is None:
-        supervisor_block = ""
-    else:
-        supervisor_block = f"supervisor:\n  observe:\n    mode: {supervisor_observe}\n"
+    skills_block = (
+        f"skills:\n  dynamic: {str(skills_dynamic).lower()}\n" if skills_dynamic is not None else ""
+    )
+    supervisor_lines = []
+    if supervisor_enabled is not None:
+        supervisor_lines.append(f"  enabled: {str(supervisor_enabled).lower()}\n")
+    if supervisor_observe is not None:
+        supervisor_lines.append(f"  observe:\n    mode: {supervisor_observe}\n")
         if supervisor_include_nodes:
-            supervisor_block += f"    include_nodes: {list(supervisor_include_nodes)!r}\n"
+            supervisor_lines.append(f"    include_nodes: {list(supervisor_include_nodes)!r}\n")
+    supervisor_block = "supervisor:\n" + "".join(supervisor_lines) if supervisor_lines else ""
     text = f"""
 orchestrator:
   auto_mode:
@@ -256,7 +269,7 @@ git:
     audit_commit_message: "chore(orchestrator): audit trail for {{task_id}}"
     audit_on_branch: {audit_on_branch}
 prompt_audit: {str(prompt_audit).lower()}
-{memory_block}{logging_block}{supervisor_block}"""
+{memory_block}{logging_block}{skills_block}{supervisor_block}"""
     return loads_config(text).config
 
 

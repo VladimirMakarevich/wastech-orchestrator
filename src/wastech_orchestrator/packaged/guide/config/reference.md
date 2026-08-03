@@ -171,14 +171,15 @@ At task start the orchestrator discovers every tracked `SKILL.md` in the clone; 
 | `skills.dynamic` | bool | `false` (whole block absent) — but **`true` if the `skills:` block is present without this key** | `true` lets the supervisor propose a node→skills map once per task (adds one turn). Note the asymmetry: omitting `skills:` entirely ⇒ `false`; writing `skills:` with no `dynamic:` ⇒ `true`. `install` writes `false`. |
 | `skills.strict` | bool | `false` | Governs operator pins: `false` = warn and skip an unresolved pin; `true` = stop the task (`manual_action_required`). |
 
-## `supervisor` — the constant oversight layer
+## `supervisor` — the oversight layer
 
-A read-only layer above every flow that observes completed nodes and writes the final summary. Its `permission_profile` is forced `read-only` in code.
+A read-only layer above every flow that observes completed nodes and writes the final summary. Its `permission_profile` is forced `read-only` in code. It is on by default and can be removed entirely with `enabled: false`, in which case the pull-request body is rendered deterministically from the run's recorded facts instead.
 
-Two keys are one-per-layer and stay at the top; model and effort are **per phase**, under `observe` / `finalize` / `handoff`.
+Three keys are one-per-layer and stay at the top; model and effort are **per phase**, under `observe` / `finalize` / `handoff`.
 
 | Field | Type / values | Default (dataclass / install) | Constraint | When to use |
 | --- | --- | --- | --- | --- |
+| `supervisor.enabled` | bool | `true` / install: `true` | — | `false` removes the layer: no per-step notes, no summary turn, no subtask handoff brief, no `skills.dynamic` proposal, and every key below inert (one warning says so). The PR body is then written deterministically. Also forces `memory.enabled` to `false` for the run — see [`memory`](#memory--persistent-repo-scoped-memory). |
 | `supervisor.role_file` | string | `"roles/supervisor.md"` | No path traversal (`..`/absolute). | The observe-lens prompt. Never loaded when the cadence resolves to `none`. |
 | `supervisor.provider` | `codex` \| `claude` \| null | `null` / install: pinned to the primary | Must be in `agents.allowed` when set. | `null` inherits the global primary; pin it so the phase models reach a provider that accepts them. |
 | `supervisor.observe.mode` | `all` \| `selected` \| `events` \| `none` | `events` / install: `events` | A flow may only narrow it (see below). | How often a completed step is worth an LLM note. See the table under it. |
@@ -208,9 +209,11 @@ Ranked by how many calls the mode can produce — which is also the order a flow
 
 **What a mode actually cost you is measured, not guessed.** Each run writes a `supervisor_usage` block into `.worc/logs/<task-id>/summary.json` (local only, never committed): calls, input, cached input, output, cost and provider wall time, as a total and split by job — `observe`, `finalize`, `handoff`, `skill`. Read the `observe` versus `finalize` split on your own flow before tuning this setting; the table above ranks the modes by how many calls they *can* produce, and that block tells you what they did produce.
 
+Switching observations off and removing the layer are two different levels. `observe.mode: none` silences the per-step notes and keeps the synthesis; `enabled: false` removes the layer including that synthesis, and the pull-request body is then rendered from the same recorded facts the packet is built from — the same sections, without the interpretation.
+
 Switching observations off does not cost you the summary. The finalize turn runs on a **fresh** session seeded by a deterministic packet of the run's facts (`.worc-io/<task-id>/supervisor/packet.json`) built from the recorded node runs and each node's own output — never from the observations — so its input is a few kilobytes regardless of how long the run was, a resumed task's summary is as complete as a first run's, and `mode: none` still produces a full PR body. The finalize turn is also handed every in-flow evaluator's recorded verdict and findings, so a gate that accepted **with** findings cannot be summarized as one that simply passed.
 
-A flow may **narrow** the cadence in its own `supervisor.observe.mode` but never widen it: a flow declaring a broader mode than yours fails validation before any node runs, naming both modes (a flow is authored content and must not be able to spend more than you allowed). The packaged content flows ship `none`; `implementation` ships `events`. One consequence worth knowing: because a flow that *states* `events` is asserting it needs deviation notes, setting your global mode to `none` is rejected for that flow rather than silently degrading it — narrow the flow's own copy if that is what you want.
+A flow may **narrow** the cadence in its own `supervisor.observe.mode` but never widen it: a flow declaring a broader mode than yours fails validation before any node runs, naming both modes (a flow is authored content and must not be able to spend more than you allowed). The packaged content flows ship `none`; `implementation` ships `events`. One consequence worth knowing: because a flow that *states* `events` is asserting it needs deviation notes, setting your global mode to `none` is rejected for that flow rather than silently degrading it — narrow the flow's own copy if that is what you want. The rule does not apply at `enabled: false` — there is no cadence to widen, so a flow that declares `events` runs unchanged. That is why removing the layer is its own key rather than a global `mode: none`.
 
 **Check the change before you queue work against it.** The rejection is fatal but cheap — it happens during flow resolution, before branch prep, so no provider runs and nothing is committed — yet the task has already been claimed by then and ends in terminal `failed`, which you have to re-queue by hand. `worc validate-flow` runs exactly the validator the engine runs at dispatch, read-only and without claiming anything, so run it after editing `observe.mode` on either side:
 
@@ -234,9 +237,11 @@ There is no cap on what the layer may spend beyond the mode itself: no call budg
 
 Omitting the whole block ⇒ `enabled: false` (no store, empty packets, CLI no-op). All numeric knobs are runtime-clamped — never fatal. Defaults are deliberately small (precision over recall).
 
+Memory also requires `supervisor.enabled: true`. That layer's closing turn is the only path that writes anything memory can later read back, so with the layer off memory would keep adding a packet to every prompt without ever learning — `supervisor.enabled: false` therefore resolves `memory.enabled` to `false` for the run and prints a warning naming both keys. Set `memory.enabled: false` yourself to make the file say what runs.
+
 | Field | Type | Default (dataclass / install) | Meaning |
 | --- | --- | --- | --- |
-| `memory.enabled` | bool | `false` / install: `true` | Global memory toggle. |
+| `memory.enabled` | bool | `false` / install: `true` | Global memory toggle. Forced to `false` for the run when `supervisor.enabled` is `false`. |
 | `memory.short_term_ttl_days` | int | `30` | Episodic entries expire after N days (long-term has no TTL). |
 | `memory.packet_max_lines` | int | `120` | Hard line backstop for a per-node memory brief. |
 | `memory.packet_max_long_term` | int | `3` | Max long-term lessons per packet. |

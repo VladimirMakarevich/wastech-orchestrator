@@ -177,7 +177,16 @@ from wastech_orchestrator.providers.base import ProviderId
 # migrated (one old `model` has two new homes and copying it would put the expensive model back on
 # the cheap notes): the loader rejects a flat key fail-closed naming the new place, and
 # `upgrade-config` strips it with a visible report line.
-CONFIG_SCHEMA_VERSION = 33
+# v34 (2026-08-03, supervisor-disable-switch-p3): adds `supervisor.enabled` (bool, default true) —
+# the whole oversight layer is not built when false, so none of its four phases happens (the
+# per-step observation, the whole-task finalize that writes `summary.md`, the handoff brief, and
+# `skills.dynamic` node→skills proposal). Absent or true => today's behavior exactly. Two couplings
+# ride with it, both resolved at LOAD time so no runtime path grows a second "is the layer on?"
+# condition: the rest of the `supervisor` block becomes inert and is no longer validated (one
+# warning names the keys), and `memory.enabled: true` is forced false for the run too, because
+# the layer's finalize turn is the only path that writes anything memory can later read back. Old
+# configs load fail-open with the default; `upgrade-config` adds the key from the template.
+CONFIG_SCHEMA_VERSION = 34
 
 
 class AuditBranch(StrEnum):
@@ -575,13 +584,16 @@ class SupervisorObserveConfig:
 
 @dataclass(frozen=True)
 class SupervisorConfig:
-    """The constant supervisor layer — oversight ABOVE any flow, not a node.
+    """The supervisor layer — oversight ABOVE any flow, not a node. On by default, removable.
 
     It exists for every task under any flow shape: it observes completed steps read-only through its
     own ``resume_own_lineage`` session and synthesizes the summary + advisory caveats at whole-task
     close. Trusted at the ``config.yaml`` level and validated under the same ceiling as flow nodes:
     ``permission_profile`` is forced ``read-only`` in code, every ``reasoning`` ∈ the allowlist
     (loader), and ``role_file`` is path-contained (validator).
+
+    Set ``enabled: false`` to remove the layer entirely; the pull-request body is then rendered
+    deterministically from the run's own recorded facts, so no run ships without one.
 
     ``role_file`` and ``provider`` are one-per-layer and stay top-level: ``role_file`` is the
     observe lens, whose flow-local namesake is ``SupervisorBlock.role_file``, and ``provider`` empty
@@ -597,6 +609,11 @@ class SupervisorConfig:
     only.
     """
 
+    # The whole layer, not a phase: false and it is never built, so there are no per-step notes, no
+    # whole-task synthesis, no subtask handoff brief and no `skills.dynamic` proposal — and every
+    # other key here is then inert (the validator says so in one warning). True by default: the
+    # constant oversight the rest of this docstring describes.
+    enabled: bool = True
     role_file: str = "roles/supervisor.md"
     provider: ProviderId | None = None
     # Defaulted nested blocks, last: a default keeps every existing positional/`replace`

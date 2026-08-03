@@ -4858,3 +4858,180 @@ def test_read_only_node_that_poisons_a_git_hook_warns_operator_and_never_parks_t
     audit_traces = [c["outcome"] for c in notifier.trace_calls if c["node_id"] == "audit"]
     assert audit_traces == [TRACE_READ_ONLY_GIT_DRIFT]
     assert any("changed git control state" in m for m in messages)
+
+
+# --- supervisor.enabled: false — the whole layer removed (P3) -------------------------------
+
+
+def test_disabled_layer_makes_no_calls_and_still_writes_the_pr_body(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The switch, end to end on the PACKAGED implementation flow — which declares `observe.mode:
+    # events`. That declaration is the trap the switch had to be designed around: expressing "off"
+    # as a global `mode: none` fails validation AFTER the task is claimed, so the task lands in a
+    # terminal `failed` to re-queue by hand (and `watch` would grind the whole queue). With
+    # `enabled: false` the narrowing check is skipped, the flow runs, and nothing calls the layer.
+    providers = _both()
+    orch, store, _, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"supervisor_enabled": False},
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-nosup"))
+    assert result.final_status is Status.DONE
+    assert orch._supervisor is None  # the object is never built — that is the whole mechanism
+
+    # Not one provider call, not one row, not one artifact belonging to the layer.
+    assert _supervisor_attempts(store, "task-nosup") == []
+    kinds = {row["kind"] for row in _evaluations(store, "task-nosup")}
+    assert not kinds & {"supervisor_step", "supervisor_final", "supervisor_skill_proposal"}
+    task_dir = task_artifact_dir(art, "task-nosup")
+    assert not (task_dir / "packet.json").exists()
+
+    # The PR body is still there, and it is the deterministic report — with no degradation callout,
+    # because nothing degraded: this is the artifact the mode is supposed to produce.
+    summary = (task_dir / "summary.md").read_text("utf-8")
+    assert "## Changes" in summary and "## Steps" in summary
+    assert "Fallback summary" not in summary
+    # No spend block either, which is how an operator tells this apart from a degraded run.
+    metadata = json.loads((task_dir / "summary.json").read_text("utf-8"))
+    assert "supervisor_usage" not in metadata and "degraded" not in metadata
+
+
+def test_absent_enabled_key_matches_an_explicit_true(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The default-parity regression: the new key must change nothing when absent. Compared on what
+    # the layer actually did — its provider calls and the evaluation kinds it recorded — not merely
+    # on "the object was built".
+    def run(task_id: str, **config_kwargs: object):
+        providers = _both()
+        orch, store, _, _ = _build(
+            git_repo,
+            make_git_config,
+            tmp_path / task_id,
+            providers=providers,
+            check_verdicts=[0],
+            config_kwargs=config_kwargs,
+        )
+        _patch_impl_edit(providers, git_repo)
+        assert (
+            orch.run_task(_complete_task(tmp_path / task_id, task_id)).final_status is Status.DONE
+        )
+        return len(_supervisor_attempts(store, task_id)), sorted(
+            {row["kind"] for row in _evaluations(store, task_id)}
+        )
+
+    assert run("task-default") == run("task-explicit", supervisor_enabled=True)
+
+
+def test_disabled_layer_leaves_only_the_operators_skill_pins(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # `skills.dynamic: true` with no layer degrades to "only what the flow pins", which is correct
+    # (the dynamic layer is fail-open by design) but silent — hence the config warning. Here: the
+    # inventory is non-empty and dynamic is on, yet nothing is proposed, so the map stays empty.
+    skill_dir = git_repo.clone / ".claude" / "skills" / "safe-change"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: safe-change\ndescription: review your change\n---\n\n# Body\nguidance\n",
+        encoding="utf-8",
+    )
+    git_run(["add", ".claude/skills/safe-change/SKILL.md"], git_repo.clone)
+    git_run(["commit", "-m", "add safe-change skill"], git_repo.clone)
+
+    providers = _both()
+    orch, store, _, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"supervisor_enabled": False, "skills_dynamic": True},
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    assert orch.run_task(_complete_task(tmp_path, "task-nosup-skills")).final_status is Status.DONE
+    skill_map = json.loads(
+        (task_artifact_dir(art, "task-nosup-skills") / "skill_map.json").read_text("utf-8")
+    )
+    # The packaged flow pins nothing, so with no proposal the effective set is empty for every node.
+    assert all(not refs for refs in skill_map.values())
+    assert not any(
+        row["kind"] == "supervisor_skill_proposal"
+        for row in _evaluations(store, "task-nosup-skills")
+    )
+    impl = next(r for p in providers.values() for r in p.requests if r.node_id == "implementation")
+    assert impl.skill_reference_paths == ()
+
+
+def test_disabled_layer_still_writes_the_deterministic_handoff_floor(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The handoff phase disappears with the layer, but the FLOOR it decorated does not: the
+    # predecessor brief (spec pointer + acceptance criteria + changed files) is assembled from
+    # artifacts, so a decomposed run keeps its subtask context with zero LLM calls.
+    subtasks = {
+        "decompose": True,
+        "subtasks": [
+            {
+                "order": 1,
+                "title": "First",
+                "slug": "first",
+                "acceptance_criteria": ["crit-one"],
+                "depends_on": [],
+            },
+            {
+                "order": 2,
+                "title": "Second",
+                "slug": "second",
+                "acceptance_criteria": ["crit-two"],
+                "depends_on": [1],
+            },
+        ],
+    }
+    state = {"n": 0}
+
+    class DecompProvider(FakeProvider):
+        def run(self, request: AgentRunRequest) -> AgentRunResult:
+            if request.node_id == "planning":
+                return AgentRunResult(
+                    status=RunStatus.SUCCEEDED,
+                    provider=self.id,
+                    node_id=request.node_id,
+                    attempt=request.attempt,
+                    exit_code=0,
+                    started_at="t",
+                    finished_at="t",
+                    final_message="plan",
+                    structured_output={"content": "plan", "human_input": None, **subtasks},
+                )
+            if request.node_id == "implementation":
+                (git_repo.clone / f"impl-{state['n']}.py").write_text("x\n", encoding="utf-8")
+                state["n"] += 1
+            return super().run(request)
+
+    providers = {
+        ProviderId.CLAUDE: DecompProvider("claude"),
+        ProviderId.CODEX: DecompProvider("codex"),
+    }
+    orch, store, _, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"decomposition": True, "supervisor_enabled": False},
+    )
+    assert orch.run_task(_complete_task(tmp_path, "task-nosup-hnd")).final_status is Status.DONE
+    assert _supervisor_attempts(store, "task-nosup-hnd") == []
+
+    brief = task_artifact_dir(art, "task-nosup-hnd") / "subtasks" / "02-second.handoff.md"
+    assert brief.exists() and brief.read_text("utf-8").strip()
+    body = brief.read_text("utf-8")
+    assert "01-first.md" in body and "crit-one" in body and "Changed files" in body

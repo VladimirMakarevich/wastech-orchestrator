@@ -16,10 +16,11 @@
 # evaluator runner already supports its self-cap) is NOT shipped in this default flow: it is a pure
 # graph-shape choice — an operator who wants it adds the node to their own flow YAML.
 #
-# NOTE: the supervisor is NOT a graph node. It is a constant orchestrator layer ABOVE any flow
+# NOTE: the supervisor is NOT a graph node. It is an orchestrator layer ABOVE any flow
 # (summary + per-step advisory oversight, configured in config.yaml: supervisor). There is NO
-# `summary` node here: the constant supervisor layer writes the summary at whole-task close (before
-# publish) and observes every completed step.
+# `summary` node here: the whole-task summary is written at close, before publish — by the
+# supervisor layer at the cadence config.yaml sets, and deterministically from the run's own
+# recorded facts when that layer is switched off (`supervisor.enabled: false`).
 #
 # ----------------------------------------------------------------------------------------------------
 # Per-node tuning (ALL fields below are OPTIONAL — omit one to inherit the default). Every

@@ -96,6 +96,7 @@ def _config(
     codex_profile: str = "workspace-write",
     strict_isolation: bool = True,
     observe_mode: str | None = None,
+    supervisor_enabled: bool | None = None,
 ) -> OrchestratorConfig:
     text = f"""
 repo:
@@ -131,8 +132,13 @@ git:
     audit_commit_message: "chore: audit {{task_id}}"
     audit_on_branch: task
 """
+    supervisor_lines = []
+    if supervisor_enabled is not None:
+        supervisor_lines.append(f"  enabled: {str(supervisor_enabled).lower()}\n")
     if observe_mode is not None:
-        text += f"supervisor:\n  observe:\n    mode: {observe_mode}\n"
+        supervisor_lines.append(f"  observe:\n    mode: {observe_mode}\n")
+    if supervisor_lines:
+        text += "supervisor:\n" + "".join(supervisor_lines)
     return loads_config(text).config
 
 
@@ -364,6 +370,29 @@ def test_flow_without_a_cadence_inherits_the_global_one(tmp_path: Path) -> None:
     snap = _snap(_flow(), tmp_path)
     validate_flow(snap)
     validate_flow_against_config(snap, config)
+
+
+@pytest.mark.parametrize("flow_mode", ["all", "selected", "events"])
+def test_disabled_layer_accepts_a_flow_declaring_any_cadence(
+    tmp_path: Path, flow_mode: str
+) -> None:
+    # The narrowing rule is a COST rule, and with the layer off there is no budget to overspend. It
+    # has to be skipped rather than merely tolerated: the packaged `implementation` flow declares
+    # `events`, this rejection lands AFTER the task is claimed, and a terminal `failed` there has to
+    # be re-queued by hand — so leaving the check armed would make the switch unusable.
+    config = _config(tmp_path, observe_mode="none", supervisor_enabled=False)
+    snap = _snap(_cadence_flow(flow_mode), tmp_path)
+    validate_flow(snap)
+    validate_flow_against_config(snap, config)  # no raise
+
+
+def test_disabled_layer_still_rejects_a_traversing_supervisor_prompt(tmp_path: Path) -> None:
+    # The switch cannot weaken the envelope. Prompt containment is a check on AUTHORED FLOW CONTENT,
+    # so it does not consult the operator's config at all — structurally, not by choice:
+    # `_check_ceiling` takes no config, so no config key can reach it.
+    flow = _flow(extra="") + '  supervisor:\n    role_file: "../escape.md"\n'
+    vs = _structural_violations(flow, tmp_path)
+    assert _has(vs, "ceiling", "..")
 
 
 def test_threat_ceiling_above_provider_capability_fatal(tmp_path: Path) -> None:

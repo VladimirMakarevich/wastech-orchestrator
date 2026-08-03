@@ -210,6 +210,10 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
         # is written explicitly at the global default — deviations only, so a run pays for
         # observations in proportion to what actually went wrong rather than to its length.
         "supervisor": {
+            # Written explicitly at the default so an operator finds the whole-layer switch in their
+            # own config rather than in the reference — the same reason `skills.dynamic` and
+            # `observe.mode` are seeded rather than left implicit.
+            "enabled": True,
             "role_file": "roles/supervisor.md",
             "provider": primary_pid.value,
             "observe": {

@@ -1,6 +1,6 @@
 # Supervisor P3: полное отключение слоя (`supervisor.enabled`) + детерминированный finalize
 
-**Статус:** **accepted** (2026-08-03; предложено в тот же день, все четыре развилки закрыты в «[Решения приёмки](#решения-приёмки-2026-08-03)» — Q1 решён **не** по рекомендации документа, Q4 найден при сверке с кодом и отменяет часть D6) **Приоритет:** P3 (не на критическом пути экономии — P0/P1/P2 уже её дали; это крайний режим «слой не нужен вообще» плюс закрытие известной дырки p0-2) **Источник:** запрос оператора 2026-08-03 + известная дырка из [deep-research-postmortem/p0-2](../deep-research-postmortem/p0-2-evaluator-findings-surfacing.md) («деградировавший finalize теряет находки эвалюаторов из тела PR»).
+**Статус:** **implemented 2026-08-03** (предложено и принято в тот же день; все четыре развилки закрыты в «[Решения приёмки](#решения-приёмки-2026-08-03)» — Q1 решён **не** по рекомендации документа, Q4 найден при сверке с кодом и отменяет часть D6; отступления от текста задачи — в «[Отклонения от текста задачи](#отклонения-от-текста-задачи-2026-08-03)») **Приоритет:** P3 (не на критическом пути экономии — P0/P1/P2 уже её дали; это крайний режим «слой не нужен вообще» плюс закрытие известной дырки p0-2) **Источник:** запрос оператора 2026-08-03 + известная дырка из [deep-research-postmortem/p0-2](../deep-research-postmortem/p0-2-evaluator-findings-surfacing.md) («деградировавший finalize теряет находки эвалюаторов из тела PR»).
 
 **Дорожная карта:** [P0 — packet + fresh finalize](supervisor-finalize-packet-and-cadence.md) → [P1 — cadence](supervisor-observation-cadence-p1.md) → [P2 — разделение обязанностей и telemetry](supervisor-responsibility-split-p2.md) → **P3 (этот документ)**.
 
@@ -376,6 +376,20 @@ Follow-ups и отчёт:
 **Не трогаем** (проверено, утверждение остаётся верным): `guide/flows/README.md:17`, `guide/flows/prompt-variables.md:30`, `guide/flows/roles.md:77`, комментарии «constant layer above the flow (not a node)» в `blog_article.yaml`, `blog_article_revise.yaml`, `content_chapter.yaml`, `content_translate.yaml`, `implementation.yaml:170`.
 
 Для `main` (одна строка в [main-docs-reconstruction-notes.md](../main-docs-reconstruction-notes.md)): затронуты `configuration.md` (новый ключ + связь с памятью), `worc_architecture.md` (слой перестаёт быть безусловным), `operations.md` / `cookbook.md` (режим «работаем без supervisor'а»).
+
+## Отклонения от текста задачи (2026-08-03)
+
+Четыре — все найдены при контакте с кодом, ни одно не меняет решений приёмки.
+
+**1. Warning `upgrade-config` печатается у пробы, а не у пост-merge `loads_config`.** P3-Q1 назвал [`cli.py:1052`](../../../src/wastech_orchestrator/cli.py). Этот сайт **недостижим** для самого частого случая: на `merged == operator` команда делает early-return «already up to date» — ровно стабильное состояние долгоживущего конфига — и 1052 лежит ниже. Warning печатается у пробы (fail-closed read-back), которая проходится на каждом вызове. Расхождение между пробой и merged по этому конфликту невозможно: `_merge` не перезаписывает существующие листья, и ни `supervisor.enabled`, ни `memory.enabled` не в `_REMOVED_KEYS`. Пиннится тестом именно на already-up-to-date конфиге.
+
+**2. `## Checks` в отчёте сводится к последнему прогону команды.** Таблица D9 помечала `_checks(check_runs)` как «✅ есть», то есть переиспользовать дословно. Но `check_runs` пишется одной строкой на **каждый** прогон, поэтому команда, которая упала и была починена, попала бы в теле зелёного PR и в `Passed`, и в `Failed`. Это не история, а противоречие — ровно тот класс ошибки, ради которого существует `render_gate_digest`, только в обратную сторону. Отчёт сворачивает по `(command, subtask_order)`, тем же правилом «предыдущие раунды перекрыты», что у `_last_verdict_per_node`. **Пакет не меняется** — байт-идентичность P0-D2 сохранена.
+
+**3. Doc-impact вырос на четыре записи.** Критерий P3-D12 верен, но проход по нему пропустил: [`.agents/rules/architecture.md:20`](../../../.agents/rules/architecture.md) («observes **each** completed step» + «writes the whole-task summary at close» — та же безусловность, что на :44), [`.agents/rules/testing.md:30`](../../../.agents/rules/testing.md) и `:60` (называют удалённый контракт «what / how / integration / why» и «deterministic minimal summary»), и [`README.md:51`](../../../README.md) — документ утверждал, что там править нечего, но фраза «watches **every** step and writes the summary» безусловна по обоим пунктам (и «every step» устарела ещё после P1).
+
+**4. `build_packet_facts` принимает узкий `PacketStorePort`, а не десять параметров.** Очевидная сигнатура — 11 аргументов — упирается в ruff `PLR0913` (`max-args = 10`), а блок `per-file-ignores` в [`pyproject.toml`](../../../pyproject.toml) явно объявлен burn-down-списком, так что добавлять туда новый код неправильно. Порт из двух read-методов — домашний паттерн (`RouterPort`, `SupervisorStorePort`), и оба вызывающих удовлетворяют ему структурно, не зная друг о друге.
+
+Сверх текста задачи сделано (по согласованию с оператором): `newline=""` на **всех четырёх** писателях `summary.md`, включая коммитимую копию `<id>.summary.md` — без остальных трёх строка из шага 3 декоративна, они перезаписывают тот же файл и вернули бы CRLF на Windows; и удалён `GitManager.diff_stat`, у которого после ухода `self._git.diff_stat()` из `_summary_md_body` не осталось продакшн-вызывающих (vulture с `min_confidence = 80` его бы не поймал).
 
 ## Вне объёма
 

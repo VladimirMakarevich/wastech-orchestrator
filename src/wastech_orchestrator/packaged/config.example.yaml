@@ -2,7 +2,7 @@
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 # This is the packaged copy used by `wastech-orchestrator init` (the only example config; nothing else to sync).
 
-schema_version: 33                  # config format version; the orchestrator refuses newer configs
+schema_version: 34                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -283,7 +283,14 @@ skills:                             # repo skill selection (optional)
   # when `dynamic`, the supervisor's proposed ones — the Core decides. Chosen SKILL.md files reach the
   # node as read-only reference paths (never executed, never the Claude Skill tool — Codex has none).
 
-supervisor:                          # constant oversight layer above any flow — always active
+supervisor:                         # oversight layer above any flow (not a node) — on by default
+  enabled: true                     # false = the layer is never built: no per-step notes, no whole-task
+                                    #   summary turn, no subtask handoff brief, no `skills.dynamic`
+                                    #   proposal, and every key below is inert (one warning says so).
+                                    #   The PR body is then rendered deterministically from the run's own
+                                    #   recorded facts — changed paths, steps, checks, gate verdicts,
+                                    #   follow-ups — so no run ships without one. Also forces
+                                    #   `memory.enabled` off for the run (see `memory`).
   role_file: "roles/supervisor.md"  # observe-lens role prompt; path-contained under roles/
   provider: claude                  # null = inherit the global primary; pin (∈ agents.allowed) to keep aligned with the models' vendor
   # `role_file` and `provider` are one per layer; model and effort are PER PHASE, because a cheap
@@ -316,6 +323,8 @@ supervisor:                          # constant oversight layer above any flow �
   # is already a durable fact the finalize packet carries verbatim.
   # A flow may NARROW this in its own `supervisor.observe.mode` (a content flow ships `none`) but
   # never widen it — a broader flow mode fails validation. Ranking: none < events < selected < all.
+  # That check does not apply at `enabled: false`: there is no cadence to widen, so a flow declaring
+  # any mode still runs. That is why switching the layer off is its own key, not a global `none`.
   # The once-per-task skill proposal (`skills.dynamic`) uses the `observe` model/effort — same cheap
   # shape — and runs regardless of `mode`, which gates per-step observations only.
 
@@ -341,6 +350,10 @@ logging:                            # operator log verbosity + on-disk artifact 
 memory:                             # persistent, repo-scoped memory (optional)
   enabled: true                     # false / omit the whole block = today's behavior: no store, no
                                     #   candidate delta, empty memory packets, CLI no-op, no cleanup
+                                    # Needs `supervisor.enabled: true`: that layer's closing turn is the
+                                    #   only path that writes anything memory can read back, so with the
+                                    #   layer off this resolves to false for the run and a warning names
+                                    #   both keys. Set it false yourself to make the file say what runs.
   short_term_ttl_days: 30           # episodic entries expire after N days (long-term has no TTL)
   # Per-node retrieval packet caps — deliberately small (precision over recall):
   packet_max_lines: 120             # hard line backstop for a per-node memory brief

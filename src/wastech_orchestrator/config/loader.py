@@ -12,7 +12,7 @@ This module owns *structural* parsing only. The cross-field semantic rules live 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -69,6 +69,16 @@ _DEFAULT_DENIED_COMMANDS: tuple[str, ...] = (
     "git push",
     "gh pr create",
     "gh pr merge",
+)
+
+# Emitted when a config asks for memory under a switched-off supervisor layer. The quench itself
+# is invisible in the resolved config, so this text has to close the gap the file leaves open:
+# name BOTH keys, say memory is off for this run, and say how to make the file honest.
+_MEMORY_WITHOUT_SUPERVISOR_WARNING = (
+    "`supervisor.enabled: false` turns memory off for this run (`memory.enabled: true` in the "
+    "config is ignored): the supervisor's finalize turn is the only path that adds anything memory "
+    "can later read back, so with the layer off memory would keep adding packets to every prompt "
+    "without ever learning. Set `memory.enabled: false` to make the config say what runs."
 )
 
 
@@ -780,7 +790,7 @@ def _build_supervisor(raw: Any, issues: list[str]) -> SupervisorConfig:
             )
     _check_keys(
         m,
-        {"role_file", "provider", "observe", "finalize", "handoff"},
+        {"enabled", "role_file", "provider", "observe", "finalize", "handoff"},
         where,
         issues,
         # Named above with a destination; `_check_keys` would only add a vaguer duplicate.
@@ -794,6 +804,7 @@ def _build_supervisor(raw: Any, issues: list[str]) -> SupervisorConfig:
         except ValueError:
             issues.append(f"{where}.provider: unknown provider {provider_raw!r}")
     return SupervisorConfig(
+        enabled=_bool(m, "enabled", True, where, issues),
         role_file=_str(m, "role_file", "roles/supervisor.md", where, issues),
         provider=provider,
         observe=_build_supervisor_observe(m.get("observe"), issues),
@@ -932,6 +943,19 @@ def _parse(raw: Mapping[str, Any], issues: list[str], warnings: list[str]) -> Or
     # fail-open and ``upgrade-config`` strips the dead block.
     _check_keys(raw, _TOP_LEVEL_KEYS, "<root>", issues, tolerated={"prompts"})
     _check_schema_version(raw, issues)
+    # Hoisted out of the constructor call below because these two are not independent — the only
+    # pair of sections whose resolved values depend on each other.
+    supervisor = _build_supervisor(raw.get("supervisor"), issues)
+    memory = _build_memory(raw.get("memory"), issues)
+    if not supervisor.enabled and memory.enabled:
+        # One mode, not two orthogonal keys: with no layer, the only writer of content memory can
+        # ever read back is gone, while the read side would keep injecting a packet into every
+        # prompt. Settled here — the single place both sections exist — so that every memory
+        # consumer keeps reading exactly one flag and none of them grows a second condition.
+        # ``replace`` rather than a fresh ``MemoryConfig``: the operator's TTL / packet / cleanup
+        # tuning must survive being switched off.
+        memory = replace(memory, enabled=False)
+        warnings.append(_MEMORY_WITHOUT_SUPERVISOR_WARNING)
     return OrchestratorConfig(
         orchestrator=_build_orchestrator(raw.get("orchestrator"), issues),
         repo=_build_repo(raw.get("repo"), issues),
@@ -942,10 +966,10 @@ def _parse(raw: Mapping[str, Any], issues: list[str], warnings: list[str]) -> Or
         git=_build_git(raw.get("git"), issues),
         telegram=_build_telegram(raw.get("telegram"), issues),
         skills=_build_skills(raw.get("skills"), issues),
-        supervisor=_build_supervisor(raw.get("supervisor"), issues),
+        supervisor=supervisor,
         paths=_build_paths(raw.get("paths"), issues),
         logging=_build_logging(raw.get("logging"), issues),
-        memory=_build_memory(raw.get("memory"), issues),
+        memory=memory,
         tools=_build_tools(raw.get("tools"), issues),
         prompt_audit=_bool(raw, "prompt_audit", False, "<root>", issues),
     )

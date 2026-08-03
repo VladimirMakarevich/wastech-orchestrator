@@ -2592,9 +2592,17 @@ class Orchestrator:
                 manual_reason="control plane: frozen flow does not match checkpoint; rerun fresh",
             )
         p.flow_name = snapshot.doc.name
-        # The constant supervisor layer starts at task start and lives the whole cycle; it
-        # carries this task's own resume_own_lineage session. It reads the frozen prompts.
-        self._supervisor = self._build_supervisor(p, snapshot, flow_dir=bundle.flow_dir)
+        # The supervisor layer starts at task start and lives the whole cycle; it carries this
+        # task's own resume_own_lineage session. It reads the frozen prompts. Switched off, it is
+        # simply not built: all four consumers already tolerate its absence, so "do not construct
+        # the object" is the whole mechanism. The assignment stays unconditional (not an `if` that
+        # skips
+        # it) so no layer from a previous task in a `watch` loop can survive into this one.
+        self._supervisor = (
+            self._build_supervisor(p, snapshot, flow_dir=bundle.flow_dir)
+            if self._config.supervisor.enabled
+            else None
+        )
         inputs = build_node_inputs(
             p,
             flow_dir=bundle.flow_dir,

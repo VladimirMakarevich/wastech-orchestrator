@@ -155,6 +155,10 @@ def test_generated_config_includes_optional_sections(tmp_path: Path) -> None:
     text = build_and_validate(_spec(tmp_path, (ProviderId.CLAUDE,)))
     cfg = loads_config(text).config
     assert cfg.supervisor.role_file == "roles/supervisor.md"
+    # The whole-layer switch is written explicitly at its default, so an operator finds it in their
+    # own config rather than only in the reference.
+    assert cfg.supervisor.enabled is True
+    assert "enabled: true" in text.split("supervisor:", 1)[1].split("logging:", 1)[0]
     # Each delivered supervisor phase carries a concrete, visible model/reasoning (the global
     # primary's model + a non-max reasoning), not an implicit inherit-from-primary null.
     for phase in (cfg.supervisor.observe, cfg.supervisor.finalize, cfg.supervisor.handoff):

@@ -193,6 +193,7 @@ def validate_config(config: OrchestratorConfig) -> list[str]:
     _validate_telegram(config, issues)
     _validate_confirmation_gates(config, issues)
     _validate_supervisor(config, issues, warnings)
+    _validate_skills(config, warnings)
     _validate_security(config, issues)
     _validate_paths(config, issues)
 
@@ -225,6 +226,32 @@ def _validate_paths(config: OrchestratorConfig, issues: list[str]) -> None:
         )
 
 
+#: Named once so the warning below and the early return it guards cannot drift apart.
+_INERT_SUPERVISOR_KEYS = "role_file / provider / observe / finalize / handoff"
+
+
+def _validate_skills(config: OrchestratorConfig, warnings: list[str]) -> None:
+    """A dynamic skill map needs the layer that proposes it.
+
+    A warning rather than a fatal issue, because the dynamic layer is fail-open by design (a
+    proposal naming a skill that does not resolve is filtered out, never an error): "each node
+    gets only the
+    skills pinned on it in the flow" is a correct degradation, not a lost guarantee. It is silent,
+    though, which is what earns the warning.
+
+    Worded about the **resolved** value on purpose: a ``skills:`` block written without a
+    ``dynamic:`` key resolves to true (the loader's default for a present block), so this can
+    fire for
+    an operator who never typed the word.
+    """
+    if config.skills.dynamic and not config.supervisor.enabled:
+        warnings.append(
+            "skills.dynamic resolves to true but supervisor.enabled is false — the once-per-task "
+            "node→skills proposal is a supervisor turn, so each node gets only the skills pinned "
+            "on it in the flow YAML"
+        )
+
+
 def _validate_supervisor(
     config: OrchestratorConfig, issues: list[str], warnings: list[str]
 ) -> None:
@@ -248,8 +275,21 @@ def _validate_supervisor(
     signal — surfaced as a WARNING, not fatal (the run still degrades via fallback; "fatal only when
     no runtime fallback"). The check fires only on the inherited path; an explicit provider is the
     operator's call and is validated for ``agents.allowed`` membership above.
+
+    With the layer switched off none of these values is ever read: no provider is resolved, no model
+    is sent, and no role file is opened, so refusing a config over a model that will never be called
+    would only punish an operator who left the block behind. It becomes one warning instead. Nothing
+    is actually lost by that — ``read_role_file`` enforces flow-dir containment unconditionally at
+    read time and the router re-checks ``agents.allowed`` at route resolution; these are the early,
+    friendly copies of both.
     """
     supervisor = config.supervisor
+    if not supervisor.enabled:
+        warnings.append(
+            "supervisor.enabled: false — the rest of the supervisor block "
+            f"({_INERT_SUPERVISOR_KEYS}) is inert and is not validated"
+        )
+        return
     provider = supervisor.provider
     if provider is not None and provider not in frozenset(config.agents.allowed):
         issues.append(f"supervisor.provider {provider.value!r} is not in agents.allowed")
