@@ -7,7 +7,12 @@ from dataclasses import replace
 import pytest
 
 from wastech_orchestrator.config.loader import ConfigError, loads_config
-from wastech_orchestrator.config.schema import OrchestratorConfig, PathsConfig
+from wastech_orchestrator.config.schema import (
+    OrchestratorConfig,
+    PathsConfig,
+    SupervisorObserveConfig,
+    SupervisorTurnConfig,
+)
 from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.providers.base import ProviderId
 
@@ -161,7 +166,11 @@ def test_supervisor_reasoning_valid_for_pinned_provider(base_config: Orchestrato
     # `minimal` is codex-only, so it is valid here even though the primary is claude.
     cfg = replace(
         base_config,
-        supervisor=replace(base_config.supervisor, provider=ProviderId.CODEX, reasoning="minimal"),
+        supervisor=replace(
+            base_config.supervisor,
+            provider=ProviderId.CODEX,
+            finalize=SupervisorTurnConfig(reasoning="minimal"),
+        ),
     )
     assert validate_config(cfg) == []
 
@@ -174,11 +183,15 @@ def test_supervisor_reasoning_rejected_against_pinned_provider(
     # resolves through the global primary (which would have accepted it).
     cfg = replace(
         _codex_primary(base_config),
-        supervisor=replace(base_config.supervisor, provider=ProviderId.CLAUDE, reasoning="minimal"),
+        supervisor=replace(
+            base_config.supervisor,
+            provider=ProviderId.CLAUDE,
+            finalize=SupervisorTurnConfig(reasoning="minimal"),
+        ),
     )
     with pytest.raises(ConfigError) as exc:
         validate_config(cfg)
-    assert any("supervisor.reasoning" in issue for issue in exc.value.issues)
+    assert any("supervisor.finalize.reasoning" in issue for issue in exc.value.issues)
 
 
 def test_inherited_supervisor_model_vendor_mismatch_warns(base_config: OrchestratorConfig) -> None:
@@ -188,11 +201,15 @@ def test_inherited_supervisor_model_vendor_mismatch_warns(base_config: Orchestra
     cfg = replace(
         _codex_primary(base_config),
         supervisor=replace(
-            base_config.supervisor, provider=None, model="claude-opus-5", reasoning=None
+            base_config.supervisor,
+            provider=None,
+            observe=SupervisorObserveConfig(),
+            finalize=SupervisorTurnConfig(model="claude-opus-5"),
         ),
     )
     warnings = validate_config(cfg)
-    assert any("supervisor.model" in w and "codex" in w for w in warnings)
+    # Named per phase: with three models to check, "supervisor.model" alone would not say which.
+    assert any("supervisor.finalize.model" in w and "codex" in w for w in warnings)
 
 
 def test_inherited_supervisor_unknown_model_does_not_warn(base_config: OrchestratorConfig) -> None:
@@ -201,7 +218,13 @@ def test_inherited_supervisor_unknown_model_does_not_warn(base_config: Orchestra
     cfg = replace(
         _codex_primary(base_config),
         supervisor=replace(
-            base_config.supervisor, provider=None, model="custom-inhouse-1", reasoning=None
+            base_config.supervisor,
+            provider=None,
+            # All three phases: the vendor check runs per phase, so leaving one at a claude model
+            # would (correctly) warn about that phase and mask what this test is about.
+            observe=SupervisorObserveConfig(model="custom-inhouse-1"),
+            finalize=SupervisorTurnConfig(model="custom-inhouse-1"),
+            handoff=SupervisorTurnConfig(model="custom-inhouse-1"),
         ),
     )
     assert validate_config(cfg) == []
@@ -284,10 +307,17 @@ def test_claude_minimal_reasoning_is_rejected(base_config: OrchestratorConfig) -
 def test_supervisor_reasoning_uses_global_primary_provider(
     base_config: OrchestratorConfig,
 ) -> None:
-    bad = replace(base_config, supervisor=replace(base_config.supervisor, reasoning="minimal"))
+    bad = replace(
+        base_config,
+        supervisor=replace(
+            base_config.supervisor, observe=SupervisorObserveConfig(reasoning="minimal")
+        ),
+    )
     with pytest.raises(ConfigError) as exc:
         validate_config(bad)
-    assert any("supervisor.reasoning" in issue and "claude" in issue for issue in exc.value.issues)
+    assert any(
+        "supervisor.observe.reasoning" in issue and "claude" in issue for issue in exc.value.issues
+    )
 
 
 def test_negative_poll_interval_is_rejected(base_config: OrchestratorConfig) -> None:

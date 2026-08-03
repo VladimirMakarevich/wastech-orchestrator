@@ -170,7 +170,14 @@ from wastech_orchestrator.providers.base import ProviderId
 # v32: adds the optional `logging.clean_runs_on_success` (bool, default true) — a successful task
 # evicts its own per-task `runs/` subtree (frozen bundles + sealed exchanges). Old (absent) configs
 # take the default, so cleanup is on out of the box; set false to retain every run for analysis.
-CONFIG_SCHEMA_VERSION = 32
+# v33 (2026-08-03, supervisor-observation-cadence-p1): the flat `supervisor.model` /
+# `supervisor.reasoning` are REMOVED; each supervisor phase carries its own pair under
+# `supervisor.observe` / `.finalize` / `.handoff`, and `observe` additionally holds the cadence
+# (`mode`, `triggers`, `include_nodes`). `role_file` and `provider` stay top-level. Values are NOT
+# migrated (one old `model` has two new homes and copying it would put the expensive model back on
+# the cheap notes): the loader rejects a flat key fail-closed naming the new place, and
+# `upgrade-config` strips it with a visible report line.
+CONFIG_SCHEMA_VERSION = 33
 
 
 class AuditBranch(StrEnum):
@@ -193,6 +200,28 @@ class BranchMode(StrEnum):
     NEW = "new"
     EXISTING = "existing"
     CURRENT = "current"
+
+
+class ObserveMode(StrEnum):
+    """How often the supervisor layer spends an LLM turn observing a completed step.
+
+    Ranked by how many calls the mode can produce: ``none`` (0) < ``events`` (only deviations) <
+    ``selected`` (the listed nodes) < ``all`` (every observable step). A flow may *narrow* the
+    global mode but never widen it; the rank table and that comparison live in
+    ``core.observe_cadence``. The whole-task ``finalize`` turn is unaffected by every mode — it is
+    seeded by the deterministic ``SupervisorPacket``, not by the observations.
+    """
+
+    ALL = "all"
+    SELECTED = "selected"
+    EVENTS = "events"
+    NONE = "none"
+
+
+#: The closed set of ``observe.mode: events`` triggers. ``rework`` covers an evaluator's rework and
+#: its give-up accept (``rework_exhausted``); ``failure`` and ``fallback`` are read from the step's
+#: own ``node_runs`` row. Closed on purpose: a new trigger arrives with the facts it needs.
+OBSERVE_TRIGGERS: frozenset[str] = frozenset({"rework", "failure", "fallback"})
 
 
 class PublishScope(StrEnum):
@@ -515,25 +544,66 @@ class SkillsConfig:
 
 
 @dataclass(frozen=True)
+class SupervisorTurnConfig:
+    """The model + effort for one supervisor phase (``finalize`` or ``handoff``).
+
+    Both empty → the resolved provider's defaults. Shared by the two phases because they need the
+    same two knobs; ``observe`` carries the cadence as well, so it has its own shape below.
+    """
+
+    model: str | None = None
+    reasoning: str | None = None
+
+
+@dataclass(frozen=True)
+class SupervisorObserveConfig:
+    """The per-step observation phase: how often it runs, and with what model + effort.
+
+    ``mode`` is the cadence (see :class:`ObserveMode`); the global default is ``events``, so a flow
+    that declares nothing still pays only for deviations. ``triggers`` narrows which deviations
+    count under ``events`` (⊆ :data:`OBSERVE_TRIGGERS`); ``include_nodes`` lists the node ids
+    observed under ``selected``. The pair is the cheap one — this phase is advisory and can fire on
+    every step of a deep fix loop, so keep it at or below the producers' tier.
+    """
+
+    mode: ObserveMode = ObserveMode.EVENTS
+    triggers: tuple[str, ...] = ("rework", "failure", "fallback")
+    include_nodes: tuple[str, ...] = ()
+    model: str | None = None
+    reasoning: str | None = None
+
+
+@dataclass(frozen=True)
 class SupervisorConfig:
     """The constant supervisor layer — oversight ABOVE any flow, not a node.
 
-    It exists for every task under any flow shape: it observes each completed step read-only through
-    its own ``resume_own_lineage`` session (~1 LLM call/step) and synthesizes the summary + advisory
-    caveats at whole-task close. Trusted at the ``config.yaml`` level and validated under the same
-    ceiling as flow nodes: ``permission_profile`` is forced ``read-only`` in code, ``reasoning`` ∈
-    the allowlist (loader), and ``role_file`` is path-contained (validator). The own session is
-    in-memory; a durable ``resume_own_lineage`` session is a node-level scope. ``model``/
-    ``reasoning`` empty → the
-    provider default. ``provider`` empty → the global primary; set it (validated in
-    ``agents.allowed``) to pin the layer to a provider — e.g. keep the supervisor on claude while
-    the primary is codex, so its ``model`` reaches a provider that accepts it.
+    It exists for every task under any flow shape: it observes completed steps read-only through its
+    own ``resume_own_lineage`` session and synthesizes the summary + advisory caveats at whole-task
+    close. Trusted at the ``config.yaml`` level and validated under the same ceiling as flow nodes:
+    ``permission_profile`` is forced ``read-only`` in code, every ``reasoning`` ∈ the allowlist
+    (loader), and ``role_file`` is path-contained (validator).
+
+    ``role_file`` and ``provider`` are one-per-layer and stay top-level: ``role_file`` is the
+    observe lens, whose flow-local namesake is ``SupervisorBlock.role_file``, and ``provider`` empty
+    → the global primary; set it (validated in ``agents.allowed``) to pin the layer to a provider —
+    e.g. keep the supervisor on claude while the primary is codex, so its models reach a provider
+    that accepts them.
+
+    Model and effort are **per phase** instead: a cheap ``observe`` note and the whole-task
+    ``finalize`` synthesis that writes ``summary.md`` (the pull-request body) have opposite cost
+    profiles, and one shared pair could not serve both. ``handoff`` is the subtask brief on a
+    decompose flow. The once-per-task skill proposal (``skills.dynamic``) uses the ``observe`` pair
+    — same cheap, schema-bound shape — independently of ``observe.mode``, which gates observations
+    only.
     """
 
     role_file: str = "roles/supervisor.md"
-    model: str | None = None
-    reasoning: str | None = None
     provider: ProviderId | None = None
+    # Defaulted nested blocks, last: a default keeps every existing positional/`replace`
+    # construction valid (same convention as ``AgentsConfig.retry``).
+    observe: SupervisorObserveConfig = field(default_factory=SupervisorObserveConfig)
+    finalize: SupervisorTurnConfig = field(default_factory=SupervisorTurnConfig)
+    handoff: SupervisorTurnConfig = field(default_factory=SupervisorTurnConfig)
 
 
 @dataclass(frozen=True)

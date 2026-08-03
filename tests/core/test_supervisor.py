@@ -15,7 +15,12 @@ from typing import Any
 import pytest
 
 from wastech_orchestrator.config.loader import ConfigError, loads_config
-from wastech_orchestrator.config.schema import SupervisorConfig
+from wastech_orchestrator.config.schema import (
+    ObserveMode,
+    SupervisorConfig,
+    SupervisorObserveConfig,
+    SupervisorTurnConfig,
+)
 from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.core.flow.engine import Finding
 from wastech_orchestrator.core.flow.run_state import FlowRunState
@@ -119,6 +124,8 @@ def _supervisor(
     model: str | None = None,
     reasoning: str | None = None,
     provider: ProviderId | None = None,
+    observe: SupervisorObserveConfig | None = None,
+    finalize: SupervisorTurnConfig | None = None,
     flow_supervisor: SupervisorBlock | None = None,
     flow_name: str | None = None,
     task_type: str | None = None,
@@ -133,7 +140,14 @@ def _supervisor(
     (tmp_path / "roles" / "supervisor.md").write_text("Observe {task_id} in {repo}.", "utf-8")
     return Supervisor(
         settings=SupervisorConfig(
-            role_file="roles/supervisor.md", model=model, reasoning=reasoning, provider=provider
+            role_file="roles/supervisor.md",
+            provider=provider,
+            # `model`/`reasoning` are the "same pair on every phase" shorthand, which is what a test
+            # about anything other than the split wants; a test about the split itself passes an
+            # explicit `observe=` / `finalize=` block.
+            observe=observe or SupervisorObserveConfig(model=model, reasoning=reasoning),
+            finalize=finalize or SupervisorTurnConfig(model=model, reasoning=reasoning),
+            handoff=SupervisorTurnConfig(model=model, reasoning=reasoning),
         ),
         router=router,
         store=store,
@@ -962,6 +976,64 @@ def test_schema_turn_caps_max_reasoning_but_free_text_keeps_it(tmp_path: Path) -
     assert free_router.requests[0].reasoning == "xhigh"
 
 
+def test_observe_and_finalize_use_their_own_model_and_reasoning(tmp_path: Path) -> None:
+    # The point of the split: a cheap note and the whole-task synthesis are configured separately,
+    # so
+    # an operator can make the notes cheap without weakening the summary that becomes the PR body.
+    router, store = FakeRouter([_ok("s", "note"), _ok("s", "# Summary\n\nDone.")]), _store(tmp_path)
+    sup = _supervisor(
+        tmp_path,
+        router,
+        store,
+        observe=SupervisorObserveConfig(model="haiku", reasoning="low"),
+        finalize=SupervisorTurnConfig(model="opus", reasoning="high"),
+    )
+
+    sup.observe(task_id=_TASK, node_id="implementation", node_run_id=1, outcome_kind="rework")
+    sup.finalize(task_id=_TASK, task_title="T")
+
+    observe_request, finalize_request = router.requests
+    assert (observe_request.model, observe_request.reasoning) == ("haiku", "low")
+    assert (finalize_request.model, finalize_request.reasoning) == ("opus", "high")
+
+
+def test_handoff_and_skill_proposal_run_independently_of_the_observation_cadence(
+    tmp_path: Path,
+) -> None:
+    # Both are unaffected by `observe.mode`: they are not per-step observations. With observations
+    # off
+    # entirely they still run — and the skill proposal rides the cheap `observe` model/effort, since
+    # it is a one-shot schema-bound turn rather than the whole-task synthesis.
+    router, store = (
+        FakeRouter(
+            [
+                _structured_handoff(
+                    {"new_surface_area": "a", "locked_decisions": "", "open_edges": ""}
+                ),
+                _proposal_result([{"node": "implementation", "skills": ["safe-change"]}]),
+            ]
+        ),
+        _store(tmp_path),
+    )
+    sup = _supervisor(
+        tmp_path,
+        router,
+        store,
+        observe=SupervisorObserveConfig(mode=ObserveMode.NONE, model="haiku", reasoning="low"),
+        finalize=SupervisorTurnConfig(model="opus", reasoning="high"),
+    )
+
+    assert sup.handoff(task_id=_TASK, subtask_order=1, floor_context="floor") is not None
+    assert sup.propose_skill_map(
+        task_id=_TASK, agent_node_ids=["implementation"], inventory=_INV
+    ) == {"implementation": ("safe-change",)}
+
+    handoff_request, proposal_request = router.requests
+    # `handoff` takes neither observe's nor finalize's pair — it has its own block (unset here).
+    assert handoff_request.model is None
+    assert (proposal_request.model, proposal_request.reasoning) == ("haiku", "low")
+
+
 def test_observe_turn_caps_max_reasoning(tmp_path: Path) -> None:
     # Per-step observation is advisory and runs once per node-run, so a deep fix loop drives
     # many observe turns; it never needs a max tier — cap it to `high` (like a schema turn), while
@@ -1505,17 +1577,54 @@ def _without_supervisor_section(text: str) -> str:
 
 
 def test_supervisor_config_from_config_yaml(packaged_config_text: str) -> None:
-    block = "supervisor:\n  model: sonnet\n  reasoning: high\n  role_file: roles/supervisor.md\n"
+    # Model and effort are per phase; `role_file` and `provider` stay one-per-layer at the top.
+    block = (
+        "supervisor:\n"
+        "  role_file: roles/supervisor.md\n"
+        "  observe:\n    model: sonnet\n    reasoning: low\n"
+        "  finalize:\n    model: opus\n    reasoning: high\n"
+        "  handoff:\n    reasoning: medium\n"
+    )
     config = _config_with_supervisor(packaged_config_text, block)
-    assert config.supervisor.model == "sonnet"
-    assert config.supervisor.reasoning == "high"
+    assert (config.supervisor.observe.model, config.supervisor.observe.reasoning) == (
+        "sonnet",
+        "low",
+    )
+    assert (config.supervisor.finalize.model, config.supervisor.finalize.reasoning) == (
+        "opus",
+        "high",
+    )
+    assert config.supervisor.handoff.reasoning == "medium"
+    assert config.supervisor.handoff.model is None  # absent key => the provider default
     assert config.supervisor.role_file == "roles/supervisor.md"
     assert config.supervisor.provider is None  # absent key => inherit the global primary
     validate_config(config)  # passes the ceiling (read-only forced in code, allowlist, containment)
 
 
+def test_supervisor_observe_cadence_from_config_yaml(packaged_config_text: str) -> None:
+    block = (
+        "supervisor:\n"
+        "  observe:\n"
+        "    mode: selected\n"
+        "    triggers: [failure]\n"
+        "    include_nodes: [implementation, review]\n"
+    )
+    observe = _config_with_supervisor(packaged_config_text, block).supervisor.observe
+    assert observe.mode is ObserveMode.SELECTED
+    assert observe.triggers == ("failure",)
+    assert observe.include_nodes == ("implementation", "review")
+
+
+def test_supervisor_observe_mode_defaults_to_events(packaged_config_text: str) -> None:
+    # The global default is the saving: a flow that declares no cadence of its own — including every
+    # user-authored one — pays for deviations only, not for `all`.
+    observe = _config_with_supervisor(packaged_config_text, "supervisor:\n  role_file: r.md\n")
+    assert observe.supervisor.observe.mode is ObserveMode.EVENTS
+    assert SupervisorObserveConfig().mode is ObserveMode.EVENTS
+
+
 def test_supervisor_config_provider_parsed(packaged_config_text: str) -> None:
-    block = "supervisor:\n  provider: codex\n  model: gpt-5.4\n  reasoning: high\n"
+    block = "supervisor:\n  provider: codex\n  finalize:\n    model: gpt-5.4\n"
     config = _config_with_supervisor(packaged_config_text, block)
     assert config.supervisor.provider == ProviderId.CODEX
 
@@ -1532,8 +1641,49 @@ def test_supervisor_absent_section_defaults(packaged_config_text: str) -> None:
 
 
 def test_supervisor_bad_reasoning_rejected(packaged_config_text: str) -> None:
-    with pytest.raises(ConfigError):
-        _config_with_supervisor(packaged_config_text, "supervisor:\n  reasoning: turbo\n")
+    with pytest.raises(ConfigError, match=r"supervisor\.observe\.reasoning"):
+        _config_with_supervisor(
+            packaged_config_text, "supervisor:\n  observe:\n    reasoning: turbo\n"
+        )
+
+
+def test_supervisor_unknown_observe_mode_rejected(packaged_config_text: str) -> None:
+    with pytest.raises(ConfigError, match=r"supervisor\.observe\.mode"):
+        _config_with_supervisor(
+            packaged_config_text, "supervisor:\n  observe:\n    mode: sometimes\n"
+        )
+
+
+def test_supervisor_unknown_observe_trigger_rejected(packaged_config_text: str) -> None:
+    # The trigger list is closed: a new trigger needs the facts that detect it, so an unknown name
+    # is a typo, not an extension point.
+    with pytest.raises(ConfigError, match="triggers"):
+        _config_with_supervisor(
+            packaged_config_text, "supervisor:\n  observe:\n    triggers: [hitl]\n"
+        )
+
+
+def test_supervisor_unknown_nested_key_rejected(packaged_config_text: str) -> None:
+    with pytest.raises(ConfigError, match=r"supervisor\.finalize"):
+        _config_with_supervisor(
+            packaged_config_text, "supervisor:\n  finalize:\n    session: fresh\n"
+        )
+
+
+@pytest.mark.parametrize("key", ["model", "reasoning"])
+def test_flat_supervisor_model_and_reasoning_are_rejected_by_name(
+    packaged_config_text: str, key: str
+) -> None:
+    # v33 removed the flat pair. Rejected fail-closed rather than tolerated, and the message names
+    # the two places the value can go — the operator has to choose, because copying one value into
+    # both would put the expensive model back on the cheap per-step notes.
+    with pytest.raises(ConfigError) as exc:
+        _config_with_supervisor(packaged_config_text, f"supervisor:\n  {key}: sonnet\n")
+    issue = next(i for i in exc.value.issues if f"supervisor.{key}" in i)
+    assert f"supervisor.observe.{key}" in issue and f"supervisor.finalize.{key}" in issue
+    assert "upgrade-config" in issue  # points at the command that strips it
+    # Exactly one issue for the key: the named rejection, not also a vaguer "unknown key".
+    assert len([i for i in exc.value.issues if f"supervisor.{key}" in i]) == 1
 
 
 def test_supervisor_role_file_traversal_rejected(packaged_config_text: str) -> None:

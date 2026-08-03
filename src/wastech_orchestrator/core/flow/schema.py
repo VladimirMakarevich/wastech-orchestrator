@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Literal
 
+from wastech_orchestrator.config.schema import ObserveMode
 from wastech_orchestrator.core.flow.contracts import (
     NetworkPolicy,
     OutputPolicy,
@@ -219,8 +220,23 @@ class DecompositionConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class SupervisorObserveBlock:
+    """Flow-local observation cadence — the same key path as the global one.
+
+    ``supervisor.observe.mode`` reads identically in ``config.yaml`` and in a flow YAML, so there is
+    one name to learn. ``None`` (the key absent) inherits the global mode; a declared mode may only
+    *narrow* it (``none < events < selected < all``), which the config-aware validator enforces
+    before any node runs. Nested rather than flat so the cadence's other knobs
+    (``include_nodes``, ``triggers``) have a home if a flow ever needs them, without a second
+    rename.
+    """
+
+    mode: ObserveMode | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class SupervisorBlock:
-    """Flow-local supervisor prompt overrides + the follow-ups opt-in.
+    """Flow-local supervisor prompt overrides, the follow-ups opt-in, and the observation cadence.
 
     The supervisor is a constant layer above any flow; this block lets a flow reshape *its wording*
     without touching global config. Only wording moves into files — the structured-output schemas
@@ -228,12 +244,15 @@ class SupervisorBlock:
     machine contract the orchestrator parses.
 
     * ``role_file`` — the observe lens, overriding the global ``config.supervisor.role_file``.
+      Unused when the cadence resolves to ``none``: nothing observes, so no lens is ever loaded.
     * ``finalize_role_file`` — the final-summary emphasis (no global counterpart — YAGNI).
     * ``handoff_role_file`` — the intra-task subtask handoff brief (no global counterpart). A third
       supervisor prompt, same contract: wording in a file, schema in code.
     * ``emit_follow_ups`` — opt the flow's finalize turn into the structured ``{summary,
       follow_ups}`` contract (a per-flow, code-oriented capability; default off). Memory is
       orthogonal (the same turn additionally emits ``memory_delta`` when memory is enabled).
+    * ``observe`` — how often this flow's steps are worth an LLM note. This is where a per-flow
+      cadence default belongs: the engine never maps a flow name to a mode.
 
     All prompt paths are validated as flow-dir-contained (fatal on traversal), like a node
     ``role_file``.
@@ -243,6 +262,7 @@ class SupervisorBlock:
     finalize_role_file: str | None = None
     handoff_role_file: str | None = None
     emit_follow_ups: bool = False
+    observe: SupervisorObserveBlock | None = None
 
 
 @dataclass(frozen=True, slots=True)

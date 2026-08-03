@@ -22,6 +22,7 @@ import yaml
 from wastech_orchestrator.config.schema import (
     CONFIG_SCHEMA_VERSION,
     DEFAULT_TOOL_TIMEOUT_SECONDS,
+    OBSERVE_TRIGGERS,
     TRUST_LEVELS,
     AgentsConfig,
     AuditBranch,
@@ -36,6 +37,7 @@ from wastech_orchestrator.config.schema import (
     LoggingConfig,
     MemoryConfig,
     MergeStrategy,
+    ObserveMode,
     OrchestratorConfig,
     OrchestratorRuntimeConfig,
     PathsConfig,
@@ -45,6 +47,8 @@ from wastech_orchestrator.config.schema import (
     SecurityConfig,
     SkillsConfig,
     SupervisorConfig,
+    SupervisorObserveConfig,
+    SupervisorTurnConfig,
     TelegramConfig,
     ToolsConfig,
     ValidationConfig,
@@ -701,19 +705,87 @@ def _build_skills(raw: Any, issues: list[str]) -> SkillsConfig:
     )
 
 
-def _build_supervisor(raw: Any, issues: list[str]) -> SupervisorConfig:
-    where = "supervisor"
-    if raw is None:
-        return SupervisorConfig()
-    m = _mapping(raw, where, issues)
-    _check_keys(m, {"role_file", "model", "reasoning", "provider"}, where, issues)
+def _reasoning(m: Mapping[str, Any], where: str, issues: list[str]) -> str | None:
+    """A ``reasoning`` value checked against the provider-agnostic union of levels.
+
+    The syntactic half of the check; ``config.validation`` re-checks it against the *resolved*
+    provider's own set. Shared by the three supervisor phase blocks.
+    """
     reasoning = _opt_str(m, "reasoning", where, issues)
     if reasoning is not None and reasoning not in _REASONING_LEVELS:
         issues.append(
             f"{where}.reasoning: invalid value {reasoning!r}, "
             f"expected one of {sorted(_REASONING_LEVELS)}"
         )
-        reasoning = None
+        return None
+    return reasoning
+
+
+def _build_supervisor_observe(raw: Any, issues: list[str]) -> SupervisorObserveConfig:
+    where = "supervisor.observe"
+    if raw is None:
+        return SupervisorObserveConfig()
+    m = _mapping(raw, where, issues)
+    _check_keys(m, {"mode", "triggers", "include_nodes", "model", "reasoning"}, where, issues)
+    default = SupervisorObserveConfig()
+    triggers = _str_tuple(m, "triggers", default.triggers, where, issues)
+    unknown = sorted(set(triggers) - OBSERVE_TRIGGERS)
+    if unknown:
+        issues.append(
+            f"{where}.triggers: unknown trigger(s) {unknown}, "
+            f"expected a subset of {sorted(OBSERVE_TRIGGERS)}"
+        )
+        triggers = default.triggers
+    return SupervisorObserveConfig(
+        mode=_enum(m.get("mode"), ObserveMode, f"{where}.mode", issues, default.mode),
+        triggers=triggers,
+        include_nodes=_str_tuple(m, "include_nodes", (), where, issues),
+        model=_opt_str(m, "model", where, issues),
+        reasoning=_reasoning(m, where, issues),
+    )
+
+
+def _build_supervisor_turn(raw: Any, where: str, issues: list[str]) -> SupervisorTurnConfig:
+    if raw is None:
+        return SupervisorTurnConfig()
+    m = _mapping(raw, where, issues)
+    _check_keys(m, {"model", "reasoning"}, where, issues)
+    return SupervisorTurnConfig(
+        model=_opt_str(m, "model", where, issues),
+        reasoning=_reasoning(m, where, issues),
+    )
+
+
+#: v33: the flat pair each phase block replaced, mapped to where its value now belongs. Rejected
+#: fail-closed by name (not as a generic "unknown key") because the operator has to *choose* a
+#: destination — the old single value cannot be copied into both without either re-inflating the
+#: cheap notes or guessing intent.
+_SUPERVISOR_MOVED_KEYS = {
+    "model": "supervisor.observe.model / supervisor.finalize.model",
+    "reasoning": "supervisor.observe.reasoning / supervisor.finalize.reasoning",
+}
+
+
+def _build_supervisor(raw: Any, issues: list[str]) -> SupervisorConfig:
+    where = "supervisor"
+    if raw is None:
+        return SupervisorConfig()
+    m = _mapping(raw, where, issues)
+    for key, destination in _SUPERVISOR_MOVED_KEYS.items():
+        if key in m:
+            issues.append(
+                f"{where}.{key}: moved — set {destination} instead (each supervisor phase now "
+                "carries its own model and reasoning). The value is not migrated; run "
+                "'wastech-orchestrator upgrade-config' to strip the old key."
+            )
+    _check_keys(
+        m,
+        {"role_file", "provider", "observe", "finalize", "handoff"},
+        where,
+        issues,
+        # Named above with a destination; `_check_keys` would only add a vaguer duplicate.
+        tolerated=set(_SUPERVISOR_MOVED_KEYS),
+    )
     provider_raw = _opt_str(m, "provider", where, issues)
     provider: ProviderId | None = None
     if provider_raw is not None:
@@ -723,9 +795,10 @@ def _build_supervisor(raw: Any, issues: list[str]) -> SupervisorConfig:
             issues.append(f"{where}.provider: unknown provider {provider_raw!r}")
     return SupervisorConfig(
         role_file=_str(m, "role_file", "roles/supervisor.md", where, issues),
-        model=_opt_str(m, "model", where, issues),
-        reasoning=reasoning,
         provider=provider,
+        observe=_build_supervisor_observe(m.get("observe"), issues),
+        finalize=_build_supervisor_turn(m.get("finalize"), "supervisor.finalize", issues),
+        handoff=_build_supervisor_turn(m.get("handoff"), "supervisor.handoff", issues),
     )
 
 

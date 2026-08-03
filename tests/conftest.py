@@ -179,12 +179,19 @@ def build_git_config(
     allow_git_evidence: bool = False,
     checkout_base_on_cleanup: bool | None = None,
     clean_runs_on_success: bool = True,
+    supervisor_observe: str | None = None,
+    supervisor_include_nodes: Sequence[str] = (),
 ) -> OrchestratorConfig:
     """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks.
 
     ``clean_runs_on_success`` mirrors the shipped default (a successful task evicts its own
     ``.worc/runs/`` subtree). Pass ``False`` in a test that inspects a finished task's frozen
     bundles or sealed exchange — the same switch an operator flips to analyze runs.
+
+    ``supervisor_observe`` sets the global observation cadence (absent → the schema default,
+    ``events``). Note that it only reaches a run whose flow declares no cadence of its own: a
+    flow's own ``supervisor.observe.mode`` narrows this, so a test driving a specific mode end to
+    end should use a flow with no ``supervisor:`` block.
     """
     env_lines = "\n".join(f"    - {e}" for e in _TEST_ALLOWED_ENV)
     cleanup_line = (
@@ -205,6 +212,12 @@ def build_git_config(
     logging_block = (
         "logging:\n  clean_runs_on_success: false\n" if not clean_runs_on_success else ""
     )
+    if supervisor_observe is None:
+        supervisor_block = ""
+    else:
+        supervisor_block = f"supervisor:\n  observe:\n    mode: {supervisor_observe}\n"
+        if supervisor_include_nodes:
+            supervisor_block += f"    include_nodes: {list(supervisor_include_nodes)!r}\n"
     text = f"""
 orchestrator:
   auto_mode:
@@ -243,7 +256,7 @@ git:
     audit_commit_message: "chore(orchestrator): audit trail for {{task_id}}"
     audit_on_branch: {audit_on_branch}
 prompt_audit: {str(prompt_audit).lower()}
-{memory_block}{logging_block}"""
+{memory_block}{logging_block}{supervisor_block}"""
     return loads_config(text).config
 
 

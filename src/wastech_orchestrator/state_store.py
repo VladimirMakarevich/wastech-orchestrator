@@ -1069,6 +1069,17 @@ class StateStore:
         )
         return [_node_run_from_row(row) for row in cur.fetchall()]
 
+    def get_node_run(self, run_id: int) -> NodeRunRow | None:
+        """One node run by id, or ``None`` if it does not exist.
+
+        A single primary-key read, for a caller that already holds the run id and wants the row's
+        recorded facts (status, the route it took) rather than the whole task's history — the
+        post-node observation cadence reads it per step, so a whole-task scan would be wasteful.
+        """
+        cur = self._conn.execute("SELECT * FROM node_runs WHERE id = ?", (run_id,))
+        row = cur.fetchone()
+        return _node_run_from_row(row) if row is not None else None
+
     def reconcile_open_node_runs(
         self,
         task_id: str,

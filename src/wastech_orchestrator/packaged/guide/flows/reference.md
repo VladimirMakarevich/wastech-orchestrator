@@ -19,7 +19,7 @@ A flow is a validated graph of typed nodes joined by outcome-labelled edges, sto
 | `budgets` | if loops | mapping name→int | `{}` | Every named loop referenced by an edge must be declared here. | Loop iteration caps (the engine clamps to `min(flow, config cap)`). |
 | `defaults` | no | `evaluator: {...}` | none | (see below) | Field defaults applied to nodes that omit them. |
 | `decomposition` | no | `{proposed_by, sub_flow, shared_budget?}` | none | (see below) | Enables one-task-many-subtasks planning. |
-| `supervisor` | no | `{role_file?, finalize_role_file?, handoff_role_file?, emit_follow_ups?}` | none | Prompt paths flow-dir-contained (no `..`). | Flow-local supervisor wording + the follow-ups opt-in (see [roles.md](roles.md)). |
+| `supervisor` | no | `{role_file?, finalize_role_file?, handoff_role_file?, emit_follow_ups?, observe?}` | none | Prompt paths flow-dir-contained (no `..`); `observe.mode` may only narrow the config's. | Flow-local supervisor wording, the follow-ups opt-in, and this flow's observation cadence — `observe: {mode: all\|selected\|events\|none}` (see [roles.md](roles.md)). |
 
 ### `output_policy` — what each variant means
 
@@ -197,7 +197,7 @@ Allowed `outcome` values by source kind: **evaluator** `{accept, rework}`; **che
 
 1. **Graph integrity** — edges resolve; outcomes are legal for the source kind; every `rework`/`fail` edge is bounded; named loops are declared in `budgets`; exactly one entry node (no incoming edges); full forward reachability; at least one terminal and every node reaches one; `lineage_affinity` is valid; decomposition references resolve.
 2. **Security ceiling** — evaluators forced `read-only` and never `editing_lineage`; every agent `permission_profile <= permission_ceiling`; `extra_args` pass the forbidden-args scan; all `role_file` / supervisor prompt paths are flow-dir-contained.
-3. **Config-aware** (when a config is loaded) — every `provider` is in `agents.allowed`; `reasoning` is valid for the resolved provider; a Codex `workspace-write` node never also has network; the ceiling is satisfiable by some allowed provider; under `strict_isolation`, no `extra_args` full-access mode; every `tool` name resolves in `.worc/tools/`.
+3. **Config-aware** (when a config is loaded) — every `provider` is in `agents.allowed`; `reasoning` is valid for the resolved provider; a Codex `workspace-write` node never also has network; the ceiling is satisfiable by some allowed provider; `supervisor.observe.mode` is no broader than the config's (rank `none < events < selected < all`); under `strict_isolation`, no `extra_args` full-access mode; every `tool` name resolves in `.worc/tools/`.
 
 Non-fatal: a `budgets` value above a config cap (the engine clamps to the min), a PR-publishing flow with no git configured (runs local-commit mode), and the prompt-variable anti-drift lint (warns on a `{name}` no node populates).
 

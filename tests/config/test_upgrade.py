@@ -216,18 +216,33 @@ def test_adds_memory_block_from_packaged_template() -> None:
 
 def test_adds_supervisor_provider_from_packaged_template() -> None:
     # v27 add: an operator supervisor block predating `provider` gains it from the packaged template
-    # (added under the existing block), while keeping its own model/reasoning.
+    # (added under the existing block), while keeping its own role_file.
     template = packaged_template_mapping()
-    operator = {
-        "schema_version": 26,
-        "supervisor": {"role_file": "roles/supervisor.md", "model": "sonnet", "reasoning": "high"},
-    }
+    operator = {"schema_version": 26, "supervisor": {"role_file": "roles/mine.md"}}
     merged, added, _ = upgrade_config_mapping(template, operator)
     assert (
         merged["supervisor"]["provider"] == "claude"
     )  # from template (packaged primary is claude)
-    assert merged["supervisor"]["model"] == "sonnet"  # operator value preserved
+    assert merged["supervisor"]["role_file"] == "roles/mine.md"  # operator value preserved
     assert "supervisor.provider" in added
+
+
+def test_v33_strips_flat_supervisor_model_and_adds_the_phase_blocks() -> None:
+    # v33 split one model/reasoning pair into three phase blocks. The flat keys are stripped (not
+    # migrated: one value, two plausible homes) and reported, while the new blocks arrive from the
+    # template — so the operator sees exactly what they have to re-declare.
+    template = packaged_template_mapping()
+    operator = {
+        "schema_version": 32,
+        "supervisor": {"role_file": "roles/supervisor.md", "model": "opus", "reasoning": "xhigh"},
+    }
+    merged, added, removed = upgrade_config_mapping(template, operator)
+    assert "model" not in merged["supervisor"] and "reasoning" not in merged["supervisor"]
+    assert removed == ["supervisor.model", "supervisor.reasoning"]
+    assert merged["supervisor"]["observe"]["mode"] == "events"  # from template
+    assert merged["supervisor"]["finalize"]["reasoning"] == "medium"
+    assert {"supervisor.observe", "supervisor.finalize", "supervisor.handoff"} <= set(added)
+    assert merged["supervisor"]["role_file"] == "roles/supervisor.md"  # untouched top-level key
 
 
 def test_strips_legacy_prompts_block() -> None:

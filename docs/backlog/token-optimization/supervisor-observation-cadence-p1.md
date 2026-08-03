@@ -1,6 +1,6 @@
 # Supervisor P1: управляемый cadence (observe/finalize split, observe.mode + event-триггеры)
 
-**Статус:** **accepted 2026-07-26** (все развилки закрыты в «[Решения приёмки](#решения-приёмки-2026-07-26)»; реализацию не начинать до мёржа P0 — это корректностное требование, а не предпочтение) **Приоритет:** P1 (даёт основную экономию — снимает промежуточные наблюдения; безопасно только поверх P0-пакета) **Источник:** [2026-07-16 варианты оптимизации supervisor](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/analysis/2026-07-16-supervisor-token-optimization-options.md) (§8 P1, Варианты B/C/D/H/I).
+**Статус:** **implemented 2026-08-03** (все развилки были закрыты в «[Решения приёмки](#решения-приёмки-2026-07-26)»; отступления от текста задачи — в «[Отклонения от текста задачи](#отклонения-от-текста-задачи-2026-08-03)») **Приоритет:** P1 (даёт основную экономию — снимает промежуточные наблюдения; безопасно только поверх P0-пакета) **Источник:** [2026-07-16 варианты оптимизации supervisor](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/analysis/2026-07-16-supervisor-token-optimization-options.md) (§8 P1, Варианты B/C/D/H/I).
 
 **Дорожная карта:** [P0 — packet + fresh finalize](supervisor-finalize-packet-and-cadence.md) → **P1 (этот документ)** → [P2 — разделение обязанностей и telemetry](supervisor-responsibility-split-p2.md).
 
@@ -92,7 +92,7 @@ flow:
 
 ### P1-D3 — номер версии схемы не фиксируем, пересчитываем при реализации
 
-Bump обязателен (плоские ключи удаляются — старый конфиг перестаёт грузиться), но конкретное число в документе не пиним: на 2026-07-26 это `31 → 32` (`config/schema.py:167`), однако любая другая задача, добравшаяся до мёржа раньше, сдвинет базу. Формулировка для реализации: «увеличить `CONFIG_SCHEMA_VERSION` на единицу от текущего значения на момент правки и внести плоские ключи в `_REMOVED_KEYS`».
+Bump обязателен (плоские ключи удаляются — старый конфиг перестаёт грузиться), но конкретное число в документе не пиним: на 2026-07-26 это выглядело как `31 → 32`, однако любая другая задача, добравшаяся до мёржа раньше, сдвинет базу. Формулировка для реализации: «увеличить `CONFIG_SCHEMA_VERSION` на единицу от текущего значения на момент правки и внести плоские ключи в `_REMOVED_KEYS`». **Фактически при реализации 2026-08-03 база была 32, стало `32 → 33`.**
 
 ### P1-D4 — дефолты по флоу живут в packaged YAML (см. §Решения)
 
@@ -142,19 +142,33 @@ Bump обязателен (плоские ключи удаляются — ст
 
 Ожидаемый эффект (числа исторические, 2026-07-16): finalize-only убирает 375 726 observation input-токенов, общий supervisor input падал бы с ~480 тыс. до ~30–60 тыс. Для приёмки метрики те же, что зафиксированы в [P0 §A/B и метрики](supervisor-finalize-packet-and-cadence.md#ab-и-метрики-решение-x1-пересмотрено-2026-08-03) (решение X1, пересмотрено 2026-08-03): нормированная доля плюс структурный инвариант, читаемые с одного прогона после P1. Отдельного baseline-прогона нет ни у P0, ни у P1.
 
+## Отклонения от текста задачи (2026-08-03)
+
+Реализация следует решениям P1-D1…P1-D8. Пять мест, где текст задачи разошёлся с кодом; в каждом сохранено решение, но не его формулировка.
+
+1. **`failure` читается из `node_runs.status`, а не из `outcome.kind` (P1-D7).** Ни один наблюдаемый вид ноды не выдаёт «провальный» kind: `fail` бывает только у `tool`/`checks` (оба в `_UNOBSERVED_NODE_KINDS`), agent-нода возвращает `done` безусловно (`_agent_outcome`), а жёсткая инфра-ошибка поднимает `NodeInfraError` до вызова хука. Реально видимый факт — `status = "failed"` в строке `node_runs`, которую хук и так читает ради `fallback`. То есть триггеров по-прежнему три, контракт post-node не расширен (главное требование P1-D7), изменился только источник факта. Заодно `rework` покрывает и `outcome.rework_exhausted` — это отдельное булево поле, а не значение `kind`.
+2. **Детерминированная step-запись не пишется** (пункт 3 эскиза реализации отменён). После P0 она ничего не даёт: шаги пакета берутся из `node_runs`, `_finalize_digest` **пропускает** пустые заметки (`core/supervisor.py`), то есть строки с `note=""` были бы для пакета невидимы, а детерминированная строка на каждый выполненный run уже пишется в ledger (`append_node_history`). Осталась бы durable-строка без читателя. Открытый вопрос из `follow_ups.md` закрыт этим решением: **`node_runs` и есть step-запись**; если P2 понадобится строка формы наблюдения, он вводит её вместе с потребителем.
+3. **Лазейка `selected` под глобальным `events` закрыта таблицей ранга, а не отдельным правилом (P1-D5).** `selected` (ранг 2) стоит выше `events` (1), поэтому обычное сравнение ранга её и отвергает — специального случая в коде нет.
+4. **Ключей `finalize.enabled` / `handoff.enabled` нет**, хотя они есть в YAML-эскизе выше. Ни одно решение P1-D1…D8 и ни один критерий приёмки их не требует, а `finalize.enabled: false` создал бы путь «прогон без summary» (то есть без тела PR), которого никто не просил; см. также non-goal P0-D4 про отсутствие тумблера у fresh finalize. Записано в `follow_ups.md` как осознанный non-goal.
+5. **`worc upgrade-config` пришлось поправить, чтобы P1-D1 вообще выполнялось.** Команда делала fail-closed `load_config(path)` **до** мёржа, поэтому лоадер, отвергающий плоский `supervisor.model`, отвергал бы ровно те конфиги, ради миграции которых команда существует, — и `_REMOVED_KEYS` стали бы недостижимы. Проверка теперь идёт по копии, из которой удалённые ключи уже вычищены (`strip_removed_keys`): любая другая структурная проблема и слишком новый `schema_version` по-прежнему отвергаются, а результат ещё раз валидируется перед записью. Вариант «сообщение в `config/validation.py`» (прецедент v31) не подошёл: он требует оставить в схеме поля-пустышки, что P1-D1 прямо запрещает.
+
+Ещё два уточнения по фактам, а не по решениям: `CONFIG_SCHEMA_VERSION` был **32**, а не 31 (стало 33), и почти все ссылки `file.py:NNN` в этом документе на момент реализации были смещены — сверяйтесь grep'ом, а не номерами.
+
+Побочное следствие, которое стоит знать оператору: флоу, который **объявляет** `events` (как `implementation.yaml`), нельзя запустить при глобальном `none` — валидатор отвергнет более широкий режим флоу. Это осознанно: флоу тем самым заявляет, что его `follow_ups` нуждаются в наблюдении отклонений, и отказ виден сразу, вместо тихой деградации. Оператору, которому нужен `none`, достаточно сузить свою копию флоу.
+
 ## Критерии приёмки
 
-- [ ] `rework`/`failure`/`fallback` создаёт observation в `events`-режиме; обычный `done`/`pass`/`accept` — нет; `hitl`/`dangerous_diff`/`subtask_boundary` триггерами не являются (решение P1-D7).
-- [ ] `none`-режим не создаёт ни одного observation, но finalize и summary сохраняются (через P0-пакет).
-- [ ] `selected` наблюдает ровно `include_nodes`.
-- [ ] Детерминированная step-запись пишется всегда — даже в `none`, — и попадает в `SupervisorPacket`.
-- [ ] `observe.reasoning` и `finalize.reasoning` применяются раздельно; граница digest — та же детерминированная (8 000 симв. из P0-D3), никаких бюджетных ключей в схеме нет (решение P1-D6).
-- [ ] Flow-local `observe.mode` сужает, но не расширяет глобальную политику: валидатор сравнивает ранги `none < events < selected < all`, отвергает более широкий режим и падает fail-closed на незнакомом значении; под глобальным `events` `selected` не принимается (решение P1-D5).
-- [ ] Глобальный дефолт — `events`; flow без блока `supervisor:` наследует его, а не `all`.
-- [ ] Handoff и skill-proposal работают независимо от `observe.mode`.
-- [ ] Движок нигде не ветвится по имени flow: режим приходит из flow-local блока или из глобального конфига, packaged-дефолты заданы в YAML самих флоу (решение P1-D4).
-- [ ] Плоские `supervisor.model` / `supervisor.reasoning` отвергаются загрузчиком fail-closed, и сообщение называет новое место ключа (решение P1-D1); `worc upgrade-config` стрипает их с отчётом и доливает новый блок; значения не переносятся молча.
-- [ ] Метрики (метод — [P0 §A/B и метрики](supervisor-finalize-packet-and-cadence.md#ab-и-метрики-решение-x1-пересмотрено-2026-08-03)): на content-flow после P1 **ровно один** supervisor-вызов (finalize) — структурный инвариант, baseline не нужен; доля supervisor в Claude-input прогона **≤ 20%** (исторические ~70%; на тех же числах один finalize даёт 20–40 тыс. при не-supervisor части ~206 тыс., то есть 9–16% — 20% оставляет запас на дисперсию); blocking-issue не пропущены.
+- [x] `rework`/`failure`/`fallback` создаёт observation в `events`-режиме; обычный `done`/`pass`/`accept` — нет; `hitl`/`dangerous_diff`/`subtask_boundary` триггерами не являются (решение P1-D7). `failure` читается из `node_runs.status` — см. отклонение 1. Тесты: `tests/core/test_observe_cadence.py`, `tests/core/test_orchestrator.py::test_observe_mode_events_observes_a_rework_deviation_only`.
+- [x] `none`-режим не создаёт ни одного observation, но finalize и summary сохраняются (через P0-пакет). Тест: `test_observe_mode_none_observes_nothing_but_keeps_the_summary`.
+- [x] `selected` наблюдает ровно `include_nodes`. Тест: `test_observe_mode_selected_observes_exactly_the_listed_nodes`.
+- [x] ~~Детерминированная step-запись пишется всегда — даже в `none`, — и попадает в `SupervisorPacket`.~~ **Отменено — см. отклонение 2.** Полноту пакета в `none` обеспечивают `node_runs` + `<node_id>.out.md`, что и проверяет тест на `none` выше; отдельная строка в `evaluations` не пишется.
+- [x] `observe.reasoning` и `finalize.reasoning` применяются раздельно; граница digest — та же детерминированная (8 000 симв. из P0-D3), никаких бюджетных ключей в схеме нет (решение P1-D6). Тест: `tests/core/test_supervisor.py::test_observe_and_finalize_use_their_own_model_and_reasoning`.
+- [x] Flow-local `observe.mode` сужает, но не расширяет глобальную политику: валидатор сравнивает ранги `none < events < selected < all`, отвергает более широкий режим и падает fail-closed на незнакомом значении; под глобальным `events` `selected` не принимается (решение P1-D5). Тесты: `tests/core/test_flow_threat_model.py::test_flow_may_{,not_}widen_the_global_observation_cadence`.
+- [x] Глобальный дефолт — `events`; flow без блока `supervisor:` наследует его, а не `all`. Тесты: `test_supervisor_observe_mode_defaults_to_events`, `test_flow_without_a_cadence_inherits_the_global_one`.
+- [x] Handoff и skill-proposal работают независимо от `observe.mode`. Skill-proposal берёт пару `observe.model`/`reasoning` (дешёвый одноразовый schema-turn), handoff — свою; тест: `test_handoff_and_skill_proposal_run_independently_of_the_observation_cadence`.
+- [x] Движок нигде не ветвится по имени flow: режим приходит из flow-local блока или из глобального конфига, packaged-дефолты заданы в YAML самих флоу (решение P1-D4). Тест: `tests/core/test_flow_snapshot.py::test_packaged_flows_declare_their_own_observation_cadence`.
+- [x] Плоские `supervisor.model` / `supervisor.reasoning` отвергаются загрузчиком fail-closed, и сообщение называет новое место ключа (решение P1-D1); `worc upgrade-config` стрипает их с отчётом и доливает новый блок; значения не переносятся молча. Потребовало правки preflight'а команды — см. отклонение 5. Тесты: `test_flat_supervisor_model_and_reasoning_are_rejected_by_name`, `tests/test_cli_upgrade_config.py::test_upgrade_migrates_a_config_whose_removed_key_the_loader_now_rejects`.
+- [ ] **(за оператором, нужен живой прогон)** Метрики (метод — [P0 §A/B и метрики](supervisor-finalize-packet-and-cadence.md#ab-и-метрики-решение-x1-пересмотрено-2026-08-03)): на content-flow после P1 **ровно один** supervisor-вызов (finalize) — структурный инвариант, baseline не нужен; доля supervisor в Claude-input прогона **≤ 20%** (исторические ~70%; на тех же числах один finalize даёт 20–40 тыс. при не-supervisor части ~206 тыс., то есть 9–16% — 20% оставляет запас на дисперсию); blocking-issue не пропущены.
 
 ## Тесты под замену/добавление
 

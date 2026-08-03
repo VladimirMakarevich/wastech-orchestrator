@@ -624,7 +624,8 @@ def test_rework_budget_exhausted_warns_operator_and_marks_trace(
 ) -> None:
     # When a non-blocking evaluator spends its whole max_rework_per_stage budget and accepts with a
     # gating finding still open, the flow continues (DONE) but the orchestrator warns the operator
-    # (console) and marks the live Telegram trace with the ⚠️ rework-exhausted label so a human knows
+    # (console) and marks the live Telegram trace with the ⚠️ rework-exhausted label so a human
+    # knows
     # the stage may need follow-up.
     from wastech_orchestrator.core.flow.registry import FlowRegistry
     from wastech_orchestrator.notify import TRACE_REWORK_EXHAUSTED
@@ -842,12 +843,14 @@ def _supervisor_attempts(store: StateStore, task_id: str) -> list:
     ).fetchall()
 
 
-def test_supervisor_layer_observes_the_interpretive_steps_and_writes_one_summary(
+def test_supervisor_layer_costs_one_call_on_a_clean_run_and_still_writes_the_summary(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # The constant supervisor layer runs above any flow — it observes each executed node read-only
-    # (advisory) EXCEPT the deterministic `tool`/`checks` kinds and the terminal `publish` node, and
-    # synthesizes the summary once at whole-task close.
+    # The headline saving. The packaged `implementation` flow ships `observe.mode: events`, so a run
+    # where nothing deviated — no rework, no failed step, no provider fallback — spends the layer's
+    # ONLY call on the whole-task finalize. The summary is unaffected because that turn is seeded by
+    # the deterministic packet (node_runs + each node's own output file), never by observations, so
+    # switching the notes off cannot cost the operator their PR body.
     providers = _both()
     orch, store, _, art = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
@@ -862,28 +865,11 @@ def test_supervisor_layer_observes_the_interpretive_steps_and_writes_one_summary
     # Every supervisor record is advisory and carries no node_id (it is a layer, not a node).
     assert {r["verdict"] for r in supervisor_rows} == {"advisory"}
     assert all(r["node_id"] is None for r in supervisor_rows)
-    steps = [r for r in rows if r["kind"] == "supervisor_step"]
-    finals = [r for r in rows if r["kind"] == "supervisor_final"]
-    # One observation per executed interpretive node (planning, implementation, review,
-    # documentation) — `testing` is a `checks` node and is deliberately not among them.
-    assert len(steps) >= 4
-    assert len(finals) == 1  # the summary synthesis is once per whole task
-    observed = _observed_nodes(store, "task-sup")
-    assert "implementation" in observed and "review" in observed
-    assert "testing" not in observed  # the checks node costs no observation turn
-    assert "publish" not in observed
-    # The structural invariant behind the saving: the layer's provider calls are exactly one per
-    # executed observable node plus one finalize. A mismatch means the post-node hook's condition
-    # drifted. Keyed on `skipped`, not on a status literal — `node_runs.status` is per-kind
-    # (`succeeded` / `passed` / `published` / …), so there is no single "completed" value to match.
-    expected = 1 + len(
-        [
-            r
-            for r in store.get_node_runs("task-sup")
-            if not r.skipped and r.node_kind not in {"tool", "checks", "publish"}
-        ]
-    )
-    assert len(_supervisor_attempts(store, "task-sup")) == expected
+    assert _observed_nodes(store, "task-sup") == []  # no deviation → no observation
+    assert len([r for r in rows if r["kind"] == "supervisor_final"]) == 1
+    # The structural invariant behind the saving: exactly one provider call, the finalize. Under the
+    # pre-P1 cadence this was 1 + one per executed observable node.
+    assert len(_supervisor_attempts(store, "task-sup")) == 1
     # The in-flow review evaluator also recorded an immutable verdict (a separate kind).
     assert any(r["kind"] == "in_flow_verdict" and r["node_id"] == "review" for r in rows)
     # The summary is always written (no config.summary_enabled gate) and committed as the PR body.
@@ -892,13 +878,170 @@ def test_supervisor_layer_observes_the_interpretive_steps_and_writes_one_summary
     assert "summary" not in _ran_nodes(store, "task-sup")
 
 
-def test_accepted_evaluator_findings_reach_the_observer_and_the_pr_body(
+def test_packaged_flow_cadence_narrows_a_broader_global_mode(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # A flow's own cadence wins over a broader global one: `implementation.yaml` declares `events`,
+    # so an operator running with the debugging-wide `all` still gets deviations-only for this flow.
+    # The flow is the narrower authority, and the engine reaches it as data — never by flow name.
+    providers = _both()
+    orch, store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"supervisor_observe": "all"},
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    assert orch.run_task(_complete_task(tmp_path, "task-narrow")).final_status is Status.DONE
+    assert _observed_nodes(store, "task-narrow") == []
+    assert len(_supervisor_attempts(store, "task-narrow")) == 1  # finalize only
+
+
+# A flow with no `supervisor:` block at all: it inherits the operator's global cadence, which is
+# what
+# makes it the vehicle for driving each mode end to end (a packaged flow's own mode would narrow
+# it).
+_NO_SUPERVISOR_BLOCK_FLOW = """
+flow:
+  name: implementation
+  task_type: implementation
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: pull_request
+  nodes:
+    - id: implementation
+      kind: agent
+      role_file: roles/implementation.md
+      session_scope: editing_lineage
+      permission_profile: workspace-write
+    - id: review
+      kind: evaluator
+      role: review
+      role_file: roles/review.md
+    - id: publish
+      kind: publish
+      policy: pull_request
+  edges:
+    - { from: implementation, to: review }
+    - { from: review, to: publish, outcome: accept }
+"""
+
+
+def _run_with_cadence(
+    git_repo,
+    make_git_config,
+    tmp_path: Path,
+    task_id: str,
+    *,
+    flow_text: str = _NO_SUPERVISOR_BLOCK_FLOW,
+    outputs: dict | None = None,
+    **config_kwargs: object,
+) -> StateStore:
+    """Run one task on an operator flow under an explicit global cadence; return the store."""
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+
+    flows = tmp_path / "flows"
+    (flows / "roles").mkdir(parents=True, exist_ok=True)
+    (flows / "roles" / "implementation.md").write_text("Implement {task_path}.", "utf-8")
+    (flows / "roles" / "review.md").write_text("Review the change.", "utf-8")
+    (flows / "roles" / "fixing.md").write_text("Fix the issue.", "utf-8")
+    (flows / "implementation.yaml").write_text(flow_text, "utf-8")
+
+    providers = _both(outputs=outputs) if outputs else _both()
+    orch, store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs=config_kwargs,
+    )
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
+    _patch_impl_edit(providers, git_repo)
+    assert orch.run_task(_complete_task(tmp_path, task_id)).final_status is Status.DONE
+    return store
+
+
+def test_observe_mode_all_observes_every_executed_observable_step(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # `all` is the pre-P1 behavior, kept as an explicit debugging choice: one observation per
+    # executed
+    # node whose kind is observable, plus the finalize.
+    store = _run_with_cadence(
+        git_repo, make_git_config, tmp_path, "task-all", supervisor_observe="all"
+    )
+    observed = _observed_nodes(store, "task-all")
+    assert observed == ["implementation", "review"]  # `publish` is never observable
+    assert len(_supervisor_attempts(store, "task-all")) == len(observed) + 1
+
+
+def test_observe_mode_none_observes_nothing_but_keeps_the_summary(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    store = _run_with_cadence(
+        git_repo, make_git_config, tmp_path, "task-none", supervisor_observe="none"
+    )
+    assert _observed_nodes(store, "task-none") == []
+    assert len(_supervisor_attempts(store, "task-none")) == 1  # the finalize turn survives
+    finals = [r for r in _evaluations(store, "task-none") if r["kind"] == "supervisor_final"]
+    assert len(finals) == 1
+
+
+def test_observe_mode_selected_observes_exactly_the_listed_nodes(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    store = _run_with_cadence(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        "task-sel",
+        supervisor_observe="selected",
+        # `documentation` is not in this flow at all — a listed id that never runs is simply not
+        # observed, it is not an error.
+        supervisor_include_nodes=["review", "documentation"],
+    )
+    assert _observed_nodes(store, "task-sel") == ["review"]
+
+
+def test_observe_mode_events_observes_a_rework_deviation_only(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The `events` cadence in action: the review evaluator spends its rework budget and then accepts
+    # with the finding still open (`rework_exhausted`), which is the `rework` trigger — so `review`
+    # is
+    # observed while `implementation` and `fixing`, which did nothing unusual, are not.
+    gating = {"findings": [{"severity": "high", "path": None, "what": "boom", "fix": None}]}
+    store = _run_with_cadence(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        "task-ev",
+        flow_text=_NON_BLOCKING_REVIEW_FLOW,
+        outputs={"review": ("needs work", gating)},
+        supervisor_observe="events",
+    )
+    # review ran twice: pass 1 reworked, pass 2 accepted with the budget spent — both are
+    # deviations.
+    assert set(_observed_nodes(store, "task-ev")) == {"review"}
+    assert "implementation" not in _observed_nodes(store, "task-ev")
+    assert "fixing" not in _observed_nodes(store, "task-ev")
+
+
+def test_accepted_evaluator_findings_reach_the_pr_body(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
     # End to end: `review` accepts (the finding is below its `high` gate) but still recorded a
-    # finding. Before this, that finding existed only in findings.json and the evaluations table —
-    # the observer saw a bare `Outcome: accept`, and the PR body told the operator the gate passed.
-    # Both surfaces must now carry it.
+    # finding. Before this, that finding existed only in findings.json and the evaluations table,
+    # and
+    # the PR body told the operator the gate simply passed. The finalize turn is handed every
+    # evaluator's recorded verdict, so the accepted finding reaches the summary — and it does so
+    # from
+    # durable state, independently of whether the step was ever observed (this run's cadence is the
+    # packaged `events`, and a plain accept is not a deviation, so no observation runs at all).
     finding_text = "docstring drift in the new helper"
     providers = _both(
         outputs={
@@ -911,31 +1054,47 @@ def test_accepted_evaluator_findings_reach_the_observer_and_the_pr_body(
             "supervisor": ("noted", {"summary": "Added the helper and its tests."}),
         }
     )
-    orch, _store, _, art = _build(
+    orch, store, _, art = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
     )
     _patch_impl_edit(providers, git_repo)
 
     result = orch.run_task(_complete_task(tmp_path, "task-findings"))
     assert result.final_status is Status.DONE
+    assert _observed_nodes(store, "task-findings") == []  # accept is not a deviation
 
-    # Wire 2+3: the observation of the review step carries the findings digest, not just the label.
-    prompts = [
-        path.read_text("utf-8")
-        for path in (task_artifact_dir(art, "task-findings") / "stages" / "supervisor").glob(
-            "run-*/rendered-prompt.md"
-        )
-    ]
-    review_observation = [p for p in prompts if "Node: review" in p]
-    assert review_observation, "the review step was observed"
-    assert any(f"- [low] {finding_text}" in p for p in review_observation)
-    # Wire 1: the provider's own prose reached the observer too.
-    assert any("I found one advisory issue" in p for p in review_observation)
-
-    # And the operator surface: the accepted finding lands in the summary that becomes the PR body.
+    # The operator surface: the accepted finding lands in the summary that becomes the PR body.
     summary = (task_artifact_dir(art, "task-findings") / "summary.md").read_text("utf-8")
     assert "## Technical debt / follow-ups" in summary
     assert finding_text in summary
+
+
+def test_an_observed_step_carries_the_evaluator_findings_not_just_the_label(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # When an observation *does* run, it gets the step's substance. Here review exhausts its rework
+    # budget and accepts with the finding still open — an accept that is also a deviation, so it is
+    # observed. Passing only the outcome label had the observer acknowledge `accept` for a node that
+    # had filed a substantive finding, and then describe the gate as having passed.
+    finding_text = "docstring drift in the new helper"
+    gating = {"findings": [{"severity": "high", "path": None, "what": finding_text, "fix": None}]}
+    store = _run_with_cadence(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        "task-obs-findings",
+        flow_text=_NON_BLOCKING_REVIEW_FLOW,
+        outputs={"review": ("I found one advisory issue", gating)},
+        supervisor_observe="events",
+    )
+    assert set(_observed_nodes(store, "task-obs-findings")) == {"review"}
+    supervisor_dir = task_artifact_dir(tmp_path / "art", "task-obs-findings") / "stages/supervisor"
+    prompts = [path.read_text("utf-8") for path in supervisor_dir.glob("run-*/rendered-prompt.md")]
+    review_observation = [p for p in prompts if "Node: review" in p]
+    assert review_observation, "the deviating review step was observed"
+    assert any(f"- [high] {finding_text}" in p for p in review_observation)
+    # The provider's own prose reached the observer too, not only the typed findings.
+    assert any("I found one advisory issue" in p for p in review_observation)
 
 
 def test_supervisor_turns_write_rendered_prompt_and_prompt_audit(
@@ -3632,15 +3791,17 @@ def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path
     stages = [r["node_id"] for r in node_records]
     assert stages == ["planning", "implementation", "review", "documentation"]
 
-    # The constant supervisor layer is itself part of the audit trail now: it observes
-    # every completed step (reusing that step's node_run_id — including non-agent steps like
-    # checks, which write no prompt-audit record of their own) and writes the once-per-task
-    # finalize turn under the reserved node_run_id=0 sentinel (it runs last but is namespaced
-    # first, since it is not a graph node).
+    # The constant supervisor layer is itself part of the audit trail: an observation reuses the
+    # observed step's node_run_id, and the once-per-task finalize turn is namespaced under the
+    # reserved node_run_id=0 sentinel (it runs last but is namespaced first, since it is not a graph
+    # node). Which steps are observed is the cadence's call — this run's is the packaged `events`
+    # and
+    # nothing deviated, so finalize is the only turn. The invariant that holds under every cadence:
+    # a supervisor turn's id is the finalize sentinel or some real step's id, never anything else.
     assert supervisor_records, "supervisor turns are part of the prompt-audit trail"
     supervisor_ids = {r["node_run_id"] for r in supervisor_records}
     assert 0 in supervisor_ids
-    assert set(node_ids) <= supervisor_ids
+    assert supervisor_ids <= set(node_ids) | {0}
 
     # The combined timeline has one line per step, in the same chronological order. Real
     # graph-node entries stay chronological by node_run_id; the supervisor's synthetic ids (a

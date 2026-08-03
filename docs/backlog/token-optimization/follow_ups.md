@@ -20,9 +20,7 @@ Sections:
 
 ## Needs a decision
 
-### Does P1 still need its "always write a deterministic step record"? (P0 → P1)
-
-[P1](supervisor-observation-cadence-p1.md) plans (item 3 of its implementation sketch) to write a deterministic step record with `note=""` on every post-node hook call, so that "the ledger and the packet stay complete even when observations are off". P0 reached that completeness by another route: the packet's steps come from `node_runs` and each run's own `<node_id>.out.md`, neither of which depends on an observation having run. So the extra always-written `evaluations` row may now buy nothing for the packet — it would only matter if something else wants an observation-shaped row per step (P2's `StepRecorder` is the plausible claimant). Decide when P1 is implemented: keep it for P2's sake, or drop it and let `node_runs` be the step record. Do not silently do both.
+Nothing open. (P1 closed the one entry that lived here: the always-written deterministic step record was dropped — `node_runs` is the step record. Recorded as deviation 2 in [P1](supervisor-observation-cadence-p1.md#отклонения-от-текста-задачи-2026-08-03).)
 
 ## Watch items
 
@@ -31,6 +29,10 @@ This campaign's headline numbers are **measured**, so its watch items are mostly
 ### P0's three run-only thresholds are unmeasured (P0)
 
 Everything checkable without a real run is covered by tests; three acceptance criteria are not, because they need one. On the first `blog_article_revise` after P0 merges, read: the finalize row's input (the real threshold — «role_file + prompt + packet ≤ 16 KB», and it must **not** grow with the rework count), the supervisor share of the run's Claude input (a control number, ~60–65% expected — its threshold is P1's, not P0's), and the average observe call (should not move: P0 only capped `final_message`). Queries are in [P0 §A/B и метрики](supervisor-finalize-packet-and-cadence.md#ab-и-метрики-решение-x1-пересмотрено-2026-08-03) — and an already-existing run on current `dev` is a free "before" (`provider_attempts` rows are never pruned). Delete this entry once the numbers are recorded.
+
+### P1's two run-only thresholds are unmeasured (P1)
+
+Everything checkable without a run is covered by tests; two of P1's acceptance numbers are not. On the first `blog_article_revise` after P1 merges, read: that the run made **exactly one** supervisor call (the finalize — a structural identity on a `mode: none` flow, no baseline needed) and that the supervisor share of the run's Claude input is **≤ 20%** (historically ~70%). Same queries as P0's, in [P0 §A/B и метрики](supervisor-finalize-packet-and-cadence.md#ab-и-метрики-решение-x1-пересмотрено-2026-08-03). Also worth a glance on the first `implementation` run: that `events` fired only where something actually deviated, and that `follow_ups` did not thin out now that ordinary steps go unobserved. Delete this entry once the numbers are recorded.
 
 ### Slot nodes contribute no `steps[].message` to the packet (P0)
 
@@ -42,6 +44,16 @@ Everything checkable without a real run is covered by tests; three acceptance cr
 
 P0 changed the packaged supervisor role prompts (`roles/supervisor.md`, `implementation/{supervisor,summary}.md`): the observe lens no longer claims to watch _every_ step, and the finalize lens is told to read the run's facts from the packet rather than recall them. A repo that tracks its own copy of `.worc/flows/` (the documented setup for owning your prompts) does **not** pick these up — it keeps a finalize lens that asks the turn to summarize "what you noted across the steps" while the turn now runs in a fresh session with no such memory. The behavior is still correct (the orchestrator appends its own packet instruction to whatever lens is in force), but the operator's own wording is now working against it. Worth a line in the upgrade notes when the derived docs are refreshed.
 
+### A target repo with its own tracked `.worc/flows/` misses the per-flow cadence defaults (P1)
+
+Same mechanism as P0's entry above, with a bigger bill: the per-flow cadence defaults are in the packaged flow YAML (`observe.mode: none` on the content flows, `events` on `implementation`), so a repo that tracks its own copy of `.worc/flows/` does **not** pick them up. Those flows declare no cadence, so they inherit the global default — which is `events`, i.e. still the saving, just not the flow-specific choice. The operator gets the full benefit by adding `observe: {mode: none}` to their own content flows' `supervisor:` block. Worth a line in the upgrade notes.
+
+### `observe.mode: none` globally is refused for a flow that declares `events` (P1)
+
+A flow may only narrow the operator's cadence, so `implementation.yaml`'s declared `events` is _broader_ than a global `none` and fails flow validation before any node runs. Deliberate — the flow is asserting that its `emit_follow_ups` needs deviation notes, and a loud refusal beats quietly thinning the follow-ups — but it does mean "turn observations off everywhere" is not a single global switch for that flow. The operator narrows their own copy of the flow instead. Expect this question the first time someone tries it.
+
+The sting is that the rejection lands _after_ the task is claimed: resolution runs before branch prep (so no provider runs, no branch, no commit), but the task still ends in terminal `failed` and has to be re-queued by hand — and a `watch` loop burns the whole queue one task at a time. `worc validate-flow --all` runs the same validator read-only without claiming anything, and its exit codes are built for `worc validate-flow --all && worc watch`; the shipped `guide/config/reference.md` now says so under `observe.mode`. Worth repeating in the upgrade notes, because there is no flow preflight inside `run` / `watch` / `ready` — `check_flows` has exactly one caller, the `validate-flow` command.
+
 ## Carried into `main`
 
 The `docs/` tree is reconstructed on `main` from the merged `dev` diff as a separate task. Doc-impact notes accumulate here so that reconstruction has breadcrumbs rather than a bare diff.
@@ -52,6 +64,13 @@ The `docs/` tree is reconstructed on `main` from the merged `dev` diff as a sepa
 - **`configuration.md`** — no schema change (P0 deliberately added no config key), but the `supervisor` section's prose is stale in two ways: it says the layer observes "each step", and it does not mention that the finalize turn's input is now bounded independently of run length. The absence of a toggle is itself a decision — see the non-goal below.
 - **`glossary.md`** — `SupervisorPacket` is a new term worth an entry.
 
+### P1 — supervisor observation cadence (P1)
+
+- **`configuration.md`** — the `supervisor` block changed shape, which is the largest doc delta of the campaign. Flat `supervisor.model` / `supervisor.reasoning` are **gone** (schema v33); model and effort are per phase under `observe` / `finalize` / `handoff`, `role_file` and `provider` stay top-level, and `observe` also carries the cadence (`mode: all|selected|events|none`, default `events`, plus `triggers` and `include_nodes`). Needs: the new key table, the mode table with what each mode costs, the narrowing rule (a flow may only narrow; rank `none < events < selected < all`, and `selected` counts as broader than `events`), the note that no budget keys exist, and the migration line — the loader rejects a flat key by name and `worc upgrade-config` strips it without carrying the value over. The shipped `packaged/guide/config/reference.md` is already rewritten and is the best source to reconstruct from.
+- **`worc_architecture.md`** — the supervisor layer no longer observes every executed node: the kind gate (`tool` / `checks` / `publish`) is now joined by a cadence gate, and the default is deviations-only. Three triggers, closed set: `rework` (incl. an evaluator's give-up accept), `failure`, `fallback` — the last two read from the step's own `node_runs` row, so the post-node hook's contract is unchanged. New pure module `core/observe_cadence.py` holds the rank table, the resolution, and the trigger detection; the flow-vs-config narrowing check lives in the flow validator's config-aware layer next to `permission_ceiling`. Also worth stating the invariant explicitly: per-flow defaults are data in the flow YAML, never a flow-name branch in the engine.
+- **`glossary.md`** — `observe.mode` / observation cadence, and "trigger" in the `events` sense, are new terms.
+- **Upgrade notes** — both operational consequences above (a tracked `.worc/flows/` keeps the global cadence; global `none` is refused for a flow declaring `events`).
+
 ## Deliberate non-goals
 
 Decided against, not overlooked.
@@ -59,6 +78,14 @@ Decided against, not overlooked.
 ### No config toggle for fresh finalize (P0-D4)
 
 The warm-resume branch was deleted outright rather than put behind a key. A toggle would have forced a config-schema bump inside a phase that changed no schema, and a second code path in the tests forever — for a greenfield project that owes no backward compatibility. A warm auto-fallback "if the packet fails to build" was refused for a sharper reason: it would restore non-determinism in the one path P0 makes reproducible, and mask the build failure. The rollback is `git revert`; the only fallback is the orchestrator's deterministic minimal summary, and a failed build is recorded as `packet_built: false` on the `supervisor_final` row. [P1](supervisor-observation-cadence-p1.md) adds no `finalize.session` key either (P1-D8) — a single-valued key is dead config.
+
+### No `finalize.enabled` / `handoff.enabled` keys (P1)
+
+The P1 document's illustrative YAML showed both, but no decision (P1-D1…D8) and no acceptance criterion asked for them, so they were left out. `finalize.enabled: false` would create a run that produces no summary — and therefore no pull-request body — which nobody requested and which the same phase deliberately made _more_ reliable; `handoff.enabled` duplicates what a flow's `handoff_role_file` and its decomposition block already decide. Same reasoning as P0-D4's refusal of a fresh-finalize toggle: a key whose only interesting value degrades the run is not a feature. If a real need appears, it arrives with the case that motivates it.
+
+### No flow-local `observe` keys beyond `mode` (P1)
+
+The flow-local `supervisor.observe` block accepts `mode` and nothing else — `include_nodes`, `triggers`, `model` and `reasoning` are operator-only, and a flow naming them fails closed. Cost belongs to the operator, not to authored content: a flow saying "watch me with the expensive model" would be spending someone else's budget. `mode` is the exception because narrowing it only ever spends _less_. The block is nested (rather than a flat `observe_mode`) precisely so `include_nodes` could join it later without a second rename.
 
 ### No `flow.final_status` field in the packet (P0)
 

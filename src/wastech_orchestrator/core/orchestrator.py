@@ -24,7 +24,13 @@ from typing import Any
 from wastech_orchestrator.check_runner import CheckRunner
 from wastech_orchestrator.checks.model import ResolvedCheckSet
 from wastech_orchestrator.checks.resolver import CheckResolver
-from wastech_orchestrator.config.schema import BranchMode, MergeStrategy, OrchestratorConfig
+from wastech_orchestrator.config.schema import (
+    BranchMode,
+    MergeStrategy,
+    ObserveMode,
+    OrchestratorConfig,
+)
+from wastech_orchestrator.core import observe_cadence
 from wastech_orchestrator.core.decomposition import (
     REASON_N_OUT_OF_RANGE,
     DecompositionDecision,
@@ -3178,6 +3184,35 @@ class Orchestrator:
 
         return facts
 
+    def _observes_step(
+        self, mode: ObserveMode, node: FlowNode, outcome: NodeOutcome, node_run_id: int
+    ) -> bool:
+        """Whether the cadence in force spends an observation turn on this completed step.
+
+        The ``events`` mode is the only one that needs facts beyond the node id, so it is the
+        only one that reads the step's ``node_runs`` row — a single primary-key lookup, and none at
+        all under ``all`` / ``selected`` / ``none``. ``include_nodes`` and ``triggers`` are
+        global-only (a flow narrows the *mode*, nothing else), so they come straight from config.
+        """
+        observe = self._config.supervisor.observe
+        triggers: frozenset[str] = frozenset()
+        if mode is ObserveMode.EVENTS:
+            row = self._store.get_node_run(node_run_id)
+            triggers = observe_cadence.triggers_for(
+                outcome_kind=outcome.kind,
+                rework_exhausted=outcome.rework_exhausted,
+                status=row.status if row is not None else None,
+                provider_used=row.provider_used if row is not None else None,
+                route_primary=row.route_primary if row is not None else None,
+            )
+        return observe_cadence.should_observe(
+            mode=mode,
+            node_id=node.id,
+            include_nodes=observe.include_nodes,
+            enabled_triggers=observe.triggers,
+            triggers=triggers,
+        )
+
     def _engine_post_node(
         self,
         p: _Pipeline,
@@ -3188,11 +3223,20 @@ class Orchestrator:
         control_digest: str | None = None,
     ) -> Callable[[FlowNode, NodeOutcome, int], None]:
         """Engine post-node hook: verify the live control plane is unchanged, let the
-        supervisor layer observe the completed step (except the kinds in
-        :data:`_UNOBSERVED_NODE_KINDS`), persist a node's output_artifact slot + its
+        supervisor layer observe the completed step (when the kind is observable at all and the
+        cadence in force selects it), persist a node's output_artifact slot + its
         generic ``<node_id>.out.md``, resolve plan skills, and — for the decomposition
         ``proposed_by`` node — decide + materialize the decomposition."""
         decomp = snapshot.doc.decomposition
+        # The observation cadence for this run: the flow's own mode when it declares one, else the
+        # operator's global mode (the validator has already refused a flow that widens it). Resolved
+        # once per run from data — the engine never maps a flow name or a node id to a mode.
+        flow_supervisor = snapshot.doc.supervisor
+        flow_observe = flow_supervisor.observe if flow_supervisor is not None else None
+        observe_mode = observe_cadence.resolve_mode(
+            self._config.supervisor.observe.mode,
+            flow_observe.mode if flow_observe is not None else None,
+        )
         # Redaction literals for the node-output writer, harvested once per run (same set the memory
         # write path uses): raw structured output is not adapter-redacted, so scrub it at write.
         node_output_secrets = self._memory_extra_secrets()
@@ -3211,12 +3255,20 @@ class Orchestrator:
             # mutated under the running task — a non-fallback manual-action security violation.
             if live_flow_dir is not None and control_digest is not None:
                 self._verify_control_plane_unchanged(snapshot, live_flow_dir, control_digest)
-            # The constant supervisor layer observes the completed step read-only (advisory), except
-            # for the three kinds in `_UNOBSERVED_NODE_KINDS`: the terminal `publish` node (its
-            # finalize hook already wrote the summary) and the deterministic `tool` / `checks`
-            # nodes, whose result is already a durable fact the finalize packet carries — a note
-            # about a pass/fail bought nothing and cost a full turn on every run.
-            if self._supervisor is not None and node.kind not in _UNOBSERVED_NODE_KINDS:
+            # The constant supervisor layer observes the completed step read-only (advisory),
+            # subject
+            # to two independent gates. First the kind: the three in `_UNOBSERVED_NODE_KINDS` are
+            # never observable — the terminal `publish` node (its finalize hook already wrote the
+            # summary) and the deterministic `tool` / `checks` nodes, whose result is already a
+            # durable fact the finalize packet carries. Then the operator's cadence: `all` observes
+            # every observable step, `selected` the listed ids, `events` only a deviation, `none`
+            # nothing at all. The whole-task summary is unaffected by any of it — finalize is seeded
+            # by the deterministic packet, not by these notes.
+            if (
+                self._supervisor is not None
+                and node.kind not in _UNOBSERVED_NODE_KINDS
+                and self._observes_step(observe_mode, node, outcome, node_run_id)
+            ):
                 self._supervisor.observe(
                     task_id=p.task.id,
                     node_id=node.id,

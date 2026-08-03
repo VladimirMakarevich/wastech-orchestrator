@@ -598,6 +598,21 @@ def _parse_skill_map(structured: Mapping[str, Any] | None) -> dict[str, tuple[st
     return out
 
 
+class SupervisorTurnSettings(Protocol):
+    """The model + effort of one supervisor phase, structurally.
+
+    Satisfied by both ``SupervisorObserveConfig`` (which carries the cadence too) and
+    ``SupervisorTurnConfig``, so the shared turn runner takes either without the two config shapes
+    having to be related by inheritance.
+    """
+
+    @property
+    def model(self) -> str | None: ...
+
+    @property
+    def reasoning(self) -> str | None: ...
+
+
 class SupervisorStorePort(Protocol):
     """The slice of the state store the supervisor needs: the immutable evaluation row, the durable
     own-session lineage (read on first use, written after each turn), the per-turn provider-attempt
@@ -713,7 +728,12 @@ class Supervisor:
         # observe turns; it never needs a max reasoning tier, so cap it to `high` (the whole-task
         # finalize keeps the configured tier).
         note = self._run(
-            task_id, prompt, node_run_id=node_run_id, subtask=subtask_order, cap_reasoning=True
+            task_id,
+            prompt,
+            node_run_id=node_run_id,
+            turn=self._settings.observe,
+            subtask=subtask_order,
+            cap_reasoning=True,
         )
         self._record(
             task_id,
@@ -844,6 +864,7 @@ class Supervisor:
                 task_id,
                 self._finalize_prompt(task_id, packet=packet_path is not None, gates=gates),
                 node_run_id=0,
+                turn=self._settings.finalize,
                 resume_session=False,
                 task_path=task_path,
                 supervisor_packet_path=packet_path,
@@ -859,6 +880,7 @@ class Supervisor:
                 gates=gates,
             ),
             node_run_id=0,
+            turn=self._settings.finalize,
             output_schema=_finalize_schema(with_delta=emit_delta, with_follow_ups=with_follow_ups),
             resume_session=False,
             task_path=task_path,
@@ -1050,6 +1072,7 @@ class Supervisor:
             task_id,
             self._handoff_prompt(task_id, subtask_order, floor_context),
             node_run_id=_HANDOFF_RUN_ID_BASE + subtask_order,
+            turn=self._settings.handoff,
             subtask=subtask_order,
             output_schema=_HANDOFF_SCHEMA,
         )
@@ -1087,6 +1110,10 @@ class Supervisor:
             task_id,
             prompt,
             node_run_id=_PROPOSAL_RUN_ID,
+            # The cheap pair: a once-per-task, schema-bound proposal has the observe phase's cost
+            # profile, not the whole-task synthesis's. Independent of ``observe.mode``, which gates
+            # per-step observations only — this turn runs whenever ``skills.dynamic`` is on.
+            turn=self._settings.observe,
             output_schema=_SKILL_MAP_SCHEMA,
             task_path=task_path,
         )
@@ -1111,6 +1138,7 @@ class Supervisor:
         prompt: str,
         *,
         node_run_id: int,
+        turn: SupervisorTurnSettings,
         subtask: int | None = None,
         resume_session: bool = True,
         cap_reasoning: bool = False,
@@ -1122,6 +1150,7 @@ class Supervisor:
             task_id,
             prompt,
             node_run_id=node_run_id,
+            turn=turn,
             subtask=subtask,
             resume_session=resume_session,
             cap_reasoning=cap_reasoning,
@@ -1136,6 +1165,7 @@ class Supervisor:
         prompt: str,
         *,
         node_run_id: int,
+        turn: SupervisorTurnSettings,
         subtask: int | None = None,
         output_schema: dict[str, Any] | None = None,
         resume_session: bool = True,
@@ -1158,12 +1188,17 @@ class Supervisor:
         ``resume_session=False`` starts a fresh session (no ``session_id``): finalize always uses
         it, because it is grounded in the ``SupervisorPacket`` at ``supervisor_packet_path`` rather
         than in session memory — which also removes the failure mode of resuming a dead session.
+
+        ``turn`` is the calling phase's own model + effort (``config.supervisor.observe`` /
+        ``.finalize`` / ``.handoff``). Required, not defaulted: a cheap note and the whole-task
+        synthesis want opposite tiers, so a phase that forgot to say which it is should not compile
+        rather than silently inherit the wrong one. The provider stays one per layer.
         """
         try:
             route = self._router.resolve_route(_SUPERVISOR_IDENTITY, self._settings.provider)
             # Cap to `high` for a schema turn (fragile at max) OR an advisory observe turn
-            # (cost-heavy in a deep loop); a free-text finalize keeps the configured tier.
-            reasoning = _schema_safe_reasoning(self._settings.reasoning, output_schema)
+            # (cost-heavy in a deep loop); a free-text finalize keeps its configured tier.
+            reasoning = _schema_safe_reasoning(turn.reasoning, output_schema)
             if cap_reasoning and reasoning in _MAX_REASONING_TIERS:
                 reasoning = _SCHEMA_REASONING_CAP
             # The session to resume + its persisted cumulative usage baseline: a resumed
@@ -1182,7 +1217,7 @@ class Supervisor:
                 timeout_seconds=self._default_timeout_seconds,
                 attempt=1,
                 node_run_id=node_run_id,  # not a graph node; audit lives in ``evaluations``
-                model=self._settings.model,
+                model=turn.model,
                 reasoning=reasoning,
                 output_schema=output_schema,
                 session_id=resume_id,
@@ -1277,7 +1312,9 @@ class Supervisor:
                     prompt=effective_prompt,
                     route=route,
                     outcome=outcome,
-                    model=self._settings.model,
+                    # The phase's model as actually sent — read off the request rather than
+                    # re-resolving it, so the audit cannot disagree with the launch.
+                    model=request.model,
                     reasoning=reasoning,
                     started_at=outcome.result.started_at,
                     secrets=self._prompt_secrets,

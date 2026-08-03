@@ -237,30 +237,42 @@ def _validate_supervisor(
     that ``role_file`` has no path traversal (``..`` or an absolute path) — the flow validator's
     containment rule for a node ``role_file``.
 
-    When ``provider`` is unset, ``supervisor.model`` is sent to the inherited global primary. A
-    model whose vendor plainly clashes with that primary (a ``claude-*`` model under a ``codex``
+    One ``provider`` serves the whole layer, but model and effort are per phase, so every check
+    below runs once per phase block (``observe`` / ``finalize`` / ``handoff``) against that one
+    resolved provider.
+
+    When ``provider`` is unset, each phase's model is sent to the inherited global primary. A model
+    whose vendor plainly clashes with that primary (a ``claude-*`` model under a ``codex``
     primary, say) 400s on every supervisor turn at runtime, silently masked by the cross-provider
     fallback. We can't verify a model in general, but a recognized cross-vendor prefix is a strong
     signal — surfaced as a WARNING, not fatal (the run still degrades via fallback; "fatal only when
     no runtime fallback"). The check fires only on the inherited path; an explicit provider is the
     operator's call and is validated for ``agents.allowed`` membership above.
     """
-    provider = config.supervisor.provider
+    supervisor = config.supervisor
+    provider = supervisor.provider
     if provider is not None and provider not in frozenset(config.agents.allowed):
         issues.append(f"supervisor.provider {provider.value!r} is not in agents.allowed")
     resolved = provider or _global_primary(config)
+    phases = (
+        ("observe", supervisor.observe.model, supervisor.observe.reasoning),
+        ("finalize", supervisor.finalize.model, supervisor.finalize.reasoning),
+        ("handoff", supervisor.handoff.model, supervisor.handoff.reasoning),
+    )
     if resolved is not None:
-        _check_reasoning(
-            where="supervisor.reasoning",
-            provider=resolved,
-            reasoning=config.supervisor.reasoning,
-            issues=issues,
-        )
-        if provider is None:
-            vendor = _infer_model_vendor(config.supervisor.model)
+        for phase, model, reasoning in phases:
+            _check_reasoning(
+                where=f"supervisor.{phase}.reasoning",
+                provider=resolved,
+                reasoning=reasoning,
+                issues=issues,
+            )
+            if provider is not None:
+                continue
+            vendor = _infer_model_vendor(model)
             if vendor is not None and vendor != resolved:
                 warnings.append(
-                    f"supervisor.model {config.supervisor.model!r} looks like a {vendor.value} "
+                    f"supervisor.{phase}.model {model!r} looks like a {vendor.value} "
                     f"model, but supervisor.provider is unset so it inherits the global primary "
                     f"{resolved.value!r}; this will fail at runtime and fall back. Pin "
                     f"supervisor.provider to {vendor.value!r} or set a {resolved.value} model."

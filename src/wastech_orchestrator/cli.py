@@ -1029,8 +1029,14 @@ def cmd_upgrade_config(args: argparse.Namespace) -> int:
     path = Path(path_str).resolve()
     text = path.read_text(encoding="utf-8")
     # Fail-closed: a structural problem or a newer-than-supported schema_version raises ConfigError
-    # (handled in main with a clean message + exit 2) — never upgrade a config we cannot read.
-    load_config(path)
+    # (handled in main with a clean message + exit 2) — never upgrade a config we cannot read. The
+    # read-back runs against a throwaway copy with the removed keys already stripped: a key this
+    # command exists to drop is rejected by the current loader (v33's flat `supervisor.model`, say),
+    # and refusing on it would leave the operator no automated path off the old schema. Every other
+    # problem still refuses here, and the regenerated file is validated again below before we write.
+    probe = config_upgrade.parse_mapping(text)
+    config_upgrade.strip_removed_keys(probe)
+    loads_config(config_upgrade.render(probe), source=str(path))
 
     operator = config_upgrade.parse_mapping(text)
     template = config_upgrade.packaged_template_mapping()

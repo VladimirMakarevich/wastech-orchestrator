@@ -204,11 +204,21 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
         # max tier — xhigh makes the structured finalize turn fragile. `provider` is pinned to
         # the primary so it stays aligned with `model` (also the primary's default) by construction
         # so an operator flipping the primary keeps a self-consistent supervisor.
+        # Effort is per phase: `observe` is advisory and can fire on every step of a deep fix loop,
+        # so it gets the cheap tier; `finalize` writes summary.md (the pull-request body) and
+        # `handoff` briefs the next subtask, so both keep the considered `high`. `observe.mode`
+        # is written explicitly at the global default — deviations only, so a run pays for
+        # observations in proportion to what actually went wrong rather than to its length.
         "supervisor": {
             "role_file": "roles/supervisor.md",
-            "model": _PROVIDER_DEFAULTS[primary_pid][0],
-            "reasoning": "high",
             "provider": primary_pid.value,
+            "observe": {
+                "mode": "events",
+                "model": _PROVIDER_DEFAULTS[primary_pid][0],
+                "reasoning": "low",
+            },
+            "finalize": {"model": _PROVIDER_DEFAULTS[primary_pid][0], "reasoning": "high"},
+            "handoff": {"model": _PROVIDER_DEFAULTS[primary_pid][0], "reasoning": "high"},
         },
         "logging": {
             "level": "info",

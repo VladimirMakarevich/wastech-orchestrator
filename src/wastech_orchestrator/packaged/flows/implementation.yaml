@@ -171,10 +171,17 @@ flow:
   # (the structured-output schemas stay in code). `role_file` overrides the global observe lens;
   # `finalize_role_file` is the final-summary emphasis; `emit_follow_ups` opts the finalize turn into
   # the evidence-gated `follow_ups` array (a code-oriented capability — research/prose flows omit it).
+  # `observe.mode: events` is stated here rather than inherited so this flow's cadence is visible where
+  # its prompts are: `emit_follow_ups: true` means the finalize turn's follow-ups and the memory delta
+  # are worth grounding in observed deviations, so `none` would starve them — but a note on every
+  # ordinary step bought nothing. `events` observes only a rework loop, a failed step, or a provider
+  # fallback, which is exactly what a reviewer of a long implementation run needs flagged.
   supervisor:
     role_file: implementation/supervisor.md
     finalize_role_file: implementation/summary.md
     emit_follow_ups: true
+    observe:
+      mode: events
 
   decomposition:
     proposed_by: planning

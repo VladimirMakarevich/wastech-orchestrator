@@ -1,6 +1,6 @@
 # Token optimization (2026-07-16 analysis)
 
-Status: **open — measurement, content hygiene and P0 shipped; P1/P2 accepted 2026-07-26, not implemented** Date: 2026-07-16 Owner: Vladimir Makarevich
+Status: **open — measurement, content hygiene, P0 and P1 shipped; P2 accepted 2026-07-26, not implemented** Date: 2026-07-16 Owner: Vladimir Makarevich
 
 Residue from the items that land — open decisions, watch items, operational consequences, deliberate non-goals, and what the `main` docs refresh must pick up — is collected in [follow_ups.md](follow_ups.md) (seeded by P0; the two earlier shipped items recorded theirs in their own documents).
 
@@ -29,8 +29,8 @@ Three findings drive everything here:
 | [Normalized token-usage accounting](normalized-usage-accounting.md) | Provider-aware normalized usage persisted per attempt in SQLite: Codex resume delta stops double-counting, Claude input = sum of its three fields, raw payload kept for audit; also fixes the latent `_produced_no_work` bug on resumed Codex runs. The measurement substrate every token A/B depends on. | **implemented 2026-07-16** |
 | [Content-flow token hygiene](content-flow-token-hygiene.md) | Two engine-free tweaks: a token-cost / history-growth warning in the session-scope docs, and packaged `blog_article_revise` defaults (`polish` → `fresh_disposable`, read-once / one-patch / one-diff role-prompt budget). | **implemented 2026-07-16** |
 | [Supervisor P0 — SupervisorPacket → fresh finalize → skip tool/checks](supervisor-finalize-packet-and-cadence.md) | Build a deterministic `SupervisorPacket` from durable state, make `finalize` always run fresh seeded by it, then stop observing `tool`/`checks` nodes. The order is mandatory. | **implemented 2026-08-03** |
-| [Supervisor P1 — observation cadence](supervisor-observation-cadence-p1.md) | `observe.mode: all\|selected\|events\|none`, three event triggers, and split observe/finalize model+reasoning. The main saver. (Budgets and the observe-session knob were dropped — P1-D6 / P1-D8.) | **accepted 2026-07-26** (next to implement — P0 has merged) |
-| [Supervisor P2 — responsibility split + telemetry](supervisor-responsibility-split-p2.md) | Extract a deterministic `StepRecorder` and persist per-function usage/cost with a supervisor report in the summary. (Separate handoff/skill budgets and the dominance warning were dropped — P2-D1.) | **accepted 2026-07-26** (implement only after P1 merges) |
+| [Supervisor P1 — observation cadence](supervisor-observation-cadence-p1.md) | `observe.mode: all\|selected\|events\|none`, three event triggers, and split observe/finalize model+reasoning. The main saver. (Budgets and the observe-session knob were dropped — P1-D6 / P1-D8.) | **implemented 2026-08-03** |
+| [Supervisor P2 — responsibility split + telemetry](supervisor-responsibility-split-p2.md) | Extract a deterministic `StepRecorder` and persist per-function usage/cost with a supervisor report in the summary. (Separate handoff/skill budgets and the dominance warning were dropped — P2-D1.) | **accepted 2026-07-26** (next to implement — P1 has merged) |
 
 See [happy-path.md](happy-path.md) for a plain-language **before/after** walk-through of the analyzed `blog_article_revise` run — what the supervisor costs today (7 LLM calls, 480k input) versus after the whole roadmap ships (1 fresh finalize, < 60k), with diagrams and the quality guards that stay in place.
 
@@ -46,7 +46,7 @@ The order is not a suggestion — two of the dependencies are correctness constr
 | 4 | Supervisor P1 | **requires #3**; its A/B uses #1 | `observe.mode: none`/`events` is safe only over the deterministic P0 packet. Budgets are no longer part of P1 (P1-D6), so nothing here depends on token accounting beyond the shared A/B measurement. |
 | 5 | Supervisor P2 | **requires #4**; per-function telemetry uses #1 | Structural cleanup after the savings land — extracts the deterministic recorder P1 introduced and reports per-function usage on top of #1. Not on the savings critical path. |
 
-Items 1–3 are done. The live critical path is now **P1 → P2**; do not start a later phase before its predecessor is merged. P0's packet exists, so P1's `observe.mode` is unblocked — note that the packet is deliberately independent of whether observations ran (`steps[].message` comes from each node's own `<node_id>.out.md`, not from an observation row), which is what makes `observe.mode: none` safe.
+Items 1–4 are done. The live critical path is now **P2** alone; do not start it before P1 is merged. P1 confirmed in code what made it safe: the packet is independent of whether observations ran (`steps[].message` comes from each node's own `<node_id>.out.md`, not from an observation row), so `observe.mode: none` keeps a full summary. P2 inherits one open thread from P1 — P1 dropped the always-written deterministic step record as buying nothing today, so if P2's `StepRecorder` wants an observation-shaped row per step it introduces it together with the consumer that reads it.
 
 ## From `proposal` to `accepted`
 
@@ -104,7 +104,7 @@ Two rules for this review: **one decision at a time**, and **re-verify against t
 | 3 | ~~P0-D1 … P0-D7~~ **done 2026-07-26 — P0 is `accepted`** | The only item whose forks could all be closed immediately |
 | 4 | ~~Implement P0~~ **done 2026-08-03** | Landed as one change (P0-D5). Three deviations from the doc's text are recorded in its own "Отклонения от текста задачи" section; the two metric queries in "A/B и метрики" were corrected there (wrong column name, and a `node_runs.status` value that does not exist) |
 | 5 | ~~P1-D1 … P1-D8~~ **done 2026-07-26 — P1 is `accepted`** | Closed earlier than planned: D6 (budgets) and D7 (triggers) were answered by shrinking scope, which needs no P0 code. Implementation still waits for P0 to merge. |
-| 6 | Implement P1 |  |
+| 6 | ~~Implement P1~~ **done 2026-08-03** | Landed as one change. Five deviations from the doc's text are recorded in its own "Отклонения от текста задачи" section — the largest being that the `failure` trigger reads `node_runs.status` rather than `outcome.kind` (no observed node kind ever produces a failure kind), and that the always-written deterministic step record was dropped after P0 made it a no-op |
 | 7 | ~~P2-D1 … P2-D4~~ **done 2026-07-26 — P2 is `accepted`** | Scope trimmed to three items; implementation still waits for P1 to merge. |
 
 ## Expected effect
