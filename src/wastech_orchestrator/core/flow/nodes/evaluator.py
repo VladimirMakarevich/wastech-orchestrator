@@ -169,7 +169,8 @@ class EvaluatorNodeRunner:
             if outcome.result is not None
             else None
         )
-        kind, rework_exhausted = self._verdict(node, ctx, outcome, raw_findings)
+        gating = self._gating_flags(node, raw_findings)
+        kind, rework_exhausted = self._verdict(node, ctx, outcome, raw_findings, gating)
         self._record_completion(run_id, outcome, kind)
         record_run_observability(
             self._s,
@@ -219,7 +220,7 @@ class EvaluatorNodeRunner:
                 subtask_order=ctx.subtask_order,
                 kind="in_flow_verdict",
                 verdict=kind,
-                findings_json=_findings_json(findings),
+                findings_json=_findings_json(findings, gating),
             )
         )
         return NodeResult(
@@ -273,6 +274,7 @@ class EvaluatorNodeRunner:
         ctx: NodeContext,
         outcome: StageOutcome,
         raw_findings: list[dict[str, Any]] | None,
+        gating: tuple[bool, ...],
     ) -> tuple[str, bool]:
         """Map the verdict to ``(edge_kind, rework_exhausted)``.
 
@@ -281,13 +283,16 @@ class EvaluatorNodeRunner:
         was spent, so it continues with findings still open. The orchestrator surfaces that as an
         operator warning + Telegram trace so a human knows the stage may need follow-up; the flag is
         never routing state (``accept`` is ``accept``).
+
+        ``gating`` is the caller's already-computed per-finding gate decision, passed in rather than
+        recomputed so the routing verdict and the flag persisted beside it are literally the same
+        values (see :meth:`_gating_flags`).
         """
         if outcome.result is None:
             return "accept", False  # dead for routing: run() raises EvaluatorInfraError first
         if raw_findings is None:
             return "manual", False  # dead for routing (run() raises); accurate audit-trail label
-        gate_rank = _severity_rank(node.gate_severity)
-        if not any(self._is_blocking(f, gate_rank) for f in raw_findings):
+        if not any(gating):
             return "accept", False
         if node.blocking:
             # A blocking evaluator gates every time it finds a blocking issue; the engine's
@@ -542,6 +547,24 @@ class EvaluatorNodeRunner:
             return True
         return _severity_rank(str(finding.get("severity", ""))) <= gate_rank
 
+    def _gating_flags(
+        self, node: EvaluatorNode, raw_findings: list[dict[str, Any]] | None
+    ) -> tuple[bool, ...]:
+        """Each raw finding's gate decision, in the findings' own order.
+
+        Materialized as a whole tuple rather than folded into the verdict test, because ``any()``
+        short-circuits: a lazy evaluation would leave every finding after the first gating one
+        unflagged, and the persisted audit would then disagree with the verdict it came from. One
+        pass feeds both :meth:`_verdict` and :func:`_findings_json`, so they cannot diverge.
+
+        ``()`` when the provider did not honor the findings schema — there is nothing to decide
+        about, and ``run()`` fails the node closed a few lines later.
+        """
+        if raw_findings is None:
+            return ()
+        gate_rank = _severity_rank(node.gate_severity)
+        return tuple(self._is_blocking(f, gate_rank) for f in raw_findings)
+
 
 def _to_finding(raw: Mapping[str, Any]) -> Finding:
     """Map a raw structured finding to the typed :class:`Finding` (severity / reason / paths).
@@ -570,9 +593,22 @@ def _to_finding(raw: Mapping[str, Any]) -> Finding:
     return Finding(severity=severity, reason=reason, paths=paths)  # type: ignore[arg-type]
 
 
-def _findings_json(findings: tuple[Finding, ...]) -> str:
-    """Serialize findings for the immutable ``evaluations`` row."""
+def _findings_json(findings: tuple[Finding, ...], gating: tuple[bool, ...]) -> str:
+    """Serialize findings for the immutable ``evaluations`` row.
+
+    ``gating`` is each finding's gate decision, in the same order, persisted because it cannot be
+    recovered from what is stored: the typed projection above collapses an explicit ``blocking``
+    flag, ``critical`` and ``high`` into one ``high``, so under a ``critical`` gate a reader
+    comparing severities cannot tell a finding that sent work back from one that was let past. The
+    flag is what lets the pull-request body list only the findings a gate accepted.
+
+    ``strict=True`` is the guard that both sequences describe the same findings: a length mismatch
+    is a programming error, and truncating silently would relabel gating findings as let-past.
+    """
     return json.dumps(
-        [{"severity": f.severity, "reason": f.reason, "paths": list(f.paths)} for f in findings],
+        [
+            {"severity": f.severity, "reason": f.reason, "paths": list(f.paths), "gating": g}
+            for f, g in zip(findings, gating, strict=True)
+        ],
         ensure_ascii=False,
     )

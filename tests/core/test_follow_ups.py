@@ -90,6 +90,57 @@ def test_finding_to_follow_up_truncates_long_reason_and_drops_empty() -> None:
     assert _finding_to_follow_up("not-a-mapping", "review") is None
 
 
+def test_gating_finding_on_a_rework_verdict_is_not_a_follow_up() -> None:
+    # It gated, so it went through the fix loop; repeating it as technical debt would describe work
+    # that was done. The row's own verdict is what says the loop is still open.
+    rows = [
+        _verdict(
+            [{"severity": "high", "reason": "sent back", "paths": [], "gating": True}],
+            verdict="rework",
+        )
+    ]
+    assert evaluator_finding_follow_ups(rows) == ()
+
+
+def test_let_past_finding_becomes_a_follow_up() -> None:
+    rows = [_verdict([{"severity": "medium", "reason": "sub-threshold", "gating": False}])]
+    (fu,) = evaluator_finding_follow_ups(rows)
+    assert fu.title == "sub-threshold"
+    assert fu.evidence == ("review evaluator finding (accepted with findings)",)
+
+
+def test_open_gating_finding_on_an_accept_is_included_with_its_own_evidence() -> None:
+    # A gating finding inside a FINAL accept is a non-blocking evaluator that spent its rework
+    # budget and continued anyway (rework_exhausted). Losing it is the worst outcome of the filter,
+    # so it is included — but not worded like an ordinary sub-threshold nit.
+    rows = [_verdict([{"severity": "high", "reason": "still broken", "gating": True}])]
+    (fu,) = evaluator_finding_follow_ups(rows)
+    assert fu.title == "still broken"
+    assert fu.evidence == ("review evaluator finding still open — rework budget exhausted",)
+    assert "accepted with findings" not in fu.evidence[0]
+
+
+def test_row_without_the_gating_key_reads_as_let_past() -> None:
+    # The benign default, stated explicitly: an absent flag costs an extra follow-up, never a lost
+    # one. This is also the shape every row written before the flag existed has.
+    rows = [_verdict([{"severity": "low", "reason": "no flag recorded"}], verdict="rework")]
+    (fu,) = evaluator_finding_follow_ups(rows)
+    assert fu.title == "no flag recorded"
+
+
+def test_mixed_row_keeps_only_the_let_past_findings() -> None:
+    rows = [
+        _verdict(
+            [
+                {"severity": "high", "reason": "gated", "gating": True},
+                {"severity": "low", "reason": "let past", "gating": False},
+            ],
+            verdict="rework",
+        )
+    ]
+    assert [fu.title for fu in evaluator_finding_follow_ups(rows)] == ["let past"]
+
+
 def test_evaluator_finding_follow_ups_skips_a_malformed_row() -> None:
     # Advisory by construction: a row whose findings do not parse costs its follow-ups, never the
     # summary. Both shapes a corrupt blob can take are skipped, not raised.

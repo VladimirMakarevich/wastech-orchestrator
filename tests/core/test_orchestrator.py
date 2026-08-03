@@ -640,7 +640,7 @@ def test_rework_budget_exhausted_warns_operator_and_marks_trace(
     gating = {"findings": [{"severity": "high", "path": None, "what": "boom", "fix": None}]}
     providers = _both(outputs={"review": ("needs work", gating)})
     notifier = RecordingNotifier()
-    orch, _store, _, _ = _build(
+    orch, store, _, art = _build(
         git_repo,
         make_git_config,
         tmp_path,
@@ -682,6 +682,21 @@ def test_rework_budget_exhausted_warns_operator_and_marks_trace(
     assert "rework" in review_traces
     assert TRACE_REWORK_EXHAUSTED in review_traces
     assert any("exhausting its rework budget" in m for m in messages)
+
+    # The finding gated on every pass, so the evaluator recorded it as gating — and because the
+    # terminal verdict is an `accept`, the follow-up derivation keeps it (losing a finding that is
+    # still open above the gate is the worst outcome) and labels it apart from an ordinary
+    # sub-threshold nit. End to end: the flag the evaluator wrote is the flag the wording keys on.
+    rows = [r for r in store.get_evaluations("task-rbx") if r.kind == "in_flow_verdict"]
+    assert [json.loads(r.findings_json)[0]["gating"] for r in rows] == [True, True]
+    assert rows[-1].verdict == "accept"
+    follow_ups = json.loads(
+        (task_artifact_dir(art, "task-rbx") / "summary.json").read_text("utf-8")
+    )["follow_ups"]
+    assert [fu["title"] for fu in follow_ups] == ["boom"]
+    assert follow_ups[0]["evidence"] == [
+        "review evaluator finding still open — rework budget exhausted"
+    ]
 
 
 def _run_complete_task_store_dir(

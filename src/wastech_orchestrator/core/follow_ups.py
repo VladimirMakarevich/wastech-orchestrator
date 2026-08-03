@@ -103,9 +103,16 @@ def follow_up_json(follow_up: FollowUp) -> dict[str, Any]:
     }
 
 
-def _finding_to_follow_up(finding: Any, node_id: str | None) -> FollowUp | None:
+def _finding_to_follow_up(
+    finding: Any, node_id: str | None, *, rework_exhausted: bool = False
+) -> FollowUp | None:
     """Map one persisted evaluator finding (``{severity, reason, paths}``) to a :class:`FollowUp`,
-    or ``None`` when it carries no usable ``reason``."""
+    or ``None`` when it carries no usable ``reason``.
+
+    ``rework_exhausted`` marks the finding that gated and was still open when a non-blocking
+    evaluator ran out of rework budget. It gets its own evidence line, so an operator reading the
+    list can tell "below the gate, noted" from "above the gate, not fixed".
+    """
     if not isinstance(finding, Mapping):
         return None
     reason = str(finding.get("reason") or "").strip()
@@ -122,11 +129,17 @@ def _finding_to_follow_up(finding: Any, node_id: str | None) -> FollowUp | None:
         title, rationale = reason, ""
     else:  # keep the bold title a label; the full text still reaches the operator via the rationale
         title, rationale = reason[:FINDING_TITLE_MAX].rstrip() + "…", reason
+    where = node_id or "review"
+    evidence = (
+        f"{where} evaluator finding still open — rework budget exhausted"
+        if rework_exhausted
+        else f"{where} evaluator finding (accepted with findings)"
+    )
     return FollowUp(
         title=title,
         rationale=rationale,
         severity=severity if severity in ("low", "medium", "high") else "medium",
-        evidence=(f"{node_id or 'review'} evaluator finding (accepted with findings)",),
+        evidence=(evidence,),
         paths=paths,
     )
 
@@ -163,16 +176,29 @@ def _row_findings(row: EvaluationRow) -> list[Mapping[str, Any]]:
 
 
 def evaluator_finding_follow_ups(evaluations: Sequence[EvaluationRow]) -> tuple[FollowUp, ...]:
-    """Derive follow-ups from the LAST in-flow verdict per evaluator node.
+    """Follow-ups from the LAST in-flow verdict per evaluator node — the findings a gate let past.
 
     An evaluator that accepts *with* findings persists them to the ``evaluations`` table and they
-    otherwise reach no operator surface. Take each evaluator node's final verdict only and convert
-    its findings so they land in ``summary.{json,md}`` and the PR body.
+    otherwise reach no operator surface, so they are converted here and land in
+    ``summary.{json,md}`` and the pull-request body.
+
+    A finding that **gated** is excluded: it has already been through rework, so repeating it as
+    technical debt would describe work that was done. The one exception is a gating finding sitting
+    in a final ``accept`` — that is a non-blocking evaluator that spent its per-instance rework
+    budget and continued with the issue still open, which is the single most important thing to
+    carry into the pull request. It is included with its own evidence line so it does not read as an
+    ordinary sub-threshold nit.
+
+    A row written without the ``gating`` key reads as not-gating, so the error lands on the benign
+    side: an extra follow-up, never a lost one.
     """
     out: list[FollowUp] = []
     for (node_id, _subtask), row in _last_verdict_per_node(evaluations).items():
         for finding in _row_findings(row):
-            follow_up = _finding_to_follow_up(finding, node_id)
+            gating = bool(finding.get("gating"))
+            if gating and row.verdict != "accept":
+                continue
+            follow_up = _finding_to_follow_up(finding, node_id, rework_exhausted=gating)
             if follow_up is not None:
                 out.append(follow_up)
     return tuple(out)
