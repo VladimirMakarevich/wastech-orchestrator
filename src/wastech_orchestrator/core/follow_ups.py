@@ -26,9 +26,10 @@ from typing import Any
 
 from wastech_orchestrator.state_store import EvaluationRow
 
-# Longest a finding's reason may be before it is used verbatim as a follow-up title; longer reasons
-# become a truncated title with the full text carried in the rationale. The same bound caps
-# a finding line in the observation prompt, so a chatty evaluator cannot inflate every step turn.
+# Longest a finding's reason may be before it is used verbatim as a follow-up title; a longer reason
+# is split by :func:`_split_reason` into a title that ends on a real boundary and a rationale
+# carrying only the remainder. The same bound caps a finding line in the observation prompt and in
+# the gate digest, so a chatty evaluator cannot inflate every step turn.
 FINDING_TITLE_MAX = 120
 
 # Heading of the follow-ups section in ``summary.md`` (= the pull-request body). Named because the
@@ -108,7 +109,9 @@ def follow_up_json(follow_up: FollowUp) -> dict[str, Any]:
     }
 
 
-_SENTENCE_ENDS = (". ", ".\n", "? ", "?\n", "! ", "!\n", "; ")
+# Boundaries a title may end on, each with its trailing space: :func:`_split_reason` collapses all
+# whitespace before searching, so a newline-terminated variant would never match.
+_SENTENCE_ENDS = (". ", "? ", "! ", "; ")
 
 
 def _split_reason(reason: str) -> tuple[str, str]:
