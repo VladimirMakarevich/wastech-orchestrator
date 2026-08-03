@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import json
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -2028,6 +2029,31 @@ def test_summary_fallback_when_provider_fails(git_repo, make_git_config, tmp_pat
     assert metadata["supervisor_usage"]["total"]["calls"] >= 1
 
 
+@contextmanager
+def _collected_warnings() -> Iterator[list[str]]:
+    """Collect ``wastech_orchestrator`` WARNING messages emitted inside the block.
+
+    A handler on the package logger rather than ``caplog``: the per-task logger is a bound adapter
+    whose records do not reach pytest's capture handler.
+    """
+    messages: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    logger = logging.getLogger("wastech_orchestrator")
+    handler = _Collect(level=logging.WARNING)
+    logger.addHandler(handler)
+    prior_level = logger.level
+    logger.setLevel(logging.WARNING)
+    try:
+        yield messages
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(prior_level)
+
+
 def test_degraded_summary_is_loud_on_done_path(git_repo, make_git_config, tmp_path: Path) -> None:
     # Decision A (a): when a provider-authored synthesis was expected on the publish path but
     # failed, the deterministic fallback is marked loud — a WARNING plus a visible callout in the
@@ -2050,22 +2076,8 @@ def test_degraded_summary_is_loud_on_done_path(git_repo, make_git_config, tmp_pa
 
     providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
 
-    messages: list[str] = []
-
-    class _Collect(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            messages.append(record.getMessage())
-
-    logger = logging.getLogger("wastech_orchestrator")
-    handler = _Collect(level=logging.WARNING)
-    logger.addHandler(handler)
-    prior_level = logger.level
-    logger.setLevel(logging.WARNING)
-    try:
+    with _collected_warnings() as messages:
         result = orch.run_task(task_file)
-    finally:
-        logger.removeHandler(handler)
-        logger.setLevel(prior_level)
 
     assert result.final_status is Status.DONE
     summary = (art / "logs" / "task-degraded" / "summary.md").read_text(encoding="utf-8")
@@ -2076,6 +2088,30 @@ def test_degraded_summary_is_loud_on_done_path(git_repo, make_git_config, tmp_pa
     # failed. It is deterministic, so it survives the failure.
     assert "## Technical debt / follow-ups" in summary
     assert finding_text in summary
+
+
+def test_native_memory_opt_in_is_announced_per_run(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The one relaxation whose effects land OUTSIDE the run's audit: Claude's own per-project memory
+    # store lives in the operator's HOME, so what a task writes there escapes the frozen bundle, the
+    # diff, and the redaction net — and a later task on the same repo reads it. The hatch stays (it
+    # is operator-owned) but it is never silent, like read-isolation and git-evidence before it.
+    for opted_in, announced in ((True, True), (False, False)):
+        providers = _both()
+        orch, _, _, _ = _build(
+            git_repo,
+            make_git_config,
+            tmp_path / f"native-{int(opted_in)}",
+            providers=providers,
+            check_verdicts=[0],
+            config_kwargs={"allow_native_memory": opted_in},
+        )
+        _patch_impl_edit(providers, git_repo)
+        with _collected_warnings() as messages:
+            result = orch.run_task(_complete_task(tmp_path, f"task-native-{int(opted_in)}"))
+        assert result.final_status is Status.DONE
+        assert any("native Claude memory ON" in m for m in messages) is announced
 
 
 def test_decomposed_task_commits_each_subtask(
