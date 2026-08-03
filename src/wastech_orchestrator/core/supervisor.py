@@ -235,7 +235,11 @@ _BUILTIN_FINALIZE = (
     "You are a read-only supervisor closing out a software task. Do not edit code.\n\n"
     "Synthesize a plain-language summary of the whole task: what was done, how it works, how it "
     "integrates, and why, grounded in the actual committed change. In a closing section list any "
-    "advisory caveats or follow-ups you noted across the steps."
+    "advisory caveats or follow-ups you noted across the steps.\n\n"
+    # The floor is enforced for every flow, so the last fallback in the chain has to state it: a
+    # flow with no finalize lens of its own (and every user-authored one) reads only this text.
+    "Answer with real prose. A one-line, placeholder or probe summary is discarded as a failed "
+    "generation and replaced by a mechanical report of the run, so it costs the whole synthesis."
 )
 _BUILTIN_HANDOFF = (
     "You are a read-only supervisor briefing the next subtask in a decomposed task. Do not edit "
@@ -342,9 +346,17 @@ _SUMMARY_OPEN_TAG = "<summary>"
 # body after three schema rejections, and the degradation guard (does ``summary.md`` exist?) could
 # not see it. Below this floor the turn counts as having produced nothing, so the deterministic
 # report (changes, steps, checks, gate verdicts, follow-ups) becomes the body instead and the run is
-# flagged degraded. A real synthesis runs to thousands of characters; the schema itself asks for a
-# lead paragraph plus 2–4 sections.
-_SUMMARY_MIN_CHARS = 200
+# flagged degraded.
+#
+# Deliberately low, because a false positive is itself a regression: replacing honest short prose
+# with a mechanical report makes the operator surface WORSE, and it is a prose flow that pays. The
+# packaged content lenses ask for four labelled points and tell the turn to keep it concrete — a
+# complete answer to all four on a small revision lands around 170 characters, so a floor set to
+# "a real synthesis" length would discard finished work. This catches the collapse signature (a
+# probe, a placeholder, one clause) and nothing above it; the lenses carry the qualitative
+# expectation, and the ``summary`` schema description already asks for a lead paragraph plus 2–4
+# sections on every flow.
+_SUMMARY_MIN_CHARS = 120
 
 
 def _sanitize_summary(summary_text: str) -> str:

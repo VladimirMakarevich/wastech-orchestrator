@@ -30,7 +30,11 @@ from wastech_orchestrator.core.follow_ups import FINDING_TITLE_MAX
 from wastech_orchestrator.core.loop_control import record_rework
 from wastech_orchestrator.core.skills import SkillInventory, SkillRef
 from wastech_orchestrator.core.state_machine import Status
-from wastech_orchestrator.core.supervisor import _HANDOFF_RUN_ID_BASE, Supervisor
+from wastech_orchestrator.core.supervisor import (
+    _HANDOFF_RUN_ID_BASE,
+    _SUMMARY_MIN_CHARS,
+    Supervisor,
+)
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
 from wastech_orchestrator.providers.base import (
     AgentRunResult,
@@ -581,11 +585,32 @@ def test_finalize_discards_a_collapsed_summary_instead_of_publishing_it(
 
     assert result.summary_path is None
     assert not (Path(task_artifact_dir(tmp_path / "art", _TASK)) / "summary.md").exists()
-    assert "below the 200-char floor" in caplog.text and "'test'" in caplog.text
+    assert f"below the {_SUMMARY_MIN_CHARS}-char floor" in caplog.text and "'test'" in caplog.text
     payload = json.loads(
         (Path(task_artifact_dir(tmp_path / "art", _TASK)) / "summary.json").read_text("utf-8")
     )
     assert payload["summary"] == ""
+
+
+def test_the_floor_keeps_a_terse_but_complete_prose_summary(tmp_path: Path) -> None:
+    # The floor is enforced for every flow, and the packaged prose lenses (blog_article,
+    # content_translate, …) ask for four labelled points and tell the turn to keep it concrete. A
+    # complete answer to all four on a small revision is short — and discarding it would replace
+    # finished work with a mechanical report on a healthy run, which is a worse PR body, not a
+    # better one. Every other finalize test runs the code-flow fixture, so this shape needs its own.
+    concise = (
+        "**What** — tightened the opening of posts/foo.md. **How** — moved the claim into the "
+        "first sentence. **Sources** — none added. **Product** — unchanged."
+    )
+    assert len(concise) < 200  # the kind of summary a prose lens is asked to produce
+    router, store = FakeRouter([_ok("s1", concise)]), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store)
+
+    path = sup.finalize(task_id=_TASK, task_title="Revise the intro").summary_path
+
+    assert path is not None and concise in path.read_text("utf-8")
+    final = next(e for e in store.get_evaluations(_TASK) if e.kind == "supervisor_final")
+    assert json.loads(final.findings_json)["summary_written"] is True
 
 
 def test_supervisor_final_summary_written_matches_what_reached_disk(tmp_path: Path) -> None:

@@ -5,4 +5,4 @@ Write the plain-language handoff for this chapter revision, for a human reviewer
 - **Integration** — how it connects to the previous and next parts.
 - **Why** — the reasoning behind the notable editorial decisions.
 
-Keep it concise and concrete. This becomes the PR body (or the local commit's summary when the repo runs without pull requests).
+Keep it concise and concrete. This becomes the PR body (or the local commit's summary when the repo runs without pull requests). Concise means a few real sentences, not a single line: a one-line or placeholder summary is discarded as a failed generation and replaced by a mechanical report of the run.
