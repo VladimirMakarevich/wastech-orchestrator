@@ -567,12 +567,14 @@ class EvaluatorNodeRunner:
 
 
 def _to_finding(raw: Mapping[str, Any]) -> Finding:
-    """Map a raw structured finding to the typed :class:`Finding` (severity / reason / paths).
+    """Map a raw structured finding to the typed :class:`Finding` (severity / reason / paths / fix).
 
     ``what``/``path`` are the findings schema's field names; ``reason``/``title``/``message``/
-    ``paths`` (plural) stay as fallbacks for any pre-schema finding shape. The full raw dict (incl.
-    ``fix``) is preserved as-is in the ``findings.json`` artifact ``fixing`` reads — this typed
-    projection is only for the audit trail and ``NodeOutcome.findings``.
+    ``paths`` (plural) stay as fallbacks for any pre-schema finding shape. The full raw dict is
+    preserved as-is in the ``findings.json`` artifact ``fixing`` reads — this typed projection is
+    for the audit trail and ``NodeOutcome.findings``. ``fix`` rides along because the audit row is
+    what the operator's follow-up list is derived from, and the remedy is a finding's actionable
+    half.
     """
     sev_token = str(raw.get("severity", "")).lower()
     if raw.get("blocking") is True or sev_token in _BLOCKING_SEVERITIES:
@@ -590,7 +592,14 @@ def _to_finding(raw: Mapping[str, Any]) -> Finding:
     else:
         single_path = raw.get("path")
         paths = (str(single_path),) if single_path else ()
-    return Finding(severity=severity, reason=reason, paths=paths)  # type: ignore[arg-type]
+    fix_raw = raw.get("fix")
+    fix = fix_raw.strip() if isinstance(fix_raw, str) and fix_raw.strip() else None
+    return Finding(
+        severity=severity,  # type: ignore[arg-type]
+        reason=reason,
+        paths=paths,
+        fix=fix,
+    )
 
 
 def _findings_json(findings: tuple[Finding, ...], gating: tuple[bool, ...]) -> str:
@@ -602,12 +611,21 @@ def _findings_json(findings: tuple[Finding, ...], gating: tuple[bool, ...]) -> s
     comparing severities cannot tell a finding that sent work back from one that was let past. The
     flag is what lets the pull-request body list only the findings a gate accepted.
 
+    ``fix`` is persisted for the same reason: the follow-ups an operator acts on are derived from
+    this row, so a remedy left only in the per-run ``findings.json`` artifact never reaches them.
+
     ``strict=True`` is the guard that both sequences describe the same findings: a length mismatch
     is a programming error, and truncating silently would relabel gating findings as let-past.
     """
     return json.dumps(
         [
-            {"severity": f.severity, "reason": f.reason, "paths": list(f.paths), "gating": g}
+            {
+                "severity": f.severity,
+                "reason": f.reason,
+                "paths": list(f.paths),
+                "gating": g,
+                "fix": f.fix,
+            }
             for f, g in zip(findings, gating, strict=True)
         ],
         ensure_ascii=False,

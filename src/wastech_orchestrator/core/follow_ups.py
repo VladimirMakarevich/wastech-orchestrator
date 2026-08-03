@@ -31,6 +31,11 @@ from wastech_orchestrator.state_store import EvaluationRow
 # a finding line in the observation prompt, so a chatty evaluator cannot inflate every step turn.
 FINDING_TITLE_MAX = 120
 
+# Heading of the follow-ups section in ``summary.md`` (= the pull-request body). Named because the
+# reused-chain-PR compactor has to find this section to keep it while eliding the prose around it,
+# and it lives in an adapter that must not import the Core (a test pins the two spellings equal).
+FOLLOW_UPS_HEADING = "## Technical debt / follow-ups"
+
 
 @dataclass(frozen=True)
 class FollowUp:
@@ -103,15 +108,42 @@ def follow_up_json(follow_up: FollowUp) -> dict[str, Any]:
     }
 
 
+_SENTENCE_ENDS = (". ", ".\n", "? ", "?\n", "! ", "!\n", "; ")
+
+
+def _split_reason(reason: str) -> tuple[str, str]:
+    """Split one finding's reason into a standalone ``(title, rationale)``.
+
+    The title used to be ``reason[:FINDING_TITLE_MAX] + "…"`` with the *whole* reason repeated as
+    the rationale, so every long finding arrived as a mid-word truncation of the text printed right
+    next to it — a queue whose titles duplicate their own bodies cannot be triaged without opening
+    each item. So: a short reason is its own title with no rationale (unchanged); a long one is cut
+    at the LAST sentence boundary that still fits the bound, else at the last word boundary, and the
+    rationale carries only what is left over — the title never repeats it, and never cuts mid-word.
+    """
+    reason = " ".join(reason.split())
+    if len(reason) <= FINDING_TITLE_MAX:
+        return reason, ""
+    head = reason[: FINDING_TITLE_MAX + 1]
+    cut = max((head.rfind(end) + 1 for end in _SENTENCE_ENDS if end in head), default=-1)
+    if cut < 1:
+        cut = head.rfind(" ")
+    if cut < 1:  # one unbroken token longer than the bound — the old behavior is the only option
+        return reason[:FINDING_TITLE_MAX].rstrip() + "…", reason
+    return reason[:cut].rstrip(), reason[cut:].lstrip()
+
+
 def _finding_to_follow_up(
     finding: Any, node_id: str | None, *, rework_exhausted: bool = False
 ) -> FollowUp | None:
-    """Map one persisted evaluator finding (``{severity, reason, paths}``) to a :class:`FollowUp`,
-    or ``None`` when it carries no usable ``reason``.
+    """Map one persisted evaluator finding (``{severity, reason, paths, fix}``) to a
+    :class:`FollowUp`, or ``None`` when it carries no usable ``reason``.
 
-    ``rework_exhausted`` marks the finding that gated and was still open when a non-blocking
-    evaluator ran out of rework budget. It gets its own evidence line, so an operator reading the
-    list can tell "below the gate, noted" from "above the gate, not fixed".
+    The reviewer's own ``fix`` becomes the ``action_hint``: it is where the remedy lives, and
+    without it every mechanically derived follow-up reached the operator as a problem with no
+    proposed solution. ``rework_exhausted`` marks the finding that gated and was still open when a
+    non-blocking evaluator ran out of rework budget. It gets its own evidence line, so an operator
+    reading the list can tell "below the gate, noted" from "above the gate, not fixed".
     """
     if not isinstance(finding, Mapping):
         return None
@@ -125,10 +157,8 @@ def _finding_to_follow_up(
         if isinstance(paths_raw, list)
         else ()
     )
-    if len(reason) <= FINDING_TITLE_MAX:
-        title, rationale = reason, ""
-    else:  # keep the bold title a label; the full text still reaches the operator via the rationale
-        title, rationale = reason[:FINDING_TITLE_MAX].rstrip() + "…", reason
+    fix = finding.get("fix")
+    title, rationale = _split_reason(reason)
     where = node_id or "review"
     evidence = (
         f"{where} evaluator finding still open — rework budget exhausted"
@@ -138,9 +168,14 @@ def _finding_to_follow_up(
     return FollowUp(
         title=title,
         rationale=rationale,
+        # The persisted severity is already the evaluator's normalized ``low``/``medium``/``high``
+        # projection (``blocking``/``critical`` collapse into ``high`` at write time, with the
+        # ``gating`` flag carrying what that collapse loses), so this branch only catches a
+        # malformed row — where erring upward is the safe direction.
         severity=severity if severity in ("low", "medium", "high") else "medium",
         evidence=(evidence,),
         paths=paths,
+        action_hint=fix.strip() if isinstance(fix, str) and fix.strip() else None,
     )
 
 
@@ -217,6 +252,14 @@ def merge_follow_ups(
 
     *primary* (the supervisor's own list) wins on a collision, so an evaluator finding the
     supervisor already reported is not duplicated; *extra* is also deduped against itself.
+
+    Exact match is deliberate, and it does leave one gap: a supervisor that *paraphrases* an
+    accepted finding produces a near-duplicate this cannot see (measured once at 10 bullets for ~6
+    issues, two pairs disagreeing on severity). The fix is upstream — the finalize prompt says that
+    accepted findings are merged in deterministically and must not be restated — because the
+    alternative keys are lossy: on ``(paths, severity)`` two genuinely distinct findings in one file
+    at one severity collapse into a single bullet, and losing an actionable item is worse than
+    printing one twice.
     """
     seen = {_follow_up_key(fu) for fu in primary}
     merged = list(primary)
@@ -231,7 +274,7 @@ def merge_follow_ups(
 
 def render_follow_ups_section(follow_ups: tuple[FollowUp, ...]) -> str:
     """Render the ``## Technical debt / follow-ups`` section appended to ``summary.md``."""
-    lines = ["## Technical debt / follow-ups", ""]
+    lines = [FOLLOW_UPS_HEADING, ""]
     for fu in follow_ups:
         parts = [f"- **[{fu.severity}] {fu.title}**"]
         if fu.rationale:
