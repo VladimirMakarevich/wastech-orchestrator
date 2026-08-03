@@ -1,6 +1,11 @@
 # 02 — Critical defects
 
-Four defects that are genuinely broken rather than merely tunable. All four are present at HEAD; none is specific to wastech-mdlint.
+Four defects that are genuinely broken rather than merely tunable. None is specific to wastech-mdlint.
+
+**All four are fixed as of 2026-08-04** (branch `feat/critical-defects-c1-c4`, off `dev`). Each section keeps its original evidence and adds a **Fixed** paragraph naming what changed and the test that pins it. Two corrections to the analysis as written, both from `b8604d7` having extracted `core/follow_ups.py` after the evidence was gathered:
+
+- the `core/supervisor.py:393` / `:481` citations under C4 resolve to `core/follow_ups.py:141` / `:207`, and `_bound_pr_body` has always lived in `git_manager.py:391`, not in `core/supervisor.py`;
+- **C4a is not a defect.** `evaluator._to_finding` normalises `blocking`/`critical` to `high` before persisting, and it is the only writer of `in_flow_verdict` rows, so `follow_ups.py:141`'s `else "medium"` is unreachable for those tokens on every flow. Details in that section.
 
 ## C1 — A finalize schema deadlock published `summary: "test"` as a whole-task summary {#c1}
 
@@ -42,7 +47,9 @@ After the third rejection the model collapsed to a minimal probe — `{"summary"
 2. Reword `packaged/flows/implementation/summary.md` to match, and say that the key must be emitted.
 3. Give `finalize` a minimum-length floor on `summary` and treat a violation as `degraded`, so a collapse is loud instead of silent.
 
-Not fixed in the Aug-3 packaged version. Evidence: appendix [G](appendix/batch-G.md).
+Evidence: appendix [G](appendix/batch-G.md).
+
+**Fixed.** All three levers pulled, with one correction of scope: the contradicting sentence _"Leave the array empty when nothing qualifies"_ is **code-appended** by `_finalize_prompt`, not written in the role file, so that is where it was reworded (the role files carry wording only — the machine contract stays in code). Specifically: `_FOLLOW_UPS_SCHEMA` gained a root `description` stating the key is always emitted, `_finalize_prompt` now says the same, and prose below `_SUMMARY_MIN_CHARS` (200) is discarded — no `summary.md`, so the orchestrator's existing `degraded` path fires and the deterministic report becomes the PR body, with a WARNING carrying the collapsed text. The ledger's `supervisor_final.summary_written` was also computed from the **raw** turn output, before sanitize and before the floor, so it claimed a summary for a run that wrote none; it is now derived from what reached disk. A `maxLength` was deliberately **not** added anywhere on authored prose — a bound the model overshoots is the same deadlock — and `tests/core/test_output_schema_strictness.py` pins that. Tests: `test_finalize_discards_a_collapsed_summary_instead_of_publishing_it`, `test_supervisor_final_summary_written_matches_what_reached_disk`, `test_finalize_prompt_and_schema_agree_that_follow_ups_is_mandatory`, `test_no_maxlength_bound_on_authored_prose`.
 
 ## C2 — `disable_read_isolation` silently drops the `~/.claude` write deny; agents wrote to the host memory store {#c2}
 
@@ -92,23 +99,27 @@ Appendix E confirms the mechanism directly on p9-11-12: the `Write` succeeded wh
 
 Per [security.md](../../../.agents/rules/security.md)'s flexibility-first rule this is an escape hatch that must keep an operator opt-out — the finding is that the _write_ side of the hatch is undocumented and invisible, not that the hatch should be removed.
 
+**Fixed — the read axis and the write axis are now gated separately.** `_native_memory_deny_tools` takes the deny kinds, and `build_claude_argv` gates only the `Read` kind on `read_isolation_off`: with the shipped default `~/.claude/**` is now `Write`/`Edit`-denied and readable (native discovery restored, which is what the hatch is for), and `allow_native_memory: true` remains the one switch that lifts all three. Relaxing reads restores native _discovery_; it was never a grant to mutate an unaudited store. The hatch is also no longer invisible: `allow_native_memory: true` logs a per-run WARNING beside the existing `read-isolation OFF` and `git-evidence ON` announces, and both `guide/config/reference.md` and `config.example.yaml` now state that this key alone governs the write side. The docstring claiming the deny is "lifted" is corrected; the comment at `:709` becomes true again as written. `memory.enabled` needed no change — `config_writer` already writes it on. Deliberately **not** changed: `build_sandbox_settings` write-denies the store in the Bash sandbox unconditionally, so `allow_native_memory: true` grants `Write`/`Edit` but not shell writes; closing that would widen the hatch, not narrow it. Tests: `test_read_isolation_off_lifts_the_native_memory_read_deny_but_keeps_the_write_deny`, `test_read_isolation_off_with_allow_native_memory_drops_every_deny`, `test_native_memory_opt_in_is_announced_per_run` — plus `test_read_isolation_default_argv_is_byte_identical`, unchanged, proving the read-isolation-**on** posture did not move.
+
 ## C3 — The PR-body compactor elides most follow-ups behind a dead link {#c3}
 
 **Category** infra (operator surface) · **Severity** medium-high · **Confidence** high · **Scope** orchestrator default
 
-All 98 follow-ups across the 20 runs were written to the PR body — appendix D verified 98/98. But all 20 tasks share PR #16, and `_bound_pr_body` in `core/supervisor.py` compacts oldest-first as later tasks append, replacing each with a stub pointing at `logs/<task-id>/summary.md`.
+All 98 follow-ups across the 20 runs were written to the PR body — appendix D verified 98/98. But all 20 tasks share PR #16, and `_bound_pr_body` (in `git_manager.py`, not `core/supervisor.py`) compacts oldest-first as later tasks append, replacing each with a stub pointing at `logs/<task-id>/summary.md`.
 
 That path is inside `.worc/`, which is git-excluded. **For anyone reading the PR on GitHub it is a dead link**, and it covers roughly 65 of the 98 follow-ups — 14 of 20 runs' worth. Bodies were 47–59 KB against a 65,536-byte limit, so compaction was triggered by genuine pressure, not a bug in the threshold.
 
-**Lever.** The stub should point at something a reviewer can open — a gist, an artifact upload, or the `summary.md` content inlined in a collapsed `<details>` block — or the compactor should preserve follow-ups preferentially over prose, since follow-ups are the actionable part. `core/supervisor.py` `_bound_pr_body`.
+**Lever.** The stub should point at something a reviewer can open — a gist, an artifact upload, or the `summary.md` content inlined in a collapsed `<details>` block — or the compactor should preserve follow-ups preferentially over prose, since follow-ups are the actionable part. `git_manager.py` `_bound_pr_body`.
+
+**Fixed — the second half of the lever, plus an honest stub.** `_bound_pr_body` now compacts in two passes: pass 1 drops each section's prose but keeps its `## Technical debt / follow-ups` section, and only pass 2 — reached when the body still exceeds the cap — gives that up too. The actionable half is the last thing surrendered. The stub no longer implies a repository-relative link; it names the run host (`.worc/logs/<id>/summary.md`, "not in the repository") and, on a pass-1 stub, says the follow-ups below are complete. The upload/gist option was **not** taken: it needs infrastructure the orchestrator does not have, and preserving the follow-ups removes the reason to leave the PR. Since `git_manager` is an adapter the Core imports, it cannot import `core.follow_ups` for the heading — the constant is mirrored, with a test pinning the two spellings equal. Tests: `test_bound_pr_body_surrenders_follow_ups_last`, `test_compact_pr_section_keeps_marker_and_title_and_is_idempotent`, `test_pr_body_follow_ups_heading_mirrors_the_core_constant`.
 
 ## C4 — Two latent defects in follow-up assembly {#c4}
 
-**Category** infra · **Severity** medium (one is unreachable on this flow, one is live) · **Confidence** high · **Scope** orchestrator default
+**Category** infra · **Severity** medium · **Confidence** high · **Scope** orchestrator default
 
-**C4a — severity relabelling.** `core/supervisor.py:393` silently relabels `blocking` and `critical` findings as `"medium"`. Unreachable for `implementation.yaml` (whose gate stops those upstream) but **live for `deep_research` and `security_audit`**, where a critical finding would be reported to the operator as medium.
+**C4a — severity relabelling. Retracted: not a defect.** The claim was that `core/supervisor.py:393` (now `core/follow_ups.py:141`) silently relabels `blocking` and `critical` findings as `"medium"`, live on `deep_research` and `security_audit`. It cannot: `evaluator._to_finding` maps `blocking`/`critical`/`high` to a single `"high"` **before** the row is persisted, and `evaluator.py:215` is the only writer of `in_flow_verdict` rows anywhere in the codebase — so the `severity` field this mapping reads is already normalised to `low`/`medium`/`high` on every flow. The `else "medium"` branch is therefore reachable only for a malformed row (a missing or unknown `severity`), where it errs _upward_. What the code does lose is the `critical`-vs-`high` distinction at persist time, and that is deliberate and documented at `evaluator.py:596-607`: the `gating` flag is persisted alongside precisely because the collapse makes severities incomparable, and `_finding_to_follow_up` uses it to give a still-open finding its own evidence line. Pinned by `test_persisted_severity_is_already_normalized_so_nothing_is_downgraded`; the comment at `follow_ups.py:141` now says why the branch exists so the next reader does not re-file this.
 
-**C4b — the dedup key cannot match.** `core/supervisor.py:481` de-duplicates follow-ups on exact normalised text, but the supervisor paraphrases the evaluator's `reason`, so a paraphrase can never match the raw original. Consequence, measured on p9-12-06's PR body: **10 bullets for ~6 distinct issues, with two pairs carrying contradictory severities** (the same issue as `low` in one bullet and `medium` in another).
+**C4b — the dedup key cannot match.** `core/supervisor.py:481` (now `core/follow_ups.py:207`) de-duplicates follow-ups on exact normalised text, but the supervisor paraphrases the evaluator's `reason`, so a paraphrase can never match the raw original. Consequence, measured on p9-12-06's PR body: **10 bullets for ~6 distinct issues, with two pairs carrying contradictory severities** (the same issue as `low` in one bullet and `medium` in another).
 
 **Also visible in the same artifact** (`p9-12-06/summary.json`, quoted under C1), two quality defects in the follow-up records themselves:
 
@@ -116,3 +127,11 @@ That path is inside `.worc/`, which is git-excluded. **For anyone reading the PR
 - `action_hint` is `null` on every single follow-up across all 20 runs, because `_to_finding`/`_findings_json` drop the reviewer's `fix` field — which is where the actual remedy lives. Every mechanical follow-up therefore arrives without its fix.
 
 **Lever.** Require `title` to be an independently written imperative of ≤80 characters, distinct from `rationale`, in the finalize schema and the `summary.md` role file; carry the evaluator's `fix` through into `action_hint`; key the dedup on `(path, severity)` or a finding id rather than prose.
+
+**Fixed, with one lever deliberately not pulled.**
+
+- **`action_hint`.** The drop chain was `_to_finding` → `_findings_json` → `_finding_to_follow_up`. `Finding` gained an optional `fix`, `_to_finding` reads it, `_findings_json` persists it, and `_finding_to_follow_up` passes it as `action_hint` — so a mechanical follow-up now arrives with the reviewer's own remedy and renders its `Suggested:` line.
+- **`title`.** `_split_reason` replaces `reason[:120] + "…"` / `rationale = reason`: a short reason is its own title with no rationale; a long one is cut at the last sentence boundary that fits, else on a word boundary, and the **remainder** goes to `rationale`. No mid-word ellipsis, and the title is never a prefix of the text beside it. The ≤80-character imperative is asked for in the schema's `title` description and in the finalize prompt — as guidance, never as a `maxLength`, because a hard bound the model overshoots is C1's deadlock in a new place.
+- **The dedup key was left as exact-match, on purpose.** `(path, severity)` is lossy: two genuinely distinct medium findings in one file collapse into one bullet, and losing an actionable item is worse than printing one twice. There is no finding id to key on without new machinery. The duplication is removed at its source instead — the finalize turn is now told that accepted evaluator findings are merged into the list deterministically and that it must record only debt **not** already in the gate-verdict digest it was handed. `merge_follow_ups`' docstring states the residual gap and why the alternatives are worse.
+
+Tests: `test_evaluator_fix_becomes_the_action_hint`, `test_evaluator_persists_the_reviewers_fix_so_a_follow_up_carries_it`, `test_split_reason_gives_a_title_that_is_not_its_own_rationale`, `test_finalize_prompt_forbids_restating_the_gate_findings`.

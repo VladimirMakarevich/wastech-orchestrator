@@ -366,7 +366,9 @@ def _follow_up_key(follow_up: FollowUp) -> tuple[str, tuple[str, ...]]:
 
 **Latent severity bug, same function, line 393:**
 
-```python
+<!-- Fenced as `text`, not `python`: a verbatim source excerpt that `ruff format` would rewrite (it is not a formattable top-level statement), which would corrupt the evidence and fail the format gate. -->
+
+```text
 severity=severity if severity in ("low", "medium", "high") else "medium",
 ```
 
