@@ -1384,8 +1384,9 @@ class GitManager:
     def changed_code_paths_since_base(self) -> list[str]:
         """Code paths changed vs ``base_branch`` (committed-since-base + uncommitted), deduped.
 
-        The path-list analog of :meth:`diff_stat`: diffs ``base_branch`` against the working tree
-        (``git diff --name-only <base>``, two-dot — committed *and* uncommitted), plus untracked
+        The path-list analog of :meth:`write_current_diff`: diffs ``base_branch`` against the
+        working tree (``git diff --name-only <base>``, two-dot — committed *and* uncommitted),
+        plus untracked
         files (``git ls-files --others``, which ``git diff`` never reports). Used **only** for
         check-set selection (the ``testing`` node), never for staging: :meth:`changed_code_paths`
         stays working-tree-only because the commit pathspec must add just the uncommitted change.
@@ -2051,8 +2052,10 @@ class GitManager:
 
         Diffs :meth:`_diff_base` against the **working tree** (``git diff <base>``, not ``git diff
         HEAD``), so it captures the task's net change whether or not it is committed yet — the same
-        base-vs-worktree coverage as :meth:`diff_stat`. ``git diff HEAD`` only showed uncommitted
-        working-tree edits, so in a decomposed run (where each subtask is committed) it collapsed to
+        base-vs-worktree coverage the deterministic report's diff stat is derived from — that stat
+        reads *this* artifact rather than running its own ``git diff``, so the report stays a pure
+        function of durable state. ``git diff HEAD`` only showed uncommitted working-tree edits, so
+        in a decomposed run (where each subtask is committed) it collapsed to
         just the trailing uncommitted hunk and badly understated the change in ``current.diff`` /
         ``{diff_path}`` / the PR body / the failure report. For ``new`` mode the base is
         ``base_branch`` (the branch is cut from it and it does not advance), so a non-decomposed run
@@ -2117,20 +2120,6 @@ class GitManager:
     def _diff_secrets(self) -> tuple[str, ...]:
         """Denied-file secret values present in the clone, to redact from written diffs."""
         return read_denied_secrets(self._clone, self._config.security.denied_read_paths)
-
-    def diff_stat(self) -> str:
-        """``git diff --stat`` of the task change vs ``base_branch`` — files + line counts only.
-
-        Diffs ``base_branch`` against the **working tree** (not ``base...HEAD``), so it reflects the
-        pending change whether or not it is committed yet. The deterministic minimal summary is
-        built during ``finalize`` — *before* the publish node's ``commit_code`` — so a
-        committed-only diff (``base...HEAD``) is still empty there and renders a misleading "(no
-        changes)". The task branch is cut from ``base_branch`` and ``base_branch`` does not advance
-        during a task, so this equals the task's net change (tracked files; same coverage as the
-        redacted ``current.diff``). ``--stat`` carries only file paths and counts (never patch
-        content), so there is nothing secret to redact.
-        """
-        return self._git("diff", "--stat", self._diff_base()).stdout
 
     # --- terminal cleanup ----------------------------------------------------------
 

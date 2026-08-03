@@ -1544,6 +1544,12 @@ def test_review_infra_failure_degrades_to_manual_not_failed(
     # Review was reached; publish never ran (the diff is preserved on the branch, not published).
     ran = _ran_nodes(store, "task-rev-infra")
     assert "review" in ran and "publish" not in ran
+    # The third terminal with no prose by design gets the same deterministic report — one renderer
+    # writes the body on every terminal — and no degradation callout, because none was expected.
+    summary = (art / "logs" / "task-rev-infra" / "summary.md").read_text(encoding="utf-8")
+    assert "## Changes" in summary and "## Steps" in summary
+    assert "- `implementation` (agent):" in summary
+    assert "Fallback summary" not in summary
 
 
 def test_review_infra_empty_diff_annotates_reason(
@@ -1990,8 +1996,8 @@ def test_minimal_flow_implement_only(git_repo, make_git_config, tmp_path: Path) 
 
 
 def test_summary_fallback_when_provider_fails(git_repo, make_git_config, tmp_path: Path) -> None:
-    # Both providers fail the supervisor's summary synthesis with an infra error → minimal summary,
-    # still DONE. The supervisor layer runs under its own "supervisor" node id (not a stage).
+    # Both providers fail the supervisor's summary synthesis with an infra error → the
+    # deterministic report, still DONE. The layer runs under its own "supervisor" node id.
     providers = _both(infra_fail={"supervisor"})
     orch, store, _, art = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
@@ -2009,14 +2015,28 @@ def test_summary_fallback_when_provider_fails(git_repo, make_git_config, tmp_pat
     result = orch.run_task(task_file)
     assert result.final_status is Status.DONE  # summary failure never blocks
     summary = (art / "logs" / "task-006" / "summary.md").read_text(encoding="utf-8")
-    assert "## What" in summary
+    # A real report of what the run did, not the four-field stub whose `## How` read "No
+    # provider-authored summary was available".
+    assert "## Changes" in summary and "## Steps" in summary
+    assert "- `implementation` (agent):" in summary
+    assert "- `s.py`" in summary  # the changed path, derived from the durable current.diff
+    for dead in ("## How", "## Integration", "No provider-authored summary was available"):
+        assert dead not in summary
+    # The layer ran and could not finish, so its spend is still recorded beside the degradation.
+    metadata = json.loads((art / "logs" / "task-006" / "summary.json").read_text(encoding="utf-8"))
+    assert metadata["degraded"] is True
+    assert metadata["supervisor_usage"]["total"]["calls"] >= 1
 
 
 def test_degraded_summary_is_loud_on_done_path(git_repo, make_git_config, tmp_path: Path) -> None:
     # Decision A (a): when a provider-authored synthesis was expected on the publish path but
     # failed, the deterministic fallback is marked loud — a WARNING plus a visible callout in the
     # PR body — so a stub is never mistaken for the full synthesis.
-    providers = _both(infra_fail={"supervisor"})
+    finding_text = "docstring drift in the new helper"
+    providers = _both(
+        infra_fail={"supervisor"},
+        outputs={"review": ("advisory", {"findings": [{"severity": "low", "what": finding_text}]})},
+    )
     orch, _, _, art = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
     )
@@ -2051,6 +2071,11 @@ def test_degraded_summary_is_loud_on_done_path(git_repo, make_git_config, tmp_pa
     summary = (art / "logs" / "task-degraded" / "summary.md").read_text(encoding="utf-8")
     assert "Fallback summary" in summary  # visible degradation callout in the PR body
     assert any("summary degraded to deterministic fallback" in m for m in messages)
+    # The p0-2 hole, closed: a finding the gate let past used to land in summary.json and vanish
+    # from the PR body on exactly this path, because the derivation lived inside the turn that
+    # failed. It is deterministic, so it survives the failure.
+    assert "## Technical debt / follow-ups" in summary
+    assert finding_text in summary
 
 
 def test_decomposed_task_commits_each_subtask(
@@ -2690,12 +2715,16 @@ def test_failed_with_branch_commits_and_pushes_task_and_summary(
     tracked = git_run(["ls-tree", "-r", "--name-only", branch], git_repo.clone)
     assert "tasks/failed/task-fail.md" in tracked  # task moved to failed/ and committed
     assert "tasks/failed/task-fail.summary.md" in tracked  # summary committed beside it
-    # A failed terminal legitimately has no synthesis — its minimal summary is the expected
+    # A failed terminal legitimately has no synthesis — the deterministic report is the expected
     # artifact, not a degradation, so it carries no "Fallback summary" callout (Decision A (a)).
     failed_summary = git_run(
         ["show", f"{branch}:tasks/failed/task-fail.summary.md"], git_repo.clone
     )
     assert "Fallback summary" not in failed_summary
+    # And it is a real report: which steps ran and what the run changed is exactly what an operator
+    # needs on a failed attempt, and it is the half the four-field stub never carried.
+    assert "## Changes" in failed_summary and "## Steps" in failed_summary
+    assert "_Task file: `task-fail.md`. Flow: `implementation`._" in failed_summary
     assert ".worc/" not in tracked  # working artifacts never enter git
     # The failed branch was pushed for inspection; the working copy is back on base.
     assert git_run(["ls-remote", "--heads", "origin", branch], git_repo.clone) != ""

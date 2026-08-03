@@ -117,6 +117,10 @@ from wastech_orchestrator.core.flow.validator import (
     validate_disabled_nodes,
 )
 from wastech_orchestrator.core.flow.wiring import build_node_inputs, build_node_services
+from wastech_orchestrator.core.follow_ups import (
+    evaluator_finding_follow_ups,
+    render_gate_digest,
+)
 from wastech_orchestrator.core.hitl import (
     consume_pending_interactions,
     reset_pending_interactions,
@@ -141,7 +145,15 @@ from wastech_orchestrator.core.skills import (
     resolve_skills,
 )
 from wastech_orchestrator.core.state_machine import Status, assert_transition
+from wastech_orchestrator.core.summary_report import (
+    SKIPPED_NODES_HEADING,
+    SUMMARY_MD_FILENAME,
+    render_skipped_nodes_section,
+    write_summary_report,
+)
 from wastech_orchestrator.core.supervisor import Supervisor
+from wastech_orchestrator.core.supervisor_packet import build_packet_facts
+from wastech_orchestrator.core.supervisor_usage import summarize_spend
 from wastech_orchestrator.git_manager import (
     CleanupOutcome,
     GitCommandError,
@@ -153,7 +165,6 @@ from wastech_orchestrator.ledger import (
     Ledger,
     LedgerRecord,
     write_failure_report,
-    write_minimal_summary,
 )
 from wastech_orchestrator.memory import (
     AuditActor,
@@ -518,6 +529,10 @@ class _Pipeline:
     # Per-task disabled flow node ids (``nodes.<id>.enabled: false``). Re-derived every run/resume
     # from front-matter, so a restart recovers it without persistence (node-disable control).
     skip: frozenset[str] = frozenset()
+    # The resolved flow's name, captured when the control bundle is bound, so the deterministic
+    # report can name the pipeline that produced the change. ``None`` before the bundle exists (a
+    # resume that goes terminal on the park ceiling), where the report omits that line.
+    flow_name: str | None = None
     # Operator-authored decomposition built + validated pre-slot from the task's ``subtasks:``
     # manifest (fresh run only). When set, it is materialized at preflight (before branch) and the
     # planning ``proposed_by`` post-hook does not re-read the agent's proposal. ``None`` on resume —
@@ -2576,6 +2591,7 @@ class Orchestrator:
                 Status.MANUAL_ACTION_REQUIRED,
                 manual_reason="control plane: frozen flow does not match checkpoint; rerun fresh",
             )
+        p.flow_name = snapshot.doc.name
         # The constant supervisor layer starts at task start and lives the whole cycle; it
         # carries this task's own resume_own_lineage session. It reads the frozen prompts.
         self._supervisor = self._build_supervisor(p, snapshot, flow_dir=bundle.flow_dir)
@@ -3035,7 +3051,9 @@ class Orchestrator:
             # (WARNING + a visible callout in the fallback body) instead of shipping a stub as if
             # it were the full synthesis. This is now the ONLY fallback: finalize runs fresh from
             # the packet, so there is no warm-session path left to degrade to.
-            summary_md_path = task_artifact_dir(self._artifacts_root, p.task.id) / "summary.md"
+            summary_md_path = (
+                task_artifact_dir(self._artifacts_root, p.task.id) / SUMMARY_MD_FILENAME
+            )
             degraded = not summary_md_path.exists()
             if degraded:
                 log.warning(
@@ -3702,25 +3720,25 @@ class Orchestrator:
         )
         self._store.update_task(p.task.id, branch=p.branch, slug=p.slug)
 
-    def _skip_section_md(self, p: _Pipeline) -> str:
-        """A ``## Pipeline nodes skipped`` markdown block, or ``""`` when nothing was skipped."""
-        if not p.skip:
-            return ""
-        lines = "\n".join(f"- `{node_id}`" for node_id in sorted(p.skip))
-        return f"\n## Pipeline nodes skipped\n\n{lines}\n"
-
     def _append_skip_section(self, p: _Pipeline) -> None:
-        """Append the skipped-nodes section to ``summary.md`` (idempotent within a run)."""
-        section = self._skip_section_md(p)
-        if not section:
+        """Append the skipped-nodes section to ``summary.md`` (idempotent within a run).
+
+        Only a provider-authored body needs this: the deterministic report renders the same section
+        from the same renderer, so the heading — which is also the idempotency key — exists once.
+        """
+        if not p.skip:
             return
-        md_path = task_artifact_dir(self._artifacts_root, p.task.id) / "summary.md"
+        md_path = task_artifact_dir(self._artifacts_root, p.task.id) / SUMMARY_MD_FILENAME
         if not md_path.exists():
             return
         existing = md_path.read_text(encoding="utf-8")
-        if "## Pipeline nodes skipped" in existing:
+        if SKIPPED_NODES_HEADING in existing:
             return
-        md_path.write_text(existing.rstrip("\n") + "\n" + section, encoding="utf-8")
+        md_path.write_text(
+            existing.rstrip("\n") + "\n\n" + render_skipped_nodes_section(p.skip),
+            encoding="utf-8",
+            newline="",
+        )
 
     def _auto_merge(self, p: _Pipeline, pr_url: str) -> PipelineResult:
         """Merge the just-created PR, bypassing human review. Audited, idempotent, non-destructive.
@@ -3757,26 +3775,49 @@ class Orchestrator:
 
     def _fallback_summary_path(self, p: _Pipeline) -> str:
         """The logs/ working copy of summary.md — PR body fallback when no task file is on disk."""
-        return str(task_artifact_dir(self._artifacts_root, p.task.id) / "summary.md")
+        return str(task_artifact_dir(self._artifacts_root, p.task.id) / SUMMARY_MD_FILENAME)
 
     def _summary_md_body(self, p: _Pipeline, *, degraded: bool = False) -> str:
-        """The human-readable summary text; falls back to a deterministic minimal summary.
+        """The human-readable summary text; falls back to the deterministic report.
 
         ``degraded`` marks the DONE-path case where a provider-authored synthesis was expected but
-        failed (see ``_engine_finalize``); it flows into the minimal summary as a visible callout.
+        failed (see ``_engine_finalize``); it reaches the report as a visible callout.
         """
-        md_path = task_artifact_dir(self._artifacts_root, p.task.id) / "summary.md"
+        md_path = task_artifact_dir(self._artifacts_root, p.task.id) / SUMMARY_MD_FILENAME
         if not md_path.exists():
-            write_minimal_summary(
-                self._artifacts_root,
-                p.task.id,
-                title=p.task.title,
-                diff_stat=self._git.diff_stat(),
-                task_ref=self._task_ref(p),
-                degraded=degraded,
-            )
-            self._append_skip_section(p)
+            self._write_deterministic_summary(p, degraded=degraded)
         return md_path.read_text(encoding="utf-8") if md_path.exists() else (p.task.title + "\n")
+
+    def _write_deterministic_summary(self, p: _Pipeline, *, degraded: bool) -> None:
+        """Write the deterministic ``summary.{md,json}`` report from the run's recorded facts.
+
+        Reads the same durable facts the oversight layer's own close-out is grounded in, so the two
+        bodies cannot disagree about what the run did — and the evaluator findings a gate let past,
+        which used to reach only the local metadata, reach the pull-request body on every path.
+        """
+        evaluations = self._store.get_evaluations(p.task.id)
+        write_summary_report(
+            self._artifacts_root,
+            build_packet_facts(
+                self._store,
+                task_id=p.task.id,
+                task_title=p.task.title,
+                task_type=p.task.task_type,
+                flow_name=p.flow_name,
+                evaluations=evaluations,
+                artifacts_root=self._artifacts_root,
+                exchange_root=self._exchange_root,
+                repo_dir=self._config.repo.local_path,
+            ),
+            follow_ups=evaluator_finding_follow_ups(evaluations),
+            gates=render_gate_digest(evaluations),
+            skipped_nodes=p.skip,
+            task_ref=self._task_ref(p),
+            degraded=degraded,
+            # Present exactly when the layer made calls, so an operator can tell "the layer never
+            # ran" from "it ran and could not finish" without a second marker.
+            supervisor_usage=summarize_spend(self._store.get_provider_attempts_for_task(p.task.id)),
+        )
 
     def _task_ref(self, p: _Pipeline) -> str | None:
         """A short sibling-relative pointer to the task file for the committed summary.
@@ -3826,7 +3867,9 @@ class Orchestrator:
             return None
         summary_path = dest.with_name(f"{p.task.id}.summary.md")
         try:
-            summary_path.write_text(body, encoding="utf-8")
+            # ``newline=""``: this copy is committed into the operator's repository, so the host's
+            # line separator must not decide what lands in their history.
+            summary_path.write_text(body, encoding="utf-8", newline="")
         except OSError:
             return None
         self._register_artifact(p.task.id, "summary_md", str(summary_path))

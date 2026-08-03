@@ -638,7 +638,9 @@ class Supervisor:
         body = body.rstrip("\n") + "\n"
         if follow_ups:  # surface the evidence-gated debt/follow-ups as a section in the PR body
             body += "\n" + render_follow_ups_section(follow_ups)
-        md_path.write_text(body, encoding="utf-8")
+        # ``newline=""``: this body is committed as the pull-request description, and the
+        # deterministic report writes the same file, so both must land as LF on every host.
+        md_path.write_text(body, encoding="utf-8", newline="")
         self._register(task_id, "summary_md", str(md_path))
         return FinalizeResult(summary_path=md_path, candidate_delta=delta, follow_ups=follow_ups)
 

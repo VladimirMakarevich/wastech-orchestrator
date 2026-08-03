@@ -55,6 +55,14 @@ forbidden_modules =
     wastech_orchestrator.core.supervisor
     wastech_orchestrator.core.supervisor_packet
 
+[importlinter:contract:summary-report-below-supervisor]
+name = The deterministic report does not depend on the layer whose output it replaces
+type = forbidden
+source_modules =
+    wastech_orchestrator.core.summary_report
+forbidden_modules =
+    wastech_orchestrator.core.supervisor
+
 [importlinter:contract:adapters-independent]
 name = The Claude and Codex adapters are independent
 type = independence
