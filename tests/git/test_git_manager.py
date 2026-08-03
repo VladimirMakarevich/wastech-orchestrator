@@ -19,6 +19,7 @@ from wastech_orchestrator.git_manager import (
     _PR_BODY_MAX_CHARS,
     _PUSH_RETRY_BACKOFF_SECONDS,
     _SECTION_SEPARATOR,
+    _SUMMARY_POINTER_PREFIX,
     _TASK_MARKER_PREFIX,
     KIND_PR_MERGE,
     RUNTIME_EXCLUDED_DIRS,
@@ -1460,6 +1461,44 @@ def test_compact_pr_section_keeps_marker_and_title_and_is_idempotent() -> None:
     assert "Do the thing" in kept and "y" * 9_000 not in kept
     assert _compact_pr_section(kept, keep_follow_ups=True) == kept
     assert _FOLLOW_UPS_HEADING not in _compact_pr_section(kept)
+
+
+def test_compact_pr_section_points_at_the_committed_summary_when_one_was_recorded() -> None:
+    # The committed `<id>.summary.md` sits next to the moved task file, in the same audit commit and
+    # therefore in this PR's own diff — so unlike the `.worc/` working copy it is a file a reviewer
+    # can actually open. The compactor cannot derive that path (it runs later, over other tasks'
+    # sections, and does not know which lifecycle folder the task file moved into), so the appending
+    # run records it beside the marker and this reads it back.
+    marker_block = (
+        f"{_TASK_MARKER_PREFIX}t7 -->\n{_SUMMARY_POINTER_PREFIX} tasks/done/t7.summary.md -->"
+    )
+    sec = f"{marker_block}\n\n## Big change\n\n" + ("y" * 9_000)
+
+    out = _compact_pr_section(sec)
+
+    assert "committed in this PR at `tasks/done/t7.summary.md`" in out
+    assert ".worc/logs" not in out  # the run-host wording is the fallback, not the default
+    assert marker_block in out  # both comments survive, so a second pass still finds the pointer
+    assert out.count(_TASK_MARKER_PREFIX) == 1  # the chain count is unaffected by the extra comment
+    assert _compact_pr_section(out) == out
+    # A task with no committed summary (a synthetic `run` path) keeps the honest run-host wording.
+    plain = _compact_pr_section(f"{_TASK_MARKER_PREFIX}t8 -->\n\n## Other\n\n" + ("z" * 9_000))
+    assert ".worc/logs/t8/summary.md" in plain and "committed in this PR" not in plain
+
+
+def test_repo_relative_names_only_paths_committed_into_the_clone(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    manager = _manager(git_repo, store, tmp_path, make_git_config)
+    committed = git_repo.clone / "tasks" / "done" / "t1.summary.md"
+    # The task lifecycle dir is excluded from the CODE commit but rides the audit commit, so it is
+    # in the repository — the one path worth naming to a reviewer.
+    assert manager._repo_relative(str(committed)) == "tasks/done/t1.summary.md"
+    # The `.worc/` working copy is git-excluded, and a path outside the clone is not ours to name.
+    assert (
+        manager._repo_relative(str(git_repo.clone / ".worc" / "logs" / "t1" / "summary.md")) is None
+    )
+    assert manager._repo_relative(str(tmp_path / "elsewhere" / "summary.md")) is None
 
 
 def test_pr_body_follow_ups_heading_mirrors_the_core_constant() -> None:
