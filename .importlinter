@@ -46,6 +46,15 @@ forbidden_modules =
     wastech_orchestrator.core.supervisor_packet
     wastech_orchestrator.core.supervisor_usage
 
+[importlinter:contract:follow-ups-below-supervisor]
+name = Follow-up derivation does not depend on the supervisor layer
+type = forbidden
+source_modules =
+    wastech_orchestrator.core.follow_ups
+forbidden_modules =
+    wastech_orchestrator.core.supervisor
+    wastech_orchestrator.core.supervisor_packet
+
 [importlinter:contract:adapters-independent]
 name = The Claude and Codex adapters are independent
 type = independence

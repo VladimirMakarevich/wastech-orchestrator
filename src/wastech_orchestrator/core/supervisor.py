@@ -54,6 +54,16 @@ from wastech_orchestrator.core.flow.usage_accounting import (
     deserialize_usage,
     snapshot_for_lineage,
 )
+from wastech_orchestrator.core.follow_ups import (
+    FINDING_TITLE_MAX,
+    FollowUp,
+    evaluator_finding_follow_ups,
+    follow_up_json,
+    merge_follow_ups,
+    parse_follow_ups,
+    render_follow_ups_section,
+    render_gate_digest,
+)
 from wastech_orchestrator.core.skills import SkillInventory
 from wastech_orchestrator.core.supervisor_packet import (
     PacketFacts,
@@ -276,232 +286,22 @@ def _finalize_schema(*, with_delta: bool, with_follow_ups: bool) -> dict[str, An
     }
 
 
-@dataclass(frozen=True)
-class FollowUp:
-    """One evidence-gated technical-debt / follow-up record (task 1). Minimal and grounded."""
-
-    title: str
-    rationale: str
-    severity: str
-    evidence: tuple[str, ...]
-    paths: tuple[str, ...] = ()
-    action_hint: str | None = None
-
-
-def parse_follow_ups(raw: Any) -> tuple[FollowUp, ...]:
-    """Parse the finalize turn's ``follow_ups`` array defensively — **evidence-gated**.
-
-    Best-effort, mirroring :func:`_parse_skill_map`: a non-list yields ``()`` and any record without
-    a non-empty ``title`` or ``evidence`` is dropped (never raised), so an ungrounded "refactor
-    idea" the model invented cannot reach ``summary.{json,md}``.
-    """
-    if not isinstance(raw, list):
-        return ()
-    out: list[FollowUp] = []
-    for item in raw:
-        if not isinstance(item, Mapping):
-            continue
-        title = item.get("title")
-        evidence = item.get("evidence")
-        if not isinstance(title, str) or not title.strip():
-            continue
-        if not isinstance(evidence, list):
-            continue
-        ev = tuple(e.strip() for e in evidence if isinstance(e, str) and e.strip())
-        if not ev:  # evidence-gated: no evidence → dropped
-            continue
-        rationale = item.get("rationale")
-        severity = item.get("severity")
-        paths = item.get("paths")
-        action_hint = item.get("action_hint")
-        out.append(
-            FollowUp(
-                title=title.strip(),
-                rationale=rationale if isinstance(rationale, str) else "",
-                severity=severity if severity in ("low", "medium", "high") else "medium",
-                evidence=ev,
-                paths=tuple(p.strip() for p in paths if isinstance(p, str) and p.strip())
-                if isinstance(paths, list)
-                else (),
-                action_hint=action_hint.strip()
-                if isinstance(action_hint, str) and action_hint.strip()
-                else None,
-            )
-        )
-    return tuple(out)
-
-
-def _render_follow_ups_section(follow_ups: tuple[FollowUp, ...]) -> str:
-    """Render the ``## Technical debt / follow-ups`` section appended to ``summary.md``."""
-    lines = ["## Technical debt / follow-ups", ""]
-    for fu in follow_ups:
-        parts = [f"- **[{fu.severity}] {fu.title}**"]
-        if fu.rationale:
-            parts.append(f" — {fu.rationale}")
-        if fu.paths:
-            parts.append(f" Paths: {', '.join(fu.paths)}.")
-        if fu.action_hint:
-            parts.append(f" Suggested: {fu.action_hint}")
-        lines.append("".join(parts))
-    return "\n".join(lines) + "\n"
-
-
-# Longest a finding's reason may be before it is used verbatim as a follow-up title; longer reasons
-# become a truncated title with the full text carried in the rationale. The same bound caps
-# a finding line in the observation prompt, so a chatty evaluator cannot inflate every step turn.
-_FINDING_TITLE_MAX = 120
-
-
 def _render_findings_digest(findings: Sequence[Finding]) -> str:
     """Render an evaluator's findings as bounded lines for the observation prompt.
 
     Severity + reason + paths only: enough for the observer to react to what the step actually said,
     without pulling a full review's prose into every per-step turn. Long reasons are cut at
-    :data:`_FINDING_TITLE_MAX`, the same bound the follow-up titles use.
+    :data:`~wastech_orchestrator.core.follow_ups.FINDING_TITLE_MAX`, the same bound the follow-up
+    titles use.
     """
     lines = []
     for finding in findings:
         reason = " ".join(finding.reason.split())
-        if len(reason) > _FINDING_TITLE_MAX:
-            reason = reason[:_FINDING_TITLE_MAX].rstrip() + "…"
+        if len(reason) > FINDING_TITLE_MAX:
+            reason = reason[:FINDING_TITLE_MAX].rstrip() + "…"
         paths = f" ({', '.join(finding.paths)})" if finding.paths else ""
         lines.append(f"- [{finding.severity}] {reason}{paths}")
     return "\n".join(lines) + "\n"
-
-
-def _finding_to_follow_up(finding: Any, node_id: str | None) -> FollowUp | None:
-    """Map one persisted evaluator finding (``{severity, reason, paths}``) to a :class:`FollowUp`,
-    or ``None`` when it carries no usable ``reason``."""
-    if not isinstance(finding, Mapping):
-        return None
-    reason = str(finding.get("reason") or "").strip()
-    if not reason:
-        return None
-    severity = finding.get("severity")
-    paths_raw = finding.get("paths")
-    paths = (
-        tuple(str(p).strip() for p in paths_raw if str(p).strip())
-        if isinstance(paths_raw, list)
-        else ()
-    )
-    if len(reason) <= _FINDING_TITLE_MAX:
-        title, rationale = reason, ""
-    else:  # keep the bold title a label; the full text still reaches the operator via the rationale
-        title, rationale = reason[:_FINDING_TITLE_MAX].rstrip() + "…", reason
-    return FollowUp(
-        title=title,
-        rationale=rationale,
-        severity=severity if severity in ("low", "medium", "high") else "medium",
-        evidence=(f"{node_id or 'review'} evaluator finding (accepted with findings)",),
-        paths=paths,
-    )
-
-
-def _last_verdict_per_node(
-    evaluations: list[EvaluationRow],
-) -> dict[tuple[str | None, int | None], EvaluationRow]:
-    """Each evaluator node's FINAL in-flow verdict row (earlier rework rounds are superseded).
-
-    ``get_evaluations`` is insertion-ordered, so the last row seen per key is that node's final
-    verdict. Keyed by ``(node_id, subtask_order)``, not by node alone: a decomposed task runs the
-    same evaluator once per subtask, so keying on the node id let subtask N's verdict evict every
-    earlier subtask's — silently, and worse the more the task was decomposed.
-    """
-    last_by_node: dict[tuple[str | None, int | None], EvaluationRow] = {}
-    for row in evaluations:
-        if row.kind == "in_flow_verdict":
-            last_by_node[(row.node_id, row.subtask_order)] = row
-    return last_by_node
-
-
-def _row_findings(row: EvaluationRow) -> list[Mapping[str, Any]]:
-    """The persisted ``{severity, reason, paths}`` findings of one verdict row (``[]`` if unusable).
-
-    Defensive on purpose: this is an advisory layer, so a malformed row is skipped, never raised.
-    """
-    try:
-        findings = json.loads(row.findings_json)
-    except json.JSONDecodeError:
-        return []
-    if not isinstance(findings, list):
-        return []
-    return [f for f in findings if isinstance(f, Mapping)]
-
-
-def _evaluator_finding_follow_ups(evaluations: list[EvaluationRow]) -> tuple[FollowUp, ...]:
-    """Derive follow-ups from the LAST in-flow verdict per evaluator node.
-
-    An evaluator that accepts *with* findings persists them to the ``evaluations`` table and they
-    otherwise reach no operator surface. Take each evaluator node's final verdict only and convert
-    its findings so they land in ``summary.{json,md}`` and the PR body.
-    """
-    out: list[FollowUp] = []
-    for (node_id, _subtask), row in _last_verdict_per_node(evaluations).items():
-        for finding in _row_findings(row):
-            follow_up = _finding_to_follow_up(finding, node_id)
-            if follow_up is not None:
-                out.append(follow_up)
-    return tuple(out)
-
-
-def _render_gate_digest(evaluations: list[EvaluationRow]) -> str | None:
-    """Render every evaluator node's final verdict + findings for the finalize turn.
-
-    Without it the finalize turn writes about the gates from session memory: the run this came from
-    produced "three independent verification gates … all of which passed" with four critic findings
-    sitting in ``state.db``. Each line states the node, its verdict, and how many findings it
-    recorded, so "passed" is not writable about a gate that emitted any. Finding reasons are cut at
-    :data:`_FINDING_TITLE_MAX`, the same bound the observation digest and the follow-up titles use.
-
-    ``None`` when the task ran no in-flow evaluator (a flow with no gates), so the section is simply
-    absent rather than an empty heading.
-    """
-    lines: list[str] = []
-    for (node_id, subtask), row in _last_verdict_per_node(evaluations).items():
-        findings = _row_findings(row)
-        subtask_label = f" (subtask {subtask})" if subtask is not None else ""
-        where = f"{node_id or 'evaluator'}{subtask_label}"
-        if not findings:
-            lines.append(f"- {where}: verdict `{row.verdict}`, no findings recorded")
-            continue
-        lines.append(f"- {where}: verdict `{row.verdict}`, {len(findings)} finding(s) recorded:")
-        for finding in findings:
-            reason = " ".join(str(finding.get("reason") or "").split())
-            if len(reason) > _FINDING_TITLE_MAX:
-                reason = reason[:_FINDING_TITLE_MAX].rstrip() + "…"
-            paths_raw = finding.get("paths")
-            paths = (
-                f" ({', '.join(str(p) for p in paths_raw)})"
-                if isinstance(paths_raw, list) and paths_raw
-                else ""
-            )
-            lines.append(f"  - [{finding.get('severity') or 'unknown'}] {reason}{paths}")
-    return "\n".join(lines) if lines else None
-
-
-def _follow_up_key(follow_up: FollowUp) -> tuple[str, tuple[str, ...]]:
-    """Exact-match dedup key for a follow-up: its normalized text plus its paths."""
-    text = " ".join(f"{follow_up.title} {follow_up.rationale}".lower().split())
-    return (text, tuple(sorted(follow_up.paths)))
-
-
-def _merge_follow_ups(
-    primary: tuple[FollowUp, ...], extra: tuple[FollowUp, ...]
-) -> tuple[FollowUp, ...]:
-    """Append *extra* follow-ups whose exact-match key is not already in *primary*.
-
-    *primary* (the supervisor's own list) wins on a collision, so an evaluator finding the
-    supervisor already reported is not duplicated; *extra* is also deduped against itself.
-    """
-    seen = {_follow_up_key(fu) for fu in primary}
-    merged = list(primary)
-    for follow_up in extra:
-        key = _follow_up_key(follow_up)
-        if key in seen:
-            continue
-        seen.add(key)
-        merged.append(follow_up)
-    return tuple(merged)
 
 
 # Pseudo-tags a model sometimes emits instead of a clean tool call — the whole
@@ -799,14 +599,14 @@ class Supervisor:
             emit_delta,
             packet_path=packet_path,
             task_path=task_path,
-            gates=_render_gate_digest(evaluations),
+            gates=render_gate_digest(evaluations),
         )
         # An evaluator that accepts *with* findings (sub-threshold, non-gating) persists them
         # to the evaluations table and they otherwise reach no operator surface. Merge them into the
         # follow-ups — deduped against the supervisor's own list — so they land in summary.{json,md}
         # and the PR body. Runs independent of ``emit_follow_ups`` (a distinct, evidence-bearing
         # source from the supervisor's LLM-authored follow-ups).
-        follow_ups = _merge_follow_ups(follow_ups, _evaluator_finding_follow_ups(evaluations))
+        follow_ups = merge_follow_ups(follow_ups, evaluator_finding_follow_ups(evaluations))
         self._record(
             task_id,
             kind="supervisor_final",
@@ -840,7 +640,7 @@ class Supervisor:
             body = f"# {task_title}\n\n{clean_summary}"
         body = body.rstrip("\n") + "\n"
         if follow_ups:  # surface the evidence-gated debt/follow-ups as a section in the PR body
-            body += "\n" + _render_follow_ups_section(follow_ups)
+            body += "\n" + render_follow_ups_section(follow_ups)
         md_path.write_text(body, encoding="utf-8")
         self._register(task_id, "summary_md", str(md_path))
         return FinalizeResult(summary_path=md_path, candidate_delta=delta, follow_ups=follow_ups)
@@ -1641,17 +1441,7 @@ class Supervisor:
         if usage is not None:
             payload["supervisor_usage"] = usage
         if follow_ups:
-            payload["follow_ups"] = [
-                {
-                    "title": fu.title,
-                    "rationale": fu.rationale,
-                    "severity": fu.severity,
-                    "paths": list(fu.paths),
-                    "evidence": list(fu.evidence),
-                    "action_hint": fu.action_hint,
-                }
-                for fu in follow_ups
-            ]
+            payload["follow_ups"] = [follow_up_json(fu) for fu in follow_ups]
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(

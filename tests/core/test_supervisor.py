@@ -25,19 +25,11 @@ from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.core.flow.engine import Finding
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import SupervisorBlock
+from wastech_orchestrator.core.follow_ups import FINDING_TITLE_MAX
 from wastech_orchestrator.core.loop_control import record_rework
 from wastech_orchestrator.core.skills import SkillInventory, SkillRef
 from wastech_orchestrator.core.state_machine import Status
-from wastech_orchestrator.core.supervisor import (
-    _FINDING_TITLE_MAX,
-    _HANDOFF_RUN_ID_BASE,
-    FollowUp,
-    Supervisor,
-    _evaluator_finding_follow_ups,
-    _finding_to_follow_up,
-    _merge_follow_ups,
-    parse_follow_ups,
-)
+from wastech_orchestrator.core.supervisor import _HANDOFF_RUN_ID_BASE, Supervisor
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
 from wastech_orchestrator.providers.base import (
     AgentRunResult,
@@ -270,7 +262,7 @@ def test_observe_prompt_bounds_a_long_finding_reason(tmp_path: Path) -> None:
     digest = next(
         line for line in router.requests[0].prompt.splitlines() if line.startswith("- [high]")
     )
-    assert len(digest) <= _FINDING_TITLE_MAX + len("- [high] ") + 1
+    assert len(digest) <= FINDING_TITLE_MAX + len("- [high] ") + 1
     assert digest.endswith("…")
 
 
@@ -1322,58 +1314,6 @@ def _verdict(
     )
 
 
-def test_evaluator_finding_follow_ups_uses_last_verdict_per_node() -> None:
-    rows = [
-        _verdict([{"severity": "high", "reason": "blocking issue", "paths": []}], verdict="rework"),
-        _verdict([{"severity": "low", "reason": "minor nit remains", "paths": ["a.py"]}]),
-        EvaluationRow(task_id=_TASK, kind="supervisor_step", verdict="advisory", node_id=None),
-    ]
-    fus = _evaluator_finding_follow_ups(rows)
-    # Only the LAST review verdict's findings — the rework-superseded round is ignored, and the
-    # supervisor_step row is not an evaluator verdict.
-    assert len(fus) == 1
-    assert fus[0].title == "minor nit remains"
-    assert fus[0].severity == "low" and fus[0].paths == ("a.py",)
-    assert "review" in fus[0].evidence[0]
-
-
-def test_evaluator_finding_follow_ups_keeps_each_subtask(tmp_path: Path) -> None:
-    # A decomposed task runs the same evaluator once per subtask, so the "last verdict per node" key
-    # has to include the subtask: keyed on node_id alone, subtask 3's verdict evicted subtasks 1 and
-    # 2, and their accepted findings reached no operator surface at all — silently, and worse the
-    # more the task was decomposed.
-    rows = [
-        _verdict([{"severity": "low", "reason": "nit in subtask 1", "paths": []}], subtask_order=1),
-        _verdict([{"severity": "low", "reason": "nit in subtask 2", "paths": []}], subtask_order=2),
-        _verdict([{"severity": "low", "reason": "superseded", "paths": []}], subtask_order=3),
-        _verdict([{"severity": "low", "reason": "nit in subtask 3", "paths": []}], subtask_order=3),
-    ]
-    titles = [fu.title for fu in _evaluator_finding_follow_ups(rows)]
-    assert titles == ["nit in subtask 1", "nit in subtask 2", "nit in subtask 3"]
-    assert "superseded" not in titles  # the per-(node, subtask) last-verdict rule still holds
-
-
-def test_finding_to_follow_up_truncates_long_reason_and_drops_empty() -> None:
-    long_reason = "x" * 200
-    fu = _finding_to_follow_up({"severity": "medium", "reason": long_reason, "paths": []}, "review")
-    assert fu is not None
-    assert fu.title.endswith("…") and len(fu.title) <= _FINDING_TITLE_MAX + 1
-    assert fu.rationale == long_reason  # full text preserved when the title is truncated
-    # No usable reason, or a non-mapping, yields nothing.
-    assert _finding_to_follow_up({"severity": "low", "reason": "", "paths": []}, "review") is None
-    assert _finding_to_follow_up("not-a-mapping", "review") is None
-
-
-def test_merge_follow_ups_exact_match_dedup() -> None:
-    primary = FollowUp("Same issue", "", "medium", evidence=("e",), paths=("p.py",))
-    dup = FollowUp("same   ISSUE", "", "low", evidence=("x",), paths=("p.py",))  # normalizes equal
-    fresh = FollowUp("Different", "", "low", evidence=("y",), paths=())
-    merged = _merge_follow_ups((primary,), (dup, fresh))
-    assert len(merged) == 2  # the duplicate is dropped, the new one kept
-    assert merged[0] is primary  # the supervisor's own list wins on a collision
-    assert merged[1].title == "Different"
-
-
 def test_finalize_surfaces_accepted_evaluator_findings(tmp_path: Path) -> None:
     # A sub-threshold finding an evaluator accepted reaches summary.json + the PR body even
     # when the flow did NOT opt into supervisor-authored follow-ups.
@@ -1589,19 +1529,6 @@ def test_handoff_uses_flow_handoff_role_file(tmp_path: Path) -> None:
     )
     sup.handoff(task_id=_TASK, subtask_order=2, floor_context="F")
     assert "HANDOFF-LENS" in router.requests[0].prompt
-
-
-def test_parse_follow_ups_is_evidence_gated() -> None:
-    raw = [
-        {"title": "keep", "rationale": "r", "evidence": ["e1"], "severity": "high"},
-        {"title": "drop-no-evidence", "rationale": "r", "evidence": [], "severity": "low"},
-        {"title": "", "rationale": "r", "evidence": ["e"], "severity": "low"},  # blank title
-        "not-a-mapping",
-    ]
-    parsed = parse_follow_ups(raw)
-    assert [f.title for f in parsed] == ["keep"]
-    assert parsed[0].evidence == ("e1",)
-    assert parse_follow_ups("not-a-list") == ()
 
 
 # -- config (validated under the node ceiling) --------------------------------
