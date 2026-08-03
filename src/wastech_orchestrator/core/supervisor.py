@@ -48,7 +48,6 @@ from wastech_orchestrator.core.flow.observability import (
     write_rendered_prompt,
 )
 from wastech_orchestrator.core.flow.prompt import RoleFileError, render_role_prompt
-from wastech_orchestrator.core.flow.recorder import collect_step_facts, read_final_diff
 from wastech_orchestrator.core.flow.schema import SupervisorBlock
 from wastech_orchestrator.core.flow.usage_accounting import (
     deserialize_usage,
@@ -66,15 +65,13 @@ from wastech_orchestrator.core.follow_ups import (
 )
 from wastech_orchestrator.core.skills import SkillInventory
 from wastech_orchestrator.core.supervisor_packet import (
-    PacketFacts,
     bound_step_message,
+    build_packet_facts,
     render_packet,
 )
 from wastech_orchestrator.core.supervisor_usage import SupervisorFunction, summarize_spend
 from wastech_orchestrator.memory.delta import DELTA_OUTPUT_SCHEMA, CandidateDelta, parse_delta
 from wastech_orchestrator.providers.artifacts import (
-    exchange_node_run_dir,
-    exchange_task_dir,
     node_run_dir,
     task_artifact_dir,
 )
@@ -778,65 +775,26 @@ class Supervisor:
     def _build_packet(
         self, task_id: str, task_title: str, evaluations: Sequence[EvaluationRow]
     ) -> str:
-        """Assemble the packet JSON from durable state — no live inputs.
+        """Render the packet from the run's durable facts — no live inputs.
 
-        Every source here is either a ``state.db`` table or an already-written task artifact, which
-        is what makes two builds from the same state byte-identical and a revive that re-executed
-        nothing reproduce the same summary input. The per-step facts are not assembled here: this
-        advisory layer *reads* the run's step record from the flow recorder, so the facts a summary
-        is written from do not depend on the layer that writes prose about them.
+        The assembly itself deliberately lives outside this class: nothing in it depends on this
+        layer, so it stays reachable when the layer does not run at all. The observation digest is
+        the one field this layer contributes.
         """
-        node_runs = tuple(self._store.get_node_runs(task_id))
         return render_packet(
-            PacketFacts(
+            build_packet_facts(
+                self._store,
                 task_id=task_id,
                 task_title=task_title,
                 task_type=self._task_type,
                 flow_name=self._flow_name,
-                steps=collect_step_facts(node_runs, self._artifacts_root, task_id),
-                check_runs=tuple(self._store.get_check_runs(task_id)),
-                diff_text=read_final_diff(self._artifacts_root, task_id),
-                diff_path=self._exchange_relpath(task_id, "current.diff"),
-                findings_path=self._findings_relpath(task_id, evaluations),
+                evaluations=evaluations,
+                artifacts_root=self._artifacts_root,
+                exchange_root=self._exchange_root,
+                repo_dir=self._repo_dir,
                 material_observations=self._finalize_digest(evaluations),
             )
         )
-
-    def _exchange_relpath(self, task_id: str, relname: str) -> str | None:
-        """A repo-relative POSIX path to an existing exchange artifact, or ``None``.
-
-        Repo-relative because the provider's working directory *is* the repository, and because an
-        absolute path inside the packet would make the bytes machine-dependent (decision P0-D2).
-        Only the exchange copy is ever named — it is the only copy the provider may read.
-        """
-        if not self._exchange_root:
-            return None
-        path = exchange_task_dir(self._exchange_root, task_id) / relname
-        if not path.is_file():
-            return None
-        try:
-            return path.resolve().relative_to(Path(self._repo_dir).resolve()).as_posix()
-        except (OSError, ValueError):
-            return None
-
-    def _findings_relpath(self, task_id: str, evaluations: Sequence[EvaluationRow]) -> str | None:
-        """The latest in-flow evaluator verdict's published ``findings.json``, or ``None``.
-
-        The verdict rows are insertion-ordered, so the last one is the most recent; its
-        ``(node_id, source_node_run_id)`` rebuilds the per-run path the evaluator published under.
-        """
-        verdicts = [row for row in evaluations if row.kind == "in_flow_verdict"]
-        if not verdicts or not self._exchange_root:
-            return None
-        last = verdicts[-1]
-        if last.node_id is None or last.source_node_run_id is None:
-            return None
-        run_dir = exchange_node_run_dir(
-            self._exchange_root, task_id, last.node_id, last.source_node_run_id
-        )
-        task_dir = exchange_task_dir(self._exchange_root, task_id)
-        relname = (run_dir.relative_to(task_dir) / "findings.json").as_posix()
-        return self._exchange_relpath(task_id, relname)
 
     # -- intra-task subtask handoff --------------------------------------------
 

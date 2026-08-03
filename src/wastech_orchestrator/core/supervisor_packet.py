@@ -17,6 +17,12 @@ Bounded by construction (P0-D3): a packet is kilobytes, not the hundreds of kilo
 replaces. The full diff is inlined only while it is small — skipping it would force the model into
 an extra tool round, and every round re-sends the whole prompt as input, which costs more than the
 4 KB it saves.
+
+Despite the module's name, the **assembly** here (:func:`build_packet_facts`, plus
+:func:`summarize_diff` and :func:`split_check_runs`) belongs to no layer: it is a plain read of
+``state.db`` and the task's artifacts. The packet is one consumer;
+:mod:`~wastech_orchestrator.core.summary_report` renders the same facts as the committed
+pull-request body when the oversight layer produces no prose, or does not run at all.
 """
 
 from __future__ import annotations
@@ -25,10 +31,12 @@ import json
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, Protocol
 
-from wastech_orchestrator.core.flow.recorder import StepFacts
-from wastech_orchestrator.state_store import CheckRunRow
+from wastech_orchestrator.core.flow.recorder import StepFacts, collect_step_facts, read_final_diff
+from wastech_orchestrator.providers.artifacts import exchange_node_run_dir, exchange_task_dir
+from wastech_orchestrator.state_store import CheckRunRow, EvaluationRow, NodeRunRow
 
 # --- Bounds (P0-D3) ------------------------------------------------------------------------------
 # Named constants, not config — nobody asked for a knob, and a packet whose size an operator can
@@ -90,6 +98,108 @@ class PacketFacts:
     material_observations: str | None
 
 
+class PacketStorePort(Protocol):
+    """The two read-only tables the run's facts are assembled from.
+
+    A narrow port rather than the whole store: the assembly is a pure read, and both callers — the
+    oversight layer through its own store port and the orchestrator through the concrete store —
+    satisfy it structurally without either knowing about the other.
+    """
+
+    def get_node_runs(self, task_id: str) -> list[NodeRunRow]:
+        """Every node run of the task, in insertion order."""
+        ...
+
+    def get_check_runs(self, task_id: str) -> list[CheckRunRow]:
+        """Every check run of the task, in insertion order."""
+        ...
+
+
+def build_packet_facts(
+    store: PacketStorePort,
+    *,
+    task_id: str,
+    task_title: str,
+    task_type: str | None,
+    flow_name: str | None,
+    evaluations: Sequence[EvaluationRow],
+    artifacts_root: str | Path,
+    exchange_root: str | Path,
+    repo_dir: str | Path,
+    material_observations: str | None = None,
+) -> PacketFacts:
+    """Assemble the run's facts from durable state — no live inputs.
+
+    Every source here is either a ``state.db`` table or an already-written task artifact, which is
+    what makes two builds from the same state byte-identical and a revive that re-executed nothing
+    reproduce the same summary input. The per-step facts are not assembled here either: they are
+    read from the flow recorder, so the facts a summary is written from do not depend on the layer
+    that writes prose about them.
+
+    A module function rather than a method for the same reason: the assembly needs nothing from the
+    oversight layer, so it stays reachable when that layer does not run at all and the pull-request
+    body has to be rendered from these facts directly. ``material_observations`` is that layer's own
+    observation digest — the one genuinely layer-authored field, hence a parameter defaulting to
+    ``None`` for every caller that has no observations to carry.
+    """
+    node_runs = tuple(store.get_node_runs(task_id))
+    return PacketFacts(
+        task_id=task_id,
+        task_title=task_title,
+        task_type=task_type,
+        flow_name=flow_name,
+        steps=collect_step_facts(node_runs, artifacts_root, task_id),
+        check_runs=tuple(store.get_check_runs(task_id)),
+        diff_text=read_final_diff(artifacts_root, task_id),
+        diff_path=_exchange_relpath(exchange_root, repo_dir, task_id, "current.diff"),
+        findings_path=_findings_relpath(exchange_root, repo_dir, task_id, evaluations),
+        material_observations=material_observations,
+    )
+
+
+def _exchange_relpath(
+    exchange_root: str | Path, repo_dir: str | Path, task_id: str, relname: str
+) -> str | None:
+    """A repo-relative POSIX path to an existing exchange artifact, or ``None``.
+
+    Repo-relative because the provider's working directory *is* the repository, and because an
+    absolute path inside the packet would make the bytes machine-dependent (decision P0-D2).
+    Only the exchange copy is ever named — it is the only copy the provider may read.
+    """
+    if not exchange_root:
+        return None
+    path = exchange_task_dir(exchange_root, task_id) / relname
+    if not path.is_file():
+        return None
+    try:
+        return path.resolve().relative_to(Path(repo_dir).resolve()).as_posix()
+    except (OSError, ValueError):
+        return None
+
+
+def _findings_relpath(
+    exchange_root: str | Path,
+    repo_dir: str | Path,
+    task_id: str,
+    evaluations: Sequence[EvaluationRow],
+) -> str | None:
+    """The latest in-flow evaluator verdict's published ``findings.json``, or ``None``.
+
+    The verdict rows are insertion-ordered, so the last one is the most recent; its
+    ``(node_id, source_node_run_id)`` rebuilds the per-run path the evaluator published under.
+    """
+    verdicts = [row for row in evaluations if row.kind == "in_flow_verdict"]
+    if not verdicts or not exchange_root:
+        return None
+    last = verdicts[-1]
+    if last.node_id is None or last.source_node_run_id is None:
+        return None
+    run_dir = exchange_node_run_dir(exchange_root, task_id, last.node_id, last.source_node_run_id)
+    task_dir = exchange_task_dir(exchange_root, task_id)
+    relname = (run_dir.relative_to(task_dir) / "findings.json").as_posix()
+    return _exchange_relpath(exchange_root, repo_dir, task_id, relname)
+
+
 def render_packet(facts: PacketFacts) -> str:
     """Render *facts* as the canonical packet JSON (``sort_keys``, trailing newline).
 
@@ -108,12 +218,22 @@ def render_packet(facts: PacketFacts) -> str:
     return json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
 
 
-def _changes(diff_text: str, diff_path: str | None) -> dict[str, Any]:
-    """The change block: changed paths, the diff stat, the artifact path, and a small diff inline.
+@dataclass(frozen=True)
+class DiffSummary:
+    """What a unified diff touched: the paths, in first-seen order, and the line counts."""
+
+    paths: tuple[str, ...]
+    insertions: int
+    deletions: int
+
+
+def summarize_diff(diff_text: str) -> DiffSummary:
+    """Parse a unified diff into changed paths + line counts.
 
     Derived from the ``current.diff`` **artifact** rather than from a live ``git diff --stat``: a
     fresh git invocation reads the working tree, which is not durable state, so it would break the
-    pure-function contract the reproducibility criterion rests on.
+    pure-function contract the reproducibility criterion rests on — for the packet and equally for
+    the committed report rendered from the same facts.
     """
     paths: list[str] = []
     insertions = 0
@@ -141,9 +261,19 @@ def _changes(diff_text: str, diff_path: str | None) -> dict[str, Any]:
             insertions += 1
         elif line.startswith("-"):
             deletions += 1
+    return DiffSummary(paths=tuple(paths), insertions=insertions, deletions=deletions)
+
+
+def _changes(diff_text: str, diff_path: str | None) -> dict[str, Any]:
+    """The change block: changed paths, the diff stat, the artifact path, a small diff inline."""
+    summary = summarize_diff(diff_text)
     changes: dict[str, Any] = {
-        "paths": paths,
-        "diff_stats": {"files": len(paths), "insertions": insertions, "deletions": deletions},
+        "paths": list(summary.paths),
+        "diff_stats": {
+            "files": len(summary.paths),
+            "insertions": summary.insertions,
+            "deletions": summary.deletions,
+        },
         "diff_path": diff_path,
     }
     if 0 < len(diff_text) <= _DIFF_INLINE_MAX:
@@ -191,13 +321,21 @@ def _steps(steps: Sequence[StepFacts]) -> list[dict[str, Any]]:
     return rendered
 
 
-def _checks(check_runs: Sequence[CheckRunRow]) -> dict[str, list[str]]:
-    """The check commands this task ran, split by result.
+@dataclass(frozen=True)
+class CheckOutcomes:
+    """The task's check commands split by result, in the order they ran.
 
-    ``skipped`` is its own list, never folded into ``failed``: a check whose toolchain was absent
-    did not fail, and a summary that says otherwise is wrong in the direction that matters. This
-    block keeps "which checks passed" writable now that the ``checks`` node is no longer observed.
+    ``skipped`` is its own field, never folded into ``failed``: a check whose toolchain was absent
+    did not fail, and a summary that says otherwise is wrong in the direction that matters.
     """
+
+    passed: tuple[str, ...]
+    failed: tuple[str, ...]
+    skipped: tuple[str, ...]
+
+
+def split_check_runs(check_runs: Sequence[CheckRunRow]) -> CheckOutcomes:
+    """Split check runs by result. One entry per *run*, so a re-run command appears once per run."""
     passed: list[str] = []
     failed: list[str] = []
     skipped: list[str] = []
@@ -208,7 +346,22 @@ def _checks(check_runs: Sequence[CheckRunRow]) -> dict[str, list[str]]:
             passed.append(row.command)
         else:
             failed.append(row.command)
-    return {"passed": passed, "failed": failed, "skipped": skipped}
+    return CheckOutcomes(passed=tuple(passed), failed=tuple(failed), skipped=tuple(skipped))
+
+
+def _checks(check_runs: Sequence[CheckRunRow]) -> dict[str, list[str]]:
+    """The check commands this task ran, split by result.
+
+    Every run is listed, including a command that failed and was later fixed: the packet is the
+    run's record, and the finalize turn is expected to read the step order alongside it. This block
+    keeps "which checks passed" writable now that the ``checks`` node is no longer observed.
+    """
+    outcomes = split_check_runs(check_runs)
+    return {
+        "passed": list(outcomes.passed),
+        "failed": list(outcomes.failed),
+        "skipped": list(outcomes.skipped),
+    }
 
 
 def _observations(digest: str | None) -> str | None:
