@@ -22,7 +22,7 @@ Supervisor — самый тяжёлый потребитель Claude-конт�
 
 - **P0.1 — сначала пакет.** `finalize` всегда собирает `SupervisorPacket` из уже имеющихся фактов (`node_runs`, `evaluations`, `current.diff`, findings, checks) + компактный digest материальных наблюдений (`_finalize_digest`). Новых данных собирать не нужно — всё уже лежит на диске и в `state.db`.
 - **P0.2 — затем fresh finalize по умолчанию.** Убираем ветку «тёплый resume vs digest»: и normal, и revive идут одним путём — fresh-сессия (`resume_session=False`), засеянная пакетом. Механизм fresh-из-digest уже существует как recovery (`_finalize_digest` + `resume=False`), делаем его основным.
-- **P0.3 — затем пропуск наблюдений `tool`/`checks`.** Правка одного условия в post-node hook (`core/orchestrator.py:3204`, текущее условие `node.kind != "publish"`): `node.kind not in {"tool", "checks", "publish"}`. Безопасно: пропущенные/недетерминированные ноды и так не наблюдаются, а на стейт-машину cadence не влияет (advisory). Этот пропуск сам по себе НЕ обесточивает finalize даже без пакета — содержательные наблюдения (`revise`/`tone_style`/`polish`) продолжают идти, — поэтому он и не подпадает под требование «сначала пакет»; но по решению P0-D5 он едет в том же изменении, а не отдельным PR. В packaged-флоу таких нод немного: по одной в `blog_article_revise` (`length`) и `implementation` (`checks`), две в `deep_research` (`:202`, `:219`), — то есть минус один-два наблюдательных вызова за прогон (исторически ~44k input-токенов на `length`).
+- **P0.3 — затем пропуск наблюдений `tool`/`checks`.** Правка одного условия в post-node hook (`core/orchestrator.py:3176`, текущее условие `node.kind != "publish"`): `node.kind not in {"tool", "checks", "publish"}`. Безопасно: пропущенные/недетерминированные ноды и так не наблюдаются, а на стейт-машину cadence не влияет (advisory). Этот пропуск сам по себе НЕ обесточивает finalize даже без пакета — содержательные наблюдения (`revise`/`tone_style`/`polish`) продолжают идти, — поэтому он и не подпадает под требование «сначала пакет»; но по решению P0-D5 он едет в том же изменении, а не отдельным PR. В packaged-флоу таких нод ровно по одной на flow (`blog_article_revise` → `length`, `implementation` → `checks`), то есть минус один наблюдательный вызов за прогон (исторически ~44k input-токенов на `length`).
 
 Дополнительно:
 
@@ -38,20 +38,18 @@ Supervisor — самый тяжёлый потребитель Claude-конт�
 
 1. Оркестратор пишет приватный авторитетный `packet.json` в supervisor-артефакты задачи (`node_run_dir(artifacts_root, task_id, "supervisor", 0)` — тот же namespacing, что у остальных supervisor-артефактов, где `0` — finalize-сентинел).
 2. Публикует редактированную копию готовым сеамом: `publish_artifact(exchange_root, task_id, "supervisor/packet.json", content, extra_secrets=…, private_path=…)` (`core/flow/nodes/exchange_publish.py:117`) → `.worc-io/<task-id>/supervisor/packet.json`. `extra_secrets` передавать обязательно — тот же набор литералов, что использует редакция сохранённых промптов.
-3. Новое поле `AgentRunRequest.supervisor_packet_path` + строка `packet` в `build_context_footer` (`providers/base.py:229-250`). Поля контекста перечислены явно ещё в двух местах, оба нужно дополнить: containment-проверка `providers/exchange.py:398` и audit-дикт `providers/_adapter_base.py:658`.
+3. Новое поле `AgentRunRequest.supervisor_packet_path` + строка `packet` в `build_context_footer` (`providers/base.py:172-231`). Поля контекста перечислены явно ещё в двух местах, оба нужно дополнить: containment-проверка `providers/exchange.py:398` и audit-дикт `providers/_adapter_base.py:658`.
 4. Путь передаётся в POSIX-форме (`as_posix()`), как и остальные exchange-пути.
 
 **Почему не frozen instruction bundle.** `instruction-bundles/<task-id>/` (WRI-011) — снимок _входов_, замороженный на старте задачи, с composite `instruction_manifest_digest`, который сверяется перед переиспользованием provider-сессии (`core/flow/instruction_bundle.py:1-31`). Пакет рождается в конце прогона, поэтому попал бы туда только через исключение в manifest-контракте — цена выше, чем одно новое поле запроса.
 
 **Почему не инлайн и не чужое поле.** Инлайн возвращает в промпт ровно те байты, ради сокращения которых затевался P0, и обходит единый redaction-seam. Переиспользование `plan_path`/`check_artifacts_path` ломает диагностику: в context-footer, в rendered-prompt и в prompt-audit пакет назывался бы планом или checks.
 
-**Приватная копия авторитетна, опубликованная — расходуема (уточнение 2026-08-02).** С v32 схемы конфига `logging.clean_runs_on_success` по умолчанию `true`: успешная задача на терминальном переходе сносит свой подкаталог в `runs/` вместе с запечатанным exchange (`remove_task_runs`, вызов — `core/orchestrator.py:4139`). Опубликованная копия пакета до пост-мортема, таким образом, не доживает, а приватный `packet.json` в артефактах задачи — доживает. Порядок операций это не ломает: finalize (`_engine_finalize`, `core/orchestrator.py:2985`) — хук publish-ноды, он отрабатывает задолго до `seal_exchange` (`:4077`) и до eviction'а, так что окно для `publish_artifact` открыто. Практическое следствие для разбора прогонов: источником всегда считать приватный файл, а не `.worc-io`-копию.
-
 **Следствие:** P0-D6 (редакция пакета) закрыт этим же решением — публикация в exchange редактирует по построению, отдельного механизма не требуется; в критерии остаётся только «`extra_secrets` переданы».
 
 ### P0-D2 — детерминизм = чистая функция durable-состояния
 
-«Пакет детерминирован» означает: **сборка пакета — чистая функция `state.db` + артефактов задачи**, без каких-либо иных входов. Ни системных часов, ни env, ни абсолютных путей, ни порядка обхода файловой системы: все пути в пакете — repo-relative POSIX, шаги упорядочены по `node_runs.id`, сериализация каноническая (`json.dumps(..., sort_keys=True)`, запись с `newline=""` — тот же домашний паттерн, что у manifest'ов, `core/flow/exchange_seal.py:189`).
+«Пакет детерминирован» означает: **сборка пакета — чистая функция `state.db` + артефактов задачи**, без каких-либо иных входов. Ни системных часов, ни env, ни абсолютных путей, ни порядка обхода файловой системы: все пути в пакете — repo-relative POSIX, шаги упорядочены по `node_runs.id`, сериализация каноническая (`json.dumps(..., sort_keys=True)`, запись с `newline=""` — тот же домашний паттерн, что у manifest'ов, `core/flow/exchange_seal.py:182`).
 
 Что это даёт в терминах проверки — два утверждения вместо одного непроверяемого:
 
@@ -92,12 +90,7 @@ Supervisor — самый тяжёлый потребитель Claude-конт�
 2. `finalize` всегда строит пакет и всегда запускается на fresh-сессии, засеянной пакетом; ветка тёплого resume удаляется вместе с флагом `_session_live` (решение P0-D4). `summary.json` по-прежнему пишется всегда; deterministic-фолбэк оркестратора при неудаче turn сохраняется без изменений.
 3. Пропуск `observe` для `node.kind ∈ {tool, checks}` в post-node hook.
 4. Тесты (см. раздел ниже).
-5. Синхронизация доков, которые физически есть на `dev` (решение X2, состав файлов уточнён 2026-08-02). Фраза «observes **each step** and writes the final summary» после P0 неверна, и живёт она не в одном файле, а в трёх — править нужно все:
-   - `packaged/guide/flows/roles.md:79` — описание supervisor-слоя;
-   - `packaged/guide/flows/README.md:164` — та же формулировка во вводном разделе про flow-local блок `supervisor:`;
-   - `packaged/guide/config/reference.md:176` — шапка раздела `supervisor`; там же строка `supervisor.model` обещает, что слой «runs once per step» — это утверждение тоже становится неверным.
-
-   Формулировка на замену: наблюдаются исполненные ноды, кроме `tool`/`checks`/`publish`, а finalize идёт packet-first из durable-состояния. Схема config в P0 не меняется, поэтому `packaged/config.example.yaml` не трогаем — в `reference.md` правится только проза, не таблица ключей. Derived `docs/` на `dev` не существует — вместо правки в описании PR оставляем строку doc-impact («затронуты finalize + cadence supervisor; вероятно влияет на `worc_architecture.md` и `configuration.md`») как хлебную крошку для реверс-инжиниринга на `main`.
+5. Синхронизация доков, которые физически есть на `dev` (решение X2, 2026-07-26): `src/wastech_orchestrator/packaged/guide/flows/roles.md:63` утверждает, что supervisor «observes **each step** and writes the final summary» — после P0 это неверно, фразу нужно переписать под «наблюдаются исполненные ноды, кроме `tool`/`checks`/`publish`» и под packet-first finalize. Схема config в P0 не меняется, поэтому `packaged/config.example.yaml` и `guide/config/reference.md` не трогаем. Derived `docs/` на `dev` не существует — вместо правки в описании PR оставляем строку doc-impact («затронуты finalize + cadence supervisor; вероятно влияет на `worc_architecture.md` и `configuration.md`») как хлебную крошку для реверс-инжиниринга на `main`.
 
 Ожидаемый эффект на исследованном прогоне (историческая оценка 2026-07-16; код с тех пор менялся, поэтому эти числа — ориентир, а не порог): пропуск `length` снимает минимум 44 107 input-токенов; fresh finalize из компактного пакета ориентировочно уменьшает финальный вызов (тогда — 104 567 input-токенов) на 65–85 тыс. Проверяется относительным порогом против свежего baseline — см. «A/B и baseline» ниже.
 
@@ -164,9 +157,9 @@ WHERE task_id = ? AND node_run_id IS NULL;
 ## Вероятные области реализации
 
 - `src/wastech_orchestrator/core/supervisor.py` — `SupervisorPacket`, всегда-fresh finalize, сборка пакета из `_finalize_digest` + durable-фактов.
-- `src/wastech_orchestrator/core/orchestrator.py` — условие пропуска `tool`/`checks` в post-node hook (`:3204`, текущее `node.kind != "publish"`); прокидывание фактов задачи (changed paths / diff / findings / checks) в `finalize`.
+- `src/wastech_orchestrator/core/orchestrator.py` — условие пропуска `tool`/`checks` в post-node hook (`:3176`, текущее `node.kind != "publish"`); прокидывание фактов задачи (changed paths / diff / findings / checks) в `finalize`.
 - `src/wastech_orchestrator/providers/base.py` — поле `supervisor_packet_path` в `AgentRunRequest` + строка `packet` в `build_context_footer` (P0-D1).
 - `src/wastech_orchestrator/providers/exchange.py` (`:398`) и `providers/_adapter_base.py` (`:658`) — два места, где поля контекста перечислены явно (containment + audit): новое поле нужно добавить в оба, иначе путь либо не пройдёт проверку содержания, либо не попадёт в аудит.
 - `src/wastech_orchestrator/core/flow/nodes/exchange_publish.py` — используется как есть (`publish_artifact`), менять не нужно.
 - `tests/core/test_supervisor.py`, `tests/core/test_flow_engine.py` — см. выше.
-- `src/wastech_orchestrator/packaged/guide/flows/roles.md` (`:79`), `packaged/guide/flows/README.md` (`:164`), `packaged/guide/config/reference.md` (`:176` + строка `supervisor.model`) — три присутствующих на `dev` doc-файла, где описано это поведение: cadence-фраза про «each step» и packet-first finalize. Derived `docs/worc_architecture.md` / `docs/configuration.md` на этой ветке отсутствуют — только doc-impact note в PR (X2).
+- `src/wastech_orchestrator/packaged/guide/flows/roles.md` — единственный присутствующий на `dev` doc-файл, который описывает это поведение: cadence-фраза про «each step» (`:63`) и packet-first finalize. Derived `docs/worc_architecture.md` / `docs/configuration.md` на этой ветке отсутствуют — только doc-impact note в PR (X2).

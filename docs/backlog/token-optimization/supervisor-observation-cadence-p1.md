@@ -11,7 +11,7 @@
 
 ## Проблема
 
-После P0 finalize дешёвый и воспроизводимый, но per-step наблюдения по-прежнему запускаются на **каждой** executed non-`tool`/`checks` ноде и по-прежнему на тёплой растущей сессии. На исследованном прогоне шесть наблюдений стоили 375 726 input-токенов и $0.44, не влияя на исход задачи (supervisor advisory-only). Один общий `SupervisorConfig` (`role_file, model, reasoning, provider` — `config/schema.py:518`) применяется и к дешёвому наблюдению, и к сложному finalize: нельзя задать low для заметок и medium для синтеза, нельзя выключить наблюдения, сохранив summary. Flow-local блок (`SupervisorBlock`: `role_file, finalize_role_file, handoff_role_file, emit_follow_ups` — `core/flow/schema.py:222`) умеет менять только формулировки, не cadence.
+После P0 finalize дешёвый и воспроизводимый, но per-step наблюдения по-прежнему запускаются на **каждой** executed non-`tool`/`checks` ноде и по-прежнему на тёплой растущей сессии. На исследованном прогоне шесть наблюдений стоили 375 726 input-токенов и $0.44, не влияя на исход задачи (supervisor advisory-only). Один общий `SupervisorConfig` (`role_file, model, reasoning, provider` — `config/schema.py:501`) применяется и к дешёвому наблюдению, и к сложному finalize: нельзя задать low для заметок и medium для синтеза, нельзя выключить наблюдения, сохранив summary. Flow-local блок (`SupervisorBlock`: `role_file, finalize_role_file, handoff_role_file, emit_follow_ups` — `core/flow/schema.py:204`) умеет менять только формулировки, не cadence.
 
 ## Требуемый результат
 
@@ -20,7 +20,7 @@
 ## Решения
 
 - **`observe.mode: all | selected | events | none`** в конфиге supervisor (Варианты B/C).
-- **Дефолты по типам flow живут в самих packaged-flow YAML, а не в коде движка (решение P1-D4, 2026-07-26).** Движок обязан оставаться flow-agnostic — ветвиться по имени flow или id ноды запрещено ([.agents/rules/architecture.md](../../../.agents/rules/architecture.md)), а user-authored flow — первоклассный. Механизм уже есть: у packaged-флоу есть flow-local блок `supervisor:` (`blog_article_revise.yaml:143`, `implementation.yaml:174`), в него и добавляется режим. Конкретно: `blog_article`, `blog_article_revise`, `content_chapter`, `content_translate` получают `none` в своих YAML; `implementation.yaml` — `events` (там `emit_follow_ups: true`, `none` просадил бы follow_ups/память).
+- **Дефолты по типам flow живут в самих packaged-flow YAML, а не в коде движка (решение P1-D4, 2026-07-26).** Движок обязан оставаться flow-agnostic — ветвиться по имени flow или id ноды запрещено ([.agents/rules/architecture.md](../../../.agents/rules/architecture.md)), а user-authored flow — первоклассный. Механизм уже есть: у packaged-флоу есть flow-local блок `supervisor:` (`blog_article_revise.yaml:143`, `implementation.yaml:173`), в него и добавляется режим. Конкретно: `blog_article`, `blog_article_revise`, `content_chapter`, `content_translate` получают `none` в своих YAML; `implementation.yaml` — `events` (там `emit_follow_ups: true`, `none` просадил бы follow_ups/память).
 - **Event-триггеры** для `events`: `rework` (в т.ч. `rework_exhausted`), `failure`, `fallback` — закрытый список из решения P1-D7. Обычные `done`/`pass`/`accept` пишутся детерминированной step-записью **без** LLM.
 - **Раздельные `observe` и `finalize` настройки** (Вариант H): своя `model`/`reasoning` у каждого. Наблюдение — дешёвая модель + low/medium; finalize — сильнее, medium. Ключа `session` нет ни у одного из блоков (решения P1-D8 и P0-D4).
 - ~~**Бюджеты** (Вариант I): `max_calls`, `max_digest_tokens`, `on_budget_exhausted`~~ — **исключены из P1 решением P1-D6 (2026-07-26).** Ограничителем расхода служит сам режим наблюдений, а не отдельный потолок; см. ниже.
@@ -88,11 +88,11 @@ flow:
       mode: none # content-flow: только finalize
 ```
 
-Цена — вложенный подблок в flow-парсере (`_parse_supervisor`, `core/flow/snapshot.py:642`) со своим `_reject_unknown`, ровно как у существующего `defaults.evaluator` (`:656-675`). Взамен: одна форма в документации, скилле `worc-flow-role` и примерах, и место для будущего `include_nodes` без второго переименования.
+Цена — вложенный подблок в flow-парсере (`_parse_supervisor`, `core/flow/snapshot.py:608`) со своим `_reject_unknown`, ровно как у существующего `defaults.evaluator` (`:626-640`). Взамен: одна форма в документации, скилле `worc-flow-role` и примерах, и место для будущего `include_nodes` без второго переименования.
 
 ### P1-D3 — номер версии схемы не фиксируем, пересчитываем при реализации
 
-Bump обязателен (плоские ключи удаляются — старый конфиг перестаёт грузиться), но конкретное число в документе не пиним: на 2026-08-02 это `32 → 33` (`config/schema.py:173`; v32 добавила `logging.clean_runs_on_success`), однако любая другая задача, добравшаяся до мёржа раньше, сдвинет базу. Формулировка для реализации: «увеличить `CONFIG_SCHEMA_VERSION` на единицу от текущего значения на момент правки и внести плоские ключи в `_REMOVED_KEYS`».
+Bump обязателен (плоские ключи удаляются — старый конфиг перестаёт грузиться), но конкретное число в документе не пиним: на 2026-07-26 это `31 → 32` (`config/schema.py:167`), однако любая другая задача, добравшаяся до мёржа раньше, сдвинет базу. Формулировка для реализации: «увеличить `CONFIG_SCHEMA_VERSION` на единицу от текущего значения на момент правки и внести плоские ключи в `_REMOVED_KEYS`».
 
 ### P1-D4 — дефолты по флоу живут в packaged YAML (см. §Решения)
 
@@ -121,7 +121,7 @@ Bump обязателен (плоские ключи удаляются — ст
 Убраны из списка:
 
 - `hitl` и `dangerous_diff` — их фактов в `outcome` нет, но главное: в обоих случаях человек **уже** был поднят (HITL-пауза шлёт запрос в Telegram и ждёт ответа, `core/hitl.py`), поэтому advisory-заметка ИИ вдогонку ничего не добавляет.
-- `subtask_boundary` — это не post-node событие: на границе подзадач уже выполняется отдельный `handoff`-turn (`core/orchestrator.py:2918`), то есть наблюдение там есть по построению.
+- `subtask_boundary` — это не post-node событие: на границе подзадач уже выполняется отдельный `handoff`-turn (`core/orchestrator.py:2891`), то есть наблюдение там есть по построению.
 
 Формально это делает список триггеров закрытым и коротким; если позже понадобится новый, он добавляется вместе с фактами, которые для него нужны.
 
@@ -138,7 +138,7 @@ Bump обязателен (плоские ключи удаляются — ст
 3. В post-node hook **всегда** писать детерминированную step-запись (node/kind/outcome/факты, `note=""`), а LLM-observer вызывать **условно** по mode/триггерам. Это гарантирует полноту ledger/пакета даже когда наблюдения выключены.
 4. Реализовать event-детекцию (`rework`/`failure` из `outcome`, `fallback` из строки `node_runs`) — без расширения контракта post-node хука (решение P1-D7).
 5. Packaged-дефолты — правкой YAML соответствующих флоу (их flow-local блок `supervisor:`), без какого-либо сопоставления имени flow в коде: content-флоу → `none`, `implementation` → `events` (решение P1-D4).
-6. Тесты (см. ниже) и синхронизация доков, которые физически есть на `dev` (решение X2, 2026-07-26): `packaged/config.example.yaml` (новый вложенный блок supervisor), `packaged/guide/config/reference.md:174-183` (таблица плоских ключей `supervisor.{role_file,provider,model,reasoning}` перестаёт соответствовать схеме), `packaged/guide/flows/reference.md:22` (состав `SupervisorBlock` + режим наблюдений), `packaged/guide/flows/roles.md:79` и `packaged/guide/flows/README.md:164` (cadence — та же фраза «observes each step» в двух файлах) и packaged-flows. Derived `docs/` на `dev` нет — вместо правки строка doc-impact в описании PR.
+6. Тесты (см. ниже) и синхронизация доков, которые физически есть на `dev` (решение X2, 2026-07-26): `packaged/config.example.yaml` (новый вложенный блок supervisor), `packaged/guide/config/reference.md:173-182` (таблица плоских ключей `supervisor.{role_file,provider,model,reasoning}` перестаёт соответствовать схеме), `packaged/guide/flows/reference.md:22` (состав `SupervisorBlock` + режим наблюдений), `packaged/guide/flows/roles.md` (cadence) и packaged-flows. Derived `docs/` на `dev` нет — вместо правки строка doc-impact в описании PR.
 
 Ожидаемый эффект (числа исторические, 2026-07-16): finalize-only убирает 375 726 observation input-токенов, общий supervisor input падал бы с ~480 тыс. до ~30–60 тыс. Для приёмки порог относительный и мерится тем же способом и против того же свежего baseline, что зафиксированы в [P0 §A/B и baseline](supervisor-finalize-packet-and-cadence.md#ab-и-baseline-решение-x1-2026-07-26) (решение X1) — отдельный прогон-baseline для P1 не нужен.
 
