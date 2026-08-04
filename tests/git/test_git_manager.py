@@ -12,11 +12,14 @@ from pathlib import Path
 import pytest
 
 from wastech_orchestrator.config.schema import BranchMode, MergeStrategy
+from wastech_orchestrator.core.follow_ups import FOLLOW_UPS_HEADING
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import (
+    _FOLLOW_UPS_HEADING,
     _PR_BODY_MAX_CHARS,
     _PUSH_RETRY_BACKOFF_SECONDS,
     _SECTION_SEPARATOR,
+    _SUMMARY_POINTER_PREFIX,
     _TASK_MARKER_PREFIX,
     KIND_PR_MERGE,
     RUNTIME_EXCLUDED_DIRS,
@@ -495,20 +498,6 @@ def test_append_runtime_excludes_respects_operators_flows_tracking_scheme(
         git_run(["check-ignore", "-q", str(flow_file.relative_to(git_repo.clone))], git_repo.clone)
     # The exchange is now ignored (exit 0 = ignored).
     git_run(["check-ignore", "-q", ".worc-io/probe"], git_repo.clone)
-
-
-def test_diff_stat_returns_stat_only(
-    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
-) -> None:
-    # diff_stat() feeds the compact minimal summary: files + counts, never the patch body.
-    _task(store)
-    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
-    (git_repo.clone / "mod.py").write_text("a = 1\nb = 2\n", encoding="utf-8")
-    gm.commit_code("task-001", "feat: mod")
-    stat = gm.diff_stat()
-    assert "mod.py" in stat and "changed" in stat
-    assert "diff --git" not in stat and "@@" not in stat
 
 
 def test_changed_code_paths_since_base_includes_committed_change(
@@ -1422,7 +1411,40 @@ def test_bound_pr_body_compacts_oldest_over_cap() -> None:
     assert out.startswith(head)  # the PR-creating task's body is never touched
     assert out.count(_TASK_MARKER_PREFIX) == 18  # no marker dropped → count stays exact
     assert ("x" * 5_000) in out  # the newest section(s) remain full
-    assert "logs/t2/summary.md" in out  # the oldest was compacted to a stub pointing at its log
+    assert ".worc/logs/t2/summary.md" in out  # the oldest was compacted to a stub
+    # The stub names the run host, not a repository-relative path: `logs/<id>/` lives under the
+    # git-excluded `.worc/`, so the old spelling read as an openable repo link and was a dead one.
+    assert "see `logs/t2/summary.md`" not in out
+
+
+def test_bound_pr_body_surrenders_follow_ups_last() -> None:
+    # Follow-ups are the actionable half of a summary. Compacting prose and follow-ups together took
+    # ~65 of 98 follow-ups out of a 20-task chain PR, so pass 1 keeps the section and only a second
+    # pass — when the body STILL does not fit — gives it up.
+    head = "Task 1 body."
+
+    def section(i: int, filler: int) -> str:
+        return (
+            f"{_TASK_MARKER_PREFIX}t{i} -->\n\n## Title {i}\n\n"
+            + ("x" * filler)
+            + f"\n\n{_FOLLOW_UPS_HEADING}\n\n- **[low] Follow-up {i}** — worth doing.\n"
+        )
+
+    body = _SECTION_SEPARATOR.join([head, *(section(i, 5_000) for i in range(2, 20))])
+    out = _bound_pr_body(body)
+    assert len(out) <= _PR_BODY_MAX_CHARS
+    assert "Follow-up 2" in out and out.count(_FOLLOW_UPS_HEADING) == 18  # every one survives
+    assert ("x" * 5_000) not in out.split(_SECTION_SEPARATOR)[1]  # …because the prose went instead
+
+    # Follow-ups so bulky that pass 1 cannot fit the body: pass 2 drops them, oldest first.
+    fat = _SECTION_SEPARATOR.join([head, *(section(i, 100) for i in range(2, 20))]).replace(
+        "worth doing.", "worth doing. " + ("z" * 5_000)
+    )
+    assert len(fat) > _PR_BODY_MAX_CHARS
+    tightened = _bound_pr_body(fat)
+    assert len(tightened) <= _PR_BODY_MAX_CHARS
+    assert tightened.count(_TASK_MARKER_PREFIX) == 18  # markers still never dropped
+    assert tightened.count(_FOLLOW_UPS_HEADING) < 18  # the oldest gave theirs up
 
 
 def test_compact_pr_section_keeps_marker_and_title_and_is_idempotent() -> None:
@@ -1430,8 +1452,59 @@ def test_compact_pr_section_keeps_marker_and_title_and_is_idempotent() -> None:
     out = _compact_pr_section(sec)
     assert f"{_TASK_MARKER_PREFIX}t5 -->" in out and "## Big change" in out
     assert "y" * 9_000 not in out  # the bulky summary is gone
-    assert "logs/t5/summary.md" in out  # replaced by a pointer to the on-disk summary
+    assert ".worc/logs/t5/summary.md" in out  # replaced by a pointer to the on-disk summary
     assert _compact_pr_section(out) == out  # re-compacting a stub changes nothing
+    # Preserving mode is idempotent too, and a second pass can still tighten it.
+    kept = _compact_pr_section(
+        f"{sec}\n\n{_FOLLOW_UPS_HEADING}\n\n- **[low] Do the thing**\n", keep_follow_ups=True
+    )
+    assert "Do the thing" in kept and "y" * 9_000 not in kept
+    assert _compact_pr_section(kept, keep_follow_ups=True) == kept
+    assert _FOLLOW_UPS_HEADING not in _compact_pr_section(kept)
+
+
+def test_compact_pr_section_points_at_the_committed_summary_when_one_was_recorded() -> None:
+    # The committed `<id>.summary.md` sits next to the moved task file, in the same audit commit and
+    # therefore in this PR's own diff — so unlike the `.worc/` working copy it is a file a reviewer
+    # can actually open. The compactor cannot derive that path (it runs later, over other tasks'
+    # sections, and does not know which lifecycle folder the task file moved into), so the appending
+    # run records it beside the marker and this reads it back.
+    marker_block = (
+        f"{_TASK_MARKER_PREFIX}t7 -->\n{_SUMMARY_POINTER_PREFIX} tasks/done/t7.summary.md -->"
+    )
+    sec = f"{marker_block}\n\n## Big change\n\n" + ("y" * 9_000)
+
+    out = _compact_pr_section(sec)
+
+    assert "committed in this PR at `tasks/done/t7.summary.md`" in out
+    assert ".worc/logs" not in out  # the run-host wording is the fallback, not the default
+    assert marker_block in out  # both comments survive, so a second pass still finds the pointer
+    assert out.count(_TASK_MARKER_PREFIX) == 1  # the chain count is unaffected by the extra comment
+    assert _compact_pr_section(out) == out
+    # A task with no committed summary (a synthetic `run` path) keeps the honest run-host wording.
+    plain = _compact_pr_section(f"{_TASK_MARKER_PREFIX}t8 -->\n\n## Other\n\n" + ("z" * 9_000))
+    assert ".worc/logs/t8/summary.md" in plain and "committed in this PR" not in plain
+
+
+def test_repo_relative_names_only_paths_committed_into_the_clone(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    manager = _manager(git_repo, store, tmp_path, make_git_config)
+    committed = git_repo.clone / "tasks" / "done" / "t1.summary.md"
+    # The task lifecycle dir is excluded from the CODE commit but rides the audit commit, so it is
+    # in the repository — the one path worth naming to a reviewer.
+    assert manager._repo_relative(str(committed)) == "tasks/done/t1.summary.md"
+    # The `.worc/` working copy is git-excluded, and a path outside the clone is not ours to name.
+    assert (
+        manager._repo_relative(str(git_repo.clone / ".worc" / "logs" / "t1" / "summary.md")) is None
+    )
+    assert manager._repo_relative(str(tmp_path / "elsewhere" / "summary.md")) is None
+
+
+def test_pr_body_follow_ups_heading_mirrors_the_core_constant() -> None:
+    # git_manager is an adapter the Core imports, so it cannot import the Core back to share this
+    # string. Pinned here instead: a drifted spelling would silently stop preserving the section.
+    assert _FOLLOW_UPS_HEADING == FOLLOW_UPS_HEADING
 
 
 def test_create_pr_reuse_body_edit_failure_is_surfaced_not_fatal(

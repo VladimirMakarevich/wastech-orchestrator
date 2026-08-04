@@ -17,7 +17,7 @@ The source of truth is the code (`src/wastech_orchestrator/`). These invariants 
 - **FlowEngine** traverses the validated flow graph, owns the transitions between nodes, charges the fix loops, and drives the node runners.
 - **Provider adapters** are the only place a specific CLI's syntax lives. They **perform no fallback** and **do not change the state machine**.
 - **Router** resolves a node's `(primary, fallback)` from config and checks availability against the allowlist. Routing is node-based.
-- **Supervisor** is a constant per-task oversight layer **above** any flow (not a node): it observes each completed step read-only and writes the whole-task summary at close.
+- **Supervisor** is a per-task oversight layer **above** any flow (not a node), constant by default and removable in one config key (`supervisor.enabled`): it observes completed steps read-only at the configured cadence and writes the whole-task summary at close; with the layer off that summary is rendered deterministically from the run's recorded facts instead.
 - **Git Manager / Check Runner / State Store / Artifact Store** are separate components with narrow responsibilities.
 - **Memory** (optional, off by default) has its own invariants: redacted atomic writes, an append-only audit, and never passing unredacted content into a prompt.
 - **Dependency direction is `core → router → provider(interface)`** — providers never depend on core, and core imports only the provider _interface_, never a concrete adapter. This is machine-enforced by `import-linter` (`lint-imports`). The factories that bind the concrete adapters live in the composition root, not in core.
@@ -41,7 +41,7 @@ The source of truth is the code (`src/wastech_orchestrator/`). These invariants 
 - **Decomposition** is flag-gated and **off by default**. The split is proposed by the agent but accepted deterministically by the core; subtasks then run strictly sequentially on the single task branch (one commit each) into a single PR.
 - **Validation gate**: every task passes a structural gate before any branch or provider run. A broken task is terminal `failed`, quarantined, and never branched.
 - **`documentation`** is a workspace-write node after `review` accepts the code: it updates the target project's docs to match the shipped change, and its edits join the same diff the orchestrator commits.
-- **Constant supervisor layer** (not a node): it observes every completed step read-only (advisory — it can flag but cannot rework) and writes the plain-language handoff at close, which becomes the PR body. It is best-effort, not a quality gate: a reviewed, passing change is never blocked by it.
+- **Supervisor layer** (not a node; constant by default, and removable with one key): it observes completed steps read-only at the operator's configured cadence (advisory — it can flag but cannot rework) and writes the plain-language handoff at close, which becomes the PR body. It is best-effort, not a quality gate: a reviewed, passing change is never blocked by it. Switched off, the PR body is rendered deterministically from the run's own recorded facts, so no run ships without one.
 
 ## Fallback and transient-failure recovery
 

@@ -1,4 +1,4 @@
-"""Completed-tasks ledger + failure report + minimal summary.
+"""Completed-tasks ledger + failure report.
 
 The ledger is an **append-only** file (``logs/completed.jsonl``) outside SQLite: one JSON record per
 terminal transition (``done`` / ``failed`` / ``manual_action_required``), never rewritten. SQLite
@@ -6,8 +6,9 @@ remains the authoritative state; the ledger is a convenience index of what has b
 duplicate-id source for the gate.
 
 This module also writes the two stuck artifacts — ``failure_report.json`` (machine) and ``stuck.md``
-(human) — and the deterministic minimal summary the Core falls back to when no provider can produce
-the ``summary`` stage.
+(human). The whole-task summary that becomes the pull-request body is not here: when no provider
+authored one it is rendered by :mod:`~wastech_orchestrator.core.summary_report` from the run's
+recorded facts.
 """
 
 from __future__ import annotations
@@ -23,8 +24,6 @@ from wastech_orchestrator.providers.artifacts import task_artifact_dir
 COMPLETED_FILENAME = "completed.jsonl"
 FAILURE_REPORT_FILENAME = "failure_report.json"
 STUCK_FILENAME = "stuck.md"
-SUMMARY_MD_FILENAME = "summary.md"
-SUMMARY_JSON_FILENAME = "summary.json"
 
 
 @dataclass(frozen=True)
@@ -218,79 +217,3 @@ def write_failure_report(
     stuck_path = task_dir / STUCK_FILENAME
     stuck_path.write_text(stuck_md, encoding="utf-8")
     return str(report_path), str(stuck_path)
-
-
-def write_minimal_summary(
-    artifacts_root: str | Path,
-    task_id: str,
-    *,
-    title: str,
-    diff_stat: str,
-    task_ref: str | None = None,
-    degraded: bool = False,
-) -> tuple[str, str]:
-    """Write a *compact* deterministic ``summary.md`` + ``summary.json``.
-
-    The Core's fallback when no provider can produce the ``summary`` stage — a reviewed, passing
-    change is never blocked by the prose step. Deliberately small: it links to the task file and
-    shows a ``git diff --stat`` (files + line counts) instead of inlining the full task description
-    and the entire patch. Inlining bloated the committed summary (a real run produced a ~580-line
-    file that was almost all raw diff) and risked an unredacted diff landing in git; the full,
-    already-redacted patch stays in ``logs/<task-id>/current.diff``.
-
-    ``task_ref`` is a short pointer to the task file (e.g. ``<id>.md``, a sibling of the committed
-    summary); when ``None`` a generic line is used.
-
-    ``degraded`` marks the case where a real provider-authored summary was *expected* but could not
-    be produced (the supervisor synthesis failed on the publish path — e.g. an unresumable session
-    on a revived task): a blockquote callout is prepended to the body and ``degraded: true`` is set
-    in the JSON, so the operator never mistakes this stub for the full synthesis. It stays ``False``
-    for the legitimate no-synthesis cases (a failed/manual-action terminal), where the minimal
-    summary is the expected artifact, not a degradation.
-    """
-    task_dir = task_artifact_dir(artifacts_root, task_id)
-    task_dir.mkdir(parents=True, exist_ok=True)
-
-    what = title
-    how = "No provider-authored summary was available; see the changed-files summary below."
-    integration = "Derived deterministically from the task and its diff stat."
-    why = (
-        f"See the task file `{task_ref}` for the full description."
-        if task_ref
-        else "See the task file for the full description."
-    )
-
-    summary_json: dict[str, object] = {
-        "what": what,
-        "how": how,
-        "integration": integration,
-        "why": why,
-    }
-    if degraded:
-        summary_json["degraded"] = True
-    json_path = task_dir / SUMMARY_JSON_FILENAME
-    json_path.write_text(
-        json.dumps(summary_json, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
-
-    changes = diff_stat.strip() or "(no changes detected)"
-    callout = (
-        "> ⚠️ **Fallback summary — not a provider-authored synthesis.** The supervisor's "
-        "whole-task summary could not be produced for this run; this is the deterministic minimal "
-        "summary derived from the task and its diff.\n\n"
-        if degraded
-        else ""
-    )
-    md = (
-        f"# {what}\n\n"
-        f"{callout}"
-        f"## What\n\n{what}\n\n"
-        f"## How\n\n{how}\n\n"
-        f"## Integration\n\n{integration}\n\n"
-        f"## Why\n\n{why}\n\n"
-        f"## Changes\n\n```\n{changes}\n```\n\n"
-        f"_Full diff: `logs/{task_id}/current.diff`._\n"
-    )
-    md_path = task_dir / SUMMARY_MD_FILENAME
-    md_path.write_text(md, encoding="utf-8")
-    return str(md_path), str(json_path)

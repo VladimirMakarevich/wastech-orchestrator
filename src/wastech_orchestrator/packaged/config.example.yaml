@@ -2,7 +2,7 @@
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 # This is the packaged copy used by `wastech-orchestrator init` (the only example config; nothing else to sync).
 
-schema_version: 32                  # config format version; the orchestrator refuses newer configs
+schema_version: 34                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -77,7 +77,10 @@ agents:
       # allow_native_memory: false  # OPT-IN RISK — when true, drops the deny that confines Claude
                                # Code's own auto-memory (~/.claude/projects/<repo>/memory/), letting
                                # it persist across tasks. That store is OUTSIDE the orchestrator's
-                               # redaction net and audit; leave off unless you accept that. Claude-only.
+                               # redaction net and audit; leave off unless you accept that. This is
+                               # the ONLY switch that makes it writable (disable_read_isolation
+                               # below lifts only reads), and each run then logs
+                               # "native Claude memory ON". Claude-only.
       permission_profile: "workspace-write"   # read-only | workspace-write (a flow node's ceiling may lower it)
       extra_args: []           # raw CLI flags appended verbatim; forbidden ones fail preflight
       primary: true            # the global primary (exactly one provider; must be in `allowed`)
@@ -283,21 +286,50 @@ skills:                             # repo skill selection (optional)
   # when `dynamic`, the supervisor's proposed ones — the Core decides. Chosen SKILL.md files reach the
   # node as read-only reference paths (never executed, never the Claude Skill tool — Codex has none).
 
-supervisor:                          # constant oversight layer above any flow — always active
-  role_file: "roles/supervisor.md"  # role prompt for the supervisor; path-contained under roles/
-  model: "claude-sonnet-5"        # null = use the global primary provider's default model
-  reasoning: medium                 # null = use the global primary provider's default reasoning
-  provider: claude                  # null = inherit the global primary; pin (∈ agents.allowed) to keep aligned with model's vendor
-  # Spend on the PRODUCER nodes, not here. This layer is advisory — it never routes, reworks, or
-  # blocks — and it runs one observation per step, so a stronger model than `agents.providers`
-  # inverts the budget: the reasoning that decides the deliverable gets the weaker one. Keep it at
-  # or below the producers' tier.
-  # Caveat worth knowing: this single `model`/`reasoning` pair covers BOTH the cheap per-step
-  # observations and the whole-task finalize turn — and that finalize turn writes `summary.md`,
-  # which becomes the pull-request body and is the only part of a long run most readers see. So you
-  # cannot yet upgrade the summary alone; splitting the two is not implemented. Until then, a flow
-  # whose summary matters (`deep_research`) constrains what the turn may claim through its
-  # `supervisor.finalize_role_file` lens instead of through a bigger model.
+supervisor:                         # oversight layer above any flow (not a node) — on by default
+  enabled: true                     # false = the layer is never built: no per-step notes, no whole-task
+                                    #   summary turn, no subtask handoff brief, no `skills.dynamic`
+                                    #   proposal, and every key below is inert (one warning says so).
+                                    #   The PR body is then rendered deterministically from the run's own
+                                    #   recorded facts — changed paths, steps, checks, gate verdicts,
+                                    #   follow-ups — so no run ships without one. Also forces
+                                    #   `memory.enabled` off for the run (see `memory`).
+  role_file: "roles/supervisor.md"  # observe-lens role prompt; path-contained under roles/
+  provider: claude                  # null = inherit the global primary; pin (∈ agents.allowed) to keep aligned with the models' vendor
+  # `role_file` and `provider` are one per layer; model and effort are PER PHASE, because a cheap
+  # per-step note and the whole-task synthesis want opposite tiers. Spend on the PRODUCER nodes, not
+  # here: this layer is advisory — it never routes, reworks, or blocks — so a stronger model than
+  # `agents.providers` inverts the budget. Keep every phase at or below the producers' tier.
+  observe:                          # the per-step notes: how often, and how cheap
+    mode: events                    # all | selected | events | none — see the table below
+    triggers: [rework, failure, fallback]  # which deviations count under `events` (this is the full set)
+    include_nodes: []               # node ids observed under `mode: selected`; ignored otherwise
+    model: "claude-sonnet-5"        # null = the resolved provider's default model
+    reasoning: low                  # null = the resolved provider's default reasoning
+  finalize:                         # the whole-task synthesis — writes summary.md (the PR body)
+    model: "claude-sonnet-5"        # worth more than `observe`: most readers of a long run see only this
+    reasoning: medium
+  handoff:                          # the subtask brief between regions of a decomposed task
+    model: "claude-sonnet-5"
+    reasoning: medium
+  # `observe.mode` is what this layer costs, ranked by how many calls it can make:
+  #   none      — never observe. `finalize` and the summary still happen: that turn is seeded by a
+  #               deterministic packet of the run's facts, not by these notes. Good for a flow whose
+  #               quality is already held by a blocking gate. NOTE: at `none` the observe lens
+  #               (`role_file`) is never loaded at all — only the finalize lens is in force.
+  #   events    — the default. Observe only a deviation: an evaluator sending work back (or accepting
+  #               after exhausting its rework budget), a step whose run failed, a step that fell back
+  #               to the non-primary provider. Cost tracks what went wrong, not how long the run was.
+  #   selected  — observe exactly the nodes in `include_nodes`.
+  #   all       — observe every executed step. Debugging setting; this is what a long run pays for.
+  # `tool`, `checks` and the terminal `publish` node are never observed under ANY mode — their result
+  # is already a durable fact the finalize packet carries verbatim.
+  # A flow may NARROW this in its own `supervisor.observe.mode` (a content flow ships `none`) but
+  # never widen it — a broader flow mode fails validation. Ranking: none < events < selected < all.
+  # That check does not apply at `enabled: false`: there is no cadence to widen, so a flow declaring
+  # any mode still runs. That is why switching the layer off is its own key, not a global `none`.
+  # The once-per-task skill proposal (`skills.dynamic`) uses the `observe` model/effort — same cheap
+  # shape — and runs regardless of `mode`, which gates per-step observations only.
 
 logging:                            # operator log verbosity + on-disk artifact retention (optional)
   level: info                       # debug | info | warning | error. Persists the structured operator
@@ -321,6 +353,10 @@ logging:                            # operator log verbosity + on-disk artifact 
 memory:                             # persistent, repo-scoped memory (optional)
   enabled: true                     # false / omit the whole block = today's behavior: no store, no
                                     #   candidate delta, empty memory packets, CLI no-op, no cleanup
+                                    # Needs `supervisor.enabled: true`: that layer's closing turn is the
+                                    #   only path that writes anything memory can read back, so with the
+                                    #   layer off this resolves to false for the run and a warning names
+                                    #   both keys. Set it false yourself to make the file say what runs.
   short_term_ttl_days: 30           # episodic entries expire after N days (long-term has no TTL)
   # Per-node retrieval packet caps — deliberately small (precision over recall):
   packet_max_lines: 120             # hard line backstop for a per-node memory brief

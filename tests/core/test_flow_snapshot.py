@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from wastech_orchestrator.config.schema import ObserveMode
 from wastech_orchestrator.core.flow.contracts import (
     OutputPolicy,
     PermissionProfile,
@@ -650,6 +651,66 @@ def test_unknown_supervisor_field_rejected(tmp_path: Path) -> None:
     body = _VALID_BODY.replace(_PUB, _PUB + "  supervisor:\n    bogus: 1\n")
     with pytest.raises(FlowLoadError, match=r"unknown field.*bogus.*supervisor"):
         load_flow(_write(tmp_path, body))
+
+
+def test_supervisor_observe_mode_parsed(tmp_path: Path) -> None:
+    # The flow-local key path is identical to the global one (`supervisor.observe.mode`), so there
+    # is
+    # one name in config.yaml, in a flow YAML, and in the docs.
+    block = "  supervisor:\n    role_file: roles/s.md\n    observe:\n      mode: none\n"
+    sup = load_flow(_write(tmp_path, _VALID_BODY.replace(_PUB, _PUB + block))).doc.supervisor
+    assert sup is not None and sup.observe is not None
+    assert sup.observe.mode is ObserveMode.NONE
+
+
+def test_supervisor_observe_absent_leaves_the_mode_unset(tmp_path: Path) -> None:
+    # Unset means "inherit the operator's global cadence", which is why it is tri-state and not a
+    # default baked into the flow layer.
+    block = "  supervisor:\n    role_file: roles/s.md\n"
+    sup = load_flow(_write(tmp_path, _VALID_BODY.replace(_PUB, _PUB + block))).doc.supervisor
+    assert sup is not None and sup.observe is None
+
+
+def test_unknown_supervisor_observe_field_rejected(tmp_path: Path) -> None:
+    # Fail-closed on the nested block too: only the cadence narrows flow-locally, so an attempt to
+    # set a flow-local model (or a typo) is an error rather than a silently ignored key.
+    block = "  supervisor:\n    observe:\n      model: opus\n"
+    with pytest.raises(FlowLoadError, match=r"unknown field.*model.*supervisor\.observe"):
+        load_flow(_write(tmp_path, _VALID_BODY.replace(_PUB, _PUB + block)))
+
+
+def test_unknown_supervisor_observe_mode_rejected(tmp_path: Path) -> None:
+    block = "  supervisor:\n    observe:\n      mode: sometimes\n"
+    with pytest.raises(FlowLoadError, match=r"ObserveMode"):
+        load_flow(_write(tmp_path, _VALID_BODY.replace(_PUB, _PUB + block)))
+
+
+@pytest.mark.parametrize(
+    ("flow_file", "expected"),
+    [
+        ("blog_article.yaml", ObserveMode.NONE),
+        ("blog_article_revise.yaml", ObserveMode.NONE),
+        ("content_chapter.yaml", ObserveMode.NONE),
+        ("content_translate.yaml", ObserveMode.NONE),
+        ("implementation.yaml", ObserveMode.EVENTS),
+    ],
+)
+def test_packaged_flows_declare_their_own_observation_cadence(
+    flow_file: str, expected: ObserveMode
+) -> None:
+    # Per-flow cadence defaults live in the flow YAML, never in engine code: the content flows are
+    # finalize-only (their quality is held by blocking gates), while `implementation` states
+    # `events` because its `emit_follow_ups` needs observed deviations to ground the follow-ups.
+    sup = load_flow(CODESIGN / flow_file).doc.supervisor
+    assert sup is not None and sup.observe is not None
+    assert sup.observe.mode is expected
+
+
+@pytest.mark.parametrize("flow_file", ["deep_research.yaml", "merge.yaml", "security_audit.yaml"])
+def test_remaining_packaged_flows_inherit_the_global_cadence(flow_file: str) -> None:
+    # Not every flow needs an opinion: these declare none and take the operator's global mode.
+    sup = load_flow(CODESIGN / flow_file).doc.supervisor
+    assert sup is None or sup.observe is None
 
 
 def test_agent_network_access_tristate(tmp_path: Path) -> None:

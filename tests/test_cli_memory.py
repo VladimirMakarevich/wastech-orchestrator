@@ -206,3 +206,15 @@ def test_disabled_memory_is_a_noop(
     args = argparse.Namespace(memory_action="show", log_level=None)
     assert cli.cmd_memory(args) == 0
     assert "disabled" in capsys.readouterr().out
+
+
+def test_disabled_supervisor_layer_makes_memory_a_no_op(clone: Path) -> None:
+    # The cost the quench accepts, pinned as behavior: the operator's file says `memory.enabled:
+    # true`, and every memory path reads the resolved `false` instead. The warning that closes
+    # that gap is on the load result, which `build_git_config` drops; see test_loader.
+    config = build_git_config(clone, memory_enabled=True, supervisor_enabled=False)
+    assert config.memory.enabled is False
+
+
+def test_memory_stays_on_when_the_layer_is_on(clone: Path) -> None:
+    assert build_git_config(clone, memory_enabled=True).memory.enabled is True

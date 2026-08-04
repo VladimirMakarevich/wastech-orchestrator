@@ -13,7 +13,7 @@ Blocks appear below in the packaged order. Every block except `schema_version`, 
 
 | Field | Type | Default | Constraint | Meaning |
 | --- | --- | --- | --- | --- |
-| `schema_version` | int | current is `32` | A value **greater** than the orchestrator's supported version fails closed ("upgrade wastech-orchestrator"); equal or lower is accepted, absent is accepted. | The config format version. `worc upgrade-config` re-emits the file at the current version. |
+| `schema_version` | int | current is `33` | A value **greater** than the orchestrator's supported version fails closed ("upgrade wastech-orchestrator"); equal or lower is accepted, absent is accepted. | The config format version. `worc upgrade-config` re-emits the file at the current version. |
 
 ## `orchestrator` — the watch loop and task queue
 
@@ -84,14 +84,14 @@ Applies per provider in `[primary, fallback]`; only transient classes (`PROVIDER
 | `.reasoning` | string \| null | `null` / install: `high` | **Per-provider set:** Claude ∈ `{low, medium, high, xhigh, max}`; Codex ∈ `{minimal, low, medium, high, xhigh, max}` (`max`→`xhigh`). | Reasoning effort. A value valid for one provider may be invalid for the other. |
 | `.primary` | bool | `false` | **Exactly one** provider across the map must be `true`, and it must be in `agents.allowed`. | The global primary: runs every flow node with no explicit `provider`, and is the sole infrastructure-fallback target. |
 | `.max_turns_gate` | bool | `false` | **Requires `telegram.enabled: true`.** Claude-only. | `true` = hitting `max_turns` pauses for a Telegram continue/stop prompt (resumes the same session) instead of failing. Makes a low `max_turns` safe. |
-| `.allow_native_memory` | bool | `false` | Claude-only; installer never writes it. | **Opt-in risk.** `true` drops the deny that confines Claude Code's own auto-memory, letting it persist across tasks in a HOME store **outside** the orchestrator's redaction net and audit trail. Leave off unless you accept that. |
+| `.allow_native_memory` | bool | `false` | Claude-only; installer never writes it. | **Opt-in risk.** `true` drops the deny that confines Claude Code's own auto-memory, letting it persist across tasks in a HOME store **outside** the orchestrator's redaction net and audit trail. This is the **only** switch that lifts the *write* side of that deny — `disable_read_isolation` lifts only the read side — so the store stays unwritable until you set this. With it on, each run logs a `native Claude memory ON` warning, the same way the other relaxations announce themselves. Leave off unless you accept that. |
 
 ## `security` — the guardrail block
 
 | Field | Type / values | Default (dataclass / install) | Constraint | When to use |
 | --- | --- | --- | --- | --- |
 | `security.strict_isolation` | bool | `true` | — | Fail-closed sandbox. `true` **rejects full-access provider modes at preflight** (Codex `danger-full-access`, Claude `bypassPermissions`) and, host-aware, a **workspace-write Claude on a Linux/WSL2 host missing `bubblewrap`+`socat`** (its Bash sandbox is unavailable). Set `false` only to consciously accept full-access / unsandboxed runs. Absolutely-forbidden flags (`--dangerously-skip-permissions`, `--allow-dangerously-skip-permissions`, `--yolo`, `--ignore-rules`) stay banned regardless. |
-| `security.disable_read_isolation` | bool | `true` (read-isolation **off** out of the box; set `false` to keep it on) | Operator-config only (never a task / flow / `extra_args` key). | Escape hatch that fully disables **read**-isolation for provider runs: Claude reloads native `CLAUDE.md` + project settings/hooks/MCP/skills (`--setting-sources project`, no `--strict-mcp-config`) and Codex reloads the user + project `.codex` config/hooks/rules; the private read-deny projection (`.worc`/env-file/provider homes/frozen bundles) is lifted. The **write** side (exchange/`.git`/`tasks/` write-deny, commit/staging gates, PR control) and the `denied_read_paths` blacklist stay in force. `strict_isolation` is the master switch and always wins toward relaxation — effective off = `disable_read_isolation OR NOT strict_isolation`, so `strict_isolation: false` forces it on. `preflight` and the run log announce `read-isolation: OFF` when in effect (never a silent weakening). Native Windows Codex requires the elevated sandbox backend to enforce the private read-deny projection; without it, read-isolation **on** fails closed during preflight or the pre-launch canary instead of running with unproven isolation. |
+| `security.disable_read_isolation` | bool | `true` (read-isolation **off** out of the box; set `false` to keep it on) | Operator-config only (never a task / flow / `extra_args` key). | Escape hatch that fully disables **read**-isolation for provider runs: Claude reloads native `CLAUDE.md` + project settings/hooks/MCP/skills (`--setting-sources project`, no `--strict-mcp-config`) and Codex reloads the user + project `.codex` config/hooks/rules; the private read-deny projection (`.worc`/env-file/provider homes/frozen bundles) is lifted. The **write** side (exchange/`.git`/`tasks/` write-deny, commit/staging gates, PR control) and the `denied_read_paths` blacklist stay in force — including the write-deny on Claude's own config home, which only `agents.providers.claude.allow_native_memory` lifts. `strict_isolation` is the master switch and always wins toward relaxation — effective off = `disable_read_isolation OR NOT strict_isolation`, so `strict_isolation: false` forces it on. `preflight` and the run log announce `read-isolation: OFF` when in effect (never a silent weakening). Native Windows Codex requires the elevated sandbox backend to enforce the private read-deny projection; without it, read-isolation **on** fails closed during preflight or the pre-launch canary instead of running with unproven isolation. |
 | `security.allow_git_evidence` | bool | `false` (the grant is **off**; a declaring flow runs as if it had not declared) | Operator-config only (never a task / flow / `extra_args` key). | Master switch for the **read-only git-evidence grant**. A flow node that sets `git_evidence: true` may then run the read-only git verbs — `log`, `show`, `diff`, `blame`, `status`, `rev-list`, `rev-parse`, `ls-files`, `shortlog`, `describe`, `cat-file`, `for-each-ref` — so an audit node can cite the commit that closed a milestone instead of grepping a changelog and calling it delivery history. The declaration and this switch are both required: a flow can express the need but cannot grant itself the capability, and turning this on hands a shell only to the nodes that asked, never to every read-only node in the run. It does **not** make the node writable — Claude scopes the shell to those verbs and write-denies the whole clone in its OS sandbox (and refuses the attempt outright on a host where it cannot sandbox a shell), Codex's `read-only` sandbox already forbids every mutation, `denied_commands` stays the floor beneath both, and commit/push/PR remain the orchestrator's alone. **Read "master switch" as a grant switch, not a kill switch:** off does not mean "no node can read git history anywhere". It means "no node *gains* a capability it did not already have" — and a Codex `read-only` node can run `git log` today regardless, because its sandbox permits commands (its mutation ban comes from the workspace being mounted `read` with the network off, not from a verb list). So with this off, the same flow still has different reach depending on which provider runs the node; turning it on is what makes them match. On Claude the switch is the whole shell, which is why the asymmetry is visible there and not here. `preflight` and the run log announce `git-evidence: ON` when in effect. |
 | `security.allowed_environment` | list[str] | OS-aware base (`PATH`, `HOME`, `USER`, `USERPROFILE`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR` + OS-launch essentials) | **REPLACES** the default. | The only env var _names_ forwarded to child processes (a name absent from the host is skipped). Keep the OS-launch essentials for your OS or the CLI may fail to start; secret **values** never go here. |
 | `security.denied_read_paths` | list of globs | `[".env", "secrets/**"]` | **REPLACES** the default. Same glob dialect as `protected_paths`. | Paths the agent CLI may never read (enforced as `--disallowedTools`), so a task cannot exfiltrate secrets. |
@@ -171,18 +171,59 @@ At task start the orchestrator discovers every tracked `SKILL.md` in the clone; 
 | `skills.dynamic` | bool | `false` (whole block absent) — but **`true` if the `skills:` block is present without this key** | `true` lets the supervisor propose a node→skills map once per task (adds one turn). Note the asymmetry: omitting `skills:` entirely ⇒ `false`; writing `skills:` with no `dynamic:` ⇒ `true`. `install` writes `false`. |
 | `skills.strict` | bool | `false` | Governs operator pins: `false` = warn and skip an unresolved pin; `true` = stop the task (`manual_action_required`). |
 
-## `supervisor` — the constant oversight layer
+## `supervisor` — the oversight layer
 
-A read-only layer above every flow that observes each step and writes the final summary. Its `permission_profile` is forced `read-only` in code.
+A read-only layer above every flow that observes completed nodes and writes the final summary. Its `permission_profile` is forced `read-only` in code. It is on by default and can be removed entirely with `enabled: false`, in which case the pull-request body is rendered deterministically from the run's recorded facts instead.
+
+Three keys are one-per-layer and stay at the top; model and effort are **per phase**, under `observe` / `finalize` / `handoff`.
 
 | Field | Type / values | Default (dataclass / install) | Constraint | When to use |
 | --- | --- | --- | --- | --- |
-| `supervisor.role_file` | string | `"roles/supervisor.md"` | No path traversal (`..`/absolute). | The observe-lens prompt. |
-| `supervisor.provider` | `codex` \| `claude` \| null | `null` / install: pinned to the primary | Must be in `agents.allowed` when set. | `null` inherits the global primary; pin it so `model` reaches a provider that accepts it. |
-| `supervisor.model` | string \| null | `null` / install: the primary's model (e.g. `claude-opus-5`) | Passed through unverified; a vendor/primary mismatch warns. | `null` = the resolved provider's default. Keep it **at or below** the producer nodes' tier: this layer is advisory (it never routes, reworks, or blocks) and runs once per step, so a stronger model here inverts the budget. |
-| `supervisor.reasoning` | string \| null | `null` / install: `high` | Per-provider set (as providers, above). | `null` = the resolved provider's default. |
+| `supervisor.enabled` | bool | `true` / install: `true` | — | `false` removes the layer: no per-step notes, no summary turn, no subtask handoff brief, no `skills.dynamic` proposal, and every key below inert (one warning says so). The PR body is then written deterministically. Also forces `memory.enabled` to `false` for the run — see [`memory`](#memory--persistent-repo-scoped-memory). |
+| `supervisor.role_file` | string | `"roles/supervisor.md"` | No path traversal (`..`/absolute). | The observe-lens prompt. Never loaded when the cadence resolves to `none`. |
+| `supervisor.provider` | `codex` \| `claude` \| null | `null` / install: pinned to the primary | Must be in `agents.allowed` when set. | `null` inherits the global primary; pin it so the phase models reach a provider that accepts them. |
+| `supervisor.observe.mode` | `all` \| `selected` \| `events` \| `none` | `events` / install: `events` | A flow may only narrow it (see below). | How often a completed step is worth an LLM note. See the table under it. |
+| `supervisor.observe.triggers` | list of `rework` \| `failure` \| `fallback` | all three | Closed set; an unknown name is rejected. | Narrows which deviations count under `events` — e.g. `[failure]` to be notified of failures only. |
+| `supervisor.observe.include_nodes` | list of node ids | `[]` | — | The nodes observed under `mode: selected`; ignored in every other mode. |
+| `supervisor.observe.model` | string \| null | `null` / install: the primary's model | Passed through unverified; a vendor/primary mismatch warns. | `null` = the resolved provider's default. The **cheap** one: this phase is advisory and can fire on every step of a deep fix loop. Also governs the once-per-task skill proposal. |
+| `supervisor.observe.reasoning` | string \| null | `null` / install: `low` | Per-provider set (as providers, above). | `null` = the resolved provider's default. Capped to `high` in code even if you set a max tier. |
+| `supervisor.finalize.model` | string \| null | `null` / install: the primary's model | As above. | The turn that writes `summary.md` — the pull-request body, and the only part of a long run most readers see. Worth more than `observe`. |
+| `supervisor.finalize.reasoning` | string \| null | `null` / install: `high` | Per-provider set. | `null` = the resolved provider's default. A max tier (`xhigh`/`max`) is capped to `high` when the turn is structured. |
+| `supervisor.handoff.model` | string \| null | `null` / install: the primary's model | As above. | The subtask brief between regions of a decomposed task. Unused by a flow that never decomposes. |
+| `supervisor.handoff.reasoning` | string \| null | `null` / install: `high` | Per-provider set. | `null` = the resolved provider's default. |
 
-One pair covers **both** supervisor roles: the cheap per-step observations and the whole-task finalize turn that writes `summary.md` — the pull-request body, and the only part of a long run most readers see. So you cannot currently upgrade the summary alone. A flow whose summary matters constrains what that turn may claim through its own `supervisor.finalize_role_file` lens instead (the packaged `deep_research` does exactly this: a research-shaped summary that is forbidden from asserting verification it did not perform). The finalize turn is also handed every in-flow evaluator's recorded verdict and findings, so a gate that accepted **with** findings cannot be summarized as one that simply passed.
+Keep every phase **at or below** the producer nodes' tier. This layer is advisory — it never routes, reworks, or blocks — so a model stronger than `agents.providers` inverts the budget: the reasoning that decides the deliverable gets the weaker one.
+
+### What `observe.mode` costs
+
+Ranked by how many calls the mode can produce — which is also the order a flow may narrow along.
+
+| Mode | Observes | Use it when |
+| --- | --- | --- |
+| `none` | nothing | The flow's quality is already held by a blocking gate. `finalize` and the summary still happen. |
+| `events` (default) | only a deviation: an evaluator sending work back (or accepting after exhausting its rework budget), a step whose run failed, a step that fell back to the non-primary provider | Almost always. Cost tracks what went wrong, not how long the run was. |
+| `selected` | exactly `include_nodes` | You want notes on two named steps and nothing else. |
+| `all` | every executed step | Debugging the run itself. This is what a long run pays for. |
+
+`tool`, `checks` and the terminal `publish` node are never observed under **any** mode — their result is already a durable fact the finalize packet carries verbatim, so an advisory note about a pass/fail bought nothing and cost a full call per run.
+
+**What a mode actually cost you is measured, not guessed.** Each run writes a `supervisor_usage` block into `.worc/logs/<task-id>/summary.json` (local only, never committed): calls, input, cached input, output, cost and provider wall time, as a total and split by job — `observe`, `finalize`, `handoff`, `skill`. Read the `observe` versus `finalize` split on your own flow before tuning this setting; the table above ranks the modes by how many calls they *can* produce, and that block tells you what they did produce.
+
+Switching observations off and removing the layer are two different levels. `observe.mode: none` silences the per-step notes and keeps the synthesis; `enabled: false` removes the layer including that synthesis, and the pull-request body is then rendered from the same recorded facts the packet is built from — the same sections, without the interpretation.
+
+Switching observations off does not cost you the summary. The finalize turn runs on a **fresh** session seeded by a deterministic packet of the run's facts (`.worc-io/<task-id>/supervisor/packet.json`) built from the recorded node runs and each node's own output — never from the observations — so its input is a few kilobytes regardless of how long the run was, a resumed task's summary is as complete as a first run's, and `mode: none` still produces a full PR body. The finalize turn is also handed every in-flow evaluator's recorded verdict and findings, so a gate that accepted **with** findings cannot be summarized as one that simply passed.
+
+A flow may **narrow** the cadence in its own `supervisor.observe.mode` but never widen it: a flow declaring a broader mode than yours fails validation before any node runs, naming both modes (a flow is authored content and must not be able to spend more than you allowed). The packaged content flows ship `none`; `implementation` ships `events`. One consequence worth knowing: because a flow that *states* `events` is asserting it needs deviation notes, setting your global mode to `none` is rejected for that flow rather than silently degrading it — narrow the flow's own copy if that is what you want. The rule does not apply at `enabled: false` — there is no cadence to widen, so a flow that declares `events` runs unchanged. That is why removing the layer is its own key rather than a global `mode: none`.
+
+**Check the change before you queue work against it.** The rejection is fatal but cheap — it happens during flow resolution, before branch prep, so no provider runs and nothing is committed — yet the task has already been claimed by then and ends in terminal `failed`, which you have to re-queue by hand. `worc validate-flow` runs exactly the validator the engine runs at dispatch, read-only and without claiming anything, so run it after editing `observe.mode` on either side:
+
+```bash
+worc validate-flow --all && worc watch
+```
+
+Exit `0` = every checked flow is valid, `1` = at least one is not, `2` = flow name not found or the config would not load — so `&&` gates the run correctly. Two practical notes: the command needs a flow NAME or `--all` (a bare `worc validate-flow` is a usage error and exits `2`, which would block the chain for the wrong reason), and `--all` checks **every** file in `.worc/flows/`, so one unrelated broken flow there fails the gate. Name the flow you are about to run — `worc validate-flow implementation && worc watch` — when that is a problem.
+
+There is no cap on what the layer may spend beyond the mode itself: no call budget, no token ceiling. The digest the finalize turn reads is bounded deterministically in code (8 000 characters), the mode bounds the frequency, and `all` is a deliberate operator choice.
 
 ## `logging` — operator verbosity and artifact retention
 
@@ -196,9 +237,11 @@ One pair covers **both** supervisor roles: the cheap per-step observations and t
 
 Omitting the whole block ⇒ `enabled: false` (no store, empty packets, CLI no-op). All numeric knobs are runtime-clamped — never fatal. Defaults are deliberately small (precision over recall).
 
+Memory also requires `supervisor.enabled: true`. That layer's closing turn is the only path that writes anything memory can later read back, so with the layer off memory would keep adding a packet to every prompt without ever learning — `supervisor.enabled: false` therefore resolves `memory.enabled` to `false` for the run and prints a warning naming both keys. Set `memory.enabled: false` yourself to make the file say what runs.
+
 | Field | Type | Default (dataclass / install) | Meaning |
 | --- | --- | --- | --- |
-| `memory.enabled` | bool | `false` / install: `true` | Global memory toggle. |
+| `memory.enabled` | bool | `false` / install: `true` | Global memory toggle. Forced to `false` for the run when `supervisor.enabled` is `false`. |
 | `memory.short_term_ttl_days` | int | `30` | Episodic entries expire after N days (long-term has no TTL). |
 | `memory.packet_max_lines` | int | `120` | Hard line backstop for a per-node memory brief. |
 | `memory.packet_max_long_term` | int | `3` | Max long-term lessons per packet. |
@@ -227,12 +270,12 @@ Omitting the whole block ⇒ `enabled: false` (no store, empty packets, CLI no-o
 ## Cross-field rules and gotchas (read before you finish)
 
 - **Exactly one `primary`.** One `agents.providers.<id>.primary: true`, and that provider must be in `agents.allowed`.
-- **Reasoning is per-provider.** Claude accepts `{low, medium, high, xhigh, max}`; Codex accepts `{minimal, low, medium, high, xhigh, max}` (`max` maps to `xhigh`). A value that validates for one provider can be rejected for the other — including on `supervisor.reasoning` against the resolved supervisor provider.
+- **Reasoning is per-provider.** Claude accepts `{low, medium, high, xhigh, max}`; Codex accepts `{minimal, low, medium, high, xhigh, max}` (`max` maps to `xhigh`). A value that validates for one provider can be rejected for the other — including on each of `supervisor.observe.reasoning` / `.finalize.reasoning` / `.handoff.reasoning` against the resolved supervisor provider (one provider serves all three phases, so each is checked against it).
 - **Telegram-gated fields.** `orchestrator.auto_mode.confirm_next_task` and any provider `max_turns_gate` require `telegram.enabled: true`.
 - **Ordering constraints.** `max_total_fix_iterations >= max_fix_cycles`; `retry.max_delay_s >= retry.base_delay_s`; `decomposition.max_subtasks >= 2`.
 - **Replace-not-extend.** `allowed_environment`, `denied_read_paths`, `denied_commands` replace their defaults wholesale.
 - **Full access needs `strict_isolation: false`.** Codex `danger-full-access` / Claude `bypassPermissions` load but are rejected at preflight unless you turn `strict_isolation` off (owning the risk).
-- **Install vs dataclass defaults differ** for a few fields: `security.trust_level` (`auto` on install), `memory.enabled` (`true`), `skills.dynamic` (`false`), provider `model`/`reasoning`, and `supervisor` (pinned to the primary). The table shows both.
+- **Install vs dataclass defaults differ** for a few fields: `security.trust_level` (`auto` on install), `memory.enabled` (`true`), `skills.dynamic` (`false`), provider `model`/`reasoning`, and `supervisor` (provider and every phase model pinned to the primary; `observe.reasoning` delivered as `low`, the other phases as `high`). The table shows both.
 - **Comments are stripped on upgrade.** `worc upgrade-config` preserves values but re-emits the file without inline comments — keep the _reason_ for an unusual value recoverable elsewhere.
 
 After editing: run `worc preflight` (providers, isolation, Telegram) and `worc validate-flow --all` (flows are not checked by preflight — a config edit can invalidate a flow). Treat config editing as done only when both are green.

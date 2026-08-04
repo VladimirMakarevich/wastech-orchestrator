@@ -1,10 +1,15 @@
-"""Persistence adapter for the flow engine.
+"""What a flow run durably recorded: the engine's persistence adapter and the step record.
 
 :class:`StateStoreRunRecorder` implements the engine's
 :class:`~wastech_orchestrator.core.flow.engine.RunRecorder` seam against the SQLite state store and
 the ledger: it records skipped nodes in ``node_runs``, checkpoints the
 :class:`~wastech_orchestrator.core.flow.run_state.FlowRunState` on the ``tasks`` row after each
 transition, and writes the flow-neutral failure report when a budget is exhausted.
+
+:class:`StepFacts` is the read side of the same subject: the deterministic, LLM-free record of what
+each executed node did. It lives here, next to the writer, so there is exactly one place that states
+a fact about a node run — the finalize packet and the observation cadence both read it rather than
+each deriving its own answer from the raw columns.
 
 :func:`hydrate_run_state` rebuilds the checkpoint on resume **from the persisted snapshot
 fingerprint** — recovery trusts the stored flow and never re-resolves it from the live config.
@@ -15,14 +20,16 @@ Side-effect idempotency lives in ``publish_operations``
 from __future__ import annotations
 
 import json
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import FlowNode
 from wastech_orchestrator.ledger import DecomposedFailureInfo, write_failure_report
-from wastech_orchestrator.providers.artifacts import task_artifact_dir
-from wastech_orchestrator.state_store import StateStore
+from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
+from wastech_orchestrator.state_store import NodeRunRow, StateStore
 
 
 def read_last_findings(store: StateStore, task_id: str) -> list[Any] | None:
@@ -53,6 +60,101 @@ def read_final_diff(artifacts_root: str | Path, task_id: str) -> str:
         )
     except OSError:
         return ""
+
+
+@dataclass(frozen=True)
+class StepFacts:
+    """What one executed flow node did, as durable fact — no LLM, no live inputs.
+
+    Assembled from the node's own ``node_runs`` row plus the closing message it wrote, never from an
+    observation: the record must be complete on a run that spent no observation turns, and identical
+    after a revive that re-executed nothing.
+
+    Every field is required, none defaulted. A defaulted field silently becomes ``None`` when a new
+    construction site forgets it, and a missing fact is invisible in every consumer — a required
+    argument is the only thing that makes the type checker say so instead.
+
+    ``message`` is the node's closing text verbatim. Bounding it is the job of whoever renders it
+    into a size-limited surface, not of the fact: a truncated record would make the truncation
+    permanent for every later reader.
+    """
+
+    node_id: str
+    node_kind: str
+    status: str | None
+    outcome: str | None
+    stage_attempts: int
+    subtask_order: int | None
+    provider_used: str | None
+    fallback_from: str | None
+    error_class: str | None
+    skipped: bool
+    skip_reason: str | None
+    started_at: str | None
+    finished_at: str | None
+    message: str | None
+
+
+def fell_back_from(row: NodeRunRow) -> str | None:
+    """The primary provider this run fell back from, or ``None`` when it ran on its primary.
+
+    The single derivation of that fact from a run row. Both the step record and the observation
+    cadence's deviation trigger ask it here, so "did this step land somewhere other than where it
+    was routed" cannot come out differently in the two places that care. Guard order matters: a
+    non-agent node kind leaves both route columns NULL, which is not a fallback.
+    """
+    if row.provider_used and row.route_primary and row.provider_used != row.route_primary:
+        return row.route_primary
+    return None
+
+
+def step_facts(row: NodeRunRow, message: str | None) -> StepFacts:
+    """One run row plus its closing message as the run's :class:`StepFacts`."""
+    return StepFacts(
+        node_id=row.node_id,
+        node_kind=row.node_kind,
+        status=row.status,
+        outcome=row.outcome,
+        stage_attempts=row.stage_attempts,
+        subtask_order=row.subtask_order,
+        provider_used=row.provider_used,
+        fallback_from=fell_back_from(row),
+        error_class=row.error_class,
+        skipped=bool(row.skipped),
+        skip_reason=row.skip_reason,
+        started_at=row.started_at,
+        finished_at=row.finished_at,
+        message=message,
+    )
+
+
+def collect_step_facts(
+    node_runs: Sequence[NodeRunRow], artifacts_root: str | Path, task_id: str
+) -> tuple[StepFacts, ...]:
+    """The task's step record: one :class:`StepFacts` per run, in the order they executed.
+
+    Takes the rows rather than a store handle, so the caller keeps ownership of the query — the
+    supervisor layer reads them through its own narrow store port, which is not the concrete store
+    this module's other helpers take.
+    """
+    return tuple(step_facts(row, _step_message(artifacts_root, task_id, row)) for row in node_runs)
+
+
+def _step_message(artifacts_root: str | Path, task_id: str, row: NodeRunRow) -> str | None:
+    """A run's closing message from the ``<node_id>.out.md`` the orchestrator wrote for it.
+
+    ``None`` when the run wrote none — a slot node whose product is an artifact, a deterministic
+    ``tool`` / ``checks`` node, a run that produced nothing. ``id`` is the run id the artifact
+    directory is named after, so a row that has none has no readable output either; without that
+    guard the directory name cannot even be formatted.
+    """
+    if row.id is None:
+        return None
+    path = node_run_dir(artifacts_root, task_id, row.node_id, row.id) / f"{row.node_id}.out.md"
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
 
 
 class StateStoreRunRecorder:

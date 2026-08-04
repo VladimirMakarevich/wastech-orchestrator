@@ -10,6 +10,7 @@ so it works from a source tree or a wheel, exactly as the runtime resolves it.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from importlib import resources
@@ -53,7 +54,12 @@ def _script() -> resources.abc.Traversable:
 
 
 def _run(
-    repo: Path, *, diff: Path | None, args: dict | None = None, task: Path | None = None
+    repo: Path,
+    *,
+    diff: Path | None,
+    args: dict | None = None,
+    task: Path | None = None,
+    child_encoding: str | None = None,
 ) -> tuple[int, dict]:
     payload = {
         "task_id": "t",
@@ -66,13 +72,18 @@ def _run(
         },
         "args": args or {},
     }
+    env = None
+    if child_encoding is not None:
+        env = {**os.environ, "PYTHONIOENCODING": child_encoding}
     with resources.as_file(_script()) as path:
         proc = subprocess.run(
             [sys.executable, str(path)],
             input=json.dumps(payload),
             capture_output=True,
             text=True,
+            encoding="utf-8",
             timeout=30,
+            env=env,
         )
     return proc.returncode, json.loads(proc.stdout)
 
@@ -207,6 +218,31 @@ def test_page_over_max_paragraphs_fails(tmp_path: Path) -> None:
     _, out = _run(repo, diff=_diff_for(tmp_path), args={"max_paragraphs": 3})
     assert out["outcome"] == "fail"
     assert any("paragraphs" in v for v in _violations(out))
+
+
+# -- cross-platform stdout encoding -------------------------------------------
+
+
+def test_reports_non_ascii_violations_under_a_legacy_child_encoding(tmp_path: Path) -> None:
+    # A Windows host hands a piped child `cp1252`, which encodes neither `≤` (extra title) nor `→`
+    # (hierarchy). The script used to die on `print` and the tool node saw an empty stdout instead
+    # of the violation — a fail read as a launch error. The seam is forced here so the regression is
+    # caught on every host, not only on the Windows runner.
+    cases = (
+        (
+            _CLEAN.replace(
+                "#### 1.1.1 First page\n", "#### 1.1.1 First page\n\n##### Extra heading\n"
+            ),
+            "≤1 Title per page",
+        ),
+        (_CLEAN.replace("### 1.1 First block\n\n", ""), "hierarchy must be ## → ### → ####"),
+    )
+    for index, (broken, expected) in enumerate(cases):
+        repo = _chapter_repo(tmp_path / f"case{index}", broken)
+        code, out = _run(repo, diff=_diff_for(tmp_path / f"case{index}"), child_encoding="cp1252")
+        assert code == 1  # it reached the end and reported, rather than dying on the encode
+        assert out["outcome"] == "fail"
+        assert any(expected in v for v in _violations(out))
 
 
 def test_length_rules_are_opt_in(tmp_path: Path) -> None:

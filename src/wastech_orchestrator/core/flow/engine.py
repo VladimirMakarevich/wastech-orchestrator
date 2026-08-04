@@ -95,13 +95,17 @@ class Finding:
     ``severity`` is the typed audit-trail projection (``low``/``medium``/``high``). Whether a
     finding actually drives ``rework`` is decided by the evaluator runner against the node's
     configurable ``gate_severity`` (default ``high``) — NOT by this flag: ``paths`` are the
-    files/locations the finding concerns. Carried on :class:`NodeOutcome` for the audit trail (the
-    immutable ``evaluations`` row) — the engine never inspects it to route.
+    files/locations the finding concerns. ``fix`` is the reviewer's own proposed remedy when it
+    supplied one — carried because it becomes the ``action_hint`` of the follow-up derived from this
+    finding, and dropping it here sent every derived follow-up to the operator without its fix.
+    Carried on :class:`NodeOutcome` for the audit trail (the immutable ``evaluations`` row) — the
+    engine never inspects it to route.
     """
 
     severity: Literal["low", "medium", "high"]
     reason: str
     paths: tuple[str, ...] = ()
+    fix: str | None = None
 
     @property
     def blocking(self) -> bool:

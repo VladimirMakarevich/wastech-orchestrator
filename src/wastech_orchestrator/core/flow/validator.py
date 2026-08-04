@@ -62,6 +62,7 @@ from wastech_orchestrator.core.flow.schema import (
 )
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.core.flow.tools_registry import ToolRegistry, ToolResolutionError
+from wastech_orchestrator.core.observe_cadence import is_same_or_narrower
 from wastech_orchestrator.core.prompts import ALLOWED_PROMPT_VARS, referenced_variables
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.providers.capabilities import (
@@ -117,7 +118,9 @@ def validate_flow_against_config(
     :func:`validate_flow`. It rejects a flow that is structurally valid but cannot be safely or
     usefully run under *this* config: a node pinned to a disallowed provider, a reasoning level the
     resolved provider does not support, a Codex write+network request, a ``permission_ceiling`` no
-    configured provider can reach, a ``tool`` node naming an unregistered executable (when a
+    configured provider can reach, a flow-local ``supervisor.observe.mode`` broader than the
+    operator's global cadence (unless ``supervisor.enabled`` is false — there is then no cadence to
+    widen), a ``tool`` node naming an unregistered executable (when a
     :class:`~.tools_registry.ToolRegistry` is supplied), or — under
     ``security.strict_isolation`` — a node whose ``extra_args`` select a provider full-access mode
     (the flow-side half of the isolation gate; the operator opts in via ``strict_isolation:
@@ -557,6 +560,28 @@ def _check_config_consistency(
                 f"allowed provider {provider_profiles} (no provider can run a node at this ceiling)"
             )
         )
+
+    # 2b. Flow supervisor.observe.mode ≤ the operator's global mode: a flow may narrow the
+    #     observation cadence (a content flow that needs only the summary sets `none`) but never
+    #     widen it, so a flow cannot spend more of the operator's budget than they allowed.
+    #     Fail-closed on an unknown mode on either side — the same rank-table comparison as
+    #     permission_profile ≤ ceiling. Skipped entirely when the layer is switched off: a cadence
+    #     that nothing will run cannot be widened, and refusing the flow then would make the switch
+    #     unusable — this rejection lands AFTER the task is claimed, so it is a terminal failure to
+    #     re-queue by hand rather than a degradation, and `watch` would grind through the queue.
+    flow_supervisor = doc.supervisor
+    flow_observe = flow_supervisor.observe if flow_supervisor is not None else None
+    flow_mode = flow_observe.mode if flow_observe is not None else None
+    if config.supervisor.enabled and flow_mode is not None:
+        global_mode = config.supervisor.observe.mode
+        if not is_same_or_narrower(flow_mode.value, global_mode.value):
+            errs.append(
+                cfg(
+                    f"supervisor.observe.mode {flow_mode.value!r} is broader than the configured "
+                    f"supervisor.observe.mode {global_mode.value!r} (a flow may only narrow the "
+                    "cadence; rank: none < events < selected < all)"
+                )
+            )
 
     # 3. strict_isolation gate (provider-config-cleanup Risk #2): under security.strict_isolation a
     #    flow node must not select a provider full-access mode in extra_args (Codex

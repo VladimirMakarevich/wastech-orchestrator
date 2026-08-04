@@ -27,7 +27,7 @@ Cover pure logic without external processes:
 - the validation gate: each Phase-A reason code, required/optional fields, duplicate-id, the injection-token scan, and Phase-B classification;
 - `init` idempotency (a second run is all-skipped; never overwrites `config.yaml`; `--dry-run` is a no-op);
 - the git footprint: scoped staging excludes `tasks/`/`logs/`/`workspace/` (and, under in-repo, the root runtime files `state.db`/`config.yaml`), the `.git/info/exclude` append is idempotent, the audit commit is orchestrator-only, the preflight rejects tracked artifacts under `external`/`exclude_local` but is **skipped** under `commit`, and the validator rejects illegal mode pairings;
-- the `summary` stage: the handoff artifact is produced, and a provider failure falls back to a deterministic minimal summary without blocking publishing;
+- the `summary` stage: the handoff artifact is produced, and a provider failure falls back to the deterministic report rendered from the run's recorded facts without blocking publishing — that report is a pure function of `state.db` plus the task's artifacts, so two renders of one run must be byte-identical (the same contract the finalize packet keeps);
 - on-disk retention: `logs clean` reaches every entry of the logs root (task dirs **and** the daemon logs) while keeping the ledger unless `--all`, accepts no flag it then ignores, refuses while a task is active, and holds the daemon logs back while a daemon is live; automatic run-artifact eviction fires only on a successful terminal with the switch on and a cleanly sealed exchange, never touches quarantined evidence, and the `rerun` status precondition that makes it safe is pinned so widening it fails loudly; `install --reconfigure` bounds its own `config.yaml.bak-*` / `flows.bak-*` / `tools.bak-*` series and never matches the operator's `state.db*.bak*`.
 
 ### Integration
@@ -57,7 +57,9 @@ On a temporary Git repository:
 - a broken task → quarantined to `tasks/rejected/` as `failed`, writes `validation_report.json`, with no branch/provider;
 - test configuration paths with side effects, including `validation.quarantine_folder`, are isolated under the test's temporary directory and never write into the repository checkout;
 - in every git footprint mode the code commit excludes `tasks/`/`logs/`/`workspace/`;
-- a successful task produces `summary.md` (what / how / integration / why) which becomes the PR body;
+- a successful task produces `summary.md`, which becomes the PR body — the supervisor layer's synthesis when it wrote one, otherwise the deterministic report (changes, steps, checks, gate verdicts, follow-ups, skipped nodes), and on **every** terminal the same single renderer writes it;
+- a synthesis that **collapsed** is not published as one: prose below the finalize floor is discarded (no `summary.md`, so the run is degraded and the report becomes the body), and the `supervisor_final` row's `summary_written` states what actually reached disk rather than what the turn returned — the guard used to be "does the file exist", which a four-byte summary passed;
+- a follow-up an operator can act on: the reviewer's `fix` reaches `action_hint`, a derived `title` is not a truncated copy of its own `rationale`, and when a reused chain PR's body is compacted to fit GitHub's limit the follow-up sections are surrendered **last** and the stub names the run host, not a repository path;
 - exhausting a fix loop or the global fix-iteration budget → `manual_action_required` + failure report; an unrecoverable error → `failed`.
 
 ## Principles

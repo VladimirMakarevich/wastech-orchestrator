@@ -22,7 +22,7 @@
 
 ## What the orchestrator does with your task
 
-wastech-orchestrator is not a chat agent. It takes one task file and drives it through a fixed pipeline of stages — **refinement → planning → implementation → testing → review → fixing → publishing** (a constant supervisor writes the summary at the end) — launching a coding-agent CLI (Codex or Claude Code) for the agent stages and running the repository's own checks for testing. When the pipeline succeeds, **the orchestrator** (never the agent) commits, pushes a branch `worc/<task-id>-<slug>` by default (or the task's validated `branch_name`), and opens a pull request.
+wastech-orchestrator is not a chat agent. It takes one task file and drives it through a fixed pipeline of stages — **refinement → planning → implementation → testing → review → fixing → publishing** (the summary at the end is written by the supervisor layer, or deterministically from the run's recorded facts when that layer is switched off) — launching a coding-agent CLI (Codex or Claude Code) for the agent stages and running the repository's own checks for testing. When the pipeline succeeds, **the orchestrator** (never the agent) commits, pushes a branch `worc/<task-id>-<slug>` by default (or the task's validated `branch_name`), and opens a pull request.
 
 Your task file is the entire contract. Write it so an agent can plan, implement, test, review, and summarize the change **without asking for hidden context**.
 
