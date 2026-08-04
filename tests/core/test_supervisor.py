@@ -9,6 +9,7 @@ plus the single ``record_rework`` accounting path.
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -29,7 +30,11 @@ from wastech_orchestrator.core.follow_ups import FINDING_TITLE_MAX
 from wastech_orchestrator.core.loop_control import record_rework
 from wastech_orchestrator.core.skills import SkillInventory, SkillRef
 from wastech_orchestrator.core.state_machine import Status
-from wastech_orchestrator.core.supervisor import _HANDOFF_RUN_ID_BASE, Supervisor
+from wastech_orchestrator.core.supervisor import (
+    _HANDOFF_RUN_ID_BASE,
+    _SUMMARY_MIN_CHARS,
+    Supervisor,
+)
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
 from wastech_orchestrator.providers.base import (
     AgentRunResult,
@@ -54,6 +59,20 @@ from wastech_orchestrator.state_store import (
 )
 
 _TASK = "task-1"
+
+
+def _prose(lead: str) -> str:
+    """*lead* plus enough structured prose to clear finalize's collapsed-generation floor.
+
+    ``supervisor._SUMMARY_MIN_CHARS`` discards a shorter summary as a collapse (an observed run
+    published ``summary: "test"`` as its PR body), so a fixture standing in for a real synthesis has
+    to look like one. The lead sentence stays first, so assertions about it are unaffected.
+    """
+    return (
+        f"{lead}\n\n## What changed\nThe parser validates its input before dispatch, and the "
+        "callers now pass the typed record.\n\n## Why\nThe untyped path accepted malformed rows "
+        "silently, so the failure surfaced two layers away from its cause."
+    )
 
 
 def _ok(session_id: str = "sess-super", message: str = "noted") -> AgentRunResult:
@@ -501,7 +520,7 @@ def test_supervisor_own_session_not_editing_lineage(tmp_path: Path) -> None:
 def test_supervisor_runs_above_any_flow_writes_summary(tmp_path: Path) -> None:
     # Independent of flow shape: finalize synthesizes and writes the summary (the PR body) + the
     # local summary.json, and records exactly one supervisor_final row.
-    router, store = FakeRouter([_ok("s1", "The whole task summary.")]), _store(tmp_path)
+    router, store = FakeRouter([_ok("s1", _prose("The whole task summary."))]), _store(tmp_path)
     sup = _supervisor(tmp_path, router, store)
 
     path = sup.finalize(task_id=_TASK, task_title="T").summary_path
@@ -533,7 +552,7 @@ def test_finalize_sanitizes_leaked_structured_dump(tmp_path: Path) -> None:
     # </follow_ups><memory_delta>…` text dump must never let those machine sections ride into
     # summary.md (the PR body). Only the human prose survives.
     leaked = (
-        "<summary>Refactored the parser and added tests.</summary>"
+        f"<summary>{_prose('Refactored the parser and added tests.')}</summary>"
         '<follow_ups>[{"title":"x"}]</follow_ups>'
         '<memory_delta>{"lessons":[]}</memory_delta><lessons>[]</lessons>'
     )
@@ -549,9 +568,67 @@ def test_finalize_sanitizes_leaked_structured_dump(tmp_path: Path) -> None:
     assert "lessons" not in body and "title" not in body  # no machine JSON leaked
 
 
+def test_finalize_discards_a_collapsed_summary_instead_of_publishing_it(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # A finalize turn that fights the response schema can collapse to a minimal probe. One did — it
+    # wrote a full synthesis three times, was rejected three times for a missing required property,
+    # then emitted `{"summary": "test", "follow_ups": []}`, which validated and shipped as the PR
+    # body. Existence was the only guard, so nothing fired. Below the floor the prose is discarded:
+    # no summary.md (the orchestrator's deterministic report becomes the body, flagged degraded), a
+    # WARNING carrying the collapsed text, and a summary.json that does not claim a summary.
+    router, store = FakeRouter([_ok("s1", "test")]), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store)
+
+    with caplog.at_level(logging.WARNING):
+        result = sup.finalize(task_id=_TASK, task_title="T")
+
+    assert result.summary_path is None
+    assert not (Path(task_artifact_dir(tmp_path / "art", _TASK)) / "summary.md").exists()
+    assert f"below the {_SUMMARY_MIN_CHARS}-char floor" in caplog.text and "'test'" in caplog.text
+    payload = json.loads(
+        (Path(task_artifact_dir(tmp_path / "art", _TASK)) / "summary.json").read_text("utf-8")
+    )
+    assert payload["summary"] == ""
+
+
+def test_the_floor_keeps_a_terse_but_complete_prose_summary(tmp_path: Path) -> None:
+    # The floor is enforced for every flow, and the packaged prose lenses (blog_article,
+    # content_translate, …) ask for four labelled points and tell the turn to keep it concrete. A
+    # complete answer to all four on a small revision is short — and discarding it would replace
+    # finished work with a mechanical report on a healthy run, which is a worse PR body, not a
+    # better one. Every other finalize test runs the code-flow fixture, so this shape needs its own.
+    concise = (
+        "**What** — tightened the opening of posts/foo.md. **How** — moved the claim into the "
+        "first sentence. **Sources** — none added. **Product** — unchanged."
+    )
+    assert len(concise) < 200  # the kind of summary a prose lens is asked to produce
+    router, store = FakeRouter([_ok("s1", concise)]), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store)
+
+    path = sup.finalize(task_id=_TASK, task_title="Revise the intro").summary_path
+
+    assert path is not None and concise in path.read_text("utf-8")
+    final = next(e for e in store.get_evaluations(_TASK) if e.kind == "supervisor_final")
+    assert json.loads(final.findings_json)["summary_written"] is True
+
+
+def test_supervisor_final_summary_written_matches_what_reached_disk(tmp_path: Path) -> None:
+    # `summary_written` used to be derived from the RAW turn output, before sanitize and before
+    # the floor, so the ledger claimed a summary for a run that wrote none — exactly the case an
+    # operator audits. It now states what actually landed.
+    dump = '<summary></summary><follow_ups>[{"title":"x"}]</follow_ups>'  # sanitizes to nothing
+    for message, written in ((dump, False), ("test", False), (_prose("Real synthesis."), True)):
+        store = _store(tmp_path / message[:6])
+        sup = _supervisor(tmp_path / message[:6], FakeRouter([_ok("s1", message)]), store)
+        sup.finalize(task_id=_TASK, task_title="T")
+        final = next(e for e in store.get_evaluations(_TASK) if e.kind == "supervisor_final")
+        assert json.loads(final.findings_json)["summary_written"] is written
+
+
 def test_finalize_writes_prompt_audit_when_enabled(tmp_path: Path) -> None:
     registered: list[Any] = []
-    router, store = FakeRouter([_ok("s1", "Synthesized summary.")]), _store(tmp_path)
+    router, store = FakeRouter([_ok("s1", _prose("Synthesized summary."))]), _store(tmp_path)
     sup = _supervisor(
         tmp_path,
         router,
@@ -574,7 +651,7 @@ def test_finalize_writes_prompt_audit_when_enabled(tmp_path: Path) -> None:
 
 def test_finalize_prefixes_h1_when_missing(tmp_path: Path) -> None:
     # A headless paragraph-slab summary gets a deterministic `# {task_title}` H1 prefix.
-    router, store = FakeRouter([_ok("s1", "One flat line of synthesis.")]), _store(tmp_path)
+    router, store = FakeRouter([_ok("s1", _prose("One flat line of synthesis."))]), _store(tmp_path)
     sup = _supervisor(tmp_path, router, store)
     path = sup.finalize(task_id=_TASK, task_title="My Task").summary_path
     assert path is not None
@@ -583,7 +660,7 @@ def test_finalize_prefixes_h1_when_missing(tmp_path: Path) -> None:
 
 def test_finalize_keeps_model_h1_without_double_prefix(tmp_path: Path) -> None:
     # When the model already opened with its own top-level heading, don't double-prefix.
-    router, store = FakeRouter([_ok("s1", "# Model heading\n\nBody.")]), _store(tmp_path)
+    router, store = FakeRouter([_ok("s1", _prose("# Model heading\n\nBody."))]), _store(tmp_path)
     sup = _supervisor(tmp_path, router, store)
     path = sup.finalize(task_id=_TASK, task_title="T").summary_path
     assert path is not None
@@ -623,7 +700,10 @@ def test_finalize_runs_fresh_from_the_packet_even_with_a_live_session(tmp_path: 
     # Inverted from the old contract: an in-process session that just succeeded is NOT resumed. The
     # warm resume was why a revived task got a thinner summary and why this call's input grew with
     # every rework cycle — finalize is now grounded in the packet, on a fresh session, always.
-    router, store = FakeRouter([_ok(), _ok("sess-super", "Packet synthesis.")]), _store(tmp_path)
+    router, store = (
+        FakeRouter([_ok(), _ok("sess-super", _prose("Packet synthesis."))]),
+        _store(tmp_path),
+    )
     sup = _wired(tmp_path, router, store)
     sup.observe(task_id=_TASK, node_id="implementation", node_run_id=5, outcome_kind="done")
     assert router.requests[0].session_id is None  # the observe turn opened the session
@@ -644,7 +724,7 @@ def test_finalize_runs_fresh_from_the_packet_even_with_a_live_session(tmp_path: 
 def test_finalize_packet_carries_the_observation_digest(tmp_path: Path) -> None:
     # The digest that used to be inlined in the revive prompt is now a packet field, so the same
     # material reaches the turn without being re-sent as prompt input.
-    router, store = FakeRouter([_ok("s1", "Synthesis.")]), _store(tmp_path)
+    router, store = FakeRouter([_ok("s1", _prose("Synthesis."))]), _store(tmp_path)
     _record_step(store, 5, node="implementation", outcome="done", note="wired the parser")
     _record_step(store, 7, node="review", outcome="accept", note="tests cover the edge case")
     sup = _wired(tmp_path, router, store)
@@ -679,7 +759,7 @@ def test_finalize_digest_none_when_no_usable_observations(tmp_path: Path) -> Non
 def test_finalize_still_runs_when_the_packet_cannot_be_built(tmp_path: Path) -> None:
     # Best-effort by contract: a packet that cannot be built is logged and the turn runs unseeded.
     # There is deliberately NO warm-session fallback — that would put the non-determinism back.
-    router, store = FakeRouter([_ok("s1", "Thin but present.")]), _store(tmp_path)
+    router, store = FakeRouter([_ok("s1", _prose("Thin but present."))]), _store(tmp_path)
     sup = _wired(tmp_path, router, store)
 
     def _boom(task_id: str) -> list:
@@ -997,28 +1077,29 @@ def test_finalize_failed_does_not_clobber_existing_summary_json(tmp_path: Path) 
     # summary.json with a blank one (symmetric to leaving summary.md untouched on failure).
     store = _store(tmp_path)
     # First finalize succeeds and writes a non-empty summary.json.
-    sup_ok = _supervisor(tmp_path, FakeRouter([_ok("s1", "Real summary.")]), store)
+    real = _prose("Real summary.")
+    sup_ok = _supervisor(tmp_path, FakeRouter([_ok("s1", real)]), store)
     sup_ok.finalize(task_id=_TASK, task_title="T")
     summary_json = Path(task_artifact_dir(tmp_path / "art", _TASK)) / "summary.json"
-    assert json.loads(summary_json.read_text("utf-8"))["summary"] == "Real summary."
+    assert json.loads(summary_json.read_text("utf-8"))["summary"] == real
 
     # A later finalize whose turn fails must not blank it.
     sup_fail = _supervisor(tmp_path, FakeRouter([None]), store)
     sup_fail.finalize(task_id=_TASK, task_title="T")
-    assert json.loads(summary_json.read_text("utf-8"))["summary"] == "Real summary."
+    assert json.loads(summary_json.read_text("utf-8"))["summary"] == real
 
 
 def test_schema_turn_caps_max_reasoning_but_free_text_keeps_it(tmp_path: Path) -> None:
     # A structured-output turn is capped to `high` when configured at a max tier (xhigh/max) so
     # the schema turn is not fragile; a free-text turn keeps the configured tier.
-    schema_router, store = FakeRouter([_structured("Sum.", {})]), _store(tmp_path)
+    schema_router, store = FakeRouter([_structured(_prose("Sum."), {})]), _store(tmp_path)
     sup_schema = _supervisor(tmp_path, schema_router, store, reasoning="xhigh")
     sup_schema.finalize(task_id=_TASK, task_title="T", emit_delta=True)  # schema turn
     assert schema_router.requests[0].reasoning == "high"
 
     free_dir = tmp_path / "b"
     free_dir.mkdir()
-    free_router = FakeRouter([_ok("s", "plain")])
+    free_router = FakeRouter([_ok("s", _prose("plain"))])
     sup_free = _supervisor(free_dir, free_router, _store(free_dir), reasoning="xhigh")
     sup_free.finalize(task_id=_TASK, task_title="T")  # free-text turn (no delta/follow-ups)
     assert free_router.requests[0].reasoning == "xhigh"
@@ -1028,7 +1109,10 @@ def test_observe_and_finalize_use_their_own_model_and_reasoning(tmp_path: Path) 
     # The point of the split: a cheap note and the whole-task synthesis are configured separately,
     # so
     # an operator can make the notes cheap without weakening the summary that becomes the PR body.
-    router, store = FakeRouter([_ok("s", "note"), _ok("s", "# Summary\n\nDone.")]), _store(tmp_path)
+    router, store = (
+        FakeRouter([_ok("s", "note"), _ok("s", _prose("# Summary\n\nDone."))]),
+        _store(tmp_path),
+    )
     sup = _supervisor(
         tmp_path,
         router,
@@ -1119,7 +1203,7 @@ def test_finalize_emits_delta_on_the_same_turn(tmp_path: Path) -> None:
             }
         ]
     }
-    router = FakeRouter([_structured("The summary.", memory_delta)])
+    router = FakeRouter([_structured(_prose("The summary."), memory_delta)])
     sup = _supervisor(tmp_path, router, _store(tmp_path))
     result = sup.finalize(task_id=_TASK, task_title="T", emit_delta=True)
     assert len(router.requests) == 1  # exactly one turn — zero extra LLM calls
@@ -1132,7 +1216,10 @@ def test_finalize_emits_delta_on_the_same_turn(tmp_path: Path) -> None:
 def test_finalize_call_count_identical_with_memory_on_or_off(tmp_path: Path) -> None:
     # Enabling memory adds no provider turns.
     counts: list[int] = []
-    cases = (("off", FakeRouter([_ok("s", "sum")])), ("on", FakeRouter([_structured("sum", {})])))
+    cases = (
+        ("off", FakeRouter([_ok("s", _prose("sum"))])),
+        ("on", FakeRouter([_structured(_prose("sum"), {})])),
+    )
     for name, router in cases:
         case_dir = tmp_path / name
         case_dir.mkdir()
@@ -1144,7 +1231,7 @@ def test_finalize_call_count_identical_with_memory_on_or_off(tmp_path: Path) -> 
 
 def test_finalize_malformed_delta_still_writes_summary(tmp_path: Path) -> None:
     # Best-effort: an unusable memory_delta never blocks the summary / publish.
-    router = FakeRouter([_structured("Good summary.", {"lessons": "not-a-list"})])
+    router = FakeRouter([_structured(_prose("Good summary."), {"lessons": "not-a-list"})])
     sup = _supervisor(tmp_path, router, _store(tmp_path))
     result = sup.finalize(task_id=_TASK, task_title="T", emit_delta=True)
     assert result.summary_path is not None  # summary still written
@@ -1200,7 +1287,7 @@ def test_observe_lens_fallback_flow_then_config_then_builtin(tmp_path: Path) -> 
 def test_finalize_lens_fallback_flow_then_builtin(tmp_path: Path) -> None:
     # Finalize lens resolves flow finalize_role_file -> built-in (2 steps; no global counterpart).
     fin_rf = _flow_lens(tmp_path, "summary.md", "FINALIZE-EMPHASIS {task_id}")
-    router = FakeRouter([_ok("s", "sum")])
+    router = FakeRouter([_ok("s", _prose("sum"))])
     sup = _supervisor(
         tmp_path,
         router,
@@ -1211,7 +1298,7 @@ def test_finalize_lens_fallback_flow_then_builtin(tmp_path: Path) -> None:
     assert "FINALIZE-EMPHASIS" in router.requests[0].prompt
 
     # No finalize file -> built-in finalize emphasis.
-    router = FakeRouter([_ok("s", "sum")])
+    router = FakeRouter([_ok("s", _prose("sum"))])
     sup = _supervisor(tmp_path, router, _store(tmp_path))
     sup.finalize(task_id=_TASK, task_title="T")
     assert "closing out a software task" in router.requests[0].prompt
@@ -1220,7 +1307,7 @@ def test_finalize_lens_fallback_flow_then_builtin(tmp_path: Path) -> None:
 def test_finalize_free_text_when_no_follow_ups_no_delta(tmp_path: Path) -> None:
     # Absent/false emit_follow_ups and memory off -> the finalize turn stays free-text (no
     # output_schema forced), exactly today's behavior.
-    router = FakeRouter([_ok("s", "plain summary")])
+    router = FakeRouter([_ok("s", _prose("plain summary"))])
     sup = _supervisor(tmp_path, router, _store(tmp_path))  # no flow block => emit_follow_ups False
     result = sup.finalize(task_id=_TASK, task_title="T", emit_delta=False)
     assert router.requests[0].output_schema is None
@@ -1257,7 +1344,7 @@ def test_emit_follow_ups_writes_json_and_summary_section(tmp_path: Path) -> None
         },
         {"title": "ungrounded idea", "rationale": "no evidence", "evidence": [], "severity": "low"},
     ]
-    router = FakeRouter([_structured_follow_ups("The summary.", follow_ups)])
+    router = FakeRouter([_structured_follow_ups(_prose("The summary."), follow_ups)])
     sup = _supervisor(
         tmp_path,
         router,
@@ -1282,7 +1369,7 @@ def test_emit_follow_ups_writes_json_and_summary_section(tmp_path: Path) -> None
 
 def test_emit_follow_ups_malformed_still_writes_summary(tmp_path: Path) -> None:
     # Best-effort: a malformed follow_ups payload never blocks the summary.
-    router = FakeRouter([_structured_follow_ups("Good summary.", "not-a-list")])  # type: ignore[arg-type]
+    router = FakeRouter([_structured_follow_ups(_prose("Good summary."), "not-a-list")])  # type: ignore[arg-type]
     sup = _supervisor(
         tmp_path,
         router,
@@ -1292,6 +1379,49 @@ def test_emit_follow_ups_malformed_still_writes_summary(tmp_path: Path) -> None:
     result = sup.finalize(task_id=_TASK, task_title="T")
     assert result.summary_path is not None and result.follow_ups == ()
     assert "## Technical debt" not in result.summary_path.read_text("utf-8")
+
+
+def test_finalize_prompt_and_schema_agree_that_follow_ups_is_mandatory(tmp_path: Path) -> None:
+    # The schema requires `follow_ups` (OpenAI strict mode requires every property in `required`)
+    # while the prompt said "leave the array empty" — so a model with nothing to report omitted the
+    # key and was rejected three times. Both surfaces must say the same thing, and the schema has to
+    # carry the contract itself, because the rejection message never explains the fix.
+    router = FakeRouter([_structured_follow_ups(_prose("S."), [])])
+    sup = _supervisor(
+        tmp_path, router, _store(tmp_path), flow_supervisor=SupervisorBlock(emit_follow_ups=True)
+    )
+    sup.finalize(task_id=_TASK, task_title="T")
+
+    assert "Always emit the `follow_ups` key" in router.requests[0].prompt
+    description = router.requests[0].output_schema["properties"]["follow_ups"]["description"]
+    assert "ALWAYS present" in description and "empty array" in description
+
+
+def test_finalize_prompt_forbids_restating_the_gate_findings(tmp_path: Path) -> None:
+    # Both sources land in one list and the merge dedups on exact text, so a paraphrase of an
+    # accepted finding survives as a second bullet (measured: 10 bullets for ~6 issues, two pairs
+    # disagreeing on severity). The turn is told not to restate them — but only when it was actually
+    # shown the gate verdicts, so the instruction never references an absent section.
+    store = _store(tmp_path)
+    store.record_evaluation(_verdict([{"severity": "low", "reason": "a nit", "gating": False}]))
+    with_gates = FakeRouter([_structured_follow_ups(_prose("S."), [])])
+    sup = _supervisor(
+        tmp_path, with_gates, store, flow_supervisor=SupervisorBlock(emit_follow_ups=True)
+    )
+    sup.finalize(task_id=_TASK, task_title="T")
+    assert "do **not** restate the evaluator findings" in with_gates.requests[0].prompt.lower()
+
+    no_gates_dir = tmp_path / "b"
+    no_gates_dir.mkdir()
+    no_gates = FakeRouter([_structured_follow_ups(_prose("S."), [])])
+    sup_no_gates = _supervisor(
+        no_gates_dir,
+        no_gates,
+        _store(no_gates_dir),
+        flow_supervisor=SupervisorBlock(emit_follow_ups=True),
+    )
+    sup_no_gates.finalize(task_id=_TASK, task_title="T")
+    assert "restate the evaluator findings" not in no_gates.requests[0].prompt.lower()
 
 
 # -- surface sub-threshold evaluator findings ---------------------------------
@@ -1329,7 +1459,7 @@ def test_finalize_surfaces_accepted_evaluator_findings(tmp_path: Path) -> None:
             ]
         )
     )
-    router = FakeRouter([_ok("s1", "Implemented the change.")])
+    router = FakeRouter([_ok("s1", _prose("Implemented the change."))])
     sup = _supervisor(tmp_path, router, store)  # no emit_follow_ups opt-in
     result = sup.finalize(task_id=_TASK, task_title="T")
 
@@ -1361,7 +1491,7 @@ def test_finalize_dedups_evaluator_findings_against_supervisor(tmp_path: Path) -
             "severity": "medium",
         }
     ]
-    router = FakeRouter([_structured_follow_ups("Summary.", supervisor_follow_ups)])
+    router = FakeRouter([_structured_follow_ups(_prose("Summary."), supervisor_follow_ups)])
     sup = _supervisor(
         tmp_path, router, store, flow_supervisor=SupervisorBlock(emit_follow_ups=True)
     )
@@ -1385,7 +1515,7 @@ def test_finalize_prompt_carries_the_recorded_gate_verdicts(tmp_path: Path) -> N
             node_id="critical_review",
         )
     )
-    router = FakeRouter([_ok("s1", "Summary.")])
+    router = FakeRouter([_ok("s1", _prose("Summary."))])
     sup = _supervisor(tmp_path, router, store)
     sup.finalize(task_id=_TASK, task_title="T")
 
@@ -1399,7 +1529,7 @@ def test_finalize_prompt_carries_the_recorded_gate_verdicts(tmp_path: Path) -> N
 
 def test_finalize_gate_section_absent_when_the_flow_has_no_evaluator(tmp_path: Path) -> None:
     # A flow with no in-flow evaluator gets no empty heading — the section is simply absent.
-    router, store = FakeRouter([_ok("s1", "Summary.")]), _store(tmp_path)
+    router, store = FakeRouter([_ok("s1", _prose("Summary."))]), _store(tmp_path)
     _record_step(store, 1, node="implementation", outcome="done", note="wired it")
     sup = _supervisor(tmp_path, router, store)
     sup.finalize(task_id=_TASK, task_title="T")
@@ -1418,7 +1548,7 @@ def test_finalize_gate_digest_keeps_only_each_nodes_final_verdict(tmp_path: Path
         )
     )
     store.record_evaluation(_verdict([], node_id="critical_review"))
-    router = FakeRouter([_ok("s1", "Summary.")])
+    router = FakeRouter([_ok("s1", _prose("Summary."))])
     sup = _supervisor(tmp_path, router, store)
     sup.finalize(task_id=_TASK, task_title="T")
 
@@ -1431,7 +1561,7 @@ def test_finalize_no_findings_leaves_no_section(tmp_path: Path) -> None:
     # No evaluator findings and no supervisor follow-ups → no empty heading (unchanged behavior).
     store = _store(tmp_path)
     store.record_evaluation(_verdict([]))  # a clean accept
-    router = FakeRouter([_ok("s1", "Clean summary.")])
+    router = FakeRouter([_ok("s1", _prose("Clean summary."))])
     sup = _supervisor(tmp_path, router, store)
     result = sup.finalize(task_id=_TASK, task_title="T")
     assert result.follow_ups == ()
@@ -1478,7 +1608,7 @@ def test_handoff_best_effort_none_on_failure_or_free_text(tmp_path: Path) -> Non
     # structured output → None. Never raises.
     none_router = _supervisor(tmp_path, FakeRouter([None]), _store(tmp_path))
     assert none_router.handoff(task_id=_TASK, subtask_order=2, floor_context="F") is None
-    free = _supervisor(tmp_path, FakeRouter([_ok("s", "prose")]), _store(tmp_path))
+    free = _supervisor(tmp_path, FakeRouter([_ok("s", _prose("prose"))]), _store(tmp_path))
     assert free.handoff(task_id=_TASK, subtask_order=2, floor_context="F") is None
 
 
@@ -1755,7 +1885,7 @@ class _AttemptsRouter:
         )
 
 
-def _claude_turn(cost: float | None, output_total: int) -> AgentRunResult:
+def _claude_turn(cost: float | None, output_total: int, message: str = "noted") -> AgentRunResult:
     return AgentRunResult(
         status=RunStatus.SUCCEEDED,
         provider="claude",
@@ -1764,7 +1894,7 @@ def _claude_turn(cost: float | None, output_total: int) -> AgentRunResult:
         exit_code=0,
         started_at="t0",
         finished_at="t1",
-        final_message="noted",
+        final_message=message,
         session_id="sess-super",
         usage={"output_tokens": output_total},
         normalized_usage=NormalizedUsage(
@@ -1887,7 +2017,11 @@ def test_summary_md_carries_no_spend_telemetry(tmp_path: Path) -> None:
     # summary.md becomes the pull-request body: the spend is the operator's, not the reviewer's, and
     # it must not travel to the remote with the change.
     store = _store(tmp_path)
-    sup = _supervisor(tmp_path, _AttemptsRouter([_claude_turn(cost=0.30, output_total=80)]), store)
+    sup = _supervisor(
+        tmp_path,
+        _AttemptsRouter([_claude_turn(cost=0.30, output_total=80, message=_prose("Done."))]),
+        store,
+    )
 
     result = sup.finalize(task_id=_TASK, task_title="T")
 

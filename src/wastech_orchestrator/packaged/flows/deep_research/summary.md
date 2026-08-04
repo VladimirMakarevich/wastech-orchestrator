@@ -14,4 +14,4 @@ Two rules on how you write it:
 
 **No number, verdict or count you were not given.** "All citations passed", "every finding was verified", "all gates passed" are the exact shape of claim that has been wrong before: they were written from memory while the recorded results said otherwise. If you do not have the figure, describe what happened qualitatively instead of inventing precision, and prefer "the citation check recorded some entries as unresolved" over a total you cannot source.
 
-Keep it concise and specific — this becomes the pull-request body, and it is the only part of a long, expensive run most readers will ever see.
+Keep it concise and specific — this becomes the pull-request body, and it is the only part of a long, expensive run most readers will ever see. Concise still means a few real sentences, not a single line: a one-line or placeholder summary is discarded as a failed generation and replaced by a mechanical report of the run.

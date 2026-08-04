@@ -177,6 +177,7 @@ def build_git_config(
     telegram_trace: bool = False,
     memory_enabled: bool = False,
     allow_git_evidence: bool = False,
+    allow_native_memory: bool = False,
     checkout_base_on_cleanup: bool | None = None,
     clean_runs_on_success: bool = True,
     supervisor_observe: str | None = None,
@@ -251,6 +252,7 @@ repo:
     claude:
       command: "claude"
       primary: true
+      allow_native_memory: {str(allow_native_memory).lower()}
     codex:
       command: "codex"
 security:

@@ -389,9 +389,11 @@ def claude_config_home() -> Path:
     return config_dir.resolve()
 
 
-def _native_memory_deny_tools() -> list[str]:
-    """Deny ``Write``/``Edit``/``Read`` on the Claude Code config dir so the spawned agent cannot
-    read, inject, or leak **native project memory** outside the target working tree.
+def _native_memory_deny_tools(
+    kinds: Sequence[str] = ("Write", "Edit", "Read"),
+) -> list[str]:
+    """Deny *kinds* (default ``Write``/``Edit``/``Read``) on the Claude Code config dir so the
+    spawned agent cannot read, inject, or leak **native project memory** outside the target tree.
 
     Claude Code keeps per-project memory at ``<config_dir>/projects/<cwd-slug>/memory/*.md`` — a
     durable store OUTSIDE the repo, so anything written there escapes ``current.diff``, the commit,
@@ -403,9 +405,12 @@ def _native_memory_deny_tools() -> list[str]:
     The config dir (:func:`claude_config_home`) is ``CLAUDE_CONFIG_DIR`` or the ``~/.claude``
     default. Emitted as Claude's ``//``-anchored absolute-path glob with POSIX slashes (the Node CLI
     normalizes them), which covers both the default and a custom absolute config dir.
+
+    *kinds* exists because the read and write axes are gated differently: relaxing read-isolation
+    restores native discovery (a ``Read``), but never permission to *write* an unaudited store.
     """
     glob = "//" + claude_config_home().as_posix().lstrip("/") + "/**"
-    return [f"Write({glob})", f"Edit({glob})", f"Read({glob})"]
+    return [f"{kind}({glob})" for kind in kinds]
 
 
 # Claude flags an operator may NOT supply through config/flow ``extra_args`` because they replace or
@@ -648,8 +653,9 @@ def build_claude_argv(
     READ side: ``--setting-sources project`` (not ``""``) restores native ``CLAUDE.md`` + project
     settings/hooks/MCP/skills discovery, ``--strict-mcp-config`` is dropped, the private
     ``internal_deny_read_paths`` set becomes readable (still Write/Edit-denied), and the
-    native-memory deny is lifted. The public ``denied_read_paths`` blacklist and the WRITE side
-    (command denies, Write/Edit denies, write-guard) are unchanged.
+    native-memory **read** deny is lifted (its Write/Edit deny stays — only
+    ``allow_native_memory`` lifts that). The public ``denied_read_paths`` blacklist and the WRITE
+    side (command denies, Write/Edit denies, write-guard) are unchanged.
 
     Raises :class:`ProviderError` (``CONFIGURATION_ERROR``) if ``extra_args`` carry an
     absolutely-forbidden flag (``--dangerously*`` / ``--yolo`` / ``--ignore-rules``), a reserved
@@ -728,14 +734,23 @@ def build_claude_argv(
         argv += ["--tools", ",".join(plan.tools)]
         argv += ["--allowedTools", ",".join(plan.allowed_tools)]
     denied_tools = _deny_tools_for(denied_commands) + _deny_read_tools_for(denied_read_paths)
-    # Confine native project memory out of the spawn — unless the operator has opted in to the
-    # agent's own native memory (agents.providers.claude.allow_native_memory) OR read-isolation is
-    # OFF, both deliberate, operator-owned restorations of Claude's own native memory (that
-    # store is unaudited and outside the redaction net). The claude config home is left to this
-    # native-memory rule (gated by the opt-in), so the internal deny below excludes it to avoid
+    # Confine native project memory out of the spawn unless the operator opted in
+    # (agents.providers.claude.allow_native_memory) — a deliberate, operator-owned restoration of
+    # Claude's own native memory (that store is unaudited and outside the redaction net). The claude
+    # config home is left entirely to this rule, so the internal deny below excludes it to avoid
     # re-denying ``~/.claude`` and breaking the opt-in.
-    if not config.allow_native_memory and not read_isolation_off:
-        denied_tools += _native_memory_deny_tools()
+    #
+    # Read-isolation OFF lifts only the READ side. It used to skip this rule wholesale, and because
+    # the internal projection excludes ``~/.claude`` too, that left the store with ZERO deny rules
+    # on the shipped default — agents were observed writing memory files into the operator's HOME,
+    # i.e. outside the workspace clone, the frozen instruction bundle, and the redaction net. The
+    # write side was never part of the hatch: relaxing reads restores native *discovery*, not
+    # permission to mutate an unaudited store. (The Bash sandbox write-denies it either way, but the
+    # CLI's own Write/Edit tools never go through that sandbox — hence only Bash was blocked.)
+    if not config.allow_native_memory:
+        denied_tools += _native_memory_deny_tools(
+            ("Write", "Edit") if read_isolation_off else ("Write", "Edit", "Read")
+        )
     claude_home = claude_config_home()
     read_deny_paths = [p for p in internal_deny_read_paths if p != claude_home]
     # With read-isolation OFF the private set stays WRITE-denied (the control plane must stay

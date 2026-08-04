@@ -245,6 +245,18 @@ _GITHUB_PR_BODY_LIMIT = 65_536
 _PR_BODY_MAX_CHARS = _GITHUB_PR_BODY_LIMIT - 5_536  # 60 000
 _TASK_MARKER_PREFIX = "<!-- worc-task:"
 _SECTION_SEPARATOR = "\n\n---\n\n"
+# Second, optional comment on an appended section's marker block: the repo-relative path of the
+# task's COMMITTED ``<id>.summary.md``. Recorded at append time because the compactor runs later and
+# over other tasks' sections, where it has no way to know the lifecycle folder the task file moved
+# into. A section without it (a synthetic ``run`` path commits no summary) falls back to naming the
+# run host. Its own comment line rather than an extension of the task marker, whose exact spelling
+# the chain count and the idempotency guard both parse.
+_SUMMARY_POINTER_PREFIX = "<!-- worc-summary:"
+# Mirror of ``core.follow_ups.FOLLOW_UPS_HEADING`` — this module is an adapter the Core imports, so
+# it must not import the Core back; a test pins the two spellings equal. Compaction keeps this
+# section and elides the prose around it: the follow-ups are the actionable half of a summary, and
+# eliding them removed ~65 of 98 follow-ups from a 20-task chain PR.
+_FOLLOW_UPS_HEADING = "## Technical debt / follow-ups"
 
 _LOG = logging.getLogger(__name__)
 
@@ -391,13 +403,17 @@ def _parse_ls_files_stage_z(output: str) -> dict[str, tuple[str, str, str]]:
 def _bound_pr_body(body: str) -> str:
     """Keep a reused chain-PR *body* below :data:`_PR_BODY_MAX_CHARS`, else compact it.
 
-    Bounds the body by **compacting the oldest task sections** — replacing each one's summary with a
-    one-line stub pointing at ``logs/<id>/summary.md`` — from oldest toward newest until it fits.
+    Bounds the body by **compacting the oldest task sections**, oldest toward newest, in two passes:
+    the first drops each section's prose but keeps its :data:`_FOLLOW_UPS_HEADING` section, the
+    second (only if the body still exceeds the cap) drops that too. Follow-ups are the actionable
+    half of a summary, so they are the last thing surrendered — a single pass took ~65 of 98
+    follow-ups out of a 20-task chain PR along with the prose.
+
     The PR-creating task's body (the head, before the first marker) and each task's marker +
     ``## title`` are always kept, so every task stays listed and the ``<!-- worc-task:<id> -->``
     markers (which the chain-length count and the idempotency guard rely on) are never removed.
-    Nothing is lost — the full summaries remain on disk. A body whose head alone exceeds the cap is
-    returned unchanged; publish then logs the ``gh`` error rather than silently corrupting it.
+    Nothing is lost — the full summaries remain on the run host. A body whose head alone exceeds the
+    cap is returned unchanged; publish then logs the ``gh`` error rather than corrupting it.
     """
     if len(body) <= _PR_BODY_MAX_CHARS:
         return body
@@ -406,27 +422,55 @@ def _bound_pr_body(body: str) -> str:
     if not sections:
         return body  # nothing appended to compact (a single oversized head)
     total = len(head) + sum(len(_SECTION_SEPARATOR) + len(s) for s in sections)
-    for i, section in enumerate(sections):  # oldest first; the newest sections stay full
-        if total <= _PR_BODY_MAX_CHARS:
-            break
-        compacted = _compact_pr_section(section)
-        total -= len(section) - len(compacted)
-        sections[i] = compacted
+    for keep_follow_ups in (True, False):
+        for i, section in enumerate(sections):  # oldest first; the newest sections stay full
+            if total <= _PR_BODY_MAX_CHARS:
+                break
+            compacted = _compact_pr_section(section, keep_follow_ups=keep_follow_ups)
+            total -= len(section) - len(compacted)
+            sections[i] = compacted
     return _SECTION_SEPARATOR.join([head, *sections])
 
 
-def _compact_pr_section(section: str) -> str:
-    """Shrink one appended chain-PR section to its task marker + ``## title`` plus a stub pointing
-    at the on-disk summary. Idempotent: re-compacting an already-stubbed section is a no-op.
+def _compact_pr_section(section: str, *, keep_follow_ups: bool = False) -> str:
+    """Shrink one appended chain-PR section to its marker block + ``## title`` plus a stub, keeping
+    the follow-ups section when *keep_follow_ups* (and one is present).
+
+    The stub points at the task's committed ``<id>.summary.md`` when the section recorded one
+    (:data:`_SUMMARY_POINTER_PREFIX`) — that file is in this PR's own diff, so a reader on GitHub
+    can open it. Otherwise it names the run host: the working copy lives under the git-excluded
+    ``.worc/``, and the stub used to spell that as ``logs/<id>/summary.md``, which read as a
+    repository path and was a dead link. Idempotent in both modes: the marker block is carried
+    through verbatim, so re-compacting a stub is a no-op and a follow-ups-preserving pass can still
+    be tightened by a second one.
     """
-    marker_line, _, after = section.partition("\n\n")
-    title_line, _, _summary = after.partition("\n\n")
-    task_id = marker_line.removeprefix(_TASK_MARKER_PREFIX).removesuffix("-->").strip()
-    stub = (
-        f"_Summary elided to keep the PR body under GitHub's limit; "
-        f"see `logs/{task_id}/summary.md`._"
+    marker_block, _, after = section.partition("\n\n")
+    title_line, _, summary = after.partition("\n\n")
+    # The task marker is the block's first line; a summary pointer, when present, follows it.
+    task_id = marker_block.split("\n", 1)[0].removeprefix(_TASK_MARKER_PREFIX).removesuffix("-->")
+    committed = next(
+        (
+            line.removeprefix(_SUMMARY_POINTER_PREFIX).removesuffix("-->").strip()
+            for line in marker_block.splitlines()
+            if line.startswith(_SUMMARY_POINTER_PREFIX)
+        ),
+        "",
     )
-    return f"{marker_line}\n\n{title_line}\n\n{stub}\n"
+    follow_ups = ""
+    if keep_follow_ups:
+        _, heading, tail = summary.partition(_FOLLOW_UPS_HEADING)
+        if heading:
+            follow_ups = f"\n{heading}{tail.rstrip()}\n"
+    what = "Summary prose" if follow_ups else "Summary"
+    kept = " the follow-ups below are complete;" if follow_ups else ""
+    where = (
+        f"the full text is committed in this PR at `{committed}`"
+        if committed
+        else f"the full text stays on the run host at `.worc/logs/{task_id.strip()}/summary.md` "
+        "(not in the repository)"
+    )
+    stub = f"_{what} elided to keep the PR body under GitHub's limit;{kept} {where}._"
+    return f"{marker_block}\n\n{title_line}\n\n{stub}\n{follow_ups}"
 
 
 @dataclass(frozen=True)
@@ -1891,7 +1935,9 @@ class GitManager:
         - **Body:** append ``## <title>`` (with the task's summary) under the existing body, guarded
           by a ``<!-- worc-task:<id> -->`` marker so re-running the same task never duplicates its
           section, then bound the whole body below the limit by compacting the oldest sections
-          (:func:`_bound_pr_body`). Each task's full summary still lives at ``logs/<id>/``.
+          (:func:`_bound_pr_body`). When ``body_path`` is the committed ``<id>.summary.md`` inside
+          the clone, its repo-relative path is recorded beside the marker so a later compaction can
+          point a reviewer at a file that is in this PR rather than at the run host.
         - **Title:** retitle to ``N tasks on <branch>`` so the PR's identity tracks the chain, not
           task 1. Folded into the same ``gh pr edit`` call (no extra round-trip).
 
@@ -1906,7 +1952,13 @@ class GitManager:
             summary = Path(body_path).read_text(encoding="utf-8").strip()
         except OSError:
             summary = ""
-        section = f"{current.rstrip()}{_SECTION_SEPARATOR}{marker}\n\n## {title}\n\n{summary}\n"
+        marker_block = marker
+        committed = self._repo_relative(body_path)
+        if committed is not None:
+            marker_block += f"\n{_SUMMARY_POINTER_PREFIX} {committed} -->"
+        section = (
+            f"{current.rstrip()}{_SECTION_SEPARATOR}{marker_block}\n\n## {title}\n\n{summary}\n"
+        )
         # Chain length counts every appended task (one marker each) plus the PR-creating task, which
         # carries no marker. Count on the pre-elision text so the title stays truthful even when
         # older sections were trimmed from the body.
@@ -1923,6 +1975,24 @@ class GitManager:
                 "could not update reused PR title/body (chain PR may not reflect this task): %s",
                 result.stderr.strip(),
             )
+
+    def _repo_relative(self, path: str) -> str | None:
+        """*path* as a POSIX repo-relative path, or ``None`` when it is outside the clone.
+
+        The PR body's summary is either the committed ``tasks/<status>/<id>.summary.md`` (inside the
+        clone, so it lands in this PR's diff) or the working copy under the git-excluded ``.worc/``
+        — a synthetic ``run`` path has no task file to commit one beside. Only the first is worth
+        naming to a reviewer, and this is what tells them apart.
+        """
+        try:
+            relative = Path(path).resolve().relative_to(Path(self._clone).resolve())
+        except (OSError, ValueError):
+            return None
+        posix = relative.as_posix()
+        # ``RUNTIME_EXCLUDED_DIRS``, not ``self._excluded_dirs``: the latter also holds the task
+        # lifecycle dir, which is exactly where the committed summary lands — excluded from the
+        # *code* commit but riding the audit commit, so it IS in the repository.
+        return None if posix.startswith(tuple(f"{d}/" for d in RUNTIME_EXCLUDED_DIRS)) else posix
 
     def _pr_body(self, pr_url: str) -> str | None:
         """The current PR body text, or ``None`` when ``gh`` cannot read it (best-effort)."""

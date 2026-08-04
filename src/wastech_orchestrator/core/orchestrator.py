@@ -2502,6 +2502,21 @@ class Orchestrator:
                     "strict_isolation": self._config.security.strict_isolation,
                 },
             )
+        claude_cfg = self._config.agents.providers.get(ProviderId.CLAUDE)
+        if claude_cfg is not None and claude_cfg.allow_native_memory:
+            # Same reasoning as the read-isolation announce above, and the one relaxation that
+            # reaches OUTSIDE the run's audit: with the opt-in on, Claude's own per-project memory
+            # store in the operator's HOME is readable and writable, so what a task learns there
+            # escapes the frozen instruction bundle, ``current.diff``, and the redaction net — and a
+            # later task on the same repo reads it, which a replay elsewhere cannot reproduce.
+            self._log(p.task.id).warning(
+                "native Claude memory ON — the agent may read and write its own per-project memory "
+                "store under the Claude config home (operator-sanctioned via "
+                "agents.providers.claude.allow_native_memory); that store is outside this run's "
+                "audit trail, artifact manifest, and redaction net, and it carries state across "
+                "tasks",
+                extra={"allow_native_memory": True},
+            )
         if self._config.security.allow_git_evidence:
             # Same reasoning as the read-isolation announce above: an optional capability that
             # widens what a node may execute is stated in the run log rather than left implicit.

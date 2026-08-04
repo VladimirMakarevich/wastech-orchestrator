@@ -16,6 +16,7 @@ from wastech_orchestrator.core.follow_ups import (
     FINDING_TITLE_MAX,
     FollowUp,
     _finding_to_follow_up,
+    _split_reason,
     evaluator_finding_follow_ups,
     follow_up_json,
     merge_follow_ups,
@@ -80,14 +81,79 @@ def test_evaluator_finding_follow_ups_keeps_each_subtask(tmp_path: Path) -> None
 
 
 def test_finding_to_follow_up_truncates_long_reason_and_drops_empty() -> None:
+    # One unbroken token past the bound has no boundary to cut on, so the old ellipsis truncation is
+    # the only option left and the full text still reaches the operator via the rationale.
     long_reason = "x" * 200
     fu = _finding_to_follow_up({"severity": "medium", "reason": long_reason, "paths": []}, "review")
     assert fu is not None
     assert fu.title.endswith("…") and len(fu.title) <= FINDING_TITLE_MAX + 1
-    assert fu.rationale == long_reason  # full text preserved when the title is truncated
+    assert fu.rationale == long_reason
     # No usable reason, or a non-mapping, yields nothing.
     assert _finding_to_follow_up({"severity": "low", "reason": "", "paths": []}, "review") is None
     assert _finding_to_follow_up("not-a-mapping", "review") is None
+
+
+def test_split_reason_gives_a_title_that_is_not_its_own_rationale() -> None:
+    # The title used to be reason[:120] + "…" with the WHOLE reason repeated as the rationale, so
+    # every long finding arrived as a mid-word truncation of the text printed right beside it — a
+    # queue whose titles duplicate their own bodies cannot be triaged without opening every item.
+    short = "The gate is not enforced."
+    assert _split_reason(short) == (short, "")  # short reasons are unchanged: title only
+
+    sentence = (
+        "The checklist pairing is not actually enforced. `testing.md` claims the inventory is "
+        "checked, but no test asserts it, so a stale entry ships silently and the reviewer trusts "
+        "a guarantee that does not exist."
+    )
+    title, rationale = _split_reason(sentence)
+    assert title == "The checklist pairing is not actually enforced."
+    assert rationale.startswith("`testing.md` claims")
+    assert title not in rationale  # not a prefix of its own body
+    assert "…" not in title
+
+    # No sentence boundary in range → cut on the last word boundary, remainder to the rationale.
+    no_stop = " ".join(f"w{n:03d}" for n in range(40))
+    title, rationale = _split_reason(no_stop)
+    assert len(title) <= FINDING_TITLE_MAX
+    assert title.split()[-1] == "w023" and rationale.split()[0] == "w024"  # never mid-word
+    assert title not in rationale
+    assert f"{title} {rationale}" == no_stop  # nothing dropped in the split
+
+
+def test_evaluator_fix_becomes_the_action_hint() -> None:
+    # The reviewer's `fix` is where the remedy lives. It used to be dropped by the typed
+    # projection, so every mechanically derived follow-up reached the operator without its fix
+    # (measured: null on all 98 follow-ups of a 20-run campaign).
+    row = _verdict(
+        [
+            {
+                "severity": "low",
+                "reason": "the manifest is not asserted",
+                "paths": ["a.py"],
+                "fix": "assert the manifest in tests/test_a.py",
+            }
+        ]
+    )
+    (fu,) = evaluator_finding_follow_ups([row])
+    assert fu.action_hint == "assert the manifest in tests/test_a.py"
+    assert "Suggested: assert the manifest" in render_follow_ups_section((fu,))
+    # A row without a usable fix keeps action_hint absent rather than empty.
+    (no_fix,) = evaluator_finding_follow_ups(
+        [_verdict([{"severity": "low", "reason": "x", "fix": "  "}])]
+    )
+    assert no_fix.action_hint is None
+
+
+def test_persisted_severity_is_already_normalized_so_nothing_is_downgraded() -> None:
+    # The evaluator collapses `blocking`/`critical` into `high` at write time (the `gating` flag
+    # carries what that loses), so the mapping never sees those tokens and the `else "medium"`
+    # branch below is reachable only for a malformed row — where it errs UPWARD, never down.
+    rows = [_verdict([{"severity": "high", "reason": "was critical", "gating": True}])]
+    (fu,) = evaluator_finding_follow_ups(rows)
+    assert fu.severity == "high"
+    assert "rework budget exhausted" in fu.evidence[0]  # the gating distinction survives
+    malformed = _finding_to_follow_up({"reason": "no severity key"}, "review")
+    assert malformed is not None and malformed.severity == "medium"
 
 
 def test_gating_finding_on_a_rework_verdict_is_not_a_follow_up() -> None:

@@ -2,13 +2,15 @@
 
 Analysis of every orchestrator run from `p9-11-01-cli-bin-noop` through `p9-12-06-process-boundary-tests` — the tasks behind `docs/mdlint_v2/P11-remediation/` and `docs/mdlint_v2/P12-consistency/` in the [wastech-mdlint](https://github.com/VladimirMakarevich/wastech-mdlint) repo. Produced with the [`/analyze-task-run`](../../../.claude/skills/analyze-task-run/SKILL.md) methodology applied per task, then cross-synthesised.
 
-**Read-only analysis.** Nothing in either repo was modified. Every finding names the lever; none of them has been pulled.
+**Read-only analysis.** Nothing in either repo was modified by the analysis itself. Every finding names the lever.
+
+**Status update (2026-08-04).** The four critical defects of [02](02-critical-defects.md) have since been fixed on `dev` (branch `feat/critical-defects-c1-c4`) — actions 1–3 of the table below plus C4, which had no row. C4a turned out to be a stale reading of a refactored file; its section records what is actually true. The prompt findings of [03](03-prompt-findings.md) and everything below are still open.
 
 ## Verdict
 
 The pipeline works. All 20 tasks reached `done` on the first attempt with zero provider retries, zero fallbacks, zero crashes and zero quarantine events, and the shipped diffs are on-scope with genuinely good test discipline (~48% of added lines are tests). The review evaluator is the standout component — it repeatedly read third-party sources (npm's bundled `bin-links`, `libnpmexec`, `@npmcli/config`, Commander's dispatch code) to disprove confident-but-wrong claims, and it caught real regressions that no automated gate in this setup could see.
 
-Two things are genuinely broken and are still broken at HEAD: a structured-output schema deadlock that published the word `test` as one task's entire whole-task summary, and a permission gap that let agents write durable notes into Claude Code's host-side memory store while the orchestrator believed memory was disabled.
+Two things were genuinely broken at the HEAD this was written against: a structured-output schema deadlock that published the word `test` as one task's entire whole-task summary, and a permission gap that let agents write durable notes into Claude Code's host-side memory store while the orchestrator believed memory was disabled. Both are fixed (see the status note above); the rest of the campaign's findings stand as written.
 
 The single largest quality lever has already been pulled, by you, mid-campaign — and the data proves it was the right call. Everything else worth doing is a prompt edit or a config key, not an architecture change.
 
@@ -16,9 +18,10 @@ The single largest quality lever has already been pulled, by you, mid-campaign �
 
 | # | Action | Lever | Scope | Evidence |
 | --- | --- | --- | --- | --- |
-| 1 | Fix the finalize schema deadlock that published `summary: "test"` | `core/supervisor.py` `_finalize_schema` / `_FOLLOW_UPS_SCHEMA` + `summary.md` role file | orchestrator | [02](02-critical-defects.md#c1) |
-| 2 | Close the `~/.claude` write-deny gap under `disable_read_isolation` | `providers/claude.py:737` | orchestrator | [02](02-critical-defects.md#c2) |
-| 3 | Stop the PR-body compactor pointing at a gitignored path | `core/supervisor.py` `_bound_pr_body` | orchestrator | [02](02-critical-defects.md#c3) |
+| 1 | ✅ Fix the finalize schema deadlock that published `summary: "test"` | `core/supervisor.py` `_finalize_schema` / `_FOLLOW_UPS_SCHEMA` / `_finalize_prompt` + the `summary.md` role files | orchestrator | [02](02-critical-defects.md#c1) |
+| 2 | ✅ Close the `~/.claude` write-deny gap under `disable_read_isolation` | `providers/claude.py` `_native_memory_deny_tools` / `build_claude_argv` | orchestrator | [02](02-critical-defects.md#c2) |
+| 3 | ✅ Stop the PR-body compactor pointing at a gitignored path, and stop it eliding the follow-ups | `git_manager.py` `_bound_pr_body` / `_compact_pr_section` | orchestrator | [02](02-critical-defects.md#c3) |
+| 3a | ✅ Make a follow-up triageable: carry the reviewer's `fix`, split title from rationale, stop the paraphrase duplicates | `core/follow_ups.py`, `core/flow/nodes/evaluator.py`, `core/flow/engine.py` | orchestrator | [02](02-critical-defects.md#c4) |
 | 4 | Teach `planning.md` to label claims verified-vs-assumed, and ban "don't re-verify" | `packaged/flows/implementation/planning.md` | both | [03](03-prompt-findings.md#p1) |
 | 5 | Tell `implementation.md` the plan is a hypothesis, not a specification | `packaged/flows/implementation/implementation.md` | both | [03](03-prompt-findings.md#p1) |
 | 6 | Give `review.md` an explicit accept/rework rule and the severity enum | `packaged/flows/implementation/review.md` | orchestrator | [03](03-prompt-findings.md#p2) |

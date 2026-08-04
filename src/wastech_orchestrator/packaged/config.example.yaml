@@ -77,7 +77,10 @@ agents:
       # allow_native_memory: false  # OPT-IN RISK — when true, drops the deny that confines Claude
                                # Code's own auto-memory (~/.claude/projects/<repo>/memory/), letting
                                # it persist across tasks. That store is OUTSIDE the orchestrator's
-                               # redaction net and audit; leave off unless you accept that. Claude-only.
+                               # redaction net and audit; leave off unless you accept that. This is
+                               # the ONLY switch that makes it writable (disable_read_isolation
+                               # below lifts only reads), and each run then logs
+                               # "native Claude memory ON". Claude-only.
       permission_profile: "workspace-write"   # read-only | workspace-write (a flow node's ceiling may lower it)
       extra_args: []           # raw CLI flags appended verbatim; forbidden ones fail preflight
       primary: true            # the global primary (exactly one provider; must be in `allowed`)

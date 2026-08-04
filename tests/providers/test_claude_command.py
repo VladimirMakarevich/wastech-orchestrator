@@ -719,15 +719,34 @@ def test_read_isolation_off_lifts_internal_reads_keeps_writes_and_blacklist(
     assert "Write(//repo/.worc-io/**)" in disallowed
 
 
-def test_read_isolation_off_drops_native_memory_deny(
+def test_read_isolation_off_lifts_the_native_memory_read_deny_but_keeps_the_write_deny(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # Native Claude memory (~/.claude) is restored, so the native-memory deny is not emitted.
+    # Reading native Claude memory (~/.claude) is restored for native discovery; WRITING it is not.
+    # Regression: this rule is the ONLY thing covering ~/.claude (the internal projection excludes
+    # it), so skipping it wholesale left that store with zero deny rules on the shipped default and
+    # agents wrote memory files into the operator's HOME — outside the clone, the frozen bundle, and
+    # the redaction net.
     home_glob = "//" + claude_config_home().as_posix().lstrip("/")
     argv = _argv(claude_config, make_request(), denied=DENIED, read_isolation_off=True)
     disallowed = argv[argv.index("--disallowedTools") + 1]
     assert f"Read({home_glob}/**)" not in disallowed
-    assert f"Write({home_glob}/**)" not in disallowed
+    assert f"Write({home_glob}/**)" in disallowed
+    assert f"Edit({home_glob}/**)" in disallowed
+
+
+def test_read_isolation_off_with_allow_native_memory_drops_every_deny(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # The opt-in is the only switch that lifts the write side, and it still does with the read hatch
+    # open — the operator owns that risk, and the escape hatch must keep working.
+    home_glob = "//" + claude_config_home().as_posix().lstrip("/")
+    opted_in = replace(claude_config, allow_native_memory=True)
+    argv = _argv(opted_in, make_request(), denied=DENIED, read_isolation_off=True)
+    disallowed = argv[argv.index("--disallowedTools") + 1]
+    for kind in ("Read", "Write", "Edit"):
+        assert f"{kind}({home_glob}/**)" not in disallowed
+    assert "Bash(git commit:*)" in disallowed  # the publish blacklist is untouched either way
 
 
 def test_read_isolation_off_sandbox_lifts_denyread_keeps_denywrite() -> None:

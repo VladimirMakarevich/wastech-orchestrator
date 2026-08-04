@@ -46,6 +46,7 @@ from wastech_orchestrator.core.flow.schema import (
     PublishNode,
 )
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
+from wastech_orchestrator.core.follow_ups import evaluator_finding_follow_ups
 from wastech_orchestrator.providers.artifacts import node_run_dir
 from wastech_orchestrator.providers.base import (
     AgentRunResult,
@@ -1772,8 +1773,30 @@ def test_evaluator_blocking_flag_on_a_low_severity_persists_as_gating(tmp_path: 
     result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "rework"
     assert json.loads(store.evaluations[-1].findings_json) == [
-        {"severity": "high", "reason": "x", "paths": [], "gating": True}
+        {"severity": "high", "reason": "x", "paths": [], "gating": True, "fix": None}
     ]
+
+
+def test_evaluator_persists_the_reviewers_fix_so_a_follow_up_carries_it(tmp_path: Path) -> None:
+    # The follow-ups an operator acts on are derived from this row, so a remedy the reviewer
+    # supplied has to survive the typed projection. It did not: `fix` reached the per-run
+    # findings.json (for `fixing`) and nowhere else, so derived follow-ups had `action_hint: null`.
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    node = _evaluator("review")
+    store = FakeStore()
+    findings = [{"what": "the manifest is unasserted", "severity": "low", "fix": "assert it"}]
+    services = _services(
+        FakeRouter(_result({"findings": findings})),
+        store,
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+    assert result.outcome.findings[0].fix == "assert it"
+    assert json.loads(store.evaluations[-1].findings_json)[0]["fix"] == "assert it"
+    (follow_up,) = evaluator_finding_follow_ups(store.evaluations)
+    assert follow_up.action_hint == "assert it"
 
 
 def test_evaluator_flags_every_finding_not_just_up_to_the_first_gating_one(tmp_path: Path) -> None:

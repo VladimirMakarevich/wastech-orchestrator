@@ -286,7 +286,9 @@ Given three rejections of a 9 KB payload whose only diagnostic is the missing pr
 
 **Evidence** — `core/orchestrator.py:3029-3036`:
 
-```python
+<!-- Fenced as `text`, not `python`: a verbatim source excerpt that `ruff format` would rewrite (it is not a formattable top-level statement), which would corrupt the evidence and fail the format gate. -->
+
+```text
 summary_md_path = task_artifact_dir(self._artifacts_root, p.task.id) / "summary.md"
 degraded = not summary_md_path.exists()
 if degraded:

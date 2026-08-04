@@ -176,13 +176,31 @@ _SKILL_MAP_SCHEMA: dict[str, Any] = {
 # strict mode when nested as the finalize turn's ``follow_ups``: no follow-ups → ``null``.
 # Formerly-optional ``paths``/``action_hint`` are nullable so the model may still omit them;
 # :func:`parse_follow_ups` treats ``null`` identically to an absent key.
+# The root ``description`` is load-bearing, not decoration: without it a model that had nothing to
+# report OMITTED the key (following the prose "leave the array empty"), was rejected three times for
+# a missing required property, and collapsed to a four-byte probe summary that shipped as a PR body.
+# The schema now states the contract the prompt states, so the two cannot disagree.
 _FOLLOW_UPS_SCHEMA: dict[str, Any] = {
     "type": ["array", "null"],
+    "description": (
+        "ALWAYS present — emit this key on every response. When nothing qualifies, emit an empty "
+        "array (or null); never omit the key, and never drop it to shorten the answer."
+    ),
     "items": {
         "type": "object",
         "additionalProperties": False,
         "properties": {
-            "title": {"type": "string", "minLength": 1},
+            "title": {
+                "type": "string",
+                "minLength": 1,
+                # Independently written, because a title that is a truncated prefix of its own
+                # ``rationale`` makes the operator's queue untriageable without opening every item.
+                "description": (
+                    "A short imperative label (aim for 80 characters or fewer) naming the action, "
+                    "written to be read on its own in a work queue — NOT a prefix, restatement, or "
+                    "truncation of `rationale`."
+                ),
+            },
             "rationale": {"type": "string"},
             "paths": {"type": ["array", "null"], "items": {"type": "string"}},
             "evidence": {"type": "array", "items": {"type": "string"}},
@@ -217,7 +235,11 @@ _BUILTIN_FINALIZE = (
     "You are a read-only supervisor closing out a software task. Do not edit code.\n\n"
     "Synthesize a plain-language summary of the whole task: what was done, how it works, how it "
     "integrates, and why, grounded in the actual committed change. In a closing section list any "
-    "advisory caveats or follow-ups you noted across the steps."
+    "advisory caveats or follow-ups you noted across the steps.\n\n"
+    # The floor is enforced for every flow, so the last fallback in the chain has to state it: a
+    # flow with no finalize lens of its own (and every user-authored one) reads only this text.
+    "Answer with real prose. A one-line, placeholder or probe summary is discarded as a failed "
+    "generation and replaced by a mechanical report of the run, so it costs the whole synthesis."
 )
 _BUILTIN_HANDOFF = (
     "You are a read-only supervisor briefing the next subtask in a decomposed task. Do not edit "
@@ -318,6 +340,23 @@ _SUMMARY_CUT_TAGS = (
     "</lessons>",
 )
 _SUMMARY_OPEN_TAG = "<summary>"
+
+# Shortest sanitized prose that can pass as a whole-task synthesis. A finalize turn that fights the
+# schema can collapse to a minimal probe — an observed run published ``summary: "test"`` as its PR
+# body after three schema rejections, and the degradation guard (does ``summary.md`` exist?) could
+# not see it. Below this floor the turn counts as having produced nothing, so the deterministic
+# report (changes, steps, checks, gate verdicts, follow-ups) becomes the body instead and the run is
+# flagged degraded.
+#
+# Deliberately low, because a false positive is itself a regression: replacing honest short prose
+# with a mechanical report makes the operator surface WORSE, and it is a prose flow that pays. The
+# packaged content lenses ask for four labelled points and tell the turn to keep it concrete — a
+# complete answer to all four on a small revision lands around 170 characters, so a floor set to
+# "a real synthesis" length would discard finished work. This catches the collapse signature (a
+# probe, a placeholder, one clause) and nothing above it; the lenses carry the qualitative
+# expectation, and the ``summary`` schema description already asks for a lead paragraph plus 2–4
+# sections on every flow.
+_SUMMARY_MIN_CHARS = 120
 
 
 def _sanitize_summary(summary_text: str) -> str:
@@ -570,8 +609,9 @@ class Supervisor:
         same turn yields the evidence-gated ``follow_ups`` array — zero extra LLM calls.
         When neither is enabled the turn is free-text.
 
-        Best-effort: a turn that cannot run yields no ``summary.md`` (the orchestrator's
-        deterministic minimal summary then applies), a ``None`` delta, and no follow-ups.
+        Best-effort: a turn that cannot run — or one whose prose collapses below
+        :data:`_SUMMARY_MIN_CHARS` — yields no ``summary.md`` (the orchestrator's deterministic
+        report then applies, flagged degraded), a ``None`` delta, and no follow-ups.
         ``summary.json`` is always written. Returns the summary path + the delta + the follow-ups.
 
         The turn **always** runs on a fresh session seeded by the ``SupervisorPacket``, on a normal
@@ -604,13 +644,33 @@ class Supervisor:
         # and the PR body. Runs independent of ``emit_follow_ups`` (a distinct, evidence-bearing
         # source from the supervisor's LLM-authored follow-ups).
         follow_ups = merge_follow_ups(follow_ups, evaluator_finding_follow_ups(evaluations))
+        # A model sometimes emits its structured output as a `<summary>…</summary>
+        # <follow_ups>[JSON]</follow_ups><memory_delta>…` text dump instead of a clean tool call.
+        # Sanitize so only the human prose reaches summary.md (the PR body) — never a raw
+        # follow_ups/memory_delta/lessons dump.
+        clean_summary = _sanitize_summary(summary_text) if summary_text else ""
+        if clean_summary and len(clean_summary) < _SUMMARY_MIN_CHARS:
+            # A collapse, not a synthesis (see _SUMMARY_MIN_CHARS): drop it so the deterministic
+            # report becomes the body and the orchestrator's degradation warning fires. Logged with
+            # the observed length, because the prose itself is what a diagnosis needs to see.
+            _LOG.warning(
+                "supervisor finalize: summary below the %d-char floor (%d chars) — discarded as a "
+                "collapsed generation; the deterministic report will be the summary: %r",
+                _SUMMARY_MIN_CHARS,
+                len(clean_summary),
+                clean_summary,
+            )
+            clean_summary = ""
+        # Recorded AFTER sanitize + the floor, so ``summary_written`` states what actually reached
+        # disk. Derived from the raw turn output it disagreed with the file whenever the model
+        # returned a pure tag dump (sanitizes to empty) or a collapsed one.
         self._record(
             task_id,
             kind="supervisor_final",
             source_node_run_id=None,
             subtask_order=None,
             payload={
-                "summary_written": summary_text is not None,
+                "summary_written": bool(clean_summary),
                 "memory_delta": delta is not None,
                 "follow_ups": len(follow_ups),
                 # Whether the turn was actually seeded by the packet. Always true on a healthy run;
@@ -619,11 +679,6 @@ class Supervisor:
                 "packet_built": packet_path is not None,
             },
         )
-        # A model sometimes emits its structured output as a `<summary>…</summary>
-        # <follow_ups>[JSON]</follow_ups><memory_delta>…` text dump instead of a clean tool call.
-        # Sanitize so only the human prose reaches summary.md (the PR body) — never a raw
-        # follow_ups/memory_delta/lessons dump.
-        clean_summary = _sanitize_summary(summary_text) if summary_text else ""
         task_dir = Path(task_artifact_dir(self._artifacts_root, task_id))
         self._write_summary_json(task_dir, task_id, task_title, clean_summary or None, follow_ups)
         if not clean_summary:
@@ -1296,10 +1351,26 @@ class Supervisor:
                 "structured `follow_ups` array. Each record is minimal and **evidence-gated**: a "
                 "`title`, a short `rationale`, the `paths` it concerns, `evidence` pointers "
                 "(files/lines/commits/checks that substantiate it), a `severity` "
-                "(low/medium/high), and an optional `action_hint`. Propose only debt grounded in "
-                "what actually happened this run — never speculative ideas. Leave the array empty "
-                "when nothing qualifies; a record without evidence is dropped.\n"
+                "(low/medium/high), and an optional `action_hint`. The `title` is an independent "
+                "imperative label (aim for 80 characters or fewer) that reads on its own in a work "
+                "queue — never a prefix or restatement of `rationale`. Propose only debt grounded "
+                "in what actually happened this run — never speculative ideas; a record without "
+                "evidence is dropped.\n"
+                "**Always emit the `follow_ups` key** — an empty array when nothing qualifies. "
+                "Omitting it fails the response schema and costs the whole synthesis.\n"
             )
+            if gates:
+                # Both sources land in one list, and the merge dedups on exact text only, so a
+                # paraphrase of an accepted finding survives as a second bullet — measured at 10
+                # bullets for ~6 issues, two pairs disagreeing on severity. Cheapest sound fix is
+                # to stop the restatement rather than to guess which near-duplicates are the same.
+                prompt += (
+                    "Do **not** restate the evaluator findings listed under the gate verdicts "
+                    "above: every finding a gate accepted is carried into this list "
+                    "deterministically, so repeating one in your own words produces a duplicate "
+                    "entry (often at a contradictory severity). Record only debt that is NOT "
+                    "already in that list.\n"
+                )
         if with_delta:
             prompt += (
                 "\n## Candidate memory delta\n"
