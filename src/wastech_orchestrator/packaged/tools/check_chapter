@@ -321,7 +321,20 @@ def _resolve_scope(paths: dict[str, object]) -> tuple[Path, list[str]]:
     return repo, []
 
 
+def _pin_stdio_to_utf8() -> None:
+    """Read stdin and write stdout as UTF-8 regardless of the host's locale encoding.
+
+    Cross-platform requirement, not a nicety: the violation messages below carry `≤` and `→`, and a
+    repo path may carry anything. A Windows host hands a piped child `cp1252`, which cannot encode
+    either character — the script would die on `print` and the tool node would see an empty stdout
+    instead of the violation it asked for.
+    """
+    for stream in (sys.stdin, sys.stdout):
+        stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main() -> int:
+    _pin_stdio_to_utf8()
     try:
         payload = json.loads(sys.stdin.read() or "{}")
     except (json.JSONDecodeError, ValueError) as exc:

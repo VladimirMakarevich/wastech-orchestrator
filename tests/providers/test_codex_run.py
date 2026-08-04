@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from wastech_orchestrator.config.schema import ProviderConfig, SecurityConfig
+from wastech_orchestrator.providers import codex as codex_mod
 from wastech_orchestrator.providers.base import (
     FALLBACK_ELIGIBLE,
     AgentProvider,
@@ -31,6 +32,19 @@ from wastech_orchestrator.runtime_layout import InternalDenyPolicy
 
 FIXED_TIME = datetime(2026, 6, 11, 12, 0, 0, tzinfo=UTC)
 FAKE_GH_TOKEN = "ghp_" + "abcdef0123456789abcdef0123"
+
+
+@pytest.fixture(autouse=True)
+def _off_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the platform seam so this module's assertions do not depend on the host OS.
+
+    On a Windows host, `preflight` also demands that `codex-windows-sandbox-setup.exe` be
+    discoverable for the `workspace-write` profile these tests configure. There is no such helper
+    next to a fake binary, so every preflight here reported that instead of the `-c/--config` or
+    resume-grammar verdict under test. Nothing in this module is about that branch — it is covered
+    on any host by `test_codex_windows_helper.py`, which injects the same seam the other way.
+    """
+    monkeypatch.setattr(codex_mod.platform, "system", lambda: "Linux")
 
 
 def _success_stream(status: str = "success") -> str:
