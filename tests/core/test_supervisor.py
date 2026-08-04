@@ -618,9 +618,13 @@ def test_supervisor_final_summary_written_matches_what_reached_disk(tmp_path: Pa
     # the floor, so the ledger claimed a summary for a run that wrote none — exactly the case an
     # operator audits. It now states what actually landed.
     dump = '<summary></summary><follow_ups>[{"title":"x"}]</follow_ups>'  # sanitizes to nothing
-    for message, written in ((dump, False), ("test", False), (_prose("Real synthesis."), True)):
-        store = _store(tmp_path / message[:6])
-        sup = _supervisor(tmp_path / message[:6], FakeRouter([_ok("s1", message)]), store)
+    cases = ((dump, False), ("test", False), (_prose("Real synthesis."), True))
+    # One store per case, under an index-named directory: the messages themselves carry `<`/`>`,
+    # which Windows forbids in a path component.
+    for index, (message, written) in enumerate(cases):
+        root = tmp_path / f"case{index}"
+        store = _store(root)
+        sup = _supervisor(root, FakeRouter([_ok("s1", message)]), store)
         sup.finalize(task_id=_TASK, task_title="T")
         final = next(e for e in store.get_evaluations(_TASK) if e.kind == "supervisor_final")
         assert json.loads(final.findings_json)["summary_written"] is written
