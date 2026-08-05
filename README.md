@@ -34,7 +34,7 @@ You start by defining a **flow** — the sequence of steps a task should go thro
 Only then do you write tasks. Each task names a flow, and the orchestrator drives it through those steps end to end:
 
 ```text
-   1. Define your flow      →   refine → plan → implement → test → review → fix → publish
+   1. Define your flow      →   refine → plan → implement → test → review → fix → document → publish
                                 (choose a built-in one or tailor your own)
 
    2. Write a task          →   tasks/pending/task-001.md   (names the flow to run)
@@ -128,6 +128,7 @@ Secrets are read from the environment (keep them in a gitignored `.env` or `expo
 ```text
 worc install [repo]     set up the orchestrator in a repository
 worc preflight          check the agent CLIs and isolation policy (read-only)
+worc validate-flow --all validate your flows in .worc/flows/ (preflight does not)
 worc run <task-file>    process exactly one task end to end
 worc watch              process pending tasks in a loop, with periodic git sync
 worc status             show the active / latest task

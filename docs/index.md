@@ -2,7 +2,7 @@
 
 A lean orchestrator that turns Markdown tasks into reviewed Pull Requests — driving **Codex** and **Claude Code** agents through a deterministic **flow** (a validated graph of typed steps) while keeping the Git lifecycle, security policy, crash recovery, and publication under a single owner.
 
-> **Status: 0.x pre-release.** The flow engine and its packaged flows (`implementation`, `deep_research`, `security_audit`), node-based provider routing and infrastructure fallback, the constant advisory supervisor layer, the security/isolation gate, scoped Git audit commits, SQLite checkpoints and crash recovery, the watch loop with periodic Git sync, and the `install` setup flow are implemented and covered by an extensive test suite. Telegram HITL is implemented; parallel `git worktree` execution remains on the roadmap.
+> **Status: 0.x pre-release.** The flow engine and its packaged flows (`implementation`, `deep_research`, `security_audit`, `merge`, and the content/blog authoring flows), node-based provider routing and infrastructure fallback, the advisory supervisor layer (on by default, removable), the deterministic PR-body report, the security/isolation gate, scoped Git audit commits, SQLite checkpoints and crash recovery, the watch loop with periodic Git sync, persistent repo-scoped memory, and the `install` setup flow are implemented and covered by an extensive test suite. Telegram HITL is implemented; parallel `git worktree` execution remains on the roadmap.
 
 ---
 
@@ -36,7 +36,7 @@ A lean orchestrator that turns Markdown tasks into reviewed Pull Requests — dr
 ## Core promises
 
 - **Agents edit; the orchestrator owns Git.** Branch creation, commit, push, and PR are never delegated to an agent.
-- **The pipeline is data, not code.** A task's `task_type` resolves to a validated **flow** graph of typed nodes; a constant **advisory supervisor** watches every step read-only and writes the PR summary, but it never changes the route, reworks a step, or overrides a gate.
+- **The pipeline is data, not code.** A task's `task_type` resolves to a validated **flow** graph of typed nodes; an **advisory supervisor** watches the run read-only at a configured cadence and writes the PR summary, but it never changes the route, reworks a step, or overrides a gate. Switch it off and the PR body is rendered deterministically from the run's own recorded facts.
 - **Node-based routing, fallback for infrastructure errors only.** Each flow node runs on its declared provider (else the global primary); test and review failures enter a bounded `fix` loop instead of switching providers.
 - **Security policy is a config-level invariant.** No task or `extra_args` can weaken the sandbox or the environment allowlist; flow-wide ceilings (`permission_ceiling`/`output_policy`/`network_policy`) are validated fail-closed before any task runs.
 - **Crash-safe and idempotent.** SQLite checkpoints at every step; a restart resumes in-flight work without double-commits or duplicate PRs.

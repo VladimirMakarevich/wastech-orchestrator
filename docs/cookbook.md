@@ -2,7 +2,7 @@
 
 This cookbook shows common ways to use **wastech-orchestrator**. It is written for operators who run the orchestrator and for developers who want a practical path from "empty workspace" to "task processed into a Pull Request".
 
-The canonical product reference remains the code and [worc_architecture.md](worc_architecture.md). The full CLI surface (`install`, `preflight`, `telegram-test`, `run`, `rerun`, `finalize`, `prs`, `merge-task`, `watch`, `stop`, `restart`, `status`, `top`, `shell`, `list`, `tasks`, `completion`, `logs`, `upgrade-config`, `upgrade-docs`) exists in the current codebase; this guide focuses on the everyday subset.
+The canonical product reference remains the code and [worc_architecture.md](worc_architecture.md). The full CLI surface (`install`, `preflight`, `validate-flow`, `telegram-test`, `run`, `promote`, `rerun`, `finalize`, `prs`, `merge-task`, `watch`, `stop`, `restart`, `status`, `top`, `shell`, `list`, `tasks`, `completion`, `clear`, `logs`, `runs`, `memory`, `upgrade-config`, `upgrade-docs`) exists in the current codebase; this guide focuses on the everyday subset.
 
 ## 1. Install Into A Repository
 
@@ -33,7 +33,7 @@ worc install .                 # interactive wizard (same on macOS)
 worc install . --non-interactive --provider codex --no-create-pr
 ```
 
-Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, the agent task-authoring `guide/` (the packaged `worc/` docs copied to `.worc/guide/`), the editable `flows/` copies (built-in flows + their per-flow prompt dirs), SQLite `state.db` (with `-wal`/`-shm`), `orchestrator.pid`, `logs/`, and `workspace/`, plus the `tasks/rejected` quarantine. (Check logs are not a top-level directory — they live under `logs/<task-id>/checks/`.) `install` appends two lines — `.worc/` and the sibling gitignored `.worc-io/` exchange — to the repo's tracked `.gitignore`. The only things kept tracked outside `.worc/`/`.worc-io/` are the `tasks/` lifecycle dirs (`pending/`/`done/`/`failed/`) at the repo root — they are intentionally git-tracked, and the task file plus its `<id>.summary.md` (in `done/` or `failed/`) are the audit trail the orchestrator commits.
+Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, the agent task-authoring `guide/` (the packaged `worc/` docs copied to `.worc/guide/`), the editable `flows/` copies (built-in flows + their per-flow prompt dirs), the `tools/` copies (executables the packaged `tool` nodes resolve against), SQLite `state.db` (with `-wal`/`-shm`), `orchestrator.pid`, `logs/`, `runs/` (per-task frozen bundles + sealed exchanges), `memory/`, and `workspace/`, plus the `tasks/rejected` quarantine. (Check logs are not a top-level directory — they live under `logs/<task-id>/checks/`.) `install` appends two lines — `.worc/` and the sibling gitignored `.worc-io/` exchange — to the repo's tracked `.gitignore`. The only things kept tracked outside `.worc/`/`.worc-io/` are the `tasks/` lifecycle dirs (`pending/`/`done/`/`failed/`) at the repo root — they are intentionally git-tracked, and the task file plus its `<id>.summary.md` (in `done/` or `failed/`) are the audit trail the orchestrator commits.
 
 Re-running is idempotent (existing files are skipped and `config.yaml` is never overwritten); `--reconfigure` backs up and regenerates; `--dry-run` writes nothing. See [configuration.md](configuration.md) for the discovery order and [operations.md](operations.md) for the full wizard. The remaining recipes all run from inside the repo without `--config`.
 
@@ -182,7 +182,7 @@ Exit codes:
 |  `1` | The task reached `failed`.                 |
 |  `2` | The task reached `manual_action_required`. |
 
-A successful task runs through validation, branch preparation, optional refinement, planning, implementation, checks (testing), review, fixing if needed, then publishing — commit, push, and PR creation — followed by terminal cleanup back to `repo.base_branch`. The plain-language summary that becomes the PR body is **not** a separate stage: the constant supervisor layer writes it at task close (see [configuration.md](configuration.md#supervisor)).
+A successful task runs through validation, branch preparation, optional refinement, planning, implementation, checks (testing), review, fixing if needed, the whole-task `documentation` pass, then publishing — commit, push, and PR creation — followed by terminal cleanup back to `repo.base_branch`. The plain-language summary that becomes the PR body is **not** a separate stage: the supervisor layer writes it at task close (see [configuration.md](configuration.md#supervisor)) — and with that layer switched off, the deterministic report is the body instead.
 
 ### Find a task to act on (`list`) + Tab-completion
 
@@ -341,8 +341,30 @@ Review for security first. Reject the change unless:
 Notes:
 
 - Variables are metadata/paths only — e.g. `{repo_path}`, `{diff_path}`, `{plan_path}`. Large content stays in the artifact files the agent reads by path. Unknown `{...}` and literal braces pass through unchanged.
-- The exact text sent each run is saved (redacted) to `.worc/logs/<task-id>/stages/<node-id>/rendered-prompt.md` so you can verify what the agent received.
+- The exact text sent each run is saved (redacted) to `.worc/logs/<task-id>/stages/<node-id>/run-<node-run-id>/rendered-prompt.md` — one per node run, so a re-running node keeps every pass.
 - A template is prompt text only: it cannot change the provider, sandbox/approvals, denied commands, or enable `git`/`gh` publishing.
+
+## 7b. Run A Different Flow (`deep_research`)
+
+A task selects its pipeline with one front-matter field. Nothing else changes — same engine, same gates, same supervisor layer:
+
+```markdown
+---
+id: task-042
+title: "How does provider fallback actually decide?"
+task_type: deep_research
+---
+```
+
+`deep_research` is worth knowing in outline because its shape differs from the coding flow in three ways an operator notices:
+
+- **The repository analysis is three sequential passes, not one**, each with a fresh context window and a narrow mandatory remit (`analysis_core` → `analysis_surfaces` → `analysis_docs_tests`). One node asked to walk everything self-triages: it goes deep on what it recognises and labels the rest "no findings". The remit is what forces even depth. For a narrow question, disable the passes you do not need **per task** (`nodes.analysis_surfaces: { enabled: false }`) rather than editing the graph.
+- **A `coverage_gate` measures the audit instead of reading it.** Every subsystem the task declares must show a traced property, not a bare "no findings" label; its rework edge re-enters at `analysis_core`, because a gap can sit in any of the three remits. That catches a thin pass before `synthesis` writes a conclusion on top of it.
+- **Two `checks` nodes run before the expensive evaluators**: the deterministic `citation` checker over the sources manifest (its report records the `manifest_path` it validated, so the fact-verification evaluator can open the same file), and a `command_profile` node running _your_ `checks.command_sets` over the Markdown about to be committed. That second one costs nothing until you configure a matching set — and once you do, it changes how the flow can fail (see the catch-all note in §8).
+
+`refinement` here is a **scoping** pass and runs on every task: it decomposes the question into sub-questions and anchors each to where its evidence lives. (It used to be gated on `derived.needs_refinement`, which is only true for an ill-formed task file — so on any well-formed task the scoping pass never ran. A complete task file and a scoped question are different things.) Skip it per task when the question is narrow enough.
+
+**What the deliverable directory contains.** `deep_research` declares `output_policy: repository_document`, so every write is confined to `docs/research/<task-id>/` and the bundle must produce `report.md` + `sources.json`. The organizing pass before the writer (`architecture_design`) deliberately writes **no file** — it returns its blueprint as its output and the writer consumes it. An intermediate blueprint written into the report directory ships in the pull request next to the deliverable, and the run that proved this shipped two documents that disagreed about coverage. So the report directory holds the deliverable and nothing else.
 
 ## 8. Configure Checks
 
@@ -383,6 +405,25 @@ checks:
 ```
 
 An **empty diff** runs nothing (the checks node passes vacuously); a changed path claimed by **no** set runs no set on its account (cover shared/root files with a no-`paths` catch-all set). A skipped `skip_if_unavailable` set is recorded loudly and **blocks `git.auto_merge`** even when the node passes. See [configuration.md](configuration.md#checks) for every field and [operations.md](operations.md#command-set-diagnostics) for the `preflight`/`status` command-set summary.
+
+Two things about that catch-all worth knowing before you rely on it:
+
+- **It fires on a Markdown-only diff too.** A no-`paths` set runs on _any_ non-empty diff, so once you also run a document-producing flow (`deep_research`, or the content/blog flows), that research run pays for the whole code gate — and a command that **rewrites** files rather than checking them parks the run on the green-but-dirtying guard. Either scope the catch-all's `paths` to code, or keep it and add a documents set running a format **check**:
+
+  ```yaml
+  checks:
+    command_sets:
+      code:
+        paths: ["src/**", "tests/**", "pyproject.toml"] # scoped, not catch-all
+        commands:
+          - { name: lint, argv: ["ruff", "check", "."] }
+      docs:
+        paths: ["**/*.md"]
+        commands: # a CHECK, never a formatter
+          - { name: prose, argv: ["npx", "prettier@3", "--check", "**/*.md"] }
+  ```
+
+- **`skip_if_unavailable` is not an escape hatch.** It converts a launch failure into a loud skip, nothing more — and a set that was the _only_ one the diff selected and is then skipped leaves the gate with nothing run, which parks the task at `manual_action_required` exactly where the launch failure would have. When you actually want a gate not to run, disable the node per task: `nodes.testing: { enabled: false }`.
 
 ## 9. Configure The Audit Commit
 
@@ -430,23 +471,32 @@ The most useful files are:
 
 ```text
 .worc/logs/
-  completed.jsonl
+  completed.jsonl                 # the ledger: one record per terminal task
+  daemon.log                      # the watch daemon's live stream (+ rotated backups)
+  daemon-startup.log              # only the daemon's pre-configuration output
   <task-id>/
     validation_report.json
     task.normalized.json
     task.enriched.md
     plan.md
     current.diff
-    review/findings.json
     checks/
-    stages/
-    summary.md
+    hitl/
+    memory/
+    stages/<node-id>/
+      history.jsonl               # one line per run of this node
+      run-<node-run-id>/          # every re-run kept: rendered-prompt.md, findings.json, <id>.out.md, …
+    summary.md / summary.json
     failure_report.json
     stuck.md
     publish/
 ```
 
 Use `completed.jsonl` as the index of terminal tasks. Use `stuck.md` and `failure_report.json` when the result is `manual_action_required`. Provider stdout/stderr/event files are redacted; the full process environment and secrets must not be stored.
+
+Note that a node's per-run artifacts are **not** at a fixed path — an evaluator's findings live under `stages/<node-id>/run-<node-run-id>/findings.json`, one directory per run, so a `review → fixing → testing → review` loop keeps every pass instead of clobbering the last. Read `stages/<node-id>/history.jsonl` for the chronological index.
+
+Per-task **runtime** state (frozen control + instruction bundles, sealed exchanges) is a separate tree under `.worc/runs/`, cleaned automatically for a successful task and on demand with `worc runs clean`; the log tree above is cleaned with `worc logs clean` (which also sweeps the daemon logs).
 
 Do not live-tail provider `stdout.log` or `stderr.log`: provider output is finalized and redacted after the subprocess exits. Use the operator log and `status` while work is in progress, then inspect provider artifacts after the attempt completes.
 
@@ -457,8 +507,10 @@ Do not live-tail provider `stdout.log` or `stderr.log`: provider output is final
 | Cause | Action |
 | --- | --- |
 | Fix budget exhausted | Read `stuck.md`, inspect the final diff, and decide whether to fix manually or refine the task. |
+| Checks gate incomplete (required toolchain absent, or every selected set skipped) | Install the toolchain, narrow the selecting `paths`, or disable that checks node for the task. A fix loop cannot install toolchains, so this never routes to `fixing`. |
 | Terminal cleanup unsafe | Inspect `repo.local_path` with `git status`, reconcile the branch, and return to `repo.base_branch`. |
 | More than one active task on restart | Decide which task is authoritative, then repair state before rerunning. |
+| Git control state drifted across an attempt (WRI-009) | Inspect `git status` plus the repo-local config/hooks, reconcile, then `rerun --continue`. On a `read-only` node holding the git-evidence grant this only warns and continues. |
 
 After resolving the problem, run:
 
@@ -481,10 +533,20 @@ agents:
       command: "codex"
       model: ""
       timeout_seconds: 7200
-      sandbox: "workspace-write"
-      permission_profile: "workspace-write"
+      permission_profile: "workspace-write" # the access level — there is no `sandbox` key here
       extra_args: []
       primary: true # the global primary (exactly one; must be in agents.allowed)
+```
+
+`sandbox: read-only` / `sandbox: workspace-write` is **rejected at config load** — the access level lives on `permission_profile`, and `sandbox` now only accepts the full-access escape `danger-full-access` (`upgrade-config` folds a legacy value across for you).
+
+Run without the oversight layer (cheapest possible run; the PR body becomes the deterministic report):
+
+```yaml
+supervisor:
+  enabled: false
+memory:
+  enabled: false # otherwise it is forced false for the run, with a warning
 ```
 
 No automatic PR creation:

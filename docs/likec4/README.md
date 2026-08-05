@@ -18,9 +18,11 @@ How this maps onto the orchestrator:
 | Level | Here | View in the model |
 | --- | --- | --- |
 | Context | operator, human-in-the-loop, `codex`/`claude`, `git`/`gh`, Telegram | `landscape` |
-| Container | single process + `state.db` / `.worc/` artifact storage | `containers` |
-| Component | **functional blocks B01–B32** | `components` |
+| Container | single process + `state.db` / `.worc/` private home / `.worc-io/` agent exchange | `containers` |
+| Component | **functional blocks B01–B32**, plus the post-taxonomy components below | `components` |
 | Code | — | (skipped; see the source under `src/`) |
+
+`B01`–`B32` is a **closed** taxonomy — it exists only in this model. Components added after it was closed carry descriptive names instead of invented numbers: `Summary Report` (the deterministic PR body), `Exchange Publisher` (the redaction + path-safety boundary onto `.worc-io/`), `Frozen Bundles` (the per-task immutable control and instruction snapshots under `runs/`), and `Memory`. Follow that convention rather than extending the numbering.
 
 L2 is intentionally thin here: the orchestrator is a **single process**, so "containers" means the process itself plus the storage it owns; child CLIs are external systems launched as subprocesses.
 
@@ -62,10 +64,12 @@ npx likec4@latest export png docs/likec4 -o docs/likec4/img
 | View | Type | What it shows |
 | --- | --- | --- |
 | `landscape` | view | Context (C4 L1): system + people + external systems |
-| `containers` | view of `orchestrator` | Containers (C4 L2): process + `state.db` / `.worc/` storage |
+| `containers` | view of `orchestrator` | Containers (C4 L2): process + `state.db` / `.worc/` / `.worc-io/` storage |
 | `components` | view of `proc` | Components (C4 L3) = functional blocks |
-| `crosscutting` | view | Cross-cutting concerns: security, editing, observability |
+| `crosscutting` | view | Cross-cutting concerns: security, redaction, isolation boundaries, observability |
+| `isolation` | view | What the agent may read, and what is frozen per task (the exchange + frozen bundles) |
 | `happyPath` | **dynamic view** | Step-by-step run of a single task: `run` → … → PR |
+| `implementationFlow` | **dynamic view** | The default flow's node graph with its bounded fix loop |
 
 A `dynamic view` is analogous to a sequence diagram: it shows the order of interactions over time.
 
@@ -78,7 +82,7 @@ To extend further:
 - **Icons** (looks "production-ready"): in an element's `style { … }` block add `icon tech:python`, `icon tech:sqlite`, etc. — see the icon catalog on the LikeC4 website. (Not added by default to avoid coupling to specific icon names without local verification.)
 - **Split into files**: `spec.likec4` / `model.likec4` / `views.likec4` (LikeC4 merges all `*.likec4` files in the directory) — convenient as the model grows.
 - **Typed relationships**: declare relationship kinds (`relationship async`, `relationship spawns`) with their own line style.
-- **All 32 blocks**: a representative subset (~18, now including the B28 flow engine and B31 supervisor) is currently included; the rest are listed as comments in `workspace.likec4` and can be added following the same pattern.
+- **All 32 blocks**: a representative subset (~22, including the B28 flow engine, the B31 supervisor, and the B32 checkers/tools) is currently included; the rest are listed as comments in `workspace.likec4` and can be added following the same pattern.
 - **CI**: run `likec4 build`/`export` in the pipeline to catch drift and publish the site.
 
 ## Keeping in Sync with Code (important)

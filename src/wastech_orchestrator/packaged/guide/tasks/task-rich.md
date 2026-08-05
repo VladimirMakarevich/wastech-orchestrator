@@ -6,7 +6,7 @@
 # `task_type` picks WHICH flow runs the task (omit ⇒ implementation); the task only names it.
 id: task-webhook-retry-budget
 title: "Add a bounded retry budget to webhook delivery"
-task_type: implementation # selects the FLOW. Omit ⇒ implementation (default). Built-ins: implementation, deep_research, security_audit; or a custom operator flow at .worc/flows/<task_type>.yaml. The task only names the flow — never edits it.
+task_type: implementation # selects the FLOW. Omit ⇒ implementation (default). Built-ins: implementation, deep_research, security_audit, content_chapter, content_translate, blog_article, blog_article_revise; or a custom operator flow at .worc/flows/<task_type>.yaml. The task only names the flow — never edits it.
 branch_name: "feature/ABC-123-webhook-retry-budget" # full branch override; omit for repo.branch_prefix/id/title slug. Ignored when branch_mode is existing/current.
 branch_mode: new # new (default; fork a fresh branch from base) | existing (work in branch_ref) | current (use the current checkout as-is). Overrides repo.branch_mode.
 # branch_ref: "feature/big-feature" # REQUIRED iff branch_mode: existing (the already-existing branch to check out); omit for new/current.

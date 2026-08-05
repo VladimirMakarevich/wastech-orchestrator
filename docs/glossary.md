@@ -19,7 +19,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 ## Entry points
 
 - **`wastech-orchestrator` / `worc`** - The CLI entry point. Both names expose the same commands, so the short alias is just a convenience, not a different interface.
-- **`install`** - Binds the current repository into `<repo>/.worc/`, writes or refreshes `config.yaml`, seeds the packaged guide and flow copies, and can run preflight after setup.
+- **`install`** - Binds the current repository into `<repo>/.worc/`, writes or refreshes `config.yaml`, seeds the packaged guide, flow, and `tool`-executable copies, and can run preflight after setup. `--reconfigure` snapshots what it replaces and keeps only the newest three of each `config.yaml.bak-*` / `flows.bak-*` / `tools.bak-*` (never your `state.db*.bak*`).
 - **`run`** - Processes one task file end to end through the orchestrator. Takes the **path** to the task file (e.g. `tasks/pending/my-task.md`), not a task id — it starts a new task from the file. (Lifecycle commands like `rerun`/`status`/`finalize` take the task **id** instead.)
 - **`promote`** - Moves a staged task file from `tasks/preparing/` into `tasks/pending/` (atomic rename). Takes a task **id** or file name, or `--all`; a decomposition root pulls its subtask specs along with it. The watcher never scans `tasks/preparing/`, so a draft composed there is never picked up mid-write.
 - **`watch`** - Watches the task queue, resumes in-flight work first, then picks pending tasks one at a time. `--queue NAME` serves only that queue.
@@ -31,7 +31,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`clear`** - Clears the terminal screen and its scrollback (the ANSI screen-wipe `Ctrl+L`/Unix `clear` emits). A visual wipe only — no logs or files are deleted (that is `logs clean`). Available both as a standalone command and as a `worc shell` verb.
 - **`list`** - Read-only enumeration of the active task, the `tasks/pending` queue, and recent terminal tasks; `--format ids` (filtered by `--scope`) is the machine-readable source that backs completion.
 - **`completion`** - Prints a `bash`/`zsh` completion script (sourced once) that completes subcommands and flags statically and task ids dynamically via `worc list --format ids`.
-- **`preflight`** - Runs read-only readiness checks for providers, isolation, and configured check sets.
+- **`preflight`** - Runs read-only readiness checks for providers, isolation, Telegram, and the configured check sets, and announces each active relaxation (`read-isolation: OFF`, `git-evidence: ON`, `native Claude memory ON`). It does **not** validate flows — that is `validate-flow`.
 - **`telegram-test`** - Sends one correlated Telegram prompt and waits for a reply as a smoke test.
 - **`upgrade-config`** - Updates an older `config.yaml` to the current schema shape without changing user values.
 - **`upgrade-docs`** - Refreshes the installed packaged guide copy under `.worc/guide/`.
@@ -40,6 +40,10 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`prs`** - Read-only list of orchestrator PRs that are open and awaiting merge; `--check` adds live GitHub state, `--sync` reconciles PRs merged externally (dry-run unless `--yes`).
 - **`merge-task`** - Operator go-ahead to merge a reviewed PR: pulls `base_branch` into the task branch, resolves any conflicts via the merge flow, then merges. The human-in-the-loop counterpart to `git.auto_merge`.
 - **`tasks`** - Read-only list of every known task with its status and branch; `--status` filters.
+- **`validate-flow`** - Runs the full fatal flow validator on demand over `.worc/flows/`, config-aware and read-only, without claiming a task. Takes a flow NAME or `--all` (a bare invocation is a usage error). Exit `0` valid / `1` invalid / `2` not found or no config. **`preflight` no longer validates flows** — this is where flow correctness is checked before you queue work, and the engine enforces the same validator fatally at dispatch regardless.
+- **`logs clean`** - Sweeps the whole `.worc/logs/` root: per-task artifact dirs **and** the daemon logs (`daemon.log` + backups, `daemon-startup.log`), keeping the ledger unless `--all`. `--keep N --all` honors both. It refuses while a task is active, and holds the daemon logs back while a watch daemon is live (two distinct messages).
+- **`runs clean`** - Removes per-task frozen bundles and sealed exchanges under `.worc/runs/`; `--include-quarantine` also drops tainted exchange evidence. Refuses while a task is active. The manual counterpart to `logging.clean_runs_on_success`.
+- **`memory`** - Inspects and curates the persistent store under `.worc/memory/`: `show` / `validate` (read-only) and `compact` / `restore` / `clear` (mutating, refused while a task is active).
 - **`--config`** - Explicit path to `config.yaml`; it overrides automatic discovery.
 - **`--env-file`** - Explicit path to an environment file; if omitted, the orchestrator auto-loads `<repo>/.worc/.env` when present.
 - **`--version`** - Prints the CLI version and exits.
@@ -73,7 +77,9 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **State machine** - The finite set of task statuses and allowed transitions between them.
 - **Single processing slot** - The invariant that only one task can be active at a time.
 - **Task lifecycle folders** - `tasks/preparing` is the staging folder the watcher never scans (compose a task there, then `promote`), `tasks/pending` holds queued tasks, `tasks/done` and `tasks/failed` hold terminal tasks, and `.worc/tasks/rejected` is the quarantine folder for invalid tasks. A running task keeps its file in `tasks/pending` — "currently active" is tracked by its `state.db` status, not a folder. The `tasks` root is the default; it is configurable via `paths.tasks_dir` (the subfolder names are fixed).
-- **`summary.md`** - The plain-language handoff written at task close. In the default publish path it becomes the PR body; when synthesis cannot run, the orchestrator falls back to a deterministic minimal summary.
+- **`summary.md`** - The plain-language handoff written at task close. In the default publish path it becomes the PR body. When no provider-authored synthesis reaches disk — the supervisor layer is off, the terminal has no prose by design, the synthesis could not run, or the prose came back **collapsed** below a short floor — no `summary.md` is written and the **deterministic report** becomes the PR body instead (the run is flagged `degraded`).
+- **Deterministic report** - The single renderer for a PR body with no provider-authored prose. Sections: `Changes / Steps / Checks / Gates / Technical debt / follow-ups / Pipeline nodes skipped`. A pure function of `state.db` plus the task's artifacts (two renders are byte-identical), it never inlines the diff — it names the changed paths and points at `logs/<task-id>/current.diff`. It replaced the four-field `What / How / Integration / Why` stub, so a `failed` or `manual_action_required` run now gets a real report.
+- **`degraded`** - The additive `summary.json` flag marking a run whose synthesis was expected but did not reach disk (absent, unusable, or collapsed).
 - **`validation_report.json`** - The structured report written by the validation gate. Rejected tasks use it to explain the failure, and accepted tasks may also persist it for resume/audit.
 - **`task.normalized.json`** - The normalized resume-safe copy of the parsed task metadata written under `logs/<task-id>/` and loaded back on recovery.
 - **`rejected`** - The quarantine outcome for a structurally invalid task. Rejected tasks do not create a branch.
@@ -103,7 +109,9 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`agents.decomposition.max_subtasks`** - Maximum accepted split size for decomposition.
 - **`agents.providers.<id>`** - Provider-specific config for `codex` or `claude`. It holds the executable command, model, reasoning level, timeout, permission profile, extra args, and the `primary` marker; Codex also uses `sandbox`, and Claude also uses `max_turns`.
 - **`security`** - Isolation, environment allowlist, denied paths, denied commands, and the fail-closed security ceiling.
-- **`security.strict_isolation`** - Controls whether full-access provider modes are rejected at preflight.
+- **`security.strict_isolation`** - Controls whether full-access provider modes are rejected at preflight. The master switch: it always wins toward relaxation.
+- **`security.disable_read_isolation`** - Operator escape hatch (default `true`, i.e. read-isolation off out of the box) that relaxes only the **read** side of the envelope: native provider instruction/config discovery is restored and the private read-deny projection is lifted. The write side stays — including the write-deny on Claude's own config home, which only `agents.providers.claude.allow_native_memory` lifts. Effective off = `disable_read_isolation OR NOT strict_isolation`.
+- **`agents.providers.claude.allow_native_memory`** - The **only** switch governing the write side of the native-memory deny. Off (default) keeps Claude Code's own auto-memory store `Write`/`Edit`-denied, so `.worc` remains the complete input set; on lets it persist across tasks outside the orchestrator's redaction net and audit, and announces itself per run.
 - **`security.allowed_environment`** - Environment variable names that are allowed to reach child processes.
 - **`security.denied_read_paths`** - Paths that the orchestrator will not read as secrets or task context.
 - **`security.denied_commands`** - Commands that are refused even if they are otherwise present in config or flow arguments.
@@ -138,11 +146,15 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`skills`** - Repo skill selection: whole-repo discovery + operator pins + supervisor proposal.
 - **`skills.dynamic`** - Whether the supervisor proposes a `node → skills` map once per task (skipped when the repo ships no skills).
 - **`skills.strict`** - Whether an unresolved operator skill pin stops the task (`true`) or is warned + skipped (`false`).
-- **`supervisor`** - The constant advisory layer above any flow.
-- **`supervisor.role_file`** - Role prompt file used by the supervisor.
-- **`supervisor.model`** - Provider model used by the supervisor, when set.
-- **`supervisor.reasoning`** - Reasoning level used by the supervisor, when set.
-- **`supervisor.provider`** - Provider the supervisor layer runs on (`codex`/`claude`); absent → the global primary. Validated ∈ `agents.allowed`, symmetric with flow nodes.
+- **`supervisor`** - The advisory oversight layer above any flow; on by default.
+- **`supervisor.enabled`** - Whole-layer switch (default `true`). `false` means the layer object is never built: no per-step observation, no finalize turn, no subtask handoff brief, no `skills.dynamic` proposal. The rest of the block becomes inert and unvalidated (one warning), and `memory.enabled` is forced to `false` for the run (a second warning names both keys). The PR body is then the deterministic report. It is its own key rather than a global `observe.mode: none` because the cadence-narrowing rule does not apply when there is no cadence.
+- **`supervisor.role_file`** - The observe-lens prompt file. Never loaded when the cadence resolves to `none`.
+- **`supervisor.provider`** - Provider all three phases run on (`codex`/`claude`); absent → the global primary. Validated ∈ `agents.allowed`, symmetric with flow nodes.
+- **`supervisor.observe`** - The observation cadence block: `mode` (`all`/`selected`/`events`/`none`, default `events`), `triggers` (`rework`/`failure`/`fallback`), `include_nodes` (for `selected`), plus this phase's `model`/`reasoning`. `tool`, `checks`, and the terminal `publish` node are never observed under any mode. A flow may **narrow** the mode but never widen it.
+- **`supervisor.finalize`** / **`supervisor.handoff`** - The other two phases' `model`/`reasoning`: the turn that writes `summary.md` (the PR body), and the subtask brief between decompose regions. Model and effort are **per phase** — there is no flat `supervisor.model`/`supervisor.reasoning` any more.
+- **`supervisor.emit_follow_ups`** (flow field, not config) - Opts a flow's finalize turn into emitting the evidence-gated `follow_ups` array. Off by default; code-oriented flows only. Independent of the evaluator-findings half, which is merged in regardless.
+- **`supervisor_usage`** - The measured per-run cost block in `summary.json`: calls, input, cached input, output, cost and provider wall time, as a total and split by job (`observe`/`finalize`/`handoff`/`skill`).
+- **`logging.clean_runs_on_success`** - Whether a **successful** task evicts its own per-task state under `.worc/runs/` (default `true`). Failed/parked tasks and quarantined evidence are never cleaned automatically; `worc runs clean` is the manual half.
 - **`prompt_audit`** - Global default for prompt recording. A per-task value can override it.
 - **`tools.default_timeout_seconds`** - Flow-wide default wall-clock timeout for a `tool` node whose own `timeout_seconds` is unset (default `3600`). Optional block; absent → the same default.
 
@@ -169,7 +181,7 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **Node bookkeeping** - `current_node` is the in-flight node inside `running`, `active_subtask` is the 1-based subtask counter on the task row, and `best_effort` lets an agent node continue when no provider can complete it.
 - **`output_artifact`** - A named slot that stores a node result and threads it downstream. Common slots include `enriched_spec` (`task.enriched.md`), `plan` (`plan.md`), and `summary` (`summary.md`).
 - **Implementation flow nodes** - `refinement` enriches a vague task, `planning` builds a plan and may propose decomposition, `implementation` edits files, `testing` runs checks, `review` performs read-only evaluation, `fixing` loops on quality findings, `documentation` writes the handoff material, and `publish` finalizes Git publication.
-- **Deep-research flow nodes** - `repository_analysis` reads the repo, `external_research` fetches outside sources, `architecture_design` shapes the report, `synthesis` writes the deliverable, `citation_check` validates `sources.json`, `fact_verification` and `critical_review` rework or accept, and `publish` creates the documentation PR.
+- **Deep-research flow nodes** - `refinement` scopes the question into anchored sub-questions (it runs on every task; it is no longer gated on `derived.needs_refinement`), `analysis_core` / `analysis_surfaces` / `analysis_docs_tests` are three sequential passes over disjoint surfaces each with a narrow mandatory remit, `coverage_gate` measures those passes (rework re-enters at `analysis_core`), `external_research` fetches outside sources, `architecture_design` organizes the evidence and writes **no file**, `synthesis` writes the deliverable (`output_file: report.md`), `citation_check` validates `sources.json`, `document_checks` runs the operator's `command_profile` over the Markdown about to be committed, `fact_verification` and `critical_review` rework or accept, and `publish` creates the documentation PR.
 - **Security-audit flow nodes** - `scope` frames the audit, `repository_analysis` inspects the repo, `dependency_scan` runs evidence scanners, `threat_analysis` and `finding_verification` refine findings, `report` writes the private report, and `private_storage` records it without git.
 - **`when`** - A deterministic skip predicate on a node. It enables or disables execution based on a resolved fact.
 - **`permission_ceiling`** - The highest permission profile allowed by a flow.
@@ -182,7 +194,12 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`budget`** and **`loop`** - The repeat counters on rework edges. They bound fix cycles and other repeated regions.
 - **`sub_flow`** - The decomposition region that is repeated for each accepted subtask.
 - **`decomposition`** - The flow feature that fans one task into sequential subtasks when planning accepts a split.
-- **`supervisor`** - The constant advisory layer above every flow. It observes completed steps read-only and writes the final summary, but it is not a node and not a status.
+- **`supervisor`** - The advisory layer above every flow (on by default, removable with `supervisor.enabled: false`). It observes completed steps read-only at its configured cadence and writes the final summary, but it is not a node and not a status.
+- **`output_file`** (flow node field) - Declares that the file an `agent` node writes **is** its output: `{<node_id>_path}` then resolves to a redacted copy of that file rather than the node's closing message. For a node whose deliverable is a document, the closing paragraph is the smaller half of what downstream nodes should grade.
+- **Node-output channel** - `{<node_id>_path}`: every `agent` node's output (as `<node_id>.out.md`) and every `tool` node's redacted stdout, exposed to later nodes as a **path**, derived from the node id with no declaration. Both `agent` and `evaluator` prompts resolve these names, so an evaluator can grade an upstream node's own work and not only the file a later node wrote from it.
+- **`defaults.evaluator`** (flow block) - Per-flow defaults every `evaluator` node inherits (`session_scope`, `permission_profile`, `max_rework_per_stage`, `gate_severity`), so a flow whose evaluators all judge "good enough" rather than "correct" can lower `gate_severity` once instead of per node.
+- **`gate_severity`** - The minimum finding severity that drives `rework` on an evaluator (`blocking`/`critical`/`high`/`medium`/`low`; built-in default `high`). Less-severe findings are recorded as advisory and reach the PR follow-ups instead. Orthogonal to `blocking`.
+- **`gating`** (persisted finding key) - Whether a finding met its node's `gate_severity`. It is what makes the follow-ups composition gate-aware: only findings a gate **let past** become PR follow-ups, plus a gating finding still open because a non-blocking evaluator spent its rework budget. The persisted shape is `{severity, reason, paths, gating, fix}`.
 - **`task_type` dispatch** - The mapping from task type to flow. It is the entry point for choosing which graph runs.
 
 ## Providers
@@ -206,7 +223,11 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **Quality failure** - A successful provider run that produced a failing result. It goes to fixing, not fallback.
 - **`session_unavailable`** - The provider could not resume the requested session. The router retries the same provider once with a fresh session.
 - **`permission_profile`** - The orchestrator permission profile passed to the provider adapter.
-- **`read-only`** - A permission profile that forbids writes.
+- **`read-only`** - A permission profile that forbids **writes**. It does **not** imply "no shell": a flow node declaring `git_evidence: true`, with `security.allow_git_evidence` on, may run the read-only git verbs while staying `read-only` on disk. Read the profile as a mutation guarantee, not a capability list.
+- **`git_evidence`** (flow node field) - A node's declaration that its job needs read-only delivery history. Inert on its own — the capability arrives only when the operator sets `security.allow_git_evidence`, and it reaches only the nodes that asked.
+- **`security.allow_git_evidence`** - The **grant** switch for that capability, not a kill switch: off means "no node _gains_ a capability it did not already have", and a Codex `read-only` node reads git history regardless (its sandbox permits commands). So off leaves the same flow with different reach per provider; on is what makes them match. Announced per run as `git-evidence: ON`.
+- **Control-state drift** (WRI-009) - Git control state (index, HEAD, task ref, repo-local config, hooks, merge markers) changing across a provider attempt. Normally terminal `manual_action_required` and never a fallback — **except** on a `read-only` node holding the git-evidence grant, where it warns and continues (that node cannot mutate the tree, and a benign `git log` side effect must not kill an expensive run). Every other profile still parks. Surfaced as `NodeOutcome.read_only_git_drift` (carrying the redacted aspect summary) and the ⚠️ trace label `TRACE_READ_ONLY_GIT_DRIFT`.
+- **⚠️ synthetic trace labels** - The three Telegram/console trace outcomes that are not a plain node verdict: `TRACE_REWORK_EXHAUSTED` (a non-blocking evaluator accepted after spending its rework budget), `TRACE_READ_ONLY_WRITE` (a `read-only` node wrote), and `TRACE_READ_ONLY_GIT_DRIFT` (the above — checked first of the two read-only labels, being the sharper event).
 - **`workspace-write`** - A permission profile that allows editing inside the workspace.
 - **`sandbox`** - The Codex isolation mode field.
 - **`danger-full-access`** - Codex full-access mode. It is operator-selectable but rejected when `strict_isolation` is enforced.
@@ -221,13 +242,13 @@ Use this file as the canonical reading aid for commands, task files, config keys
 
 - **`checks.command_sets`** - The operator-authored quality gate. The orchestrator does not auto-discover commands.
 - **`command_profile`** - The current `checks`-node mode that diff-selects operator-authored `checks.command_sets`, runs them all through the Check Runner, and maps the aggregate to pass/fail/incomplete.
-- **`citation`** - The deterministic citation-manifest checker used by `deep_research`; it fails when a cited source is broken.
+- **`citation`** - The deterministic citation-manifest checker used by `deep_research`; it fails when a cited source is broken. Its `citation.json` report records the `manifest_path` it validated, so a downstream verifier opens the same manifest rather than guessing at it.
 - **`dependency_scan`** - The core-owned argv scanner used by `security_audit`; it always reports pass and lets the flow decide what that means.
 - **Command set** - A named group of check commands selected by diff paths and run together.
 - **`ResolvedCheck`** - The normalized internal form of one check command. It is always an argv list, never a shell string.
 - **`ResolvedCheckSet`** - The normalized internal form of one command set.
 - **`cwd`** - The repo-relative working directory for one check command.
-- **`skip_if_unavailable`** - A check-set setting that allows a missing binary to be skipped loudly.
+- **`skip_if_unavailable`** - A check-set setting that allows a missing binary to be skipped loudly. **Not an escape hatch:** it converts a launch failure into a loud skip, so a set that was the _only_ one the diff selected and is then skipped leaves the gate with nothing run — and parks the task exactly where the launch failure would have. Disabling the checks node per task is the escape.
 - **Quality gate** - The check-run phase that can pass, fail, or be incomplete.
 - **Incomplete gate** - The gate state where a required toolchain is missing or every selected check was skipped. It sends the task to `manual_action_required`.
 - **Check Runner** - The component that launches configured checks and aggregates their outcome.
@@ -260,13 +281,17 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`terminal cleanup`** - Freeing the single processing slot after a task reaches a terminal status: it returns the working tree to `base_branch` (safely, or fails closed) when the branch mode / `repo.checkout_base_on_cleanup` calls for it, otherwise it leaves HEAD on the working branch.
 - **`workspace/repo`** - The dedicated clone or workspace used for agent edits.
 - **`<repo>/.worc/`** - The orchestrator runtime home. It holds config, the seeded editable `flows/` (and their `roles/`), the installed `guide/`, logs (check logs included, under `logs/<task-id>/checks/`), workspace state, and other generated files. The typed layout (WRI-004) names three surfaces under it: `control_home` (the operator-editable control plane — `config.yaml`, `flows/`, `tools/`, `guide/`), `private_home` (private runtime state the agent must never read — `state.db`, `logs/`, memory, secrets, process-control files), and `exchange_root` (`<repo>/.worc-io`, the redacted agent-facing exchange). All three resolve under `.worc`/`.worc-io` today.
-- **Frozen control bundle** (WRI-010) - A per-task, immutable snapshot of the exact control inputs a task's flow references (the flow YAML, every node `role_file`, the supervisor prompts, and each `tool` node's resolved executable), written to `<private_home>/control-bundles/<task-id>/` at task start. The orchestrator binds the flow runners, supervisor, and tool-node registry to it so no later node reopens live `.worc`, preventing an agent from rewriting a later prompt or tool mid-run. A live control edit during any attempt is detected (after the WRI-012 quiescence barrier) and routed to `manual_action_required` — never provider fallback. `continue`/resume reuses the original bundle (verified against `tasks.control_bundle_digest`); a fresh `rerun`/restart re-freezes from the operator's current control plane.
+- **`<private_home>/runs/`** - The one parent of every per-task runtime root: `control-bundles/`, `instruction-bundles/`, `exchange-seals/`, and `exchange-quarantine/`. They share one defining property — private state keyed by task id, written by one run, never agent-readable — so they are grouped rather than scattered beside the operator's own `config.yaml` / `flows/` / `guide/`. `runs/` (not the individual roots) is the named entry in the internal read-deny set and the single root retention reasons about. No migration code exists: in a workspace installed before the rename the four pre-rename directories are orphaned at the `.worc/` root.
+- **Frozen instruction bundle** (WRI-011) - A per-task, immutable snapshot of the agent inputs whose identity must stay stable — the validated task packet, the selected skill **packages**, and the root repository instruction files — under one `instruction_manifest_digest`, at `<private_home>/runs/instruction-bundles/<task-id>/`. The agent only ever reads redacted exchange copies of these.
+- **Exchange seal** (WRI-007) - The checksum-verified terminal snapshot of a task's `.worc-io/` exchange, at `<private_home>/runs/exchange-seals/<task-id>/seal-<NNNNNN>/`. Written at **every** terminal, success included — it is the archive of what the agent last saw, not a record of trouble. `rerun --continue` restores the latest verified one.
+- **Exchange quarantine** - Where a mutation-flagged exchange tree is kept as tainted evidence (`<private_home>/runs/exchange-quarantine/<task-id>/<NNNNNN>/`, with the expected and observed manifests). Never sealed, never restore-eligible, and never removed automatically — only `worc runs clean --include-quarantine` deletes it.
+- **Frozen control bundle** (WRI-010) - A per-task, immutable snapshot of the exact control inputs a task's flow references (the flow YAML, every node `role_file`, the supervisor prompts, and each `tool` node's resolved executable), written to `<private_home>/runs/control-bundles/<task-id>/` at task start. The orchestrator binds the flow runners, supervisor, and tool-node registry to it so no later node reopens live `.worc`, preventing an agent from rewriting a later prompt or tool mid-run. A live control edit during any attempt is detected (after the WRI-012 quiescence barrier) and routed to `manual_action_required` — never provider fallback. `continue`/resume reuses the original bundle (verified against `tasks.control_bundle_digest`); a fresh `rerun`/restart re-freezes from the operator's current control plane.
 - **State Store** - The SQLite-backed persistence layer around `state.db` that stores task state and run records.
 - **Ledger** - The append-only completed-task record in `completed.jsonl`.
 - **`state.db`** - The SQLite state store that keeps task progress and run bookkeeping.
 - **`logs/<task-id>/`** - The per-task artifact root.
 - **`summary.md`** - The human-readable handoff artifact written at task close; it doubles as the PR body in the default publish flow.
-- **`summary.json`** - The local-only machine-readable companion to `summary.md`.
+- **`summary.json`** - The local-only machine-readable companion to `summary.md`. One key set on every terminal and from both writers: `{what, summary, [follow_ups], [supervisor_usage], [degraded]}`.
 - **`failure_report.json`** - The structured report written when a task ends in failure or becomes stuck.
 - **`stuck.md`** - The human-readable stuck-state note for exhausted fix budgets.
 - **`completed.jsonl`** - The append-only ledger of terminal tasks.
@@ -318,4 +343,8 @@ Use this file as the canonical reading aid for commands, task files, config keys
 - **`footprint.location`**, **`footprint.tracking`**, **`footprint.external_root`** - Removed footprint keys from older config shapes.
 - **`min_size_signal`** and **`commit_per_subtask`** - Removed decorative decomposition keys that are no longer read.
 - **`security.deletion_approval_exempt_paths`** - Removed skip-list (config v25). Replaced by the inverse model — `security.trust_level` (which deletions ask at all) plus `security.protected_paths` (the always-ask floor). `upgrade-config` strips the old key; there is no automatic conversion.
-- **`summary stage`** - The old name for the idea that is now handled by the constant supervisor layer and the final `summary.md` artifact.
+- **`summary stage`** - The old name for the idea that is now handled by the supervisor layer and the final `summary.md` artifact.
+- **`write_minimal_summary`** - The removed four-field `What / How / Integration / Why` PR-body stub, and with it the `summary.json` triad `how` / `integration` / `why`. One deterministic report now writes the body on every terminal that has no provider prose.
+- **`GitManager.diff_stat`** - Deleted along with that stub; the stat comes from the durable `current.diff`.
+- **`supervisor.model`** / **`supervisor.reasoning`** - The former flat, one-per-layer model and effort keys. Both are now **per phase** under `supervisor.observe` / `.finalize` / `.handoff`.
+- **`agents.providers.codex.sandbox: read-only|workspace-write`** - Rejected at config load. The access level is `permission_profile`; `sandbox` now accepts only the full-access escape `danger-full-access`. `upgrade-config` migrates a legacy value.

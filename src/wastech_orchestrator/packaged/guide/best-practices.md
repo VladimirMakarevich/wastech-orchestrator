@@ -40,7 +40,7 @@ A task runs a **flow** — a fixed pipeline of stages. Omit `task_type` and you 
 task_type: deep_research # omit ⇒ implementation
 ```
 
-- **Built-ins:** `implementation` (default), `deep_research`, `security_audit`.
+- **Built-ins:** `implementation` (default), `deep_research`, `security_audit`, `content_chapter`, `content_translate`, `blog_article`, `blog_article_revise`. (`merge` ships too but is never task-dispatched.)
 - **Custom flows:** an operator can add `<repo>/.worc/flows/<task_type>.yaml`, and you select it by naming it in `task_type`. A `task_type` with no matching flow fails the task before any branch is created.
 
 The task only _names_ the flow; it never edits the graph or a stage's provider/model — those live in the flow YAML (an operator concern). The only per-task pipeline knob is disabling a node (`nodes.<node-id>.enabled: false`); to reshape the pipeline or retune models, author/edit the flow under `.worc/flows/`.
@@ -78,7 +78,7 @@ Before handing over a task:
 
 - [ ] `id` is lowercase, matches `^[a-z0-9][a-z0-9._-]{0,63}$`, has no trailing dot, and is not a Windows device name (`con`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`).
 - [ ] `title` is short, specific, and non-empty.
-- [ ] `task_type` is omitted (⇒ `implementation`) or names a flow that exists — a built-in (`deep_research`, `security_audit`) or an operator flow in `.worc/flows/`.
+- [ ] `task_type` is omitted (⇒ `implementation`) or names a flow that exists — one of the built-ins above, or an operator flow in `.worc/flows/`.
 - [ ] `## Description` is concrete and non-empty.
 - [ ] Acceptance criteria are present and testable (unless you intend refinement to add them).
 - [ ] `## Constraints` lists do-not-touch areas and dependency/compatibility limits.
