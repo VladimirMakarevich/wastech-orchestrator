@@ -39,6 +39,7 @@ nav:
   - Reference:
       - Configuration: configuration.md
       - Task Authoring: task-authoring.md
+      - Flow Authoring: flow-authoring.md
       - Telegram: telegram.md
   - Architecture:
       - Architecture Overview: worc_architecture.md

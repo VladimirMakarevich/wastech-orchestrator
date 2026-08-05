@@ -19,9 +19,9 @@ A live task belongs in the repo's own `tasks/pending/` directory (committed and 
 task_type: deep_research # or: security_audit, implementation (default), or a custom operator flow
 ```
 
-Built-in flows: `implementation` (default coding pipeline), `deep_research`, `security_audit` — `install` seeds editable copies into `<repo>/.worc/flows/`. An operator can add more by dropping a `<task_type>.yaml` there (the file's own `flow.task_type` must match its name), or replace a built-in by editing its seeded copy. `.worc/flows/` is the only place flows resolve from, so a `task_type` with no file there fails the task at flow resolution, before any branch is created.
+Built-in flows: `implementation` (default coding pipeline), `deep_research`, `security_audit`, and the content-authoring set `content_chapter` / `content_translate` / `blog_article` / `blog_article_revise` — `install` seeds editable copies of all of them into `<repo>/.worc/flows/`, plus the `tool` executables they reference into `.worc/tools/`. (`merge` ships too but is never task-dispatched: the orchestrator selects it via `git.merge_flow` when merging the base branch into a finished task branch conflicts.) An operator can add more by dropping a `<task_type>.yaml` there (the file's own `flow.task_type` must match its name), or replace a built-in by editing its seeded copy. `.worc/flows/` is the only place flows resolve from, so a `task_type` with no file there fails the task at flow resolution, before any branch is created.
 
-The task only **names** the flow — it never edits the graph, its nodes, or their providers/models. Picking a different built-in is the one task-side choice. To change _which_ stages run for a single task, the only per-task knob is disabling a node (see below); to reshape the pipeline or retune a stage's provider/model, edit the flow YAML under `.worc/flows/` (an operator/flow-authoring change, not a task field).
+The task only **names** the flow — it never edits the graph. Picking a different built-in is the main task-side choice. To change _which_ stages run for a single task, disable a node (see below); to overlay one node's model/reasoning/provider for a single run, use the same `nodes` block (see below); to reshape the pipeline or retune a stage for every task, edit the flow YAML under `.worc/flows/` (an operator/flow-authoring change, not a task field).
 
 ## Decomposition — split a large task
 
@@ -82,7 +82,9 @@ It never lowers the hard ceiling (env-allowlist, the `--dangerously-*`/bypass ba
 
 ## Disabling nodes — `nodes.<node-id>.enabled: false`
 
-Disable a node only when it adds no value for this task. Keys are flow **node ids**; any node in the task's resolved flow may be disabled. The ids below are the default `implementation` flow's; a custom flow exposes its own (e.g. `code_review`). `refinement` is skipped automatically when the task is already complete (see "Refinement" below).
+Disable a node only when it adds no value for this task. Keys are flow **node ids**; any node in the task's resolved flow may be disabled. The ids below are the default `implementation` flow's; a custom flow exposes its own (e.g. `code_review`). `refinement` is skipped automatically when the task is already complete (see "Refinement" below) — with one flow-specific exception: `deep_research`'s `refinement` is a *scoping* pass that carries no completeness predicate and runs on every task, so disabling it here is the only way to skip it.
+
+Disabling a `checks` node is also the sanctioned way to make a quality gate not run for one task. Do not reach for a set's `skip_if_unavailable` instead: that only turns a missing toolchain into a loud skip, and a set that was the *only* one the diff selected then leaves the gate with nothing run — which parks the task at `manual_action_required`, the same place the launch failure would have.
 
 ```yaml
 nodes:
@@ -101,11 +103,27 @@ What disabling the default-flow nodes does:
 | `review` | Commit with **no agent review gate**. |
 | `fixing` | A test/review failure spins the fix loop as a no-op to its cap, then `manual_action_required`. |
 
-**Disabling `review` is high-risk** — it removes the only agent quality gate before commit/PR. There is no config gate for it (no `agents.allow_review_skip`): which nodes are safe to disable is the operator's flow-authoring responsibility. Node-disable is per-task only (`nodes.<node-id>.enabled: false`); `enabled` is the **only** valid per-node key. Naming an id absent from the task's flow ends the task `failed` (a controlled error at flow resolution).
+**Disabling `review` is high-risk** — it removes the only agent quality gate before commit/PR. There is no config gate for it (no `agents.allow_review_skip`): which nodes are safe to disable is the operator's flow-authoring responsibility. Node-disable is per-task only. Naming an id absent from the task's flow ends the task `failed` (a controlled error at flow resolution).
 
-## Provider / model / reasoning — not a task knob
+Also note what disabling **does not** reach: the whole-task summary is not a graph node, so no `nodes` entry removes it. Removing that oversight layer is the operator's config switch `supervisor.enabled: false`, after which the pull-request body is rendered deterministically from the run's own recorded facts.
 
-Which provider runs a stage, and with which model and reasoning effort, is decided by the **flow** (each flow node declares its own `provider`/`model`/`reasoning`, or defaults to the operator's global primary provider) — never by the task. A task cannot repoint a stage's provider or set its model. If a stage needs a stronger model, that is an operator/flow change, not a task front-matter field.
+## Provider / model / reasoning — an overlay, not a redesign
+
+A node's **defaults** are decided by the **flow** (each flow node declares its own `provider`/`model`/`reasoning`, or falls back to the operator's global primary). A task may **overlay** them for one run, inside the same `nodes` block:
+
+```yaml
+nodes:
+  implementation: { model: claude-opus-5, reasoning: high }
+  review: { provider: codex }
+```
+
+This exists so one default flow can cover several model/effort/provider variants without a separate flow file per combination — useful for an experiment or a one-off run. Three things bound it:
+
+- **Best-effort, never fatal.** A `provider` must be in `agents.allowed` and a `reasoning` must be supported by the resolved provider; an invalid value — or an overlay on a node that runs no agent, such as `testing` or `publish` — is logged as a warning and **skipped**, and the node runs on the flow's declared value. `model` is passed through unchecked. That is deliberate: an unattended `watch` queue must never be blocked by a typo in one task.
+- **It changes the executor, nothing else.** A task can never change provider commands, credentials, sandbox or approval settings, `extra_args`, or any security policy.
+- **It does not edit the graph.** Reshaping the pipeline, or retuning a node for every task, is still an operator/flow change under `.worc/flows/`.
+
+The effective post-override model, reasoning, and provider appear in the prompt audit (`logs/<task-id>/prompt-audit/`).
 
 ## `auto_merge` — danger
 

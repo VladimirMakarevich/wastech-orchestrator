@@ -159,6 +159,16 @@ The command does not run a provider, process a task, edit repository files, comm
 - `contacts` from task front matter are plain-text mentions only. They do not select the chat.
 - **Live step-trace** (`telegram.trace: true`, off by default): the orchestrator pushes one best-effort message per executed flow node finish — `<emoji> <node-id> → <outcome>`, e.g. `✅ implementation → done`, `🔁 review → rework`, `❌ testing → fail` (✅ accept/done/pass, 🔁 rework, ❌ fail, ▶️ otherwise). This gives a remote operator live visibility into a long `watch` run between the start and the terminal notification. It carries only the node id + outcome — never diff, prompt, or agent text — and is fire-and-forget: a send failure never affects the pipeline, and a skipped node emits nothing. Independent of local log verbosity (this is a Telegram push, not a file). The leading emoji keeps trace lines visually distinct from approval/question prompts in the same chat.
 
+  Three **⚠️ synthetic labels** are not plain node verdicts but events worth flagging, and each is also always logged as a console warning independent of this flag:
+
+  | Trace | Means | What to do |
+  | --- | --- | --- |
+  | `⚠️ <node> → accept (rework budget exhausted)` | A **non-blocking** evaluator spent its `max_rework_per_stage` with a finding still open, so it accepted and the flow continued (never `manual`). | Read the finding in the PR follow-ups — the gate deliberately moved on, and it may still need attention. |
+  | `⚠️ <node> → done (read-only node wrote to the workspace)` | A `read-only` node produced a file. The run does **not** park; the change is neither published nor handed downstream. | Note it; a stray file is inert. Worth checking the role prompt. |
+  | `⚠️ <node> → done (read-only node changed git control state)` | A `read-only` node holding the [git-evidence grant](configuration.md#allow_git_evidence-the-read-only-git-evidence-grant) drifted git control state (a hook, `.git/config`, the index). The run warns and continues instead of parking. | **Treat this as a stop-the-run signal.** Unlike a stray file, a planted `.git/hooks/post-commit` is executed by the next git command in that clone — and the next one is the orchestrator's own commit or push. Kill the run, discard the clone, inspect what was planted. |
+
+  The last one is checked first of the two read-only labels, being the sharper event. A `workspace-write` node doing either still parks the task in `manual_action_required` — the never-park rule covers the read-only class alone.
+
 Waiting state is stored in `logs/<task-id>/hitl/*.json`, not as a new state-machine status. After a restart, the orchestrator resumes the persisted message/deadline or re-runs the stage with the persisted answer.
 
 ## 9. Troubleshooting

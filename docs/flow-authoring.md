@@ -1,6 +1,6 @@
 # Flow authoring
 
-A **flow** is the pipeline a task runs through, expressed as data: a validated graph of typed nodes (`agent`, `evaluator`, `checks`, `tool`, `publish`) connected by outcome-labelled edges. A task's `task_type` selects its flow. The orchestrator ships three built-in flows — `implementation` (the default), `deep_research`, and `security_audit` — and an operator can add or override flows without touching Python. This guide shows how to author, register, validate, and debug a custom flow from scratch.
+A **flow** is the pipeline a task runs through, expressed as data: a validated graph of typed nodes (`agent`, `evaluator`, `checks`, `tool`, `hitl`, `publish`) connected by outcome-labelled edges. A task's `task_type` selects its flow. The orchestrator ships eight built-in flows — `implementation` (the default), `deep_research`, `security_audit`, `content_chapter`, `content_translate`, `blog_article`, `blog_article_revise`, and the never-task-dispatched `merge` (selected by `git.merge_flow`) — and an operator can add or override flows without touching Python. This guide shows how to author, register, validate, and debug a custom flow from scratch.
 
 If you only want to change _what a step says_ (not the graph), you do not need a new flow — edit the node's `role_file` prompt in the delivered copy (see [Customize a node's prompt](cookbook.md#7a-customize-a-nodes-prompt)). Author a new flow only when you need a different set of steps, a different output kind, or a different route.
 
@@ -8,7 +8,7 @@ If you only want to change _what a step says_ (not the graph), you do not need a
 
 Flows resolve from **one place**: the operator's `<repo>/.worc/flows/<task_type>.yaml`. Drop a YAML file here to add a new `task_type` or to replace a built-in of the same name. Each flow **owns its prompts** in a sibling folder named after the `task_type`: `.worc/flows/<task_type>/*.md`. So `role_file` paths in the YAML are written relative to `.worc/flows/` and point into that folder (e.g. `role_file: my_flow/implement.md`).
 
-The built-ins ship inside the package under `packaged/flows/`, but that tree is **delivery-only**: `install` copies it into `.worc/flows/` as editable, active copies, and the orchestrator never reads the packaged tree at run time. So the seeded copies of `implementation`/`deep_research`/`security_audit` are already your operator flows to edit — and a `task_type` with no file in `.worc/flows/` is a hard "flow not found" (run `install` to deliver the built-ins), not a silent fall-back to a bundled copy. What you see in `.worc/flows/` is exactly what runs.
+The built-ins ship inside the package under `packaged/flows/`, but that tree is **delivery-only**: `install` copies it into `.worc/flows/` as editable, active copies (and the `tool` executables they reference into `.worc/tools/`), and the orchestrator never reads the packaged tree at run time. So every seeded built-in is already your operator flow to edit — and a `task_type` with no file in `.worc/flows/` is a hard "flow not found" (run `install` to deliver the built-ins), not a silent fall-back to a bundled copy. What you see in `.worc/flows/` is exactly what runs.
 
 The dispatch file stays flat (`.worc/flows/<task_type>.yaml`) so the registry finds it by name; only the prompts live in the per-flow subfolder. The shared supervisor prompt is the one exception — it stays at `.worc/flows/roles/supervisor.md` because the supervisor is a constant layer above _every_ flow, not a node of any one flow.
 
@@ -101,7 +101,7 @@ Implement the task at {task_path} in the repository {repo_path}. Follow the plan
 
 - **`agent`** — launches a coding-agent CLI (Codex or Claude Code) with the node's `role_file` as its prompt. Fields: `role_file` (required), `session_scope` (`fresh_disposable` | `editing_lineage` | `resume_own_lineage`), `permission_profile` (≤ the flow ceiling), optional `output_artifact`, `hitl`, `when`, `lineage_affinity`, and the per-node overrides below.
 - **`evaluator`** — a read-only judge that returns `accept` / `rework`. Fields: `role` (e.g. `review`), `role_file`, `blocking` (a failing verdict blocks vs is advisory), `max_rework_per_stage`, `gate_severity` (minimum finding severity that gates; default `high`, lower it to make a critic block on any finding). Evaluators are forced `read-only`. An evaluator returns a structured **findings** verdict and is **fail-closed** — see [What a node returns](#what-a-node-returns-output-contracts-schemas-and-slots). A **non-blocking** evaluator (`blocking: false`) never parks the task: once its `max_rework_per_stage` budget is spent with a finding still open it accepts and the flow continues — and the orchestrator emits a console warning + a ⚠️ Telegram trace (`accept (rework budget exhausted)`) so an operator knows the stage moved on and may need follow-up. Any findings an evaluator **accepts with** (sub-`gate_severity`, non-gating) are not discarded: at task close each evaluator node's final verdict is mirrored into the task's `summary.json` / `summary.md` follow-ups (and thus the PR body), deduped against the supervisor's own list, so a legitimately non-blocking finding still reaches the operator instead of vanishing. This runs regardless of `supervisor.emit_follow_ups`.
-- **`checks`** — runs deterministic repository commands, no agent. `checker: command_profile` runs the configured check command sets; other checkers exist (`citation`, `dependency_scan`). Outcomes: `pass` / `fail`.
+- **`checks`** — runs deterministic repository commands, no agent. `checker: command_profile` runs the configured check command sets; other checkers exist (`citation`, which validates a sources manifest and records the `manifest_path` it checked in its `citation.json` report so a downstream verifier opens the same file, and `dependency_scan`). Outcomes: `pass` / `fail`. **A `checks` node is fail-closed on an _incomplete_ run**, so a required toolchain that cannot launch — or every selected set skipped — parks the task at `manual_action_required` rather than publishing. Note `skip_if_unavailable: true` only half helps: it turns the launch failure into a loud skip, but a set that was the _only_ one selected and is then skipped leaves the gate with nothing run, which parks on the same path. The clean escape is per task: `nodes.<checks-node-id>.enabled: false`.
 - **`tool`** — runs **your own** executable from `.worc/tools/` out-of-process (any language), under the same launch ceiling as an agent. Fields: `tool` (the registered executable name), optional flat-scalar `args`, optional `timeout_seconds`, `when`. Outcomes: `pass` / `fail` / `route:*` (by exit code or an optional JSON object on stdout). Use it for deterministic logic that is neither an LLM step (`agent`) nor a built-in gate (`checks`). See [Custom tool nodes](#custom-tool-nodes).
 - **`publish`** — the terminal. `policy: pull_request` / `documentation_pull_request` opens a PR; `policy: none` is a graph terminal that performs no Git action (the orchestrator still owns any real commit/push/PR).
 
@@ -115,7 +115,7 @@ Each edge is `{ from, to, outcome? }`. A `checks` or `tool` node emits `pass`/`f
 
 ## Role files (prompts)
 
-A node's prompt is the content of its `role_file`. Role files render only an allowlisted set of path/metadata variables — `{task_path}`, `{repo_path}`, `{plan_path}`, `{diff_path}`, `{review_path}`, `{skills_path}`, `{memory_path}`, `{subtask_order}`/`{subtask_count}`/`{subtask_spec_path}`, and a few more — never task bodies, diffs, env, or secrets. A variable that is empty for a given node renders as the empty string; wrap optional references in a conditional block `{?name}…{/name}` so they drop cleanly when empty. For the full variable contract and which runner populates each, see [configuration.md → Prompt templates](configuration.md#prompt-templates-no-longer-a-config-block).
+A node's prompt is the content of its `role_file`. Role files render only an allowlisted set of path/metadata variables — `{task_path}`, `{repo_path}`, `{plan_path}`, `{diff_path}`, `{checks_path}`, `{review_path}`, `{skills_path}`, `{memory_path}`, `{subtask_order}`/`{subtask_count}`/`{subtask_spec_path}`, `{predecessor_context}` (the intra-task subtask handoff brief), plus every node's `{<node_id>_path}` — never task bodies, diffs, env, or secrets. A variable that is empty for a given node renders as the empty string; wrap optional references in a conditional block `{?name}…{/name}` so they drop cleanly when empty. For the full variable contract and which runner populates each, see [configuration.md → Prompt templates](configuration.md#prompt-templates-no-longer-a-config-block).
 
 `role_file` paths are contained to the flow directory: a path with `..` or an absolute path is rejected at load. Keep prompts inside your `<task_type>/` folder.
 
@@ -123,7 +123,48 @@ A node's prompt is the content of its `role_file`. Role files render only an all
 
 ## Per-node overrides
 
-Every `agent`/`evaluator` node may pin its own `provider` (`codex` | `claude`), `model`, and `reasoning`; omit any and the node inherits the `config.yaml` provider defaults (`provider` ⇒ the global primary). A node may also set `network_access: true|false` to override the flow-wide network default for that node alone. Spend more reasoning where rework is decided (review), less on mechanical steps. See [configuration.md → Per-node overrides in flows](configuration.md#per-node-overrides-in-flows).
+Every `agent`/`evaluator` node may pin its own `provider` (`codex` | `claude`), `model`, and `reasoning`; omit any and the node inherits the `config.yaml` provider defaults (`provider` ⇒ the global primary). A node may also set `network_access: true|false` to override the flow-wide network default for that node alone, and `git_evidence: true` to ask for the [read-only git verbs](#read-only-git-evidence-git_evidence). Spend more reasoning where rework is decided (review), less on mechanical steps. See [configuration.md → Per-node overrides in flows](configuration.md#per-node-overrides-in-flows).
+
+### Read-only git evidence (`git_evidence`)
+
+An audit node that treats delivery history as prime evidence needs to read it. `git_evidence: true` on an `agent` or `evaluator` node **asks** for that; the operator's `security.allow_git_evidence` decides whether the request is honored. Both halves are required — a flow can express the need but cannot grant itself the capability, and the switch hands the verbs only to the nodes that asked, never to every read-only node in the run. With the switch off (the default) a declaring flow still loads and validates; it simply runs as it would without the declaration.
+
+**What you get is an observable contract, not a flag list: history is readable, the repository cannot be changed, nothing is published.** The two providers reach it differently, and the guarantees have different shapes:
+
+- **Claude** has no shell at all under `read-only`, so the grant adds one and scopes it to the read-only verbs (`log`, `show`, `diff`, `blame`, `status`, `rev-list`, `rev-parse`, `ls-files`, `shortlog`, `describe`, `cat-file`, `for-each-ref`). A command matching none of them is refused by the CLI before it runs. Underneath that allowlist the OS sandbox write-denies the whole clone — so the allowlist is the convenience and the sandbox is the guarantee. On a host where a shell cannot be sandboxed the adapter refuses the attempt rather than running it unsandboxed (on Linux/WSL2 missing `bubblewrap`+`socat` that is a hard preflight-class failure; on native Windows the shell is simply dropped and the node runs as an ordinary read-only node).
+- **Codex** needs nothing added: its `read-only` sandbox already permits commands, so `git log` works there today. What forbids mutation is not a verb list but the sandbox — the workspace is mounted `read` and the network is off, so `git commit` has nothing to write to and `git push` nowhere to go. That is the stronger of the two guarantees, and no prompt, task, or flow can argue with it.
+
+So do not expect a symmetric verb allowlist across providers; expect the same observable contract. `security.denied_commands` stays the floor beneath both (a deny always beats an allow), and publishing remains the orchestrator's alone.
+
+> **Re-verify the Claude deny direction when you pin a new `claude` major.** That the CLI _denies_ a `Bash` call matching no `--allowedTools` pattern — rather than approving it — is behavior no offline test can assert and no `--help` grep can answer; preflight checks that the flag exists, not what it means. It was verified by hand against **`claude` 2.1.217**, under the argv this adapter builds, with two probes: (1) `--allowedTools "…,Bash(git log:*)"` plus a request to run `echo x > f.txt` must come back an error tagged `"non_execution_kind": "permission-rule"` with **no file created**; (2) `git log --oneline -1` must run clean. If a future CLI approves the first probe instead, the verb allowlist is decorative and only the sandbox confines the shell — history stays readable and the repository still cannot be changed, but the node is no longer held to _reading git_. The documented fallback in that case is Codex's shape: drop the allowlist and rely on the sandbox alone.
+
+If a write from such a node ever does land, the run does **not** park: a console warning plus a ⚠️ Telegram trace (`done (read-only node wrote to the workspace)`), and the run continues — the change is neither published nor handed to any downstream node. The reasoning matches a non-blocking evaluator's exhausted budget: the capability is real and worth keeping, so a stray file is reported rather than traded for it.
+
+The same never-park rule covers a change to **Git control state** (a hook, `.git/config`, the index): a warning plus a ⚠️ `done (read-only node changed git control state)` trace naming the drifted aspect. **Treat that one as a stop-the-run signal, not a note.** The two events differ in cost: a stray file is inert (nothing stages it, nothing downstream reads it), while a planted `.git/hooks/post-commit` is executed by the next git command in that clone — and the next one is the orchestrator's own commit or push. Kill the run, discard the clone, and look at what was planted. A `workspace-write` node doing the same still parks the task in `manual_action_required`.
+
+### Flow-level `defaults`
+
+`defaults.evaluator` is applied to any `evaluator` node that omits the field: `session_scope` (default `fresh_disposable`), `permission_profile` (default `read-only`), `max_rework_per_stage` (default `1`), `gate_severity` (built-in default `high`). Use it to avoid repeating the same settings across many evaluators — `deep_research` sets `gate_severity: medium` here, covering both of its evaluators at once, because its evaluators judge whether a research deliverable is _good enough_ rather than whether code is correct and so have no natural way to emit `high`/`critical`.
+
+### The flow's `supervisor:` block
+
+The supervisor is a layer above the flow, not a node — but a flow may reshape **its wording** and narrow its cadence. Only wording lives in files; the structured schemas (`follow_ups`, `memory_delta`) stay in code, so a flow author can never break the machine contract the orchestrator parses.
+
+```yaml
+supervisor:
+  role_file: my_flow/supervisor.md # observe lens; else config.supervisor.role_file, else built-in
+  finalize_role_file: my_flow/summary.md # the final-summary lens; else the built-in
+  handoff_role_file: my_flow/handoff.md # the subtask-brief lens; else the built-in
+  emit_follow_ups: true # opt the finalize turn into the evidence-gated follow_ups array
+  observe:
+    mode: events # may only NARROW config.supervisor.observe.mode
+```
+
+- All paths are contained to the flow directory, like any `role_file`.
+- `emit_follow_ups` is a **code-oriented** capability (technical-debt / refactor signals); research and prose flows leave it off. It costs no extra call — the same finalize turn emits the array. It governs only the _supervisor-authored_ half: your evaluators' accepted findings reach the follow-ups section regardless.
+- **`observe.mode` may only narrow.** A flow declaring a broader mode than the config fails validation naming both modes — a flow is authored content and must not be able to spend more than the operator allowed. The corollary bites in the other direction too: because a flow that _states_ `events` is asserting it needs deviation notes, an operator setting the global mode to `none` gets a **rejection** for that flow rather than a silent degrade. Narrow the flow's own copy if that is what you want. The rule does not apply at `supervisor.enabled: false` — there is no cadence to widen, so such a flow runs unchanged.
+- A finalize lens is worth writing when the built-in one is wrong for your deliverable. The built-in is written for a code change ("grounded in the actual committed change"); applied to a research deliverable that is two new Markdown files it produced a summary with two false claims and re-presented the critic's central finding as a strength. `deep_research` therefore ships its own, which additionally forbids first-person verification claims — the finalize turn describes what the pipeline did, never what it personally re-opened.
+- **State the length expectation in your finalize lens.** Prose that comes back below a short collapse floor is discarded: no `summary.md` is written, the run is flagged `degraded`, and the deterministic report becomes the PR body (the discarded text rides a WARNING). Every packaged lens and the built-in fallback state this, so the contract sits where the model reads it.
 
 ## Editing sessions and lineages
 
@@ -176,7 +217,9 @@ A node's output is written to a file and passed to later nodes **as a path varia
 
   The slot vocabulary is fixed to these three; a flow only chooses _which_ node fills each, and one node fills at most one slot.
 
-- **Generic channel** — every other agent node's output is written to `<node_id>.out.md`, and every `tool` node's redacted stdout to `tools/<node_id>/stdout.txt`, each exposed automatically as `{<node_id>_path}`, so a later node can consume an earlier node's output by naming that variable in its prompt.
+- **Generic channel** — every other agent node's output is written to `<node_id>.out.md`, and every `tool` node's redacted stdout to `tools/<node_id>/stdout.txt`, each exposed automatically as `{<node_id>_path}`, so a later node can consume an earlier node's output by naming that variable in its prompt. Both `agent` and `evaluator` prompts resolve these names, so an evaluator can grade an upstream node's own **work** and not only the file some later node wrote from it — that is how a coverage gate grades the analysis passes behind it.
+
+- **`output_file:` — when the file _is_ the output.** For a node whose real product is a file it writes, declare `output_file: <repo-relative path>` and `{<node_id>_path}` resolves to a **redacted copy of that file** instead of the node's closing message. A node that writes a document and then describes it in one paragraph otherwise hands the next node the paragraph, which is the smaller half — the packaged `deep_research` `synthesis` node sets `output_file: report.md` for exactly this reason, so its evaluators grade the report rather than a summary of it. Either way it stays a **path**, and downstream prompts are unchanged (`{synthesis_path}` is `{synthesis_path}`). Keep the name in step with what the role prompt tells the node to write.
 
 ### Overriding a node's `output_schema` (the one real foot-gun)
 
@@ -223,6 +266,8 @@ The tool reports back through its **exit code** and an **optional** JSON object 
 
 - **Linter style** — just `exit 0` (→ `pass`) or non-zero (→ `fail`); stdout is ignored as the outcome but saved as an artifact. Minimum effort.
 - **Rich style** — print `{"outcome": "pass" | "fail" | "route:<label>", "findings": [...], "data": {...}}`. A JSON `outcome` is authoritative (an invalid value fails closed to `manual_action_required`); `route:*` drives an explicit edge. `findings` and `data` are **recorded** (shown to the human / supervisor) but **never auto-applied** — the core never turns a returned value into a Git or state write.
+
+> **Write stdout as UTF-8 explicitly — this is a contract, not a nicety.** The runner decodes a tool's stdout as **UTF-8 on every OS**, so a tool that falls back to the host locale encoding is broken **on Windows only**, and silently until the first non-ASCII byte. A piped child on a Windows host gets `cp1252`, which cannot encode a `≤` or a `→` — so a violation message carrying one kills the script inside its own `print`, and the node then reports a _crashed checker_ instead of the `fail` it had already computed. Both shipped tools pin stdin/stdout to UTF-8 for exactly this reason (in Python: `sys.stdout.reconfigure(encoding="utf-8")`, or write bytes). Both once got this wrong, which is why it is stated here.
 
 **Composition.** A tool's redacted stdout is exposed downstream as `{<node_id>_path}`, exactly like an agent's output. That is how a tool-as-check hands its report to a fixer agent — the fixer's role prompt reads `{md-check_path}` — and how a tool-as-producer feeds the next node. No magic: findings reach the agent as a path variable, not through the engine.
 
@@ -294,22 +339,30 @@ An unknown `task_type` (no matching flow file) fails the task at flow resolution
 
 ## Validation catches flow errors before any task runs
 
-Every flow file — packaged and operator — is loaded and validated at `install` and at `preflight`; any failure makes `preflight` report `NOT ready` and blocks the run. Three layers run:
+A flow is loaded and validated **at dispatch**, when a task resolves it — so a broken or unsafe flow fails that task rather than a global gate. **`preflight` does not validate flows.** Check them on demand with `worc validate-flow`, which runs exactly the validator the engine runs at dispatch, read-only, over your `.worc/flows/`, without claiming anything:
+
+```bash
+worc validate-flow my_flow    # one flow (bare stem, or my_flow.yaml)
+worc validate-flow --all      # every *.yaml in .worc/flows/
+```
+
+Exit `0` = every checked flow is valid, `1` = at least one is not, `2` = the named flow was not found, a usage error (a bare `worc validate-flow` with neither a name nor `--all`), or the config would not load — so `worc validate-flow my_flow && worc watch` gates correctly. Note `--all` checks **every** file in `.worc/flows/`, so one unrelated broken flow there fails the gate; name the flow you are about to run when that is a problem. `WARN` lines (an unknown `{token}` in a role prompt) never change the exit code.
+
+Three layers run:
 
 - **Graph integrity** — every node `id` is a portable single-segment token (not a dot/separator/uppercase/Windows device name), edges resolve, outcomes are valid per node kind, every `fail`/`rework` edge is bounded, exactly one entry node, every node reaches a terminal, and every `lineage_affinity` target is an `editing_lineage` owner with no affinity of its own (no chains).
 - **Security ceiling** — no node's `permission_profile` exceeds the flow `permission_ceiling`; evaluators are forced read-only; `role_file` paths contain no traversal; unknown fields fail closed.
-- **Config consistency** — a pinned `provider` is in `agents.allowed`, its `reasoning` is supported by that provider, and (under `security.strict_isolation`) no `extra_args` selects a full-access sandbox mode.
+- **Config consistency** — a pinned `provider` is in `agents.allowed`, its `reasoning` is supported by that provider, Codex is not routed to a `workspace-write` node resolving `network_access: true`, a `tool:` node names a tool actually delivered under `.worc/tools/`, the flow's `supervisor.observe.mode` does not **widen** the config's cadence, and (under `security.strict_isolation`) no `extra_args` selects a full-access sandbox mode.
 
-Run it explicitly with:
+Two failure modes are worth calling out because they cost you a queued task rather than a command:
 
-```bash
-worc --config ./.worc/config.yaml preflight
-```
+- A **cadence widening** is fatal but cheap in machine terms — it happens during flow resolution, before branch prep, so no provider runs and nothing is committed — yet the task has **already been claimed** by then and ends in terminal `failed`, which you re-queue by hand. Validate after editing `observe.mode` on either side.
+- On resume, the live flow is re-validated against the live config, so a config change can only ever **narrow** what an in-flight task may do.
 
 ## Inspecting rendered prompts and artifacts
 
 - Set `prompt_audit: true` (config-wide or per task) to record **who** received **what prompt** per node run under `logs/<task-id>/prompt-audit/`. Compare the rendered prompt against your role file when an edit "did nothing" — you may be editing a different copy than the one the node resolves.
-- Per-run artifacts (plan, diff, check logs, review findings, `summary.json`) live under `.worc/logs/<task-id>/`. Node execution and status live in `state.db` (inspect with `status`).
+- Per-run artifacts live under `.worc/logs/<task-id>/`, one directory **per node run**: `stages/<node-id>/run-<node-run-id>/` holds that pass's `rendered-prompt.md`, `findings.json`, `<node-id>.out.md`, checks reports, and tool streams, so a rework loop keeps every pass instead of clobbering the last. `stages/<node-id>/history.jsonl` is the chronological index. Task-level slots (`plan.md`, `current.diff`, `summary.md`/`summary.json`) sit at the task root. Node execution and status live in `state.db` (inspect with `status`).
 
 ## Best practices and foot-guns
 
@@ -321,7 +374,7 @@ worc --config ./.worc/config.yaml preflight
 - **Prompt variables are paths only.** Never expect task bodies, diffs, or secrets in a prompt — only the allowlisted path/metadata variables are substituted.
 - **Strict `output_schema` or none at all.** If you override a node's `output_schema`, put `additionalProperties: false` on every object in it — Codex rejects a non-strict schema with a 400 and the node fails every run. Prefer the built-in contract unless you genuinely need a custom shape ([What a node returns](#what-a-node-returns-output-contracts-schemas-and-slots)).
 - **Evaluators must emit findings, not prose.** A `review`/`verifier`/`critic` role prompt has to return the structured findings result; a prose-only verdict is treated as "schema not honored" and fail-closes the task to manual review.
-- **Validate before you rely on it.** Run `preflight` after every flow edit; it fails closed with a one-line reason.
+- **Validate before you rely on it.** Run `worc validate-flow <name>` after every flow edit — **not** `preflight`, which no longer checks flows. It fails closed with a one-line reason, and a config edit can invalidate a flow too, so run it after those as well.
 
 ## See also
 
