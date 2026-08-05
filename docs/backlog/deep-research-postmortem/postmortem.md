@@ -8,9 +8,9 @@ Scope: how the nodes behaved, what actually crossed each edge, whether the quali
 
 Related existing entries, to avoid double-counting:
 
-- [VF-16](../issues/runtime-validation-findings.md) already tracks per-node model/reasoning allocation and the `claude-opus-4-8` → `claude-opus-5` move at identical pricing. The cost table below is deep-research-specific evidence for it, not a new item.
-- [VF-18](../issues/runtime-validation-findings.md) already tracks "review findings below the rework threshold are recorded and then dropped" at severity **Low**, first seen on `p9-06-format-gate`. **DR-1 below is the root cause of VF-18 and escalates it** — the mechanism is a config default, not a threshold, and it dropped a `medium` finding, not only `low` ones.
-- The window-level pass in [runtime-validation-findings.md](../issues/runtime-validation-findings.md) already recorded one p9-09 observation (all 41 citations re-checked, 0 line mismatches, and the file-scoped snippet check). DR-5 develops that into the full gate analysis.
+- VF-16 already tracks per-node model/reasoning allocation and the `claude-opus-4-8` → `claude-opus-5` move at identical pricing. The cost table below is deep-research-specific evidence for it, not a new item.
+- VF-18 already tracks "review findings below the rework threshold are recorded and then dropped" at severity **Low**, first seen on `p9-06-format-gate`. **DR-1 below is the root cause of VF-18 and escalates it** — the mechanism is a config default, not a threshold, and it dropped a `medium` finding, not only `low` ones.
+- The window-level pass in `runtime-validation-findings.md` already recorded one p9-09 observation (all 41 citations re-checked, 0 line mismatches, and the file-scoped snippet check). DR-5 develops that into the full gate analysis.
 
 Everything else below is new.
 
@@ -350,7 +350,7 @@ Meanwhile `critic.md:14-15` tells the model: _"**You keep your own session acros
 
 ## DR-13 — a `repository_document` publish commits into a gated repo without running any repo command
 
-Severity: **Medium** Status: **open** Scope: flow (packaged + target) Relates to: [VF-11](../issues/runtime-validation-findings.md)
+Severity: **Medium** Status: **open** Scope: flow (packaged + target) Relates to: VF-11
 
 ### Observed
 
@@ -368,7 +368,7 @@ On `p9-09` that broke the target's CI. Gate state re-run on `feat/p9-remediation
 
 Two of the four were committed by `242a518` — the `p9-09` deliverable itself (`report.md` and the leaked `report-structure.md`). The audit whose job was to find problems is the most recent thing to have turned the branch red.
 
-The other two (`P10-consistency/05-test-depth.md`, `registry-inventory.test.ts`) came from `implementation`-flow tasks that _do_ have a `command_profile` node — they slipped through because the target's `checks.command_sets.default` lists `typecheck` / `lint` / `test` / `build` and **omits `format`**. That half is already [VF-11](../issues/runtime-validation-findings.md); the new half is that `deep_research` would not have caught it even if the command set were complete, because it runs no commands at all.
+The other two (`P10-consistency/05-test-depth.md`, `registry-inventory.test.ts`) came from `implementation`-flow tasks that _do_ have a `command_profile` node — they slipped through because the target's `checks.command_sets.default` lists `typecheck` / `lint` / `test` / `build` and **omits `format`**. That half is already VF-11; the new half is that `deep_research` would not have caught it even if the command set were complete, because it runs no commands at all.
 
 ### Expected
 

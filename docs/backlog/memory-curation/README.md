@@ -72,7 +72,7 @@ A useful checkpoint after step 5: run `worc memory validate` against the Wastime
 - **V2 / V3 / V4 memory** (SQLite + FTS, embeddings, entity graph). Gated on a measured recall lift (AC-O4) in the memory backlog row; curation does not lift that gate and must not become a back door to it.
 - **Retrieval relevance** (the audit's P1: planning nodes rank without the task's target, `task_type` / `touched_symbols` unused, byte-identical packets for different chapters). A real defect and a large one, but orthogonal: it is about what memory is _read_, this campaign is about whether memory is _true_. It needs its own item — see Open below.
 - **Terminal failures as typed events** (the audit's P1: 0 of 3 real failures represented). Same reason: a write-seam feature, not a curation one. Also needs its own item.
-- **Supervisor cadence and cost.** Already designed in [../token-optimization/](../token-optimization/README.md). P2.6 borrows its measurements for the cost estimate and otherwise defers to it.
+- **Supervisor cadence and cost.** Already designed in `../token-optimization/`. P2.6 borrows its measurements for the cost estimate and otherwise defers to it.
 
 ## Open
 

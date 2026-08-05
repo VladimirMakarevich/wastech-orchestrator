@@ -71,8 +71,8 @@ A useful checkpoint after step 3: **re-run the same task** (`p9-09`) unchanged a
 
 ## Not in this campaign
 
-- **Model selection.** `claude-opus-4-8` → `claude-opus-5` at identical pricing is already [VF-16](../issues/runtime-validation-findings.md). Note only that for this flow the change must be made in `.worc/flows/deep_research.yaml` (seven pinned occurrences) — the node pins override `config.yaml` entirely, so editing the config alone does nothing.
-- **Supervisor cadence and packet design.** Already designed in [../token-optimization/](../token-optimization/README.md) (P0/P1/P2). This run is additional evidence for it; P1.7 and P3.10c defer to those documents rather than restating them.
+- **Model selection.** `claude-opus-4-8` → `claude-opus-5` at identical pricing is already VF-16. Note only that for this flow the change must be made in `.worc/flows/deep_research.yaml` (seven pinned occurrences) — the node pins override `config.yaml` entirely, so editing the config alone does nothing.
+- **Supervisor cadence and packet design.** Already designed in `../token-optimization/` (P0/P1/P2). This run is additional evidence for it; P1.7 and P3.10c defer to those documents rather than restating them.
 - **Defects in the target repo.** The false negatives the post-mortem found in `wastech-mdlint` (the CLI `bin` no-op, `SEC-003`'s path escape, and eight more) belong in that repo's own backlog. They appear in [postmortem.md](postmortem.md) only as evidence that the audit's headline conclusion was unsafe.
 
 ## Open

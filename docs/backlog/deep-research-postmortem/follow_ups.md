@@ -4,7 +4,7 @@ The campaign's running list of things that outlived the item that produced them:
 
 Add to it as items land. Keep an entry only while it can still cost something — delete it when it is done or has become untrue, rather than marking it resolved.
 
-**This folder is deleted once its items land, so nothing that must outlive it may live only here.** As of 2026-07-27 everything still active has a home in the backlog root: the two unclosed gaps from the git-evidence grant in [../read-only-shell-residues.md](../read-only-shell-residues.md), the target-repo chores in [../target-resync-after-deep-research.md](../target-resync-after-deep-research.md), and the derived-docs breadcrumbs in [../main-docs-reconstruction-notes.md](../main-docs-reconstruction-notes.md). The entries below are kept as the working record until then; each says where its surviving copy is. Anything new added here must do the same.
+**This folder is deleted once its items land, so nothing that must outlive it may live only here.** As of 2026-07-27 everything still active has a home in the backlog root: the two unclosed gaps from the git-evidence grant in [../read-only-shell-residues.md](../read-only-shell-residues.md), the target-repo chores in `../target-resync-after-deep-research.md` (that document was removed as outdated on 2026-08-05, so the entries below are now the only copy), and the derived-docs breadcrumbs in [../main-docs-reconstruction-notes.md](../main-docs-reconstruction-notes.md). The entries below are kept as the working record until then; each says where its surviving copy is. Anything new added here must do the same.
 
 - [Watch items](#watch-items) — nothing to do unless the world changes
 - [Operational consequences](#operational-consequences) — true of every target repo, not of the code
@@ -53,7 +53,7 @@ The misreading it invites was closed on 2026-07-27 at its source: the fact was a
 
 ## Operational consequences
 
-**Surviving copy: [../target-resync-after-deep-research.md](../target-resync-after-deep-research.md)** — all three entries below are chores in the target repo's `.worc/`, undone as of 2026-07-27, so they outlive this folder as an operator checklist there.
+**No surviving copy** — `../target-resync-after-deep-research.md` held these and was removed as outdated on 2026-08-05, so the three entries below are the record. They are chores in the target repo's `.worc/`, undone as of 2026-07-27; re-home them before this folder is deleted.
 
 ### Target repositories need a `.worc/flows/` refresh (P0.1, P1.4, P1.4a, P2.8, P2.9, P3.10)
 

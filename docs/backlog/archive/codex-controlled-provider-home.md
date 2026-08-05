@@ -1,6 +1,6 @@
 # Codex: orchestrator-controlled provider home (deferred hardening)
 
-Status: **deferred — future hardening** Date: 2026-07-21 Owner: Vladimir Makarevich Source: read-isolation design review decision F7 ([review](../agent-worc-read-isolation/design-review-2026-07-21.md)); split out of [WRI-003](../agent-worc-read-isolation/wri-003-codex-permission-profile-isolation.md).
+Status: **deferred — future hardening** Date: 2026-07-21 Owner: Vladimir Makarevich Source: read-isolation design review decision F7 (review); split out of WRI-003.
 
 ## Context
 

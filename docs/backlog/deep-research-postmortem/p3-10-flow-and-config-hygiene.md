@@ -4,7 +4,7 @@ Priority: **P3** Status: **implemented (10c dropped)** Date: 2026-07-25 Source: 
 
 A collection of small, independent items. None is individually worth a task; together they remove three pieces of configuration that cannot do anything and trim ~$0.9 per run.
 
-**10c is dropped from this campaign** (operator decision, 2026-07-25): the supervisor's cost is not addressed here. The structural answer stays where it was already designed — [supervisor-observation-cadence-p1](../token-optimization/supervisor-observation-cadence-p1.md). With 10c out, the supervisor row of the 10e reasoning table goes with it; the remaining trim is ≈ −$0.7 per run.
+**10c is dropped from this campaign** (operator decision, 2026-07-25): the supervisor's cost is not addressed here. The structural answer stays where it was already designed — supervisor-observation-cadence-p1. With 10c out, the supervisor row of the 10e reasoning table goes with it; the remaining trim is ≈ −$0.7 per run.
 
 ## 10a — `refinement` is structurally unreachable
 
@@ -30,7 +30,7 @@ $0.72 (5.6% of task cost) and ~76 s of serialized dead time, for 7 step notes pl
 
 The step notes have exactly one consumer in the codebase — `_recover_from_digest` ([`core/supervisor.py:661-687`](../../../src/wastech_orchestrator/core/supervisor.py)), used only when the session dies. Here `recovered_from_digest: false`, so **nothing ever read them**. Its rubric (`roles/supervisor.md`) names two detection targets — repeated fix-cycle failure and out-of-scope file drift — and with `fix_iterations = 0` on a read-only flow, neither could fire.
 
-**Change:** `SupervisorConfig` has no `enabled` flag, so the layer can only be cheapened. Set `supervisor.reasoning: medium → low` in the target config. The structural answer — a flow-local `supervision.role_file` so a research flow can state a rubric that can actually fire, and an observation cadence — is already designed in [supervisor-observation-cadence-p1](../token-optimization/supervisor-observation-cadence-p1.md); this run is additional evidence for it, not a new proposal.
+**Change:** `SupervisorConfig` has no `enabled` flag, so the layer can only be cheapened. Set `supervisor.reasoning: medium → low` in the target config. The structural answer — a flow-local `supervision.role_file` so a research flow can state a rubric that can actually fire, and an observation cadence — is already designed in supervisor-observation-cadence-p1; this run is additional evidence for it, not a new proposal.
 
 ## 10d — `resume_own_lineage` is dead configuration, and the prompt says otherwise
 
@@ -42,7 +42,7 @@ Meanwhile `critic.md:14-15` asserts _"**You keep your own session across rounds*
 
 ## 10e — reasoning trim
 
-Per-node fit from the run, holding [VF-16](../issues/runtime-validation-findings.md)'s model discussion separate:
+Per-node fit from the run, holding VF-16's model discussion separate:
 
 | Node | Now | Proposed | Why |
 | --- | --- | --- | --- |
@@ -64,7 +64,7 @@ Not orchestrator defects; hygiene on the validation target:
 
 ## 10g — `deep_research` runs no repository command before committing
 
-Source: [postmortem.md](postmortem.md) DR-13. Related: [VF-11](../issues/runtime-validation-findings.md).
+Source: [postmortem.md](postmortem.md) DR-13. Related: VF-11.
 
 The flow's only `checks` node is `checker: citation`. There is no `command_profile` node anywhere in the graph, unlike `implementation.yaml:72-73`. So the flow writes Markdown into the target repository, commits it, and opens a PR without running anything the repository defines.
 

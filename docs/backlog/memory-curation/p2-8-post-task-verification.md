@@ -41,7 +41,7 @@ A fixture task writes three records — one supported, one with a non-resolving 
 
 ## Scope / risk
 
-The highest-value item of the curation half, and it must not turn into a gate: verification is advisory, runs after the task is closed and published, and can never reopen, re-route or fail a task (the supervisor's advisory-by-construction rule, `core/supervisor.py:1-21`). Watch the cadence: one pass per delta-writing task is frequent, so keep the input narrow and the reasoning tier modest, or it becomes the supervisor-cadence problem again in a new place (see [../token-optimization/](../token-optimization/README.md)). Also resist scope drift into "and re-verify neighbours" — a broad sweep is [P2.6](p2-6-curator-propose-only.md)'s job, triggered by a health signal.
+The highest-value item of the curation half, and it must not turn into a gate: verification is advisory, runs after the task is closed and published, and can never reopen, re-route or fail a task (the supervisor's advisory-by-construction rule, `core/supervisor.py:1-21`). Watch the cadence: one pass per delta-writing task is frequent, so keep the input narrow and the reasoning tier modest, or it becomes the supervisor-cadence problem again in a new place (see `../token-optimization/`). Also resist scope drift into "and re-verify neighbours" — a broad sweep is [P2.6](p2-6-curator-propose-only.md)'s job, triggered by a health signal.
 
 ## Depends on
 

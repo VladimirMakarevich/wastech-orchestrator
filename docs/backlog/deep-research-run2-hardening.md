@@ -99,7 +99,7 @@ The node is **not given its own round-1 report**. Combined with the same prompt'
 
 ### Scope and expected impact
 
-Orchestrator default (`packaged/`), with the target copy refreshed via the [`upgrade-flows`](upgrade-flows.md) / `install --reconfigure` path already tracked in [target-resync-after-deep-research.md](target-resync-after-deep-research.md). On run 2's numbers this returns **~$21** and ~34 minutes, and it makes the P1.4 contract true rather than aspirational.
+Orchestrator default (`packaged/`), with the target copy refreshed via the [`upgrade-flows`](upgrade-flows.md) / `install --reconfigure` path already tracked in `target-resync-after-deep-research.md`. On run 2's numbers this returns **~$21** and ~34 minutes, and it makes the P1.4 contract true rather than aspirational.
 
 Deliberately **not** proposed: routing the rework edge to the owning pass only. `coverage_gate` findings can span remits, the head-of-chain re-entry is a considered decision recorded in P1.4, and once step 1 lands a pass with nothing named for it _is_ cheap. Re-routing would trade a correct guarantee for a saving this item already delivers.
 
@@ -367,7 +367,7 @@ The flow caught its own blind spots three times through three different gates �
 - **Re-routing the `coverage_gate` rework edge** — considered and rejected under [P0.1](#p01--give-a-re-entering-node-its-own-prior-output).
 - **`fact_verification`'s `network_access: true`** — measured `web_search_requests: 0, web_fetch_requests: 0`, because with `external_research` disabled there are no external `url` entries to fetch. Unused surface on this task shape, not a defect; a per-task concern, not a packaged-default change.
 - **An empty `.claude/` directory** appeared inside the deliverable folder (a provider initialised it there). Git does not track empty directories, so it did not reach the pull request. Cosmetic; recorded only so the next reader is not alarmed.
-- **Target re-sync.** Everything here lands in `packaged/`; getting it into `wastech-mdlint` is the existing [target-resync-after-deep-research.md](target-resync-after-deep-research.md) + [upgrade-flows.md](upgrade-flows.md) work, and this document adds to that queue rather than duplicating it.
+- **Target re-sync.** Everything here lands in `packaged/`; getting it into `wastech-mdlint` is the existing `target-resync-after-deep-research.md` + [upgrade-flows.md](upgrade-flows.md) work, and this document adds to that queue rather than duplicating it.
 
 ## Execution order
 
