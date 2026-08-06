@@ -60,6 +60,7 @@ On a temporary Git repository:
 - a successful task produces `summary.md`, which becomes the PR body — the supervisor layer's synthesis when it wrote one, otherwise the deterministic report (changes, steps, checks, gate verdicts, follow-ups, skipped nodes), and on **every** terminal the same single renderer writes it;
 - a synthesis that **collapsed** is not published as one: prose below the finalize floor is discarded (no `summary.md`, so the run is degraded and the report becomes the body), and the `supervisor_final` row's `summary_written` states what actually reached disk rather than what the turn returned — the guard used to be "does the file exist", which a four-byte summary passed;
 - a follow-up an operator can act on: the reviewer's `fix` reaches `action_hint`, a derived `title` is not a truncated copy of its own `rationale`, and when a reused chain PR's body is compacted to fit GitHub's limit the follow-up sections are surrendered **last** and the stub names the run host, not a repository path;
+- the same follow-ups **accumulate** in `.worc/follow-ups.md` across tasks — append-only (no entry lost or overwritten, and the same item found by two tasks appears twice), fed from both producers (the supervisor's finalize and the deterministic derivation with the layer off), writing nothing at all for a task that left none, and LF on every host;
 - exhausting a fix loop or the global fix-iteration budget → `manual_action_required` + failure report; an unrecoverable error → `failed`.
 
 ## Principles

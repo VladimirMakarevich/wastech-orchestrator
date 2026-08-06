@@ -24,6 +24,7 @@ from wastech_orchestrator.core.flow.exchange_seal import (
 )
 from wastech_orchestrator.core.flow.nodes.base import NodeInfraError
 from wastech_orchestrator.core.flow.nodes.exchange_publish import ExchangeMutationManual
+from wastech_orchestrator.core.follow_ups import FOLLOW_UPS_FILENAME
 from wastech_orchestrator.core.orchestrator import Eligibility, Orchestrator, SlotBusyError
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import (
@@ -1105,6 +1106,87 @@ def test_accepted_evaluator_findings_reach_the_pr_body(
     summary = (task_artifact_dir(art, "task-findings") / "summary.md").read_text("utf-8")
     assert "## Technical debt / follow-ups" in summary
     assert finding_text in summary
+
+
+def test_follow_ups_accumulate_in_the_control_home_across_tasks(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The two surfaces above answer "what did THIS task leave behind?" — one PR body per change,
+    # one `summary.json` under a directory `worc logs clean` deletes. `.worc/follow-ups.md` answers
+    # "what has this orchestrator not fixed in this repository?", so it must survive the next task.
+    finding_text = "docstring drift in the new helper"
+    providers = _both(
+        outputs={
+            "review": (
+                "I found one advisory issue",
+                {"findings": [{"severity": "low", "what": finding_text}]},
+            ),
+            "supervisor": ("noted", {"summary": "Added the helper and its tests."}),
+        }
+    )
+    orch, _, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0, 0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    assert orch.run_task(_complete_task(tmp_path, "task-fu-a")).final_status is Status.DONE
+    assert orch.run_task(_complete_task(tmp_path, "task-fu-b")).final_status is Status.DONE
+
+    # At the ROOT of the control home, not under `logs/`: `worc logs clean` sweeps that root by
+    # shape, so a file placed there would be deleted with the artifacts it is meant to outlive.
+    registry = git_repo.clone / ".worc" / FOLLOW_UPS_FILENAME
+    text = registry.read_text("utf-8")
+    assert [line.split(" —")[0] for line in text.splitlines() if line.startswith("## ")] == [
+        "## task-fu-a",
+        "## task-fu-b",
+    ]
+    # No cross-task dedup: the same item two tasks each found is listed twice, because nothing ever
+    # reads the file back — a writer that reconciled would silently undo the operator's deletions.
+    assert text.count(finding_text) == 2
+
+
+def test_follow_ups_file_written_with_the_supervisor_layer_off(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The second producer: with no layer there is no finalize turn, so the deterministic report
+    # derives the follow-ups from the evaluations — and the file is fed from that path too.
+    finding_text = "the helper duplicates an existing one"
+    providers = _both(
+        outputs={
+            "review": (
+                "one advisory issue",
+                {"findings": [{"severity": "low", "what": finding_text}]},
+            )
+        }
+    )
+    orch, _, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"supervisor_enabled": False},
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    assert orch.run_task(_complete_task(tmp_path, "task-fu-nosup")).final_status is Status.DONE
+    text = (git_repo.clone / ".worc" / FOLLOW_UPS_FILENAME).read_text("utf-8")
+    assert "## task-fu-nosup — Add a thing" in text  # the task title heads its own section
+    assert finding_text in text
+
+
+def test_follow_ups_file_absent_when_a_task_leaves_none(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # A clean task writes nothing — not an empty section, not the file. Its existence is the signal.
+    providers = _both(outputs={"supervisor": ("noted", {"summary": "Added the helper."})})
+    orch, _, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    assert orch.run_task(_complete_task(tmp_path, "task-fu-clean")).final_status is Status.DONE
+    assert not (git_repo.clone / ".worc" / FOLLOW_UPS_FILENAME).exists()
 
 
 def test_an_observed_step_carries_the_evaluator_findings_not_just_the_label(

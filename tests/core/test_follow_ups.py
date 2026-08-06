@@ -14,9 +14,11 @@ from typing import Any
 
 from wastech_orchestrator.core.follow_ups import (
     FINDING_TITLE_MAX,
+    FOLLOW_UPS_FILENAME,
     FollowUp,
     _finding_to_follow_up,
     _split_reason,
+    append_task_follow_ups,
     evaluator_finding_follow_ups,
     follow_up_json,
     merge_follow_ups,
@@ -283,6 +285,73 @@ def test_render_follow_ups_section_shape() -> None:
         "- **[low] Bare**\n"
         "- **[high] Full** — because Paths: a.py, b.py. Suggested: extract a helper\n"
     )
+
+
+# -- the accumulating .worc/follow-ups.md -------------------------------------
+
+
+def _append(path: Path, task_id: str, *titles: str) -> None:
+    append_task_follow_ups(
+        path,
+        task_id=task_id,
+        task_title=f"Title of {task_id}",
+        finished_at="2026-08-06T10:00:00+00:00",
+        follow_ups=tuple(FollowUp(t, "", "low", ("e",)) for t in titles),
+    )
+
+
+def test_append_task_follow_ups_accumulates_across_tasks(tmp_path: Path) -> None:
+    # The point of the file: ten tasks with three findings each leave thirty entries. Nothing is
+    # rewritten, so every task's block survives every later append and the explanatory header — the
+    # file's only self-documentation, since there is no CLI for it — is written exactly once.
+    path = tmp_path / FOLLOW_UPS_FILENAME
+    _append(path, "task-a", "first", "second")
+    _append(path, "task-b", "third")
+    _append(path, "task-c", "fourth")
+
+    text = path.read_text("utf-8")
+    assert text.count("# Follow-ups the orchestrator did not fix") == 1
+    assert [line for line in text.splitlines() if line.startswith("## ")] == [
+        "## task-a — Title of task-a",
+        "## task-b — Title of task-b",
+        "## task-c — Title of task-c",
+    ]
+    assert text.count("- **[low] ") == 4
+    assert "Finished 2026-08-06T10:00:00+00:00." in text
+    # Each block is separated from the previous one by a blank line, so the Markdown is readable
+    # after an arbitrary number of appends rather than only after the first.
+    assert "\n\n## task-b" in text
+
+
+def test_append_task_follow_ups_repeats_an_item_two_tasks_both_found(tmp_path: Path) -> None:
+    # Dedup is within a task only (`merge_follow_ups`, upstream). There is deliberately no
+    # cross-task dedup here: the file is never read back, because a writer that reconciles would
+    # silently undo the operator's deletions — and deleting an entry is the only way to close one.
+    path = tmp_path / FOLLOW_UPS_FILENAME
+    _append(path, "task-a", "the same debt")
+    _append(path, "task-b", "the same debt")
+    assert path.read_text("utf-8").count("- **[low] the same debt**") == 2
+
+
+def test_append_task_follow_ups_writes_nothing_without_follow_ups(tmp_path: Path) -> None:
+    # A task with no follow-ups leaves no empty section — and no file at all, so the file's
+    # existence means it has something in it.
+    path = tmp_path / FOLLOW_UPS_FILENAME
+    _append(path, "task-clean")
+    assert not path.exists()
+    # Nor does it touch a file later tasks created.
+    _append(path, "task-a", "real debt")
+    before = path.read_bytes()
+    _append(path, "task-clean-2")
+    assert path.read_bytes() == before
+
+
+def test_append_task_follow_ups_writes_lf_on_every_host(tmp_path: Path) -> None:
+    # The daemon may run on any host; the file must not change line endings with it.
+    path = tmp_path / FOLLOW_UPS_FILENAME
+    _append(path, "task-a", "first")
+    _append(path, "task-b", "second")
+    assert b"\r\n" not in path.read_bytes()
 
 
 def test_render_gate_digest_is_none_without_evaluators() -> None:

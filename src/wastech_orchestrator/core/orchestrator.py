@@ -119,7 +119,11 @@ from wastech_orchestrator.core.flow.validator import (
 )
 from wastech_orchestrator.core.flow.wiring import build_node_inputs, build_node_services
 from wastech_orchestrator.core.follow_ups import (
+    FOLLOW_UPS_FILENAME,
+    FollowUp,
+    append_task_follow_ups,
     evaluator_finding_follow_ups,
+    merge_follow_ups,
     render_gate_digest,
 )
 from wastech_orchestrator.core.hitl import (
@@ -540,6 +544,10 @@ class _Pipeline:
     # Empty on ordinary runs; drives the non-blocking operator notice (console/log WARNING, PR
     # summary, ledger record, Telegram) — editing governance files is ordinary work, never a block.
     governance_changed: tuple[str, ...] = ()
+    # This task's follow-ups, carried from whichever producer computed them (the supervisor's
+    # finalize turn, or the deterministic report's derivation from the evaluations) to the single
+    # append site in `_finalize_task_artifacts`. Taken from memory, never re-derived from state.db.
+    follow_ups: tuple[FollowUp, ...] = ()
 
 
 class Eligibility(StrEnum):
@@ -3156,6 +3164,9 @@ class Orchestrator:
                 task_path=inputs.task_path,
                 emit_delta=memory_on,
             )
+            # Already merged with the evaluator findings a gate let past (the layer does that
+            # itself), so this is the whole list `.worc/follow-ups.md` receives for the task.
+            p.follow_ups = finalized.follow_ups
             if memory_on:
                 self._write_memory(p, finalized.candidate_delta, WriteSource.SUCCESS)
             log.info(
@@ -3913,6 +3924,12 @@ class Orchestrator:
         which used to reach only the local metadata, reach the pull-request body on every path.
         """
         evaluations = self._store.get_evaluations(p.task.id)
+        # Merged, not assigned: on a degraded DONE the supervisor already computed its own list
+        # (and merged the same findings into it) but produced no prose, so this writer runs second.
+        # A bare assignment would drop the layer's own debt notes from the body AND from the
+        # accumulating file — and the merge is a no-op on every path where nothing set them.
+        follow_ups = merge_follow_ups(p.follow_ups, evaluator_finding_follow_ups(evaluations))
+        p.follow_ups = follow_ups
         write_summary_report(
             self._artifacts_root,
             build_packet_facts(
@@ -3926,7 +3943,7 @@ class Orchestrator:
                 exchange_root=self._exchange_root,
                 repo_dir=self._config.repo.local_path,
             ),
-            follow_ups=evaluator_finding_follow_ups(evaluations),
+            follow_ups=follow_ups,
             gates=render_gate_digest(evaluations),
             skipped_nodes=p.skip,
             task_ref=self._task_ref(p),
@@ -3980,6 +3997,10 @@ class Orchestrator:
         body = self._summary_md_body(p, degraded=degraded)
         if p.governance_changed:
             body += _render_governance_section(p.governance_changed)
+        # After `_summary_md_body`, because that call is what runs the deterministic producer of
+        # `p.follow_ups`; and before the `dest is None` return, because a task with no on-disk file
+        # (a synthetic `run`) still leaves debt worth accumulating.
+        self._append_follow_ups_file(p)
         if dest is None:
             return None
         summary_path = dest.with_name(f"{p.task.id}.summary.md")
@@ -3991,6 +4012,37 @@ class Orchestrator:
             return None
         self._register_artifact(p.task.id, "summary_md", str(summary_path))
         return summary_path
+
+    def _append_follow_ups_file(self, p: _Pipeline) -> None:
+        """Accumulate this task's follow-ups into ``.worc/follow-ups.md``: append-only, best-effort.
+
+        The one append site: it is reached on both terminal paths that finalize (the ``done``
+        finalize and the infra-terminal publish), which is also why the tuple travels on
+        ``_Pipeline`` instead of being re-derived here. The paths that bypass finalize need
+        nothing — ``_resume_cleanup`` closes a task whose finalize already ran in the previous
+        process, and the manual ``finalize`` command closes one that never produced a summary or a
+        follow-up.
+
+        Best-effort by contract: an unwritable control home is one WARNING, never a change to the
+        task's terminal status. The file is the operator's to curate, so nothing here reads it back.
+        A task with no follow-ups writes nothing — the writer owns that guard, so this call is
+        unconditional.
+        """
+        path = self._layout.control_home / FOLLOW_UPS_FILENAME
+        try:
+            append_task_follow_ups(
+                path,
+                task_id=p.task.id,
+                task_title=p.task.title,
+                finished_at=self._clock(),
+                follow_ups=p.follow_ups,
+            )
+        except OSError as exc:
+            self._log(p.task.id).warning(
+                "follow-ups file not updated (%d item(s) reach summary.json and the PR body only)",
+                len(p.follow_ups),
+                extra={"path": path.as_posix(), "error": str(exc)},
+            )
 
     # --- terminal handling ----------------------------------------------------------------
 
