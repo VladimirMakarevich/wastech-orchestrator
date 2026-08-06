@@ -283,6 +283,24 @@ def _run_claude(scenario: str, cli_args: list[str]) -> int:
     return 2
 
 
+def _run_auth_status(cli_name: str) -> int:
+    """Model the credential-status verb each CLI answers at preflight.
+
+    Deliberately **scenario-independent** and always logged in: the startup gate refuses to run at
+    all against a logged-out provider, so every scenario below it must get past this probe for the
+    scenario itself to be what the test exercises. A test wanting the logged-out answer drives the
+    adapter directly rather than through this stand-in.
+
+    Each dialect answers in its real shape — Claude a JSON object keyed ``loggedIn``, Codex a fixed
+    sentence — so the parsers are exercised rather than bypassed.
+    """
+    if cli_name == "claude":
+        sys.stdout.write(json.dumps({"loggedIn": True, "authMethod": "claude.ai"}) + "\n")
+        return 0
+    sys.stdout.write("Logged in using ChatGPT\n")
+    return 0
+
+
 def _run_codex_sandbox(cli_args: list[str]) -> int:
     """Model ``codex sandbox -P`` for the no-model canary.
 
@@ -366,6 +384,11 @@ def main() -> int:
     # the ``exec`` scenario below is what the test actually exercises.
     if cli_name == "codex" and cli_args and cli_args[0] == "sandbox":
         return _run_codex_sandbox(cli_args)
+
+    # Preflight asks each CLI about its own stored credentials before anything else runs. Answered
+    # ahead of the scenario dispatch for the same reason as the canary above: it gates the run.
+    if cli_args[:2] in (["auth", "status"], ["login", "status"]):
+        return _run_auth_status(cli_name)
 
     # ``success_edit`` behaves like ``success`` but also makes a deterministic code change in the
     # working directory (the clone), so a pipeline run has something to commit (phases 4–5 e2e).
