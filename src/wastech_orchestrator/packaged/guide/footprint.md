@@ -15,6 +15,7 @@ Two rules hold for the whole `.worc/` home:
 | `config.example.yaml` | Commented reference copy, never read at runtime. | Yes (`worc install --reconfigure` restores it). |
 | `flows/`, `tools/` | Editable copies of the built-in flows, their role prompts, and the executables `tool` nodes resolve against. Yours to edit. | No — a flow a task names must exist here. |
 | `guide/` | This documentation, copied in by `install`. | Yes (`worc upgrade-docs` restores it). |
+| `follow-ups.md` | The accumulating list of what tasks noticed and did not fix — one section per finished task. Yours to curate; see below. | Entry by entry, by hand. |
 | `logs/<task-id>/` | Per-task artifacts: the rendered prompts, per-attempt provider output, `current.diff`, `summary.md`, the local-only `summary.json` (the same summary plus follow-ups and what the supervisor layer spent), check logs, HITL records. The biggest thing here by far — megabytes per task. | Yes — `worc logs clean`. |
 | `logs/daemon.log`, `logs/daemon-startup.log` | The `watch` daemon's operator trace (rotating, 10 MB × 5 backups) and the raw stream of a console-spawned daemon, kept so a startup crash is recoverable. | Yes — `worc logs clean` takes them, once no daemon is running. |
 | `logs/completed.jsonl` | The **ledger**: one append-only JSON record per terminal task. The audit index of everything that has run. | Only with `worc logs clean --all`. See below. |
@@ -28,6 +29,20 @@ Two rules hold for the whole `.worc/` home:
 | `config.yaml.bak-*`, `flows.bak-*`, `tools.bak-*` | Snapshots taken by `worc install --reconfigure` before it refreshes those files. The three newest of each are kept and older ones are pruned automatically. | Yes. Backups you name yourself (`config.yaml.bak-before-upgrade`) are never pruned — only the timestamped ones the orchestrator wrote. |
 
 At the repository root, outside `.worc/`: `tasks/pending/`, `tasks/preparing/`, `tasks/done/`, `tasks/failed/`. These are deliberately **not** in `.worc/` — a finished task's file and its `<task-id>.summary.md` are committed there as the human-readable audit trail. Nothing prunes them; they are yours to curate.
+
+## `follow-ups.md` — the one file you curate by hand
+
+A task's follow-ups otherwise reach you in two places that both answer "what did _this_ task leave behind?" — the `## Technical debt / follow-ups` section of its pull-request body, and `logs/<task-id>/summary.json`, under a directory `worc logs clean` deletes. Ten tasks that each wave three sub-threshold review findings past your gate leave thirty items across thirty places.
+
+`follow-ups.md` answers the other question: **what has this orchestrator not fixed in this repository?** As each task finishes, its follow-ups — the supervisor's own technical-debt notes plus the review findings below your `gate_severity` — are appended as one section headed by the task id and the time it finished.
+
+Three properties worth knowing:
+
+- **Append-only.** Nothing rewrites, regenerates, or reconciles it. Duplicates inside one task are removed before it is written, but the same item found by two tasks is listed twice — deliberately: a writer that read the file back would silently undo your edits.
+- **There is no command for it.** No `worc follow-ups`, no `resolve` verb. You read the file and edit it, and **deleting an entry is how you close it.**
+- **A task with no follow-ups writes nothing** — not an empty section, not the file. If the file exists, there is something in it.
+
+It is gitignored with the rest of `.worc/`, so it never reaches a commit or a pull-request diff, and no cleanup command touches it: `worc logs clean` sweeps `logs/`, and this file sits at the root. It grows until you prune it, and a failed write is one warning in the log — it never changes how a task ended.
 
 ## `runs/` — the per-task runtime roots
 

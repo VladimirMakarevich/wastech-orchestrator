@@ -15,6 +15,13 @@ contract keeps it from growing a dependency back on it.
 Bounded on purpose: only each evaluator node's FINAL verdict is read (an intermediate rework round's
 finding was fixed, and repeating it would describe work that was done), and a finding's reason is
 cut at :data:`FINDING_TITLE_MAX` so a chatty evaluator cannot inflate the body.
+
+The third sink is this module's only I/O: :func:`append_task_follow_ups` accumulates each finished
+task's list into ``.worc/follow-ups.md``. The two surfaces above answer "what did *this* task leave
+behind?"; ten tasks waving three findings past the gate each leave thirty items the operator would
+otherwise collect by hand from thirty pull requests and from ``summary.json`` files a
+``worc logs clean`` deletes. That file answers "what has this orchestrator not fixed in this
+repository?" and is append-only on purpose — see the function.
 """
 
 from __future__ import annotations
@@ -22,6 +29,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from wastech_orchestrator.state_store import EvaluationRow
@@ -36,6 +44,23 @@ FINDING_TITLE_MAX = 120
 # reused-chain-PR compactor has to find this section to keep it while eliding the prose around it,
 # and it lives in an adapter that must not import the Core (a test pins the two spellings equal).
 FOLLOW_UPS_HEADING = "## Technical debt / follow-ups"
+
+# The accumulating file, at the root of the control home (``<repo>/.worc/``) rather than under
+# ``logs/``: ``worc logs clean`` sweeps that root by shape, so a file placed there would be deleted
+# with the artifacts it outlives.
+FOLLOW_UPS_FILENAME = "follow-ups.md"
+
+# Written once, when the file is created: there is no CLI surface for this file at all, so its own
+# first lines are the only place it can explain itself. Concatenated rather than triple-quoted so
+# the paragraph lands as ONE unwrapped line, the way every Markdown file here is written.
+_FOLLOW_UPS_FILE_HEADER = (
+    "# Follow-ups the orchestrator did not fix\n"
+    "\n"
+    "One section per finished task, appended as it finishes. Nothing rewrites, regenerates, or "
+    "reconciles this file: the same item found by two tasks is listed twice, and **deleting an "
+    "entry is how you close it**. Gitignored with the rest of `.worc/`, so it never reaches a "
+    "commit or a pull-request diff.\n"
+)
 
 
 @dataclass(frozen=True)
@@ -275,19 +300,57 @@ def merge_follow_ups(
     return tuple(merged)
 
 
+def _follow_up_bullet(follow_up: FollowUp) -> str:
+    """One follow-up as a Markdown bullet — the shape both sinks below print."""
+    parts = [f"- **[{follow_up.severity}] {follow_up.title}**"]
+    if follow_up.rationale:
+        parts.append(f" — {follow_up.rationale}")
+    if follow_up.paths:
+        parts.append(f" Paths: {', '.join(follow_up.paths)}.")
+    if follow_up.action_hint:
+        parts.append(f" Suggested: {follow_up.action_hint}")
+    return "".join(parts)
+
+
 def render_follow_ups_section(follow_ups: tuple[FollowUp, ...]) -> str:
     """Render the ``## Technical debt / follow-ups`` section appended to ``summary.md``."""
-    lines = [FOLLOW_UPS_HEADING, ""]
-    for fu in follow_ups:
-        parts = [f"- **[{fu.severity}] {fu.title}**"]
-        if fu.rationale:
-            parts.append(f" — {fu.rationale}")
-        if fu.paths:
-            parts.append(f" Paths: {', '.join(fu.paths)}.")
-        if fu.action_hint:
-            parts.append(f" Suggested: {fu.action_hint}")
-        lines.append("".join(parts))
+    lines = [FOLLOW_UPS_HEADING, ""] + [_follow_up_bullet(fu) for fu in follow_ups]
     return "\n".join(lines) + "\n"
+
+
+def append_task_follow_ups(
+    path: Path,
+    *,
+    task_id: str,
+    task_title: str,
+    finished_at: str,
+    follow_ups: tuple[FollowUp, ...],
+) -> None:
+    """Append one finished task's *follow_ups* to the accumulating file at *path*.
+
+    **Append-only, and that is the whole design.** The file is never read back, never regenerated
+    from ``state.db``, and never deduped across tasks: rebuilding it would overwrite the operator's
+    edits, and with no ``resolve`` verb anywhere that would leave no way to ever close an item. Ten
+    tasks with three findings each therefore leave thirty entries, including repeats — the operator
+    curates by deleting, which a writer that reconciles would silently undo.
+
+    A task with no follow-ups writes **nothing** (not an empty section, not even the file), so the
+    file's existence means there is something in it. The one-time header is written when the file is
+    created; ``newline=""`` keeps the separator LF on every host, because the daemon may run
+    anywhere and the file must not change line endings with it.
+
+    Raises ``OSError`` — the caller decides, and for the orchestrator this is best-effort: an
+    unwritable control home must not change a task's terminal status.
+    """
+    if not follow_ups:
+        return
+    header = "" if path.exists() else _FOLLOW_UPS_FILE_HEADER
+    # The leading "" is the blank line that separates this section from whatever precedes it — the
+    # header on the first append, the previous task's last bullet on every later one.
+    lines = ["", f"## {task_id} — {task_title}", "", f"Finished {finished_at}.", ""]
+    lines += [_follow_up_bullet(fu) for fu in follow_ups]
+    with path.open("a", encoding="utf-8", newline="") as handle:
+        handle.write(header + "\n".join(lines) + "\n")
 
 
 def render_gate_digest(evaluations: Sequence[EvaluationRow]) -> str | None:

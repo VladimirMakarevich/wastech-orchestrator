@@ -22,6 +22,7 @@ The agents do the editing. The orchestrator owns the process and the Git lifecyc
 - **Two agents, one interface.** Codex and Claude Code are interchangeable. If one fails for an infrastructure reason (missing binary, timeout, rate limit), the orchestrator automatically falls back to the other.
 - **The orchestrator owns Git.** Agents never commit or push. Branch naming, staging, commit, push, PR, and the safe return to your base branch are all handled for you.
 - **Your work stays in your repo.** The task file and its summary are committed alongside your code as an audit trail; everything else lives in a single gitignored home and never touches Git history.
+- **Debt does not scatter.** What a task noticed but did not fix — the supervisor's technical-debt notes and the review findings below your gate — is appended to one growing `.worc/follow-ups.md`. "What has this orchestrator not fixed here?" is one file, not thirty pull-request bodies. Nothing rewrites it: you close an item by deleting its entry.
 - **Runs unattended.** A watch loop periodically syncs your base branch, so a teammate can hand off a task just by committing it and pushing.
 - **Crash-safe and idempotent.** Every step is checkpointed. A restart resumes the in-flight task and never double-commits, double-pushes, or re-opens a PR.
 - **Secure by default.** The sandbox policy and environment allowlist are locked at the config level — no task can weaken them, and no secrets are ever written to logs or artifacts.
