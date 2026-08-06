@@ -16,7 +16,10 @@ from wastech_orchestrator.install.config_writer import InstallSpec, build_and_va
 from wastech_orchestrator.providers.base import ProviderId
 
 # Slow integration tests: real watch-daemon lifecycle (pid files, process control).
-pytestmark = pytest.mark.slow
+# ``run``/``watch``/``rerun`` probe every allowed provider's credentials before starting. These
+# tests are about command orchestration, not credentials, and the config names the real CLIs — so
+# the gate is disarmed module-wide and asserted on directly by its own tests instead.
+pytestmark = [pytest.mark.slow, pytest.mark.usefixtures("no_provider_auth_gate")]
 
 
 def test_pending_dir_is_under_the_bound_repo(tmp_path: Path) -> None:

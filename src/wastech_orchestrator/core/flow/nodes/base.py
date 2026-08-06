@@ -52,19 +52,46 @@ RunProcess = Callable[..., ProcessResult]
 class NodeInfraError(Exception):
     """A node could not run because of an infrastructure failure (not a quality result).
 
-    Agent infra-exhaustion (no provider could complete the stage even after fallback) and a check
-    *launch* failure both raise this; the orchestrator maps it to terminal ``failed`` — it never
-    routes to fixing (no code change can fix infrastructure).
+    Raised when the Router exhausted every provider for a stage (no provider could complete it, even
+    after fallback) and when a provider did not honor a mandatory structured-output contract. Never
+    routed to fixing — no code change can repair infrastructure.
 
-    ``error_class`` carries the normalized terminal error class (``None`` when unknown — e.g. a
-    check launch failure) so the orchestrator can tell a *transient* exhaustion
-    (PROVIDER_UNAVAILABLE / NETWORK_UNAVAILABLE — both providers down) apart from a hard infra
-    failure: the former parks the task as resumable (B-lite), the latter goes terminal.
+    ``error_classes`` is every class that was *raised* across the stage's attempts — the primary,
+    its same-provider transient retries, and the fallback — in attempt order. It is what the
+    park/manual/terminal decision reads, because the last attempt's class alone lets a fallback
+    provider that failed worse than the primary mask a park-eligible failure of the primary, making
+    the task's survival depend on a provider that never ran a token of work.
+
+    ``error_class`` is the single *representative*: the class the Router settled on, used for
+    messages, logs and the per-node audit row. It is also the only source of the operator-stop
+    distinction — a stop replaces the representative with ``CANCELLED`` while the killed attempt's
+    own row still reads as a process crash.
+
+    A caller that legitimately knows exactly one class (an unparseable structured output, a
+    synthesized cancellation) passes only ``error_class`` and the set is derived from it.
+
+    ``resets_at`` is the provider's own claim about when a retry could succeed (ISO-8601 UTC), when
+    one was reported. Untrusted input the Core validates and clamps before scheduling on it;
+    ``None`` for every error carrying no such claim.
     """
 
-    def __init__(self, message: str, *, error_class: ErrorClass | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_class: ErrorClass | None = None,
+        error_classes: Sequence[ErrorClass] = (),
+        resets_at: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.error_class = error_class
+        self.resets_at = resets_at
+        # An empty set falls back to the representative on purpose: a caller that knows one class,
+        # and an exhausted stage whose attempt rows were never populated, must both decide on the
+        # class they do have rather than fail closed on a set they never intended to leave empty.
+        self.error_classes: tuple[ErrorClass, ...] = tuple(error_classes) or (
+            () if error_class is None else (error_class,)
+        )
 
 
 class EvaluatorInfraError(NodeInfraError):

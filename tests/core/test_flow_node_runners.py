@@ -866,6 +866,131 @@ def test_evaluator_no_work_surfaces_infra_class_not_schema(tmp_path: Path) -> No
     assert "schema not honored" not in str(exc.value)
 
 
+# --- the raised class SET, not just the settled one ----------------------------------------------
+
+
+def _mixed_exhausted_router(extra_attempts: tuple[Any, ...] = ()) -> type[FakeRouter]:
+    """A router whose stage exhausted with a resumable primary and a worse fallback.
+
+    The shape of the production incident: claude raised a rate limit, codex then died on expired
+    credentials, so the *settled* class is the masking one while the resumable class survives only
+    in the attempt rows.
+    """
+    from wastech_orchestrator.providers.base import ErrorClass, NormalizedError
+    from wastech_orchestrator.routing.router import ProviderAttempt
+
+    class _Router(FakeRouter):
+        def run_stage(self, request: Any, route: ResolvedRoute, *, snapshot: Any = None) -> Any:
+            self.requests.append(request)
+            return StageOutcome(
+                route=route,
+                result=None,
+                provider_used=None,
+                stage_attempts=2,
+                terminal_error=NormalizedError(
+                    ErrorClass.AUTHENTICATION_FAILED, "credentials expired"
+                ),
+                attempts=(
+                    ProviderAttempt(
+                        provider=ProviderId.CLAUDE,
+                        attempt=1,
+                        status=None,
+                        error_class=ErrorClass.RATE_LIMITED,
+                        result=None,
+                    ),
+                    ProviderAttempt(
+                        provider=ProviderId.CODEX,
+                        attempt=2,
+                        status=None,
+                        error_class=ErrorClass.AUTHENTICATION_FAILED,
+                        result=None,
+                    ),
+                    *extra_attempts,
+                ),
+            )
+
+    return _Router
+
+
+def test_agent_infra_exhaustion_carries_every_raised_class(tmp_path: Path) -> None:
+    from wastech_orchestrator.core.flow.nodes.base import NodeInfraError
+    from wastech_orchestrator.providers.base import ErrorClass
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(
+        id="impl",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
+    services = _services(
+        _mixed_exhausted_router()(None),
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+    )
+    with pytest.raises(NodeInfraError) as exc:
+        AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert exc.value.error_classes == (
+        ErrorClass.RATE_LIMITED,
+        ErrorClass.AUTHENTICATION_FAILED,
+    )
+    # The representative stays the class the Router settled on — it is what the message reads.
+    assert exc.value.error_class is ErrorClass.AUTHENTICATION_FAILED
+
+
+def test_evaluator_infra_exhaustion_carries_every_raised_class(tmp_path: Path) -> None:
+    from wastech_orchestrator.core.flow.nodes.base import EvaluatorInfraError
+    from wastech_orchestrator.providers.base import ErrorClass
+
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    services = _services(
+        _mixed_exhausted_router()(None),
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    with pytest.raises(EvaluatorInfraError) as exc:
+        EvaluatorNodeRunner(services, _inputs(tmp_path)).run(
+            _evaluator("review"), _ctx(_evaluator("review"))
+        )
+    assert exc.value.error_classes == (
+        ErrorClass.RATE_LIMITED,
+        ErrorClass.AUTHENTICATION_FAILED,
+    )
+
+
+def test_infra_exhaustion_excludes_an_attempt_that_returned_a_verdict(tmp_path: Path) -> None:
+    # Only the attempts that RAISED may reach the park/manual decision. A row carrying a status
+    # returned a quality verdict, and a quality verdict must never be able to hold the queue slot or
+    # flag a security condition — so it is filtered out even though it sits in the same tuple.
+    from wastech_orchestrator.core.flow.nodes.base import NodeInfraError
+    from wastech_orchestrator.providers.base import ErrorClass
+    from wastech_orchestrator.routing.router import ProviderAttempt
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(
+        id="impl",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
+    returned = ProviderAttempt(
+        provider=ProviderId.CODEX,
+        attempt=3,
+        status=RunStatus.FAILED,
+        error_class=ErrorClass.CONTAINMENT_UNVERIFIED,
+        result=None,
+    )
+    services = _services(
+        _mixed_exhausted_router((returned,))(None),
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+    )
+    with pytest.raises(NodeInfraError) as exc:
+        AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert ErrorClass.CONTAINMENT_UNVERIFIED not in exc.value.error_classes
+
+
 def test_agent_workspace_write_writes_diff(tmp_path: Path) -> None:
     (tmp_path / "r.md").write_text("go", "utf-8")
     node = AgentNode(

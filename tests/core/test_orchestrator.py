@@ -12,7 +12,7 @@ import logging
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -22,6 +22,7 @@ from wastech_orchestrator.core.flow.exchange_seal import (
     exchange_quarantine_root,
     exchange_seal_root,
 )
+from wastech_orchestrator.core.flow.nodes.base import NodeInfraError
 from wastech_orchestrator.core.flow.nodes.exchange_publish import ExchangeMutationManual
 from wastech_orchestrator.core.orchestrator import Eligibility, Orchestrator, SlotBusyError
 from wastech_orchestrator.core.state_machine import Status
@@ -74,11 +75,14 @@ class FakeProvider:
         outputs: dict[str, tuple[str, dict | None]] | None = None,
         infra_fail: set[str] | None = None,
         infra_error_class: ErrorClass = ErrorClass.TIMEOUT,
+        infra_resets_at: str | None = None,
     ) -> None:
         self.id = provider_id
         self._outputs = outputs or {}
         self._infra_fail = infra_fail or set()
         self._infra_error_class = infra_error_class
+        # The reset instant a rate-limit raise reports, so the park can schedule on it.
+        self._infra_resets_at = infra_resets_at
         self._healed = False
         self.requests: list[AgentRunRequest] = []
 
@@ -91,7 +95,6 @@ class FakeProvider:
             provider_id=self.id,
             executable_found=True,
             version="1",
-            authenticated=True,
             supports_required_features=True,
             message="ok",
         )
@@ -99,7 +102,11 @@ class FakeProvider:
     def run(self, request: AgentRunRequest) -> AgentRunResult:
         self.requests.append(request)
         if request.node_id in self._infra_fail and not self._healed:
-            raise ProviderError(error_class=self._infra_error_class, message="infra fail")
+            raise ProviderError(
+                error_class=self._infra_error_class,
+                message="infra fail",
+                resets_at=self._infra_resets_at,
+            )
         message, structured = self._outputs.get(request.node_id, ("done", None))
         if request.node_id == "refinement":
             structured = (
@@ -376,10 +383,16 @@ def _complete_task(tmp_path: Path, task_id: str = "task-001") -> str:
     return str(path)
 
 
-def _both(**kwargs) -> dict[ProviderId, FakeProvider]:
+def _both(*, claude=None, codex=None, **kwargs) -> dict[ProviderId, FakeProvider]:
+    """Both fakes from one shared kwarg set, with optional per-provider overrides.
+
+    A MIXED pair — each provider failing with its own error class — is what reproduces a broken
+    fallback masking a park-eligible primary; one shared kwarg set cannot express it. The shared
+    path is unchanged, so every existing call site keeps working untouched.
+    """
     return {
-        ProviderId.CLAUDE: FakeProvider("claude", **kwargs),
-        ProviderId.CODEX: FakeProvider("codex", **kwargs),
+        ProviderId.CLAUDE: FakeProvider("claude", **{**kwargs, **(claude or {})}),
+        ProviderId.CODEX: FakeProvider("codex", **{**kwargs, **(codex or {})}),
     }
 
 
@@ -1948,6 +1961,354 @@ def test_no_work_exhaustion_fails_task(git_repo, make_git_config, tmp_path: Path
     assert task is not None and task.blocked_since is None
     assert (art / "logs" / "task-nowork" / "failure_report.json").exists()
     assert ledger.records()[0]["final_status"] == "failed"
+
+
+# --- a provider-reported reset instant makes the park precise instead of blind -------------------
+
+# 30 minutes past the _Clock epoch: inside the 6h ceiling, comfortably in the future.
+_WAKE = datetime.fromtimestamp(1800, tz=UTC).isoformat()
+
+
+def _rate_limited_at(wake: str | None) -> dict[ProviderId, FakeProvider]:
+    return _both(
+        infra_fail={"implementation"},
+        infra_error_class=ErrorClass.RATE_LIMITED,
+        claude={"infra_resets_at": wake},
+    )
+
+
+def test_rate_limit_park_stamps_the_provider_reported_wake_instant(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The adapter already captured the instant its limit window reopens and threw it away, so even a
+    # correct park then waited blind against a six-hour ceiling for a window reopening in minutes.
+    clock = _Clock()
+    providers = _rate_limited_at(_WAKE)
+    orch, store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0], clock=clock
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    assert orch.run_task(_complete_task(tmp_path, "task-wake")).final_status is Status.RUNNING
+    task = store.get_task("task-wake")
+    assert task is not None
+    assert task.blocked_since is not None
+    assert task.blocked_until == _WAKE
+
+
+def test_ticks_before_the_wake_instant_launch_no_provider(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The whole point: instead of a full re-entry per poll interval that prepares git, launches an
+    # agent and is refused in seconds, a tick inside the window is one cheap no-op.
+    clock = _Clock()
+    providers = _rate_limited_at(_WAKE)
+    orch, store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0], clock=clock
+    )
+    _patch_impl_edit(providers, git_repo)
+    assert orch.run_task(_complete_task(tmp_path, "task-quiet")).final_status is Status.RUNNING
+    attempts_after_park = len(_impl_attempts(providers))
+    runs_after_park = len(store.get_node_runs("task-quiet"))
+
+    clock.advance(600)  # still inside the reported window
+    assert orch.resume() is not None  # the slot stays held (non-terminal)
+    assert len(_impl_attempts(providers)) == attempts_after_park  # no provider was launched
+    assert len(store.get_node_runs("task-quiet")) == runs_after_park  # and no node run was opened
+
+    # The first tick at or after the instant re-enters for real; the outage cleared, it finishes.
+    clock.advance(1800)
+    for provider in providers.values():
+        provider.heal()
+    result = orch.resume()
+    assert result is not None and result.final_status is Status.DONE
+    assert len(_impl_attempts(providers)) > attempts_after_park
+    task = store.get_task("task-quiet")
+    assert task is not None and task.blocked_until is None  # cleared at terminal
+
+
+def test_wake_instant_beyond_the_ceiling_is_clamped(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # Untrusted provider input: a claimed window past the park ceiling must not outlive the ceiling
+    # that would fail the task anyway, so the stamp is clamped rather than believed.
+    clock = _Clock()
+    far = datetime.fromtimestamp(21600 * 10, tz=UTC).isoformat()
+    providers = _rate_limited_at(far)
+    orch, store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0], clock=clock
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    assert orch.run_task(_complete_task(tmp_path, "task-clamp")).final_status is Status.RUNNING
+    task = store.get_task("task-clamp")
+    assert task is not None and task.blocked_since is not None
+    ceiling = datetime.fromisoformat(task.blocked_since) + timedelta(seconds=21600)
+    assert task.blocked_until == ceiling.isoformat()
+
+    # And the ceiling still terminates the task at the ceiling — the instant never extends it.
+    clock.advance(21600 + 60)
+    result = orch.resume()
+    assert result is not None and result.final_status is Status.FAILED
+
+
+@pytest.mark.parametrize(
+    "wake",
+    [
+        None,  # the provider reported nothing
+        "not-an-instant",  # unparseable
+        # Already past. The controllable clock starts at the epoch, so "past" is before 1970 here —
+        # a 2020 instant would be the FUTURE relative to it, so it would clamp instead of drop.
+        "1969-12-31T23:00:00+00:00",
+        # Naive: comparing it against the aware instant the clock yields raises TypeError, which the
+        # neighbouring ceiling check's ``except ValueError`` would not have caught.
+        "1970-01-01T00:30:00",
+    ],
+)
+def test_unusable_wake_instants_leave_the_park_blind(
+    git_repo, make_git_config, tmp_path: Path, wake: str | None
+) -> None:
+    # Never worse than before: an instant that cannot be trusted leaves the previous behavior, which
+    # is to try again on the next tick.
+    clock = _Clock()
+    providers = _rate_limited_at(wake)
+    orch, store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0], clock=clock
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    assert orch.run_task(_complete_task(tmp_path, "task-blind")).final_status is Status.RUNNING
+    task = store.get_task("task-blind")
+    assert task is not None and task.blocked_since is not None
+    assert task.blocked_until is None
+
+
+def test_a_re_park_refreshes_the_wake_instant(git_repo, make_git_config, tmp_path: Path) -> None:
+    # Unlike blocked_since (stamped once so the ceiling measures total parked time), the instant is
+    # rewritten on every park: a later outage reporting nothing must not inherit an earlier
+    # provider's window and go on deferring a task that could already run.
+    clock = _Clock()
+    providers = _rate_limited_at(_WAKE)
+    orch, store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0], clock=clock
+    )
+    _patch_impl_edit(providers, git_repo)
+    assert orch.run_task(_complete_task(tmp_path, "task-repark")).final_status is Status.RUNNING
+    first = store.get_task("task-repark")
+    assert first is not None and first.blocked_until == _WAKE
+    parked_since = first.blocked_since
+
+    # Past the window, the outage is now a plain unavailability that reports no instant.
+    clock.advance(3600)
+    for provider in providers.values():
+        provider._infra_error_class = ErrorClass.PROVIDER_UNAVAILABLE
+        provider._infra_resets_at = None
+    assert orch.resume() is not None
+
+    again = store.get_task("task-repark")
+    assert again is not None
+    assert again.blocked_until is None  # refreshed, not inherited
+    assert again.blocked_since == parked_since  # the ceiling still measures from the first park
+
+
+def test_a_cancel_park_carries_no_wake_instant(git_repo, make_git_config, tmp_path: Path) -> None:
+    # An operator stop resumes when the operator says so, not when some provider's window reopens.
+    # Asserted on the Core's own guard: the Router already declines to carry an instant onto a
+    # cancel, so no integration path can produce the combination — the guard makes the invariant
+    # local instead of dependent on that distant decision.
+    clock = _Clock()
+    orch, _store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0], clock=clock
+    )
+    parked_since = clock()
+
+    def wake_for(error_class: ErrorClass) -> str | None:
+        return orch._park_wake_instant(
+            NodeInfraError("x", error_class=error_class, resets_at=_WAKE),
+            parked_since=parked_since,
+        )
+
+    assert wake_for(ErrorClass.RATE_LIMITED) == _WAKE  # the control: a real limit does schedule
+    assert wake_for(ErrorClass.CANCELLED) is None
+
+
+# --- the exhaustion class is aggregated across attempts, not taken from the last one -------------
+
+
+def _impl_attempts(providers: dict[ProviderId, FakeProvider]) -> list[AgentRunRequest]:
+    return [
+        r
+        for provider in providers.values()
+        for r in provider.requests
+        if r.node_id == "implementation"
+    ]
+
+
+def test_mixed_class_exhaustion_parks_on_the_park_eligible_attempt(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The primary hits a subscription limit and the fallback dies on expired credentials, so the
+    # class the Router settles on is the fallback's — which is not park-eligible. The task must
+    # still park: whether work survives must not depend on how badly a provider that ran nothing
+    # failed.
+    providers = _both(
+        infra_fail={"implementation"},
+        claude={"infra_error_class": ErrorClass.RATE_LIMITED},
+        codex={"infra_error_class": ErrorClass.AUTHENTICATION_FAILED},
+    )
+    orch, store, ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-mixed"))
+
+    assert result.final_status is Status.RUNNING  # parked, not terminal FAILED
+    task = store.get_task("task-mixed")
+    assert task is not None and task.status is Status.RUNNING
+    assert task.blocked_since is not None
+    assert ledger.records() == []
+    assert not (art / "logs" / "task-mixed" / "failure_report.json").exists()
+    assert "publish" not in _ran_nodes(store, "task-mixed")
+    # Both providers really were tried, so the park is not passing for want of a fallback hop.
+    assert len(_impl_attempts(providers)) == 2
+
+
+def test_containment_on_the_fallback_is_manual_not_parked(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # Security outranks a resumable sibling: a rate-limited primary must never let an unproven
+    # process tree on the fallback auto-resume. The task goes to manual with the exchange flagged
+    # unsafe (so the terminal seam holds the tree) and is NOT parked.
+    providers = _both(
+        infra_fail={"implementation"},
+        claude={"infra_error_class": ErrorClass.RATE_LIMITED},
+        codex={"infra_error_class": ErrorClass.CONTAINMENT_UNVERIFIED},
+    )
+    orch, store, ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-mixed-contain"))
+
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+    task = store.get_task("task-mixed-contain")
+    assert task is not None and task.status is Status.MANUAL_ACTION_REQUIRED
+    assert task.blocked_since is None  # never parked
+    assert store.get_exchange_guard("task-mixed-contain")[1] is True  # active exchange unsafe
+    assert "publish" not in _ran_nodes(store, "task-mixed-contain")
+    assert ledger.records()[0]["final_status"] == "manual_action_required"
+
+
+def test_cancel_park_keeps_the_cancel_class_over_a_park_eligible_attempt(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # An operator stop that lands on a rate-limited stage still reads as stopped, not as waiting on
+    # a provider window. Both dispositions park today, so the recorded class is the only observable
+    # difference — assert it, because it is what decides whether a wake instant may be inherited.
+    providers = _both(
+        infra_fail={"implementation"}, claude={"infra_error_class": ErrorClass.RATE_LIMITED}
+    )
+    stop = {"requested": False}
+    orch, store, ledger, _art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        is_cancelled=lambda: stop["requested"],
+    )
+    _patch_impl_edit(providers, git_repo)
+    original_run = providers[ProviderId.CLAUDE].run
+
+    def cancel_during_implementation(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            stop["requested"] = True
+        return original_run(request)
+
+    providers[ProviderId.CLAUDE].run = cancel_during_implementation  # type: ignore[method-assign]
+
+    result = orch.run_task(_complete_task(tmp_path, "task-cancel-limit"))
+
+    assert result.final_status is Status.RUNNING
+    task = store.get_task("task-cancel-limit")
+    assert task is not None and task.blocked_since is not None
+    assert ledger.records() == []
+    impl_run = [
+        r for r in store.get_node_runs("task-cancel-limit") if r.node_id == "implementation"
+    ][-1]
+    assert impl_run.error_class == ErrorClass.CANCELLED.value
+    # The killed attempt's own row keeps the class the provider actually raised.
+    attempt_classes = [a.error_class for a in store.get_provider_attempts(impl_run.id)]
+    assert attempt_classes == [ErrorClass.RATE_LIMITED.value]
+
+
+def test_rate_limited_evaluator_parks_then_resumes_to_done(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # An evaluator that cannot run degrades to manual to preserve an already-green diff. That is
+    # the right answer for "could not run, ever" — not for "the window resets shortly". Parking
+    # preserves strictly more: the diff survives AND the review still runs, with no operator.
+    providers = _both(infra_fail={"review"}, infra_error_class=ErrorClass.RATE_LIMITED)
+    orch, store, ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    first = orch.run_task(_complete_task(tmp_path, "task-eval-limit"))
+
+    assert first.final_status is Status.RUNNING  # parked, not degraded to manual
+    parked = store.get_task("task-eval-limit")
+    assert parked is not None and parked.blocked_since is not None
+    assert ledger.records() == []
+    assert not (art / "logs" / "task-eval-limit" / "failure_report.json").exists()
+
+    for provider in providers.values():
+        provider.heal()
+    result = orch.resume()
+
+    assert result is not None and result.final_status is Status.DONE
+    task = store.get_task("task-eval-limit")
+    assert task is not None and task.blocked_since is None
+    assert "review" in _ran_nodes(store, "task-eval-limit")
+    assert "publish" in _ran_nodes(store, "task-eval-limit")
+
+
+def test_infra_stuck_report_names_every_provider_attempt(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # A terminal that names only the class the Router settled on hides the real cause and the fact a
+    # fallback was tried at all — which is what made the incident expensive to diagnose.
+    providers = _both(
+        infra_fail={"implementation"}, infra_error_class=ErrorClass.AUTHENTICATION_FAILED
+    )
+    orch, store, _ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    result = orch.run_task(_complete_task(tmp_path, "task-report"))
+    assert result.final_status is Status.FAILED
+
+    report = json.loads(
+        (art / "logs" / "task-report" / "failure_report.json").read_text(encoding="utf-8")
+    )
+    assert report["node_id"] == "implementation"
+    attempts = report["provider_attempts"]
+    assert {a["provider"] for a in attempts} == {"claude", "codex"}
+    assert {a["error_class"] for a in attempts} == {ErrorClass.AUTHENTICATION_FAILED.value}
+    # Only the operator-facing fields: no private-tree path, no usage/cost columns.
+    assert all(
+        set(a) == {"provider", "attempt", "error_class", "exit_code", "started_at"}
+        for a in attempts
+    )
+
+    stuck = (art / "logs" / "task-report" / "stuck.md").read_text(encoding="utf-8")
+    assert "## Provider attempts" in stuck
+    assert "claude" in stuck and "codex" in stuck
+    assert "This task could not run:" in stuck
+    assert "fix loop exhausted" not in stuck  # no loop ran and no budget was spent
 
 
 _MINIMAL_FLOW = """
@@ -3920,10 +4281,12 @@ def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path
     assert {"prompt_audit", "prompt_audit_timeline"} <= kinds
 
 
-# NOTE: the live-path "primary fails → fallback runs" prompt-audit scenario no longer exists for the
-# packaged flow: every node defaults to the global primary, whose fallback target is itself (none).
-# Fallback fires only for a node pinned to a non-primary provider. The fallback who-metadata
-# (is_fallback across primary+fallback attempts) is unit-covered in test_flow_observability.py.
+# NOTE: there is no prompt-audit assertion for the live "primary fails → fallback runs" path, only
+# because a prompt audit is not what proves it. The path itself is real and reachable here: an
+# unpinned node resolves to the global primary whose fallback is the other allowed provider, so the
+# packaged flow driven by two allowed providers does fall back — the mixed-class exhaustion tests
+# above depend on exactly that. The fallback who-metadata (is_fallback across primary+fallback
+# attempts) is unit-covered in test_flow_observability.py.
 
 
 def test_prompt_audit_absent_when_disabled(git_repo, make_git_config, tmp_path: Path) -> None:

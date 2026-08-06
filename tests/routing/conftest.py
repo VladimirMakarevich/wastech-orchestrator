@@ -44,11 +44,14 @@ class FakeProvider:
         provider_id: ProviderId,
         *,
         raises: ErrorClass | None = None,
+        raises_resets_at: str | None = None,
         status: RunStatus = RunStatus.SUCCEEDED,
     ) -> None:
         self.id = provider_id.value
         self._provider_id = provider_id
         self._raises = raises
+        # The reset instant a rate-limit raise reports, so the Router's carry-through is assertable.
+        self._raises_resets_at = raises_resets_at
         self._status = status
         self.requests: list[AgentRunRequest] = []
 
@@ -61,7 +64,6 @@ class FakeProvider:
             provider_id=self.id,
             executable_found=True,
             version="fake-1.0",
-            authenticated=True,
             supports_required_features=True,
             message="fake",
         )
@@ -69,7 +71,11 @@ class FakeProvider:
     def run(self, request: AgentRunRequest) -> AgentRunResult:
         self.requests.append(request)
         if self._raises is not None:
-            raise ProviderError(self._raises, f"fake {self._raises.value}")
+            raise ProviderError(
+                self._raises,
+                f"fake {self._raises.value}",
+                resets_at=self._raises_resets_at,
+            )
         error = (
             NormalizedError(ErrorClass.TASK_FAILURE, "fake quality failure")
             if self._status is RunStatus.FAILED
@@ -125,9 +131,12 @@ def make_fake_provider() -> Callable[..., FakeProvider]:
         provider_id: ProviderId,
         *,
         raises: ErrorClass | None = None,
+        raises_resets_at: str | None = None,
         status: RunStatus = RunStatus.SUCCEEDED,
     ) -> FakeProvider:
-        return FakeProvider(provider_id, raises=raises, status=status)
+        return FakeProvider(
+            provider_id, raises=raises, raises_resets_at=raises_resets_at, status=status
+        )
 
     return _make
 

@@ -12,10 +12,11 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import sqlite3
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -125,6 +126,10 @@ from wastech_orchestrator.core.hitl import (
     consume_pending_interactions,
     reset_pending_interactions,
 )
+from wastech_orchestrator.core.infra_disposition import (
+    InfraDisposition,
+    classify_exhaustion,
+)
 from wastech_orchestrator.core.loop_control import (
     ExhaustedLoop,
     LoopCounters,
@@ -161,9 +166,11 @@ from wastech_orchestrator.git_manager import (
     ManualActionRequired,
 )
 from wastech_orchestrator.ledger import (
+    INFRA_LOOP,
     STUCK_FILENAME,
     Ledger,
     LedgerRecord,
+    NodeFailureEvidence,
     write_failure_report,
 )
 from wastech_orchestrator.memory import (
@@ -198,7 +205,6 @@ from wastech_orchestrator.providers.artifacts import (
     task_artifact_dir,
 )
 from wastech_orchestrator.providers.base import (
-    PARK_ELIGIBLE,
     ErrorClass,
     ProviderId,
 )
@@ -252,15 +258,6 @@ _LOG = logging.getLogger(__name__)
 # The lifecycle folders a task file moves between under ``tasks/`` (registration → done/failed).
 # "Currently running" is tracked by the task's ``state.db`` status, not a physical folder.
 _LIFECYCLE_FOLDERS = ("pending", "done", "failed")
-
-# Infra error classes that are a fail-closed SECURITY / manual-action condition for ANY node kind
-# (agent or evaluator): a provider tree that could not be proven quiescent
-# (``CONTAINMENT_UNVERIFIED``) or a missing host isolation capability with no qualifying fallback
-# (``CAPABILITY_UNAVAILABLE``). Never a quality fail, never a park, never a shippable green
-# diff — the error-class dispatch checks this before the evaluator-vs-node split.
-_CONTAINMENT_MANUAL_CLASSES = frozenset(
-    {ErrorClass.CONTAINMENT_UNVERIFIED, ErrorClass.CAPABILITY_UNAVAILABLE}
-)
 
 # Node kinds the constant supervisor layer does NOT observe. ``publish`` is terminal (its finalize
 # hook already wrote the summary); ``tool`` and ``checks`` are deterministic, so their result is
@@ -1998,6 +1995,19 @@ class Orchestrator:
                 node_id=run_state.current_node if run_state is not None else None,
                 run_state=run_state,
             )
+        row = self._store.get_task(p.task.id)
+        if row is not None and self._still_blocked(row.blocked_until):
+            # A provider named the instant its own limit window reopens, so this tick is one cheap
+            # no-op instead of a full re-entry that would prepare git, launch an agent, and be
+            # refused in seconds. Deliberately AFTER the ceiling — that must always win over a
+            # provider-supplied instant — and before any git or provider work. The caller stops on a
+            # non-terminal resume, so the slot stays held and the wait is bounded by the poll
+            # interval; there is no timer and no sleep, and that bound is the whole point.
+            self._log(p.task.id).info(
+                "parked task waiting on a provider window",
+                extra={"blocked_until": row.blocked_until},
+            )
+            return PipelineResult(task_id=p.task.id, final_status=Status.RUNNING)
         if run_state is None:
             # No usable checkpoint (interrupted before the engine wrote one) → restart from the top
             # via the full driver (re-does preflight + branch prep + a fresh freeze + engine).
@@ -2695,46 +2705,75 @@ class Orchestrator:
             )
         except EvaluatorInfraError as exc:
             self._sync_counters_from_run_state(p, run_state)
-            # The error-class dispatch comes BEFORE the evaluator degrade-to-manual. A
-            # containment/capability failure is a security condition for every node kind — an
-            # evaluator's (green) diff does not make an unproven process tree or a missing isolation
-            # capability shippable — so it must take the same fail-closed path as an agent node
-            # (flag the exchange unsafe, skip the seal, withhold Git), never the honest-terminal
-            # degrade below.
-            if exc.error_class in _CONTAINMENT_MANUAL_CLASSES:
-                return self._terminal_infra_manual(p, exc, run_state)
             # An evaluator that could not *run* (infra/misconfig) must not discard an already-green
-            # diff: degrade to manual (branch preserved, operator reviews/publishes), not failed.
-            # ``str(exc)`` already carries the real cause (e.g. ``agent_no_progress``); when the
-            # branch has no diff, say so plainly so the manual terminal never implies a change to
-            # review that does not exist (an honest terminal).
-            reason = str(exc)
-            # EXPERIMENTAL(no-work-infra): empty-diff annotation on the degrade-to-manual reason.
-            if not read_final_diff(self._artifacts_root, p.task.id).strip():
-                reason = f"{reason} (no changes were produced to review)"
-            return self._fail(
+            # diff: its terminal preserves the branch for an operator to review/publish rather than
+            # failing the task.
+            return self._dispatch_infra_exhaustion(
                 p,
-                reason,
-                status=Status.MANUAL_ACTION_REQUIRED,
-                node_id=run_state.current_node,
-                run_state=run_state,
+                exc,
+                run_state,
+                terminal_status=Status.MANUAL_ACTION_REQUIRED,
+                terminal_reason=self._evaluator_degrade_reason(p, exc),
             )
         except NodeInfraError as exc:
             self._sync_counters_from_run_state(p, run_state)
-            if exc.error_class in PARK_ELIGIBLE or exc.error_class is ErrorClass.CANCELLED:
-                # Park (resumable, B-lite), don't discard the task, when either: every allowed
-                # provider is transiently unavailable or rate-limited (retries + fallback done),
-                # or an operator stop cancelled the agent (reliable-stop) — a cancel must never
-                # read as terminal. A subscription/session limit parks too: it resets on its own
-                # window, so the task waits it out and resumes rather than failing / burning the
-                # queue. The checkpoint is already persisted; the next watch tick / process start
-                # resumes from current_node (or fails it past agents.retry.max_blocked_s).
-                return self._park(p, run_state, exc)
-            if exc.error_class in _CONTAINMENT_MANUAL_CLASSES:
-                return self._terminal_infra_manual(p, exc, run_state)
-            return self._fail(p, str(exc), node_id=run_state.current_node, run_state=run_state)
+            # An agent node's exhaustion leaves no usable result to ship, so its terminal is failed.
+            return self._dispatch_infra_exhaustion(
+                p,
+                exc,
+                run_state,
+                terminal_status=Status.FAILED,
+                terminal_reason=str(exc),
+            )
         self._sync_counters_from_run_state(p, run_state)
         return self._finish_engine_run(p, result)
+
+    def _dispatch_infra_exhaustion(
+        self,
+        p: _Pipeline,
+        exc: NodeInfraError,
+        run_state: FlowRunState,
+        *,
+        terminal_status: Status,
+        terminal_reason: str,
+    ) -> PipelineResult:
+        """Route a node whose provider stage was exhausted, by the aggregate class disposition.
+
+        Shared by every node kind so the containment-before-park precedence is applied exactly once
+        and cannot diverge between them: an evaluator's green diff does not make an unproven process
+        tree or a missing isolation capability shippable, and a security condition on any attempt
+        outranks a resumable one on another. The caller supplies only what its own terminal means,
+        because that — not the precedence — is what differs by node kind.
+        """
+        disposition = classify_exhaustion(exc.error_classes, representative=exc.error_class)
+        if disposition is InfraDisposition.MANUAL:
+            return self._terminal_infra_manual(p, exc, run_state)
+        if disposition is InfraDisposition.PARK:
+            # Resumable, not discarded: every allowed provider hit a transient limit or outage
+            # (retries and fallback done), or an operator stop cancelled the agent. A subscription
+            # limit resets on its own window, so the task waits it out. The checkpoint is already
+            # persisted; a later watch tick / process start resumes from current_node, or fails it
+            # once total parked time passes agents.retry.max_blocked_s.
+            return self._park(p, run_state, exc)
+        return self._fail(
+            p,
+            terminal_reason,
+            status=terminal_status,
+            node_id=run_state.current_node,
+            run_state=run_state,
+        )
+
+    def _evaluator_degrade_reason(self, p: _Pipeline, exc: EvaluatorInfraError) -> str:
+        """The terminal reason for an evaluator that could not run, preserving its green diff.
+
+        ``str(exc)`` already carries the real cause; when the branch has no diff, say so plainly so
+        the manual terminal never implies a change to review that does not exist.
+        """
+        reason = str(exc)
+        # EXPERIMENTAL(no-work-infra): empty-diff annotation on the degrade-to-manual reason.
+        if not read_final_diff(self._artifacts_root, p.task.id).strip():
+            reason = f"{reason} (no changes were produced to review)"
+        return reason
 
     def _terminal_infra_manual(
         self, p: _Pipeline, exc: NodeInfraError, run_state: FlowRunState
@@ -2748,8 +2787,13 @@ class Orchestrator:
         withheld (``_fail`` / ``_go_terminal`` honor the flag), holding the tree until an operator
         resolves. ``CAPABILITY_UNAVAILABLE`` has no live writer, so only the manual
         terminal applies.
+
+        The unsafe flag is decided from *every* class the stage raised, never the settled one: an
+        operator stop landing on the same attempt replaces the settled class with a cancel while the
+        unproven tree stays unproven, and missing the flag there would let the terminal seam seal a
+        tree an unknown descendant may still be writing.
         """
-        if exc.error_class is ErrorClass.CONTAINMENT_UNVERIFIED:
+        if ErrorClass.CONTAINMENT_UNVERIFIED in exc.error_classes:
             self._store.update_task(p.task.id, exchange_active_unsafe=1)
         return self._fail(
             p,
@@ -2767,19 +2811,69 @@ class Orchestrator:
         tick / next start; the flow checkpoint is already saved (``current_node``). Records the
         first park instant in ``tasks.blocked_since`` (kept across re-parks so the ceiling measures
         total parked wall-clock); the ceiling is checked on resume in :meth:`_resume_via_engine`. No
-        commit/push and no failure report — the partial work is preserved by the checkpoint."""
+        commit/push and no failure report — the partial work is preserved by the checkpoint.
+
+        ``tasks.blocked_until`` records when a provider said its own window reopens, so the wait is
+        precise instead of one blind re-entry per poll interval. Unlike ``blocked_since`` it is
+        rewritten on EVERY park: a later exhaustion reporting no instant must not inherit an earlier
+        provider's window and go on deferring a task that could already run."""
         existing = self._store.get_task(p.task.id)
-        if existing is None or existing.blocked_since is None:
-            self._store.update_task(p.task.id, blocked_since=self._clock())
+        prior = existing.blocked_since if existing is not None else None
+        parked_since = prior if prior is not None else self._clock()
+        blocked_until = self._park_wake_instant(exc, parked_since=parked_since)
+        self._store.update_task(p.task.id, blocked_since=parked_since, blocked_until=blocked_until)
         log = bind(_LOG, task_id=p.task.id)
         log.info(
             "task parked (resumable)",  # transient-infra exhaustion or an operator-stop cancel
             extra={
                 "node_id": run_state.current_node,
                 "error_class": exc.error_class.value if exc.error_class else None,
+                "blocked_until": blocked_until,
             },
         )
         return PipelineResult(task_id=p.task.id, final_status=Status.RUNNING)
+
+    def _park_wake_instant(self, exc: NodeInfraError, *, parked_since: str) -> str | None:
+        """The earliest instant a parked task may attempt a provider again, else ``None`` for any
+        tick.
+
+        The provider's reported reset is untrusted input. It is ignored — leaving the blind
+        next-tick behavior, never worse — when it is absent, unparseable, or not actually in the
+        future; and it is clamped to the park ceiling so a provider claiming a window next week can
+        never outlive the ceiling that would fail the task anyway. No new configuration key: the
+        clamp is the existing ceiling.
+
+        An operator stop is excluded outright: a cancelled run resumes when the operator says so,
+        not when some provider's window reopens. Every comparison goes through the injected
+        clock, and a clock that yields no comparable instant is treated as no instant rather than
+        breaking a park — note that a naive clock compared against a provider's timezone-aware
+        instant raises ``TypeError``, not ``ValueError``.
+        """
+        if exc.error_class is ErrorClass.CANCELLED or exc.resets_at is None:
+            return None
+        try:
+            wake = datetime.fromisoformat(exc.resets_at)
+            if wake <= datetime.fromisoformat(self._clock()):
+                return None
+            ceiling = datetime.fromisoformat(parked_since) + timedelta(
+                seconds=self._config.agents.retry.max_blocked_s
+            )
+            return min(wake, ceiling).isoformat()
+        except (ValueError, TypeError):
+            return None
+
+    def _still_blocked(self, blocked_until: str | None) -> bool:
+        """Whether a parked task's provider-reported window has not reopened yet.
+
+        Fails **open** on anything unparseable or incomparable: a junk instant must cost one wasted
+        re-entry, never wedge a task that nothing else would release.
+        """
+        if blocked_until is None:
+            return False
+        try:
+            return datetime.fromisoformat(blocked_until) > datetime.fromisoformat(self._clock())
+        except (ValueError, TypeError):
+            return False
 
     def _park_ceiling_exceeded(self, p: _Pipeline) -> str | None:
         """Return a terminal reason if the task has been parked (B-lite) past ``max_blocked_s``.
@@ -3975,25 +4069,63 @@ class Orchestrator:
     ) -> None:
         """Write ``failure_report.json`` + ``stuck.md`` for an infra terminal (best-effort).
 
-        Reuses the flow-neutral ledger writer. There is no fix-loop budget here, so ``loop="infra"``
-        and ``limit_name`` carries the infra error. A write failure must never mask the terminal
-        outcome, so it is logged, not raised.
+        Reuses the flow-neutral ledger writer. No fix-loop budget was spent here, so the report is
+        marked as such and ``limit_name`` carries the infra error. Every provider attempt of the
+        failing node is named, because an artifact reporting only the class the Router settled on
+        hides both the real cause and the fact that a fallback was tried at all. A write or read
+        failure must never mask the terminal outcome, so it is logged, not raised.
         """
         try:
             report_path, _stuck = write_failure_report(
                 self._artifacts_root,
                 p.task.id,
-                loop="infra",
+                loop=INFRA_LOOP,
                 limit_name=error,
                 counters=dict(run_state.loop_counters) if run_state is not None else {},
                 last_check_log=None,
                 last_review_findings=read_last_findings(self._store, p.task.id),
                 final_diff=read_final_diff(self._artifacts_root, p.task.id),
-                node_id=node_id,
+                failing_node=NodeFailureEvidence(
+                    node_id=node_id,
+                    provider_attempts=self._provider_attempt_evidence(p.task.id, node_id),
+                ),
             )
             self._store.update_task(p.task.id, failure_report_path=report_path)
-        except OSError as exc:
+        except (OSError, sqlite3.Error) as exc:
             self._log(p.task.id).warning("failure report not written", extra={"error": str(exc)})
+
+    def _provider_attempt_evidence(
+        self, task_id: str, node_id: str | None
+    ) -> tuple[Mapping[str, Any], ...]:
+        """The failing node run's provider attempts, projected to secret-free report fields.
+
+        Read from the store rather than threaded through the exception: both node runners record the
+        attempts *before* they raise, so every row is already durable by the time a terminal is
+        decided — the exception carries the decision input, the store carries the evidence.
+
+        ``()`` when there is no node to attribute the attempts to, because a whole-task dump would
+        mix in nodes that already succeeded and the supervisor layer's own provider calls.
+        """
+        if node_id is None:
+            return ()
+        runs = [run for run in self._store.get_node_runs(task_id) if run.node_id == node_id]
+        # Ascending by id, so the last match is the run that just failed — a fix loop or a subtask
+        # region legitimately runs the same node id several times within one task.
+        run_id = runs[-1].id if runs else None
+        if run_id is None:
+            return ()
+        # An explicit whitelist, never the whole row: the attempt directory is a path into the
+        # private artifact tree and the usage columns are not part of an operator artifact.
+        return tuple(
+            {
+                "provider": row.provider,
+                "attempt": row.attempt,
+                "error_class": row.error_class,
+                "exit_code": row.exit_code,
+                "started_at": row.started_at,
+            }
+            for row in self._store.get_provider_attempts(run_id)
+        )
 
     def _reconcile_open_node_runs(self, task_id: str, *, reason: str) -> None:
         """Close node runs left ``running`` by a hard stop, at a terminal transition.
@@ -4109,7 +4241,10 @@ class Orchestrator:
             cleanup_completed=cleanup.safe,
             cleanup_completed_at=self._clock() if cleanup.safe else None,
             cleanup_last_error=last_error,
-            blocked_since=None,  # B-lite: a terminal task is no longer parked
+            # A terminal task is no longer parked, and a surviving wake instant would defer a
+            # later rerun that nobody is waiting on.
+            blocked_since=None,
+            blocked_until=None,
         )
         # Close any node run left ``running`` by a hard stop before recording the terminal
         # state. A no-op on the normal path (the engine finalizes every node it runs); it catches a

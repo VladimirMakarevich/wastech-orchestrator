@@ -66,7 +66,7 @@ Applies per provider in `[primary, fallback]`; only transient classes (`PROVIDER
 | `agents.retry.max_attempts` | int | `2` | `>= 0` (`0` disables retry) | Same-provider retries _after_ the first attempt. |
 | `agents.retry.base_delay_s` | float | `2.0` | `>= 0` | Exponential-backoff base: `min(base * 2**k, max_delay_s)`, no jitter. |
 | `agents.retry.max_delay_s` | float | `30.0` | `>= 0` and `>= base_delay_s` | Per-retry delay cap. |
-| `agents.retry.max_blocked_s` | float | `21600.0` (6h) | `>= 0` | Park ceiling: once every provider is exhausted (outage _or_ rate-limit), the task parks resumable and fails only after this much total parked wall-clock. |
+| `agents.retry.max_blocked_s` | float | `21600.0` (6h) | `>= 0` | Park ceiling: once every provider is exhausted and **any** attempt reported an outage _or_ a rate-limit, the task parks resumable and fails only after this much total parked wall-clock. A fallback provider failing on something worse (expired credentials, say) does not cancel the park. When a provider reports the instant its own limit window reopens, the task idles until then instead of retrying every poll — that only ever _shortens_ the wait, and this ceiling still ends it. `worc top` / `worc status` show the wake instant. |
 
 ### `agents.providers.<id>` — per-provider CLI settings
 
@@ -279,3 +279,5 @@ Memory also requires `supervisor.enabled: true`. That layer's closing turn is th
 - **Comments are stripped on upgrade.** `worc upgrade-config` preserves values but re-emits the file without inline comments — keep the _reason_ for an unusual value recoverable elsewhere.
 
 After editing: run `worc preflight` (providers, isolation, Telegram) and `worc validate-flow --all` (flows are not checked by preflight — a config edit can invalidate a flow). Treat config editing as done only when both are green.
+
+Preflight also asks each provider's CLI whether it holds stored credentials and reports it as `auth=logged_in (…)` / `auth=logged_out` / `auth=unknown`. A provider reporting `logged_out` fails preflight **whatever its role** — a fallback that cannot start is not a fallback, and its silence is only discovered at the moment it is needed — and `worc run`, `worc watch` and `worc rerun` refuse to start for the same reason. Fix it by logging that CLI in, or by removing it from `agents.allowed` if this host does not use it. Note two things about that answer: it reports credential _presence_, not validity (an expired token still reads as present until a real call fails), and on macOS the CLIs resolve credentials through the Keychain via `$USER`, so trimming that name out of `security.allowed_environment` makes a logged-in CLI report logged out. An `unknown` answer only warns — a probe that cannot answer never blocks a run.
