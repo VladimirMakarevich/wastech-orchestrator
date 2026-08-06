@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import sqlite3
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -125,6 +126,10 @@ from wastech_orchestrator.core.hitl import (
     consume_pending_interactions,
     reset_pending_interactions,
 )
+from wastech_orchestrator.core.infra_disposition import (
+    InfraDisposition,
+    classify_exhaustion,
+)
 from wastech_orchestrator.core.loop_control import (
     ExhaustedLoop,
     LoopCounters,
@@ -161,9 +166,11 @@ from wastech_orchestrator.git_manager import (
     ManualActionRequired,
 )
 from wastech_orchestrator.ledger import (
+    INFRA_LOOP,
     STUCK_FILENAME,
     Ledger,
     LedgerRecord,
+    NodeFailureEvidence,
     write_failure_report,
 )
 from wastech_orchestrator.memory import (
@@ -198,7 +205,6 @@ from wastech_orchestrator.providers.artifacts import (
     task_artifact_dir,
 )
 from wastech_orchestrator.providers.base import (
-    PARK_ELIGIBLE,
     ErrorClass,
     ProviderId,
 )
@@ -252,15 +258,6 @@ _LOG = logging.getLogger(__name__)
 # The lifecycle folders a task file moves between under ``tasks/`` (registration → done/failed).
 # "Currently running" is tracked by the task's ``state.db`` status, not a physical folder.
 _LIFECYCLE_FOLDERS = ("pending", "done", "failed")
-
-# Infra error classes that are a fail-closed SECURITY / manual-action condition for ANY node kind
-# (agent or evaluator): a provider tree that could not be proven quiescent
-# (``CONTAINMENT_UNVERIFIED``) or a missing host isolation capability with no qualifying fallback
-# (``CAPABILITY_UNAVAILABLE``). Never a quality fail, never a park, never a shippable green
-# diff — the error-class dispatch checks this before the evaluator-vs-node split.
-_CONTAINMENT_MANUAL_CLASSES = frozenset(
-    {ErrorClass.CONTAINMENT_UNVERIFIED, ErrorClass.CAPABILITY_UNAVAILABLE}
-)
 
 # Node kinds the constant supervisor layer does NOT observe. ``publish`` is terminal (its finalize
 # hook already wrote the summary); ``tool`` and ``checks`` are deterministic, so their result is
@@ -2695,46 +2692,75 @@ class Orchestrator:
             )
         except EvaluatorInfraError as exc:
             self._sync_counters_from_run_state(p, run_state)
-            # The error-class dispatch comes BEFORE the evaluator degrade-to-manual. A
-            # containment/capability failure is a security condition for every node kind — an
-            # evaluator's (green) diff does not make an unproven process tree or a missing isolation
-            # capability shippable — so it must take the same fail-closed path as an agent node
-            # (flag the exchange unsafe, skip the seal, withhold Git), never the honest-terminal
-            # degrade below.
-            if exc.error_class in _CONTAINMENT_MANUAL_CLASSES:
-                return self._terminal_infra_manual(p, exc, run_state)
             # An evaluator that could not *run* (infra/misconfig) must not discard an already-green
-            # diff: degrade to manual (branch preserved, operator reviews/publishes), not failed.
-            # ``str(exc)`` already carries the real cause (e.g. ``agent_no_progress``); when the
-            # branch has no diff, say so plainly so the manual terminal never implies a change to
-            # review that does not exist (an honest terminal).
-            reason = str(exc)
-            # EXPERIMENTAL(no-work-infra): empty-diff annotation on the degrade-to-manual reason.
-            if not read_final_diff(self._artifacts_root, p.task.id).strip():
-                reason = f"{reason} (no changes were produced to review)"
-            return self._fail(
+            # diff: its terminal preserves the branch for an operator to review/publish rather than
+            # failing the task.
+            return self._dispatch_infra_exhaustion(
                 p,
-                reason,
-                status=Status.MANUAL_ACTION_REQUIRED,
-                node_id=run_state.current_node,
-                run_state=run_state,
+                exc,
+                run_state,
+                terminal_status=Status.MANUAL_ACTION_REQUIRED,
+                terminal_reason=self._evaluator_degrade_reason(p, exc),
             )
         except NodeInfraError as exc:
             self._sync_counters_from_run_state(p, run_state)
-            if exc.error_class in PARK_ELIGIBLE or exc.error_class is ErrorClass.CANCELLED:
-                # Park (resumable, B-lite), don't discard the task, when either: every allowed
-                # provider is transiently unavailable or rate-limited (retries + fallback done),
-                # or an operator stop cancelled the agent (reliable-stop) — a cancel must never
-                # read as terminal. A subscription/session limit parks too: it resets on its own
-                # window, so the task waits it out and resumes rather than failing / burning the
-                # queue. The checkpoint is already persisted; the next watch tick / process start
-                # resumes from current_node (or fails it past agents.retry.max_blocked_s).
-                return self._park(p, run_state, exc)
-            if exc.error_class in _CONTAINMENT_MANUAL_CLASSES:
-                return self._terminal_infra_manual(p, exc, run_state)
-            return self._fail(p, str(exc), node_id=run_state.current_node, run_state=run_state)
+            # An agent node's exhaustion leaves no usable result to ship, so its terminal is failed.
+            return self._dispatch_infra_exhaustion(
+                p,
+                exc,
+                run_state,
+                terminal_status=Status.FAILED,
+                terminal_reason=str(exc),
+            )
         self._sync_counters_from_run_state(p, run_state)
         return self._finish_engine_run(p, result)
+
+    def _dispatch_infra_exhaustion(
+        self,
+        p: _Pipeline,
+        exc: NodeInfraError,
+        run_state: FlowRunState,
+        *,
+        terminal_status: Status,
+        terminal_reason: str,
+    ) -> PipelineResult:
+        """Route a node whose provider stage was exhausted, by the aggregate class disposition.
+
+        Shared by every node kind so the containment-before-park precedence is applied exactly once
+        and cannot diverge between them: an evaluator's green diff does not make an unproven process
+        tree or a missing isolation capability shippable, and a security condition on any attempt
+        outranks a resumable one on another. The caller supplies only what its own terminal means,
+        because that — not the precedence — is what differs by node kind.
+        """
+        disposition = classify_exhaustion(exc.error_classes, representative=exc.error_class)
+        if disposition is InfraDisposition.MANUAL:
+            return self._terminal_infra_manual(p, exc, run_state)
+        if disposition is InfraDisposition.PARK:
+            # Resumable, not discarded: every allowed provider hit a transient limit or outage
+            # (retries and fallback done), or an operator stop cancelled the agent. A subscription
+            # limit resets on its own window, so the task waits it out. The checkpoint is already
+            # persisted; a later watch tick / process start resumes from current_node, or fails it
+            # once total parked time passes agents.retry.max_blocked_s.
+            return self._park(p, run_state, exc)
+        return self._fail(
+            p,
+            terminal_reason,
+            status=terminal_status,
+            node_id=run_state.current_node,
+            run_state=run_state,
+        )
+
+    def _evaluator_degrade_reason(self, p: _Pipeline, exc: EvaluatorInfraError) -> str:
+        """The terminal reason for an evaluator that could not run, preserving its green diff.
+
+        ``str(exc)`` already carries the real cause; when the branch has no diff, say so plainly so
+        the manual terminal never implies a change to review that does not exist.
+        """
+        reason = str(exc)
+        # EXPERIMENTAL(no-work-infra): empty-diff annotation on the degrade-to-manual reason.
+        if not read_final_diff(self._artifacts_root, p.task.id).strip():
+            reason = f"{reason} (no changes were produced to review)"
+        return reason
 
     def _terminal_infra_manual(
         self, p: _Pipeline, exc: NodeInfraError, run_state: FlowRunState
@@ -2748,8 +2774,13 @@ class Orchestrator:
         withheld (``_fail`` / ``_go_terminal`` honor the flag), holding the tree until an operator
         resolves. ``CAPABILITY_UNAVAILABLE`` has no live writer, so only the manual
         terminal applies.
+
+        The unsafe flag is decided from *every* class the stage raised, never the settled one: an
+        operator stop landing on the same attempt replaces the settled class with a cancel while the
+        unproven tree stays unproven, and missing the flag there would let the terminal seam seal a
+        tree an unknown descendant may still be writing.
         """
-        if exc.error_class is ErrorClass.CONTAINMENT_UNVERIFIED:
+        if ErrorClass.CONTAINMENT_UNVERIFIED in exc.error_classes:
             self._store.update_task(p.task.id, exchange_active_unsafe=1)
         return self._fail(
             p,
@@ -3975,25 +4006,63 @@ class Orchestrator:
     ) -> None:
         """Write ``failure_report.json`` + ``stuck.md`` for an infra terminal (best-effort).
 
-        Reuses the flow-neutral ledger writer. There is no fix-loop budget here, so ``loop="infra"``
-        and ``limit_name`` carries the infra error. A write failure must never mask the terminal
-        outcome, so it is logged, not raised.
+        Reuses the flow-neutral ledger writer. No fix-loop budget was spent here, so the report is
+        marked as such and ``limit_name`` carries the infra error. Every provider attempt of the
+        failing node is named, because an artifact reporting only the class the Router settled on
+        hides both the real cause and the fact that a fallback was tried at all. A write or read
+        failure must never mask the terminal outcome, so it is logged, not raised.
         """
         try:
             report_path, _stuck = write_failure_report(
                 self._artifacts_root,
                 p.task.id,
-                loop="infra",
+                loop=INFRA_LOOP,
                 limit_name=error,
                 counters=dict(run_state.loop_counters) if run_state is not None else {},
                 last_check_log=None,
                 last_review_findings=read_last_findings(self._store, p.task.id),
                 final_diff=read_final_diff(self._artifacts_root, p.task.id),
-                node_id=node_id,
+                failing_node=NodeFailureEvidence(
+                    node_id=node_id,
+                    provider_attempts=self._provider_attempt_evidence(p.task.id, node_id),
+                ),
             )
             self._store.update_task(p.task.id, failure_report_path=report_path)
-        except OSError as exc:
+        except (OSError, sqlite3.Error) as exc:
             self._log(p.task.id).warning("failure report not written", extra={"error": str(exc)})
+
+    def _provider_attempt_evidence(
+        self, task_id: str, node_id: str | None
+    ) -> tuple[Mapping[str, Any], ...]:
+        """The failing node run's provider attempts, projected to secret-free report fields.
+
+        Read from the store rather than threaded through the exception: both node runners record the
+        attempts *before* they raise, so every row is already durable by the time a terminal is
+        decided — the exception carries the decision input, the store carries the evidence.
+
+        ``()`` when there is no node to attribute the attempts to, because a whole-task dump would
+        mix in nodes that already succeeded and the supervisor layer's own provider calls.
+        """
+        if node_id is None:
+            return ()
+        runs = [run for run in self._store.get_node_runs(task_id) if run.node_id == node_id]
+        # Ascending by id, so the last match is the run that just failed — a fix loop or a subtask
+        # region legitimately runs the same node id several times within one task.
+        run_id = runs[-1].id if runs else None
+        if run_id is None:
+            return ()
+        # An explicit whitelist, never the whole row: the attempt directory is a path into the
+        # private artifact tree and the usage columns are not part of an operator artifact.
+        return tuple(
+            {
+                "provider": row.provider,
+                "attempt": row.attempt,
+                "error_class": row.error_class,
+                "exit_code": row.exit_code,
+                "started_at": row.started_at,
+            }
+            for row in self._store.get_provider_attempts(run_id)
+        )
 
     def _reconcile_open_node_runs(self, task_id: str, *, reason: str) -> None:
         """Close node runs left ``running`` by a hard stop, at a terminal transition.

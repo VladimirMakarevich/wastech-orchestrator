@@ -27,7 +27,11 @@ from typing import Any
 
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import FlowNode
-from wastech_orchestrator.ledger import DecomposedFailureInfo, write_failure_report
+from wastech_orchestrator.ledger import (
+    DecomposedFailureInfo,
+    NodeFailureEvidence,
+    write_failure_report,
+)
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
 from wastech_orchestrator.state_store import NodeRunRow, StateStore
 
@@ -198,7 +202,8 @@ class StateStoreRunRecorder:
             last_review_findings=read_last_findings(self._store, self._task_id),
             final_diff=read_final_diff(self._artifacts_root, self._task_id),
             decomposed=self._decomposed_failure(subtask_order),
-            node_id=node_id,
+            # A fix-loop terminal spent a budget, not a provider, so it carries no attempt evidence.
+            failing_node=NodeFailureEvidence(node_id=node_id),
         )
         self._store.update_task(self._task_id, failure_report_path=report_path)
         return report_path

@@ -193,6 +193,15 @@ class EvaluatorNodeRunner:
             raise EvaluatorInfraError(
                 f"evaluator node {node.id!r}: no provider could run it ({err})",
                 error_class=error_class,
+                # Every attempt's class, not just the settled one: a fallback that fails worse than
+                # the primary must not be able to mask a resumable primary failure. Only the rows
+                # that RAISED count — a row carrying a status returned a verdict, and a quality
+                # verdict must never be able to reach a park or manual decision.
+                error_classes=tuple(
+                    a.error_class
+                    for a in outcome.attempts
+                    if a.status is None and a.error_class is not None
+                ),
             )
         assert_exchange_unchanged(
             exchange_before, self._s.exchange_root, ctx.task_id, node_id=node.id

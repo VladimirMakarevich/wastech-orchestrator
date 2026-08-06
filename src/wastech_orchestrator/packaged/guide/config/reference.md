@@ -66,7 +66,7 @@ Applies per provider in `[primary, fallback]`; only transient classes (`PROVIDER
 | `agents.retry.max_attempts` | int | `2` | `>= 0` (`0` disables retry) | Same-provider retries _after_ the first attempt. |
 | `agents.retry.base_delay_s` | float | `2.0` | `>= 0` | Exponential-backoff base: `min(base * 2**k, max_delay_s)`, no jitter. |
 | `agents.retry.max_delay_s` | float | `30.0` | `>= 0` and `>= base_delay_s` | Per-retry delay cap. |
-| `agents.retry.max_blocked_s` | float | `21600.0` (6h) | `>= 0` | Park ceiling: once every provider is exhausted (outage _or_ rate-limit), the task parks resumable and fails only after this much total parked wall-clock. |
+| `agents.retry.max_blocked_s` | float | `21600.0` (6h) | `>= 0` | Park ceiling: once every provider is exhausted and **any** attempt reported an outage _or_ a rate-limit, the task parks resumable and fails only after this much total parked wall-clock. A fallback provider failing on something worse (expired credentials, say) does not cancel the park. |
 
 ### `agents.providers.<id>` — per-provider CLI settings
 
