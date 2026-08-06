@@ -20,7 +20,17 @@ from wastech_orchestrator import cli
 from wastech_orchestrator.notify import AskResult
 from wastech_orchestrator.observability import logging as obslog
 from wastech_orchestrator.providers._adapter_base import IsolationCapabilityReport
-from wastech_orchestrator.providers.base import AgentRunRequest, ProviderHealth, ProviderId
+from wastech_orchestrator.providers.base import (
+    AgentRunRequest,
+    AuthProbe,
+    AuthState,
+    ProviderHealth,
+    ProviderId,
+)
+
+# The default credential answer for a healthy fake, so the ~15 tests that predate the auth probe
+# keep printing an OK auth field instead of tripping the logged-out refusal.
+_LOGGED_IN = AuthProbe(state=AuthState.LOGGED_IN, method="fake-method", detail="stored credentials")
 
 
 @pytest.fixture(autouse=True)
@@ -43,21 +53,24 @@ class _FakeHealthProvider:
         healthy: bool = True,
         degraded_reasons: tuple[str, ...] = (),
         smoke: IsolationCapabilityReport | None = None,
+        auth: AuthProbe | None = _LOGGED_IN,
     ) -> None:
         self.id = provider_id
         self._healthy = healthy
         self._degraded_reasons = degraded_reasons
         self._smoke = smoke
+        self._auth = auth
 
     def preflight(self) -> ProviderHealth:
         return ProviderHealth(
             provider_id=self.id,
             executable_found=self._healthy,
             version="1.2.3" if self._healthy else None,
-            authenticated=self._healthy,
             supports_required_features=self._healthy,
             message="available" if self._healthy else "executable not found",
             degraded_reasons=self._degraded_reasons,
+            # A CLI that could not run makes no credential claim, matching the real adapter.
+            auth=self._auth if self._healthy else None,
         )
 
     def isolation_capability_smoke(self, *, home_dir: object) -> IsolationCapabilityReport | None:
@@ -78,23 +91,27 @@ def _patch_providers(
     gh_result: tuple[bool, str] = (True, "gh: OK"),
     degraded: dict[str, tuple[str, ...]] | None = None,
     smokes: dict[str, IsolationCapabilityReport] | None = None,
+    auth: dict[str, AuthProbe | None] | None = None,
     **healthy: bool,
 ) -> None:
     monkeypatch.setattr(cli, "_load_config", lambda _path: config)
     degraded = degraded or {}
     smokes = smokes or {}
+    auth = auth or {}
     providers = {
         ProviderId.CLAUDE: _FakeHealthProvider(
             "claude",
             healthy=healthy.get("claude", True),
             degraded_reasons=degraded.get("claude", ()),
             smoke=smokes.get("claude"),
+            auth=auth.get("claude", _LOGGED_IN),
         ),
         ProviderId.CODEX: _FakeHealthProvider(
             "codex",
             healthy=healthy.get("codex", True),
             degraded_reasons=degraded.get("codex", ()),
             smoke=smokes.get("codex"),
+            auth=auth.get("codex", _LOGGED_IN),
         ),
     }
     monkeypatch.setattr(cli, "build_providers", lambda _c, *, layout: providers)
@@ -123,6 +140,102 @@ def test_preflight_not_ready_when_a_binary_is_missing(
     assert rc == 1
     assert "codex: FAIL" in out
     assert "preflight: NOT ready" in out
+
+
+_LOGGED_OUT = AuthProbe(
+    state=AuthState.LOGGED_OUT, method=None, detail="not logged in (run 'codex login')"
+)
+
+
+def test_preflight_fails_when_a_provider_is_logged_out(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A deliberate inversion of the fallback-aware degradation rule above: a logged-out provider is
+    # fatal even though a fallback exists, because "a fallback will cover" is exactly the assumption
+    # a dead fallback breaks — and its silence is only discovered at the moment it is needed.
+    _patch_providers(
+        monkeypatch,
+        make_git_config(git_repo.clone),  # allowed: [claude, codex]
+        auth={"codex": _LOGGED_OUT},
+    )
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "codex: FAIL — not logged in (run 'codex login')" in out
+    # The message must name every lever, including the one an operator will actually hit.
+    assert "agents.allowed" in out
+    assert "security.allowed_environment" in out
+    assert "preflight: NOT ready" in out
+
+
+def test_preflight_fails_when_the_logged_out_provider_is_the_primary(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The verdict is role-independent: the same answer whether the provider is a fallback or the one
+    # that runs every node.
+    base = make_git_config(git_repo.clone)
+    codex_primary = replace(
+        base,
+        agents=replace(
+            base.agents,
+            providers={
+                ProviderId.CLAUDE: replace(base.agents.providers[ProviderId.CLAUDE], primary=False),
+                ProviderId.CODEX: replace(base.agents.providers[ProviderId.CODEX], primary=True),
+            },
+        ),
+    )
+    _patch_providers(monkeypatch, codex_primary, auth={"codex": _LOGGED_OUT})
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "codex: FAIL — not logged in" in out
+    assert "preflight: NOT ready" in out
+
+
+def test_preflight_warns_when_the_auth_probe_cannot_answer(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A probe that could not read an answer must not block a run — the same principle that governs
+    # the logged-out gh advisory. A drifted CLI is not evidence of a missing credential.
+    _patch_providers(
+        monkeypatch,
+        make_git_config(git_repo.clone),
+        auth={
+            "codex": AuthProbe(
+                state=AuthState.UNKNOWN, method=None, detail="no recognizable credential answer"
+            )
+        },
+    )
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "codex: WARN — no recognizable credential answer" in out
+    assert "preflight: ready" in out
+
+
+def test_preflight_makes_no_auth_claim_when_nothing_was_probed(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # An adapter with no credential verb makes no claim at all — the defect being fixed was a field
+    # that asserted an authentication nothing had checked.
+    _patch_providers(
+        monkeypatch, make_git_config(git_repo.clone), auth={"claude": None, "codex": None}
+    )
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "auth=" not in out
+    assert "preflight: ready" in out
+
+
+def test_preflight_healthy_line_names_the_auth_method(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _patch_providers(monkeypatch, make_git_config(git_repo.clone))
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "auth=logged_in (fake-method)" in out
 
 
 def test_preflight_degraded_warns_when_fallback_exists(

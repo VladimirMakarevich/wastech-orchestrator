@@ -40,6 +40,8 @@ from wastech_orchestrator.providers._adapter_base import (
 from wastech_orchestrator.providers.artifacts import ArtifactPaths
 from wastech_orchestrator.providers.base import (
     AgentRunRequest,
+    AuthProbe,
+    AuthState,
     ErrorClass,
     NormalizedUsage,
     ProviderError,
@@ -282,6 +284,25 @@ _LIMIT_BANNER = re.compile(
     r"session limit|usage limit|hit your (session|usage) limit|limit .* resets",
     re.IGNORECASE,
 )
+
+
+def _parse_auth_status(output: str) -> dict[str, Any] | None:
+    """The credential-status object out of a combined stdout+stderr probe answer, else ``None``.
+
+    Tries the whole answer first (a pretty-printed object spanning lines), then line by line,
+    because the probe appends stderr to stdout and a startup notice on either stream must not turn a
+    good answer into an unknown. Only an object actually carrying ``loggedIn`` counts as the answer.
+    """
+    for candidate in (output.strip(), *(line.strip() for line in output.splitlines())):
+        if not candidate.startswith("{"):
+            continue
+        try:
+            payload = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and "loggedIn" in payload:
+            return payload
+    return None
 
 
 def _is_limit_event(payload: object) -> bool:
@@ -1018,6 +1039,47 @@ class ClaudeCodeProvider(BaseCliProvider):
                 "nodes will fail on claude — pin a compatible Claude CLI or route these nodes "
                 "to another provider"
             ),
+        )
+
+    def _preflight_auth_state(self, env: Mapping[str, str]) -> AuthProbe | None:
+        """Report whether the Claude CLI holds stored credentials, via ``claude auth status``.
+
+        Exactly two keys are copied out of the answer: the login state and the auth method. That
+        same object also carries the account email and the organization id and name, and they are
+        dropped HERE, at the parse boundary — if they never enter the record, no later format string
+        can leak them into a preflight line, a log record or a report.
+
+        The exit code is deliberately not the signal: the verb exits 0 whether or not credentials
+        exist, so the payload is the only honest answer. ``--json`` is passed explicitly even though
+        it is today's default, because the CLI also offers a human-readable mode. No readable answer
+        at all is UNKNOWN, never a claim in either direction.
+        """
+        _, output = self._probe([self._config.command, "auth", "status", "--json"], env)
+        payload = _parse_auth_status(output)
+        if payload is None:
+            return AuthProbe(
+                state=AuthState.UNKNOWN,
+                method=None,
+                detail="'claude auth status' gave no readable credential answer",
+            )
+        logged_in = payload.get("loggedIn")
+        method = payload.get("authMethod")
+        if logged_in is True:
+            return AuthProbe(
+                state=AuthState.LOGGED_IN,
+                method=method if isinstance(method, str) else None,
+                detail="the CLI reports stored credentials",
+            )
+        if logged_in is False:
+            return AuthProbe(
+                state=AuthState.LOGGED_OUT,
+                method=None,
+                detail="not logged in (run 'claude auth login')",
+            )
+        return AuthProbe(
+            state=AuthState.UNKNOWN,
+            method=None,
+            detail="'claude auth status' answered ambiguously",
         )
 
     def _build_argv(self, request: AgentRunRequest, paths: ArtifactPaths) -> tuple[list[str], None]:

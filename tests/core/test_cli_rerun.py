@@ -17,7 +17,10 @@ from wastech_orchestrator.ledger import Ledger, LedgerRecord
 from wastech_orchestrator.state_store import StateStore, TaskRow
 
 # Every test here is a slow integration test (real git / subprocess / process tree).
-pytestmark = pytest.mark.slow
+# ``run``/``watch``/``rerun`` probe every allowed provider's credentials before starting. These
+# tests are about command orchestration, not credentials, and the config names the real CLIs — so
+# the gate is disarmed module-wide and asserted on directly by its own tests instead.
+pytestmark = [pytest.mark.slow, pytest.mark.usefixtures("no_provider_auth_gate")]
 
 _ENV = ["PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA"]
 

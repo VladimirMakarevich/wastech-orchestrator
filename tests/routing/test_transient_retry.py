@@ -45,7 +45,6 @@ class _FlakyProvider:
             provider_id=self.id,
             executable_found=True,
             version="1",
-            authenticated=True,
             supports_required_features=True,
             message="ok",
         )
@@ -84,7 +83,6 @@ class _ScriptedProvider:
             provider_id=self.id,
             executable_found=True,
             version="1",
-            authenticated=True,
             supports_required_features=True,
             message="ok",
         )

@@ -34,6 +34,15 @@ class GitControlUnavailableError(OSError):
     """Git is too old to enforce the git-control neutralization (needs >= 2.9)."""
 
 
+class ProviderNotLoggedInError(OSError):
+    """An allowed agent provider's CLI reports no stored credentials, so a run must not start.
+
+    Raised by the CLI's startup gate rather than here: the check needs the config and the provider
+    composition, which this module deliberately knows nothing about. Only the exception type lives
+    beside its siblings, so every startup refusal is handled as one family.
+    """
+
+
 def require_git_control() -> None:
     """Fail fast unless git honors the hook-neutralization (``core.hooksPath``, git 2.9+).
 

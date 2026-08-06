@@ -195,6 +195,17 @@ class AuthProbe:
 
 **7. A note for whoever re-verifies the codex caveat.** The evidence window has closed: `~/.codex/auth.json` on the incident host was rewritten at 2026-08-06 11:25, so the expired-refresh-token bytes that made `codex login status` exit 0 while the CLI 401'd are gone. Re-confirmed today: `codex login status` has no `--json` and no validity mode (`codex login --help` lists only `status`). Take the caveat from the incident record — do not conclude from a green probe on a freshly refreshed token that the probe proves validity.
 
+**8. Both logged-out answers, measured as built — one of them changes the probe.** The design above verified only what each verb prints when logged **in**. Probed against throwaway credential directories:
+
+| Verb | Logged out |
+| --- | --- |
+| `claude auth status --json` | exit **0**, `{"loggedIn": false, "authMethod": "none", "apiProvider": "firstParty"}` |
+| `codex login status` | exit **1**, `Not logged in` on **stderr** (stdout empty) |
+
+So the codex probe must **not** gate on a clean exit — it reads the combined stdout+stderr that `_probe` already returns, and matches `"not logged in"` before `"logged in"` because the former contains the latter. Had it keyed off `ok`, the logged-out branch would have been unreachable and the whole part would have shipped as a no-op that reads as done. The Claude probe passes `--json` explicitly: it is the default today, but the verb also offers `--text`. The login verbs the messages name are `claude auth login` and `codex login`.
+
+**9. `cmd_rerun` is gated too, so the "one rule for every entry point" heading is now true.** The implementation section below names only `cmd_watch` and `cmd_run`; `rerun --continue` is this incident's own documented recovery path and re-spends real money from a checkpoint, so the same argument applies verbatim. The gate sits exactly where `require_git_control` does in that command — after the plan is accepted, before any work is re-driven.
+
 ## P3 — honor `resetsAt`, and stop feeding the queue into a known-limited provider
 
 The adapter already captures the event that carries the answer: [`claude.py`](../../src/wastech_orchestrator/providers/claude.py) stores `rate_limit_event` — including `resetsAt: 1785993000` (07:10 local, 34 minutes out) — and uses it only to set a boolean. The instant is discarded.

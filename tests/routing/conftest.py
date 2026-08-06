@@ -61,7 +61,6 @@ class FakeProvider:
             provider_id=self.id,
             executable_found=True,
             version="fake-1.0",
-            authenticated=True,
             supports_required_features=True,
             message="fake",
         )

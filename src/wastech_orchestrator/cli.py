@@ -78,7 +78,7 @@ from wastech_orchestrator.notify.telegram import check_telegram_preflight
 from wastech_orchestrator.observability.logging import configure_logging, set_log_level
 from wastech_orchestrator.preflight import preflight_gh
 from wastech_orchestrator.providers import process as agent_process
-from wastech_orchestrator.providers.base import ProviderId
+from wastech_orchestrator.providers.base import AuthProbe, AuthState, ProviderId
 from wastech_orchestrator.runtime_layout import CONTROL_HOME_DIRNAME, RuntimeLayout, runs_root
 from wastech_orchestrator.security.isolation import check_isolation
 from wastech_orchestrator.state_store import IncompatibleStateError, StateStore, TaskRow
@@ -1787,6 +1787,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     if config.git.create_pull_request:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
         preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
+    # A node may route to ANY allowed provider, so one that cannot start is refused up front
+    # rather than discovered at the first fallback with a stage's work already spent.
+    require_provider_auth(config)
     orchestrator = build_orchestrator(
         config,
         layout=layout_for(config),
@@ -1987,6 +1990,9 @@ def cmd_rerun(args: argparse.Namespace) -> int:
     if config.git.create_pull_request:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
         preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
+    # A node may route to ANY allowed provider, so one that cannot start is refused up front
+    # rather than discovered at the first fallback with a stage's work already spent.
+    require_provider_auth(config)
 
     for note in plan.notes:
         print(f"rerun: note: {note}")
@@ -2772,6 +2778,80 @@ def _snapshot_labels(layout: MemoryLayout) -> list[str]:
     return sorted(p.name for p in snaps.iterdir() if p.is_dir())
 
 
+def _auth_report_field(auth: AuthProbe | None) -> str:
+    """The ``auth=…`` fragment of a provider's preflight health line.
+
+    Empty when nothing was probed, so a provider whose adapter implements no credential verb prints
+    no auth claim at all rather than an invented one.
+    """
+    if auth is None:
+        return ""
+    method = f" ({auth.method})" if auth.method else ""
+    return f", auth={auth.state.value}{method}"
+
+
+def _logged_out_refusal(pid: ProviderId, auth: AuthProbe) -> str:
+    """The operator-facing refusal for an allowed provider whose CLI reports no credentials.
+
+    Shared by the preflight report and the startup gate so both name the same levers. It names
+    ``agents.allowed`` because that is the second lever: the verdict does not care whether the
+    provider is anyone's primary, so a host that only ever uses one CLI has to say so in the config
+    rather than leaving a provider listed that no node can actually reach. And it names the
+    environment allowlist because that list *replaces* its default — a host whose CLI resolves
+    credentials through a variable the allowlist no longer passes reports logged out while being
+    logged in, and that failure looks identical to a real one.
+    """
+    return (
+        f"{auth.detail}; {pid.value} is in agents.allowed, so a node may route to it — log in or "
+        f"remove it from agents.allowed (if this host IS logged in, check that "
+        f"security.allowed_environment still passes the variables the CLI needs to reach its "
+        f"credential store)"
+    )
+
+
+def _auth_verdict(pid: ProviderId, auth: AuthProbe | None) -> tuple[bool, str | None]:
+    """The blocking verdict and any extra report line for one provider's credential probe.
+
+    A logged-out provider is fatal **whatever its role in any route** — a deliberate inversion of
+    the fallback-aware rule governing an advisory degradation, because "a fallback will cover" is
+    precisely the assumption a dead fallback breaks, and its silence is only discovered at the
+    moment it is needed. A probe that could not answer warns instead, on the same principle that
+    already governs the logged-out ``gh`` advisory: a flaky or drifted probe must never stop a run.
+    """
+    if auth is None or auth.state is AuthState.LOGGED_IN:
+        return True, None
+    if auth.state is AuthState.LOGGED_OUT:
+        return False, f"{pid.value}: FAIL — {_logged_out_refusal(pid, auth)}"
+    return True, f"{pid.value}: WARN — {auth.detail} (a probe that cannot answer must not block)"
+
+
+def require_provider_auth(config: OrchestratorConfig) -> None:
+    """Refuse to start when an allowed provider's CLI reports no stored credentials.
+
+    The unattended counterpart to the preflight auth line: a daemon has no operator to read a
+    warning, and a provider that cannot start is otherwise discovered only once a node routes to
+    it — by which point a stage's work is already spent. Deliberately narrower than
+    :func:`run_preflight`, which also gates Telegram, ``gh``, the isolation policy and the live
+    capability smoke: none of those may decide whether a task starts.
+
+    Only an explicit logged-out answer blocks. A provider with no probe, an unreadable answer, or
+    no configured adapter never does — refusing on a probe that could not answer would trade a rare
+    wasted run for a daemon that will not start at all. Auth is the whole scope: a missing
+    executable is a strictly worse condition, deliberately still left to surface at first use.
+
+    Every allowed provider is probed through ``preflight()``, the only channel to a credential
+    answer, so this costs a handful of short, timeout-bounded child-process launches per invocation.
+
+    :raises ProviderNotLoggedInError: an allowed provider reported no credentials.
+    """
+    providers = build_providers(config, layout=layout_for(config))
+    for pid in config.agents.allowed:
+        provider = providers.get(pid)
+        auth = provider.preflight().auth if provider is not None else None
+        if auth is not None and auth.state is AuthState.LOGGED_OUT:
+            raise preflight.ProviderNotLoggedInError(_logged_out_refusal(pid, auth))
+
+
 def run_preflight(
     config: OrchestratorConfig, *, env_file: Path | None = None, capability_smoke: bool = False
 ) -> tuple[bool, list[str]]:
@@ -2805,8 +2885,15 @@ def run_preflight(
         ok = ok and healthy
         lines.append(
             f"{pid.value}: {'OK' if healthy else 'FAIL'} — {health.message} "
-            f"(version={health.version or 'unknown'}, authenticated={health.authenticated})"
+            f"(version={health.version or 'unknown'}{_auth_report_field(health.auth)})"
         )
+        # A logged-out provider is fatal in ANY role, unlike the fallback-aware degradations below.
+        # Kept off ``healthy`` deliberately: that flag also gates the opt-in capability smoke, and
+        # an OK version line followed by its own FAIL reason is the shape already set below.
+        auth_ok, auth_line = _auth_verdict(pid, health.auth)
+        ok = ok and auth_ok
+        if auth_line is not None:
+            lines.append(auth_line)
         # Advisory degradations are fatal only when this provider has no fallback (it is the sole
         # allowed provider), else a warning — a fallback provider will cover the degraded nodes.
         has_fallback = any(other != pid for other in config.agents.allowed)
@@ -3024,6 +3111,9 @@ def cmd_watch(args: argparse.Namespace) -> int:
     if config.git.create_pull_request:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
         preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
+    # A node may route to ANY allowed provider, so one that cannot start is refused up front
+    # rather than discovered at the first fallback with a stage's work already spent.
+    require_provider_auth(config)
     poll = (
         args.poll_seconds
         if args.poll_seconds is not None
@@ -4298,7 +4388,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_runs(args)
         if args.command == "memory":
             return cmd_memory(args)
-    except (ConfigError, IncompatibleStateError, preflight.GhNotAvailableError) as exc:
+    except (
+        ConfigError,
+        IncompatibleStateError,
+        preflight.GhNotAvailableError,
+        preflight.ProviderNotLoggedInError,
+    ) as exc:
         print(f"error: {exc}")
         return 2
     except ManualActionRequired as exc:

@@ -39,6 +39,7 @@ from wastech_orchestrator.providers.base import (
     MAX_TURNS_SUBTYPE,
     AgentRunRequest,
     AgentRunResult,
+    AuthProbe,
     ErrorClass,
     NormalizedError,
     NormalizedUsage,
@@ -325,7 +326,7 @@ class BaseCliProvider:
     # --- shared lifecycle ----------------------------------------------------------------------
 
     def preflight(self) -> ProviderHealth:
-        """Detect the executable and parse its version (auth is best-effort/offline)."""
+        """Detect the executable, parse its version, and ask the CLI about its own credentials."""
         label = self._executable_label()
         env = self._augment_child_env(build_child_env(self._security.allowed_environment))
         with tempfile.TemporaryDirectory() as scratch:
@@ -340,12 +341,13 @@ class BaseCliProvider:
             )
             stdout_text = read_text(stdout_path)
 
+        # A CLI that could not run makes no credential claim at all, so ``auth`` is left unset on
+        # every unhealthy path below rather than being guessed in either direction.
         if proc.launch_error is not None:
             return ProviderHealth(
                 provider_id=self.id,
                 executable_found=False,
                 version=None,
-                authenticated=False,
                 supports_required_features=False,
                 message=f"{label} executable not found",
             )
@@ -354,18 +356,18 @@ class BaseCliProvider:
                 provider_id=self.id,
                 executable_found=True,
                 version=None,
-                authenticated=False,
                 supports_required_features=False,
                 message=f"{label} was found but '{label} --version' did not succeed",
             )
         version = _parse_version(stdout_text)
         capability_error = self._preflight_capability_error(env)
         if capability_error is not None:
+            # This path already fails preflight, so a second reason buys nothing and probing here
+            # would only spend another child-process launch.
             return ProviderHealth(
                 provider_id=self.id,
                 executable_found=True,
                 version=version,
-                authenticated=True,
                 supports_required_features=False,
                 message=capability_error,
             )
@@ -373,11 +375,11 @@ class BaseCliProvider:
             provider_id=self.id,
             executable_found=True,
             version=version,
-            authenticated=True,
             supports_required_features=version is not None,
             message=f"{label} {version or 'unknown version'} available"
             f"{self._preflight_healthy_detail(env)}",
             degraded_reasons=self._preflight_degraded_reasons(env),
+            auth=self._preflight_auth_state(env),
         )
 
     def _preflight_capability_error(self, env: Mapping[str, str]) -> str | None:
@@ -399,6 +401,19 @@ class BaseCliProvider:
         CLI syntax; it does not know ``agents.allowed``). Default: none.
         """
         return ()
+
+    def _preflight_auth_state(self, env: Mapping[str, str]) -> AuthProbe | None:
+        """Subclass hook: report what this CLI says about its own stored credentials.
+
+        Runs through :meth:`_probe`, so it inherits the preflight timeout and the allowlisted
+        environment and never launches the model. The base knows no CLI syntax: only the subclass
+        knows the verb and how to read the answer — and it must copy nothing out of that answer
+        beyond the login state and the credential mechanism, because a credential answer can carry
+        an account identity and everything placed on the returned record is printable.
+
+        Default ``None``: an adapter with no such verb makes no claim rather than guessing one.
+        """
+        return None
 
     def _preflight_healthy_detail(self, env: Mapping[str, str]) -> str:
         """Subclass hook: extra detail appended to the healthy preflight message (e.g. a resolved

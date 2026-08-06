@@ -20,6 +20,7 @@ from wastech_orchestrator.providers.base import (
     FALLBACK_ELIGIBLE,
     AgentProvider,
     AgentRunRequest,
+    AuthState,
     ErrorClass,
     ProviderError,
     RunStatus,
@@ -495,10 +496,11 @@ _FULL_CLAUDE_HELP = (
 
 
 class _ProbingClaudeRun:
-    """A fake runner answering ``claude --version`` and ``claude --help`` by argv (preflight)."""
+    """A fake runner answering ``--version``, ``--help`` and ``auth status`` by argv (preflight)."""
 
-    def __init__(self, *, help_text: str) -> None:
+    def __init__(self, *, help_text: str, auth_answer: str = '{"loggedIn": true}') -> None:
         self._help_text = help_text
+        self._auth_answer = auth_answer
         self.argvs: list[list[str]] = []
 
     def __call__(
@@ -514,7 +516,12 @@ class _ProbingClaudeRun:
         recorder: Any = None,
     ) -> ProcessResult:
         self.argvs.append(list(argv))
-        out = "2.1.217 (Claude Code)\n" if "--version" in argv else self._help_text
+        if "--version" in argv:
+            out = "2.1.217 (Claude Code)\n"
+        elif "auth" in argv:
+            out = self._auth_answer
+        else:
+            out = self._help_text
         Path(stdout_path).write_text(out, encoding="utf-8")
         return ProcessResult(
             exit_code=0,
@@ -575,3 +582,80 @@ def test_preflight_degrades_when_resume_flag_missing(
     health = _probing_provider(claude_config, security_config, tmp_path, fake).preflight()
     assert health.supports_required_features is True  # isolation-critical flags still present
     assert any("--resume" in reason for reason in health.degraded_reasons)
+
+
+# --- Claude credential probe (claude auth status) -----------------------------------------------
+
+
+def test_preflight_auth_reports_logged_in_without_copying_any_identity(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # The real answer carries the account email and the organization id and name beside the two keys
+    # this probe wants. They are dropped at the parse boundary, so no later format string can leak
+    # them into a preflight line, a log record or a report — assert on the whole record at once.
+    email, org_id, org_name = "someone@example.com", "org_12345", "Example Org"
+    fake = _ProbingClaudeRun(
+        help_text=_FULL_CLAUDE_HELP,
+        auth_answer=json.dumps(
+            {
+                "loggedIn": True,
+                "authMethod": "claude.ai",
+                "apiProvider": "firstParty",
+                "email": email,
+                "orgId": org_id,
+                "orgName": org_name,
+                "subscriptionType": "team",
+            }
+        ),
+    )
+    health = _probing_provider(claude_config, security_config, tmp_path, fake).preflight()
+    assert health.auth is not None
+    assert health.auth.state is AuthState.LOGGED_IN
+    assert health.auth.method == "claude.ai"
+    rendered = repr(health)
+    assert not any(secret in rendered for secret in (email, org_id, org_name))
+    # ``--json`` is passed explicitly rather than relying on it staying the CLI's default.
+    assert ["claude", "auth", "status", "--json"] in fake.argvs
+
+
+def test_preflight_auth_reports_logged_out(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # The verb exits 0 whether or not credentials exist, so the payload is the only honest signal.
+    fake = _ProbingClaudeRun(
+        help_text=_FULL_CLAUDE_HELP,
+        auth_answer=json.dumps({"loggedIn": False, "authMethod": "none"}),
+    )
+    health = _probing_provider(claude_config, security_config, tmp_path, fake).preflight()
+    assert health.auth is not None
+    assert health.auth.state is AuthState.LOGGED_OUT
+    assert health.auth.method is None  # a logged-out answer names no mechanism worth reporting
+    assert "claude auth login" in health.auth.detail
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Logged in as someone@example.com\n",  # a human-readable mode, not the object
+        '{"apiProvider": "firstParty"}',  # an object that does not answer the question
+        "",
+    ],
+)
+def test_preflight_auth_is_unknown_when_the_answer_is_unreadable(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path, answer: str
+) -> None:
+    # An unreadable answer is not evidence in either direction, so it makes no claim.
+    fake = _ProbingClaudeRun(help_text=_FULL_CLAUDE_HELP, auth_answer=answer)
+    health = _probing_provider(claude_config, security_config, tmp_path, fake).preflight()
+    assert health.auth is not None
+    assert health.auth.state is AuthState.UNKNOWN
+
+
+def test_preflight_missing_binary_makes_no_credential_claim(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # A CLI that could not run has nothing to probe, so it asserts nothing — the whole point of
+    # replacing a boolean that read true on every path where the version check happened to exit 0.
+    fake = FakeRun(launch_error="not found")
+    provider = _provider(claude_config, security_config, tmp_path, fake)
+    assert provider.preflight().auth is None

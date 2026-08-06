@@ -36,6 +36,8 @@ from wastech_orchestrator.providers._adapter_base import (
 from wastech_orchestrator.providers.artifacts import ArtifactPaths
 from wastech_orchestrator.providers.base import (
     AgentRunRequest,
+    AuthProbe,
+    AuthState,
     ErrorClass,
     NormalizedError,
     NormalizedUsage,
@@ -844,6 +846,45 @@ class CodexProvider(BaseCliProvider):
                 "resume nodes (supervisor, documentation, rework, fixing) will fail on codex — "
                 "pin a compatible Codex CLI or route these nodes to another provider"
             ),
+        )
+
+    def _preflight_auth_state(self, env: Mapping[str, str]) -> AuthProbe | None:
+        """Report whether the Codex CLI holds stored credentials, via ``codex login status``.
+
+        Credential **presence** only, and the gap matters: the verb prints the stored-credential
+        line and exits 0 for an already-expired refresh token too, so a green answer means there are
+        credentials to try, not that the next launch will authenticate. There is no machine-readable
+        mode and no round-trip that would prove validity without spending a model call.
+
+        The state is therefore read from the fixed sentence rather than the exit code — logged out
+        is a non-zero exit printed on stderr, which the probe folds into the same text — and
+        anything unrecognized stays UNKNOWN rather than a claim. ``method`` is left unset because
+        the answer is prose, and pattern-matching a mechanism out of a sentence that may be reworded
+        upstream would assert more than the probe knows.
+
+        Worth knowing when this reports a logged-out CLI that is in fact logged in: on macOS the CLI
+        resolves subscription credentials through the Keychain via ``USER``, so an environment
+        allowlist missing that name changes the answer.
+        """
+        _, output = self._probe([self._config.command, "login", "status"], env)
+        text = output.strip().lower()
+        # Checked first: the logged-out sentence contains the logged-in one as a substring.
+        if "not logged in" in text:
+            return AuthProbe(
+                state=AuthState.LOGGED_OUT,
+                method=None,
+                detail="not logged in (run 'codex login')",
+            )
+        if "logged in" in text:
+            return AuthProbe(
+                state=AuthState.LOGGED_IN,
+                method=None,
+                detail="the CLI reports stored credentials",
+            )
+        return AuthProbe(
+            state=AuthState.UNKNOWN,
+            method=None,
+            detail="'codex login status' gave no recognizable credential answer",
         )
 
     def _signatures(self) -> Sequence[StderrSignature]:

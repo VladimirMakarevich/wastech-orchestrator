@@ -43,6 +43,19 @@ def _assume_bash_sandbox_available(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+@pytest.fixture
+def no_provider_auth_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disarm the startup credential gate for command tests that are not about credentials.
+
+    ``run``/``watch``/``rerun`` probe every allowed provider's CLI before starting, and the shared
+    test config names the real ``claude``/``codex`` commands — so without this a test about PID
+    files or a confirmation prompt would spawn the operator's actual CLIs and its result would
+    depend on whether this host happens to be logged in. The gate's own behavior is covered directly
+    by the tests asserting on it, so switching it off here removes a host dependency, not coverage.
+    """
+    monkeypatch.setattr("wastech_orchestrator.cli.require_provider_auth", lambda _config: None)
+
+
 # The packaged built-in flows tree (source-tree/wheel path). ``worc install`` copies this into an
 # operator's ``.worc/flows/``; since the registry no longer falls back to the packaged tree at run
 # time, a test that resolves a built-in flow points a FlowRegistry's ``operator_flows_dir`` here, or
