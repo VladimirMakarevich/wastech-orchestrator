@@ -12,7 +12,7 @@ import logging
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -22,6 +22,7 @@ from wastech_orchestrator.core.flow.exchange_seal import (
     exchange_quarantine_root,
     exchange_seal_root,
 )
+from wastech_orchestrator.core.flow.nodes.base import NodeInfraError
 from wastech_orchestrator.core.flow.nodes.exchange_publish import ExchangeMutationManual
 from wastech_orchestrator.core.orchestrator import Eligibility, Orchestrator, SlotBusyError
 from wastech_orchestrator.core.state_machine import Status
@@ -74,11 +75,14 @@ class FakeProvider:
         outputs: dict[str, tuple[str, dict | None]] | None = None,
         infra_fail: set[str] | None = None,
         infra_error_class: ErrorClass = ErrorClass.TIMEOUT,
+        infra_resets_at: str | None = None,
     ) -> None:
         self.id = provider_id
         self._outputs = outputs or {}
         self._infra_fail = infra_fail or set()
         self._infra_error_class = infra_error_class
+        # The reset instant a rate-limit raise reports, so the park can schedule on it.
+        self._infra_resets_at = infra_resets_at
         self._healed = False
         self.requests: list[AgentRunRequest] = []
 
@@ -98,7 +102,11 @@ class FakeProvider:
     def run(self, request: AgentRunRequest) -> AgentRunResult:
         self.requests.append(request)
         if request.node_id in self._infra_fail and not self._healed:
-            raise ProviderError(error_class=self._infra_error_class, message="infra fail")
+            raise ProviderError(
+                error_class=self._infra_error_class,
+                message="infra fail",
+                resets_at=self._infra_resets_at,
+            )
         message, structured = self._outputs.get(request.node_id, ("done", None))
         if request.node_id == "refinement":
             structured = (
@@ -1953,6 +1961,175 @@ def test_no_work_exhaustion_fails_task(git_repo, make_git_config, tmp_path: Path
     assert task is not None and task.blocked_since is None
     assert (art / "logs" / "task-nowork" / "failure_report.json").exists()
     assert ledger.records()[0]["final_status"] == "failed"
+
+
+# --- a provider-reported reset instant makes the park precise instead of blind -------------------
+
+# 30 minutes past the _Clock epoch: inside the 6h ceiling, comfortably in the future.
+_WAKE = datetime.fromtimestamp(1800, tz=UTC).isoformat()
+
+
+def _rate_limited_at(wake: str | None) -> dict[ProviderId, FakeProvider]:
+    return _both(
+        infra_fail={"implementation"},
+        infra_error_class=ErrorClass.RATE_LIMITED,
+        claude={"infra_resets_at": wake},
+    )
+
+
+def test_rate_limit_park_stamps_the_provider_reported_wake_instant(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The adapter already captured the instant its limit window reopens and threw it away, so even a
+    # correct park then waited blind against a six-hour ceiling for a window reopening in minutes.
+    clock = _Clock()
+    providers = _rate_limited_at(_WAKE)
+    orch, store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0], clock=clock
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    assert orch.run_task(_complete_task(tmp_path, "task-wake")).final_status is Status.RUNNING
+    task = store.get_task("task-wake")
+    assert task is not None
+    assert task.blocked_since is not None
+    assert task.blocked_until == _WAKE
+
+
+def test_ticks_before_the_wake_instant_launch_no_provider(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The whole point: instead of a full re-entry per poll interval that prepares git, launches an
+    # agent and is refused in seconds, a tick inside the window is one cheap no-op.
+    clock = _Clock()
+    providers = _rate_limited_at(_WAKE)
+    orch, store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0], clock=clock
+    )
+    _patch_impl_edit(providers, git_repo)
+    assert orch.run_task(_complete_task(tmp_path, "task-quiet")).final_status is Status.RUNNING
+    attempts_after_park = len(_impl_attempts(providers))
+    runs_after_park = len(store.get_node_runs("task-quiet"))
+
+    clock.advance(600)  # still inside the reported window
+    assert orch.resume() is not None  # the slot stays held (non-terminal)
+    assert len(_impl_attempts(providers)) == attempts_after_park  # no provider was launched
+    assert len(store.get_node_runs("task-quiet")) == runs_after_park  # and no node run was opened
+
+    # The first tick at or after the instant re-enters for real; the outage cleared, it finishes.
+    clock.advance(1800)
+    for provider in providers.values():
+        provider.heal()
+    result = orch.resume()
+    assert result is not None and result.final_status is Status.DONE
+    assert len(_impl_attempts(providers)) > attempts_after_park
+    task = store.get_task("task-quiet")
+    assert task is not None and task.blocked_until is None  # cleared at terminal
+
+
+def test_wake_instant_beyond_the_ceiling_is_clamped(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # Untrusted provider input: a claimed window past the park ceiling must not outlive the ceiling
+    # that would fail the task anyway, so the stamp is clamped rather than believed.
+    clock = _Clock()
+    far = datetime.fromtimestamp(21600 * 10, tz=UTC).isoformat()
+    providers = _rate_limited_at(far)
+    orch, store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0], clock=clock
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    assert orch.run_task(_complete_task(tmp_path, "task-clamp")).final_status is Status.RUNNING
+    task = store.get_task("task-clamp")
+    assert task is not None and task.blocked_since is not None
+    ceiling = datetime.fromisoformat(task.blocked_since) + timedelta(seconds=21600)
+    assert task.blocked_until == ceiling.isoformat()
+
+    # And the ceiling still terminates the task at the ceiling — the instant never extends it.
+    clock.advance(21600 + 60)
+    result = orch.resume()
+    assert result is not None and result.final_status is Status.FAILED
+
+
+@pytest.mark.parametrize(
+    "wake",
+    [
+        None,  # the provider reported nothing
+        "not-an-instant",  # unparseable
+        # Already past. The controllable clock starts at the epoch, so "past" is before 1970 here —
+        # a 2020 instant would be the FUTURE relative to it, so it would clamp instead of drop.
+        "1969-12-31T23:00:00+00:00",
+        # Naive: comparing it against the aware instant the clock yields raises TypeError, which the
+        # neighbouring ceiling check's ``except ValueError`` would not have caught.
+        "1970-01-01T00:30:00",
+    ],
+)
+def test_unusable_wake_instants_leave_the_park_blind(
+    git_repo, make_git_config, tmp_path: Path, wake: str | None
+) -> None:
+    # Never worse than before: an instant that cannot be trusted leaves the previous behavior, which
+    # is to try again on the next tick.
+    clock = _Clock()
+    providers = _rate_limited_at(wake)
+    orch, store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0], clock=clock
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    assert orch.run_task(_complete_task(tmp_path, "task-blind")).final_status is Status.RUNNING
+    task = store.get_task("task-blind")
+    assert task is not None and task.blocked_since is not None
+    assert task.blocked_until is None
+
+
+def test_a_re_park_refreshes_the_wake_instant(git_repo, make_git_config, tmp_path: Path) -> None:
+    # Unlike blocked_since (stamped once so the ceiling measures total parked time), the instant is
+    # rewritten on every park: a later outage reporting nothing must not inherit an earlier
+    # provider's window and go on deferring a task that could already run.
+    clock = _Clock()
+    providers = _rate_limited_at(_WAKE)
+    orch, store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0], clock=clock
+    )
+    _patch_impl_edit(providers, git_repo)
+    assert orch.run_task(_complete_task(tmp_path, "task-repark")).final_status is Status.RUNNING
+    first = store.get_task("task-repark")
+    assert first is not None and first.blocked_until == _WAKE
+    parked_since = first.blocked_since
+
+    # Past the window, the outage is now a plain unavailability that reports no instant.
+    clock.advance(3600)
+    for provider in providers.values():
+        provider._infra_error_class = ErrorClass.PROVIDER_UNAVAILABLE
+        provider._infra_resets_at = None
+    assert orch.resume() is not None
+
+    again = store.get_task("task-repark")
+    assert again is not None
+    assert again.blocked_until is None  # refreshed, not inherited
+    assert again.blocked_since == parked_since  # the ceiling still measures from the first park
+
+
+def test_a_cancel_park_carries_no_wake_instant(git_repo, make_git_config, tmp_path: Path) -> None:
+    # An operator stop resumes when the operator says so, not when some provider's window reopens.
+    # Asserted on the Core's own guard: the Router already declines to carry an instant onto a
+    # cancel, so no integration path can produce the combination — the guard makes the invariant
+    # local instead of dependent on that distant decision.
+    clock = _Clock()
+    orch, _store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0], clock=clock
+    )
+    parked_since = clock()
+
+    def wake_for(error_class: ErrorClass) -> str | None:
+        return orch._park_wake_instant(
+            NodeInfraError("x", error_class=error_class, resets_at=_WAKE),
+            parked_since=parked_since,
+        )
+
+    assert wake_for(ErrorClass.RATE_LIMITED) == _WAKE  # the control: a real limit does schedule
+    assert wake_for(ErrorClass.CANCELLED) is None
 
 
 # --- the exhaustion class is aggregated across attempts, not taken from the last one -------------

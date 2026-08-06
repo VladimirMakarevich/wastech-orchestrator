@@ -268,6 +268,58 @@ def test_rate_limit_stderr_raises_rate_limited(
     assert exc.value.error_class is ErrorClass.RATE_LIMITED
 
 
+def _session_limit_stream(resets_at: object) -> str:
+    events: list[dict[str, Any]] = [
+        {"type": "system", "subtype": "init", "session_id": "sess-1"},
+        {"type": "rate_limit_event", "status": "rejected", "resetsAt": resets_at},
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "api_error_status": 429,
+            "result": "You've hit your session limit · resets 7:10am",
+            "session_id": "sess-1",
+        },
+    ]
+    return "\n".join(json.dumps(e) for e in events)
+
+
+def test_rate_limited_raise_carries_the_reset_instant_as_iso_utc(
+    claude_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # The epoch becomes a wall-clock string exactly once, here, so the carried field stays
+    # provider-neutral and nothing downstream does timezone arithmetic. It rides the RAISED
+    # exception, because that is what the Router rebuilds its own normalized error from.
+    epoch = 1785993000
+    fake = FakeRun(stdout=_session_limit_stream(epoch), exit_code=1)
+    provider = _provider(claude_config, security_config, tmp_path, fake)
+    with pytest.raises(ProviderError) as exc:
+        provider.run(make_request())
+    assert exc.value.error_class is ErrorClass.RATE_LIMITED
+    assert exc.value.resets_at == datetime.fromtimestamp(epoch, tz=UTC).isoformat()
+
+
+@pytest.mark.parametrize("resets_at", [1e30, -1e30, "soon"])
+def test_unrepresentable_reset_instant_leaves_the_raise_without_one(
+    claude_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+    resets_at: object,
+) -> None:
+    # A limit the platform cannot turn into a datetime still raises as a limit — it just carries no
+    # wake instant, which costs one blind retry instead of deferring a task on a bad value.
+    fake = FakeRun(stdout=_session_limit_stream(resets_at), exit_code=1)
+    provider = _provider(claude_config, security_config, tmp_path, fake)
+    with pytest.raises(ProviderError) as exc:
+        provider.run(make_request())
+    assert exc.value.error_class is ErrorClass.RATE_LIMITED
+    assert exc.value.resets_at is None
+
+
 def test_invalid_output_raises_invalid_output(
     claude_config: ProviderConfig,
     security_config: SecurityConfig,

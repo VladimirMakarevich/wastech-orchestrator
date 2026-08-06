@@ -77,6 +77,22 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _iso_instant(epoch_seconds: float | None) -> str | None:
+    """A provider-reported Unix instant as an ISO-8601 UTC string, else ``None``.
+
+    The single point where a CLI's epoch becomes the orchestrator's wall-clock spelling, so nothing
+    downstream does timezone arithmetic and the carried field stays provider-neutral. A value the
+    platform cannot represent as a datetime yields ``None``: a missing wake instant costs one blind
+    retry, while a wrong one would defer a task nobody is waiting on.
+    """
+    if epoch_seconds is None:
+        return None
+    try:
+        return datetime.fromtimestamp(epoch_seconds, tz=UTC).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 @dataclass(frozen=True)
 class ParsedEvents:
     """The fields a provider extracts from its CLI's event stream."""
@@ -99,6 +115,10 @@ class ParsedEvents:
     # ``task_failure`` but a transient infra event: the finalize step RAISES ``RATE_LIMITED`` (so
     # the Router falls over / the orchestrator parks) instead of returning a quality failure.
     rate_limited: bool = False
+    # The Unix instant the provider said its limit window reopens, when the terminal event carried
+    # one. Epoch here and ISO on the raised error: each adapter owns its own CLI's spelling, and
+    # exactly one place converts. ``None`` when the CLI reports no reset instant at all.
+    rate_limit_resets_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -573,9 +593,16 @@ class BaseCliProvider:
             # failure: RAISE ``RATE_LIMITED`` so the Router falls over to the other provider and, on
             # exhaustion, the orchestrator parks the task (resumable) instead of burning the queue /
             # a fix budget. Persist the failed-attempt artifact first, like the other raise paths.
-            error = NormalizedError(ErrorClass.RATE_LIMITED, message_for(ErrorClass.RATE_LIMITED))
+            error = NormalizedError(
+                ErrorClass.RATE_LIMITED,
+                message_for(ErrorClass.RATE_LIMITED),
+                resets_at=_iso_instant(parsed.rate_limit_resets_at),
+            )
             self._finalize_failure(paths, request, started_at, finished_at, proc, error)
-            raise ProviderError(error.error_class, error.message)
+            # Set on the raised exception too, not only on the recorded error: the Router rebuilds
+            # its own normalized error from what was RAISED, so an instant living only here would be
+            # dropped before the Core ever saw it.
+            raise ProviderError(error.error_class, error.message, resets_at=error.resets_at)
 
         if not parsed.succeeded and _produced_no_work(parsed, request):
             # EXPERIMENTAL(no-work-infra) — trial block; revert this whole `if` to fall back to

@@ -202,6 +202,9 @@ class EvaluatorNodeRunner:
                     for a in outcome.attempts
                     if a.status is None and a.error_class is not None
                 ),
+                # The provider's own claim about when a retry could succeed, for the Core to
+                # validate and clamp; absent for a provider that reports no reset instant.
+                resets_at=outcome.terminal_error.resets_at if outcome.terminal_error else None,
             )
         assert_exchange_unchanged(
             exchange_before, self._s.exchange_root, ctx.task_id, node_id=node.id

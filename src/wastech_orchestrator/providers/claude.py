@@ -305,6 +305,20 @@ def _parse_auth_status(output: str) -> dict[str, Any] | None:
     return None
 
 
+def _limit_resets_at(payload: object) -> float | None:
+    """The Unix instant a reported limit window reopens, when the event carries one.
+
+    Anything that is not a plain number yields ``None``: this is provider input, and a missing wake
+    instant costs only the blind next-tick retry the orchestrator would do anyway.
+    """
+    if not isinstance(payload, dict):
+        return None
+    raw = payload.get("resetsAt")
+    if isinstance(raw, bool) or not isinstance(raw, int | float):
+        return None
+    return float(raw)
+
+
 def _is_limit_event(payload: object) -> bool:
     """True when a ``rate_limit_event`` payload marks a rejected / capped request."""
     return isinstance(payload, dict) and (
@@ -960,6 +974,7 @@ def parse_stream_json(stdout_text: str) -> ParsedEvents:
         succeeded=succeeded,
         failure_subtype=failure_subtype,
         rate_limited=rate_limited,
+        rate_limit_resets_at=_limit_resets_at(rate_limit_event),
     )
 
 

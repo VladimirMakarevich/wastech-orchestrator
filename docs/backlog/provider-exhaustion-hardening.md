@@ -1,6 +1,16 @@
 # Provider exhaustion: park with fidelity, prove the fallback is alive, honor the reset
 
-Status: **ready for implementation** Date: 2026-08-06 Owner: Vladimir Makarevich Reviewed: 2026-08-06 (every code claim below re-verified against `dev`)
+Status: **implemented** Date: 2026-08-06 Owner: Vladimir Makarevich Reviewed: 2026-08-06 (every code claim below re-verified against `dev`)
+
+All three parts shipped, one commit each. The design below is kept as written, with the as-built deviations recorded inline where they matter — read those notes as the authority where they disagree with the surrounding text. The five that changed real behavior:
+
+- **A second security hole, not in the design.** `_terminal_infra_manual` flagged the exchange unsafe from the _representative_ class, and the Router rewrites that to `cancelled` on any error once a stop is pending — including `containment_unverified`. A stop landing on an unproven process tree therefore left the quarantine flag unset while the status still said manual, so the terminal seam would seal, commit and push a tree an unknown descendant might still be writing. It reads the class set now (P1, §5b).
+- **The two exception handlers' precedence was already inverted relative to each other** — the generic one tested `PARK_ELIGIBLE` before the containment classes, the evaluator one the reverse. Invisible with a single class, a security regression the moment classes aggregate. The shared dispatch makes re-inverting it impossible (P1, §5).
+- **The third disposition is `TERMINAL`, not `FAIL`**, because the evaluator's fail-closed schema raise carries no class and lands there, and a member named `FAIL` invites `Status.FAILED` — silently destroying an already-green diff (P1, §4).
+- **The codex logged-out answer is a non-zero exit on stderr**, not exit 0 on stdout. Only the logged-**in** answers had been verified; keying the probe on a clean exit would have made the `LOGGED_OUT` branch unreachable and shipped P2 as a no-op that reads as done (P2, §8).
+- **Hop 4 as specified would not have helped this incident.** The instant is now aggregated across attempts like the class, instead of taken from the settling attempt (P3, hop 4).
+
+Two decisions were taken against the text below: `AuthProbe.proves_validity` is dropped as an unread field (P2, §1), and `cmd_rerun` is gated alongside `run`/`watch` (P2, §9).
 
 One task in three ordered parts, all found by a single production incident. **P1** is a correctness defect that destroyed work; **P2** closes the blind spot that let a dead fallback sit unnoticed for eight hours; **P3** is what makes the recovery cheap. P1 without P2 parks correctly and then waits on a provider that will never answer; P2 without P1 leaves the class-aggregation bug live for the next trigger; P3 is meaningless until P1 restores the park it refines.
 
@@ -233,6 +243,10 @@ Two parts:
 | 6 | [`orchestrator.py`](../../src/wastech_orchestrator/core/orchestrator.py) `_park` | validate, clamp, stamp `tasks.blocked_until` |
 
 The epoch→ISO conversion belongs at hop 2 because the field type stays provider-neutral (`resetsAt` is a Claude spelling) and nothing downstream should do timezone arithmetic. Codex reports no reset instant, so its errors leave the field `None` — that is not a gap, it is the field working.
+
+**Hop 4 as specified would have shipped P3 as a no-op for this very incident, and this is the most important correction to the design.** "Copy `exc.resets_at` into each `NormalizedError` it builds" makes the surviving instant the one belonging to whichever attempt **settled** — and the settling attempt is the fallback. In the incident the fallback died on expired credentials and reported no instant at all, so `terminal_error.resets_at` would have been `None` and the park would still have waited blind. This is precisely the last-attempt-wins bug P1 exists to fix, reappearing one field over.
+
+So the Router tracks the **earliest instant any attempt reported** across the whole stage and stamps it on the exhausted outcome, exactly as the class is now aggregated. Earliest rather than latest because waking too early costs one cheap re-park while waking too late is the blind wait being removed. The `CANCELLED` exclusion moves to that single point, which is also where it belongs: one place decides, instead of three sites each remembering not to copy.
 
 **2. Schema v21: additive `tasks.blocked_until TEXT`.** Add the `_migrate` guard next to the `blocked_since` one, the `TaskRow` field, and — this is the project convention, not optional — the `v21` entry in the version-comment block at the top of [`state_store.py`](../../src/wastech_orchestrator/state_store.py) stating that it is additive (a brand-new `0` database adopts it; an older _versioned_ database is still refused fail-closed and recreated, which is free here — nothing is deployed).
 

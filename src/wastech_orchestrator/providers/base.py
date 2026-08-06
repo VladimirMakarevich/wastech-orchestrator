@@ -320,6 +320,10 @@ class NormalizedError:
     # The CLI's own terminal subtype for a quality failure (e.g. Claude ``error_max_turns``), when
     # the adapter parsed one. ``None`` for infra errors that never reached a terminal event.
     failure_subtype: str | None = None
+    # The instant the provider said its limit window reopens (ISO-8601 UTC), when it reported one.
+    # UNTRUSTED provider input: whoever schedules on it validates and clamps it first. ``None`` for
+    # every error that carries no such claim, which includes every provider that never reports one.
+    resets_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -373,9 +377,16 @@ class AgentRunResult:
 class ProviderError(Exception):
     """Provider exception carrying a normalized error class."""
 
-    def __init__(self, error_class: ErrorClass, message: str) -> None:
+    def __init__(
+        self, error_class: ErrorClass, message: str, *, resets_at: str | None = None
+    ) -> None:
         super().__init__(message)
         self.error_class = error_class
+        # Carried on the exception, not only on the adapter's own recorded error: the Router builds
+        # its normalized error from what was RAISED, so an instant kept only adapter-side would be
+        # dropped before the Core could act on it. Keyword-only so every positional raise site — and
+        # there are many — stays untouched.
+        self.resets_at = resets_at
 
     @property
     def is_fallback_eligible(self) -> bool:

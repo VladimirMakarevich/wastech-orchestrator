@@ -60,7 +60,10 @@ agents:
                                     #   this much total parked time (6h > a provider's ~5h usage window).
                                     #   "Any" is literal: the decision reads the error class of EVERY
                                     #   attempt in the stage, so a fallback that fails worse than the
-                                    #   primary cannot turn a park into a terminal failure
+                                    #   primary cannot turn a park into a terminal failure.
+                                    #   A provider that reports when its own limit window reopens
+                                    #   SHORTENS the wait within this ceiling (the task idles until
+                                    #   then instead of retrying every poll); the ceiling still wins
 
   # Provider routing is node-based: a flow node declares its own `provider` (else the global
   # primary below). Exactly one configured provider must set `primary: true` — it runs every node

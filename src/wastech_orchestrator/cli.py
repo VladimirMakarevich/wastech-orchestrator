@@ -1243,10 +1243,15 @@ def _display_status(row: TaskRow, *, daemon_alive: bool) -> str:
     A ``running`` row with no live daemon is parked at its checkpoint, awaiting resume — not
     executing — so it reads as ``parked (no daemon)``. This dominates the B-lite ``(paused)``
     marker, which only makes sense while the daemon is alive and waiting out a provider outage.
+
+    A pause carrying a provider-reported wake instant names it, because otherwise a daemon correctly
+    waiting out a limit is indistinguishable from a hung one.
     """
     if row.status is Status.RUNNING and not daemon_alive:
         return "parked (no daemon)"
     if row.status is Status.RUNNING and row.blocked_since:
+        if row.blocked_until:
+            return f"{row.status.value} (paused until {row.blocked_until})"
         return f"{row.status.value} (paused)"
     return row.status.value
 
@@ -3602,6 +3607,8 @@ class _ActiveView(NamedTuple):
     fix_iterations: int
     subtask: str | None  # "2/5" for a decomposed task, else None
     parked_since: str | None  # tasks.blocked_since (ISO) when parked, else None
+    # tasks.blocked_until (ISO) when a provider named its own reset instant, else None.
+    parked_until: str | None
     gate_pending: bool  # a durable HITL gate is waiting on the operator
 
 
@@ -3671,6 +3678,7 @@ def build_top_snapshot(
         except KeyError:
             current_node = None  # row vanished between the two reads (terminal race)
         parked = row.blocked_since if (row.status is Status.RUNNING and row.blocked_since) else None
+        parked_until = row.blocked_until if parked else None
         subtask = (
             f"{row.active_subtask}/{row.subtask_count}"
             if row.active_subtask is not None and row.subtask_count is not None
@@ -3687,6 +3695,7 @@ def build_top_snapshot(
                 fix_iterations=row.fix_iterations,
                 subtask=subtask,
                 parked_since=parked,
+                parked_until=parked_until,
                 gate_pending=_has_pending_gate(worc_home, row.task_id),
             )
         )
@@ -3750,7 +3759,10 @@ def render_top(snapshot: TopSnapshot) -> str:
                 meta.append(f"branch={view.branch}")
             lines.append("    " + "  ".join(meta))
             if view.parked_since:
-                lines.append(f"    paused — every provider unavailable since {view.parked_since}")
+                paused = f"    paused — every provider unavailable since {view.parked_since}"
+                if view.parked_until:
+                    paused += f"; next attempt at {view.parked_until}"
+                lines.append(paused)
             if view.gate_pending:
                 lines.append("    awaiting operator (gate pending)")
 

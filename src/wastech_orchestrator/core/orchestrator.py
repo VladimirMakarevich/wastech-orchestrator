@@ -16,7 +16,7 @@ import sqlite3
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -1995,6 +1995,19 @@ class Orchestrator:
                 node_id=run_state.current_node if run_state is not None else None,
                 run_state=run_state,
             )
+        row = self._store.get_task(p.task.id)
+        if row is not None and self._still_blocked(row.blocked_until):
+            # A provider named the instant its own limit window reopens, so this tick is one cheap
+            # no-op instead of a full re-entry that would prepare git, launch an agent, and be
+            # refused in seconds. Deliberately AFTER the ceiling — that must always win over a
+            # provider-supplied instant — and before any git or provider work. The caller stops on a
+            # non-terminal resume, so the slot stays held and the wait is bounded by the poll
+            # interval; there is no timer and no sleep, and that bound is the whole point.
+            self._log(p.task.id).info(
+                "parked task waiting on a provider window",
+                extra={"blocked_until": row.blocked_until},
+            )
+            return PipelineResult(task_id=p.task.id, final_status=Status.RUNNING)
         if run_state is None:
             # No usable checkpoint (interrupted before the engine wrote one) → restart from the top
             # via the full driver (re-does preflight + branch prep + a fresh freeze + engine).
@@ -2798,19 +2811,69 @@ class Orchestrator:
         tick / next start; the flow checkpoint is already saved (``current_node``). Records the
         first park instant in ``tasks.blocked_since`` (kept across re-parks so the ceiling measures
         total parked wall-clock); the ceiling is checked on resume in :meth:`_resume_via_engine`. No
-        commit/push and no failure report — the partial work is preserved by the checkpoint."""
+        commit/push and no failure report — the partial work is preserved by the checkpoint.
+
+        ``tasks.blocked_until`` records when a provider said its own window reopens, so the wait is
+        precise instead of one blind re-entry per poll interval. Unlike ``blocked_since`` it is
+        rewritten on EVERY park: a later exhaustion reporting no instant must not inherit an earlier
+        provider's window and go on deferring a task that could already run."""
         existing = self._store.get_task(p.task.id)
-        if existing is None or existing.blocked_since is None:
-            self._store.update_task(p.task.id, blocked_since=self._clock())
+        prior = existing.blocked_since if existing is not None else None
+        parked_since = prior if prior is not None else self._clock()
+        blocked_until = self._park_wake_instant(exc, parked_since=parked_since)
+        self._store.update_task(p.task.id, blocked_since=parked_since, blocked_until=blocked_until)
         log = bind(_LOG, task_id=p.task.id)
         log.info(
             "task parked (resumable)",  # transient-infra exhaustion or an operator-stop cancel
             extra={
                 "node_id": run_state.current_node,
                 "error_class": exc.error_class.value if exc.error_class else None,
+                "blocked_until": blocked_until,
             },
         )
         return PipelineResult(task_id=p.task.id, final_status=Status.RUNNING)
+
+    def _park_wake_instant(self, exc: NodeInfraError, *, parked_since: str) -> str | None:
+        """The earliest instant a parked task may attempt a provider again, else ``None`` for any
+        tick.
+
+        The provider's reported reset is untrusted input. It is ignored — leaving the blind
+        next-tick behavior, never worse — when it is absent, unparseable, or not actually in the
+        future; and it is clamped to the park ceiling so a provider claiming a window next week can
+        never outlive the ceiling that would fail the task anyway. No new configuration key: the
+        clamp is the existing ceiling.
+
+        An operator stop is excluded outright: a cancelled run resumes when the operator says so,
+        not when some provider's window reopens. Every comparison goes through the injected
+        clock, and a clock that yields no comparable instant is treated as no instant rather than
+        breaking a park — note that a naive clock compared against a provider's timezone-aware
+        instant raises ``TypeError``, not ``ValueError``.
+        """
+        if exc.error_class is ErrorClass.CANCELLED or exc.resets_at is None:
+            return None
+        try:
+            wake = datetime.fromisoformat(exc.resets_at)
+            if wake <= datetime.fromisoformat(self._clock()):
+                return None
+            ceiling = datetime.fromisoformat(parked_since) + timedelta(
+                seconds=self._config.agents.retry.max_blocked_s
+            )
+            return min(wake, ceiling).isoformat()
+        except (ValueError, TypeError):
+            return None
+
+    def _still_blocked(self, blocked_until: str | None) -> bool:
+        """Whether a parked task's provider-reported window has not reopened yet.
+
+        Fails **open** on anything unparseable or incomparable: a junk instant must cost one wasted
+        re-entry, never wedge a task that nothing else would release.
+        """
+        if blocked_until is None:
+            return False
+        try:
+            return datetime.fromisoformat(blocked_until) > datetime.fromisoformat(self._clock())
+        except (ValueError, TypeError):
+            return False
 
     def _park_ceiling_exceeded(self, p: _Pipeline) -> str | None:
         """Return a terminal reason if the task has been parked (B-lite) past ``max_blocked_s``.
@@ -4178,7 +4241,10 @@ class Orchestrator:
             cleanup_completed=cleanup.safe,
             cleanup_completed_at=self._clock() if cleanup.safe else None,
             cleanup_last_error=last_error,
-            blocked_since=None,  # B-lite: a terminal task is no longer parked
+            # A terminal task is no longer parked, and a surviving wake instant would defer a
+            # later rerun that nobody is waiting on.
+            blocked_since=None,
+            blocked_until=None,
         )
         # Close any node run left ``running`` by a hard stop before recording the terminal
         # state. A no-op on the normal path (the engine finalizes every node it runs); it catches a

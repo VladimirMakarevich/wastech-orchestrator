@@ -69,6 +69,10 @@ class NodeInfraError(Exception):
 
     A caller that legitimately knows exactly one class (an unparseable structured output, a
     synthesized cancellation) passes only ``error_class`` and the set is derived from it.
+
+    ``resets_at`` is the provider's own claim about when a retry could succeed (ISO-8601 UTC), when
+    one was reported. Untrusted input the Core validates and clamps before scheduling on it;
+    ``None`` for every error carrying no such claim.
     """
 
     def __init__(
@@ -77,9 +81,11 @@ class NodeInfraError(Exception):
         *,
         error_class: ErrorClass | None = None,
         error_classes: Sequence[ErrorClass] = (),
+        resets_at: str | None = None,
     ) -> None:
         super().__init__(message)
         self.error_class = error_class
+        self.resets_at = resets_at
         # An empty set falls back to the representative on purpose: a caller that knows one class,
         # and an exhausted stage whose attempt rows were never populated, must both decide on the
         # class they do have rather than fail closed on a set they never intended to leave empty.

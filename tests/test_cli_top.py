@@ -8,6 +8,7 @@ import json
 import random
 import threading
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
@@ -201,6 +202,7 @@ def test_build_top_snapshot_active_parked_gate_queue_recent(
     assert active.task_id == "t-active"
     assert active.current_node == "review"
     assert active.parked_since == "2026-06-28T00:00:00+00:00"
+    assert active.parked_until is None  # this provider reported no reset instant
     assert "paused" in active.status_label
     assert active.gate_pending is True
     # Foreign queue filtered out; survivors in priority order, each labelled with its priority.
@@ -225,6 +227,7 @@ def test_build_top_snapshot_unparked_active_has_no_gate(
     store.close()
     assert len(snap.active) == 1
     assert snap.active[0].parked_since is None
+    assert snap.active[0].parked_until is None
     assert snap.active[0].gate_pending is False
     assert snap.active[0].status_label == "running"
 
@@ -266,6 +269,7 @@ def test_render_top_full_frame() -> None:
                 fix_iterations=2,
                 subtask="1/3",
                 parked_since="2026-06-28T00:00:00+00:00",
+                parked_until="2026-06-28T01:30:00+00:00",
                 gate_pending=True,
             ),
         ),
@@ -283,7 +287,10 @@ def test_render_top_full_frame() -> None:
     assert "t1" in out and "Do thing" in out
     assert "node=review" in out
     assert "subtask=1/3" in out
-    assert "paused — every provider unavailable since 2026-06-28T00:00:00+00:00" in out
+    assert (
+        "paused — every provider unavailable since 2026-06-28T00:00:00+00:00; "
+        "next attempt at 2026-06-28T01:30:00+00:00" in out
+    )
     assert "awaiting operator (gate pending)" in out
     assert "p-high" in out and "p-low" in out
     assert "/tmp/daemon.log" in out
@@ -392,3 +399,43 @@ def test_cmd_top_wires_args_into_loop(
     assert captured["recent_limit"] == 3
     assert captured["poll_seconds"] == cli._TOP_DEFAULT_POLL_SECONDS
     assert captured["log_path"] is None
+
+
+# --- the provider-reported wake instant reaches the read-only surfaces ---------------------------
+
+
+def test_display_status_names_the_wake_instant() -> None:
+    # Otherwise a daemon correctly waiting out a reported limit looks exactly like a hung one,
+    # which is the diagnosis cost this work exists to remove.
+    row = TaskRow(task_id="t1", title="T", status=Status.RUNNING)
+    parked = replace(row, blocked_since="2026-06-28T00:00:00+00:00")
+    assert cli._display_status(parked, daemon_alive=True) == "running (paused)"
+    with_instant = replace(parked, blocked_until="2026-06-28T01:30:00+00:00")
+    assert (
+        cli._display_status(with_instant, daemon_alive=True)
+        == "running (paused until 2026-06-28T01:30:00+00:00)"
+    )
+    # A dead daemon still dominates: the task is parked at its checkpoint, not waiting on a window.
+    assert cli._display_status(with_instant, daemon_alive=False) == "parked (no daemon)"
+
+
+def test_build_top_snapshot_carries_the_wake_instant(
+    make_git_config: Callable[..., OrchestratorConfig],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = make_git_config(tmp_path / "clone")
+    monkeypatch.setattr(cli, "_daemon_alive", lambda _c: True)
+    store = _seed_store(config)
+    store.insert_task(TaskRow(task_id="t1", title="T", status=Status.RUNNING))
+    store.update_task(
+        "t1",
+        blocked_since="2026-06-28T00:00:00+00:00",
+        blocked_until="2026-06-28T01:30:00+00:00",
+    )
+    snap = cli.build_top_snapshot(
+        config, store, selector="default", log_path=None, log_tail_lines=5, recent_limit=5
+    )
+    store.close()
+    assert snap.active[0].parked_until == "2026-06-28T01:30:00+00:00"
+    assert "next attempt at 2026-06-28T01:30:00+00:00" in cli.render_top(snap)

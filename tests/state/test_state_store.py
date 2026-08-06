@@ -121,6 +121,33 @@ def test_blocked_since_round_trips_and_clears(store: StateStore) -> None:
     assert store.get_task("task-001").blocked_since is None  # type: ignore[union-attr]
 
 
+def test_blocked_until_round_trips_and_clears(store: StateStore) -> None:
+    # The provider-reported wake instant defaults to None (meaning "attempt on the next tick", so
+    # it can only ever shorten a wait), is rewritten on every park, and is cleared at terminal.
+    store.insert_task(_new_task())
+    assert store.get_task("task-001").blocked_until is None  # type: ignore[union-attr]
+    store.update_task("task-001", blocked_until="2026-06-27T07:10:00+00:00")
+    assert store.get_task("task-001").blocked_until == "2026-06-27T07:10:00+00:00"  # type: ignore[union-attr]
+    store.update_task("task-001", blocked_until=None)
+    assert store.get_task("task-001").blocked_until is None  # type: ignore[union-attr]
+
+
+def test_continue_clears_the_wake_instant_so_an_operator_is_not_deferred(
+    store: StateStore,
+) -> None:
+    # An operator asking for a task to run now must not be silently deferred by a stale window from
+    # an earlier park — the resume would return non-terminal and do nothing at all.
+    store.insert_task(_new_task())
+    store.update_task(
+        "task-001",
+        status=Status.FAILED.value,
+        blocked_since="2026-06-27T00:00:00+00:00",
+        blocked_until="2026-06-27T07:10:00+00:00",
+    )
+    store.revive_task_for_continue("task-001", Status.RUNNING)
+    assert store.get_task("task-001").blocked_until is None  # type: ignore[union-attr]
+
+
 def test_find_active_tasks_excludes_terminal_and_pending(store: StateStore) -> None:
     store.insert_task(TaskRow(task_id="a", title="a", status=Status.RUNNING))
     store.insert_task(TaskRow(task_id="b", title="b", status=Status.PENDING))
