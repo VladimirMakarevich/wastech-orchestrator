@@ -49,17 +49,34 @@ def _resolve(
     )
 
 
+def _pin_state(monkeypatch: pytest.MonkeyPatch, state: str | None) -> None:
+    """Pin the /proc state probe: the real one reads a live PID, which no test may depend on."""
+    monkeypatch.setattr(process_control, "read_process_state", lambda _pid: state)
+
+
 # --- the gate matrix --------------------------------------------------------------------
 
 
-def test_idle_stops_soft_no_prompt_for_any_form(
+def test_idle_stops_soft_no_prompt_without_force_full(
     monkeypatch: pytest.MonkeyPatch, make_git_config: _ConfigFactory, tmp_path
 ) -> None:
     config = make_git_config(tmp_path / "clone")
-    for force, force_full in [(False, False), (True, False), (False, True)]:
-        decision = _resolve(config, monkeypatch, active=False, force=force, force_full=force_full)
+    for force in [False, True]:
+        decision = _resolve(config, monkeypatch, active=False, force=force)
         assert decision.proceed is True
-        assert decision.level == "soft"  # idle: ordinary stop even with --force-full
+        assert decision.level == "soft"  # nothing in flight: an ordinary stop, and no prompt
+
+
+def test_idle_force_full_is_still_full(
+    monkeypatch: pytest.MonkeyPatch, make_git_config: _ConfigFactory, tmp_path
+) -> None:
+    # --force-full outranks the activity probe. An idle daemon is exactly the wedged/suspended case
+    # that needs the hard rung, so "no active task" must not silently downgrade it to soft.
+    decision = _resolve(
+        make_git_config(tmp_path / "clone"), monkeypatch, active=False, force_full=True
+    )
+    assert decision.proceed is True
+    assert decision.level == "full"
 
 
 def test_busy_no_flag_non_interactive_refuses_nonzero(
@@ -267,6 +284,7 @@ def test_cmd_stop_soft_timeout_reports_pending_graceful_stop(
     monkeypatch.setattr(cli, "load_config_for", lambda _a: config)
     monkeypatch.setattr(cli, "has_active_task", lambda _c: True)
     monkeypatch.setattr(sys, "stdin", io.StringIO())
+    _pin_state(monkeypatch, None)  # the message must not depend on whatever PID 1234 really is
     monkeypatch.setattr(
         cli.process_control,
         "stop_process",
@@ -282,22 +300,50 @@ def test_cmd_stop_soft_timeout_reports_pending_graceful_stop(
     assert "SIGKILL" not in out
 
 
-def test_timed_out_stop_message_windows_keeps_pid_for_force_full() -> None:
+def test_timed_out_stop_message_windows_keeps_pid_for_force_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # The graceful stop stays pending; tell the operator the target remains intact.
+    _pin_state(monkeypatch, None)  # Windows/macOS: no state source, so no claim is made
     msg = cli._timed_out_stop_message(1234, 30.0, is_windows=True)
     assert "did not confirm shutdown in 30s" in msg
     assert "kept its PID file" in msg
     assert "--force-full" in msg
 
 
-def test_timed_out_stop_message_posix_is_pending_and_points_at_force_full() -> None:
+def test_timed_out_stop_message_posix_is_pending_and_points_at_force_full(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # The normal POSIX soft-timeout path: a pending graceful stop, never a SIGKILL. It names
     # --force-full as the immediate interrupt but never mentions the Windows-only taskkill.
+    _pin_state(monkeypatch, None)
     msg = cli._timed_out_stop_message(1234, 30.0, is_windows=False)
     assert "did not confirm shutdown in 30s" in msg
     assert "pending" in msg
     assert "--force-full" in msg
     assert "taskkill" not in msg
+    assert "suspended" not in msg  # no state source → no claim about why it did not confirm
+
+
+def test_timed_out_stop_message_names_a_suspended_watcher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Linux only: a watcher still in state T after the soft path's own SIGCONT is not busy, and
+    # "retry with --force-full" alone would hide the cheaper, cleaner resolution.
+    _pin_state(monkeypatch, "T")
+    msg = cli._timed_out_stop_message(1234, 30.0, is_windows=False)
+    assert "suspended (state T)" in msg
+    assert "kill -CONT 1234" in msg
+    assert "--force-full" in msg  # the hard rung is still offered, not replaced
+
+
+def test_timed_out_stop_message_running_state_makes_no_suspension_claim(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _pin_state(monkeypatch, "R")
+    msg = cli._timed_out_stop_message(1234, 30.0, is_windows=False)
+    assert "suspended" not in msg
+    assert "--force-full" in msg
 
 
 def test_cmd_stop_reports_preserved_handles_when_pid_is_missing(

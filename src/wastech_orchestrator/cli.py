@@ -157,9 +157,9 @@ def _add_stop_force_flags(parser: argparse.ArgumentParser) -> None:
     """The stop-ladder force flags shared by ``stop`` and ``restart`` (mutually exclusive).
 
     No flag → idle stops with no prompt; a busy daemon refuses (interactive: confirm ``YES``).
-    ``--force`` → soft stop at the next flow-node boundary (with timeout escalation).
-    ``--force-full`` → hard stop: kill the active process tree/group now. See
-    ``_resolve_stop_level``.
+    ``--force`` → soft stop at the next flow-node boundary (never escalates; a timeout leaves the
+    stop pending). ``--force-full`` → hard stop **whether or not a task is active**: kill the
+    daemon's process tree/group now. See ``_resolve_stop_level``.
     """
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
@@ -171,7 +171,8 @@ def _add_stop_force_flags(parser: argparse.ArgumentParser) -> None:
         "--force-full",
         dest="force_full",
         action="store_true",
-        help="hard stop now: kill the daemon and active agent (POSIX groups / Windows tree)",
+        help="hard stop now, idle or busy: kill the daemon and any active agent (POSIX groups / "
+        "Windows tree). The rung for a wedged or suspended watcher a soft stop cannot reach",
     )
     parser.add_argument(
         "--non-interactive",
@@ -3237,16 +3238,19 @@ class _StopDecision(NamedTuple):
 def _resolve_stop_level(
     config: OrchestratorConfig, *, force: bool, force_full: bool, interactive: bool
 ) -> _StopDecision:
-    """The stop ladder, keyed on whether a task is active (a read-only ``find_active_tasks`` probe).
+    """The stop ladder: an explicit ``--force-full`` first, then whether a task is active.
 
-    Idle → ordinary (soft) stop, no prompt, any form. Busy + no flag → refuse (interactive: confirm
-    the literal ``YES`` → soft; non-interactive: exit non-zero, require a flag). Busy + ``--force``
-    → soft; busy + ``--force-full`` → hard (full).
+    ``--force-full`` → hard (full), idle or busy: the flag is the operator naming the hardest rung,
+    and it outranks the activity probe because a daemon that needs it is usually **idle** — wedged,
+    suspended, or stuck in a syscall — so keying the rung on activity removes it exactly where it is
+    needed. Otherwise, keyed on a read-only ``find_active_tasks`` probe: idle → ordinary (soft)
+    stop, no prompt; busy + no flag → refuse (interactive: confirm the literal ``YES`` → soft;
+    non-interactive: exit non-zero, require a flag); busy + ``--force`` → soft.
     """
+    if force_full:
+        return _StopDecision(proceed=True, level="full")  # explicit hardest rung; never downgraded
     if not has_active_task(config):
         return _StopDecision(proceed=True, level="soft")  # nothing in flight: any form just stops
-    if force_full:
-        return _StopDecision(proceed=True, level="full")
     if force:
         return _StopDecision(proceed=True, level="soft")
     if interactive:
@@ -3308,11 +3312,20 @@ def _timed_out_stop_message(pid: int | None, timeout: float, *, is_windows: bool
     hard-kill seam is available. The PID and stop-file remain intact, so the daemon still exits at
     its next node boundary, a second watcher cannot start, and ``--force-full`` remains the only
     immediate interrupt.
+
+    Where the state is free to read (Linux ``/proc``), a watcher still stopped after the soft path's
+    own SIGCONT is named as such rather than left to read as "busy" — the operator's own
+    ``kill -CONT`` is then the cheapest resolution, and it exits cleanly instead of being killed.
     """
     base = (
         f"stop: watcher {pid} did not confirm shutdown in {timeout:g}s; "
         "graceful stop is still pending (kept its PID file)"
     )
+    if pid is not None and process_control.read_process_state(pid) == "T":
+        return (
+            f"{base}; it is suspended (state T), not busy — resume it with `kill -CONT {pid}` "
+            "and the pending stop completes, or use --force-full to kill it"
+        )
     if is_windows:
         return f"{base}; retry with --force-full to kill its process tree"
     return f"{base}; retry with --force-full to interrupt now and reap the agent subtree"
