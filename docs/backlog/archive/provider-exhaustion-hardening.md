@@ -40,22 +40,22 @@ Neither fault is the interesting part. The interesting part is that the orchestr
 
 ### What should have happened
 
-[`config.example.yaml`](../../src/wastech_orchestrator/packaged/config.example.yaml) states the contract on the `max_blocked_s` line: _"every provider down OR rate-limited -> park as resumable; fail only after"_. A rate-limited stage parks (`RUNNING` + `blocked_since`), the single-slot park holds the queue, and the next tick resumes after the reset. That is also what [`test_rate_limited_exhaustion_parks_task_resumable`](../../tests/core/test_orchestrator.py) asserts.
+[`config.example.yaml`](../../../src/wastech_orchestrator/packaged/config.example.yaml) states the contract on the `max_blocked_s` line: _"every provider down OR rate-limited -> park as resumable; fail only after"_. A rate-limited stage parks (`RUNNING` + `blocked_since`), the single-slot park holds the queue, and the next tick resumes after the reset. That is also what [`test_rate_limited_exhaustion_parks_task_resumable`](../../../tests/core/test_orchestrator.py) asserts.
 
 ### Why it did not
 
 The class that reaches the park decision is the class of the **last** attempt:
 
-1. [`router.py`](../../src/wastech_orchestrator/routing/router.py) — `last_error` is reassigned inside `except ProviderError` on every attempt. After claude it holds `rate_limited`; after codex, `authentication_failed`.
+1. [`router.py`](../../../src/wastech_orchestrator/routing/router.py) — `last_error` is reassigned inside `except ProviderError` on every attempt. After claude it holds `rate_limited`; after codex, `authentication_failed`.
 2. Same file — the exhausted-stage return is `StageOutcome(..., terminal_error=last_error)`. The rate limit is gone from the outcome.
-3. [`agent.py`](../../src/wastech_orchestrator/core/flow/nodes/agent.py) — `NodeInfraError` is raised carrying that single class.
-4. [`orchestrator.py`](../../src/wastech_orchestrator/core/orchestrator.py) — `if exc.error_class in PARK_ELIGIBLE`. `PARK_ELIGIBLE` is `{provider_unavailable, network_unavailable, rate_limited}` ([`base.py`](../../src/wastech_orchestrator/providers/base.py)); `authentication_failed` is not in it → `_fail()` → terminal.
+3. [`agent.py`](../../../src/wastech_orchestrator/core/flow/nodes/agent.py) — `NodeInfraError` is raised carrying that single class.
+4. [`orchestrator.py`](../../../src/wastech_orchestrator/core/orchestrator.py) — `if exc.error_class in PARK_ELIGIBLE`. `PARK_ELIGIBLE` is `{provider_unavailable, network_unavailable, rate_limited}` ([`base.py`](../../../src/wastech_orchestrator/providers/base.py)); `authentication_failed` is not in it → `_fail()` → terminal.
 
 **The defect stated plainly: a broken fallback provider masks a park-eligible failure of the primary.** The worse the fallback's own failure, the worse the core's decision. Whether the task survives depends on a provider that never ran a token of work.
 
 ### Why the tests missed it
 
-Every park test builds providers with `_both(infra_error_class=...)` ([`test_orchestrator.py`](../../tests/core/test_orchestrator.py)) — one kwarg, applied to both providers, so **both always fail with the identical class**. A mixed pair is not merely untested, it is not expressible with the current helper.
+Every park test builds providers with `_both(infra_error_class=...)` ([`test_orchestrator.py`](../../../tests/core/test_orchestrator.py)) — one kwarg, applied to both providers, so **both always fail with the identical class**. A mixed pair is not merely untested, it is not expressible with the current helper.
 
 ### Proposed design
 
@@ -73,12 +73,12 @@ Carry every attempt's class to the decision, and make the decision a documented 
 
 Two smaller decisions to record while writing it:
 
-- `agent_no_progress` is deliberately fallback-eligible but **not** park-eligible ([`base.py`](../../src/wastech_orchestrator/providers/base.py)). Under the new predicate, `rate_limited` primary + `agent_no_progress` fallback parks. That is the right answer (the primary's limit is a real transient) but it widens where the no-work net can hold the slot — state it in the comment rather than leaving a reader to infer it.
-- `cancelled` keeps its own branch and must not be reachable through the aggregate: a stop-kill on one attempt plus a rate limit on another still means _stopped_, not _waiting_. **Note what this does and does not change today:** [`orchestrator.py`](../../src/wastech_orchestrator/core/orchestrator.py) routes `PARK_ELIGIBLE` and `CANCELLED` to the _same_ `_park`, so the distinction is currently only the label on the log line and the report — there is no routing difference to preserve. It becomes a real routing difference in P3, where a cancel park must **not** inherit a rate-limit `resets_at`. Write the branch now so P3 does not have to reopen the predicate.
+- `agent_no_progress` is deliberately fallback-eligible but **not** park-eligible ([`base.py`](../../../src/wastech_orchestrator/providers/base.py)). Under the new predicate, `rate_limited` primary + `agent_no_progress` fallback parks. That is the right answer (the primary's limit is a real transient) but it widens where the no-work net can hold the slot — state it in the comment rather than leaving a reader to infer it.
+- `cancelled` keeps its own branch and must not be reachable through the aggregate: a stop-kill on one attempt plus a rate limit on another still means _stopped_, not _waiting_. **Note what this does and does not change today:** [`orchestrator.py`](../../../src/wastech_orchestrator/core/orchestrator.py) routes `PARK_ELIGIBLE` and `CANCELLED` to the _same_ `_park`, so the distinction is currently only the label on the log line and the report — there is no routing difference to preserve. It becomes a real routing difference in P3, where a cancel park must **not** inherit a rate-limit `resets_at`. Write the branch now so P3 does not have to reopen the predicate.
 
 ### Implementation (P1)
 
-**1. Widen the exception, keep every existing raise site untouched.** In [`nodes/base.py`](../../src/wastech_orchestrator/core/flow/nodes/base.py), `NodeInfraError` gains `error_classes: tuple[ErrorClass, ...]` beside the existing `error_class`, which stays the _representative_ used in messages and logs. Derive the set from the single class when only that is given, so the raise sites that legitimately know one class — `_typed`'s invalid-structured-output, the evaluator's fail-closed findings schema, the `FlowCancelled` synthesis at [`orchestrator.py`](../../src/wastech_orchestrator/core/orchestrator.py) — need no edit at all. (This list previously named "the check-launch failure"; there is no such raise site — [`nodes/checks.py`](../../src/wastech_orchestrator/core/flow/nodes/checks.py) raises only `NodeManualRequired`, and `NodeInfraError`'s own docstring carried the same stale claim.)
+**1. Widen the exception, keep every existing raise site untouched.** In [`nodes/base.py`](../../../src/wastech_orchestrator/core/flow/nodes/base.py), `NodeInfraError` gains `error_classes: tuple[ErrorClass, ...]` beside the existing `error_class`, which stays the _representative_ used in messages and logs. Derive the set from the single class when only that is given, so the raise sites that legitimately know one class — `_typed`'s invalid-structured-output, the evaluator's fail-closed findings schema, the `FlowCancelled` synthesis at [`orchestrator.py`](../../../src/wastech_orchestrator/core/orchestrator.py) — need no edit at all. (This list previously named "the check-launch failure"; there is no such raise site — [`nodes/checks.py`](../../../src/wastech_orchestrator/core/flow/nodes/checks.py) raises only `NodeManualRequired`, and `NodeInfraError`'s own docstring carried the same stale claim.)
 
 ```python
 def __init__(self, message, *, error_class=None, error_classes=()):
@@ -89,9 +89,9 @@ def __init__(self, message, *, error_class=None, error_classes=()):
 
 **As built, the `or`-fallback turned out to be load-bearing rather than merely tidy.** `run_stage` returns `attempts=()` when `max_stage_attempts == 0`, and every `FakeRouter`-shaped exhausted outcome in `tests/core/test_flow_node_runners.py` does the same while carrying a set `terminal_error`. Written as `if error_classes is not None` those all collapse to an empty set and change disposition, so the derivation is commented at the assignment.
 
-**2. Fill the set at the two exhaustion raise sites.** [`nodes/agent.py`](../../src/wastech_orchestrator/core/flow/nodes/agent.py) (`_invoke`, the `outcome.result is None` branch) and [`nodes/evaluator.py`](../../src/wastech_orchestrator/core/flow/nodes/evaluator.py) (`EvaluatorInfraError`, same branch) both already hold the `StageOutcome`. The set is `tuple(a.error_class for a in outcome.attempts if a.status is None and a.error_class is not None)`. In an exhausted outcome _every_ attempt row is a raise row — `run_stage` returns early the moment any attempt yields a result — so the `status is None` filter changes nothing today; keep it anyway, because it is what makes the predicate's domain "the classes that were _raised_" instead of "whatever is in the tuple", and a returned `task_failure` row must never be able to reach a park/manual decision.
+**2. Fill the set at the two exhaustion raise sites.** [`nodes/agent.py`](../../../src/wastech_orchestrator/core/flow/nodes/agent.py) (`_invoke`, the `outcome.result is None` branch) and [`nodes/evaluator.py`](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py) (`EvaluatorInfraError`, same branch) both already hold the `StageOutcome`. The set is `tuple(a.error_class for a in outcome.attempts if a.status is None and a.error_class is not None)`. In an exhausted outcome _every_ attempt row is a raise row — `run_stage` returns early the moment any attempt yields a result — so the `status is None` filter changes nothing today; keep it anyway, because it is what makes the predicate's domain "the classes that were _raised_" instead of "whatever is in the tuple", and a returned `task_failure` row must never be able to reach a park/manual decision.
 
-**3. This also fixes a same-provider instance of the identical bug.** `_retry_transient` in [`router.py`](../../src/wastech_orchestrator/routing/router.py) rebuilds `last_error` from `last_class` — the class of the **last** retry — and overwrites `exc` with it, so a `rate_limited` first attempt followed by two `network_unavailable` retries also loses its class. The aggregate covers it for free: each retry appends its own `ProviderAttempt` row. Do not "fix" it in the router.
+**3. This also fixes a same-provider instance of the identical bug.** `_retry_transient` in [`router.py`](../../../src/wastech_orchestrator/routing/router.py) rebuilds `last_error` from `last_class` — the class of the **last** retry — and overwrites `exc` with it, so a `rate_limited` first attempt followed by two `network_unavailable` retries also loses its class. The aggregate covers it for free: each retry appends its own `ProviderAttempt` row. Do not "fix" it in the router.
 
 **4. The predicate is a pure function in Core, table-tested.** Shaped like `fallback_allowed` is in the router — a pure decision table with its own unit test, not logic buried in an `except` block:
 
@@ -142,7 +142,7 @@ The 429, the reset time, the fact that a fallback was even attempted — all abs
 
 **The attempts need no new plumbing — they are already in `state.db` at the moment of the raise.** Both node runners call `record_run_observability` _before_ the `outcome.result is None` check, so every `provider_attempts` row for the failing node run is committed before the exception exists. `_write_infra_failure_report` has `task_id` + `node_id`, and the two getters it needs already exist on the store: `get_node_runs(task_id)` (take the last row whose `node_id` matches) then `get_provider_attempts(run_id)`. Read them there rather than threading a second payload through the exception — the exception carries policy input (`error_classes`), the report carries evidence, and the evidence is already durable.
 
-`write_failure_report` in [`ledger.py`](../../src/wastech_orchestrator/ledger.py) gains one optional `provider_attempts: Sequence[Mapping[str, Any]] = ()` parameter → a `provider_attempts` key in the JSON and a `## Provider attempts` section in `stuck.md`, one line per attempt: `provider · attempt · error_class · exit_code · started_at`. Every field is already secret-free by the `ProviderAttemptRow` contract; do not add the attempt directory or any message text without re-checking that.
+`write_failure_report` in [`ledger.py`](../../../src/wastech_orchestrator/ledger.py) gains one optional `provider_attempts: Sequence[Mapping[str, Any]] = ()` parameter → a `provider_attempts` key in the JSON and a `## Provider attempts` section in `stuck.md`, one line per attempt: `provider · attempt · error_class · exit_code · started_at`. Every field is already secret-free by the `ProviderAttemptRow` contract; do not add the attempt directory or any message text without re-checking that.
 
 **Fix the sentence while you are there.** For an infra terminal the writer emits `The **infra** fix loop exhausted its limit (…)` — but `loop="infra"` is a sentinel, there is no infra fix loop, and no limit was exhausted. The operator's first line should state what happened: when `loop == "infra"`, render `This task could not run: <limit_name>` instead. One branch in the `stuck_md` f-string; it is the single most-read line in the artifact.
 
@@ -150,7 +150,7 @@ The 429, the reset time, the fact that a fallback was even attempted — all abs
 
 Two defects, both necessary for the incident.
 
-**(a) `authenticated` is decorative.** [`_adapter_base.py`](../../src/wastech_orchestrator/providers/_adapter_base.py) hardcodes `authenticated=True` on every path where `<cli> --version` exits 0 — the docstring concedes _"auth is best-effort/offline"_. Worse, `run_preflight` ([`cli.py`](../../src/wastech_orchestrator/cli.py)) computes `healthy = executable_found and supports_required_features` and merely **prints** `authenticated=...`. So `worc preflight` on the night of the incident would have reported `codex: OK — codex 0.144.4 available (authenticated=True)`. A false statement, in the field the operator would check.
+**(a) `authenticated` is decorative.** [`_adapter_base.py`](../../../src/wastech_orchestrator/providers/_adapter_base.py) hardcodes `authenticated=True` on every path where `<cli> --version` exits 0 — the docstring concedes _"auth is best-effort/offline"_. Worse, `run_preflight` ([`cli.py`](../../../src/wastech_orchestrator/cli.py)) computes `healthy = executable_found and supports_required_features` and merely **prints** `authenticated=...`. So `worc preflight` on the night of the incident would have reported `codex: OK — codex 0.144.4 available (authenticated=True)`. A false statement, in the field the operator would check.
 
 **(b) `run_preflight` never runs unattended.** Its only callers are `cmd_preflight` and the installer's post-write auto-run. `cmd_watch` does call the `preflight` module for `require_git_control` / `require_gh` / `warn_if_gh_logged_out` — git and GitHub are verified before a daemon starts; **the agent providers are not**.
 
@@ -173,7 +173,7 @@ A real auth probe as a subclass hook alongside `_preflight_capability_error` / `
 
 ### Implementation (P2)
 
-**1. Delete the boolean instead of trying to make it honest.** `ProviderHealth.authenticated: bool` is replaced by `auth: AuthProbe | None` in [`base.py`](../../src/wastech_orchestrator/providers/base.py). The requirement "do not let `authenticated` make a claim the probe cannot support" then holds structurally — there is no boolean left to lie with, and `proves_validity` is the field that keeps a presence check from reading as a validity check:
+**1. Delete the boolean instead of trying to make it honest.** `ProviderHealth.authenticated: bool` is replaced by `auth: AuthProbe | None` in [`base.py`](../../../src/wastech_orchestrator/providers/base.py). The requirement "do not let `authenticated` make a claim the probe cannot support" then holds structurally — there is no boolean left to lie with, and `proves_validity` is the field that keeps a presence check from reading as a validity check:
 
 ```python
 class AuthState(StrEnum):
@@ -193,13 +193,13 @@ class AuthProbe:
 
 `None` means _not probed_ — a provider whose adapter implements no hook makes no claim at all, which is the correct reading for a third adapter added later.
 
-**2. The hook.** `_preflight_auth_state(env) -> AuthProbe | None` on `BaseCliProvider` in [`_adapter_base.py`](../../src/wastech_orchestrator/providers/_adapter_base.py), default `None`, called from `preflight()` on the healthy path only (a CLI whose `--version` did not succeed has nothing to probe). It runs through the existing `_probe()` helper, so it inherits the preflight timeout and the allowlisted env for free and stays inside the "no CLI syntax in the base" boundary — the verb lives in the subclass.
+**2. The hook.** `_preflight_auth_state(env) -> AuthProbe | None` on `BaseCliProvider` in [`_adapter_base.py`](../../../src/wastech_orchestrator/providers/_adapter_base.py), default `None`, called from `preflight()` on the healthy path only (a CLI whose `--version` did not succeed has nothing to probe). It runs through the existing `_probe()` helper, so it inherits the preflight timeout and the allowlisted env for free and stays inside the "no CLI syntax in the base" boundary — the verb lives in the subclass.
 
 **3. Redact at the parse boundary, not at the print site.** The Claude probe parses `claude auth status`, reads exactly `loggedIn` and `authMethod`, and discards the rest of the object _there_. `email`, `orgId`, `orgName` must never be assigned to a field, appended to a `detail`, or included in a probe-failure message — if they never enter the dataclass, no later f-string can leak them. The codex probe's output is a fixed sentence with nothing to redact, but the same rule applies to its failure text.
 
 **4. The verdict in `run_preflight`.** `LOGGED_OUT` → `FAIL` regardless of the provider's role in any route (the deliberate inversion). `UNKNOWN` → `WARN`, on the same principle that already governs `warn_if_gh_logged_out` — a flaky probe must not block a run. `None` → print nothing. The report line replaces `authenticated={…}` with `auth=logged_in (claude.ai)` / `auth=LOGGED OUT` / `auth=unknown`. The failure message must name the lever, because the inversion has a consequence an operator will hit: a host with only Claude logged in now fails preflight while `codex` sits in `agents.allowed`. So: `codex: FAIL — not logged in ('codex login'); it is in agents.allowed, so a node may route to it — log in or remove it from agents.allowed`.
 
-**5. Do not call `run_preflight` from `cmd_watch`.** It is the obvious move and it is wrong: `run_preflight` also gates Telegram, `gh`, the isolation policy check, and (opt-in) the live capability smoke, so wiring it into `watch` silently makes an unrelated Telegram or `gh` result able to refuse a daemon start — a much larger behavior change than this task asks for. Add a narrow gate instead, shaped like the ones it sits beside: `require_provider_auth(config)` that builds the providers, runs only the auth probe for each `agents.allowed` provider, and exits non-zero on any `LOGGED_OUT`. Put it in [`cli.py`](../../src/wastech_orchestrator/cli.py) next to `run_preflight` rather than in [`preflight.py`](../../src/wastech_orchestrator/preflight.py) — that module deliberately imports only `install.detect` and knows nothing of the config or the provider composition, and `lint-imports` is the gate that will say so.
+**5. Do not call `run_preflight` from `cmd_watch`.** It is the obvious move and it is wrong: `run_preflight` also gates Telegram, `gh`, the isolation policy check, and (opt-in) the live capability smoke, so wiring it into `watch` silently makes an unrelated Telegram or `gh` result able to refuse a daemon start — a much larger behavior change than this task asks for. Add a narrow gate instead, shaped like the ones it sits beside: `require_provider_auth(config)` that builds the providers, runs only the auth probe for each `agents.allowed` provider, and exits non-zero on any `LOGGED_OUT`. Put it in [`cli.py`](../../../src/wastech_orchestrator/cli.py) next to `run_preflight` rather than in [`preflight.py`](../../../src/wastech_orchestrator/preflight.py) — that module deliberately imports only `install.detect` and knows nothing of the config or the provider composition, and `lint-imports` is the gate that will say so.
 
 **6. One rule for every entry point: refuse.** `cmd_watch` (both the single-pass and daemon paths) and `cmd_run` call it unconditionally, exactly like `require_git_control()`. Splitting the rule by `poll > 0` buys nothing — an operator running one task against a logged-out provider gains no information by watching it fail at the first fallback — and a single rule is one less branch to test.
 
@@ -218,16 +218,16 @@ So the codex probe must **not** gate on a clean exit — it reads the combined s
 
 ## P3 — honor `resetsAt`, and stop feeding the queue into a known-limited provider
 
-The adapter already captures the event that carries the answer: [`claude.py`](../../src/wastech_orchestrator/providers/claude.py) stores `rate_limit_event` — including `resetsAt: 1785993000` (07:10 local, 34 minutes out) — and uses it only to set a boolean. The instant is discarded.
+The adapter already captures the event that carries the answer: [`claude.py`](../../../src/wastech_orchestrator/providers/claude.py) stores `rate_limit_event` — including `resetsAt: 1785993000` (07:10 local, 34 minutes out) — and uses it only to set a boolean. The instant is discarded.
 
 Consequence, even after P1 lands: a parked task waits blind. `_park_ceiling_exceeded` measures against `agents.retry.max_blocked_s` (6h) and the wake-up is whenever the next `watch` tick happens to come around. The orchestrator would know it needs 34 minutes and instead poll for six hours' worth of ticks.
 
 Two parts:
 
 - **Carry the instant.** A `resets_at` / `retry_after` on `NormalizedError`, threaded to `_park` so the resume is scheduled rather than stumbled into. Treat it as **untrusted provider input**: clamp to `max_blocked_s`, reject absurd or past values, and compare through the injected `clock()` — never `datetime.now()` — so the behavior stays testable, which is how every other time-dependent path here is written.
-- **A provider cooldown the queue can see.** After P1 the single-slot park already stops the bleeding — the emergent circuit breaker described in [`test_cli_pipeline.py`](../../tests/core/test_cli_pipeline.py) (_"no separate breaker; it falls out of the single-slot park"_) works again the moment a park happens. P3 only makes the wait precise instead of 300s churn against a provider that is certain to 429.
+- **A provider cooldown the queue can see.** After P1 the single-slot park already stops the bleeding — the emergent circuit breaker described in [`test_cli_pipeline.py`](../../../tests/core/test_cli_pipeline.py) (_"no separate breaker; it falls out of the single-slot park"_) works again the moment a park happens. P3 only makes the wait precise instead of 300s churn against a provider that is certain to 429.
 
-**Scope boundary, stated so this does not quietly become a different feature.** This is _reactive_: a provider has already reported a limit **and its own reset instant**, so the orchestrator is recording a fact. It is explicitly **not** [`runtime_provider_capacity_gate.md`](archive/runtime_provider_capacity_gate.md), which stays deferred — that item is _proactive_ admission control (query account headroom before claiming a task) and carries all the hard parts this one does not: no provider reports a remaining token budget, utilization is not a completion guarantee, and usage moves concurrently on other devices. No capacity query, no headroom thresholds, no token estimation here.
+**Scope boundary, stated so this does not quietly become a different feature.** This is _reactive_: a provider has already reported a limit **and its own reset instant**, so the orchestrator is recording a fact. It is explicitly **not** [`runtime_provider_capacity_gate.md`](runtime_provider_capacity_gate.md), which stays deferred — that item is _proactive_ admission control (query account headroom before claiming a task) and carries all the hard parts this one does not: no provider reports a remaining token budget, utilization is not a completion guarantee, and usage moves concurrently on other devices. No capacity query, no headroom thresholds, no token estimation here.
 
 ### Implementation (P3)
 
@@ -235,12 +235,12 @@ Two parts:
 
 | # | Where | Change |
 | --- | --- | --- |
-| 1 | [`claude.py`](../../src/wastech_orchestrator/providers/claude.py) `parse_stream_json` | read `resetsAt` off the already-captured `rate_limit_event` into a new `ParsedEvents.rate_limit_resets_at` |
-| 2 | [`_adapter_base.py`](../../src/wastech_orchestrator/providers/_adapter_base.py) rate-limit raise | epoch → ISO-8601 UTC once, here; set it on the `NormalizedError` **and** the raised `ProviderError` |
-| 3 | [`base.py`](../../src/wastech_orchestrator/providers/base.py) | `NormalizedError.resets_at: str \| None` + the same optional kwarg on `ProviderError.__init__` |
-| 4 | [`router.py`](../../src/wastech_orchestrator/routing/router.py) | copy `exc.resets_at` into each `NormalizedError` it builds — the main `except`, the fresh-session retry, the transient-exhausted synthesis; **not** the `CANCELLED` one |
+| 1 | [`claude.py`](../../../src/wastech_orchestrator/providers/claude.py) `parse_stream_json` | read `resetsAt` off the already-captured `rate_limit_event` into a new `ParsedEvents.rate_limit_resets_at` |
+| 2 | [`_adapter_base.py`](../../../src/wastech_orchestrator/providers/_adapter_base.py) rate-limit raise | epoch → ISO-8601 UTC once, here; set it on the `NormalizedError` **and** the raised `ProviderError` |
+| 3 | [`base.py`](../../../src/wastech_orchestrator/providers/base.py) | `NormalizedError.resets_at: str \| None` + the same optional kwarg on `ProviderError.__init__` |
+| 4 | [`router.py`](../../../src/wastech_orchestrator/routing/router.py) | copy `exc.resets_at` into each `NormalizedError` it builds — the main `except`, the fresh-session retry, the transient-exhausted synthesis; **not** the `CANCELLED` one |
 | 5 | `nodes/agent.py` / `nodes/evaluator.py` | pass `outcome.terminal_error.resets_at` onto `NodeInfraError` |
-| 6 | [`orchestrator.py`](../../src/wastech_orchestrator/core/orchestrator.py) `_park` | validate, clamp, stamp `tasks.blocked_until` |
+| 6 | [`orchestrator.py`](../../../src/wastech_orchestrator/core/orchestrator.py) `_park` | validate, clamp, stamp `tasks.blocked_until` |
 
 The epoch→ISO conversion belongs at hop 2 because the field type stays provider-neutral (`resetsAt` is a Claude spelling) and nothing downstream should do timezone arithmetic. Codex reports no reset instant, so its errors leave the field `None` — that is not a gap, it is the field working.
 
@@ -248,7 +248,7 @@ The epoch→ISO conversion belongs at hop 2 because the field type stays provide
 
 So the Router tracks the **earliest instant any attempt reported** across the whole stage and stamps it on the exhausted outcome, exactly as the class is now aggregated. Earliest rather than latest because waking too early costs one cheap re-park while waking too late is the blind wait being removed. The `CANCELLED` exclusion moves to that single point, which is also where it belongs: one place decides, instead of three sites each remembering not to copy.
 
-**2. Schema v21: additive `tasks.blocked_until TEXT`.** Add the `_migrate` guard next to the `blocked_since` one, the `TaskRow` field, and — this is the project convention, not optional — the `v21` entry in the version-comment block at the top of [`state_store.py`](../../src/wastech_orchestrator/state_store.py) stating that it is additive (a brand-new `0` database adopts it; an older _versioned_ database is still refused fail-closed and recreated, which is free here — nothing is deployed).
+**2. Schema v21: additive `tasks.blocked_until TEXT`.** Add the `_migrate` guard next to the `blocked_since` one, the `TaskRow` field, and — this is the project convention, not optional — the `v21` entry in the version-comment block at the top of [`state_store.py`](../../../src/wastech_orchestrator/state_store.py) stating that it is additive (a brand-new `0` database adopts it; an older _versioned_ database is still refused fail-closed and recreated, which is free here — nothing is deployed).
 
 **3. There is no scheduler, and none should be built.** The wake is "the first `watch` tick at or after the instant". In `_resume_via_engine`, **after** `_park_ceiling_exceeded` (the ceiling must always win over a provider-supplied instant) and **before** `_check_preflight` / `prepare_branch`, short-circuit: if `blocked_until` is still in the future, log once and return `PipelineResult(final_status=Status.RUNNING)`. `watch_once` already returns early on a non-terminal resume, so the slot stays held, no git is touched, and no provider is launched. Precision is therefore bounded by `orchestrator.poll_interval_seconds` (300s default) — the wait becomes one cheap no-op tick per interval instead of a full re-entry that 429s in 2.5s. That bound is the whole feature; a timer thread or an interruptible sleep would be a different, larger one.
 
@@ -268,7 +268,7 @@ So the Router tracks the **earliest instant any attempt reported** across the wh
 
 The test gap is as much the deliverable as the code — the existing suite asserts this exact scenario and passes.
 
-**Unblock the fixture first, or none of P1 is expressible.** `_both(**kwargs)` in [`test_orchestrator.py`](../../tests/core/test_orchestrator.py) applies one kwarg set to both fakes. Widen it with per-provider overrides and leave the shared path alone, so all ~40 existing call sites are untouched:
+**Unblock the fixture first, or none of P1 is expressible.** `_both(**kwargs)` in [`test_orchestrator.py`](../../../tests/core/test_orchestrator.py) applies one kwarg set to both fakes. Widen it with per-provider overrides and leave the shared path alone, so all ~40 existing call sites are untouched:
 
 ```python
 def _both(*, claude=None, codex=None, **kwargs) -> dict[ProviderId, FakeProvider]:
@@ -278,7 +278,7 @@ def _both(*, claude=None, codex=None, **kwargs) -> dict[ProviderId, FakeProvider
     }
 ```
 
-The shared test config ([`conftest.py`](../../tests/conftest.py)) is already the incident's shape — `allowed: [claude, codex]`, `claude.primary: true`, both configured — so an unpinned node resolves claude→codex and a mixed pair reproduces the incident exactly. (While there: the note above `test_prompt_audit_*` claiming the global primary's "fallback target is itself (none)" predates symmetric cross-provider failover and now contradicts `resolve_route`; verify and correct it, since a reader would conclude this whole scenario is unreachable.)
+The shared test config ([`conftest.py`](../../../tests/conftest.py)) is already the incident's shape — `allowed: [claude, codex]`, `claude.primary: true`, both configured — so an unpinned node resolves claude→codex and a mixed pair reproduces the incident exactly. (While there: the note above `test_prompt_audit_*` claiming the global primary's "fallback target is itself (none)" predates symmetric cross-provider failover and now contradicts `resolve_route`; verify and correct it, since a reader would conclude this whole scenario is unreachable.)
 
 **P1 — unit (fast, in `tests/core/`):** `classify_exhaustion` as a decision table, the same shape as the existing `fallback_allowed` table in `tests/routing/`. Every row: containment-anywhere → MANUAL (including containment + rate_limited in both orders), representative CANCELLED + rate_limited → PARK-as-cancel, rate_limited + authentication_failed → PARK, authentication_failed alone → FAIL, empty → FAIL. This is where the precedence is actually pinned; the integration tests below prove it is wired.
 
@@ -292,7 +292,7 @@ The shared test config ([`conftest.py`](../../tests/conftest.py)) is already the
 
 **P2:**
 
-- A `LOGGED_OUT` provider fails `run_preflight` whether or not it is the primary, and the message names `agents.allowed` (extend [`test_cli_preflight.py`](../../tests/test_cli_preflight.py), which already flips `primary` between providers).
+- A `LOGGED_OUT` provider fails `run_preflight` whether or not it is the primary, and the message names `agents.allowed` (extend [`test_cli_preflight.py`](../../../tests/test_cli_preflight.py), which already flips `primary` between providers).
 - `UNKNOWN` warns and does not fail; a provider with no probe hook prints no auth claim at all.
 - `cmd_watch` (daemon and single-pass) and `cmd_run` refuse to start on `LOGGED_OUT`; nothing in `state.db` is touched.
 - The Claude probe's `AuthProbe` and every line it produces contain no `email` / `orgId` / `orgName` — assert on a fake probe payload carrying all three.
@@ -341,12 +341,12 @@ Grouped by part, so P1 can ship alone and each part's blast radius is visible be
 - A cancel park carries no `blocked_until`.
 - `worc top` / `status` show the wake instant.
 
-Plus the repo-wide Definition of Done from [AGENTS.md](../../AGENTS.md): `ruff check .`, `ruff format --check .`, `mypy src`, `lint-imports`, `pytest`, and the `interrogate` / `vulture` / `deptry` gates.
+Plus the repo-wide Definition of Done from [AGENTS.md](../../../AGENTS.md): `ruff check .`, `ruff format --check .`, `mypy src`, `lint-imports`, `pytest`, and the `interrogate` / `vulture` / `deptry` gates.
 
 ## Non-goals
 
 - **No proactive capacity or headroom query** — that is the archived capacity-gate item, deliberately left deferred.
-- **No automatic re-login or credential handling.** Credentials stay outside the orchestrator; a dead token is detected and reported, never repaired. (The "Automatic CLI installation/authorization" row in [the backlog README](README.md) is a separate, deliberately deferred idea.) Reading or parsing `~/.codex/auth.json` / the Claude credential store to inspect a token's expiry is credential handling and is out of scope even though it would technically answer the validity question.
+- **No automatic re-login or credential handling.** Credentials stay outside the orchestrator; a dead token is detected and reported, never repaired. (The "Automatic CLI installation/authorization" row in [the backlog README](../README.md) is a separate, deliberately deferred idea.) Reading or parsing `~/.codex/auth.json` / the Claude credential store to inspect a token's expiry is credential handling and is out of scope even though it would technically answer the validity question.
 - **No change to fallback eligibility.** `FALLBACK_ELIGIBLE` is untouched; the fallback in the incident was correct. Only what the Core concludes _after_ exhaustion changes.
 - **No new error classes**, no change to which classes are infra, no concurrency change.
 - **No new config keys in any of the three parts.** The clamp reuses `agents.retry.max_blocked_s`; the auth verdict and the park precedence are policy, not operator preference. A toggle here would let a config weaken the park or the security precedence, which is the opposite of the point.
@@ -356,9 +356,9 @@ Plus the repo-wide Definition of Done from [AGENTS.md](../../AGENTS.md): `ruff c
 
 `/sync-docs` scopes itself to the branch; on `dev` the surfaces that can go stale here are:
 
-- [`config.example.yaml`](../../src/wastech_orchestrator/packaged/config.example.yaml) — the `max_blocked_s` comment is the line that states the park contract P1 restores; extend it to say the class is aggregated across attempts and that a provider-reported reset shortens the wait within this ceiling.
+- [`config.example.yaml`](../../../src/wastech_orchestrator/packaged/config.example.yaml) — the `max_blocked_s` comment is the line that states the park contract P1 restores; extend it to say the class is aggregated across attempts and that a provider-reported reset shortens the wait within this ceiling.
 - `src/wastech_orchestrator/packaged/guide/` — whichever quickstart describes `worc preflight` / `worc watch` startup, now that a logged-out provider refuses to start; and the operator-facing description of a parked task if it names `blocked_since`.
-- [.agents/rules/architecture.md](../../.agents/rules/architecture.md) — the "Soft, resumable pause" rule reads _"when both retries and cross-provider fallback are exhausted **for a transient class**"_. That singular phrasing is exactly the reading the bug hid behind; restate it as the aggregate ("when **any** attempt in the exhausted stage reported a park-eligible class, and no attempt reported a containment/capability failure").
+- [.agents/rules/architecture.md](../../../.agents/rules/architecture.md) — the "Soft, resumable pause" rule reads _"when both retries and cross-provider fallback are exhausted **for a transient class**"_. That singular phrasing is exactly the reading the bug hid behind; restate it as the aggregate ("when **any** attempt in the exhausted stage reported a park-eligible class, and no attempt reported a containment/capability failure").
 - **PR doc-impact note (breadcrumb for the `main` reconstruction):** touched provider preflight, the park/fail decision, and `state.db` schema (v21) — likely affects `configuration.md`, `operations.md`, and `worc_architecture.md`.
 
 ## Operator recovery for the incident itself (already known, recorded for the reconstruction)

@@ -22,7 +22,7 @@ Separately, its 5 403-byte verdict file reaches nobody, and the verifier's promp
 
 ## Evidence
 
-[`core/flow/checkers/citation.py:140-141`](../../../src/wastech_orchestrator/core/flow/checkers/citation.py):
+[`core/flow/checkers/citation.py:140-141`](../../../../src/wastech_orchestrator/core/flow/checkers/citation.py):
 
 ```python
 on_line = isinstance(line_no, int) and snippet.strip() in lines[line_no - 1]
@@ -50,7 +50,7 @@ The routing half: `checks.py:150-151` writes `citation.json` privately, and `che
 1. **Make the cited line authoritative.** Drop the `or` fallback, or keep it and emit a distinct `weak` status when the snippet is present in the file but not on the cited line. A `weak` status is the safer first move: it surfaces mis-attribution without failing runs whose citations are merely imprecise, and it gives the verifier something concrete to chase.
 2. **A missing snippet is `uncheckable`, not `verified`.** `citation.py:138` currently passes an entry that carries only `path` + `line`. It has not been checked; label it accordingly.
 3. **Publish `citation.json` and set `checks_path` on both outcomes**, so the verifier receives the per-entry verdicts it is told to rely on. `checks.py:160` already registers it as an artifact; only the pass-path publish is missing.
-4. **Stop hardcoding the manifest filename.** [`checks.py:147`](../../../src/wastech_orchestrator/core/flow/nodes/checks.py) resolves `(report_dir or checks_dir) / "sources.json"` — a literal. A flow whose synthesis node names its manifest anything else gets `uncheckable: sources.json missing` and a gate that silently does nothing. Make it a checks-node field defaulting to `sources.json`, so an operator-authored flow can point the checker at its own manifest. (Added from the [P2.9](p2-9-deliverable-containment.md) review: this is the only place in the engine where a deliverable's filename genuinely must be known, and it is the whole declarative surface this area needs.)
+4. **Stop hardcoding the manifest filename.** [`checks.py:147`](../../../../src/wastech_orchestrator/core/flow/nodes/checks.py) resolves `(report_dir or checks_dir) / "sources.json"` — a literal. A flow whose synthesis node names its manifest anything else gets `uncheckable: sources.json missing` and a gate that silently does nothing. Make it a checks-node field defaulting to `sources.json`, so an operator-authored flow can point the checker at its own manifest. (Added from the [P2.9](p2-9-deliverable-containment.md) review: this is the only place in the engine where a deliverable's filename genuinely must be known, and it is the whole declarative surface this area needs.)
 5. Leave the `claim` field unvalidated by the deterministic checker — validating a claim is the verifier's job, not a checker's. But once (3) lands, the verifier can be told which entries are `weak`/`uncheckable` and made responsible for them ([P1.5](p1-5-research-role-prompts.md) items 1–3).
 
 ## Acceptance

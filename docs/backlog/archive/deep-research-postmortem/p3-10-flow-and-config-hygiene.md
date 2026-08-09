@@ -8,7 +8,7 @@ A collection of small, independent items. None is individually worth a task; tog
 
 ## 10a — `refinement` is structurally unreachable
 
-[`core/orchestrator.py:3120`](../../../src/wastech_orchestrator/core/orchestrator.py) resolves `derived.needs_refinement = completeness is not Completeness.COMPLETE`. `Completeness.COMPLETE` requires only a non-empty description plus an `## Acceptance criteria` section, so **any well-formed task file skips refinement**. On `p9-09` the ledger recorded `skip_reason = "disabled by task"` only because `_should_skip` checks the disabled set before the `when:` predicate — the node would have been skipped anyway.
+[`core/orchestrator.py:3120`](../../../../src/wastech_orchestrator/core/orchestrator.py) resolves `derived.needs_refinement = completeness is not Completeness.COMPLETE`. `Completeness.COMPLETE` requires only a non-empty description plus an `## Acceptance criteria` section, so **any well-formed task file skips refinement**. On `p9-09` the ledger recorded `skip_reason = "disabled by task"` only because `_should_skip` checks the disabled set before the `when:` predicate — the node would have been skipped anyway.
 
 What is lost: `.worc/flows/deep_research/refinement.md` is the strongest-written prompt in the set. It instructs decomposition along the roadmap, per-phase sub-questions, and anchoring each sub-question to where its evidence lives — and `repository_analysis.md` consumes it via `{?refinement_path}… cover every sub-question it lists{/refinement_path}`. A per-subsystem sub-question brief is a plausible partial fix for [P1.4](p1-4-audit-coverage-gate.md)'s coverage problem.
 
@@ -16,7 +16,7 @@ What is lost: `.worc/flows/deep_research/refinement.md` is the strongest-written
 
 ## 10b — `external_research`'s gate can never fire
 
-Same resolver, [`core/orchestrator.py:3124`](../../../src/wastech_orchestrator/core/orchestrator.py): `config.external_research = snapshot.doc.network_policy is not None`. `deep_research.yaml` sets `network_policy: research`, so `when: { fact: config.external_research }` is **always True**. Despite the `config.` namespace it is neither a config key nor a task field, and unknown facts silently resolve `False`, so an author cannot tell a typo from a working gate.
+Same resolver, [`core/orchestrator.py:3124`](../../../../src/wastech_orchestrator/core/orchestrator.py): `config.external_research = snapshot.doc.network_policy is not None`. `deep_research.yaml` sets `network_policy: research`, so `when: { fact: config.external_research }` is **always True**. Despite the `config.` namespace it is neither a config key nor a task field, and unknown facts silently resolve `False`, so an author cannot tell a typo from a working gate.
 
 **Change:** none to the engine — the fact resolver is core code, not operator-authorable. At 3.2% of spend the node is cheap insurance, and per-task opt-out via `nodes: { external_research: { enabled: false } }` already works. Worth doing: document that `config.external_research` means "this flow has a network policy", not "this question needs external grounding", so nobody mistakes it for a relevance gate.
 
@@ -28,7 +28,7 @@ Kept below as evidence only; no change is made under this campaign.
 
 $0.72 (5.6% of task cost) and ~76 s of serialized dead time, for 7 step notes plus the finalize turn. Ten tool calls across all eight runs; runs 000077, 000080, 000081 and 000082 made **zero**. Six of seven notes contain an explicit "no corrections needed".
 
-The step notes have exactly one consumer in the codebase — `_recover_from_digest` ([`core/supervisor.py:661-687`](../../../src/wastech_orchestrator/core/supervisor.py)), used only when the session dies. Here `recovered_from_digest: false`, so **nothing ever read them**. Its rubric (`roles/supervisor.md`) names two detection targets — repeated fix-cycle failure and out-of-scope file drift — and with `fix_iterations = 0` on a read-only flow, neither could fire.
+The step notes have exactly one consumer in the codebase — `_recover_from_digest` ([`core/supervisor.py:661-687`](../../../../src/wastech_orchestrator/core/supervisor.py)), used only when the session dies. Here `recovered_from_digest: false`, so **nothing ever read them**. Its rubric (`roles/supervisor.md`) names two detection targets — repeated fix-cycle failure and out-of-scope file drift — and with `fix_iterations = 0` on a read-only flow, neither could fire.
 
 **Change:** `SupervisorConfig` has no `enabled` flag, so the layer can only be cheapened. Set `supervisor.reasoning: medium → low` in the target config. The structural answer — a flow-local `supervision.role_file` so a research flow can state a rubric that can actually fire, and an observation cadence — is already designed in supervisor-observation-cadence-p1; this run is additional evidence for it, not a new proposal.
 

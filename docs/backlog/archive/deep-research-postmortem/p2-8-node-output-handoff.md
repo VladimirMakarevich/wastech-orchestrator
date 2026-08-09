@@ -25,10 +25,10 @@ Cost of the weak channel: `repository_analysis` read 400 450 B across 60 files a
 
 Structural causes:
 
-- [`core/flow/prompt_vars.py:26-36`](../../../src/wastech_orchestrator/core/flow/prompt_vars.py) — `node_output_vars()` is documented as "a path to a Core-written, redacted artifact, **never inlined content**"; enforced at [`core/prompts.py:55-90`](../../../src/wastech_orchestrator/core/prompts.py).
-- [`providers/base.py:215-235`](../../../src/wastech_orchestrator/providers/base.py) — `build_context_footer` has a fixed six-slot shape (`task / plan / diff / checks / review / human_input`) with **no upstream-output slot**, so handoff depends on a prompt author remembering to hand-write `{<node_id>_path}` into prose.
-- [`core/flow/nodes/evaluator.py:378-386`](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py) — `_prompt_variables()` never calls `_node_output_paths` (the agent path does, at `agent.py:606-610` / `:669`), so evaluators **structurally cannot** reference an upstream node's output. That is why `verifier.md` and `critic.md` hardcode `{repo}/docs/research/{task_id}/report.md`.
-- [`core/flow/postprocess.py:183-189`](../../../src/wastech_orchestrator/core/flow/postprocess.py) — `_slot_content` publishes `structured_output["content"]` or `final_message`, i.e. the chat sign-off. A node whose real product is a written file publishes only its summary.
+- [`core/flow/prompt_vars.py:26-36`](../../../../src/wastech_orchestrator/core/flow/prompt_vars.py) — `node_output_vars()` is documented as "a path to a Core-written, redacted artifact, **never inlined content**"; enforced at [`core/prompts.py:55-90`](../../../../src/wastech_orchestrator/core/prompts.py).
+- [`providers/base.py:215-235`](../../../../src/wastech_orchestrator/providers/base.py) — `build_context_footer` has a fixed six-slot shape (`task / plan / diff / checks / review / human_input`) with **no upstream-output slot**, so handoff depends on a prompt author remembering to hand-write `{<node_id>_path}` into prose.
+- [`core/flow/nodes/evaluator.py:378-386`](../../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py) — `_prompt_variables()` never calls `_node_output_paths` (the agent path does, at `agent.py:606-610` / `:669`), so evaluators **structurally cannot** reference an upstream node's output. That is why `verifier.md` and `critic.md` hardcode `{repo}/docs/research/{task_id}/report.md`.
+- [`core/flow/postprocess.py:183-189`](../../../../src/wastech_orchestrator/core/flow/postprocess.py) — `_slot_content` publishes `structured_output["content"]` or `final_message`, i.e. the chat sign-off. A node whose real product is a written file publishes only its summary.
 
 ## Status note
 

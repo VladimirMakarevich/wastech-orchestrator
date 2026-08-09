@@ -21,7 +21,7 @@ This is **not** F45 (short harvested literals rewriting ordinary words, fixed by
 
 ## Evidence
 
-[`providers/redaction.py:74-76`](../../../src/wastech_orchestrator/providers/redaction.py):
+[`providers/redaction.py:74-76`](../../../../src/wastech_orchestrator/providers/redaction.py):
 
 ```python
 _SENSITIVE_WORD = r"(?:TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|ACCESS[_-]?KEY|AUTHORIZATION|CREDENTIALS?|PRIVATE[_-]?KEY)"
@@ -43,7 +43,7 @@ The contradiction is internal: `redaction.py:78-80` states that matching is by w
 
 ### Harm 1 — invalid JSON in the audit log
 
-Redaction is applied to the already-serialized stream at [`providers/_adapter_base.py:483`](../../../src/wastech_orchestrator/providers/_adapter_base.py), and the value group `[^\s\"]+` eats the escape backslash of `\"`:
+Redaction is applied to the already-serialized stream at [`providers/_adapter_base.py:483`](../../../../src/wastech_orchestrator/providers/_adapter_base.py), and the value group `[^\s\"]+` eats the escape backslash of `\"`:
 
 ```
 in : {"text":"  tokens: \"tokens\","}
@@ -54,7 +54,7 @@ On `p9-09`, 2 of 14 `events.jsonl` files have an unparsable line (`repository_an
 
 ### Harm 2 — corrupted handoff, already observed in production
 
-The same function redacts node output at [`core/flow/postprocess.py:155`](../../../src/wastech_orchestrator/core/flow/postprocess.py), and **that redacted copy is what the downstream `{<node_id>_path}` channel resolves** (WRI-001, `postprocess.py:158-168`). It did not fire on `p9-09`'s outputs, but it did on `p10-05-test-depth`, whose published PR body carries the evidence:
+The same function redacts node output at [`core/flow/postprocess.py:155`](../../../../src/wastech_orchestrator/core/flow/postprocess.py), and **that redacted copy is what the downstream `{<node_id>_path}` channel resolves** (WRI-001, `postprocess.py:158-168`). It did not fire on `p9-09`'s outputs, but it did on `p10-05-test-depth`, whose published PR body carries the evidence:
 
 > "A transient artifact in the plan draft (a malformed `tokens: [REDACTED]` fragment in the SIZE-001 test sketch) was flagged as a risk to verify; a spot-check of the committed `rules-size.test.ts` confirmed it resolved to valid `tokens: { warn: … }` syntax."
 

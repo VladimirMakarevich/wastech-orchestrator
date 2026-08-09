@@ -1,8 +1,8 @@
 # Doc-impact notes for the `main` docs reconstruction
 
-Status: **inventory** Date: 2026-07-27 Owner: Vladimir Makarevich
+Status: **archived 2026-08-09 — consumed by the `main` docs reconstruction** Date: 2026-07-27 Owner: Vladimir Makarevich
 
-`dev` deliberately carries no derived documentation: the descriptive documents (`worc_architecture.md`, `configuration.md`, `cookbook.md`, `glossary.md`, `operations.md`, the site) live on `main` and are reconstructed there from the merged `dev` diff as a separate task ([.agents/rules/git-workflow.md](../../.agents/rules/git-workflow.md) §A). AGENTS.md therefore asks each `dev` change to leave a one-line doc-impact note instead of creating those files.
+`dev` deliberately carries no derived documentation: the descriptive documents (`worc_architecture.md`, `configuration.md`, `cookbook.md`, `glossary.md`, `operations.md`, the site) live on `main` and are reconstructed there from the merged `dev` diff as a separate task ([.agents/rules/git-workflow.md](../../../.agents/rules/git-workflow.md) §A). AGENTS.md therefore asks each `dev` change to leave a one-line doc-impact note instead of creating those files.
 
 This is where those notes accumulate. It exists because a bare diff does not say _which page now contradicts the code_, and because the campaign folders that collected the notes are deleted once their items land — the reconstruction task runs later than that.
 

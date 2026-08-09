@@ -10,11 +10,11 @@ Two independent defects combine into that dead end, plus one message that active
 
 ## The incident, in one paragraph
 
-`worc restart` stopped the previous watcher, wrote its own PID into `.worc/orchestrator.pid` (it runs `cmd_watch` in-process — [`cli.py:3406`](../../src/wastech_orchestrator/cli.py)), and was then **suspended** — `ps` showed state `T` with a zsh parent and no children. Ctrl-Z or a background stdin read (SIGTTIN) both produce that state; the trigger was not recorded, and the fix does not depend on which it was. A suspended process runs no loop, so it never observed the `orchestrator.stop` sentinel, and the SIGTERM the soft stop sent it simply sat pending. Both tasks in flight were already terminal, so nothing was active. `kill -CONT <pid>` resumed it, the pending SIGTERM fired immediately, and it exited through the confirmed-terminal branch — PID file, sentinel and children file all reaped, state consistent.
+`worc restart` stopped the previous watcher, wrote its own PID into `.worc/orchestrator.pid` (it runs `cmd_watch` in-process — [`cli.py:3406`](../../../src/wastech_orchestrator/cli.py)), and was then **suspended** — `ps` showed state `T` with a zsh parent and no children. Ctrl-Z or a background stdin read (SIGTTIN) both produce that state; the trigger was not recorded, and the fix does not depend on which it was. A suspended process runs no loop, so it never observed the `orchestrator.stop` sentinel, and the SIGTERM the soft stop sent it simply sat pending. Both tasks in flight were already terminal, so nothing was active. `kill -CONT <pid>` resumed it, the pending SIGTERM fired immediately, and it exited through the confirmed-terminal branch — PID file, sentinel and children file all reaped, state consistent.
 
 ## A — `--force-full` does not escalate when no task is active
 
-**Problem.** [`_resolve_stop_level`](../../src/wastech_orchestrator/cli.py) tests activity **before** it tests the flags:
+**Problem.** [`_resolve_stop_level`](../../../src/wastech_orchestrator/cli.py) tests activity **before** it tests the flags:
 
 ```python
 if not has_active_task(config):
@@ -29,11 +29,11 @@ So on an idle daemon `--force-full` silently becomes a soft stop and `_stop_via_
 
 Note what this is **not**: it is not a new hard rung and it does not make hard stops easier to reach by accident. `--force-full` is already the explicit, documented, hardest form; this only stops the ladder from quietly discarding it.
 
-**This overturns a recorded decision, so change the test deliberately.** [`test_idle_stops_soft_no_prompt_for_any_form`](../../tests/test_cli_stop.py) asserts today's behavior in so many words — `assert decision.level == "soft"  # idle: ordinary stop even with --force-full` (`test_cli_stop.py:53`) — over the whole flag matrix. That is a decision, not an oversight, and the argument above ("no active task" is not "soft will work") is what overturns it. Split the test rather than patching it: idle + no flag / `--force` stays `soft`; idle + `--force-full` becomes `full`.
+**This overturns a recorded decision, so change the test deliberately.** [`test_idle_stops_soft_no_prompt_for_any_form`](../../../tests/test_cli_stop.py) asserts today's behavior in so many words — `assert decision.level == "soft"  # idle: ordinary stop even with --force-full` (`test_cli_stop.py:53`) — over the whole flag matrix. That is a decision, not an oversight, and the argument above ("no active task" is not "soft will work") is what overturns it. Split the test rather than patching it: idle + no flag / `--force` stays `soft`; idle + `--force-full` becomes `full`.
 
 ## B — a soft stop cannot wake a stopped process
 
-**Problem.** [`_stop_via_signal`](../../src/wastech_orchestrator/process_control.py) probes liveness, writes the sentinel, sends `term_sig`, then polls (`process_control.py:588`). Against a process in state `T` every one of those steps succeeds and none of them accomplish anything: `is_running` uses `os.kill(pid, 0)`, which reports a stopped process as alive; the sentinel is a file the process is not running to read; and the SIGTERM at `process_control.py:618` is queued, not delivered, until something resumes the process. The poll then runs out the full timeout and reports `timed_out`, which is honest but unhelpful — the stop is not slow, it is impossible.
+**Problem.** [`_stop_via_signal`](../../../src/wastech_orchestrator/process_control.py) probes liveness, writes the sentinel, sends `term_sig`, then polls (`process_control.py:588`). Against a process in state `T` every one of those steps succeeds and none of them accomplish anything: `is_running` uses `os.kill(pid, 0)`, which reports a stopped process as alive; the sentinel is a file the process is not running to read; and the SIGTERM at `process_control.py:618` is queued, not delivered, until something resumes the process. The poll then runs out the full timeout and reports `timed_out`, which is honest but unhelpful — the stop is not slow, it is impossible.
 
 **Proposed design.** Pair `SIGCONT` with `term_sig` on the POSIX path. `SIGCONT` to a process that is not stopped is a no-op by definition, so this needs no detection, no new dependency and no platform branch beyond the POSIX one it already sits in — which matters here, because detecting state `T` properly is _not_ cheap: `_read_proc_start_time` already documents that non-Linux POSIX has no dependency-free process-state source, and this module may not shell out. `SIGCONT` sidesteps that constraint entirely.
 
@@ -62,7 +62,7 @@ Windows is unaffected — there is no SIGSTOP, and `_stop_via_pid_file` sends no
 
 ## C — the timeout message names the rung that A just disabled
 
-**Problem.** [`_timed_out_stop_message`](../../src/wastech_orchestrator/cli.py) tells the operator to "retry with `--force-full` to interrupt now and reap the agent subtree" (`cli.py:3304`). With defect A in place and no active task, that retry provably does nothing — the operator runs it, gets a byte-identical message, and has no next move. The message is also the only operator-facing account of the state, and it never mentions that the process might be stopped rather than busy.
+**Problem.** [`_timed_out_stop_message`](../../../src/wastech_orchestrator/cli.py) tells the operator to "retry with `--force-full` to interrupt now and reap the agent subtree" (`cli.py:3304`). With defect A in place and no active task, that retry provably does nothing — the operator runs it, gets a byte-identical message, and has no next move. The message is also the only operator-facing account of the state, and it never mentions that the process might be stopped rather than busy.
 
 **Proposed design.** Once A lands the advice becomes true again, so most of this closes itself. What remains is worth one line: on Linux, where `/proc/<pid>/stat` field 3 is free to read, name the state when it is `T` ("watcher <pid> is suspended (state T); resume it with `kill -CONT <pid>`"). Elsewhere, no detection and no claim. Lowest value of the three; do not do it alone.
 

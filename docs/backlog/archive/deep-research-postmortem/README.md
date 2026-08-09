@@ -1,12 +1,12 @@
 # `deep_research` post-mortem campaign (2026-07-25)
 
-Status: **all eleven items implemented (P0.1, P0.3, P0.2, P1.6, P1.5, P1.4, P1.7, P1.4a, P2.8, P2.9, P3.10); P2.8 piece 3 and P3.10's 10c are deliberately out. What remains is the checkpoint re-run, which needs a target-repo `.worc/` refresh first — see [follow_ups.md](follow_ups.md)** Date: 2026-07-25 Owner: Vladimir Makarevich
+Status: **archived 2026-08-09 — all eleven items implemented (P0.1, P0.3, P0.2, P1.6, P1.5, P1.4, P1.7, P1.4a, P2.8, P2.9, P3.10); P2.8 piece 3 and P3.10's 10c are deliberately out. What remains is the checkpoint re-run, which needs a target-repo `.worc/` refresh first — see [follow_ups.md](follow_ups.md)** Date: 2026-07-25 Owner: Vladimir Makarevich
 
 Residue from the items that have landed — open decisions, watch items, the `.worc/` refresh every target repo needs, and what the `main` docs refresh must pick up — is collected in [follow_ups.md](follow_ups.md).
 
 This folder groups everything that came out of the post-mortem of `p9-09-full-solution-deep-audit`, the **first and only production run of the `deep_research` flow**, into a single campaign with one execution order. The analysis is in [postmortem.md](postmortem.md); the files below are the implementable tasks it produced.
 
-These documents are design detail, not an implementation contract, and must not override the hard invariants in [../../../CLAUDE.md](../../../CLAUDE.md) / [../../../AGENTS.md](../../../AGENTS.md) / [../../../.agents/rules/](../../../.agents/rules/).
+These documents are design detail, not an implementation contract, and must not override the hard invariants in [../../../CLAUDE.md](../../../../CLAUDE.md) / [../../../AGENTS.md](../../../../AGENTS.md) / [../../../.agents/rules/](../../../../.agents/rules/).
 
 ## Campaign-wide constraint: flow-agnostic by construction
 

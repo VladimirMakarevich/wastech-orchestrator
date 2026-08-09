@@ -21,9 +21,9 @@ The failure is silent in three compounding ways: `max_rework_per_stage: 3` is ne
 
 ## Evidence
 
-- [`core/flow/schema.py:31`](../../../src/wastech_orchestrator/core/flow/schema.py) — `DEFAULT_GATE_SEVERITY = "high"`.
-- [`core/flow/nodes/evaluator.py:461-468`](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py) — gates iff `_severity_rank(severity) <= gate_rank`; `medium` is rank 3, `high` is rank 2.
-- [`core/flow/nodes/evaluator.py:265-267`](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py) — the early `return "accept", False` precedes the budget branch.
+- [`core/flow/schema.py:31`](../../../../src/wastech_orchestrator/core/flow/schema.py) — `DEFAULT_GATE_SEVERITY = "high"`.
+- [`core/flow/nodes/evaluator.py:461-468`](../../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py) — gates iff `_severity_rank(severity) <= gate_rank`; `medium` is rank 3, `high` is rank 2.
+- [`core/flow/nodes/evaluator.py:265-267`](../../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py) — the early `return "accept", False` precedes the budget branch.
 - `.worc/flows/deep_research/critic.md:25-27` — _"severity **medium** or high marks a substantive weakness that should be reworked … accept and let them carry into the report's Open questions."_ Both halves are false: medium does not gate, and nothing carries a critic finding into the report.
 - The operator's installed `deep_research.yaml` deleted the three header-comment lines that documented `gate_severity`, so the one knob that would have caught this was undiscoverable.
 
