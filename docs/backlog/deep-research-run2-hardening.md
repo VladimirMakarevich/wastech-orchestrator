@@ -4,7 +4,7 @@ Priority: **P0–P2** Status: **open** Date: 2026-08-05 Source: post-mortem of `
 
 ## Why this exists
 
-`audit-v2-implementation` is the **second** production run of the `deep_research` flow and the first one after the [deep-research-postmortem](deep-research-postmortem/README.md) campaign (P0.1…P3.10) landed. That campaign's fixes work — see [What run 2 validated](#what-run-2-validated) — and they moved the failure mode. Run 1 failed by reading 18% of the in-scope files with nothing measuring it. Run 2 read **100% of both code remits** and produced a materially better audit, then spent **~32% of its budget ($63 of $197.08) on rework rounds that were structurally unable to be cheap or to land their fixes**.
+`audit-v2-implementation` is the **second** production run of the `deep_research` flow and the first one after the eleven-item `deep_research` post-mortem campaign landed. That campaign's fixes work — see [What run 2 validated](#what-run-2-validated) — and they moved the failure mode. Run 1 failed by reading 18% of the in-scope files with nothing measuring it. Run 2 read **100% of both code remits** and produced a materially better audit, then spent **~32% of its budget ($63 of $197.08) on rework rounds that were structurally unable to be cheap or to land their fixes**.
 
 The theme of every P0 item below is the same: the flow bounds work through **prompt-level instructions** ("close the named gaps, do not re-derive", "apply the fix") while the **mechanism** makes obeying them impossible or unverifiable. Fixing the wording is not the lever; fixing what the node receives and what it must report is.
 
@@ -59,7 +59,7 @@ Cost by node, all runs summed:
 
 ### Problem
 
-[P1.4 of the previous campaign](deep-research-postmortem/p1-4-audit-coverage-gate.md) states the design contract for a `coverage_gate` rework:
+The previous campaign stated the design contract for a `coverage_gate` rework:
 
 > The cost of a second full sweep is bounded by the findings rather than by the corpus: each analysis prompt carries a `{?review_path}` re-entry section that hands it the gate's findings and tells it to close the named gaps in its own remit first and not re-derive what the previous round covered, **so a pass with nothing named for it is a cheap turn**.
 
@@ -92,14 +92,14 @@ The node is **not given its own round-1 report**. Combined with the same prompt'
 
 ### Fix steps
 
-1. Add a self-prior output channel — e.g. `{?self_prior_path}` — resolved in [`core/flow/context_paths.py`](../../src/wastech_orchestrator/core/flow/context_paths.py) (the module [P1.4](deep-research-postmortem/p1-4-audit-coverage-gate.md) created when it moved `build_node_output_paths` out of `agent.py`), pointing at the node's own most recent output for this task.
+1. Add a self-prior output channel — e.g. `{?self_prior_path}` — resolved in [`core/flow/context_paths.py`](../../src/wastech_orchestrator/core/flow/context_paths.py) (the module the previous campaign created when it moved `build_node_output_paths` out of `agent.py`), pointing at the node's own most recent output for this task.
 2. Render it for `agent` nodes on re-entry only (absent on the first pass, so round 1 is unchanged), and extend the prompt-variable allowlist/lint the same way P1.4 did for evaluators.
 3. Rewrite the `{?review_path}` section in the three analysis prompts to state the achievable contract: carry the prior report forward **verbatim**, re-derive only what the named gaps require, and mark every carried-forward section as unchanged from the previous round.
 4. Require the `## Coverage` section to distinguish "opened this round" from "carried forward from round N", so `coverage_gate` can still tell read from asserted.
 
 ### Scope and expected impact
 
-Orchestrator default (`packaged/`), with the target copy refreshed via the [`upgrade-flows`](upgrade-flows.md) / `install --reconfigure` path already tracked in [target-resync-after-deep-research.md](target-resync-after-deep-research.md). On run 2's numbers this returns **~$21** and ~34 minutes, and it makes the P1.4 contract true rather than aspirational.
+Orchestrator default (`packaged/`), with the target copy refreshed via the [`upgrade-flows`](upgrade-flows.md) / `install --reconfigure` path already tracked in `target-resync-after-deep-research.md`. On run 2's numbers this returns **~$21** and ~34 minutes, and it makes the P1.4 contract true rather than aspirational.
 
 Deliberately **not** proposed: routing the rework edge to the owning pass only. `coverage_gate` findings can span remits, the head-of-chain re-entry is a considered decision recorded in P1.4, and once step 1 lands a pass with nothing named for it _is_ cheap. Re-routing would trade a correct guarantee for a saving this item already delivers.
 
@@ -180,7 +180,7 @@ The rework closed it — the manifest went 220 → 261 → **424** entries, and 
 
 ### Root cause
 
-[P1.6 of the previous campaign](deep-research-postmortem/p1-6-citation-checker-strictness.md) (implemented 2026-07-26) made the _cited line authoritative for entries that are in the manifest_. It did not give the checker any view of the deliverable's own citations, so **checked coverage is self-declared**: the agent decides what enters `sources.json`, and the checker grades exactly that set. A report can cite fifty lines, declare five, and pass.
+The previous campaign's citation-checker hardening (implemented 2026-07-26) made the _cited line authoritative for entries that are in the manifest_. It did not give the checker any view of the deliverable's own citations, so **checked coverage is self-declared**: the agent decides what enters `sources.json`, and the checker grades exactly that set. A report can cite fifty lines, declare five, and pass.
 
 ### Fix steps
 
@@ -214,7 +214,7 @@ The task names "code contradicts a documented invariant, requirement, **decision
 1. In [`packaged/flows/deep_research/coverage.md`](../../src/wastech_orchestrator/packaged/flows/deep_research/coverage.md), add a third check: every standard the task names (invariants, requirements, decisions, exit criteria, repository rules) must appear as a **judgment axis** — findings filed against it, or an explicit nil return stating it was used and produced none.
 2. Require the analysis prompts' `## Coverage` section to list the standards applied alongside the files opened, so the gate has something to measure rather than having to infer it.
 3. Keep the existing scope rule from P1.4 — "scope is what the task declares plus what the reports themselves claim" — so a narrowly scoped task is still not punished.
-4. Follow the [P0.1 severity convention](deep-research-postmortem/p0-1-evaluator-gate-severity.md): state the mechanism, do not restate `medium`, so the prompt cannot go stale against the YAML.
+4. Follow the established severity convention: state the mechanism, do not restate `medium`, so the prompt cannot go stale against the YAML.
 
 ### Scope and expected impact
 
@@ -257,7 +257,7 @@ Orchestrator default, docs-only except step 4. Prevents a regression that would 
 
 ### Problem
 
-[P1.4 of the previous campaign](deep-research-postmortem/p1-4-audit-coverage-gate.md) states the convention explicitly for `coverage_gate`: "`budget: 2` on the edge matches `max_rework_per_stage: 2`, so the non-blocking self-cap always fires before the edge budget does." `fact_verification` breaks it — the edge is `{ from: fact_verification, to: synthesis, outcome: rework, budget: 2 }` while the node sets `max_rework_per_stage: 1`. The node cap binds; the edge budget is dead. An operator reading `edges` expects two repair rounds and gets one.
+The previous campaign stated the convention explicitly for `coverage_gate`: "`budget: 2` on the edge matches `max_rework_per_stage: 2`, so the non-blocking self-cap always fires before the edge budget does." `fact_verification` breaks it — the edge is `{ from: fact_verification, to: synthesis, outcome: rework, budget: 2 }` while the node sets `max_rework_per_stage: 1`. The node cap binds; the edge budget is dead. An operator reading `edges` expects two repair rounds and gets one.
 
 `critical_review` (edge 3 / node 3) and `coverage_gate` (edge 2 / node 2) both agree, so `fact_verification` is the lone outlier.
 
@@ -337,10 +337,10 @@ Fix: emit an info line for a `checks` node's start/outcome and for a skipped nod
 
 Checked deliberately, so the campaign's cost is on record as having bought something:
 
-- **The three-pass remit split ([P1.4](deep-research-postmortem/p1-4-audit-coverage-gate.md)) works.** Run 1 opened 18% of in-scope files. Run 2 opened **72/72** core files with per-subdirectory counts matching the task's declared denominators exactly, and **18/18** entry-point/adapter files. `analysis_docs_tests` declared its sampling instead of hiding it — 47/132 plan files opened in full, the remaining 85 covered by three whole-corpus extractions over **132/132**, with anomaly-triggered full reads that produced five of its findings — and it **corrected the task's own denominators** (the guide is 51 files, not 53; 25 per-rule pages, not 19).
-- **`gate_severity: medium` ([P0.1](deep-research-postmortem/p0-1-evaluator-gate-severity.md)) works.** `coverage_gate` round 1: three `medium` → `rework`. Round 2: three `low` → `accept`. The exact mechanism run 1 lacked.
+- **The three-pass remit split works.** Run 1 opened 18% of in-scope files. Run 2 opened **72/72** core files with per-subdirectory counts matching the task's declared denominators exactly, and **18/18** entry-point/adapter files. `analysis_docs_tests` declared its sampling instead of hiding it — 47/132 plan files opened in full, the remaining 85 covered by three whole-corpus extractions over **132/132**, with anomaly-triggered full reads that produced five of its findings — and it **corrected the task's own denominators** (the guide is 51 files, not 53; 25 per-rule pages, not 19).
+- **`gate_severity: medium` works.** `coverage_gate` round 1: three `medium` → `rework`. Round 2: three `low` → `accept`. The exact mechanism run 1 lacked.
 - **The coverage gate earns its keep at $2.19/round.** It caught a cross-pass attribution error before `synthesis` could build on it: pass 3 justified skipping the 25 per-rule guide pages by claiming pass 1 had validated them against each rule's Zod schema, when pass 1's remit excludes the guide.
-- **Evaluator findings reach the record ([P0.2](deep-research-postmortem/p0-2-evaluator-findings-surfacing.md)).** `evaluations.findings_json` carries every verdict with severity and reason, and the supervisor's `advisory` rows sit alongside them.
+- **Evaluator findings reach the record.** `evaluations.findings_json` carries every verdict with severity and reason, and the supervisor's `advisory` rows sit alongside them.
 - **`resume_own_lineage` on `critical_review` pays for itself.** Round 1 (fresh): 37 turns / $3.30. Round 2 (resumed, one `node_lineage` row): **12 turns / $2.04** — cheaper _and_ strictly more capable, because it can assert "unchanged after the previous round flagged it".
 - **The read-only git-evidence grant is used as intended.** All three passes ran `git log` / `git show --stat`; pass 1 established that P10–P12 landed as a single squashed commit, which is a delivery-history finding no changelog would give.
 - **Path hygiene holds** — stored logs redact the absolute repository path as `[REDACTED]`.
@@ -367,7 +367,7 @@ The flow caught its own blind spots three times through three different gates �
 - **Re-routing the `coverage_gate` rework edge** — considered and rejected under [P0.1](#p01--give-a-re-entering-node-its-own-prior-output).
 - **`fact_verification`'s `network_access: true`** — measured `web_search_requests: 0, web_fetch_requests: 0`, because with `external_research` disabled there are no external `url` entries to fetch. Unused surface on this task shape, not a defect; a per-task concern, not a packaged-default change.
 - **An empty `.claude/` directory** appeared inside the deliverable folder (a provider initialised it there). Git does not track empty directories, so it did not reach the pull request. Cosmetic; recorded only so the next reader is not alarmed.
-- **Target re-sync.** Everything here lands in `packaged/`; getting it into `wastech-mdlint` is the existing [target-resync-after-deep-research.md](target-resync-after-deep-research.md) + [upgrade-flows.md](upgrade-flows.md) work, and this document adds to that queue rather than duplicating it.
+- **Target re-sync.** Everything here lands in `packaged/`; getting it into `wastech-mdlint` is the existing `target-resync-after-deep-research.md` + [upgrade-flows.md](upgrade-flows.md) work, and this document adds to that queue rather than duplicating it.
 
 ## Execution order
 
