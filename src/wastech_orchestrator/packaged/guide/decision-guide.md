@@ -82,7 +82,9 @@ It never lowers the hard ceiling (env-allowlist, the `--dangerously-*`/bypass ba
 
 ## Disabling nodes — `nodes.<node-id>.enabled: false`
 
-Disable a node only when it adds no value for this task. Keys are flow **node ids**; any node in the task's resolved flow may be disabled. The ids below are the default `implementation` flow's; a custom flow exposes its own (e.g. `code_review`). `refinement` is skipped automatically when the task is already complete (see "Refinement" below).
+Disable a node only when it adds no value for this task. Keys are flow **node ids**; any node in the task's resolved flow may be disabled. The ids below are the default `implementation` flow's; a custom flow exposes its own (e.g. `code_review`). `refinement` is skipped automatically when the task is already complete (see "Refinement" below) — with one flow-specific exception: `deep_research`'s `refinement` is a _scoping_ pass carrying no completeness predicate, so it runs on every task and disabling it here is the only way to skip it.
+
+Disabling a `checks` node is also the sanctioned way to make a quality gate not run for one task. Do not reach for a set's `skip_if_unavailable` instead: that only turns a missing toolchain into a loud skip, and a set that was the _only_ one the diff selected then leaves the gate with nothing run — which parks the task at `manual_action_required`, the same place the launch failure would have.
 
 ```yaml
 nodes:
@@ -103,6 +105,8 @@ What disabling the default-flow nodes does:
 
 **Disabling `review` is high-risk** — it removes the only agent quality gate before commit/PR. There is no config gate for it (no `agents.allow_review_skip`): which nodes are safe to disable is the operator's flow-authoring responsibility. Node-disable is per-task only (`nodes.<node-id>.enabled: false`); the valid per-node keys are `enabled`, `model`, `reasoning`, and `provider` — any other sub-key rejects the task (`invalid_node_override`). Naming an id absent from the task's flow ends the task `failed` (a controlled error at flow resolution).
 
+Also note what disabling **does not** reach: the whole-task summary is not a graph node, so no `nodes` entry removes it. Removing that oversight layer is the operator's config switch `supervisor.enabled: false`, after which the pull-request body is rendered deterministically from the run's own recorded facts.
+
 ## Provider / model / reasoning — a per-run overlay, not a redesign
 
 Which provider runs a stage, and with which model and reasoning effort, is the **flow's** decision: each node declares its own `provider`/`model`/`reasoning`, falling back to the operator's global provider defaults. A task may overlay that for one run, per node:
@@ -115,6 +119,8 @@ nodes:
 ```
 
 The resolution chain is task node override → flow node declaration → provider config default. The overrides are deliberately **best-effort**: the validation gate checks only that each is a non-empty string, and one the resolved flow or config cannot honor (a `provider` outside `agents.allowed`, a `reasoning` the provider does not support) is warned and skipped at run time, falling back to the flow's value — the task is never aborted for it. `model` is passed through unchecked, because model names have no reliable tier ordering. Use this to run one task at a different effort or on the other agent; when a stage needs a stronger model _every_ time, change the flow YAML instead — that is the durable fix.
+
+With the operator's `prompt_audit` flag on, the effective post-override provider, model, and reasoning are recorded per node under `logs/<task-id>/prompt-audit/` — that is where you confirm an overlay was honored rather than warned and skipped.
 
 ## `auto_merge` — danger
 
