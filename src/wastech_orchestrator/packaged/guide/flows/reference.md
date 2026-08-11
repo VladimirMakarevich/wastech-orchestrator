@@ -70,7 +70,7 @@ The same holds if such a node changes **Git control state** — a hook, `.git/co
 
 ### `defaults.evaluator`
 
-Applied to any evaluator node that omits the field. Keys: `session_scope` (default `fresh_disposable`), `permission_profile` (default `read-only`), `max_rework_per_stage` (default `1`), `gate_severity` (built-in default `high`). Use it to avoid repeating the same evaluator settings across many evaluator nodes — `deep_research` sets `gate_severity: medium` here, which covers both of its evaluators at once.
+Applied to any evaluator node that omits the field. Keys: `session_scope` (default `fresh_disposable`), `permission_profile` (default `read-only`), `max_rework_per_stage` (default `1`), `gate_severity` (built-in default `high`). Use it to avoid repeating the same evaluator settings across many evaluator nodes — `deep_research` sets `gate_severity: medium` here, which covers all three of its evaluators (`coverage_gate`, `fact_verification`, `critical_review`) at once.
 
 ### `decomposition`
 
@@ -170,8 +170,8 @@ The tool runs under the same ceiling as an agent (argv-no-shell, mandatory timeo
 
 | Field | Type / values | Default | Meaning |
 | --- | --- | --- | --- |
-| `signal` | `question` \| `approval` | required | The kind of human interaction. Requires `telegram.enabled`. |
-| `timeout_s` | int \| null | `null` | Blocking timeout (fails closed). |
+| `signal` | `question` \| `approval` | required | The kind of human interaction. Requires `telegram.enabled`. `question` proceeds unconditionally (`done`) once any non-empty answer arrives; `approval` **branches** — declare `route:approve` / `route:deny` edges for it. |
+| `timeout_s` | int \| null | `null` → `telegram.ask_timeout_s` | Blocking timeout, fail-closed: a timeout, a transport error, a missing notifier, or an invalid answer parks the task at `manual_action_required`. |
 | `when` | predicate | `null` | Conditional run. |
 
 ### `publish` node
@@ -191,13 +191,13 @@ The tool runs under the same ceiling as an agent (argv-no-shell, mandatory timeo
 | `budget` | int | — | Required on a `rework`/`fail` edge unless it has a `loop`. | Inline iteration cap for this edge. |
 | `loop` | string | — | Must be declared in `budgets`. | Names a shared loop budget (e.g. `test_fix`). |
 
-Allowed `outcome` values by source kind: **evaluator** `{accept, rework}`; **checks** `{pass, fail}`; **tool** `{pass, fail}` (plus any `route:*`); **all other kinds** unconditional (`outcome` omitted). The outcomes that charge a loop budget are `{rework, fail}` — so **every `rework`/`fail` edge must carry a `budget` or a `loop`** (unbounded loops fail validation).
+Allowed `outcome` values by source kind: **evaluator** `{accept, rework}`; **checks** `{pass, fail}`; **tool** `{pass, fail}`; **all other kinds** unconditional (`outcome` omitted). A `route:<name>` outcome is accepted on **any** source kind — and a `hitl` node with `signal: approval` emits one, so it needs `route:approve` / `route:deny` edges rather than an unconditional one. The outcomes that charge a loop budget are `{rework, fail}` — so **every `rework`/`fail` edge must carry a `budget` or a `loop`** (unbounded loops fail validation).
 
 ## Validation (what `validate-flow` checks — all fatal, all collected)
 
-1. **Graph integrity** — edges resolve; outcomes are legal for the source kind; every `rework`/`fail` edge is bounded; named loops are declared in `budgets`; exactly one entry node (no incoming edges); full forward reachability; at least one terminal and every node reaches one; `lineage_affinity` is valid; decomposition references resolve.
-2. **Security ceiling** — evaluators forced `read-only` and never `editing_lineage`; every agent `permission_profile <= permission_ceiling`; `extra_args` pass the forbidden-args scan; all `role_file` / supervisor prompt paths are flow-dir-contained.
-3. **Config-aware** (when a config is loaded) — every `provider` is in `agents.allowed`; `reasoning` is valid for the resolved provider; a Codex `workspace-write` node never also has network; the ceiling is satisfiable by some allowed provider; `supervisor.observe.mode` is no broader than the config's (rank `none < events < selected < all`); under `strict_isolation`, no `extra_args` full-access mode; every `tool` name resolves in `.worc/tools/`.
+1. **Graph integrity** — edges resolve; outcomes are legal for the source kind; every `rework`/`fail` edge is bounded; named loops are declared in `budgets`; exactly one entry node (no incoming edges); full forward reachability; at least one terminal and every node reaches one; `lineage_affinity` is valid; decomposition references resolve and its `sub_flow` region is connected (an edge from `proposed_by` into it, and a forward exit edge out of it).
+2. **Security ceiling** — evaluators forced `read-only` and never `editing_lineage`; every agent `permission_profile <= permission_ceiling`; `git_evidence` rejected on a `workspace-write` agent node; `extra_args` pass the forbidden-args scan; all `role_file` / supervisor prompt paths are flow-dir-contained.
+3. **Config-aware** (when a config is loaded) — every `provider` is in `agents.allowed`; `reasoning` is valid for the resolved provider; a Codex `workspace-write` node never also has network; the ceiling is satisfiable by some allowed provider; `supervisor.observe.mode` is no broader than the config's (rank `none < events < selected < all`; skipped entirely when `supervisor.enabled` is false — there is then no cadence to widen); under `strict_isolation`, no `extra_args` full-access mode; every `tool` name resolves in `.worc/tools/`.
 
 Non-fatal: a `budgets` value above a config cap (the engine clamps to the min), a PR-publishing flow with no git configured (runs local-commit mode), and the prompt-variable anti-drift lint (warns on a `{name}` no node populates).
 
