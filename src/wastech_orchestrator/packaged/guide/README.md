@@ -5,7 +5,7 @@
 - **[best-practices.md](best-practices.md)** — how to write a _good_ task (testable criteria, scoping, constraints, the project's own working rules).
 - **[decision-guide.md](decision-guide.md)** — _when to use what_ (run vs watch, disabling nodes, auto-merge, where task files live, Telegram).
 - **[footprint.md](footprint.md)** — what the orchestrator leaves in the repository: every directory and file under `.worc/`, whether its presence is normal, what is safe to delete, and how retention works. Includes `follow-ups.md`, the accumulating list of what tasks noticed and did not fix — the one file you curate by hand.
-- **[tasks/task-minimal.md](tasks/task-minimal.md)** — the smallest valid task (just `id`, `title`, and a body) and **[tasks/task-rich.md](tasks/task-rich.md)** — a rich task that exercises the common front-matter fields with inline rule notes. Copy one and fill it in.
+- **[tasks/task-minimal.md](tasks/task-minimal.md)** — the smallest valid task (just `id`, `title`, and a body) and **[tasks/task-rich.md](tasks/task-rich.md)** — a maximal task that exercises _every_ front-matter field with inline rule notes. Copy one and fill it in.
 - **[skills/worc-task/SKILL.md](skills/worc-task/SKILL.md)** — a copy-ready task-authoring skill that turns raw work into one valid orchestrator task file.
 - **[skills/worc-deco-task/SKILL.md](skills/worc-deco-task/SKILL.md)** — a copy-ready task-authoring skill for operator-authored decomposition (root task + subtask specs).
 - **[config/README.md](config/README.md)** — build or tune the orchestrator's own `config.yaml` for this repository.
