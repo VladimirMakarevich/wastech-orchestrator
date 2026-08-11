@@ -6,7 +6,7 @@ Status: **proposed** Date: 2026-07-27 Owner: Vladimir Makarevich
 
 Packaged flows improve with the orchestrator; installed flows do not. A target repository resolves flows **only** from `<repo>/.worc/flows/`, so every improvement to a packaged flow is inert in an already-installed repo until someone refreshes that tree — and the only command that refreshes it also rewrites `config.yaml`. The result is that the improvements pile up unclaimed, which is exactly what happened to the `deep_research` campaign: six changes across five items, all waiting behind one refresh nobody wants to run.
 
-This is not the git-ref/pipx install friction from [archive/install-and-upgrade-flow.md](archive/install-and-upgrade-flow.md) — that item is about getting a newer `worc` onto the machine. This one starts after that succeeded: the new `worc` is installed and its better flows still do not run.
+This is not the git-ref/pipx install friction covered by the separate install-and-upgrade item — that one is about getting a newer `worc` onto the machine at all. This one starts after that succeeded: the new `worc` is installed and its better flows still do not run.
 
 ## Current behavior (verified)
 
@@ -18,7 +18,7 @@ This is not the git-ref/pipx install friction from [archive/install-and-upgrade-
 
 **The targeted-refresh pattern already exists for docs.** `worc upgrade-docs` ([`cmd_upgrade_docs`](../../src/wastech_orchestrator/cli.py)) resolves the install from `config.yaml`, diffs packaged against installed, reports `+ ~ -` per file, no-ops when current, previews under `--dry-run`, writes atomically, and removes files no longer in the package. It takes no backup, and says why: the guide is "generated content with no operator edits to preserve". **Flows are the opposite** — they are the editable, active copies that override the built-ins — so the shape transfers but that one justification does not.
 
-**What the coupling cost, concretely.** The `deep_research` refresh backlog (see [deep-research-postmortem/follow_ups.md](archive/deep-research-postmortem/follow_ups.md)) carries `gate_severity` on the evaluators, `git_evidence` on three analysis nodes, `output_file` on `synthesis` plus two rewritten evaluator prompts, two rewritten role prompts, a dropped `when:` predicate and a whole new `document_checks` node — and P1.4's four new role files, which are the one entry that **fails the flow to load** if the YAML arrives without them. A hand copy is the likely response to "refresh your flows" with no command named, and a hand copy is exactly how that order gets reversed.
+**What the coupling cost, concretely.** The `deep_research` refresh backlog carries `gate_severity` on the evaluators, `git_evidence` on three analysis nodes, `output_file` on `synthesis` plus two rewritten evaluator prompts, two rewritten role prompts, a dropped `when:` predicate and a whole new `document_checks` node — and P1.4's four new role files, which are the one entry that **fails the flow to load** if the YAML arrives without them. A hand copy is the likely response to "refresh your flows" with no command named, and a hand copy is exactly how that order gets reversed.
 
 ## Proposed minimal design
 

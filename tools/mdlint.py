@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Lint this repository's Markdown corpus with wastech-mdlint.
 
-One entry point for the local shell, the pre-commit hook, and CI, so all three run the same
-corpus with the same rules; anything a contributor sees locally is what the build sees. Two
-responsibilities justify a script instead of a bare command:
+One entry point for the local shell and the pre-commit hook, so both run the same corpus with the
+same rules rather than two hand-written command lines that drift. Two responsibilities justify a
+script instead of a bare command:
 
 * **Finding the linter.** It is not published to a package registry, so there is no dependency copy
   in this repository and no bin on PATH to rely on. Resolution is env var, then a sibling checkout,
@@ -14,8 +14,9 @@ responsibilities justify a script instead of a bare command:
   makes the command correct on either branch with no branch-name logic anywhere.
 
 Exit codes mirror the linter's own: ``0`` clean, ``1`` findings, ``2`` operational failure. A linter
-that cannot be found is a skip with a note locally and a hard failure under ``CI``: a build that
-silently reports success for a gate it never ran is worse than a red one.
+that cannot be found is a skip with a note, so committing a typo fix never requires a Node toolchain
+— but not under ``CI``, where the same case is a hard failure, because an automated caller that
+reports success for a gate it never ran is worse than a red one.
 """
 
 from __future__ import annotations

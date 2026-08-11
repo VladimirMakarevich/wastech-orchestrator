@@ -49,11 +49,13 @@ The file's absence from `dev` is the whole mechanism: a merge cannot conflict on
 }
 ```
 
-Nothing else has to change: [../../tools/mdlint.py](../../tools/mdlint.py) already runs the shared config plus every overlay it finds, so the same command and the same CI step cover the new file the moment it is committed.
+Nothing else has to change: [../../tools/mdlint.py](../../tools/mdlint.py) already runs the shared config plus every overlay it finds, so the same command and the same pre-commit hook cover the new file the moment it is committed.
 
-## One link to repoint in the same change
+## One dead link to remove in the same change
 
-`docs/operations.md` (line 124 at the time of writing) links to `backlog/install-and-upgrade-flow.md`, which now lives at `backlog/archive/install-and-upgrade-flow.md`. It is the **only** finding the shared config reports on `main` that a `dev → main` merge will not clear on its own — every other one there is a stale copy of a shared file that is already clean on `dev`. Repoint it and the gate is green on `main`: [operations.md on main](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/operations.md).
+`docs/operations.md` (line 124 at the time of writing) links to `backlog/install-and-upgrade-flow.md`. That document was retired along with the rest of the backlog archive, so the target does not exist on either branch — drop the link and keep the sentence, the way the queue documents on `dev` were cleaned. It is the **only** finding the shared config reports on `main` that a `dev → main` merge will not clear on its own; every other one there is a stale copy of a shared file that is already clean on `dev`. The page is [operations.md on main](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/operations.md).
+
+That merge is also where the archive itself leaves `main`: `dev` deleted `docs/backlog/archive/**` and `docs/backlog/deep-research-postmortem/**`, so the merge proposes those deletions and they must be **accepted**. Keeping them would restore documents nothing links to any more, and the shared config no longer excuses their internal links.
 
 ## Verifying it
 

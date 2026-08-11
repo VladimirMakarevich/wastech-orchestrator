@@ -29,14 +29,7 @@
     "**/*.codex.audit.md",
     // Produced by a research run and regenerated rather than maintained; its shape belongs to the run
     // that wrote it, so holding it to the standards of hand-written documentation reports noise.
-    "docs/research/**",
-    // Closed records of finished work, kept for history and not maintained: they name documents that
-    // were implemented and then deleted, so every link inside them is a link into the past. Both
-    // trees are retained on the documentation branch and absent here, which is why these two
-    // patterns select nothing on this branch and matter on the other one — 27 dead links and one
-    // reference cycle there, not one of them about a document anyone still edits.
-    "docs/backlog/archive/**",
-    "docs/backlog/deep-research-postmortem/**"
+    "docs/research/**"
   ],
 
   // Every rule below reports ZERO over this corpus today, so any output at all means a new problem
@@ -48,18 +41,7 @@
     // shared document may only reach a documentation-branch-only file through an absolute URL,
     // because a relative path to it dangles on this branch — and that is now a failing build rather
     // than a convention.
-    {
-      "rule": "REF-001",
-      "options": {
-        // The archived queue items are retained on the documentation branch and dropped here on
-        // purpose, so 32 links from four queue documents cannot resolve on this branch and would
-        // make the gate red on the day it lands. This filter names link TARGETS, not source files,
-        // so every other relative link in the corpus is still checked. It is meant to be temporary:
-        // repointing those links at absolute URLs — the same treatment every other cross-branch link
-        // gets — removes the need for it.
-        "exclude": ["docs/backlog/archive", "docs/backlog/archive/**"]
-      }
-    },
+    { "rule": "REF-001" },
     // Link anchors match a real heading slug. Cheap, and it catches the renamed-heading class of
     // breakage that a plain link check cannot see.
     { "rule": "REF-002" },

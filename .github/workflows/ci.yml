@@ -2,9 +2,11 @@ name: ci
 
 # Quality gate on every pull request and on pushes to any long-lived branch (dev / main / release).
 # `dev` matters most: all real work merges there, so without it in the push list those merge commits
-# would run no CI at all outside of pull requests. Only the `markdown` job reads docs/, and it needs
-# no branch handling: it lints whatever the checkout contains, so the docs-less `dev` tree and the
-# documentation-carrying branches are covered by the same step (see .agents/rules/git-workflow.md §A).
+# would run no CI at all outside of pull requests. Nothing here reads docs/, so the docs-less `dev`
+# tree needs no special handling (see .agents/rules/git-workflow.md §A). The Markdown gate is
+# deliberately not here yet: its linter is not published to a package registry, so a job would have to
+# build it from a pinned source checkout, and that is not worth carrying while the tool is still
+# changing. It runs as a local pre-commit hook until then.
 #
 # WRI-006 (cross-platform isolation verification): cross-platform behaviour is a hard repository
 # invariant, so the deterministic test suite — which exercises provider command generation, the typed
@@ -74,49 +76,6 @@ jobs:
 
       - name: Dependency hygiene (deptry)
         run: deptry src
-
-  markdown:
-    name: markdown context (ubuntu)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      # The linter is a separate repository and is not published to npm, so the gate builds it from
-      # source. Two properties are load-bearing. The ref is a commit SHA, not a branch: a moving ref
-      # would let an upstream change turn this build red without a commit here. And the checkout goes
-      # to the runner's temp directory rather than into the workspace — the linter's own repository
-      # carries ~150 Markdown files, and any path inside the workspace would put them in the corpus
-      # this job is meant to measure.
-      - name: Check out the Markdown linter
-        uses: actions/checkout@v4
-        with:
-          repository: VladimirMakarevich/wastech-mdlint
-          ref: 3317157d1464515a85209deab5cc33089f89b497
-          path: ${{ runner.temp }}/wastech-mdlint
-
-      - uses: actions/setup-node@v4
-        with:
-          # The linter's engines floor. Its own install is engine-strict, so an older runner default
-          # would fail the install rather than warn.
-          node-version: "24.17.x"
-          cache: npm
-          cache-dependency-path: ${{ runner.temp }}/wastech-mdlint/package-lock.json
-
-      - name: Build the linter
-        working-directory: ${{ runner.temp }}/wastech-mdlint
-        run: |
-          npm ci
-          npm run build
-
-      # One command for CI, the hook, and the shell, so a contributor cannot see a different corpus
-      # than the build does. It runs the shared config plus every additive config present in the
-      # checkout, which is how the branch that carries the derived documentation gets its extra rules
-      # without this workflow knowing which branch it is on. `CI` is set by Actions, so a linter it
-      # cannot find fails here instead of skipping the way it does locally.
-      - name: Markdown gate (wastech-mdlint)
-        env:
-          WASTECH_MDLINT_HOME: ${{ runner.temp }}/wastech-mdlint
-        run: python3 tools/mdlint.py
 
   test:
     name: tests (${{ matrix.os }} / py${{ matrix.python-version }})
