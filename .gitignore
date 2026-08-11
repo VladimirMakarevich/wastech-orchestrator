@@ -26,6 +26,10 @@ secrets/
 # all live here and are local-only. tasks/ (the audit trail) is intentionally NOT ignored (§21).
 .worc/
 
+# Node dependencies. This project ships no JavaScript; the directory only appears if the Markdown
+# linter is ever installed here as a package instead of resolved from a checkout of its own.
+node_modules/
+
 # IDE / ОС
 .idea/
 .vscode/

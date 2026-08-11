@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "wastech-mdlint": {
+      "command": "node",
+      "args": ["${WASTECH_MDLINT_HOME}/packages/mcp-server/dist/index.js"]
+    }
+  }
+}
