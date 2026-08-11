@@ -19,8 +19,14 @@ Resolution rules:
   flow that violates graph or ceiling rules raises
   :class:`~.validator.FlowValidationError`. When the registry is constructed with a *config*,
   :func:`~.validator.validate_flow_against_config` runs too (the config-aware layer): node
-  providers/reasoning ∈ allowlist, ``permission_ceiling`` ≤ a configured provider, PR-publishing
-  needs git, and ``budgets`` ≤ the config safety caps.
+  providers/reasoning ∈ allowlist, ``permission_ceiling`` ≤ a configured provider's capability, no
+  Codex node with both ``workspace-write`` and network, every ``tool`` node's name resolvable under
+  ``.worc/tools/``, a flow-local ``supervisor.observe.mode`` that does not *widen* the global
+  cadence, and — under ``security.strict_isolation`` — no ``extra_args`` selecting a provider
+  full-access mode. Flow ``budgets`` vs ``agents.max_*`` and ``publishing`` vs the git config are
+  deliberately **not** checked here: the engine clamps a budget to ``min(flow, cap)`` and
+  ``git.create_pull_request: false`` is a supported local-commit mode (see the validator's module
+  docstring).
 """
 
 from __future__ import annotations
