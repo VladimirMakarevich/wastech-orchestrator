@@ -8,6 +8,7 @@ Prefer the smallest config that can run safely:
 
 - one `primary` provider;
 - `strict_isolation: true`;
+- `security.protected_paths` naming the repo's sensitive surfaces — the default `trust_level: auto` raises the approval gate on nothing else, and the default empty list is no floor at all;
 - `auto_merge: false`;
 - Telegram disabled until a human-in-the-loop path is really needed;
 - one or a few clear `checks.command_sets`.
@@ -22,7 +23,7 @@ Every extra knob increases the chance that a later operator misunderstands why i
 - If both CLIs are installed and intentionally supported, allow both.
 - Exactly one provider is `primary: true`; make that the provider the team expects most nodes to run on.
 
-Do not add a provider "for later" if preflight would fail on every machine today.
+Do not add a provider "for later" if preflight would fail on every machine today. A provider in `allowed` whose CLI reports no stored credentials is fatal in any role: it fails preflight, and `run` / `rerun` / `watch` refuse to start at all — whether or not any node routes to it.
 
 ## 3. Design check sets around change ownership
 
@@ -74,9 +75,11 @@ That matters because `upgrade-config` preserves values but re-emits the file and
 
 `worc preflight` is the fastest way to catch:
 
-- provider binaries missing from `PATH`;
+- provider binaries missing from `PATH`, and any allowed provider whose CLI reports no credentials;
 - invalid or unsafe provider settings;
-- Telegram misconfiguration;
-- inconsistent check-set definitions.
+- `gh` missing from `PATH` while `git.create_pull_request` is on;
+- Telegram misconfiguration.
 
-Preflight does **not** validate flow files — run `worc validate-flow --all` for that (it is config-aware, so it also catches flows made invalid by a config edit, e.g. a node pinned to a provider you just removed from `agents.allowed`). Do not treat config editing as done until both preflight and `validate-flow --all` are green.
+It does not probe or run your checks: it lists each configured command set with its `paths`, commands, and flags, which is enough to eyeball selection coverage. A malformed set never gets that far — the config validator rejects it on load, so every command exits 2 with the reason.
+
+Preflight does **not** validate flow files — run `worc validate-flow --all` for that (it is config-aware, so it also catches flows made invalid by a config edit, e.g. a node pinned to a provider you just removed from `agents.allowed`). It covers your own flows under `.worc/flows/` only — the packaged built-ins are excluded, so with no operator flows `--all` reports nothing to check and exits 0. Do not treat config editing as done until both preflight and `validate-flow --all` are green.

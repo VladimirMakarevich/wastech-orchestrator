@@ -10,7 +10,7 @@ import pytest
 
 from wastech_orchestrator.config.schema import BranchMode, OrchestratorConfig, PublishScope
 from wastech_orchestrator.observability.logging import LOGGER_NAME
-from wastech_orchestrator.task.model import NodeOverride
+from wastech_orchestrator.task.model import REQUIRED_TASK_FIELDS, NodeOverride
 from wastech_orchestrator.task.parser import ParsedSource
 from wastech_orchestrator.task.validation_gate import (
     Completeness,
@@ -118,6 +118,26 @@ def test_unknown_top_level_field(config: OrchestratorConfig) -> None:
 
 def test_missing_required_title(config: OrchestratorConfig) -> None:
     text = "---\nid: task-001\n---\n\n## Description\n\nx\n"
+    result = _gate(config).validate(_src(text))
+    assert result.reason is ValidationReason.MISSING_REQUIRED_FIELD
+    assert result.detail == "title"
+
+
+@pytest.mark.parametrize("omitted", sorted(REQUIRED_TASK_FIELDS))
+def test_every_required_field_is_enforced(config: OrchestratorConfig, omitted: str) -> None:
+    # The gate reads REQUIRED_TASK_FIELDS, so the constant is the whole required set — not a
+    # docstring beside two hard-coded literals. Adding a key there must make this fail without it.
+    frontmatter = {"id": "task-001", "title": "T"}
+    del frontmatter[omitted]
+    fields = "".join(f"{key}: {value}\n" for key, value in frontmatter.items())
+    result = _gate(config).validate(_src(f"---\n{fields}---\n\n## Description\n\nx\n"))
+    assert result.reason is ValidationReason.MISSING_REQUIRED_FIELD
+    assert result.detail == omitted
+
+
+def test_blank_title_is_missing_not_present(config: OrchestratorConfig) -> None:
+    # Presence alone is not enough for `title`: it names the branch and the summary.
+    text = '---\nid: task-001\ntitle: "   "\n---\n\n## Description\n\nx\n'
     result = _gate(config).validate(_src(text))
     assert result.reason is ValidationReason.MISSING_REQUIRED_FIELD
     assert result.detail == "title"

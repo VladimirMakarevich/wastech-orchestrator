@@ -143,8 +143,9 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "allowed_environment": list(default_allowed_environment()),
             "denied_read_paths": [".env", "secrets/**"],
             "denied_commands": ["git commit", "git push", "gh pr create", "gh pr merge"],
-            # Fresh installs default to "auto" (routine in-repo deletions/renames no longer gate);
-            # the schema dataclass default stays "strict" as the absent-block safe fallback.
+            # Written explicitly at the one default "auto" carries everywhere (dataclass, loader,
+            # and here): routine in-repo deletions/renames never gate — only a `protected_paths`
+            # match asks.
             "trust_level": "auto",
             "protected_paths": [],
             # Seeded off, and seeded *explicitly*: the read-only git-evidence grant is an opt-in the
@@ -157,8 +158,6 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "max_task_lines": 5000,
             "max_line_bytes": 8192,
             "max_control_ratio": 0.01,
-            "required_fields": ["id", "title"],
-            "reject_unknown_fields": True,
             "quarantine_folder": quarantine,
         },
         "checks": {

@@ -186,7 +186,16 @@ from wastech_orchestrator.providers.base import ProviderId
 # warning names the keys), and `memory.enabled: true` is forced false for the run too, because
 # the layer's finalize turn is the only path that writes anything memory can later read back. Old
 # configs load fail-open with the default; `upgrade-config` adds the key from the template.
-CONFIG_SCHEMA_VERSION = 34
+# v35 (2026-08-11, dead-validation-keys): removes `validation.required_fields` and
+# `validation.reject_unknown_fields`. Both were parsed, stored, and even written by `install`, yet
+# read by nothing: the task gate hard-codes the requirement (`id`, a non-blank `title`, a non-empty
+# `Description` section) and rejects an unrecognized front-matter key unconditionally against
+# `task.model.ALLOWED_TASK_KEYS`. Neither belongs to the operator: a config able to drop `id` from
+# the required set, or to open the fail-closed unknown-key gate, would weaken invariants the branch
+# names, run dirs, and state store all depend on. Removing the keys is therefore the fix, not wiring
+# them up. Both are tolerated (ignored) on load — every config `install` wrote carries them, so they
+# must not become a hard unknown-key error — and `upgrade-config` strips them.
+CONFIG_SCHEMA_VERSION = 35
 
 
 class AuditBranch(StrEnum):
@@ -435,8 +444,6 @@ class ValidationConfig:
     max_task_lines: int
     max_line_bytes: int
     max_control_ratio: float
-    required_fields: tuple[str, ...]
-    reject_unknown_fields: bool
     quarantine_folder: str
 
 

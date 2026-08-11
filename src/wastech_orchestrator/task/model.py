@@ -63,6 +63,10 @@ ALLOWED_TASK_KEYS: frozenset[str] = frozenset(
         "nodes",
     }
 )
+# The front-matter keys a task must carry, enforced by ``task.validation_gate`` (which additionally
+# rejects a blank ``title`` and an empty ``Description`` section). Not operator-configurable: ``id``
+# becomes a branch fragment, a run directory, and a state-store key, so a config able to drop it
+# would break identity rather than relax a policy (config v35 removed the key that pretended to).
 REQUIRED_TASK_FIELDS: frozenset[str] = frozenset({"id", "title"})
 
 # The queue tag partitions a git-distributed task pool across several worc instances: an instance

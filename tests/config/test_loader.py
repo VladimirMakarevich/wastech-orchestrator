@@ -508,6 +508,26 @@ def test_legacy_prompts_block_is_tolerated() -> None:
     assert not hasattr(cfg, "prompts")
 
 
+# --- legacy validation knobs (removed in config v35) ---
+
+
+def test_legacy_validation_knobs_are_tolerated() -> None:
+    # config v35 removed `validation.required_fields` / `reject_unknown_fields`: both were parsed
+    # and written by `install`, yet read by nothing (the task gate hard-codes the required front
+    # matter and denies an unknown key unconditionally). Every config `install` wrote carries them,
+    # so they must load fail-open — ignored, never stored — and `upgrade-config` strips them.
+    text = _LEGACY + (
+        "validation:\n"
+        "  required_fields: ['id', 'title', 'owner']\n"
+        "  reject_unknown_fields: false\n"
+        "  max_task_lines: 4000\n"
+    )
+    cfg = loads_config(text).config
+    assert not hasattr(cfg.validation, "required_fields")
+    assert not hasattr(cfg.validation, "reject_unknown_fields")
+    assert cfg.validation.max_task_lines == 4000  # the live sibling key still applies
+
+
 # --- agents.retry (transient provider-failure recovery, config v20) ---
 
 
