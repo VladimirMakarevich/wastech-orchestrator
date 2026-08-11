@@ -282,16 +282,17 @@ def test_unknown_checks_key_is_rejected() -> None:
     assert any("retries" in issue for issue in exc.value.issues)
 
 
-def test_trust_level_defaults_to_strict_and_protected_empty() -> None:
+def test_trust_level_defaults_to_auto_and_protected_empty() -> None:
     result = loads_config(_LEGACY)
-    assert result.config.security.trust_level == "strict"
+    assert result.config.security.trust_level == "auto"
     assert result.config.security.protected_paths == ()
 
 
 def test_trust_level_loads() -> None:
-    text = _LEGACY + "security:\n  trust_level: auto\n"
+    # `strict` is the non-default level, so this proves the key is read rather than defaulted.
+    text = _LEGACY + "security:\n  trust_level: strict\n"
     result = loads_config(text)
-    assert result.config.security.trust_level == "auto"
+    assert result.config.security.trust_level == "strict"
 
 
 def test_trust_level_invalid_value_is_rejected() -> None:

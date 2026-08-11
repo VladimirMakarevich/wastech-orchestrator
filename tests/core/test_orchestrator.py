@@ -3548,6 +3548,8 @@ def test_dangerous_diff_requires_approval(
         providers=providers,
         check_verdicts=[0],
         notifier=notifier,
+        # The diff-shape gate is `strict`-only; `auto` (the default) asks on protected_paths alone.
+        config_kwargs={"trust_level": "strict"},
     )
 
     result = orch.run_task(_complete_task(tmp_path, f"task-{danger}-approval"))
@@ -3587,6 +3589,8 @@ def test_denied_dependency_change_gets_one_safe_reconsideration(
         providers=providers,
         check_verdicts=[0],
         notifier=notifier,
+        # The diff-shape gate is `strict`-only; `auto` (the default) asks on protected_paths alone.
+        config_kwargs={"trust_level": "strict"},
     )
 
     result = orch.run_task(_complete_task(tmp_path, "task-denied-dependency"))
@@ -3622,6 +3626,8 @@ def test_denied_dangerous_change_that_remains_requires_manual_action(
         providers=providers,
         check_verdicts=[0],
         notifier=notifier,
+        # The diff-shape gate is `strict`-only; `auto` (the default) asks on protected_paths alone.
+        config_kwargs={"trust_level": "strict"},
     )
 
     result = orch.run_task(_complete_task(tmp_path, "task-denied-risk-remains"))
@@ -3746,6 +3752,8 @@ def test_expanded_diff_requires_separate_approval_after_planning(
         providers=providers,
         check_verdicts=[0],
         notifier=notifier,
+        # The diff-shape gate is `strict`-only; `auto` (the default) asks on protected_paths alone.
+        config_kwargs={"trust_level": "strict"},
     )
 
     result = orch.run_task(_complete_task(tmp_path, "task-expanded-approval"))

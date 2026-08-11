@@ -28,22 +28,22 @@ If you genuinely want the orchestrator to enrich an under-specified task, omit a
 One task = one branch = one PR. Keep it to a single, reviewable change:
 
 - Prefer "add a retry budget to webhook delivery" over "improve webhook reliability."
-- If the work spans several independent changes, split it into separate tasks. (Whether one large task is auto-decomposed into sequential subtasks is a flow/planning decision; the gate defaults to the operator's `agents.decomposition.enabled` but a task may override it with `decomposition: true|false` — describe the scope and let planning propose a split.)
+- If the work spans several independent changes, split it into separate tasks. When one split task must land after another, list the earlier task's id in the later one's `depends_on`: the scheduler skips a dependent while a dependency is unmerged and runs other eligible tasks meanwhile. (Whether one large task is auto-decomposed into sequential subtasks is a flow/planning decision; the gate defaults to the operator's `agents.decomposition.enabled` but a task may override it with `decomposition: true|false` — describe the scope and let planning propose a split.)
 - A tightly scoped task plans better, reviews faster, and is far less likely to need a fixing cycle.
 - If your repo expects a customer-specific branch convention, set `branch_name` to the full target branch (e.g. `branch_name: "feature/ABC-123-webhook-retry-budget"`); otherwise omit it and use the orchestrator's default branch naming.
 
 ## 3. Pick the flow with `task_type` (default: `implementation`)
 
-A task runs a **flow** — a fixed pipeline of stages. Omit `task_type` and you get the default `implementation` flow (`planning → implementation → testing → review → fixing → documentation → publish`), which is what almost every coding task wants. Set `task_type` to run a different flow:
+A task runs a **flow** — a fixed pipeline of stages. Omit `task_type` and you get the default `implementation` flow (`refinement → planning → implementation → testing → review → fixing → documentation → publish`, with `refinement` skipped for a complete task), which is what almost every coding task wants. Set `task_type` to run a different flow:
 
 ```yaml
 task_type: deep_research # omit ⇒ implementation
 ```
 
-- **Built-ins:** `implementation` (default), `deep_research`, `security_audit`.
+- **Built-ins** (delivered into `.worc/flows/` by `worc install`): `implementation` (default), `deep_research`, `security_audit`, `merge`, `blog_article`, `blog_article_revise`, `content_chapter`, `content_translate`.
 - **Custom flows:** an operator can add `<repo>/.worc/flows/<task_type>.yaml`, and you select it by naming it in `task_type`. A `task_type` with no matching flow fails the task before any branch is created.
 
-The task only _names_ the flow; it never edits the graph or a stage's provider/model — those live in the flow YAML (an operator concern). The only per-task pipeline knob is disabling a node (`nodes.<node-id>.enabled: false`); to reshape the pipeline or retune models, author/edit the flow under `.worc/flows/`.
+The task only _names_ the flow; it never edits the graph — the stages, their edges, and their gating live in the flow YAML (an operator concern). Two per-task knobs act on the resolved flow, both keyed by node id: `nodes.<node-id>.enabled: false` disables a node, and `nodes.<node-id>.{model,reasoning,provider}` overlays that node's declared executor for this run only. The overrides are best-effort — one the resolved flow or config cannot honor is warned and skipped, falling back to the flow's declared value, never failing the task. To reshape the pipeline, or to retune models durably, author/edit the flow under `.worc/flows/`.
 
 ## 4. State constraints explicitly
 
@@ -62,7 +62,7 @@ A task you author should ask for work that fits how this project (and most well-
 - **Minimal, focused changes** that match the style of the surrounding code.
 - **Tests updated with behavior** — new or changed behavior comes with new or updated tests.
 - **Docs kept in sync** — when the change touches user-facing behavior, CLI, config, or architecture, the docs are updated in the same change.
-- **Canonical names** — refer to stages and providers by their real names: stages `refinement, planning, implementation, testing, review, fixing, summary, publishing`; providers `codex`, `claude`.
+- **Canonical names** — refer to stages and providers by their real names: the `implementation` flow's stages are `refinement, planning, implementation, testing, review, fixing, documentation, publish`; providers are `codex`, `claude`. There is no `summary` stage — the whole-task summary is written by the supervisor layer above the flow, not by a node.
 
 ## 6. Honor the security invariants
 
@@ -70,15 +70,15 @@ These are non-negotiable for this orchestrator; never write a task that tries to
 
 - **No secrets** in the task file (no tokens, keys, or passwords). Credentials are configured in the environment by the operator, never carried in a task.
 - **No flags that weaken the sandbox or approvals.** A task cannot pass CLI flags to the agent, cannot change commands, `extra_args`, credentials, or the security policy. Front matter is scanned for flag-shaped values and rejected.
-- **A task cannot add, replace, or relax checks.** The quality-gate commands are an operator concern resolved from config at install time; task content cannot change them.
+- **A task cannot add, replace, or relax checks.** The quality-gate commands are an operator concern resolved from `checks.command_sets` in `config.yaml` — there is no discovery and no agent assist, and which sets run for a diff is a deterministic function of the changed paths. Task content cannot change any of it.
 
 ## Authoring checklist
 
 Before handing over a task:
 
-- [ ] `id` is lowercase, matches `^[a-z0-9][a-z0-9._-]{0,63}$`, has no trailing dot, and is not a Windows device name (`con`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`).
+- [ ] `id` is lowercase, matches `^[a-z0-9][a-z0-9._-]{0,63}$`, has no trailing dot, and is not a Windows device name (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9` — the check reads the stem before the first dot, so `con.task` is rejected too).
 - [ ] `title` is short, specific, and non-empty.
-- [ ] `task_type` is omitted (⇒ `implementation`) or names a flow that exists — a built-in (`deep_research`, `security_audit`) or an operator flow in `.worc/flows/`.
+- [ ] `task_type` is omitted (⇒ `implementation`) or names a flow that exists — a built-in (`deep_research`, `security_audit`, `merge`, `blog_article`, `blog_article_revise`, `content_chapter`, `content_translate`) or an operator flow in `.worc/flows/`.
 - [ ] `## Description` is concrete and non-empty.
 - [ ] Acceptance criteria are present and testable (unless you intend refinement to add them).
 - [ ] `## Constraints` lists do-not-touch areas and dependency/compatibility limits.

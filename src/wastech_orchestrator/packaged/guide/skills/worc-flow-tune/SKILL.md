@@ -5,7 +5,7 @@ description: Tune an existing wastech-orchestrator flow's per-node execution kno
 
 # worc-flow-tune
 
-Help an operator change _how_ a flow's steps execute — the provider, model, reasoning effort, timeout, network access, and loop budgets — while leaving the graph (nodes, edges, routes) and the prompts untouched. These live on the flow node, never on the task: **a task file can never repoint a stage's provider or set its model.** Speak in the user's language (default to the language they wrote in).
+Help an operator change _how_ a flow's steps execute — the provider, model, reasoning effort, timeout, network access, and loop budgets — while leaving the graph (nodes, edges, routes) and the prompts untouched. The flow node is where these are **declared**, and editing it is the durable change; a task file can only overlay `provider`/`model`/`reasoning` for a single run, per node, best-effort (`nodes.<node-id>`), and cannot touch the other knobs at all. **When a stage should run differently _every_ time, it belongs here, not in a task.** Speak in the user's language (default to the language they wrote in).
 
 ## When to use
 
@@ -42,7 +42,7 @@ A brand-new task always picks up the edited flow. To apply your edit to a **spec
 
 ## What not to do
 
-- Don't set `provider`/`model`/`reasoning` in a **task file** — they are flow-node concerns and get the task rejected. Tune the flow node instead.
+- Don't put `provider`/`model`/`reasoning` at a **task file's top level** — that is rejected outright (`unknown_top_level_field`). A per-node overlay under `nodes.<node-id>` _is_ accepted, but it is one run only and best-effort (an unsupported value is warned and silently skipped), so it is for a one-off experiment — never the place to record a durable decision. Tune the flow node for that.
 - Don't name a `provider` that is not in `agents.allowed`, or a `reasoning` value invalid for that provider — validation fails.
 - Don't give a Codex `workspace-write` node `network_access: true` — it is rejected; split external fetches into a `read-only` node.
 - Don't invent a `model` id; it is passed through unverified and will only fail at run time. Keep to models the provider actually serves.

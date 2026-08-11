@@ -351,7 +351,7 @@ class NodeServices:
     #: effective approval policy for the dangerous-diff gate (``config.security.trust_level`` with
     #: any per-task override applied). ``strict`` gates any deletion/dependency diff; ``auto`` gates
     #: only a ``protected_paths`` match.
-    trust_level: str = "strict"
+    trust_level: str = "auto"
     #: operator allowlist (repo-relative globs) of paths that ALWAYS require approval on any change,
     #: regardless of ``trust_level`` (``config.security.protected_paths``). Empty = no floor.
     protected_paths: tuple[str, ...] = ()

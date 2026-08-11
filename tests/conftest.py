@@ -191,6 +191,7 @@ def build_git_config(
     memory_enabled: bool = False,
     allow_git_evidence: bool = False,
     allow_native_memory: bool = False,
+    trust_level: str | None = None,
     checkout_base_on_cleanup: bool | None = None,
     clean_runs_on_success: bool = True,
     supervisor_observe: str | None = None,
@@ -222,6 +223,8 @@ def build_git_config(
         else ""
     )
     paths_block = f"paths:\n  tasks_dir: {tasks_dir!r}\n" if tasks_dir != "tasks" else ""
+    # Absent => the shipped default `auto`; pass "strict" in a test that drives the diff-shape gate.
+    trust_level_line = f"  trust_level: {trust_level}\n" if trust_level is not None else ""
     # ``checks`` (shell-string commands) map to one always-on ``default`` command set (v15).
     if checks:
         cmd_lines = "\n".join(f"        - {{ argv: {shlex.split(c)!r} }}" for c in checks)
@@ -270,7 +273,7 @@ repo:
       command: "codex"
 security:
   allow_git_evidence: {str(allow_git_evidence).lower()}
-  allowed_environment:
+{trust_level_line}  allowed_environment:
 {env_lines}
 {validation_block}{telegram_block}checks:
 {checks_block}  timeout_seconds: 30

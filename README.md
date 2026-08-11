@@ -30,15 +30,15 @@ The agents do the editing. The orchestrator owns the process and the Git lifecyc
 
 ## How it works
 
-You start by defining a **flow** — the sequence of steps a task should go through, and which agent runs each one. Pick a built-in flow or shape your own to match how you work: a full pipeline for feature work, a lighter one for quick fixes, a research-only flow with no code changes at all. This is where you decide _what you actually need_.
+You start by defining a **flow** — the sequence of steps a task should go through, and which agent runs each one. Pick a built-in flow or shape your own to match how you work: a full pipeline for feature work, a research flow that produces a repository document instead of code, an audit flow that publishes nothing at all. This is where you decide _what you actually need_.
 
-Only then do you write tasks. Each task names a flow, and the orchestrator drives it through those steps end to end:
+Only then do you write tasks. Each task names its flow through the front-matter `task_type` (absent = the `implementation` flow), and the orchestrator drives it through those steps end to end:
 
 ```text
-   1. Define your flow      →   refine → plan → implement → test → review → fix → publish
+   1. Define your flow      →   refine → plan → implement → test → review → fix → document → publish
                                 (choose a built-in one or tailor your own)
 
-   2. Write a task          →   tasks/pending/task-001.md   (names the flow to run)
+   2. Write a task          →   tasks/pending/task-001.md   (task_type names the flow)
                                      │
                                      ▼
    3. The orchestrator runs it   ┌──────────────────────────────────────┐
@@ -67,7 +67,7 @@ You authorize the tools yourself, once, in the environment the orchestrator runs
 # 1. Install
 pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git"
 
-# 2. Set up your repo (interactive wizard: detects origin, branch, agents, checks)
+# 2. Set up your repo (interactive wizard: detects origin, branch, agents)
 cd /path/to/my-repo
 worc install .
 
@@ -96,6 +96,9 @@ The signup form accepts any string as an email. Validate the `email` field and s
 Promote it to `tasks/pending/` and run it:
 
 ```bash
+# Move the staged file into tasks/pending/ (atomic):
+worc promote task-001
+
 # Process exactly one task, end to end:
 worc run tasks/pending/task-001.md
 
@@ -117,7 +120,7 @@ The orchestrator creates a branch, runs the pipeline and your checks, commits th
 | --- | --- |
 | `repo.url` / `repo.base_branch` | The target repository and the branch PRs target. |
 | `agents.allowed` / providers | Which agents are enabled and which is the default. |
-| `checks.command_sets` | Your test/lint commands, run as the testing stage. |
+| `checks.command_sets` | Your test/lint commands, run as the testing stage. `install` leaves this empty — you author it. |
 | `orchestrator.auto_mode.enabled` | Whether the next pending task starts automatically (default off). |
 | `git.create_pull_request` | Open a PR after push (needs `gh`). |
 | `telegram.*` | Optional notifications and human-in-the-loop approvals. |
@@ -129,6 +132,7 @@ Secrets are read from the environment (keep them in a gitignored `.env` or `expo
 ```text
 worc install [repo]     set up the orchestrator in a repository
 worc preflight          check the agent CLIs and isolation policy (read-only)
+worc promote <id>       move a staged task from tasks/preparing/ into tasks/pending/
 worc run <task-file>    process exactly one task end to end
 worc watch              process pending tasks in a loop, with periodic git sync
 worc status             show the active / latest task

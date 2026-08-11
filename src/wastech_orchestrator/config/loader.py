@@ -557,13 +557,15 @@ def _build_security(raw: Any, issues: list[str]) -> SecurityConfig:
         where,
         issues,
     )
-    trust_level = _str(m, "trust_level", "strict", where, issues)
+    trust_level = _str(m, "trust_level", "auto", where, issues)
     if trust_level not in TRUST_LEVELS:
         issues.append(
             f"{where}.trust_level: invalid value {trust_level!r}, "
             f"expected one of {sorted(TRUST_LEVELS)}"
         )
-        trust_level = "strict"
+        # Unreachable in effect — a recorded issue fails the load — but keeps the value inside
+        # TRUST_LEVELS for the construction below, and matches the default above.
+        trust_level = "auto"
     return SecurityConfig(
         strict_isolation=_bool(m, "strict_isolation", True, where, issues),
         disable_read_isolation=_bool(m, "disable_read_isolation", True, where, issues),

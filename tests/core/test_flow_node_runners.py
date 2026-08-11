@@ -190,6 +190,7 @@ def _services(
     packet_builder: Any = None,
     security_preamble: str | None = None,
     allow_git_evidence: bool = False,
+    trust_level: str = "auto",
 ) -> Any:
     return NodeServices(
         router=router,
@@ -204,6 +205,7 @@ def _services(
         packet_builder=packet_builder,
         security_preamble=security_preamble,
         allow_git_evidence=allow_git_evidence,
+        trust_level=trust_level,
     )
 
 
@@ -1057,11 +1059,13 @@ def test_agent_dangerous_diff_goes_manual(tmp_path: Path) -> None:
         permission_profile=PermissionProfile.WORKSPACE_WRITE,
     )
     git = FakeGit(changed=(ChangedPath(status="D", path="src/core.py"),))
+    # The diff-shape gate is a `strict`-only behavior, so pin it — `auto` is the default level.
     services = _services(
         FakeRouter(_result()),
         FakeStore(),
         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
         git=git,
+        trust_level="strict",
     )
     with pytest.raises(NodeManualRequired):
         AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
@@ -1581,6 +1585,8 @@ def test_dangerous_diff_reconsider_resumes_editing_lineage(tmp_path: Path) -> No
         git=git,
         notifier=notifier,
         ask_timeout_s=60,
+        # The diff-shape gate is a `strict`-only behavior; `auto` is the default level.
+        trust_level="strict",
     )
     result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
 

@@ -68,7 +68,7 @@ def build_node_services(
     run_process: RunProcess = _default_run_process,
     process_env: Mapping[str, str] | None = None,
     scan_timeout_s: int = 600,
-    trust_level: str = "strict",
+    trust_level: str = "auto",
     protected_paths: tuple[str, ...] = (),
     allow_git_evidence: bool = False,
     security_preamble: str | None = None,

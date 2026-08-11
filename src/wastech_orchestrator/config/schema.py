@@ -129,8 +129,8 @@ from wastech_orchestrator.providers.base import ProviderId
 # install. Old configs load fail-open with defaults and `upgrade-config` adds it from the template.
 # No behavior consumes the knobs yet (phase 01 wires the shape only).
 # v25 (2026-07-03, trust-levels-danger-approval): replaces `security.deletion_approval_exempt_paths`
-# with the approval-policy knob `security.trust_level` (strict|auto, default `auto` at install; the
-# dataclass default is the safe fallback `strict`) plus `security.protected_paths` (repo-relative
+# with the approval-policy knob `security.trust_level` (strict|auto, default `auto` everywhere —
+# dataclass, loader, and install) plus `security.protected_paths` (repo-relative
 # globs that ALWAYS require approval, at any trust_level — the always-ask floor). `strict` keeps the
 # old behavior (gate every deletion/rename or dependency-manifest edit); `auto` turns the diff-shape
 # gate off so only a `protected_paths` match raises approval. The old key is removed outright
@@ -385,9 +385,11 @@ class SecurityConfig:
     denied_commands: tuple[str, ...]
     # Approval policy for the mid-task dangerous-diff gate. ``strict`` gates any
     # deletion/rename or dependency-manifest edit; ``auto`` turns the diff-shape gate off so only a
-    # ``protected_paths`` match raises approval. The dataclass default is the safe fallback
-    # ``strict``; a fresh install writes ``auto`` (config_writer).
-    trust_level: str = "strict"
+    # ``protected_paths`` match raises approval. ``auto`` everywhere — the dataclass default, the
+    # loader's absent-key default, and what a fresh install writes (config_writer) — so "the
+    # default" has one answer no matter how a config arrives. ``protected_paths`` stays the
+    # always-ask floor under either level.
+    trust_level: str = "auto"
     # Operator allowlist (repo-relative globs) of paths that ALWAYS require approval on any change,
     # regardless of ``trust_level`` — the always-ask floor no level can lower. Empty = no floor.
     protected_paths: tuple[str, ...] = ()
