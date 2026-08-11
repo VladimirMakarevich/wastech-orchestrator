@@ -51,7 +51,7 @@ Only these keys are allowed. **Any other key makes the task rejected** (`unknown
 | --- | --: | --- | --- |
 | `id` | **yes** | string | Stable id. Must match `^[a-z0-9][a-z0-9._-]{0,63}$`. |
 | `title` | **yes** | string | Short, non-empty human title. Branch slug + reports. |
-| `task_type` | no | string | Flow selector. Omit ⇒ `implementation` (the default coding pipeline). Built-ins: `implementation`, `deep_research`, `security_audit`, `content_chapter`, `content_translate`, `blog_article`, `blog_article_revise`; operators add more as `<repo>/.worc/flows/<task_type>.yaml`. An unknown type (no matching flow) fails the task before any branch is created. The task only _names_ the flow — it never edits it. |
+| `task_type` | no | string | Flow selector. Omit ⇒ `implementation` (the default coding pipeline). Built-ins: `implementation`, `deep_research`, `security_audit`; operators add more as `<repo>/.worc/flows/<task_type>.yaml`. An unknown type (no matching flow) fails the task before any branch is created. The task only _names_ the flow — it never edits it. |
 | `pr_title` | no | string \| null | PR title override, used verbatim instead of `title`. Does not change the branch name or commit messages. Omit to auto-generate. |
 | `branch_mode` | no | `new` \| `existing` \| `current` | Where task git ops point. `new` (default) forks a fresh branch from base; `existing` works in `branch_ref`; `current` uses the current checkout as-is. Overrides `repo.branch_mode`. |
 | `branch_ref` | no | string | Branch to check out — **required iff** `branch_mode: existing`; must already exist (never auto-created). Ignored for other modes. |
@@ -69,7 +69,7 @@ Body sections: `## Description` (required, non-empty) · `## Acceptance criteria
 
 ### `nodes` (per-node disable)
 
-The per-node keys are `enabled` (the disable toggle) plus the best-effort executor overlays `model` / `reasoning` / `provider`, keyed by a flow **node id**. The default `implementation` flow's node ids are `planning`, `implementation`, `testing`, `review`, `fixing`, `documentation` (and `refinement`, which is skipped automatically when the task is complete — not via `nodes`). Disabling effects: `planning` → stub plan, single unit; `testing` → straight to review, no checks; `review` → **commit with no agent review gate (high-risk)**; `fixing` → a failure spins the fix loop to its cap, then `manual_action_required`; `documentation` → the project's docs are not updated for this task.
+The only per-node knob is `enabled: false`, keyed by a flow **node id**. The default `implementation` flow's node ids are `planning`, `implementation`, `testing`, `review`, `fixing` (and `refinement`, which is skipped automatically when the task is complete — not via `nodes`). Disabling effects: `planning` → stub plan, single unit; `testing` → straight to review, no checks; `review` → **commit with no agent review gate (high-risk)**; `fixing` → a failure spins the fix loop to its cap, then `manual_action_required`.
 
 ```yaml
 nodes:
@@ -90,7 +90,7 @@ The validation gate rejects a task **before** any branch or agent runs. To alway
 7. **Front-matter values are plain text.** No value may look like a CLI argument: a value that **starts with `-`** or contains an **argv-shaped token** (a backtick `` ` ``, `;`, `|`, `$(`, or a newline) is rejected as `injection_suspected`. This applies to **every** field, `title` and `contacts` included (the gate does not exempt display fields). Front matter is scanned defensively even though the body never builds CLI arguments — so put code, shell snippets, or punctuation-heavy phrasing in the **body**, and keep front-matter values to short plain labels (e.g. title `Fix parse() on empty input`, not ``Fix `parse()` on empty input``).
 8. Keep it reasonably sized (the gate caps file size, line count, and per-line length).
 
-**Provider, model, and reasoning are not _top-level_ task fields** — a node's defaults live on the flow node (the operator's flow + config). Never add top-level `provider`, `model`, `reasoning`, or `agents` keys. They are valid only **inside** a `nodes.<node-id>` block, as a best-effort per-run overlay (`nodes: { review: { provider: codex } }`); an invalid overlay is warned and skipped at run time, never fatal. Do not use it to work around a flow that needs retuning — that is an operator/flow change.
+**Provider, model, and reasoning are not task fields** — they live on the flow node (the operator's flow + config). A task cannot repoint a stage's provider or set its model. Never add `provider`, `model`, `reasoning`, or `agents` keys.
 
 ## Skeleton (copy and fill in)
 
