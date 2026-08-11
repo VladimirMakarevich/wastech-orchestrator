@@ -105,13 +105,13 @@ class ChildHandle:
     start_time: str | None
 
 
-def _read_proc_start_time(pid: int) -> str | None:
-    """Best-effort process start-time token for ``pid`` (recycling guard); Linux ``/proc`` only.
+def _read_proc_stat_fields(pid: int) -> list[str] | None:
+    """The ``/proc/<pid>/stat`` fields **after** ``comm``, or ``None``; Linux only. Never raises.
 
-    Returns the 22nd ``/proc/<pid>/stat`` field (``starttime``, ticks since boot) on Linux,
-    else ``None``. Non-Linux POSIX has no dependency-free start-time source and this module never
-    launches a child process (the no-shell-out invariant), so there liveness degrades to a bare PID
-    probe — the documented fallback. Never raises.
+    Off Linux there is no dependency-free source and this module never launches a child process
+    (the no-shell-out invariant), so every caller degrades to "no information" rather than shelling
+    out to ``ps``. Index 0 of the result is stat field 3 (``state``); index 19 is field 22
+    (``starttime``).
     """
     if not sys.platform.startswith("linux"):
         return None
@@ -119,13 +119,33 @@ def _read_proc_start_time(pid: int) -> str | None:
         stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
     except OSError:
         return None
-    # Field 2 is "(comm)" and may contain spaces/parens; split after the final ')'. The token after
-    # comm at 0-based index 19 is starttime (the 22nd stat field), ticks since boot.
+    # Field 2 is "(comm)" and may contain spaces/parens, so the split is after the *final* ')'.
     rparen = stat.rfind(")")
     if rparen == -1:
         return None
-    fields = stat[rparen + 2 :].split()
-    return fields[19] if len(fields) > 19 else None
+    return stat[rparen + 2 :].split()
+
+
+def _read_proc_start_time(pid: int) -> str | None:
+    """Best-effort process start-time token for ``pid`` (recycling guard); Linux ``/proc`` only.
+
+    The 22nd ``/proc/<pid>/stat`` field (``starttime``, ticks since boot). ``None`` off Linux, where
+    liveness degrades to a bare PID probe — the documented fallback.
+    """
+    fields = _read_proc_stat_fields(pid)
+    if fields is None or len(fields) <= 19:
+        return None
+    return fields[19]
+
+
+def read_process_state(pid: int) -> str | None:
+    """Best-effort single-letter process state for ``pid`` (``R``/``S``/``T``/``D``…); Linux only.
+
+    The 3rd ``/proc/<pid>/stat`` field. ``None`` off Linux, where the caller must claim nothing.
+    Used only to enrich the operator's stop-timeout message; nothing branches on it.
+    """
+    fields = _read_proc_stat_fields(pid)
+    return fields[0] if fields else None
 
 
 def pid_file_path(artifacts_root: str | os.PathLike[str]) -> Path:
@@ -386,6 +406,9 @@ def stop_process(
     poll: float = 0.2,
     term_sig: int = signal.SIGTERM,
     kill_sig: int = getattr(signal, "SIGKILL", signal.SIGTERM),
+    # Resolved defensively like ``kill_sig``: ``signal.SIGCONT`` does not exist on Windows, so
+    # naming it directly here would raise at *import* time there. ``None`` = no wake-up signal.
+    cont_sig: int | None = getattr(signal, "SIGCONT", None),
     stop_file: Path | None = None,
     level: str = "soft",
     kill_fn: KillFn = os.kill,
@@ -405,8 +428,10 @@ def stop_process(
 
     * ``"soft"`` (default) — cooperative node-boundary stop that **never hard-kills on either
       platform**. **POSIX**: write ``stop_file``, probe liveness, send ``term_sig`` (SIGTERM) for an
-      immediate wakeup, and poll. **Windows**: ``os.kill`` can't reach an unrelated process, so
-      write ``stop_file`` and wait for the daemon to remove its own PID file. On either platform, if
+      immediate wakeup followed by ``cont_sig`` (SIGCONT) so a *stopped* daemon is resumed and the
+      queued SIGTERM is actually delivered, then poll. **Windows**: ``os.kill`` can't reach an
+      unrelated process, so write ``stop_file`` and wait for the daemon to remove its own PID file
+      (no SIGCONT — there is no SIGSTOP there). On either platform, if
       the daemon outlives the timeout it stays a **pending graceful stop**: retain every handle and
       report ``timed_out`` so the daemon still exits at its next node boundary, a duplicate watcher
       is blocked, and a later ``--force-full`` can still target it.
@@ -455,6 +480,7 @@ def stop_process(
             timeout=timeout,
             poll=poll,
             term_sig=term_sig,
+            cont_sig=cont_sig,
             stop_file=stop_file,
             kill_fn=kill_fn,
             sleep_fn=sleep_fn,
@@ -592,13 +618,25 @@ def _stop_via_signal(
     timeout: float,
     poll: float,
     term_sig: int,
+    cont_sig: int | None,
     stop_file: Path | None,
     kill_fn: KillFn,
     sleep_fn: SleepFn,
     now_fn: NowFn,
     start_time_fn: StartTimeFn,
 ) -> StopOutcome:
-    """POSIX soft stop: probe liveness, SIGTERM (+ stop-file), poll for a cooperative exit.
+    """POSIX soft stop: probe, SIGTERM + SIGCONT (+ stop-file), poll for a cooperative exit.
+
+    Nothing here reaches a daemon **stopped** by SIGSTOP/SIGTSTP/SIGTTIN on its own: the liveness
+    probe reports it alive, the sentinel is a file it is not running to read, and ``term_sig`` only
+    queues — so the poll would run out the full timeout against a stop that is not slow but
+    impossible. ``cont_sig`` resumes it so that queued signal is delivered; to a process that is not
+    stopped it is a no-op, which is why no state detection is needed (there is no dependency-free
+    process-state source off Linux and this module never shells out — see
+    :func:`_read_proc_start_time`). Sent **after** ``term_sig``, never before: ``SIGTTIN`` re-arms
+    itself, so a resumed process can re-enter state ``T`` before a later signal lands, whereas a
+    SIGTERM queued first is delivered on the first return to userspace (``SIGCONT`` discards pending
+    *stop* signals only, so it never displaces it).
 
     On timeout this stays a **pending graceful stop**: it never kills and keeps every handle
     (PID file, stop sentinel) intact, so the daemon still sees the request and exits at its next
@@ -616,7 +654,9 @@ def _stop_via_signal(
         _write_stop_file(stop_file)  # cross-platform fallback; harmless alongside the signal
     try:
         kill_fn(pid, term_sig)
-    except OSError as exc:  # raced to exit between the probe and the signal
+        if cont_sig is not None:
+            kill_fn(pid, cont_sig)  # wake a stopped daemon so the queued term_sig is delivered
+    except OSError as exc:  # raced to exit between the probe and either signal
         if not _is_no_such_process(exc):
             raise
         path.unlink(missing_ok=True)

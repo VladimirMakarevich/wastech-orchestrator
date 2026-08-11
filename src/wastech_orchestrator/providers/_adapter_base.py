@@ -39,6 +39,7 @@ from wastech_orchestrator.providers.base import (
     MAX_TURNS_SUBTYPE,
     AgentRunRequest,
     AgentRunResult,
+    AuthProbe,
     ErrorClass,
     NormalizedError,
     NormalizedUsage,
@@ -76,6 +77,22 @@ def _utc_now() -> datetime:
     return datetime.now(UTC)
 
 
+def _iso_instant(epoch_seconds: float | None) -> str | None:
+    """A provider-reported Unix instant as an ISO-8601 UTC string, else ``None``.
+
+    The single point where a CLI's epoch becomes the orchestrator's wall-clock spelling, so nothing
+    downstream does timezone arithmetic and the carried field stays provider-neutral. A value the
+    platform cannot represent as a datetime yields ``None``: a missing wake instant costs one blind
+    retry, while a wrong one would defer a task nobody is waiting on.
+    """
+    if epoch_seconds is None:
+        return None
+    try:
+        return datetime.fromtimestamp(epoch_seconds, tz=UTC).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 @dataclass(frozen=True)
 class ParsedEvents:
     """The fields a provider extracts from its CLI's event stream."""
@@ -98,6 +115,10 @@ class ParsedEvents:
     # ``task_failure`` but a transient infra event: the finalize step RAISES ``RATE_LIMITED`` (so
     # the Router falls over / the orchestrator parks) instead of returning a quality failure.
     rate_limited: bool = False
+    # The Unix instant the provider said its limit window reopens, when the terminal event carried
+    # one. Epoch here and ISO on the raised error: each adapter owns its own CLI's spelling, and
+    # exactly one place converts. ``None`` when the CLI reports no reset instant at all.
+    rate_limit_resets_at: float | None = None
 
 
 @dataclass(frozen=True)
@@ -325,7 +346,7 @@ class BaseCliProvider:
     # --- shared lifecycle ----------------------------------------------------------------------
 
     def preflight(self) -> ProviderHealth:
-        """Detect the executable and parse its version (auth is best-effort/offline)."""
+        """Detect the executable, parse its version, and ask the CLI about its own credentials."""
         label = self._executable_label()
         env = self._augment_child_env(build_child_env(self._security.allowed_environment))
         with tempfile.TemporaryDirectory() as scratch:
@@ -340,12 +361,13 @@ class BaseCliProvider:
             )
             stdout_text = read_text(stdout_path)
 
+        # A CLI that could not run makes no credential claim at all, so ``auth`` is left unset on
+        # every unhealthy path below rather than being guessed in either direction.
         if proc.launch_error is not None:
             return ProviderHealth(
                 provider_id=self.id,
                 executable_found=False,
                 version=None,
-                authenticated=False,
                 supports_required_features=False,
                 message=f"{label} executable not found",
             )
@@ -354,18 +376,18 @@ class BaseCliProvider:
                 provider_id=self.id,
                 executable_found=True,
                 version=None,
-                authenticated=False,
                 supports_required_features=False,
                 message=f"{label} was found but '{label} --version' did not succeed",
             )
         version = _parse_version(stdout_text)
         capability_error = self._preflight_capability_error(env)
         if capability_error is not None:
+            # This path already fails preflight, so a second reason buys nothing and probing here
+            # would only spend another child-process launch.
             return ProviderHealth(
                 provider_id=self.id,
                 executable_found=True,
                 version=version,
-                authenticated=True,
                 supports_required_features=False,
                 message=capability_error,
             )
@@ -373,11 +395,11 @@ class BaseCliProvider:
             provider_id=self.id,
             executable_found=True,
             version=version,
-            authenticated=True,
             supports_required_features=version is not None,
             message=f"{label} {version or 'unknown version'} available"
             f"{self._preflight_healthy_detail(env)}",
             degraded_reasons=self._preflight_degraded_reasons(env),
+            auth=self._preflight_auth_state(env),
         )
 
     def _preflight_capability_error(self, env: Mapping[str, str]) -> str | None:
@@ -399,6 +421,19 @@ class BaseCliProvider:
         CLI syntax; it does not know ``agents.allowed``). Default: none.
         """
         return ()
+
+    def _preflight_auth_state(self, env: Mapping[str, str]) -> AuthProbe | None:
+        """Subclass hook: report what this CLI says about its own stored credentials.
+
+        Runs through :meth:`_probe`, so it inherits the preflight timeout and the allowlisted
+        environment and never launches the model. The base knows no CLI syntax: only the subclass
+        knows the verb and how to read the answer — and it must copy nothing out of that answer
+        beyond the login state and the credential mechanism, because a credential answer can carry
+        an account identity and everything placed on the returned record is printable.
+
+        Default ``None``: an adapter with no such verb makes no claim rather than guessing one.
+        """
+        return None
 
     def _preflight_healthy_detail(self, env: Mapping[str, str]) -> str:
         """Subclass hook: extra detail appended to the healthy preflight message (e.g. a resolved
@@ -558,9 +593,16 @@ class BaseCliProvider:
             # failure: RAISE ``RATE_LIMITED`` so the Router falls over to the other provider and, on
             # exhaustion, the orchestrator parks the task (resumable) instead of burning the queue /
             # a fix budget. Persist the failed-attempt artifact first, like the other raise paths.
-            error = NormalizedError(ErrorClass.RATE_LIMITED, message_for(ErrorClass.RATE_LIMITED))
+            error = NormalizedError(
+                ErrorClass.RATE_LIMITED,
+                message_for(ErrorClass.RATE_LIMITED),
+                resets_at=_iso_instant(parsed.rate_limit_resets_at),
+            )
             self._finalize_failure(paths, request, started_at, finished_at, proc, error)
-            raise ProviderError(error.error_class, error.message)
+            # Set on the raised exception too, not only on the recorded error: the Router rebuilds
+            # its own normalized error from what was RAISED, so an instant living only here would be
+            # dropped before the Core ever saw it.
+            raise ProviderError(error.error_class, error.message, resets_at=error.resets_at)
 
         if not parsed.succeeded and _produced_no_work(parsed, request):
             # EXPERIMENTAL(no-work-infra) — trial block; revert this whole `if` to fall back to

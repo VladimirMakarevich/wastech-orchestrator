@@ -3,7 +3,10 @@ name: ci
 # Quality gate on every pull request and on pushes to any long-lived branch (dev / main / release).
 # `dev` matters most: all real work merges there, so without it in the push list those merge commits
 # would run no CI at all outside of pull requests. Nothing here reads docs/, so the docs-less `dev`
-# tree needs no special handling (see .agents/rules/git-workflow.md §A).
+# tree needs no special handling (see .agents/rules/git-workflow.md §A). The Markdown gate is
+# deliberately not here yet: its linter is not published to a package registry, so a job would have to
+# build it from a pinned source checkout, and that is not worth carrying while the tool is still
+# changing. It runs as a local pre-commit hook until then.
 #
 # WRI-006 (cross-platform isolation verification): cross-platform behaviour is a hard repository
 # invariant, so the deterministic test suite — which exercises provider command generation, the typed

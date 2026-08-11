@@ -135,3 +135,57 @@ def test_fully_malformed_stream_is_invalid_output() -> None:
     with pytest.raises(ProviderError) as exc:
         parse_stream_json("not json at all\n{still not json")
     assert exc.value.error_class is ErrorClass.INVALID_OUTPUT
+
+
+# --- the reported rate-limit reset instant --------------------------------------------------------
+
+
+def _limit_stream(rate_limit_event: dict[str, object] | None) -> str:
+    events: list[dict[str, object]] = []
+    if rate_limit_event is not None:
+        events.append(rate_limit_event)
+    events.append(
+        {
+            "type": "result",
+            "subtype": "success",
+            "is_error": True,
+            "api_error_status": 429,
+            "result": "You've hit your session limit · resets 7:10am",
+            "session_id": "sess-1",
+        }
+    )
+    return _stream(*events)
+
+
+def test_rate_limit_event_reset_instant_is_captured() -> None:
+    # The adapter already captured this event to classify the limit and threw the instant away, so a
+    # correct park then waited blind against a six-hour ceiling for a window reopening in minutes.
+    parsed = parse_stream_json(
+        _limit_stream(
+            {
+                "type": "rate_limit_event",
+                "status": "rejected",
+                "rateLimitType": "five_hour",
+                "resetsAt": 1785993000,
+            }
+        )
+    )
+    assert parsed.rate_limited is True
+    assert parsed.rate_limit_resets_at == 1785993000.0
+
+
+def test_rate_limit_without_a_reset_instant_reports_none() -> None:
+    # A limit is still a limit without a wake instant; the task just waits for the next tick.
+    parsed = parse_stream_json(_limit_stream({"type": "rate_limit_event", "status": "rejected"}))
+    assert parsed.rate_limited is True
+    assert parsed.rate_limit_resets_at is None
+
+
+@pytest.mark.parametrize("raw", ["1785993000", None, True, {"at": 1}, [1785993000]])
+def test_non_numeric_reset_instant_is_ignored(raw: object) -> None:
+    # Provider input: anything that is not a plain number makes no claim rather than a bad one.
+    # ``True`` is called out because bool is an int subclass and would otherwise parse as 1.0.
+    parsed = parse_stream_json(
+        _limit_stream({"type": "rate_limit_event", "status": "rejected", "resetsAt": raw})
+    )
+    assert parsed.rate_limit_resets_at is None

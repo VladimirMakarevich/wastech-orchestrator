@@ -25,6 +25,11 @@ COMPLETED_FILENAME = "completed.jsonl"
 FAILURE_REPORT_FILENAME = "failure_report.json"
 STUCK_FILENAME = "stuck.md"
 
+#: The ``loop`` value for a terminal that exhausted no fix-loop budget at all — the infrastructure
+#: could not run the node. Shared with the caller that writes such a report so the artifact's first
+#: line never claims a loop and a limit that do not exist.
+INFRA_LOOP = "infra"
+
 
 @dataclass(frozen=True)
 class LedgerRecord:
@@ -149,6 +154,23 @@ class DecomposedFailureInfo:
     committed_shas: tuple[str, ...] = field(default_factory=tuple)
 
 
+@dataclass(frozen=True)
+class NodeFailureEvidence:
+    """Which node run a terminal came from, and what its providers actually did.
+
+    ``provider_attempts`` is one secret-free mapping per attempt (``provider`` / ``attempt`` /
+    ``error_class`` / ``exit_code`` / ``started_at``), in attempt order. Empty for a fix-loop
+    terminal, where a budget rather than a provider ran out. Kept as plain mappings so this writer
+    stays independent of the storage row type, the same way review findings are passed.
+
+    Grouped with ``node_id`` rather than added as another parameter because the two are read
+    together: the attempts only mean anything once you know which node run produced them.
+    """
+
+    node_id: str | None = None
+    provider_attempts: tuple[Mapping[str, Any], ...] = ()
+
+
 def write_failure_report(
     artifacts_root: str | Path,
     task_id: str,
@@ -160,23 +182,29 @@ def write_failure_report(
     last_review_findings: Sequence[Mapping[str, Any]] | None,
     final_diff: str,
     decomposed: DecomposedFailureInfo | None = None,
-    node_id: str | None = None,
+    failing_node: NodeFailureEvidence | None = None,
 ) -> tuple[str, str]:
     """Write ``failure_report.json`` + ``stuck.md``; return both paths.
 
     Flow-neutral: the base fields (``task_id``/``node_id``/``loop``/``counters``)
     are always written; the implementation-specific sections (``last_check_log``,
     ``last_review_findings``, ``final_diff``) stay empty when the flow has no such nodes.
+
+    A ``loop`` of :data:`INFRA_LOOP` marks a terminal where no fix-loop budget was spent at all, and
+    the human artifact opens by stating that instead of naming a loop that does not exist.
     """
     task_dir = task_artifact_dir(artifacts_root, task_id)
     task_dir.mkdir(parents=True, exist_ok=True)
+    evidence = failing_node or NodeFailureEvidence()
 
     report: dict[str, Any] = {
         "task_id": task_id,
-        "node_id": node_id,
+        "node_id": evidence.node_id,
         "loop": loop,
         "limit_exhausted": limit_name,
         "counters": dict(counters),
+        # Always emitted, empty when there is nothing to attribute, so a consumer never branches.
+        "provider_attempts": [dict(a) for a in evidence.provider_attempts],
         "last_check_log": last_check_log,
         "last_review_findings": [dict(f) for f in (last_review_findings or [])],
         "final_diff": final_diff,
@@ -203,10 +231,28 @@ def write_failure_report(
             f"- subtasks committed: {decomposed.subtasks_completed} "
             f"({', '.join(decomposed.committed_shas) or 'none'})\n"
         )
+    if loop == INFRA_LOOP:
+        # No fix loop ran and no budget was spent, so the most-read line in the artifact must not
+        # claim otherwise — it states what actually stopped the task.
+        headline = f"This task could not run: {limit_name}\n\n"
+    else:
+        headline = f"The **{loop}** fix loop exhausted its limit (`{limit_name}`).\n\n"
+    # Leads the artifact when present: for a terminal the infrastructure caused, the counters are
+    # empty and there is no check log or findings, so the attempts are the only evidence there is.
+    attempts_md = ""
+    if evidence.provider_attempts:
+        attempts_md = "\n## Provider attempts\n\n" + "".join(
+            f"- {a.get('provider', 'unknown')} · attempt {a.get('attempt', '?')} · "
+            f"{a.get('error_class') or 'no error class'} · "
+            f"exit {a.get('exit_code') if a.get('exit_code') is not None else 'n/a'} · "
+            f"{a.get('started_at') or 'n/a'}\n"
+            for a in evidence.provider_attempts
+        )
     stuck_md = (
         f"# Task {task_id} stuck\n\n"
-        f"The **{loop}** fix loop exhausted its limit (`{limit_name}`).\n\n"
-        f"## Counters\n\n"
+        + headline
+        + attempts_md
+        + "\n## Counters\n\n"
         + "\n".join(f"- {k}: {v}" for k, v in counters.items())
         + "\n"
         + decomposed_md

@@ -143,18 +143,50 @@ PARK_ELIGIBLE: frozenset[ErrorClass] = TRANSIENT_RETRYABLE | frozenset({ErrorCla
 # --- Contract data structures ---
 
 
+class AuthState(StrEnum):
+    """What a provider's CLI reports about its own stored credentials.
+
+    ``LOGGED_IN`` is a statement about credential **presence**, never about validity: both shipped
+    probes read what the CLI has on disk, and a stored credential whose refresh token has already
+    expired still reports as present right up to the moment a real launch gets a 401. Nothing here
+    may be read as proof that the next launch will authenticate.
+    """
+
+    LOGGED_IN = "logged_in"
+    LOGGED_OUT = "logged_out"
+    UNKNOWN = "unknown"
+
+
+@dataclass(frozen=True)
+class AuthProbe:
+    """One provider's credential answer, as its own CLI reported it during preflight."""
+
+    state: AuthState
+    # The credential mechanism the CLI names (e.g. ``claude.ai``) — a mechanism, never an identity.
+    # ``None`` when the CLI names none or the answer is prose with nothing reliable to read.
+    method: str | None
+    # Operator-facing line: what the probe found and, when actionable, the lever that fixes it.
+    # Secret-free AND identity-free by contract — a credential answer can carry an account email and
+    # organization, and this string reaches the console and the daemon log.
+    detail: str
+
+
 @dataclass(frozen=True)
 class ProviderHealth:
     provider_id: str
     executable_found: bool
     version: str | None
-    authenticated: bool
     supports_required_features: bool
     message: str  # diagnostics without secrets
     # Advisory degradations that are FATAL only when this provider has no fallback (the sole allowed
     # provider), else a warning. The adapter detects them (it knows CLI syntax); ``run_preflight``
     # applies the fallback-aware verdict (it knows ``agents.allowed``). Secret-free by contract.
     degraded_reasons: tuple[str, ...] = ()
+    # What the provider's CLI says about its own credentials, or ``None`` for *not probed* — an
+    # executable that could not run, and an adapter implementing no such verb, both make no claim.
+    # There is deliberately no boolean here: the field this replaced was hardcoded true on every
+    # path where ``--version`` exited 0, so preflight asserted an authentication it never checked.
+    auth: AuthProbe | None = None
 
 
 @dataclass(frozen=True)
@@ -288,6 +320,10 @@ class NormalizedError:
     # The CLI's own terminal subtype for a quality failure (e.g. Claude ``error_max_turns``), when
     # the adapter parsed one. ``None`` for infra errors that never reached a terminal event.
     failure_subtype: str | None = None
+    # The instant the provider said its limit window reopens (ISO-8601 UTC), when it reported one.
+    # UNTRUSTED provider input: whoever schedules on it validates and clamps it first. ``None`` for
+    # every error that carries no such claim, which includes every provider that never reports one.
+    resets_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -341,9 +377,16 @@ class AgentRunResult:
 class ProviderError(Exception):
     """Provider exception carrying a normalized error class."""
 
-    def __init__(self, error_class: ErrorClass, message: str) -> None:
+    def __init__(
+        self, error_class: ErrorClass, message: str, *, resets_at: str | None = None
+    ) -> None:
         super().__init__(message)
         self.error_class = error_class
+        # Carried on the exception, not only on the adapter's own recorded error: the Router builds
+        # its normalized error from what was RAISED, so an instant kept only adapter-side would be
+        # dropped before the Core could act on it. Keyword-only so every positional raise site — and
+        # there are many — stays untouched.
+        self.resets_at = resets_at
 
     @property
     def is_fallback_eligible(self) -> bool:

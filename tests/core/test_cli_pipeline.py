@@ -22,7 +22,10 @@ from wastech_orchestrator.state_store import StateStore, TaskRow
 from wastech_orchestrator.task.model import DEFAULT_QUEUE
 
 # Every test here is a slow integration test (real git / subprocess / process tree).
-pytestmark = pytest.mark.slow
+# ``run``/``watch``/``rerun`` probe every allowed provider's credentials before starting. These
+# tests are about command orchestration, not credentials, and the config names the real CLIs — so
+# the gate is disarmed module-wide and asserted on directly by its own tests instead.
+pytestmark = [pytest.mark.slow, pytest.mark.usefixtures("no_provider_auth_gate")]
 
 
 @pytest.fixture(autouse=True)

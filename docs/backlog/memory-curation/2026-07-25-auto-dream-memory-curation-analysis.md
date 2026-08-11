@@ -1,6 +1,6 @@
 # Анализ идеи: периодический supervisor-проход «auto-dream» по памяти
 
-Дата: 2026-07-25. Метод: read-only анализ кода оркестратора на 2026-07-25 (`src/wastech_orchestrator/{memory,core,config}`, `cli.py`) плюс данные [аудита памяти на WastimeApp](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/analysis/2026-07-24-wastimeapp-memory-audit.md) (2026-07-24; `docs/analysis/` живёт только на `main`) и [токен-анализа](../token-optimization/2026-07-16-blog-review-happy-in-my-misfortunes-4-token-analysis.md). Ни один прогон в рамках этого анализа не запускался, память не изменялась.
+Дата: 2026-07-25. Метод: read-only анализ кода оркестратора на 2026-07-25 (`src/wastech_orchestrator/{memory,core,config}`, `cli.py`) плюс данные [аудита памяти на WastimeApp](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/analysis/2026-07-24-wastimeapp-memory-audit.md) (2026-07-24; `docs/analysis/` живёт только на `main`) и токен-анализа. Ни один прогон в рамках этого анализа не запускался, память не изменялась.
 
 ## 0. Что анализируется
 

@@ -10,6 +10,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import replace
 
+import pytest
+
 from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.providers.base import (
     AgentRunRequest,
@@ -95,6 +97,69 @@ def test_both_infra_failures_exhaust_the_stage(
     assert outcome.terminal_error is not None
     assert outcome.terminal_error.error_class is ErrorClass.RATE_LIMITED  # the last error wins
     assert len(outcome.attempts) == 2
+
+
+_EARLY = "2026-08-06T05:10:00+00:00"
+_LATE = "2026-08-06T09:40:00+00:00"
+
+
+@pytest.mark.parametrize(
+    "primary_reset,fallback_reset,expected",
+    [
+        # The incident's own shape: the primary reported its window, the fallback died for an
+        # unrelated reason and reported nothing. Taking the SETTLING attempt's instant would discard
+        # the only answer there is, in exactly the case the feature exists for.
+        (_EARLY, None, _EARLY),
+        (None, _EARLY, _EARLY),  # symmetric — whichever attempt knew it
+        (_LATE, _EARLY, _EARLY),  # both knew: wake at the earliest, then re-park if still limited
+        (_EARLY, _LATE, _EARLY),
+        (None, None, None),  # nobody knew: the park stays blind, as before
+    ],
+)
+def test_exhausted_stage_surfaces_the_earliest_reported_reset_instant(
+    config: OrchestratorConfig,
+    make_fake_provider: Callable[..., object],
+    make_request: Callable[..., AgentRunRequest],
+    primary_reset: str | None,
+    fallback_reset: str | None,
+    expected: str | None,
+) -> None:
+    # The instant crosses six hops from the CLI event to the parked task; this is the cheap guard on
+    # the one most likely to drop it, because the Router builds its normalized error from the RAISED
+    # exception rather than from anything the adapter kept.
+    primary = make_fake_provider(
+        ProviderId.CODEX, raises=ErrorClass.RATE_LIMITED, raises_resets_at=primary_reset
+    )
+    fallback = make_fake_provider(
+        ProviderId.CLAUDE, raises=ErrorClass.RATE_LIMITED, raises_resets_at=fallback_reset
+    )
+    router = _router(config, primary, fallback)
+    outcome = router.run_stage(
+        make_request(node_id="review"), router.resolve_route("review", ProviderId.CODEX)
+    )
+    assert outcome.terminal_error is not None
+    assert outcome.terminal_error.resets_at == expected
+
+
+def test_a_reset_instant_survives_a_fallback_that_failed_for_another_reason(
+    config: OrchestratorConfig,
+    make_fake_provider: Callable[..., object],
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # The literal incident: rate-limited primary, fallback dead on expired credentials. The class
+    # the stage settles on is the fallback's, and so is its (absent) instant — but the window the
+    # primary reported is still the only useful answer, so it must survive to the park.
+    primary = make_fake_provider(
+        ProviderId.CODEX, raises=ErrorClass.RATE_LIMITED, raises_resets_at=_EARLY
+    )
+    fallback = make_fake_provider(ProviderId.CLAUDE, raises=ErrorClass.AUTHENTICATION_FAILED)
+    router = _router(config, primary, fallback)
+    outcome = router.run_stage(
+        make_request(node_id="review"), router.resolve_route("review", ProviderId.CODEX)
+    )
+    assert outcome.terminal_error is not None
+    assert outcome.terminal_error.error_class is ErrorClass.AUTHENTICATION_FAILED
+    assert outcome.terminal_error.resets_at == _EARLY
 
 
 def test_non_fallback_infra_error_stops_at_primary(

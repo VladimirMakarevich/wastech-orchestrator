@@ -12,6 +12,12 @@ from pathlib import Path
 REPO_URL = "https://github.com/VladimirMakarevich/wastech-orchestrator"
 STAGE_DIR = Path(".site-src")
 
+# Every page published by the site, in `mkdocs.yml` nav order. The two lists are one decision split
+# across two files, so `strict: true` turns any drift into a failed build: a nav entry with no
+# staged file aborts the build outright, and a staged file with no nav entry publishes an orphan
+# page nothing links to. `tests/test_stage_site_docs.py` asserts the two agree — keep them in step.
+# Contributor-only docs (`docs/likec4/`, `docs/analysis/`, `docs/backlog/`) are deliberately absent:
+# they are read in the repository, and `rewrite_links` sends links to them to GitHub.
 PUBLIC_MARKDOWN = [
     Path("docs/index.md"),
     Path("docs/how-it-works.md"),
@@ -21,9 +27,9 @@ PUBLIC_MARKDOWN = [
     Path("docs/glossary.md"),
     Path("docs/configuration.md"),
     Path("docs/task-authoring.md"),
+    Path("docs/flow-authoring.md"),
     Path("docs/telegram.md"),
     Path("docs/worc_architecture.md"),
-    Path("docs/likec4/README.md"),
 ]
 
 PUBLIC_ASSETS = [

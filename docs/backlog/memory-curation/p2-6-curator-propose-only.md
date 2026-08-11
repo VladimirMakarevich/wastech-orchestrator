@@ -84,7 +84,7 @@ A fixture store seeded with one instance of each of the five classes asserts a p
 
 ## Scope / risk
 
-This is where a model enters the memory subsystem, so every guarantee it might weaken must be structural rather than prompt-based: read-only permission profile, no write API reachable from the curator module, a closed op enum in code, and the trust ceiling from P0.2. Two things to watch: (a) cost is not the objection (one supervisor observe turn already measured 44 107 input tokens, and seven advisory calls were 70,3% of a task's Claude input — see [../token-optimization/](../token-optimization/README.md)), but the cost of a **wrong** proposal multiplies into every future packet, which is why nothing auto-applies here; (b) an "authority halo" — a curated-looking record invites less scrutiny, so the report must state plainly that a proposal is a hypothesis until approved.
+This is where a model enters the memory subsystem, so every guarantee it might weaken must be structural rather than prompt-based: read-only permission profile, no write API reachable from the curator module, a closed op enum in code, and the trust ceiling from P0.2. Two things to watch: (a) cost is not the objection (one supervisor observe turn already measured 44 107 input tokens, and seven advisory calls were 70,3% of a task's Claude input — see `../token-optimization/`), but the cost of a **wrong** proposal multiplies into every future packet, which is why nothing auto-applies here; (b) an "authority halo" — a curated-looking record invites less scrutiny, so the report must state plainly that a proposal is a hypothesis until approved.
 
 ## Depends on
 

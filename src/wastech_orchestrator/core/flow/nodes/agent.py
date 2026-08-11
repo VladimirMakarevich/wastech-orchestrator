@@ -514,6 +514,18 @@ class AgentNodeRunner:
             raise NodeInfraError(
                 f"agent node {node.id!r}: no provider could complete it ({err})",
                 error_class=error_class,
+                # Every attempt's class, not just the settled one: a fallback that fails worse than
+                # the primary must not be able to mask a resumable primary failure. Only the rows
+                # that RAISED count — a row carrying a status returned a verdict, and a quality
+                # verdict must never be able to reach a park or manual decision.
+                error_classes=tuple(
+                    a.error_class
+                    for a in outcome.attempts
+                    if a.status is None and a.error_class is not None
+                ),
+                # The provider's own claim about when a retry could succeed, for the Core to
+                # validate and clamp; absent for a provider that reports no reset instant.
+                resets_at=outcome.terminal_error.resets_at if outcome.terminal_error else None,
             )
         # The result is trusted (the quiescence barrier proved the provider tree empty inside the
         # adapter), so compare now — before `_apply_post_edit_guard`'s `git diff`/commit touch the

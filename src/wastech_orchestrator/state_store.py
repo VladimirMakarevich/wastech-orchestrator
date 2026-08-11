@@ -115,7 +115,15 @@ def _utc_now_iso() -> str:
 # reconciliation a single ``GROUP BY``: no row is filtered out, so the buckets always sum to the
 # task's total.
 # Additive; an older versioned DB is refused fail-closed and recreated (greenfield).
-DB_SCHEMA_VERSION = 20
+# v21 (provider-reported wake instant): added the **additive** nullable ``tasks.blocked_until``
+# column — the earliest instant a parked task may attempt a provider again, stamped only when the
+# exhausted stage's provider reported its own reset time and clamped to the park ceiling. NULL keeps
+# the previous blind behavior (retry on the next tick), so the column can only ever *shorten* a
+# wait, never extend one; the ceiling still terminates the task regardless. Additive, ``_migrate``
+# adds
+# it on a brand-new (``0``) database; an older versioned DB is still refused fail-closed and
+# recreated (greenfield — no production data to migrate).
+DB_SCHEMA_VERSION = 21
 
 
 class IncompatibleStateError(Exception):
@@ -139,6 +147,9 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # v13: the B-lite soft-pause timestamp (transient-provider-failure-recovery).
     if "blocked_since" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN blocked_since TEXT")
+    # v21: the provider-reported instant a parked task may next attempt a provider.
+    if "blocked_until" not in task_cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN blocked_until TEXT")
     # v14: cumulative per-loop rework totals.
     if "test_fix_total" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN test_fix_total INTEGER NOT NULL DEFAULT 0")
@@ -278,6 +289,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     flow_run_counters TEXT,
     flow_fingerprint TEXT,
     blocked_since TEXT,
+    blocked_until TEXT,
     control_bundle_digest TEXT,
     instruction_manifest_digest TEXT,
     exchange_contaminated INTEGER NOT NULL DEFAULT 0,
@@ -470,6 +482,10 @@ class TaskRow:
     # ISO instant of the first B-lite soft-pause (every provider transiently unavailable); cleared
     # at terminal. None = not parked. The ceiling is measured from here (total parked wall-clock).
     blocked_since: str | None = None
+    # ISO instant the parked task may next attempt a provider, set only when the exhausted stage's
+    # provider reported its own reset time, clamped to the ceiling above. None = attempt on the next
+    # tick, so this can only shorten a wait. Rewritten on every park and cleared at terminal.
+    blocked_until: str | None = None
 
 
 @dataclass(frozen=True)
@@ -936,11 +952,15 @@ class StateStore:
         resume engine drives the task to a fresh terminal + cleanup. This terminal → active flip is
         a deliberate operator-driven, out-of-band transition (no ``assert_transition``), mirroring
         how recovery sets statuses directly.
+
+        Any provider-reported wake instant is dropped: the operator asked for this task to run now,
+        so a stale window from an earlier park must not silently defer the resume they requested.
         """
         self.update_task(
             task_id,
             conn,
             status=stage_status.value,
+            blocked_until=None,
             finished_at=None,
             cleanup_completed=None,
             cleanup_completed_at=None,
@@ -1810,4 +1830,5 @@ def _task_from_row(row: sqlite3.Row) -> TaskRow:
         created_at=row["created_at"],
         updated_at=row["updated_at"],
         blocked_since=row["blocked_since"],
+        blocked_until=row["blocked_until"],
     )

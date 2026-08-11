@@ -15,6 +15,7 @@ Two rules hold for the whole `.worc/` home:
 | `config.example.yaml` | Commented reference copy, never read at runtime. | Yes (`worc install --reconfigure` restores it). |
 | `flows/`, `tools/` | Editable copies of the built-in flows, their role prompts, and the executables `tool` nodes resolve against. Yours to edit. | No — a flow a task names must exist here. |
 | `guide/` | This documentation, copied in by `install`. | Yes (`worc upgrade-docs` restores it). |
+| `follow-ups.md` | The accumulating list of what tasks noticed and did not fix — one section per finished task. Yours to curate; see below. | Entry by entry, by hand. |
 | `logs/<task-id>/` | Per-task artifacts: the rendered prompts, per-attempt provider output, `current.diff`, `summary.md`, the local-only `summary.json` (the same summary plus follow-ups and what the supervisor layer spent), check logs, HITL records. The biggest thing here by far — megabytes per task. | Yes — `worc logs clean`. |
 | `logs/daemon.log`, `logs/daemon-startup.log` | The `watch` daemon's operator trace (rotating, 10 MB × 5 backups) and the raw stream of a console-spawned daemon, kept so a startup crash is recoverable. | Yes — `worc logs clean` takes them, once no daemon is running. |
 | `logs/completed.jsonl` | The **ledger**: one append-only JSON record per terminal task. The audit index of everything that has run. | Only with `worc logs clean --all`. See below. |
@@ -22,12 +23,35 @@ Two rules hold for the whole `.worc/` home:
 | `memory/` | The persistent, repo-scoped memory store (when `memory.enabled`). | Curate it with `worc memory compact` / `worc memory clear`, not by hand. |
 | `security-reports/` | Deliverables of a flow whose output policy keeps its report private (a security audit) rather than committing it. | Yours — read them first; nothing else reclaims them. |
 | `workspace/`, `tasks/rejected/`, `state.db*` | Scratch space, quarantined task files that failed the validation gate, and the authoritative task database. | `state.db` is the source of truth — never delete it while tasks are in flight. |
-| `orchestrator.pid`, `orchestrator.stop`, `orchestrator.children` | Process control for the `watch` daemon: its recorded PID, the stop sentinel `worc stop` writes, and the agent handles a hard stop needs to reap. | No — `worc stop` manages them. A stale `.pid` after a crash is cleared by the next `stop`. |
+| `orchestrator.pid`, `orchestrator.stop`, `orchestrator.children` | Process control for the `watch` daemon: its recorded PID, the stop sentinel `worc stop` writes, and the agent handles a hard stop needs to reap. | No — `worc stop` manages them. A stale `.pid` after a crash is cleared by the next `stop`. If a `stop` times out the `.pid` is **kept on purpose** (the stop is still pending, and it blocks a second watcher) — see below. |
 | `git-null-hooks/` | A deliberately empty directory every orchestrator-run `git` command uses as its hooks path, so no repository hook runs in an orchestrator git process. | No — it must exist and stay empty. |
 | `.env` | Your secrets. Never committed, never logged, never passed to an agent. | No. |
 | `config.yaml.bak-*`, `flows.bak-*`, `tools.bak-*` | Snapshots taken by `worc install --reconfigure` before it refreshes those files. The three newest of each are kept and older ones are pruned automatically. | Yes. Backups you name yourself (`config.yaml.bak-before-upgrade`) are never pruned — only the timestamped ones the orchestrator wrote. |
 
 At the repository root, outside `.worc/`: `tasks/pending/`, `tasks/preparing/`, `tasks/done/`, `tasks/failed/`. These are deliberately **not** in `.worc/` — a finished task's file and its `<task-id>.summary.md` are committed there as the human-readable audit trail. Nothing prunes them; they are yours to curate.
+
+## When `worc stop` reports a timeout
+
+A soft `stop` asks the daemon to finish its current flow node and exit. If it does not confirm within the timeout, **nothing is killed and nothing is cleaned up** — that is deliberate: the request stays pending, the daemon still exits at its next node boundary, and the surviving `orchestrator.pid` is what stops a second watcher from starting on top of it. Two ways out, in order of cost:
+
+- **The watcher is suspended, not busy.** A watcher stopped by `Ctrl-Z` or by reading the terminal in the background sits in state `T` and executes nothing — it will never see the sentinel, and a SIGTERM to it only queues. `stop` already sends a `SIGCONT` alongside its SIGTERM to cover exactly this, so it normally resolves itself; if a message still says the watcher is suspended, `kill -CONT <pid>` resumes it and the pending stop completes on its own, cleanly.
+- **`worc stop --force-full`** is the hard rung, and it works **whether or not a task is active**: it kills the daemon's process group and reaps the running agent's whole subtree, then clears the PID, sentinel and child handles. The task resumes from its checkpoint on the next start. Use it for a watcher that is genuinely wedged.
+
+Both also work through the console as `down` and `down --force-full`.
+
+## `follow-ups.md` — the one file you curate by hand
+
+A task's follow-ups otherwise reach you in two places that both answer "what did _this_ task leave behind?" — the `## Technical debt / follow-ups` section of its pull-request body, and `logs/<task-id>/summary.json`, under a directory `worc logs clean` deletes. Ten tasks that each wave three sub-threshold review findings past your gate leave thirty items across thirty places.
+
+`follow-ups.md` answers the other question: **what has this orchestrator not fixed in this repository?** As each task finishes, its follow-ups — the supervisor's own technical-debt notes plus the review findings below your `gate_severity` — are appended as one section headed by the task id and the time it finished.
+
+Three properties worth knowing:
+
+- **Append-only.** Nothing rewrites, regenerates, or reconciles it. Duplicates inside one task are removed before it is written, but the same item found by two tasks is listed twice — deliberately: a writer that read the file back would silently undo your edits.
+- **There is no command for it.** No `worc follow-ups`, no `resolve` verb. You read the file and edit it, and **deleting an entry is how you close it.**
+- **A task with no follow-ups writes nothing** — not an empty section, not the file. If the file exists, there is something in it.
+
+It is gitignored with the rest of `.worc/`, so it never reaches a commit or a pull-request diff, and no cleanup command touches it: `worc logs clean` sweeps `logs/`, and this file sits at the root. It grows until you prune it, and a failed write is one warning in the log — it never changes how a task ended.
 
 ## `runs/` — the per-task runtime roots
 
