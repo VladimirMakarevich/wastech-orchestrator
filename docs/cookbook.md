@@ -109,8 +109,8 @@ Preflight checks each allowed provider (executable, version, and what its CLI sa
 env: OK — loaded 2 variable(s) from .worc/.env
 claude: OK — claude 2.1.210 available (version=2.1.210, auth=logged_in (claude.ai))
 codex: OK — codex 0.144.4 available (version=0.144.4, auth=logged_in)
-isolation: OK (enforced)
 codex: isolation smoke OK — codex workspace-write sandbox: OS-enforced (empty MCP inventory)
+isolation: OK (enforced)
 checks: 1 command set(s):
   repo (paths: always): ruff check .; mypy src; .venv/bin/python -m pytest
 gh: OK

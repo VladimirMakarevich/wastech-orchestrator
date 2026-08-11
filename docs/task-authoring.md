@@ -39,10 +39,12 @@ Describe what should change and where the user-visible behavior should end up.
 
 The validation gate requires:
 
-- a leading `---` front matter block;
+- a leading `---` front matter block — the fence must be on the **first** line (no blank line before it) and must be closed by a second `---`;
 - `id`;
-- `title`;
+- a non-blank `title`;
 - a non-empty `## Description` section or non-empty body.
+
+Front matter is parsed with duplicate keys **rejected** rather than last-one-wins (`frontmatter_malformed`), in both YAML and JSON. The file itself must also stay inside the `validation` limits — UTF-8, at most `max_task_bytes` (default 262144), `max_task_lines` (default 5000), `max_line_bytes` per line (default 8192), and a control-character ratio at or below `max_control_ratio` (default `0.01`); a violation rejects as `file_too_large` / `not_utf8` / `too_long` / `binary_or_control_chars` (see [configuration.md](configuration.md#validation)).
 
 The gate rejects structurally unsafe tasks before branch creation or provider execution.
 
@@ -52,10 +54,10 @@ Allowed fields:
 
 | Field | Required | Type | Meaning |
 | --- | --: | --- | --- |
-| `id` | yes | string | Stable task id. Must match `^[a-z0-9][a-z0-9._-]{0,63}$`, must not end in `.`, and must not be a Windows device name (`con`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, with or without an extension). It becomes a directory/file name and a branch fragment, so the rule is host-independent (rejected on macOS/Linux too, never sanitized). |
+| `id` | yes | string | Stable task id. Must match `^[a-z0-9][a-z0-9._-]{0,63}$`, must not end in `.`, and must not be a Windows device name (`con`, `prn`, `aux`, `nul`, `com1`–`com9`, `lpt1`–`lpt9`, with or without an extension — the check reads the stem before the first dot). It becomes a directory/file name and a branch fragment, so the rule is host-independent (rejected on macOS/Linux too, never sanitized). |
 | `title` | yes | string | Short human-readable title. Used for the default branch slug, PR title, commit messages, and reports. **Plain text only** — like every front-matter value it must not contain argv-shaped tokens (`` ` ``, `;`, `\|`, `$(`, a leading `-`); put code/shell snippets in the body, not the title. See [front-matter values are plain text](#front-matter-values-are-plain-text). |
 | `task_type` | no | string | Selects the flow that runs the task. Omitted ⇒ `implementation` (the default coding pipeline). Built-ins: `implementation`, `deep_research`, `security_audit`, `content_chapter`, `content_translate`, `blog_article`, `blog_article_revise` (`merge` also ships but is never task-dispatched — it is selected by `git.merge_flow`); an operator flow in `<repo>/.worc/flows/<task_type>.yaml` may add others. An unknown `task_type` (no matching flow) fails the task before any branch is created. The task only _names_ the flow — it never edits the graph. To author a new flow, see [flow-authoring.md](flow-authoring.md). |
-| `branch_name` | no | string \| null | Full task branch override (only in `new` branch mode). Omitted ⇒ `<repo.branch_prefix>/<id>-<slug(title)>`; set it to match a project's branch naming policy. Ignored (a validation warning) in `existing`/`current` mode. See [`branch_name`](#branch_name). |
+| `branch_name` | no | string \| null | Full task branch override (only in `new` branch mode). Omitted ⇒ `<repo.branch_prefix>/<epoch>-<id>-<slug(title)>`; set it to match a project's branch naming policy. Ignored (a validation warning) in `existing`/`current` mode. See [`branch_name`](#branch_name). |
 | `branch_mode` | no | `new` \| `existing` \| `current` | Where this task's git operations point. Omitted ⇒ the instance default `repo.branch_mode`. `new` forks a fresh task branch; `existing` works in `branch_ref`; `current` works in the working tree's current branch as-is. The task value wins. See [`branch_mode`](#branch_mode). |
 | `branch_ref` | no | string | The existing branch to work in — **required iff** the resolved mode is `existing`, and a validation error otherwise. Must already exist locally or on the remote (no auto-create; checked at preflight). See [`branch_mode`](#branch_mode). |
 | `publish` | no | `commit` \| `push` \| `pull_request` | Downgrade-only cap on how far the `publish` node goes: `commit` stops after the commits, `push` stops before the PR, `pull_request` is the full sequence. Omitted ⇒ the flow's publishing policy. A cap, never an escalation (`min(flow_policy, publish)`); a no-op on a flow with no PR-publishing node. See [`publish`](#publish). |
@@ -72,11 +74,11 @@ Allowed fields:
 
 The current validation gate rejects unknown fields fail-closed (`unknown_top_level_field`). Keep task front matter limited to the fields above. A task can overlay a flow node's `model`/`reasoning`/`provider` per run via the `nodes` block (best-effort — an invalid value is warned and skipped at run time, never fatal), but cannot change commands, `extra_args`, credentials, sandbox, or any security policy (see [Provider, model, reasoning](#provider-model-reasoning)).
 
-A task **rejected at the validation gate** (before it was ever claimed — no branch, no `state.db` row) does not reserve its `id`. The normal loop works: the rejected file lands in `tasks/rejected/` with a reason, you fix it, and submit again **under the same `id`** — it is not treated as a `duplicate_task_id`. On the console the reject prints the machine reason **and** the offending field + cause (e.g. `title: argv-shaped token`), so you can see what to fix without opening the JSON report. A real duplicate (a task that was actually claimed / has a branch) is still rejected.
+A task **rejected at the validation gate** (before it was ever claimed — no branch, no `state.db` row) does not reserve its `id`. The normal loop works: the rejected file lands in `.worc/tasks/rejected/` with a reason, you fix it, and submit again **under the same `id`** — it is not treated as a `duplicate_task_id`. On the console the reject prints the machine reason **and** the offending field + cause (e.g. `title: argv-shaped token`), so you can see what to fix without opening the JSON report. A real duplicate (a task that was actually claimed / has a branch) is still rejected.
 
 ### Front-matter values are plain text
 
-**Every front-matter value must be plain text** — no value may look like a CLI argument. A value is rejected (`injection_suspected`, quarantined to `tasks/rejected/`) when it **starts with `-`** or contains an **argv-shaped token**: a backtick `` ` ``, `;`, `|`, `$(`, or a newline. This applies uniformly to **all** fields, `title` and `contacts` included — the gate does not exempt "display" fields, so it never has to reason about which value might reach a command.
+**Every front-matter value must be plain text** — no value may look like a CLI argument. A value is rejected (`injection_suspected`, quarantined to `.worc/tasks/rejected/`) when it **starts with `-`**, contains an **argv-shaped token** (a backtick `` ` ``, `;`, `|`, `$(`, a newline, or a carriage return), or matches a known sandbox/approval-bypass **flag shape**. This applies uniformly to **all** fields, `title` and `contacts` included, and recursively to nested lists and mappings — the gate does not exempt "display" fields, so it never has to reason about which value might reach a command.
 
 This is a **structural** guarantee first (task content reaches agents only as file _paths_, never spliced into a CLI argv) and this scan is the belt-and-braces layer on top. In practice it costs you nothing: put any code, shell snippet, or punctuation-heavy phrasing in the task **body** (which is never scanned), and keep the front matter to short plain labels.
 
@@ -107,18 +109,20 @@ id: "task 001" # whitespace
 id: "../task-001" # path traversal shape
 id: "-task-001" # leading separator
 id: "task-001." # trailing dot (Windows strips it → a different on-disk name)
-id: con # Windows device name (also con.txt, nul, com1–com9, lpt1–lpt9)
+id: con # Windows device name (also con.txt, prn, aux, nul, com1–com9, lpt1–lpt9)
 ```
 
 The orchestrator rejects invalid ids; it does not sanitize them. The device-name and trailing-dot rules are host-independent — an id that is not portable to Windows is rejected on macOS and Linux too, so the same task behaves the same on every supported OS.
 
 ## `branch_name`
 
-By default the orchestrator creates a task branch from `repo.branch_prefix`, the task `id`, and a slug of `title`, for example:
+By default the orchestrator creates a task branch from `repo.branch_prefix`, a Unix-epoch stamp of when the attempt started, the task `id`, and a slug of `title` — the stamp is what keeps a re-run's branch from colliding with the previous attempt's:
 
 ```text
-worc/task-001-add-login-form-validation
+worc/1765432100-task-001-add-login-form-validation
 ```
+
+The whole auto-generated name is bounded to 50 characters (the example above is exactly at the budget): the slug is truncated to fit, and dropped entirely when the prefix + stamp + id already fill it.
 
 Set `branch_name` when a project or customer requires a different branch naming convention:
 
@@ -127,7 +131,7 @@ branch_name: "feature/ABC-123-add-login-validation"
 branch_name: "customer/acme/ABC-123-login-validation"
 ```
 
-The value is the **full branch name**, not only a suffix. It is validated before branch creation and provider execution. It must be a safe Git branch ref, must not start with `-` or `refs/`, must not contain whitespace/control characters or Git-ref metacharacters, and must not equal `repo.base_branch`.
+The value is the **full branch name**, not only a suffix. It is validated before branch creation and provider execution. It must be a safe Git branch ref, must not start with `-` or `refs/`, must not contain whitespace/control characters or Git-ref metacharacters, and must not equal `repo.base_branch`. A `branch_name` longer than 50 characters is **not** a rejection: it is logged as a warning and the auto-generated name is used instead.
 
 The PR title still comes from `title`; `branch_name` changes only the Git branch/head used for push and PR creation.
 
@@ -156,9 +160,9 @@ Rules and safety:
 
 - **`existing` requires `branch_ref`**, and `branch_ref` is only valid with `existing` (either violation is a validation error). The ref must already exist locally or on the remote — the orchestrator never auto-creates it (a missing ref is rejected at preflight, before any slot or branch is taken).
 - **`current` needs a real branch** — a detached `HEAD` is rejected. Because it rides your live checkout, `current` is a poor fit for unattended `watch` (it emits a warning), and sub-tasks from decomposition inherit the parent's one working branch.
-- **The orchestrator never mutates a branch it does not own.** In `existing`/`current` mode it never deletes, resets-to-base, or force-checks-out-away from the branch; terminal cleanup leaves both an `existing`- and a `current`-mode tree exactly where you left it (by default — `new` returns to base, and `repo.checkout_base_on_cleanup` overrides either way; `current` always stays). Consequently a **fresh** `rerun` is refused in these modes — use `rerun --continue` to resume in place, or clean up the branch yourself.
+- **The orchestrator never mutates a branch it does not own.** In `existing`/`current` mode it never deletes, resets-to-base, or force-checks-out-away from the branch; terminal cleanup leaves both an `existing`- and a `current`-mode tree exactly where you left it (by default — `new` returns to base, and `repo.checkout_base_on_cleanup` overrides either way; `current` always stays). Consequently a **fresh** `rerun` is refused in these modes **once the run produced work** (there is a resume checkpoint) — use `rerun --continue` to resume in place, or clean up the branch yourself. A run that died before any work has nothing to reset and no resume point, so a plain `rerun` restarts it **in place** on the same branch.
 - **`branch_name` is ignored** outside `new` mode (there is nothing to name); setting it there is a validation warning.
-- **Publishing is orthogonal.** Branch mode only redirects where the `publish` node's commit/push/PR point; whether a `publish` node runs at all is still the flow's decision. When the working branch resolves to the PR base (e.g. `current` on `main`), a PR is impossible — the orchestrator still commits and pushes (directly to the base, subject to branch protection) and **skips the PR** with a logged note; `auto_merge` then no-ops. A chain of tasks on one shared branch converges on a **single** PR: an already-open `head→base` PR is reused rather than re-created, and each reusing task appends its own `## <title>` + summary section to the PR body (keyed by task id, so a rerun does not duplicate it) **and retitles the PR to `N tasks on <branch>`** — so the PR reflects the whole chain instead of only its first task. The body is kept under GitHub's size limit by compacting the oldest sections to a one-line pointer at their on-disk `logs/<id>/summary.md` (every task's marker + `## <title>` is always kept, so the chain stays fully listed).
+- **Publishing is orthogonal.** Branch mode only redirects where the `publish` node's commit/push/PR point; whether a `publish` node runs at all is still the flow's decision. When the working branch resolves to the PR base (e.g. `current` on `main`), a PR is impossible — the orchestrator still commits and pushes (directly to the base, subject to branch protection) and **skips the PR** with a logged note; `auto_merge` then no-ops. A chain of tasks on one shared branch converges on a **single** PR: an already-open `head→base` PR is reused rather than re-created, and each reusing task appends its own `## <title>` + summary section to the PR body (keyed by task id, so a rerun does not duplicate it) **and retitles the PR to `N tasks on <branch>`** — so the PR reflects the whole chain instead of only its first task. The body is kept under GitHub's size limit by compacting the oldest sections, oldest first, in two passes: the first elides a section's prose but keeps its `## Technical debt / follow-ups`, and only if the body is still over does a second pass drop that too. Each compacted section leaves a one-line pointer — at the task's own committed `<id>.summary.md` when that file is in this PR's diff, otherwise at `.worc/logs/<id>/summary.md` on the run host. Every task's marker + `## <title>` is always kept, so the chain stays fully listed.
 
 ## `publish`
 
@@ -189,7 +193,7 @@ The per-task value **wins** over the global default (there is no operator gate, 
 
 ## Refinement (automatic)
 
-Refinement-skip is deterministic — there is no task flag. The orchestrator skips refinement automatically when the task is **complete**: a non-empty `## Description` plus acceptance criteria. Provide acceptance criteria to skip refinement; omit them to let refinement enrich the task. Missing acceptance criteria never rejects the task — it makes refinement run.
+Refinement-skip is deterministic — there is no task flag. The orchestrator skips refinement automatically when the task is **complete**: a non-empty body plus a structured `## Acceptance criteria` **section**. It must be a real heading (matched case-insensitively, at any heading level); prose that merely mentions acceptance criteria does not count, and a task written that way routes through refinement — the safe direction, since refinement never rejects. Provide the section to skip refinement; omit it to let refinement enrich the task. Missing acceptance criteria never rejects the task — it makes refinement run.
 
 When it runs, refinement is mostly autonomous: it enriches the task with documented assumptions and acceptance criteria. It **may** pause for one clarifying **question** — and only a question, never an approval — when a material ambiguity cannot be resolved safely from repository evidence (the packaged `refinement` node carries `hitl: allow_question`); otherwise it proceeds without asking. To keep an unattended run from stalling here, make the task complete and decisive (see [Planning escalation and unattended runs](#planning-escalation-and-unattended-runs)).
 
@@ -208,7 +212,7 @@ When a node escalates, the run blocks until a human answers (via the configured 
 
 - **Be complete and decisive.** Put the material scope boundaries in `## Description` and `## Constraints` — what is in scope, what is explicitly out, which approach to take when there is a fork (e.g. "do not introduce a database migration; keep storage in-memory"). `planning` escalates on genuinely material, unresolved scope decisions; deciding them up front removes the trigger.
 - **Provide acceptance criteria.** A non-empty `## Acceptance criteria` makes the orchestrator skip refinement (it is deterministic — there is no flag), so a complete task goes straight to planning.
-- **Existing levers, if you want to bypass a node entirely.** `nodes.planning.enabled: false` skips planning altogether (a stub plan is written — use only when planning adds nothing); `auto_merge: true` skips the human _review_ gate (the dangerous-diff guard still applies). Neither relaxes an embedded planning/refinement escalation — they remove or bypass the step.
+- **Existing levers, if you want to bypass a node entirely.** `nodes.planning.enabled: false` skips planning altogether (no `plan.md` is produced and downstream prompts simply omit the plan — use only when planning adds nothing); `auto_merge: true` skips the human **PR review** before the merge (the dangerous-diff guard still applies). Neither relaxes an embedded planning/refinement escalation — they remove or bypass the step.
 
 In short: a well-specified task completes unattended because no node needs to ask; an under-specified one will (correctly) stop for a human. See [operations.md → Running](operations.md#4-running) for how this interacts with `auto_mode`.
 
@@ -240,17 +244,17 @@ decomposition: true
 
 Values:
 
-| Value   | Meaning                                                           |
-| ------- | ----------------------------------------------------------------- |
-| `true`  | Permit a split for this task even if the global gate is off.      |
-| `false` | Forbid a split for this task even if the global gate is on.       |
-| omitted | Use the global `agents.decomposition.enabled` from `config.yaml`. |
+| Value | Meaning |
+| --- | --- |
+| `true` | Permit a split for this task even if the global gate is off. |
+| `false` | Forbid a split for this task even if the global gate is on. |
+| omitted | Use the global `agents.decomposition.enabled` from `config.yaml` (`false` on a fresh install). |
 
-The per-task value **always wins** (in both directions — there is no operator gate), mirroring [`auto_merge`](#auto_merge) and [`prompt_audit`](#prompt_audit). It only flips the _gate_: whether a split actually happens is still decided by the flow's `decomposition:` block and the planning stage's proposal (an operator [`subtasks`](#subtasks-operator-authored-decomposition) manifest ignores this gate and always splits). The field never edits the graph or forces a split — it cannot change `max_subtasks`, the provider, or any security setting. It is unrelated to the old `decompose` flag (removed in `schema_version` 11), which forced a split.
+The per-task value **always wins** (in both directions — there is no operator gate), mirroring [`auto_merge`](#auto_merge) and [`prompt_audit`](#prompt_audit). It only flips the _gate_: whether a split actually happens is still decided by the flow's `decomposition:` block and the planning stage's proposal (an operator [`subtasks`](#subtasks-operator-authored-decomposition) manifest ignores this gate and always splits). The field never edits the graph or forces a split — it cannot change `max_subtasks`, the provider, or any security setting. There is no field that _forces_ a split; the closest thing is an explicit `subtasks:` manifest, which is the split.
 
 ## Provider, model, reasoning
 
-The flow node owns the **default** provider, model, and reasoning: each node declares its own `provider:` — or, when omitted, defaults to the operator's single global primary provider (the one with `primary: true` in `config.yaml` under `agents.providers`) — plus its `model`/`reasoning`. A task may **overlay** those defaults per run via the [`nodes`](#nodes) block (`nodes.<node-id>.{model,reasoning,provider}`), so one default flow can cover several model/effort/provider variants without a separate flow file. The overlay is **best-effort**: a `provider` must be in `agents.allowed`, a `reasoning` must be one the resolved provider supports, and any value that is invalid for the resolved flow/config is **warned and skipped at run time** (the flow's declared value stands — the task is never aborted). `model` is passed through unchecked. A task still **cannot** change commands, `extra_args`, credentials, sandbox, or any security policy.
+The flow node owns the **default** provider, model, and reasoning: each node declares its own `provider:` — or, when omitted, defaults to the operator's single global primary provider (the one with `primary: true` in `config.yaml` under `agents.providers`) — plus its `model`/`reasoning`. A task may **overlay** those defaults per run via the [`nodes`](#nodes) block (`nodes.<node-id>.{model,reasoning,provider}`), so one default flow can cover several model/effort/provider variants without a separate flow file. The overlay is **best-effort**: a `provider` must be one of `claude` / `codex` and in `agents.allowed`, a `reasoning` must be one the resolved provider supports (`claude`: `low`, `medium`, `high`, `xhigh`, `max`; `codex` also accepts `minimal`), and any value that is invalid for the resolved flow/config is **warned and skipped at run time** (the flow's declared value stands — the task is never aborted). `model` is passed through unchecked — model names have no reliable tier ordering to validate against. The resolution order is task override → flow node declaration → provider config default. A task still **cannot** change commands, `extra_args`, credentials, sandbox, or any security policy.
 
 > **Tasks cannot supply or weaken checks.** The quality-gate commands are an operator/infrastructure concern, authored only in `config.yaml` under `checks.command_sets` (see [configuration.md](configuration.md#checks)). A task file has no field to add, replace, relax, or re-select a check — which sets run is a deterministic function of the task diff, not task content — keeping the quality gate independent of the task.
 
@@ -357,7 +361,7 @@ depends_on: [] # optional; slugs of earlier subtasks (default: none)
 - `depends_on` lists **slugs of earlier subtasks**; a forward, self, or unknown reference is rejected. The Core applies the same linear/`max_subtasks` gate as the agent split, so you cannot weaken it.
 - **Where they live:** put subtask files in a **subfolder** — author them under `tasks/preparing/subtasks/…` and `promote` carries them to `tasks/pending/subtasks/…`. The scheduler scans only the top level of `tasks/pending/`, so subtask files there never run as standalone tasks; a path that lands beside the root is rejected.
 - **Path rules (fail-closed):** each reference must be repo-relative with no `..`/absolute/traversal and resolve under the task directory.
-- **Rejected fail-closed before any branch** (quarantined to `tasks/rejected/` with a `validation_report.json`): a malformed/missing subtask file, a bad path, fewer than 2 or more than `max_subtasks` units, a forward dependency, or a `task_type` whose flow declares no `decomposition:` block (`flow_cannot_decompose`).
+- **Rejected fail-closed before any branch** (the file is quarantined to `.worc/tasks/rejected/` and a `validation_report.json` is written under `.worc/logs/<task-id>/`): a malformed/missing subtask file (no front-matter `title`, or an empty body), two subtasks resolving to the same slug, a bad path, fewer than 2 or more than `max_subtasks` units (default 8), a forward dependency, or a `task_type` whose flow declares no `decomposition:` block (`flow_cannot_decompose`).
 
 ## `auto_merge`
 
@@ -384,7 +388,7 @@ The `nodes` block carries the per-node overrides. Keys are flow **node ids** (th
 ```yaml
 nodes:
   planning:
-    enabled: false # write a stub plan and run as a single unit (no decomposition)
+    enabled: false # no plan is written; the task runs as a single unit (no decomposition)
   testing:
     enabled: false # bypass the Check Runner (e.g. a repo with no test suite)
   implementation:
@@ -394,9 +398,9 @@ nodes:
     provider: codex # review this task with codex instead of the flow's default
 ```
 
-Any node present in the task's resolved flow may be disabled — there is no fixed allowlist. **Which nodes are safe to disable is the operator's responsibility** (they author the flow and run the tasks). The node ids above (`planning`, `testing`, `review`, `fixing`, …) are those of the default `implementation` flow; a custom flow exposes its own node ids (e.g. `code_review`). `refinement` is skipped automatically by completeness, not by a `nodes` entry — with one flow-specific caveat: `deep_research`'s `refinement` is a _scoping_ pass that carries no completeness predicate and therefore runs on every task, so disabling it per task is the only way to skip it. The whole-task **summary** is not a graph node — it is written by the supervisor layer at task close (see [configuration.md](configuration.md#supervisor)), and removing that layer is a config switch (`supervisor.enabled: false`), never a per-task `nodes` entry. Node-disable is **per-task only** — there is no global config knob (to drop a node everywhere, remove it from the flow).
+Any node present in the task's resolved flow may be disabled — there is no fixed allowlist. **Which nodes are safe to disable is the operator's responsibility** (they author the flow and run the tasks). The default `implementation` flow's node ids are `refinement`, `planning`, `implementation`, `testing`, `review`, `fixing`, `documentation`, and `publish`; a custom flow exposes its own node ids (e.g. `code_review`). `refinement` is skipped automatically by completeness, not by a `nodes` entry — with one flow-specific caveat: `deep_research`'s `refinement` is a _scoping_ pass that carries no completeness predicate and therefore runs on every task, so disabling it per task is the only way to skip it. The whole-task **summary** is not a graph node — it is written by the supervisor layer at task close (see [configuration.md](configuration.md#supervisor)), and switching that layer off is a config switch (`supervisor.enabled: false`, after which the summary is still written, deterministically from the run's own recorded facts), never a per-task `nodes` entry. Node-disable is **per-task only** — there is no global config knob (to drop a node everywhere, remove it from the flow).
 
-What disabling the default-flow nodes does: `planning` → stub plan, single unit; `testing` → straight to review (no checks); `review` → commit with no agent quality gate; `fixing` → the test/review fix loop runs as a no-op to its cap, then `manual_action_required`. Every disable is recorded in `state.db` (`node_runs.skipped`) and listed in the PR body / summary.
+What disabling the default-flow nodes does: `planning` → no plan, single unit; `testing` → straight to review (no checks); `review` → commit with no agent quality gate; `fixing` → the test/review fix loop runs as a no-op to its cap, then `manual_action_required`; `documentation` → the code ships with the project's docs untouched; `publish` → the flow ends `DONE` with nothing committed, pushed, or opened (`publish: commit`/`push` is the finer-grained lever). Every disable is recorded in `state.db` (`node_runs.skipped`) and listed in the PR body / summary.
 
 The `model`/`reasoning`/`provider` overlay is **best-effort** (see [Provider, model, reasoning](#provider-model-reasoning)): it overlays the flow node's declared executor for this run only. `provider` must be in `agents.allowed` and `reasoning` must be supported by the resolved provider; an invalid value (or an overlay on a node that has no executor, e.g. a `checks`/`publish` node) is **warned and skipped at run time** — the flow's declared value stands and the task runs on. The overlay applies to both agent and evaluator nodes; the effective model/reasoning/provider is recorded in the prompt audit. `model` is passed through unchecked.
 
@@ -494,7 +498,7 @@ Unknown field:
 ---
 id: task-043
 title: "Add retries"
-priority: high
+model: claude-opus-5
 ---
 
 ## Description
@@ -502,7 +506,7 @@ priority: high
 Add retries to webhooks.
 ```
 
-Reason: `unknown_top_level_field` when unknown fields are rejected.
+Reason: `unknown_top_level_field`. There is no top-level `model` key — a per-run model belongs under [`nodes`](#nodes) (`nodes.<node-id>.model`). Anything outside the [allowed field list](#front-matter-fields) is rejected the same way, fail-closed.
 
 Invalid node override:
 
