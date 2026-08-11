@@ -8,7 +8,7 @@ Date: 2026-08-05 (reconstructed from the merged `dev` diff; originally written 2
 
 ## 1. The idea in one paragraph
 
-The application does not replace the coding agent or Git. It is an **orchestrator**: it watches the task folder, validates and parses a task, prepares a dedicated branch, and runs the task through a deterministic **flow** — a YAML graph of typed nodes (refine → plan → implement → test → review → document → publish for the default flow) driven by a **flow engine**. The heavy lifting on the code is done by an **external coding agent** (Codex CLI or Claude Code CLI) behind a single `AgentProvider` abstraction; each node runs on its declared provider or the one **global primary**, and a transient infrastructure failure is retried (same provider, backoff) then falls back to the other allowed provider — and if both are unavailable the task soft-pauses and resumes later rather than dying (a quality failure never switches providers — it loops through `fixing`). Above the flow sits a **read-only supervisor layer** — on by default, removable with `supervisor.enabled: false` — that observes completed steps at a configured cadence and writes the plain-language summary that becomes the PR body; it never decides the route, and with it switched off the PR body is rendered deterministically from the run's own recorded facts. Only the orchestrator commits, pushes, and opens the PR; the agents only edit files in a dedicated clone. After a task finishes, the working copy returns to the base branch; only then may the next task start, and taking it automatically is an explicit, off-by-default **auto mode**. Git access uses ordinary means (SSH key, credential helper, `gh auth login`); the agent subscription is used only to reach the agent, never as a Git authentication mechanism.
+The application does not replace the coding agent or Git. It is an **orchestrator**: it watches the task folder, validates and parses a task, prepares a dedicated branch, and runs the task through a deterministic **flow** — a YAML graph of typed nodes (refine → plan → implement → test → review → document → publish for the default flow) driven by a **flow engine**. The heavy lifting on the code is done by an **external coding agent** (Codex CLI or Claude Code CLI) behind a single `AgentProvider` abstraction; each node runs on its declared provider or the one **global primary**, and a transient infrastructure failure is retried (same provider, backoff) then falls back to the other allowed provider — and if both are unavailable the task soft-pauses and resumes later rather than dying (a quality failure never switches providers — it loops through `fixing`). Above the flow sits a **read-only supervisor layer** — on by default, removable with `supervisor.enabled: false` — that observes completed steps at a configured cadence and writes the plain-language summary that becomes the PR body; it never decides the route, and with it switched off the PR body is rendered deterministically from the run's own recorded facts. Only the orchestrator commits, pushes, and opens the PR; the agents only edit files in a dedicated clone. After a task finishes, the working copy returns to the base branch (in the default `branch_mode: new`; `existing` / `current` stay on their branch); only then may the next task start, and taking it automatically is an explicit, off-by-default **auto mode**. Git access uses ordinary means (SSH key, credential helper, `gh auth login`); the agent subscription is used only to reach the agent, never as a Git authentication mechanism.
 
 ---
 
@@ -21,7 +21,7 @@ The application does not replace the coding agent or Git. It is an **orchestrato
 5. **Guardrails in layers.** Sandbox/approval profiles and an environment allowlist before execution; a dangerous-diff classifier and flow-wide ceilings (`permission_ceiling` / `output_policy` / `network_policy`) validated fail-closed before any task runs.
 6. **Fresh context per task, durable session within it.** The orchestrator builds the flow, node services, and supervisor anew for each task — no shared state between tasks. _Within_ a task the editing agent keeps a durable session (implementation → fixing, across the test/fix loop), persisted so it survives a restart.
 7. **Human-in-the-loop via Telegram.** Clarifying questions and approval of dangerous actions block one checkpoint until an answer or a fail-closed timeout.
-8. **Fallback is for infrastructure errors only, and recovery is bounded.** Missing binary, auth error, rate limit, timeout, crash, invalid output → fall back to the **other** allowed provider (symmetric Claude↔Codex). A _transient_ class (`provider_unavailable` / `network_unavailable`) is first retried on the same provider with backoff (`agents.retry`), and if both providers are down the task soft-pauses (resumable) instead of failing. Test failures and review findings go to `fixing`, never to another provider.
+8. **Fallback is for infrastructure errors only, and recovery is bounded.** Missing binary, unsupported version, auth error, rate limit, timeout, crash, invalid output, no-work → fall back to the **other** allowed provider (symmetric Claude↔Codex). A _transient_ class (`provider_unavailable` / `network_unavailable`) is first retried on the same provider with backoff (`agents.retry`), and once every provider is exhausted a **park-eligible** class (those two plus `rate_limited`) soft-pauses the task (resumable) instead of failing. Test failures and review findings go to `fixing`, never to another provider.
 
 ---
 
@@ -44,7 +44,7 @@ flowchart TB
     agents["codex / claude<br/>CLI coding agents"]
     vcs["git / gh — CLI"]
     tg["Telegram Bot API"]
-    db[("state.db<br/>SQLite v20")]
+    db[("state.db<br/>SQLite v21")]
     art[("Artifacts<br/>.worc/ · tasks/")]
 
     operator -->|"run · watch · rerun · ..."| cli
@@ -62,7 +62,7 @@ flowchart TB
 
 ### 4.1 Orchestrator wrapper (the spine)
 
-A thin wrapper around the flow engine. It owns everything that is _not_ a node: the §19 validation gate, acquiring the single processing slot, registering the task in the State Store, resolving the flow for the task's `task_type`, the isolation and check **preflights** (both before any branch), branch preparation, the terminal cleanup back to the base branch, and the one ledger record at the end. It builds the node services, inputs, and the supervisor, then hands the validated graph to the engine via `drive_flow`.
+A thin wrapper around the flow engine. It owns everything that is _not_ a node: the §19 validation gate, acquiring the single processing slot, registering the task in the State Store, resolving the flow for the task's `task_type`, the isolation and check **preflights** (both before any branch), branch preparation, the terminal cleanup (§4.6), and the one ledger record at the end. It builds the node services, inputs, and the supervisor, then hands the validated graph to the engine via `drive_flow`.
 
 ### 4.2 Flow engine + flow definition
 
@@ -71,7 +71,7 @@ The pipeline expressed as **data**. A flow is a YAML document — a graph of typ
 - `derived.needs_refinement` — "the task's completeness classification is **not** `COMPLETE`". A non-empty description plus an `## Acceptance criteria` section already counts as complete, so on a well-formed task file this is `false`. That is right for `implementation`'s gap-filling `refinement`, and was wrong for `deep_research`'s _scoping_ pass (a complete task file and a scoped question are different things) — which is why `deep_research`'s `refinement` no longer carries the predicate and is instead skipped per task.
 - `config.external_research` — "**this flow declares a `network_policy`**". Despite the `config.` namespace it is neither a config key nor a task field. `deep_research` sets `network_policy: research`, so the predicate is always true there and gates nothing; it is kept as a statement of the node's dependency. Whether a given question needs external evidence is a per-task call (`nodes.external_research.enabled: false`).
 
-Flows are resolved by `task_type` from **one place** — the operator flow at `<repo>/.worc/flows/<task_type>.yaml`. The built-ins ship inside the package under `packaged/flows/`, but that tree is **delivery-only**: `install` copies it into `.worc/flows/` as editable copies (every flow in §5 plus their shared `roles/` prompts and the `tools/` executables the packaged `tool` nodes resolve against), and the orchestrator never reads the packaged tree at run time. So out of the box every built-in is already an editable operator flow (`install --reconfigure` refreshes them, snapshotting the old dir first), and a `task_type` with no file in `.worc/flows/` fails resolution with a clear "not found" rather than silently loading a bundled copy. Every resolved flow passes a **fatal three-layer validator** at dispatch (`resolve`) before its task runs — and on demand via `worc validate-flow`:
+Flows are resolved by `task_type` from **one place** — the operator flow at `<repo>/.worc/flows/<task_type>.yaml`, whose own `flow.task_type` must match the lookup key. The built-ins ship inside the package under `packaged/flows/`, but that tree is **delivery-only**: `install` copies it into `.worc/flows/` as editable copies (every flow in §5 plus their per-flow node prompts and the shared `roles/` supervisor lens), and separately into `.worc/tools/` (the executables the packaged `tool` nodes resolve against); the orchestrator never reads the packaged tree at run time. So out of the box every built-in is already an editable operator flow (`install --reconfigure` refreshes them, snapshotting the old dir first), and a `task_type` with no file in `.worc/flows/` fails resolution with a clear "not found" rather than silently loading a bundled copy. Every resolved flow passes a **fatal three-layer validator** at dispatch (`resolve`) before its task runs — and on demand via `worc validate-flow`:
 
 - **Graph integrity** — edges resolve; outcomes are valid per node kind; every `rework`/`fail` edge is bounded by a budget or named loop; exactly one entry node; every node can reach a terminal.
 - **Security ceiling** — a node's `permission_profile` may not exceed the flow `permission_ceiling`; evaluators are forced `read-only`; `extra_args` pass the forbidden-args screen; `role_file` paths contain no traversal; unknown fields fail closed.
@@ -83,7 +83,7 @@ Node kinds:
 | --- | --- | --- |
 | `agent` | runs an author/editor through the router (optional embedded HITL, dangerous-diff guard, editing session) | `done` |
 | `evaluator` | a read-only verdict over a produced artifact; a blocking gate, or a non-blocking self-capping reviewer | `accept` / `rework` |
-| `checks` | a quality gate: the operator's diff-selected `checks.command_sets`, or the `citation` / `dependency_scan` checkers | `pass` / `fail` |
+| `checks` | a quality gate; the `checker` picks which: `command_profile` (the operator's diff-selected `checks.command_sets`), `citation`, or `dependency_scan` | `pass` / `fail` |
 | `tool` | an operator-owned executable from `.worc/tools/`, run out-of-process under the same launch ceiling as an agent (argv, timeout, env allowlist) | `pass` / `fail` / `route:*` |
 | `hitl` | a bare durable human gate | approve/deny, or done |
 | `publish` | the orchestrator-owned git publish for the flow's publishing policy | `done` |
@@ -104,7 +104,7 @@ class AgentProvider(Protocol):
     def run(self, request: AgentRunRequest) -> AgentRunResult: ...
 ```
 
-`CodexCLI` (wrapping `codex exec`, with `codex exec resume <id>` for durable sessions) and `ClaudeCLI` (wrapping `claude`, with `--resume <id>`) are the two adapters. Routing is **per node**: a node declares its own `provider` (`codex` | `claude`), and a node with no `provider` runs on the **global primary** — the single configured provider with `primary: true`. Infrastructure fallback is **symmetric**: a node whose primary differs from the global primary falls back to it, and a node already on the global primary falls back to the **other** allowed provider (Claude↔Codex). For a _transient_ class (`provider_unavailable` / `network_unavailable`) the Router first retries the **same** provider with bounded exponential backoff (`agents.retry`, a per-provider budget separate from `max_stage_attempts`) before switching; if **every** allowed provider is unavailable the orchestrator parks the task as **resumable** (`tasks.blocked_since`, soft pause) instead of failing, bounded by `agents.retry.max_blocked_s`. The watch daemon wires one cancellation predicate into both Router and FlowEngine: a soft stop parks at the untouched next-node checkpoint, while a hard-killed provider error is classified `CANCELLED` before fallback can respawn an agent. Every provider attempt also crosses a **process-tree quiescence barrier** (WRI-012): `run_process` runs each launch inside an orchestrator-owned platform containment (a POSIX session/group with during-run descendant tracking, or a Windows kill-on-close Job Object) and, on every exit path, terminates it and proves it empty within a bounded budget before the result is trusted — so a background/detached descendant that outlived the CLI cannot keep writing after the attempt returns. An unprovable subtree is a non-fallback `CONTAINMENT_UNVERIFIED` security condition that routes the task to `manual_action_required` (the recorded `(pid, pgid)` children-file handle is kept so a later hard stop/recovery can still reap the survivor). Test failures and review findings are _not_ infrastructure errors — they go to `fixing`.
+`CodexCLI` (wrapping `codex exec`, with `codex exec resume <id>` for durable sessions) and `ClaudeCLI` (wrapping `claude`, with `--resume <id>`) are the two adapters. Routing is **per node**: a node declares its own `provider` (`codex` | `claude`), and a node with no `provider` runs on the **global primary** — the single configured provider with `primary: true`. Infrastructure fallback is **symmetric**: a node whose primary differs from the global primary falls back to it, and a node already on the global primary falls back to the **other** allowed provider (Claude↔Codex). For a _transient_ class (`provider_unavailable` / `network_unavailable`) the Router first retries the **same** provider with bounded exponential backoff (`agents.retry`, a per-provider budget separate from `max_stage_attempts`) before switching; if **every** allowed provider is exhausted on a park-eligible class — those two plus `rate_limited`, whose reset window is a long defer rather than a tight retry — the orchestrator parks the task as **resumable** (`tasks.blocked_since`, soft pause) instead of failing, bounded by `agents.retry.max_blocked_s` (6h by default, so a rate-limited task outlasts a provider's ~5h usage window). The watch daemon wires one cancellation predicate into both Router and FlowEngine: a soft stop parks at the untouched next-node checkpoint, while a hard-killed provider error is classified `CANCELLED` before fallback can respawn an agent. Every provider attempt also crosses a **process-tree quiescence barrier** (WRI-012): `run_process` runs each launch inside an orchestrator-owned platform containment (a POSIX session/group with during-run descendant tracking, or a Windows kill-on-close Job Object) and, on every exit path, terminates it and proves it empty within a bounded budget before the result is trusted — so a background/detached descendant that outlived the CLI cannot keep writing after the attempt returns. An unprovable subtree is a non-fallback `CONTAINMENT_UNVERIFIED` security condition that routes the task to `manual_action_required` (the recorded `(pid, pgid)` children-file handle is kept so a later hard stop/recovery can still reap the survivor). Test failures and review findings are _not_ infrastructure errors — they go to `fixing`.
 
 ### 4.4 Supervisor (advisory, read-only, on by default)
 
@@ -130,28 +130,28 @@ Quality-gate commands are **operator-authored**, never auto-detected or hardcode
 
 ### 4.6 Git Manager
 
-The **only** component that runs commit / push / PR. Before a task it prepares the branch (`worc/<epoch>-<task-id>-<slug>` by default — an epoch prefix makes every fresh run unique, and the full name is capped at 50 chars by truncating the slug — or the task's validated `branch_name`); on publish it makes a **scoped code commit** (an explicit pathspec that excludes `.worc/`, `.worc-io/`, and `tasks/` — never `git add .`/`-A`) plus a separate **task-scoped audit commit** of just that task's `tasks/<state>/<id>.md` + `<id>.summary.md`, pushes, and (when enabled) opens the PR with the summary as its body — all idempotent via `publish_operations` fingerprints. Optional **auto-merge** (off by default) merges the PR; a blocked merge ends `manual_action_required` with the PR left open, never a forced merge. Terminal cleanup returns the working copy to `repo.base_branch`, then `fetch` + `pull --ff-only`.
+The **only** component that runs commit / push / PR. Before a task it prepares the branch (`worc/<epoch>-<task-id>-<slug>` by default — an epoch prefix makes every fresh run unique, and the full name is capped at 50 chars by truncating the slug — or the task's validated `branch_name`); on publish it makes a **scoped code commit** (an explicit pathspec that excludes `.worc/`, `.worc-io/`, and `tasks/` — never `git add .`/`-A`) plus a separate **task-scoped audit commit** of just that task's `tasks/<state>/<id>.md` + `<id>.summary.md`, pushes, and (when enabled) opens the PR with the summary as its body — all idempotent via `publish_operations` fingerprints. A per-task `publish` is a **downgrade-only cap** over `commit < push < pull_request`: the effective scope is `min(flow policy, task.publish)`, so a task can stop the sequence early but never manufacture a PR the flow's graph does not publish. Optional **auto-merge** (off by default) merges the PR; a blocked merge ends `manual_action_required` with the PR left open, never a forced merge. Terminal cleanup returns the working copy to `repo.base_branch` and then runs `fetch` + `pull --ff-only` — under `branch_mode: new` by default, with `repo.checkout_base_on_cleanup` (`null` → defer to the mode, `false` → never return, `true` → force `new`+`existing` to) as the explicit override; `current` always stays on the operator's branch.
 
 ### 4.7 State Store with checkpoints
 
-SQLite (`state.db`, schema **v20**). It holds the task status, the flow checkpoint (`current_node` + counters + fingerprint), the B-lite soft-pause marker (`blocked_since`), per-node audit (`node_runs`, `provider_attempts`), checks, artifacts (each with a sha256), publish idempotency, subtasks, advisory `evaluations`, and the durable editing/own sessions (`editing_lineage` / `node_lineage` — the only place a raw session id is ever stored). `editing_lineage` is keyed `(task_id, subtask_order, lineage_key)`, so one execution unit can carry more than one durable editing session — one per lineage, keyed `lineage_affinity or <node id>`. Because the orchestrator is **greenfield**, the store does not migrate across destructive versions: a brand-new database is created at the current shape, and an older-versioned one is refused fail-closed (recreate it). A newer one is also refused.
+SQLite (`state.db`, schema **v21**). It holds the task status, the flow checkpoint (`current_node` + counters + fingerprint), the B-lite soft-pause markers (`blocked_since`, plus `blocked_until` when a provider named its own reset instant), per-node audit (`node_runs`, `provider_attempts`), checks, artifacts (each with a sha256), publish idempotency, subtasks, advisory `evaluations`, and the durable editing/own sessions (`editing_lineage` / `node_lineage` — the only place a raw session id is ever stored). `editing_lineage` is keyed `(task_id, subtask_order, lineage_key)`, so one execution unit can carry more than one durable editing session — one per lineage, keyed `lineage_affinity or <node id>`. Because the orchestrator is **greenfield**, the store does not migrate across destructive versions: a brand-new database is created at the current shape, and an older-versioned one is refused fail-closed (recreate it). A newer one is also refused.
 
 ### 4.8 Human-in-the-Loop via Telegram
 
 A transport-neutral `Notifier` provides terminal notifications and one durable question/approval round-trip that blocks a single checkpoint.
 
-- `refinement` and `planning` may emit one typed question or approval. Questions use ForceReply; approvals use inline buttons. Only the configured chat and exact prompt/callback are accepted.
-- After an `implementation`/`fixing` edit, tracked-file deletions and dependency manifest/lock changes require approval before tests (an exact planning pre-approval can pre-clear a matching diff).
-- A **changed check-command set** is gated, fail-closed, on first use.
+- Which nodes may ask is **declared by the flow**, not hardcoded: an `agent` node carries `hitl: {allow_question, allow_approval}`, and each grant is worth one typed round-trip. In the packaged `implementation` flow that is `refinement` (question only) and `planning` (question + approval). Questions use ForceReply; approvals use inline buttons. Only the configured chat and exact prompt/callback are accepted.
+- After an `implementation`/`fixing` edit, tracked-file deletions and dependency manifest/lock changes require approval before tests (an exact planning pre-approval can pre-clear a matching diff). Under the default `security.trust_level: auto` that diff-shape gate is off and only a `security.protected_paths` match raises approval; `strict` restores it. `protected_paths` is the always-ask floor under either level.
+- A standalone `hitl` node is the bare durable gate; `orchestrator.auto_mode.confirm_next_task` and the Claude `max_turns_gate` are the two other fail-closed prompts, both off by default and both requiring `telegram.enabled`.
 - Waiting state is a durable artifact under `logs/<task-id>/hitl/`; a restart resumes the message/deadline. Timeout, transport failure, ambiguous approval, or a repeated request → `manual_action_required`. Routine commit/push/PR is never gated.
 
 ### 4.9 Security policy
 
 `argv` only (no shell interpolation of user strings); the agent runs in `workspace-write` sandbox with `on-request` approvals; only allowlisted environment variables reach child processes; `denied_read_paths` and `denied_commands` are enforced; front matter is scanned for injection-shaped tokens (belt-and-braces over the file-path-only context guarantee); `strict_isolation` fails preflight if isolation cannot be enforced. No task and no `extra_args` can weaken any of this; the flow ceilings are validated fatally before any task runs.
 
-**`read-only` means "cannot write", not "has no shell".** The profile's guarantee is about mutation, and a node may legitimately need to _read_ delivery history to cite it. A flow node declaring `git_evidence: true` may — once the operator sets `security.allow_git_evidence` — run the read-only git verbs (`log`, `show`, `diff`, `blame`, `status`, `rev-list`, `rev-parse`, `ls-files`, `shortlog`, `describe`, `cat-file`, `for-each-ref`) while staying `read-only` on disk: Claude scopes the shell to those verbs and write-denies the whole clone in its OS sandbox (refusing outright on a host where it cannot sandbox a shell), Codex's `read-only` sandbox already forbids every mutation, `denied_commands` remains the floor under both, and commit/push/PR stay the orchestrator's alone. Both halves are required — a flow can express the need but cannot grant itself the capability. Read the config switch as a **grant** switch, not a kill switch: with it off, a Codex `read-only` node still reads git history (its sandbox permits commands; the mutation ban comes from the workspace being mounted read-only with the network off), so the provider asymmetry persists until the switch is on and the two providers' reach matches.
+**`read-only` means "cannot write", not "has no shell".** The profile's guarantee is about mutation, and a node may legitimately need to _read_ delivery history to cite it. A flow node declaring `git_evidence: true` may — once the operator sets `security.allow_git_evidence` — run the read-only git verbs (`log`, `show`, `diff`, `blame`, `status`, `rev-list`, `rev-parse`, `ls-files`, `shortlog`, `describe`, `cat-file`, `for-each-ref`) while staying `read-only` on disk: Claude scopes the shell to those verbs and write-denies the whole clone in its OS sandbox — and where it cannot sandbox a shell under `strict_isolation` it never runs one unsandboxed, refusing the node outright on Linux/WSL2 without `bubblewrap`+`socat` (a non-fallback `capability_unavailable` raised before any paid call) and simply dropping `Bash` on native Windows, where the granted shell goes away with it. Codex's `read-only` sandbox already forbids every mutation, `denied_commands` remains the floor under both, and commit/push/PR stay the orchestrator's alone. Both halves are required — a flow can express the need but cannot grant itself the capability. Read the config switch as a **grant** switch, not a kill switch: with it off, a Codex `read-only` node still reads git history (its sandbox permits commands; the mutation ban comes from the workspace being mounted read-only with the network off), so the provider asymmetry persists until the switch is on and the two providers' reach matches.
 
-As **defense in depth** (not enforcement), the orchestrator also prepends a short, fixed, Core-owned **security preamble** to every provider prompt (agent/evaluator/supervisor) — "don't read/mutate `.worc`/`.worc-io`/`.git`/`tasks/`/instruction/credential files; never commit/push" — built once from the layout constants and carried on `AgentRunRequest.security_preamble`, prepended at the single neutral seam `build_effective_prompt` (order `preamble → role prompt → context footer`); it gains a read-restraint reinforcement when read-isolation is off, and is a soft backstop only — the sandbox + deny projection remain the enforcement (VF-7).
+As **defense in depth** (not enforcement), the orchestrator also prepends a short, fixed, Core-owned **security preamble** to every provider prompt (agent/evaluator/supervisor) — "change only what the task requires and only inside your clone; don't read or write `.worc/`; `.worc-io/` is read-only input; don't touch git control state or `tasks/`; never commit/push/merge or open a PR; never read credential files or provider auth homes" — built once from the layout constants and carried on `AgentRunRequest.security_preamble`, prepended at the single neutral seam `build_effective_prompt` (order `preamble → role prompt → context footer`). The repo's own root instruction files (`AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`) are deliberately **not** in that deny list — the preamble names them as ordinary repository files to edit when the task calls for it, forbidding only the opportunistic rewriting of the agent's own rules. Together with `.agents/rules/**` they are the fixed governance set: a diff that touches one is not blocked, it is _reported_ to the operator (console, PR summary, ledger, Telegram). It gains a read-restraint reinforcement when read-isolation is off, and is a soft backstop only — the sandbox + deny projection remain the enforcement (VF-7).
 
 ---
 
@@ -162,7 +162,7 @@ As **defense in depth** (not enforcement), the orchestrator also prepends a shor
 | `implementation` | default | code → Pull Request | the default coding pipeline + two fix loops + a whole-task `documentation` node + optional decomposition |
 | `deep_research` | `deep_research` | a documentation PR (`docs/research/<id>/`) | three disjoint analysis passes behind a `coverage_gate`, `external_research` (network-gated), a `citation` checker, a `command_profile` document gate, two non-blocking evaluators |
 | `security_audit` | `security_audit` | a **private** report under `.worc/security-reports/<id>/` | a `dependency_scan` checker; `publishing: none` (no git at all) |
-| `merge` | — (not task-dispatched) | a resolved, green base-merge | `conflict_resolution` → `testing` with a bounded `merge_fix` loop; terminal `publish` with `policy: none`. Selected by `git.merge_flow`, run only when `worc merge-task` hits a conflict |
+| `merge` | `merge` — never dispatched by a task | a resolved, green base-merge | `conflict_resolution` → `testing` with a bounded `merge_fix` loop (budget 5); terminal `publish` with `policy: none` — the flow itself runs **no** git operation. Selected by `git.merge_flow`, run only when `worc merge-task` hits a conflict |
 | `content_chapter` | `content_chapter` | an edited long-form chapter (`code_change`) | the deterministic `check_chapter` `tool` gate + a blocking story critic + a style pass |
 | `content_translate` | `content_translate` | an English production chapter (`code_change`) | `check_chapter` with per-page length `args` + an adaptation critic |
 | `blog_article` | `blog_article` | one new authorial article (`code_change`) | a networked researcher + the `check_length` `tool` floor + a blocking tone/style critic + a polish pass |
@@ -224,7 +224,7 @@ Each transition is asserted against an explicit `ALLOWED_TRANSITIONS` table and 
 `config.yaml` is **infrastructure + provider defaults + non-weakenable safety caps** — the flow owns the graph, the config owns the environment. The full reference (every field, default, and validation rule) is [configuration.md](configuration.md); the packaged starting point is [`config.example.yaml`](../src/wastech_orchestrator/packaged/config.example.yaml). The shape, in brief:
 
 ```yaml
-schema_version: 34
+schema_version: 35
 
 orchestrator:
   auto_mode: { enabled: false } # pick the next pending task after cleanup
@@ -232,7 +232,14 @@ orchestrator:
   queue: default # this instance's static selector over a shared task pool
 
 repo:
-  { url, local_path, base_branch: main, branch_prefix: worc, branch_mode: new }
+  {
+    url,
+    local_path,
+    base_branch: main,
+    branch_prefix: worc,
+    branch_mode: new,
+    checkout_base_on_cleanup: null,
+  }
 paths: { tasks_dir: tasks } # the repo-relative task lifecycle root
 
 agents:
@@ -240,6 +247,13 @@ agents:
   max_stage_attempts: 3
   max_fix_cycles: 15
   max_total_fix_iterations: 30 # >= max_fix_cycles
+  retry: # bounded same-provider transient retry + the soft-pause ceiling
+    {
+      max_attempts: 2,
+      base_delay_s: 2.0,
+      max_delay_s: 30.0,
+      max_blocked_s: 21600.0,
+    }
   decomposition: { enabled: false, max_subtasks: 8, ... }
   providers: # node-based routing: a node declares `provider`, else the global primary below
     claude:
@@ -248,12 +262,17 @@ agents:
         model: "",
         reasoning: null,
         permission_profile: workspace-write,
+        max_turns: 400,
         primary: true,
       }
     codex:
+      # `permission_profile` is the provider-neutral access level for BOTH providers; a legacy
+      # `sandbox: read-only|workspace-write` is rejected. `sandbox` survives on codex only as the
+      # `danger-full-access` escape, loadable under `strict_isolation: false`.
       {
         command: codex,
-        sandbox: workspace-write,
+        model: "",
+        reasoning: null,
         permission_profile: workspace-write,
       }
 
@@ -325,7 +344,7 @@ The `control_home` control plane (`config.yaml`, `flows/` + their `roles/`, `too
 
 The second root is the **exchange** `<repo>/.worc-io/<task-id>/` (WRI-001) — the only provider-readable orchestration surface. Everything an agent reads as a context path (the task snapshot, `plan.md`, `current.diff`, the first failing checks log, evaluator `findings.json`, generic `<node>.out.md` / tool `stdout.txt`, subtask specs, handoff briefs, memory packets, a sanitized HITL answer packet, selected skill snapshots) is published there through **one redaction + path-safety boundary** (`providers/exchange.py`): content is scrubbed, the destination is proven a contained single-link regular file (no symlink/junction/reparse/hard-link/NTFS-ADS escape), the write is atomic and LF-stable. Private writers keep writing under `.worc/logs/` unchanged — each routing point is additive (the private copy stays the audit record; only a redacted copy crosses). A pre-launch invariant enforces that `.worc-io/` holds at most the current task's directory, and each provider request is checked so no live/private/control path (only `working_directory`) reaches the agent. At every terminal status the orchestrator **seals** a checksum-verified copy into `<private_home>/runs/exchange-seals/<task-id>/seal-<NNNNNN>/` and then removes the active `.worc-io/<task-id>/` (WRI-007), so a terminal task never leaves an agent-readable exchange behind; `rerun --continue` restores the latest verified snapshot. A tree that mutation detection flags is **quarantined** to `runs/exchange-quarantine/<task-id>/<NNNNNN>/` instead, and `--continue` is refused.
 
-The **only** things outside these two roots are the `tasks/` lifecycle dirs (`pending`/`done`/`failed`) at the repo root, which are git-tracked: the task file plus its `<id>.summary.md` (in `done/` or `failed/`) are the committed audit trail. The code commit excludes `.worc/` (gitignored), `.worc-io/` (gitignored), and `tasks/` (it rides the separate audit commit). Parallel tasks via `git worktree` remain on the roadmap (see [backlog/](backlog/)).
+The **only** things outside these two roots are the `tasks/` lifecycle dirs (`preparing`/`pending`/`done`/`failed`) at the repo root, which are git-tracked: the task file plus its `<id>.summary.md` (in `done/` or `failed/`) are the committed audit trail. The code commit excludes `.worc/` (gitignored), `.worc-io/` (gitignored), and `tasks/` (it rides the separate audit commit). Parallel tasks via `git worktree` remain on the roadmap (see [backlog/](backlog/)).
 
 ---
 
@@ -341,10 +360,10 @@ The **only** things outside these two roots are the `tasks/` lifecycle dirs (`pe
 7.  the engine traverses the flow (default: refine → plan → implement → test → review → fix(loop) → document → publish):
       - agent nodes run via the router → a provider adapter; the supervisor layer observes completed steps read-only at its configured cadence
       - testing runs the diff-selected command sets; review is a read-only evaluator; edits are guarded by the dangerous-diff classifier
-      - HITL: refinement/planning may ask one durable question/approval; dangerous diffs and changed check sets are gated, fail-closed
+      - HITL: a node the flow granted `hitl:` may ask one durable question/approval; a dangerous diff is gated fail-closed (protected_paths always; every deletion/dependency edit under trust_level: strict)
 8.  at close the supervisor layer synthesizes summary.md (or, absent/collapsed, the deterministic report becomes the PR body); the orchestrator moves the task file → tasks/done/ (or failed/)
 9.  publish: scoped code commit + task-scoped audit commit, push, gh pr create (PR body = the summary) — idempotent
-10. terminal cleanup → checkout repo.base_branch → fetch + pull --ff-only; write one ledger record; notify via Telegram
+10. terminal cleanup → checkout repo.base_branch (when the branch mode / checkout_base_on_cleanup says to) → fetch + pull --ff-only; write one ledger record; notify via Telegram
 11. discovery & auto mode: the watch loop keeps refreshing base every poll_interval_seconds; with auto_mode on, the next
       pending task starts ONLY after cleanup returned to base; otherwise idle (still polling)
 12. (resume) on a crash at any step — continue from the flow checkpoint node, or finish an incomplete terminal cleanup
@@ -379,7 +398,7 @@ memory        inspect and curate the persistent store (show / validate / compact
 upgrade-config / upgrade-docs  materialize new config keys / refresh the packaged guide
 ```
 
-Every command is also available under the short alias `worc`. Exit codes: `0` done, `1` failed, `2` `manual_action_required`. Global options (`--config`, `--log-level`, `--log-format`, `--log-file`, `--heartbeat-seconds`) go before the subcommand.
+The canonical entry point is `wastech-orchestrator`; `worc` is the short alias for the same command. Exit codes: `0` done, `1` failed, `2` `manual_action_required`, `3` **soft-paused** (the resumable B-lite park — not a terminal failure, so CI can tell "provider down, still resumable" from "failed"). Global options (`--config`, `--env-file`, `--log-level`, `--log-format`, `--log-file`, `--heartbeat-seconds`) go before the subcommand.
 
 ---
 
