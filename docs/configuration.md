@@ -34,14 +34,14 @@ Exactly one configured provider must set `primary: true` — the **global primar
 ## `schema_version`
 
 ```yaml
-schema_version: 34
+schema_version: 35
 ```
 
-Optional top-level integer marking the `config.yaml` **format** version (current: `34`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
+Optional top-level integer marking the `config.yaml` **format** version (current: `35`). The orchestrator **refuses a config whose `schema_version` is newer than it understands** (clean `error:` message, exit 2) so an older install never misreads a newer format; an absent or older value is accepted. `install` stamps the current version into generated configs. It is bumped only when the config format changes, independently of the package version. See the spec's "Versioning and compatibility" section and [operations.md](operations.md#upgrading-the-orchestrator).
 
 ## Config Discovery
 
-Commands that load config (`run`, `watch`, `preflight`, `status`) resolve `config.yaml` in this order:
+Every command except `install`, `clear`, and `completion` loads config; each resolves `config.yaml` in this order:
 
 1. an explicit `--config PATH`;
 2. `<repo-root>/.worc/config.yaml`, discovered by walking up from the current directory to the Git root (so any command works from any subdirectory of the repo);
@@ -134,7 +134,9 @@ paths:
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `tasks_dir` | string | `"tasks"` | Repo-relative directory holding the `pending` / `done` / `failed` lifecycle subfolders. Rename it to avoid clashing with a repo that already uses `tasks/` for something else. |
+| `tasks_dir` | string | `"tasks"` | Repo-relative directory holding the `preparing` / `pending` / `done` / `failed` lifecycle subfolders. Rename it to avoid clashing with a repo that already uses `tasks/` for something else. |
+
+`preparing/` is the staging area the `watch` scanner never looks in: compose a task there at leisure, then `worc promote [ID_OR_FILE]` (or `worc promote --all`) moves it into `pending/` atomically, so a half-written file is never claimed mid-edit. A decomposition root pulls its subtask specs along with it.
 
 The value is validated as repo-relative: no absolute path, no `~`, no `..` traversal, and it must **not** live under the gitignored `.worc/` home (that would silently drop the audit trail from Git). A repo-relative subpath (e.g. `config/tasks`) is allowed. The lifecycle subfolder names themselves are fixed.
 
@@ -208,7 +210,7 @@ Validation rejects negative values and `max_delay_s < base_delay_s`. Each attemp
 
 There is no `agents.routing` block. Provider routing lives on the **flow node**: each agent/evaluator node may declare a `provider:` (`codex` | `claude`), and a node with no `provider` runs on the **global primary** — the one configured provider with `primary: true` (see [`agents.providers`](#agentsproviders)). Infrastructure fallback is **symmetric** across the two allowed providers: when a node's primary differs from the global primary, an infrastructure failure falls back to the global primary; when the node already runs on the global primary, it falls back to the **other** allowed provider (Claude↔Codex). With only one allowed provider there is no fallback target — an infrastructure failure is handled by the `agents.retry` same-provider budget, then the soft pause.
 
-`testing` and `publishing` never run an agent. The Check Runner owns `testing`; the Git Manager owns `publishing`.
+A `checks` node and a `publish` node never run an agent (in the packaged `implementation` flow, the nodes `testing` and `publish`). The Check Runner owns the first; the Git Manager owns the second.
 
 Rules (enforced at load/validate and at flow preflight):
 
@@ -296,7 +298,7 @@ agents:
 
 These are caught at **config load** — the whole config is rejected before any task runs — re-checked by the provider command builder at launch, and re-checked on a flow node's `extra_args` at flow load. Note `--dangerously-skip-permissions` stays forbidden even though it is functionally the flag form of `bypassPermissions`: keeping the whole `--dangerously*` namespace bright is the parity rule.
 
-**Reserved Claude `extra_args` (WRI-002).** Claude flags that would re-open a surface the adapter deliberately closes are **rejected regardless of `strict_isolation`** (they are not the sanctioned full-access opt-out — an operator who wants that uses the gated `--permission-mode bypassPermissions` below): `--tools`, `--allowedTools`/`--disallowedTools`, `--settings`, `--setting-sources`, `--mcp-config`, `--strict-mcp-config`, `--add-dir`, `--file`, `--agent`/`--agents`, `--plugin-dir`/`--plugin-url`, `--chrome`/`--ide`/`--remote-control`, `--bg`/`--background`/`--worktree`/`--tmux`, `--system-prompt`/`--append-system-prompt[-file]`, `--session-id`/`--fork-session`/`--resume`/`--continue`, `--safe-mode`, `--bare`. The orchestrator owns tools/settings/MCP/session — a task or flow cannot supply them.
+**Reserved Claude `extra_args` (WRI-002).** Claude flags that would re-open a surface the adapter deliberately closes are **rejected regardless of `strict_isolation`** (they are not the sanctioned full-access opt-out — an operator who wants that uses the gated `--permission-mode bypassPermissions` below): `--tools`, `--allowedTools`/`--allowed-tools`, `--disallowedTools`/`--disallowed-tools`, `--settings`, `--setting-sources`, `--mcp-config`, `--strict-mcp-config`, `--add-dir`, `--file`, `--agent`/`--agents`, `--plugin-dir`/`--plugin-url`, `--chrome`/`--no-chrome`/`--ide`/`--remote-control`/`--remote-control-session-name-prefix`, `--bg`/`--background`/`--worktree`/`-w`/`--tmux`, `--system-prompt`/`--system-prompt-file`/`--append-system-prompt`/`--append-system-prompt-file`, `--session-id`/`--fork-session`/`--no-session-persistence`/`--resume`/`-r`/`--continue`/`-c`/`--from-pr`, `--safe-mode`, `--bare`, `--disable-slash-commands`. The orchestrator owns tools/settings/MCP/session — a task or flow cannot supply them. Note the short forms are reserved too, and that `-c` means `--continue` here (under Codex the same token is `--config`, reserved for its own reason below); both are matched in split (`--tools X`) and inline (`--tools=X`) form.
 
 **Reserved Codex `extra_args` (WRI-003).** Codex flags that would select, replace, or weaken the permission profile, config-isolation, workspace, tool, or approval/sandbox policy the adapter owns are likewise **rejected regardless of `strict_isolation`**: `-c`/`--config`, `-p`/`--profile`, `-P`/`--permission-profile`, `-s`/`--sandbox`, the approval/sandbox-mode selectors `--full-auto` and `-a`/`--ask-for-approval`, `--add-dir`, `--ignore-user-config`, `--enable`/`--disable`, `--oss`, `--local-provider`, `--skip-git-repo-check`, `--ephemeral`, `--strict-config`, `-C`/`--cd`, and the output-plumbing flags the adapter sets itself (`--output-schema`, `--json`, `-o`/`--output-last-message`, `--color`). `--full-auto` matters especially: it turns on `--sandbox workspace-write`, and selecting **any** `--sandbox` mode makes Codex stop applying the generated `default_permissions="worc"` profile — the private-file read denials (`.worc`/`.env`/`state.db`) would silently vanish. (The full-access escape stays the gated `sandbox: danger-full-access` below, never an argv flag.)
 
@@ -413,8 +415,6 @@ validation:
   max_task_lines: 5000
   max_line_bytes: 8192
   max_control_ratio: 0.01
-  required_fields: ["id", "title"]
-  reject_unknown_fields: true
   quarantine_folder: "./.worc/tasks/rejected"
 ```
 
@@ -424,9 +424,9 @@ validation:
 | `max_task_lines` | integer | `5000` | Maximum number of lines. |
 | `max_line_bytes` | integer | `8192` | Maximum UTF-8 byte length for one line. |
 | `max_control_ratio` | number | `0.01` | Maximum share of disallowed control characters. |
-| `required_fields` | list of strings | `["id", "title"]` | Schema field for required front matter. The current gate requires `id`, `title`, and a Description body. |
-| `reject_unknown_fields` | boolean | `true` | Schema field for unknown front matter policy. The current gate rejects unknown task fields fail-closed. |
 | `quarantine_folder` | string | `"./.worc/tasks/rejected"` | Destination for structurally rejected task files (under the gitignored `.worc/` home, so rejects are never swept into the audit commit). |
+
+**Two things here are deliberately not operator-configurable.** The required front matter (`id`, a non-blank `title`, and a non-empty `Description` section) and the fail-closed deny on an unrecognized front-matter key are hard-coded in the task gate, checked against the canonical `ALLOWED_TASK_KEYS` set. The `required_fields` and `reject_unknown_fields` keys that once pretended otherwise were parsed, stored, and written by `install`, yet read by nothing — they were **removed in `schema_version` 35**, because a config able to drop `id` from the required set, or to open the unknown-key gate, would weaken invariants the branch names, run directories, and state store all depend on. Both are tolerated (ignored) on load, since every config `install` ever wrote carries them; `upgrade-config` strips them.
 
 Current task front matter fields are:
 
@@ -634,7 +634,7 @@ For a node whose real product is a **file it writes**, what the channel carries 
 
 **Put an optional section's heading _inside_ its block.** Blocks do not nest and there is no "any-of-these-variables" form, so a heading left outside the block it introduces cannot track whether the section is empty — it renders with nothing under it. Give each optional item its own heading within its own block (`{?memory_path}\n\n## Repository Memory\n\n…{/memory_path}`) and fold the leading blank line in too; the heading then appears exactly when its content does. The packaged `planning`/`implementation`/`fixing`/`review` roles follow this for their memory / subtask / predecessor items. Avoid the inverse temptation — one shared heading guarded by a separate flag — because nothing can tell it which of _your_ variables the section actually holds.
 
-**Safety.** Role files are prompt **text** only — delivered to the CLI on stdin, never as a command argument. A role file cannot change the provider, `extra_args`, sandbox/approval mode, denied commands, denied reads, the environment allowlist, or fallback policy; it cannot enable `git commit`/`git push`/`gh pr create`. Each rendered prompt is written, redacted, to `logs/<task-id>/stages/<stage>/run-<node-run-id>/rendered-prompt.md` for audit (one per node run — a re-running node keeps every pass). See [operations.md](operations.md) for troubleshooting.
+**Safety.** Role files are prompt **text** only — delivered to the CLI on stdin, never as a command argument. A role file cannot change the provider, `extra_args`, sandbox/approval mode, denied commands, denied reads, the environment allowlist, or fallback policy; it cannot enable `git commit`/`git push`/`gh pr create`. Each rendered prompt is written, redacted, to `logs/<task-id>/stages/<node-id>/run-<node-run-id:06d>/rendered-prompt.md` for audit (one per node run — a re-running node keeps every pass, since the run id is part of the path). See [operations.md](operations.md) for troubleshooting.
 
 ## Flows (`task_type` dispatch and operator flows)
 
@@ -643,7 +643,7 @@ The pipeline a task runs is a **flow** — a declarative YAML graph of nodes (`a
 There is no flow block in `config.yaml`. Flows live as files in the operator's `.worc/flows/`, the sole resolution source (see the [Flow authoring guide](flow-authoring.md) for a from-scratch walkthrough):
 
 - **Operator flows** — `<repo>/.worc/flows/<task_type>.yaml`. Drop a YAML file here to add a new `task_type` or to replace a built-in of the same name. Role files live in each flow's own subdir under `.worc/flows/<task_type>/*.md`.
-- **Built-ins are delivered, not resolved from the package.** The built-ins — `implementation`, `deep_research`, `security_audit`, `merge`, `content_chapter`, `content_translate`, `blog_article`, `blog_article_revise` — ship inside the package under `packaged/flows/`, but that tree is **delivery-only**: **`install` seeds `.worc/flows/`** with editable copies of each (`<task_type>.yaml` plus its `<task_type>/` prompt dir, and the shared `roles/`), and the orchestrator never reads the packaged tree at run time. `install` likewise delivers the `tool` executables the packaged flows reference into `.worc/tools/`. So out of the box every built-in is already an operator flow you can edit; a package upgrade does not refresh the copies, so `install --reconfigure` refreshes them to the packaged version (snapshotting the existing dir to `flows.bak-<UTC>` first, keeping only the newest three such snapshots). A `task_type` with no file in `.worc/flows/` is a hard "flow not found", not a silent fall-back to a bundled copy. `merge` is the one built-in that is never task-dispatched: it is selected by [`git.merge_flow`](#git) and runs only when `worc merge-task` hits a base-merge conflict.
+- **Built-ins are delivered, not resolved from the package.** The built-ins — `implementation`, `deep_research`, `security_audit`, `merge`, `content_chapter`, `content_translate`, `blog_article`, `blog_article_revise` — ship inside the package under `packaged/flows/`, but that tree is **delivery-only**: **`install` seeds `.worc/flows/`** with editable copies of each (`<task_type>.yaml` plus its `<task_type>/` prompt dir, and the shared `roles/`), and the orchestrator never reads the packaged tree at run time. `install` likewise delivers the `tool` executables the packaged flows reference into `.worc/tools/`. So out of the box every built-in is already an operator flow you can edit; a package upgrade does not refresh the copies, so `install --reconfigure` refreshes them to the packaged version (snapshotting the existing dir to `flows.bak-<UTC>` first — and `.worc/tools/` to `tools.bak-<UTC>` alongside it — keeping only the newest three snapshots of each kind, matched by the fixed-width UTC stamp so a backup you named by hand is never pruned). A `task_type` with no file in `.worc/flows/` is a hard "flow not found", not a silent fall-back to a bundled copy. `merge` is the one built-in that is never task-dispatched: it is selected by [`git.merge_flow`](#git) and runs only when `worc merge-task` hits a base-merge conflict.
 
 `config.yaml` is **infrastructure + provider defaults** that the flow's nodes fall back to (`model`/`reasoning`/`permission_profile`/`timeout`), plus the non-weakenable safety caps. The flow owns the graph; the config owns the environment. Trust is file-level: an operator flow is trusted to the same degree as `config.yaml` (same owner, same directory), and the fatal validator below guarantees it can never escalate beyond the ceiling.
 
@@ -688,7 +688,7 @@ nodes:
     reasoning: xhigh # spend the most reasoning where rework is decided
 ```
 
-The full set of optional per-node fields (all default to the value shown):
+The per-node fields that override something `config.yaml` sets, plus the evaluator's own gates (all default to the value shown). The fields that shape the graph rather than override the config — `session_scope`, `lineage_affinity`, `when`, `hitl`, `skills`, `output_schema`, `output_artifact` — belong to the flow author and are documented in the [Flow authoring guide](flow-authoring.md):
 
 | Field | Node kinds | Default | Meaning |
 | --- | --- | --- | --- |
@@ -834,7 +834,7 @@ The whole-task handoff is two files under `logs/<task-id>/`: the human `summary.
 
 The report's sections are **Changes / Steps / Checks / Gates / Technical debt / follow-ups / Pipeline nodes skipped**. It is a pure function of `state.db` plus the task's artifacts — two renders of one run are byte-identical — and it **never inlines the diff**: a pull request already _is_ its diff, so the report names the changed paths and points at `logs/<task-id>/current.diff`. A `failed` or `manual_action_required` run therefore gets a real report rather than a stub.
 
-**How the follow-ups section is composed.** Every evaluator finding is persisted with a `gating` flag, so only the findings a gate actually **let past** become PR follow-ups — plus a gating finding still open because a _non-blocking_ evaluator spent its `max_rework_per_stage` budget, worded as still open. Each mechanically derived record carries the evaluator's own `fix` as its `action_hint` and a `title` that is the finding's first sentence, with the remainder in `rationale` (rather than a mid-word truncation). The persisted finding shape is `{severity, reason, paths, gating, fix}`, and `failure_report.json` findings gain the same additive keys. The finalize turn is told not to restate the accepted findings merged in for it. This composition runs regardless of `supervisor.emit_follow_ups`, which only governs the _supervisor-authored_ half.
+**How the follow-ups section is composed.** Every evaluator finding is persisted with a `gating` flag, so only the findings a gate actually **let past** become PR follow-ups — plus a gating finding still open because a _non-blocking_ evaluator spent its `max_rework_per_stage` budget, worded as still open. Each mechanically derived record carries the evaluator's own `fix` as its `action_hint` and a `title` that is the finding's first sentence, with the remainder in `rationale` (rather than a mid-word truncation). The persisted finding shape is `{severity, reason, paths, gating, fix}`, and `failure_report.json` findings gain the same additive keys. The finalize turn is told not to restate the accepted findings merged in for it. This composition runs regardless of `supervisor.emit_follow_ups`, which only governs the _supervisor-authored_ half — and which is a **flow** key, declared in a flow's own `supervisor:` block (the packaged `implementation` flow sets it), not a `config.yaml` one: the config `supervisor` block accepts only `enabled`, `role_file`, `provider`, `observe`, `finalize`, and `handoff`, and anything else there is a fail-closed unknown key.
 
 ## `logging`
 
@@ -929,7 +929,7 @@ Optional top-level boolean (default `false`). Added in `config.yaml` `schema_ver
 prompt_audit: false # record each step's prompt + who (provider/model/attempt/fallback/status)
 ```
 
-Each per-step file is named `<stage_run_id:06d>-<stage>[-sub<NN>].json` (the zero-padded `stage_run_id` makes a lexical sort chronological) and lists every agent that ran the prompt — the primary plus any fallback — with its attempt number, status, and error class; the prompt is identical across a stage's attempts, so it is stored once. The prompt text is redacted with the same policy as `rendered-prompt.md` (no secrets in artifacts). The directory is archived into `attempt-<N>/` on `rerun` like the rest of the task's logs.
+Each per-step file is named `<node_run_id:06d>-<node-id>[-sub<NN>].json` (the zero-padded `node_run_id` makes a lexical sort chronological) and lists every agent that ran the prompt — the primary plus any fallback — with its attempt number, status, and error class; the prompt is identical across a stage's attempts, so it is stored once. The prompt text is redacted with the same policy as `rendered-prompt.md` (no secrets in artifacts). The directory is archived into `attempt-<N>/` on `rerun` like the rest of the task's logs.
 
 A per-task `prompt_audit: true|false` in the [task front matter](task-authoring.md) **always overrides** this global value (task wins, in both directions — there is no operator gate). So a global `true` audits every task, while a global `false` plus a per-task `true` audits only that task.
 
