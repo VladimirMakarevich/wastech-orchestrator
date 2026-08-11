@@ -766,16 +766,20 @@ def _copy_worc_docs(dest_root: Path, *, overwrite: bool, dry: bool) -> tuple[lis
 
 
 def _flows_root() -> Traversable:
-    """The packaged built-in flows (``implementation``/``deep_research``/``security_audit``) and
-    their per-node role-prompt templates under each flow's own subdir (works from a source tree or a
-    wheel).
+    """Every packaged built-in flow and its per-node role-prompt templates, under each flow's own
+    subdir (works from a source tree or a wheel).
+
+    Deliberately *not* enumerated here: the shipped set is whatever ``packaged/flows/*.yaml``
+    contains, and a name list in a docstring only drifts behind it (it already had). Read the
+    directory for the current set.
 
     ``install`` copies this whole tree into ``.worc/flows/`` so the operator gets editable, *active*
-    copies: the registry prefers ``<repo>/.worc/flows/<task_type>.yaml`` over the packaged built-in,
-    and a node's ``role_file`` resolves under its flow-owned dir ``.worc/flows/<task_type>/``.
-    Unlike the generated ``guide/``, these are operator-editable, so a plain re-run never clobbers
-    them (see
-    ``_copy_packaged_flows`` / ``_backup_flows_dir``).
+    copies — which is the only reason a built-in is runnable at all: the registry resolves
+    ``<repo>/.worc/flows/<task_type>.yaml`` and nothing else, so this tree is delivery-only and is
+    never read at task-execution time (an unresolved ``task_type`` is an error, not a fall-back to
+    the bundled copy). A node's ``role_file`` resolves under its flow-owned dir
+    ``.worc/flows/<task_type>/``. Unlike the generated ``guide/``, these are operator-editable, so a
+    plain re-run never clobbers them (see ``_copy_packaged_flows`` / ``_backup_flows_dir``).
     """
     return resources.files("wastech_orchestrator").joinpath("packaged", "flows")
 

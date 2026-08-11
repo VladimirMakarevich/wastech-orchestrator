@@ -4,8 +4,9 @@ Two mechanisms, both triggered by **declared data**, never a stage name:
 
 * :func:`apply_output_artifact` — when an agent node declares ``output_artifact: <slot>``, write
   the agent's output to that slot file, register it, and thread the path into the downstream
-  :class:`NodeInputs` (so the next node gets ``{plan_path}`` / ``{summary_body_path}``). The slot
-  vocabulary is core-fixed (validated at load); the flow only picks *which* node fills it.
+  :class:`NodeInputs` field the slot names (``plan_path``, read by the next node's ``{plan_path}``;
+  ``summary_body_path``, read by the ``publish`` node for the PR body — not a prompt variable). The
+  slot vocabulary is core-fixed (validated at load); the flow only picks *which* node fills it.
 * :func:`read_decomposition` — read the ``decompose`` / ``subtasks`` contract off the
   ``decomposition.proposed_by`` node's output and apply the deterministic gate. The agent
   *recommends*; the core decides (no flow weakens ``max_subtasks`` or the linear-dependency rule).
@@ -142,7 +143,7 @@ def write_node_output(
 
     No-op (returns ``None``) when:
 
-    * the node fills one of the three special slots via ``output_artifact`` — that slot *is* its
+    * the node fills one of the :data:`OUTPUT_SLOTS` via ``output_artifact`` — that slot *is* its
       output channel (``{plan_path}`` etc.), so no duplicate ``.out.md`` is written (one node = one
       output); or
     * there is no content to persist (a best-effort node that produced nothing).

@@ -282,16 +282,17 @@ def test_unknown_checks_key_is_rejected() -> None:
     assert any("retries" in issue for issue in exc.value.issues)
 
 
-def test_trust_level_defaults_to_strict_and_protected_empty() -> None:
+def test_trust_level_defaults_to_auto_and_protected_empty() -> None:
     result = loads_config(_LEGACY)
-    assert result.config.security.trust_level == "strict"
+    assert result.config.security.trust_level == "auto"
     assert result.config.security.protected_paths == ()
 
 
 def test_trust_level_loads() -> None:
-    text = _LEGACY + "security:\n  trust_level: auto\n"
+    # `strict` is the non-default level, so this proves the key is read rather than defaulted.
+    text = _LEGACY + "security:\n  trust_level: strict\n"
     result = loads_config(text)
-    assert result.config.security.trust_level == "auto"
+    assert result.config.security.trust_level == "strict"
 
 
 def test_trust_level_invalid_value_is_rejected() -> None:
@@ -505,6 +506,26 @@ def test_legacy_prompts_block_is_tolerated() -> None:
     text = _LEGACY + "prompts:\n  templates_dir: './tpl'\n  mode: append\n  preamble: 'hi'\n"
     cfg = loads_config(text).config
     assert not hasattr(cfg, "prompts")
+
+
+# --- legacy validation knobs (removed in config v35) ---
+
+
+def test_legacy_validation_knobs_are_tolerated() -> None:
+    # config v35 removed `validation.required_fields` / `reject_unknown_fields`: both were parsed
+    # and written by `install`, yet read by nothing (the task gate hard-codes the required front
+    # matter and denies an unknown key unconditionally). Every config `install` wrote carries them,
+    # so they must load fail-open — ignored, never stored — and `upgrade-config` strips them.
+    text = _LEGACY + (
+        "validation:\n"
+        "  required_fields: ['id', 'title', 'owner']\n"
+        "  reject_unknown_fields: false\n"
+        "  max_task_lines: 4000\n"
+    )
+    cfg = loads_config(text).config
+    assert not hasattr(cfg.validation, "required_fields")
+    assert not hasattr(cfg.validation, "reject_unknown_fields")
+    assert cfg.validation.max_task_lines == 4000  # the live sibling key still applies
 
 
 # --- agents.retry (transient provider-failure recovery, config v20) ---

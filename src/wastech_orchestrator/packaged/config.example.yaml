@@ -2,7 +2,7 @@
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 # This is the packaged copy used by `wastech-orchestrator init` (the only example config; nothing else to sync).
 
-schema_version: 34                  # config format version; the orchestrator refuses newer configs
+schema_version: 35                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -200,9 +200,10 @@ validation:                         # input hardening gate; rejects broken tasks
   max_task_lines: 5000              # reject a task file with more lines than this
   max_line_bytes: 8192              # reject any single line longer than this (bytes)
   max_control_ratio: 0.01           # reject if control/binary chars exceed this fraction (0.01 = 1%)
-  required_fields: ["id", "title"]  # front-matter keys every task must define
-  reject_unknown_fields: true       # true = reject a task carrying front-matter keys the schema doesn't know
   quarantine_folder: "./.worc/tasks/rejected"   # rejected task files are moved here
+  # NOT configurable (and no longer accepted as keys, config v35): the required front matter
+  # (`id`, a non-blank `title`, a non-empty `Description` section) and the deny on an unrecognized
+  # front-matter key are hard-coded in the task gate. `upgrade-config` strips both old keys.
 
 checks:
   # Named per-project command sets (monorepo-ready). Empty / omitted = NO quality gate (every task

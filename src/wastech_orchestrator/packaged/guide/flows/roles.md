@@ -13,7 +13,7 @@ Prompts are short and imperative. They reference artifacts by path variable (nev
 
 ## The node output contract (what a prompt must make the agent return)
 
-Every `agent` and `evaluator` node returns a **typed structured result**, not free text — and the core re-validates it, so a malformed result fails the node. You cannot loosen this from a flow. Which contract applies is selected automatically by the node's shape:
+An `evaluator` node always returns a **typed structured result**, not free text, and so does an `agent` node whose shape selects one (`hitl:`, or the node named by `decomposition.proposed_by`). The core re-validates that result, so a malformed one fails the node, and you cannot loosen it from a flow. A plain `agent` node has no built-in schema — its output is its final message. Which contract applies is selected automatically by the node's shape:
 
 | Node shape | Must return | Notes |
 | --- | --- | --- |
@@ -45,13 +45,13 @@ An audit lens that treats delivery history as evidence — "did the change that 
 
 ## Named output slots (`output_artifact`)
 
-Besides the generic `{<id>_path}` channel, an `agent` node can fill **one** of four fixed slots with `output_artifact:`, landing its `content` in a well-known file that later nodes read by a stable variable (the node returns the content as its structured output; the orchestrator writes the file):
+Besides the generic `{<id>_path}` channel, an `agent` node can fill **one** of four fixed slots with `output_artifact:`, landing its `content` in a well-known file the orchestrator writes (the node returns the content as its structured output; it does not write files itself). Only the `plan` slot is readable from a later prompt as a variable:
 
 | `output_artifact` | Writes | Read downstream as |
 | --- | --- | --- |
 | `enriched_spec` | `task.enriched.md` | (audit only — no downstream variable) |
 | `plan` | `plan.md` | `{plan_path}` |
-| `summary` | `summary.md` | `{summary_body_path}` (normally the supervisor fills this, not a flow node) |
+| `summary` | `summary.md` | (no prompt variable — it feeds the `publish` node's pull-request body; normally the supervisor fills this, not a flow node) |
 | `report` | `report.md` (into the flow's private report dir) | (private — the `private_control_workspace_report` shape, e.g. `security_audit`; read-only node, no agent write) |
 
 The vocabulary is fixed to these four; a flow only chooses which node fills each, and one node fills at most one slot.

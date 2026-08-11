@@ -22,7 +22,7 @@ Speak in the user's language (default to the language they wrote in).
 4. **Write each subtask spec** at `tasks/preparing/subtasks/NN-<slug>.md` (`NN` = zero-padded order):
    - Front matter: `title` (**required**); `slug` (optional — defaults to `slugify(title)`; it names the `NN-<slug>.md` file); `depends_on` (optional — a list of **slugs of EARLIER subtasks only**).
    - **No `id`.** A spec file is a reduced spec, not a standalone task — that is what keeps it from ever running on its own.
-   - Body: `## Acceptance criteria` (and any per-step instructions). The body is materialized **verbatim** and injected into the implementation step, so write it however the step needs.
+   - Body: `## Acceptance criteria` (and any per-step instructions). **Required — an empty body is a reject.** The body is materialized **verbatim** into an immutable `NN-<slug>.md` spec that the edit steps (`implementation`, `fixing`) read as `{subtask_spec_path}`, so write it however the step needs.
 5. **Promote the batch** when it is complete: `worc promote <root-id>` moves the root **and the subtask specs it references** together into `tasks/pending/` (subfolder preserved), atomically — so the root never reaches the queue without its specs. (`worc promote --all` promotes everything staged, including the whole `subtasks/` subfolder.) The subtask paths are relative to the root, so they stay valid after the move; no rewriting.
 6. **Self-check** against the hard rules below before finishing.
 
@@ -65,13 +65,14 @@ depends_on: ["cart-model"] # optional; slugs of EARLIER subtasks only
 
 ## Hard rules / fail-closed reasons
 
-The whole split is validated **before any branch** and quarantined (to `tasks/rejected/`) on any violation:
+The whole split is validated **before any branch** and quarantined (to `.worc/tasks/rejected/` — the runtime quarantine, deliberately outside the git-tracked `tasks/` tree) on any violation:
 
 - **Count out of range** — fewer than 2 or more than `max_subtasks` (`subtask_count_out_of_range`).
 - **Forward / self / unknown dependency** — a subtask's `depends_on` may reference only the slugs of subtasks **before** it; the gate enforces a linear order (`subtask_depends_forward`).
 - **Missing or malformed spec file** — a referenced file that doesn't exist, has no front matter, lacks a `title`, or has an empty body (`subtask_file_missing`, `subtask_malformed`).
-- **Bad path** — every `subtasks:` entry must be repo-relative with no `..`, no absolute path, no traversal, and must resolve under the task directory. Spec files **must** live in a **subfolder** (e.g. `tasks/preparing/subtasks/…`, promoted to `tasks/pending/subtasks/…`); a path beside the root task is rejected (the scheduler scans only the top level, so a subfolder also keeps specs from running as standalone tasks).
-- **Flow can't decompose** — the task's `task_type` selects a flow with no `decomposition:` block (`flow_cannot_decompose`). The default `implementation` flow supports it.
+- **Duplicate slug** — two specs that resolve to the same slug (easy to hit with near-identical titles, since `slug` defaults to `slugify(title)`) reject the batch (`subtask_malformed`). Set an explicit `slug` when titles collide.
+- **Bad path** — every `subtasks:` entry must be repo-relative with no `..`, no absolute path, no traversal, and must resolve under the task directory (`invalid_subtask_path`). Spec files **must** live in a **subfolder** (e.g. `tasks/preparing/subtasks/…`, promoted to `tasks/pending/subtasks/…`); a path beside the root task is rejected (the scheduler scans only the top level, so a subfolder also keeps specs from running as standalone tasks).
+- **Flow can't decompose** — the task's `task_type` does not resolve at all, or selects a flow with no `decomposition:` block (`flow_cannot_decompose`). The default `implementation` flow supports it.
 
 The root task itself must still obey every single-task rule (valid `id`, only allowed front-matter keys, no secrets, no flag-shaped values, etc.).
 

@@ -101,6 +101,25 @@ def test_removed_checks_keys_are_stripped() -> None:
     assert merged["checks"]["timeout_seconds"] == 60  # operator's value preserved
 
 
+def test_removed_validation_keys_are_stripped() -> None:
+    # v35: `validation.required_fields` / `reject_unknown_fields` are removed (both were read by
+    # nothing). `upgrade-config` strips them and leaves every live sibling value untouched.
+    template = {"validation": {"max_task_lines": 5000}}
+    operator = {
+        "validation": {
+            "required_fields": ["id", "title"],
+            "reject_unknown_fields": True,
+            "max_task_lines": 4000,
+        }
+    }
+    merged, _, removed = upgrade_config_mapping(template, operator)
+    assert "required_fields" not in merged["validation"]
+    assert "reject_unknown_fields" not in merged["validation"]
+    assert merged["validation"]["max_task_lines"] == 4000  # operator's value preserved
+    assert "validation.required_fields" in removed
+    assert "validation.reject_unknown_fields" in removed
+
+
 def test_schema_version_forced_to_current() -> None:
     merged, _, _ = upgrade_config_mapping({"schema_version": CONFIG_SCHEMA_VERSION}, {"x": 1})
     assert merged["schema_version"] == CONFIG_SCHEMA_VERSION

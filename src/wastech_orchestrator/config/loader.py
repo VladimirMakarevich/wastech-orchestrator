@@ -557,13 +557,15 @@ def _build_security(raw: Any, issues: list[str]) -> SecurityConfig:
         where,
         issues,
     )
-    trust_level = _str(m, "trust_level", "strict", where, issues)
+    trust_level = _str(m, "trust_level", "auto", where, issues)
     if trust_level not in TRUST_LEVELS:
         issues.append(
             f"{where}.trust_level: invalid value {trust_level!r}, "
             f"expected one of {sorted(TRUST_LEVELS)}"
         )
-        trust_level = "strict"
+        # Unreachable in effect — a recorded issue fails the load — but keeps the value inside
+        # TRUST_LEVELS for the construction below, and matches the default above.
+        trust_level = "auto"
     return SecurityConfig(
         strict_isolation=_bool(m, "strict_isolation", True, where, issues),
         disable_read_isolation=_bool(m, "disable_read_isolation", True, where, issues),
@@ -594,20 +596,21 @@ def _build_validation(raw: Any, issues: list[str]) -> ValidationConfig:
             "max_task_lines",
             "max_line_bytes",
             "max_control_ratio",
-            "required_fields",
-            "reject_unknown_fields",
             "quarantine_folder",
         },
         where,
         issues,
+        # ``required_fields`` / ``reject_unknown_fields`` (removed v35) are tolerated, not accepted:
+        # both were read by nothing (the task gate owns the requirement and the unknown-key deny),
+        # and every config ``install`` wrote carries them, so rejecting them would brick those
+        # files. ``upgrade-config`` strips both.
+        tolerated={"required_fields", "reject_unknown_fields"},
     )
     return ValidationConfig(
         max_task_bytes=_int(m, "max_task_bytes", 262144, where, issues),
         max_task_lines=_int(m, "max_task_lines", 5000, where, issues),
         max_line_bytes=_int(m, "max_line_bytes", 8192, where, issues),
         max_control_ratio=_float(m, "max_control_ratio", 0.01, where, issues),
-        required_fields=_str_tuple(m, "required_fields", ("id", "title"), where, issues),
-        reject_unknown_fields=_bool(m, "reject_unknown_fields", True, where, issues),
         quarantine_folder=_str(m, "quarantine_folder", "./.worc/tasks/rejected", where, issues),
     )
 

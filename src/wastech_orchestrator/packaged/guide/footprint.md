@@ -1,6 +1,6 @@
 # What the orchestrator leaves in your repository
 
-Everything the orchestrator writes lives in two places: the gitignored `.worc/` home (its own state, never committed) and the `tasks/` lifecycle tree at the repository root (committed, because it is the audit trail). This page says what each directory is, when it appears, whether its presence is normal, and what may be deleted.
+Everything the orchestrator writes for itself lives in two places: the gitignored `.worc/` home (its own state, never committed) and the `tasks/` lifecycle tree at the repository root (committed, because it is the audit trail). A third place is not the orchestrator's own state but a flow's deliverable: a flow whose `output_policy` is `repository_document` — the built-in `deep_research` — writes `docs/research/<task-id>/report.md` and `sources.json`, and those are committed like any other change. (`code_change` flows have no dedicated directory: the diff itself is the deliverable. `private_control_workspace_report` keeps its report inside `.worc/` — see `security-reports/` below.) This page says what each directory is, when it appears, whether its presence is normal, and what may be deleted.
 
 Two rules hold for the whole `.worc/` home:
 
@@ -21,7 +21,7 @@ Two rules hold for the whole `.worc/` home:
 | `logs/completed.jsonl` | The **ledger**: one append-only JSON record per terminal task. The audit index of everything that has run. | Only with `worc logs clean --all`. See below. |
 | `runs/` | Per-task private runtime state, keyed by task id. Four roots — the section below explains each. | Automatically, or with `worc runs clean`. |
 | `memory/` | The persistent, repo-scoped memory store (when `memory.enabled`). | Curate it with `worc memory compact` / `worc memory clear`, not by hand. |
-| `security-reports/` | Deliverables of a flow whose output policy keeps its report private (a security audit) rather than committing it. | Yours — read them first; nothing else reclaims them. |
+| `security-reports/<task-id>/` | Deliverables of a flow whose output policy keeps its report private (`private_control_workspace_report` — the built-in `security_audit`) rather than committing it: one directory per task, each holding at least the `report.md` the policy requires. | Yours — read them first; nothing else reclaims them. |
 | `workspace/`, `tasks/rejected/`, `state.db*` | Scratch space, quarantined task files that failed the validation gate, and the authoritative task database. | `state.db` is the source of truth — never delete it while tasks are in flight. |
 | `orchestrator.pid`, `orchestrator.stop`, `orchestrator.children` | Process control for the `watch` daemon: its recorded PID, the stop sentinel `worc stop` writes, and the agent handles a hard stop needs to reap. | No — `worc stop` manages them. A stale `.pid` after a crash is cleared by the next `stop`. If a `stop` times out the `.pid` is **kept on purpose** (the stop is still pending, and it blocks a second watcher) — see below. |
 | `git-null-hooks/` | A deliberately empty directory every orchestrator-run `git` command uses as its hooks path, so no repository hook runs in an orchestrator git process. | No — it must exist and stay empty. |
@@ -43,7 +43,7 @@ Both also work through the console as `down` and `down --force-full`.
 
 A task's follow-ups otherwise reach you in two places that both answer "what did _this_ task leave behind?" — the `## Technical debt / follow-ups` section of its pull-request body, and `logs/<task-id>/summary.json`, under a directory `worc logs clean` deletes. Ten tasks that each wave three sub-threshold review findings past your gate leave thirty items across thirty places.
 
-`follow-ups.md` answers the other question: **what has this orchestrator not fixed in this repository?** As each task finishes, its follow-ups — the supervisor's own technical-debt notes plus the review findings below your `gate_severity` — are appended as one section headed by the task id and the time it finished.
+`follow-ups.md` answers the other question: **what has this orchestrator not fixed in this repository?** As each task finishes, its follow-ups — the supervisor's own technical-debt notes plus the review findings below your `gate_severity` — are appended as one section headed `## <task-id> — <task title>`, with the finish time on the line below it.
 
 Three properties worth knowing:
 

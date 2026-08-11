@@ -47,6 +47,9 @@ from wastech_orchestrator.config.schema import CONFIG_SCHEMA_VERSION
 # stripped, not migrated: one old value has two new homes, and copying it into both would put the
 # expensive model back on the cheap per-step notes. The operator re-declares what they want; the
 # loss is visible in this command's report, so there is no silent drift.
+# v35: ``validation.required_fields``/``reject_unknown_fields`` are gone — both were read by nothing
+# (the task gate hard-codes the required front matter and denies an unknown key unconditionally), so
+# stripping them removes a knob that never did anything rather than changing any behavior.
 # The parent-path may be dotted (walked segment by segment).
 _REMOVED_KEYS: tuple[tuple[str, str], ...] = (
     ("", "prompts"),
@@ -65,6 +68,8 @@ _REMOVED_KEYS: tuple[tuple[str, str], ...] = (
     ("security", "deletion_approval_exempt_paths"),
     ("supervisor", "model"),
     ("supervisor", "reasoning"),
+    ("validation", "required_fields"),
+    ("validation", "reject_unknown_fields"),
 )
 
 _UPGRADE_HEADER = (

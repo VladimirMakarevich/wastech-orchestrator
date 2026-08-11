@@ -1,19 +1,19 @@
 # `config.yaml` — complete field reference
 
-**You are an operator (or an agent helping one) configuring wastech-orchestrator.** This is the complete, self-contained reference for every `config.yaml` field — its allowed values, its default, its constraints, and when to change it. You do not need the internet or the repo's own `docs/` to fill in a config. The copy-paste template carrying these same fields is `config.example.yaml` (the file `worc init` writes); this file explains what each one means. For the _how-to_ walkthrough ("build in this order") see [README.md](README.md); for safe defaults see [best-practices.md](best-practices.md).
+**You are an operator (or an agent helping one) configuring wastech-orchestrator.** This is the complete, self-contained reference for every `config.yaml` field — its allowed values, its default, its constraints, and when to change it. You do not need the internet or the repo's own `docs/` to fill in a config. The copy-paste template carrying these same fields is `config.example.yaml` (`worc install` copies it verbatim into `.worc/`, beside the `config.yaml` it generates); this file explains what each one means. For the _how-to_ walkthrough ("build in this order") see [README.md](README.md); for safe defaults see [best-practices.md](best-practices.md).
 
 Two rules apply everywhere:
 
 - **Unknown keys fail closed.** A key the schema does not know — at the top level or inside any block — is a hard load error (a few long-removed keys are silently tolerated for back-compat). Do not invent fields.
 - **Three list fields _replace_, never extend, their defaults:** `security.allowed_environment`, `security.denied_read_paths`, `security.denied_commands`. If you write one, write the whole list you need.
 
-Blocks appear below in the packaged order. Every block except `schema_version`, `repo`, `agents`, and `security` is optional — omit it to take the defaults shown.
+Blocks appear below in the packaged order. **Every block is optional to the loader** — omit any one and it takes the defaults shown. Only one thing is structurally mandatory: exactly one `agents.providers.<id>.primary: true`, so a config with no `agents.providers` map is rejected. `repo` is optional in the same technical sense but not in practice — its defaults (`url: ""`, `local_path: "./workspace/repo"`) are placeholders, so a usable config always sets it.
 
 ## `schema_version`
 
 | Field | Type | Default | Constraint | Meaning |
 | --- | --- | --- | --- | --- |
-| `schema_version` | int | current is `33` | A value **greater** than the orchestrator's supported version fails closed ("upgrade wastech-orchestrator"); equal or lower is accepted, absent is accepted. | The config format version. `worc upgrade-config` re-emits the file at the current version. |
+| `schema_version` | int | current is `35` | A value **greater** than the orchestrator's supported version fails closed ("upgrade wastech-orchestrator"); equal or lower is accepted, absent is accepted. | The config format version. `worc upgrade-config` re-emits the file at the current version. |
 
 ## `orchestrator` — the watch loop and task queue
 
@@ -96,7 +96,7 @@ Applies per provider in `[primary, fallback]`; only transient classes (`PROVIDER
 | `security.allowed_environment` | list[str] | OS-aware base (`PATH`, `HOME`, `USER`, `USERPROFILE`, `CODEX_HOME`, `CLAUDE_CONFIG_DIR` + OS-launch essentials) | **REPLACES** the default. | The only env var _names_ forwarded to child processes (a name absent from the host is skipped). Keep the OS-launch essentials for your OS or the CLI may fail to start; secret **values** never go here. |
 | `security.denied_read_paths` | list of globs | `[".env", "secrets/**"]` | **REPLACES** the default. Same glob dialect as `protected_paths`. | Paths the agent CLI may never read (enforced as `--disallowedTools`), so a task cannot exfiltrate secrets. |
 | `security.denied_commands` | list[str] | `["git commit", "git push", "gh pr create", "gh pr merge"]` | **REPLACES** the default. | Commands the agent/checks may never run. Keep every entry you need — publishing is the orchestrator's job, not the agent's. |
-| `security.trust_level` | `strict` \| `auto` | `strict` / install: `auto` | Per-task `trust_level` overrides it. | Approval policy for the mid-task dangerous-diff gate. `strict` = gate every tracked-file deletion/rename or dependency-manifest/lock edit; `auto` = only a `protected_paths` match asks. Never lowers the hard ceiling — only which diffs raise the gate. |
+| `security.trust_level` | `strict` \| `auto` | `auto` | Per-task `trust_level` overrides it. | Approval policy for the mid-task dangerous-diff gate. `strict` = gate every tracked-file deletion/rename or dependency-manifest/lock edit; `auto` = only a `protected_paths` match asks. Never lowers the hard ceiling — only which diffs raise the gate. |
 | `security.protected_paths` | list of repo-relative globs | `[]` | Each must be repo-relative (no absolute/`~`/`..`). | The always-ask floor: any change to a matching path requires approval regardless of `trust_level`. `[]` = no floor. Add sensitive surfaces (e.g. `.github/workflows/**`, `src/security/**`). |
 
 ## `validation` — input hardening gate
@@ -109,9 +109,9 @@ Rejects a malformed task **before** any branch or agent runs.
 | `validation.max_task_lines` | int | `5000` | Reject a task file with more lines. |
 | `validation.max_line_bytes` | int | `8192` | Reject any single line longer than this. |
 | `validation.max_control_ratio` | float | `0.01` | Reject if control/binary chars exceed this fraction (0.01 = 1%). |
-| `validation.required_fields` | list[str] | `["id", "title"]` | Front-matter keys every task must define. |
-| `validation.reject_unknown_fields` | bool | `true` | `true` rejects a task carrying unknown front-matter keys. |
 | `validation.quarantine_folder` | string | `"./.worc/tasks/rejected"` | Where rejected task files are moved. |
+
+Two things this block does **not** control, because they are not the operator's to relax (the keys that pretended to be were removed in config v35 — `upgrade-config` strips them): the required front matter (`id`, a non-blank `title`, and a non-empty `Description` section) and the deny on an unrecognized front-matter key. Both are hard-coded in the task gate. `id` becomes a branch fragment, a run directory, and a state-store key, so dropping it would break identity rather than loosen a policy.
 
 ## `checks` — the quality gate (per-project command sets)
 
@@ -275,7 +275,7 @@ Memory also requires `supervisor.enabled: true`. That layer's closing turn is th
 - **Ordering constraints.** `max_total_fix_iterations >= max_fix_cycles`; `retry.max_delay_s >= retry.base_delay_s`; `decomposition.max_subtasks >= 2`.
 - **Replace-not-extend.** `allowed_environment`, `denied_read_paths`, `denied_commands` replace their defaults wholesale.
 - **Full access needs `strict_isolation: false`.** Codex `danger-full-access` / Claude `bypassPermissions` load but are rejected at preflight unless you turn `strict_isolation` off (owning the risk).
-- **Install vs dataclass defaults differ** for a few fields: `security.trust_level` (`auto` on install), `memory.enabled` (`true`), `skills.dynamic` (`false`), provider `model`/`reasoning`, and `supervisor` (provider and every phase model pinned to the primary; `observe.reasoning` delivered as `low`, the other phases as `high`). The table shows both.
+- **Install vs dataclass defaults differ** for a few fields: `memory.enabled` (`true`), `skills.dynamic` (`false`), provider `model`/`reasoning`, and `supervisor` (provider and every phase model pinned to the primary; `observe.reasoning` delivered as `low`, the other phases as `high`). The table shows both.
 - **Comments are stripped on upgrade.** `worc upgrade-config` preserves values but re-emits the file without inline comments — keep the _reason_ for an unusual value recoverable elsewhere.
 
 After editing: run `worc preflight` (providers, isolation, Telegram) and `worc validate-flow --all` (flows are not checked by preflight — a config edit can invalidate a flow). Treat config editing as done only when both are green.

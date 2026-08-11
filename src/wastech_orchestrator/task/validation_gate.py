@@ -37,6 +37,7 @@ from wastech_orchestrator.task.model import (
     ALLOWED_TASK_KEYS,
     BRANCH_NAME_MAX_LEN,
     DEFAULT_QUEUE,
+    REQUIRED_TASK_FIELDS,
     TASK_ID_PATTERN,
     NodeOverride,
     NormalizedTask,
@@ -216,11 +217,17 @@ class ValidationGate:
         # context (and feeds the Phase-B acceptance-criteria scan).
         description_section = self._extract_description(body)
 
-        # missing_required_field — id/title present, body Description non-empty.
-        if "id" not in frontmatter:
-            return _rej(ValidationReason.MISSING_REQUIRED_FIELD, "id")
+        # missing_required_field — every REQUIRED_TASK_FIELDS key present, body Description
+        # non-empty. Read from the constant (like ALLOWED_TASK_KEYS above) so the required set is
+        # declared in exactly one place; ``sorted`` only makes which key is *named* first
+        # deterministic, since a frozenset has no order to rely on.
+        for field in sorted(REQUIRED_TASK_FIELDS):
+            if field not in frontmatter:
+                return _rej(ValidationReason.MISSING_REQUIRED_FIELD, field)
+        # Presence is not enough for ``title``: it names the branch and the summary, so a blank
+        # string is as unusable as an absent key.
         title_value = frontmatter.get("title")
-        if "title" not in frontmatter or (isinstance(title_value, str) and not title_value.strip()):
+        if isinstance(title_value, str) and not title_value.strip():
             return _rej(ValidationReason.MISSING_REQUIRED_FIELD, "title")
         if not description_section.strip():
             return _rej(ValidationReason.MISSING_REQUIRED_FIELD, "description")

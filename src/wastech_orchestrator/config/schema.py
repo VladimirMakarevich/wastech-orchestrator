@@ -129,8 +129,8 @@ from wastech_orchestrator.providers.base import ProviderId
 # install. Old configs load fail-open with defaults and `upgrade-config` adds it from the template.
 # No behavior consumes the knobs yet (phase 01 wires the shape only).
 # v25 (2026-07-03, trust-levels-danger-approval): replaces `security.deletion_approval_exempt_paths`
-# with the approval-policy knob `security.trust_level` (strict|auto, default `auto` at install; the
-# dataclass default is the safe fallback `strict`) plus `security.protected_paths` (repo-relative
+# with the approval-policy knob `security.trust_level` (strict|auto, default `auto` everywhere —
+# dataclass, loader, and install) plus `security.protected_paths` (repo-relative
 # globs that ALWAYS require approval, at any trust_level — the always-ask floor). `strict` keeps the
 # old behavior (gate every deletion/rename or dependency-manifest edit); `auto` turns the diff-shape
 # gate off so only a `protected_paths` match raises approval. The old key is removed outright
@@ -186,7 +186,16 @@ from wastech_orchestrator.providers.base import ProviderId
 # warning names the keys), and `memory.enabled: true` is forced false for the run too, because
 # the layer's finalize turn is the only path that writes anything memory can later read back. Old
 # configs load fail-open with the default; `upgrade-config` adds the key from the template.
-CONFIG_SCHEMA_VERSION = 34
+# v35 (2026-08-11, dead-validation-keys): removes `validation.required_fields` and
+# `validation.reject_unknown_fields`. Both were parsed, stored, and even written by `install`, yet
+# read by nothing: the task gate hard-codes the requirement (`id`, a non-blank `title`, a non-empty
+# `Description` section) and rejects an unrecognized front-matter key unconditionally against
+# `task.model.ALLOWED_TASK_KEYS`. Neither belongs to the operator: a config able to drop `id` from
+# the required set, or to open the fail-closed unknown-key gate, would weaken invariants the branch
+# names, run dirs, and state store all depend on. Removing the keys is therefore the fix, not wiring
+# them up. Both are tolerated (ignored) on load — every config `install` wrote carries them, so they
+# must not become a hard unknown-key error — and `upgrade-config` strips them.
+CONFIG_SCHEMA_VERSION = 35
 
 
 class AuditBranch(StrEnum):
@@ -385,9 +394,11 @@ class SecurityConfig:
     denied_commands: tuple[str, ...]
     # Approval policy for the mid-task dangerous-diff gate. ``strict`` gates any
     # deletion/rename or dependency-manifest edit; ``auto`` turns the diff-shape gate off so only a
-    # ``protected_paths`` match raises approval. The dataclass default is the safe fallback
-    # ``strict``; a fresh install writes ``auto`` (config_writer).
-    trust_level: str = "strict"
+    # ``protected_paths`` match raises approval. ``auto`` everywhere — the dataclass default, the
+    # loader's absent-key default, and what a fresh install writes (config_writer) — so "the
+    # default" has one answer no matter how a config arrives. ``protected_paths`` stays the
+    # always-ask floor under either level.
+    trust_level: str = "auto"
     # Operator allowlist (repo-relative globs) of paths that ALWAYS require approval on any change,
     # regardless of ``trust_level`` — the always-ask floor no level can lower. Empty = no floor.
     protected_paths: tuple[str, ...] = ()
@@ -433,8 +444,6 @@ class ValidationConfig:
     max_task_lines: int
     max_line_bytes: int
     max_control_ratio: float
-    required_fields: tuple[str, ...]
-    reject_unknown_fields: bool
     quarantine_folder: str
 
 
