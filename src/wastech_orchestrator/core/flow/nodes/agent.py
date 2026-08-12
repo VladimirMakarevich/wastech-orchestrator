@@ -246,8 +246,9 @@ class AgentNodeRunner:
         """The node's typed-output contract, derived from declared structure (never a stage name).
 
         The decomposition proposer emits the ``planning`` contract (content + human_input +
-        decompose/subtasks/skills); any other HITL-capable node emits ``human_input`` (content +
-        human_input); a plain author node emits ``none``.
+        decompose/subtasks); any other HITL-capable node emits ``human_input`` (content +
+        human_input); a plain author node emits ``none``. The proposer check comes first, so a
+        proposer that also declares ``hitl:`` still gets ``planning`` (which carries human_input).
         """
         decomp = ctx.snapshot.doc.decomposition
         if decomp is not None and node.id == decomp.proposed_by:
