@@ -81,6 +81,9 @@ model {
       watch = component 'B02 watch daemon' 'Periodic discovery of pending tasks, one at a time' {
         #entrypoint
       }
+      installer = component 'B03 Installer' 'worc install: detect the repo, write .worc/ (config, flows, tools, guide)' {
+        #entrypoint
+      }
       config = component 'B05 Configuration' 'Load and validate config.yaml (fail-closed)' {
       }
       pipeline = component 'B06 Orchestrator wrapper' 'Spine: gate · slot · branch · terminal cleanup; hands the graph to the engine' {
@@ -95,6 +98,17 @@ model {
       }
       state = component 'B07 State Store' 'State machine + persistence in SQLite' {
       }
+      ledger = component 'B08 Ledger' 'Append-only logs/completed.jsonl, one record per terminal transition; writes failure_report.json + stuck.md' {
+      }
+      loops = component 'B09 Loop Control' 'Per-task fix counters on the tasks row; effective cap = min(flow budget, agents.max_fix_cycles / max_total_fix_iterations)' {
+      }
+      decomp = component 'B11 Decomposition' 'Flag-gated planning sub-phase, off by default: the Core accepts a proposed split only by a deterministic rule (2..max_subtasks, linear depends_on)' {
+      }
+      hitl = component 'B12 HITL' 'Typed human_input / planning signals: strict validation, ask through the Notifier, redacted answer back as {human_input_path} on a fresh run' {
+      }
+      dangerous = component 'B14 Dangerous-diff Guard' 'Deterministic gate over the uncommitted diff (trust_level + protected paths) — deletions / dependency / protected changes need human approval' {
+        #crosscutting
+      }
       gate = component 'B16 Task Gate' 'Parsing and §19 validation before slot and branch' {
       }
       router = component 'B17 Router' 'Provider selection + fallback (infrastructure failures only)' {
@@ -103,7 +117,7 @@ model {
       }
       subprocess = component 'B19 Subprocess Runner' 'run_process: argv without shell, timeout, env allowlist' {
       }
-      resolver = component 'B23 Check Resolution' 'Normalize command_sets; diff-select which sets run (no discovery)' {
+      resolver = component 'B23 Check Resolution' 'Normalize command_sets; diff-select which sets run for the touched paths' {
       }
       checks = component 'B24 Checks' 'Run all selected command sets; launch-fail / quality-fail / skip' {
       }
@@ -132,14 +146,15 @@ model {
       }
 
       // Remaining blocks — components of the same proc; added by the same pattern:
-      // B03 Installer, B04 Config-discovery, B08 Ledger, B09 Fix-loop, B10 Recovery,
-      // B11 Decomposition, B12 HITL, B13 Skills, B14 Dangerous-diff, B15 Prompts, B20 Artifact-layout,
+      // B10 Recovery, B13 Skills, B15 Prompts, B20 Artifact-layout,
       // B29 Flow-definition/validation, B30 Flow-node-runners.
+      // B04 (Config-discovery) is RETIRED, not pending: the config `discovery` block was removed in
+      // config schema v15 and is only tolerated as a legacy key today (see config/loader.py).
       // Components added after the B01–B32 taxonomy was closed carry descriptive names rather than
       // invented numbers: Summary Report, Exchange Publisher, Frozen Bundles, Memory.
     }
 
-    db = store 'State Store (state.db)' 'tasks, node_runs, provider_attempts, check_runs, evaluations, lineages, publish_operations (schema v20)' {
+    db = store 'State Store (state.db)' 'tasks, node_runs, provider_attempts, check_runs, evaluations, artifacts, subtasks, editing_lineage, node_lineage, publish_operations (schema v21)' {
       #datastore
       technology 'SQLite'
     }
@@ -151,18 +166,37 @@ model {
       #datastore
       technology 'Filesystem'
     }
+    workspace = store 'Repository working tree' 'The code the agents actually edit; it carries .worc/ and .worc-io/. Write-denied for the agent: .git, the effective hooks dir, tasks/, and the exchange projection' {
+      #datastore
+      technology 'Git worktree'
+    }
+    queue = store 'Task queue (tasks/)' 'The committed lifecycle tree (preparing/ -> pending/ -> ...): agent-readable, never agent-writable, so no task can be injected for the daemon to pick up' {
+      #datastore
+      technology 'Filesystem'
+    }
   }
 
   // --- Relationships (verified against code; backbone, without all cross-cutting edges) ---
-  operator -> cli 'Subcommands: run / watch / rerun / finalize / status / validate-flow / logs · runs · memory'
-  telegram -> human 'Request / response'
+  // 26 subcommands, by group: setup (install · upgrade-config · upgrade-docs · completion) ·
+  // run (run · watch · stop · restart · promote · rerun · finalize) ·
+  // inspect (status · top · list · tasks · logs · runs · memory · prs · shell · clear) ·
+  // check (preflight · validate-flow · telegram-test) · publish (merge-task).
+  operator -> cli 'Subcommands: install · run / watch / stop / restart / promote / rerun / finalize · status / top / list / tasks / logs / runs / memory / prs · preflight / validate-flow'
+  telegram -> human 'Question / approval request'
+  human -> telegram 'Answer / approve / deny'
 
+  cli -> installer 'install (writes .worc/ before anything else can run)'
   cli -> config 'Load + validate (discovered from .worc/)'
   cli -> watch 'Dispatch watch / stop / restart'
   cli -> pipeline 'run / rerun / finalize'
+  cli -> queue 'promote: preparing/ -> pending/ (atomic move)'
+  installer -> artifacts 'Create .worc/: config, flows, tools, guide'
+  watch -> queue 'Discover pending task files'
   watch -> pipeline 'resume / run_task (single slot)'
 
   pipeline -> gate '§19 validation (before slot and branch)'
+  gate -> queue 'Read the task file'
+  gate -> ledger 'Duplicate-id check (completed.jsonl)'
   gate -> security 'scan_frontmatter (injections)'
   pipeline -> state 'Status transitions (transactional)'
   state -> db 'Read / write'
@@ -177,12 +211,25 @@ model {
   memory -> artifacts 'Store + audit + snapshots under .worc/memory/'
   engine -> router 'Agent / evaluator nodes'
   engine -> frozen 'Reads the frozen copies; post-attempt digest re-check'
+  engine -> decomp 'planning: accept or reject the proposed split (deterministic rule)'
+  decomp -> db 'subtasks'
+  engine -> loops 'Charge every rework / fail edge against the counters'
+  loops -> db 'Counters on the tasks row'
+  engine -> hitl 'Nodes with a human_input / planning contract'
+  engine -> dangerous 'Workspace-write nodes: classify the uncommitted diff'
+  dangerous -> hitl 'Approval request for the classified change set'
+  hitl -> notifier 'Notifier.ask (transport-agnostic), correlated'
+  hitl -> artifacts 'Durable interaction records (resumable across restarts)'
+  hitl -> engine 'Redacted answer -> {human_input_path} on a fresh run'
   router -> providers 'AgentProvider.run'
   providers -> subprocess 'run_process (containment + quiescence barrier)'
   providers -> codex 'Launch (argv, no shell)'
   providers -> claude 'Launch (argv, no shell)'
   providers -> security 'Profile / env / forbidden / git-evidence grant'
   providers -> redaction 'Stream redaction'
+  security -> workspace 'Write-guard deny set per workspace-write attempt'
+  codex -> workspace 'Edit code (Write/Edit inside the tree)'
+  claude -> workspace 'Edit code (Write/Edit inside the tree)'
   engine -> checks 'Checks nodes (testing)'
   engine -> tools 'Checker + tool nodes'
   tools -> subprocess 'run_process (UTF-8 stdout)'
@@ -195,8 +242,11 @@ model {
   pipeline -> gitmgr 'Branch prep / terminal cleanup / git control-state fingerprint'
   engine -> gitmgr 'Publish node (commit / push / PR)'
   gitmgr -> subprocess 'run_process'
+  gitmgr -> workspace 'Branch, stage and commit from the working tree'
   gitmgr -> github 'git / gh'
   gitmgr -> db 'publish_operations (idempotency)'
+  pipeline -> ledger 'Terminal transition record (done / failed / manual_action_required)'
+  ledger -> artifacts 'completed.jsonl · failure_report.json · stuck.md'
   pipeline -> notifier 'HITL / notifications / ⚠️ traces'
   notifier -> telegram 'send / getUpdates'
 
@@ -228,13 +278,13 @@ views {
 
   view crosscutting {
     title 'Cross-cutting: security, redaction, isolation boundaries, observability'
-    include security, redaction, observ, exchange, frozen, providers, gitmgr, checks, subprocess, gate, db, artifacts, exchangeRoot
+    include security, redaction, observ, exchange, frozen, dangerous, providers, gitmgr, checks, subprocess, gate, db, artifacts, exchangeRoot, workspace
     autoLayout TopBottom
   }
 
   view isolation {
-    title 'Isolation boundaries: what the agent may read, and what is frozen'
-    include frozen, exchange, security, providers, codex, claude, artifacts, exchangeRoot
+    title 'Isolation boundaries: what the agent may read, what it may write, and what is frozen'
+    include frozen, exchange, security, providers, codex, claude, artifacts, exchangeRoot, workspace, queue
     autoLayout LeftRight
   }
 
@@ -261,6 +311,30 @@ views {
     gitmgr -> github 'gh pr create'
     exchange -> artifacts 'seal the terminal exchange under runs/'
     pipeline -> notifier 'outcome notification'
+  }
+
+  // The counterpart of happyPath: what the same run does when something goes wrong. Fallback is for
+  // infrastructure classes only — a quality failure, a review finding, or a security condition never
+  // reaches it.
+  dynamic view failurePath {
+    title 'Failure paths: fallback, fix loops, park, and the three terminals'
+    providers -> router 'Infrastructure error class (binary_not_found · rate_limited · timeout · process_crashed …)'
+    router -> providers 'Fallback to the other provider — infrastructure classes only'
+    router -> engine 'Every allowed provider exhausted'
+    engine -> pipeline 'Disposition over the whole set of raised classes, security first'
+    pipeline -> state 'containment_unverified / capability_unavailable -> manual_action_required, terminal git withheld'
+    exchange -> artifacts 'Unsafe tree: quarantine instead of a terminal seal'
+    pipeline -> state 'Park-eligible (rate limit · outage · operator stop): hold the checkpoint, a later tick resumes; past agents.retry.max_blocked_s it fails'
+    pipeline -> state 'Otherwise terminal by node kind: agent -> failed · evaluator -> manual_action_required (its green diff stays reviewable)'
+    checks -> engine 'Quality failure (tests / linters) -> fixing, never a fallback'
+    engine -> router 'review: blocking findings -> fixing'
+    engine -> loops 'Charge the rework edge'
+    loops -> state 'Budget exhausted -> manual_action_required with a failure report'
+    engine -> dangerous 'Uncommitted diff hits the approval gate'
+    dangerous -> hitl 'Ask the human to approve'
+    hitl -> state 'Denied, and the changes were retained -> manual_action_required'
+    pipeline -> ledger 'Terminal record + failure_report.json / stuck.md'
+    pipeline -> notifier 'Outcome notification'
   }
 
   dynamic view implementationFlow {
