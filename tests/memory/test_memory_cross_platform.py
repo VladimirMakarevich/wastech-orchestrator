@@ -1,7 +1,7 @@
-"""Cross-platform (NFR8 / AC-X1 / AC-X2) round-trip coverage for the memory store.
+"""Cross-platform round-trip coverage for the memory store.
 
 These tests are OS-agnostic — they live in the shared suite and pass everywhere — but their point is
-to be exercised on **real Windows**, where the audit (F5) left AC-X1/AC-X2 as "POSIX storage is
+to be exercised on **real Windows**, where the audit left the POSIX-path guarantees as "storage is
 tested … but there is no Windows-form round-trip test". They pin the two cross-platform invariants:
 
 * **Paths round-trip as POSIX.** Every stored/compared path string is the ``Path.as_posix()`` form,
@@ -50,7 +50,7 @@ def _indexed_service(repo: Path) -> MemoryService:
     """A service whose write funnel validates entity paths against the *live* repo tree (no git).
 
     The provider returns an empty tracked set, so ``path_exists`` must fall back to a native
-    filesystem stat — which is exactly the Windows behavior AC-X1 needs to exercise.
+    filesystem stat — which is exactly the Windows behavior this needs to exercise.
     """
     index = DerivedIndex(repo, tracked_paths_provider=lambda _root: frozenset())
     return MemoryService(MemoryLayout(repo / ".worc"), index=index)
@@ -76,7 +76,7 @@ def test_posix_path_resolves_against_native_filesystem(tmp_path: Path) -> None:
     assert all("\\" not in candidate for candidate in candidates)
 
 
-# --- (b) end-to-end F1: entity path validated against the native FS, stored forward-slashed ----
+# --- (b) end-to-end: entity path validated against the native FS, stored forward-slashed -------
 
 
 def test_entity_card_end_to_end_stores_posix_path(tmp_path: Path) -> None:

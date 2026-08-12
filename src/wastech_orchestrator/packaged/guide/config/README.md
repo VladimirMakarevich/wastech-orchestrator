@@ -10,7 +10,7 @@
 
 Prefer editing the `.worc/config.yaml` that `worc install .` already generated for this repository. It starts from the packaged defaults, uses the detected repo root and base branch, and is already validated to the current schema shape.
 
-Only build from scratch when there is no installed config yet. In that case, keep the same block order as the packaged example (only `schema_version`, `repo`, `agents`, and `security` are required — every other block is optional and takes its defaults when omitted; see [reference.md](reference.md) for the defaults):
+Only build from scratch when there is no installed config yet. In that case, keep the same block order as the packaged example (every block is optional to the loader and takes its defaults when omitted — the one structural requirement is exactly one `agents.providers.<id>.primary: true`; in practice always write `repo` too, since its defaults are placeholders. See [reference.md](reference.md) for the defaults):
 
 1. `schema_version`
 2. `orchestrator`
@@ -50,7 +50,8 @@ Decide which CLIs are actually available and keep the set small:
 
 - `allowed` — only the providers the operator can really run (`codex`, `claude`).
 - Exactly one provider must be `primary: true`.
-- Leave the shipped `model`, `reasoning`, `timeout_seconds`, `sandbox`, `permission_profile`, and `max_turns` defaults unless the operator has a concrete reason to change them.
+- Leave the shipped `model`, `reasoning`, `timeout_seconds`, `permission_profile`, and `max_turns` defaults unless the operator has a concrete reason to change them.
+- Do not write `sandbox` at all. `install` never emits it, the access level lives in `permission_profile`, and its only surviving value is the Codex full-access escape.
 - Leave `decomposition.enabled: false` until the team is ready for one-task-many-subtasks planning.
 
 ### 3. `security`
@@ -58,8 +59,10 @@ Decide which CLIs are actually available and keep the set small:
 Treat this block as a guardrail, not a convenience area:
 
 - Keep `strict_isolation: true` unless the operator consciously accepts full-access runs.
+- Know that `disable_read_isolation` defaults to `true` — read-isolation is **off** out of the box, and `install` does not write the key. Set it `false` to turn read-isolation on; the write side (commit/staging gates, PR control, `denied_read_paths`) is in force either way.
 - Pass only names in `allowed_environment`; secret **values** never belong in the file.
 - Keep `denied_commands` complete; it replaces the default list rather than extending it.
+- `allow_git_evidence` (default `false`) is the master switch for the read-only git-evidence grant: only with it on does a flow node's `git_evidence: true` actually give that node the read-only git verbs. It never makes a node writable — the sandbox still denies every write and `denied_commands` still applies — but leave it off unless a flow you run genuinely audits delivery history.
 - Do not add `extra_args` that disable sandboxing, approvals, or rule enforcement.
 - `trust_level` sets the approval threshold for the mid-task dangerous-diff gate: `auto` (default) lets routine in-repo deletions/edits proceed; `strict` gates every deletion or dependency-manifest edit. It never lowers the hard ceiling — only which diffs raise the gate.
 - `protected_paths` is the always-ask floor: repo-relative globs (same dialect as `checks.command_sets[].paths`) that require approval on **any** change regardless of `trust_level`. Default `[]` (no floor); add sensitive surfaces here (e.g. `.github/workflows/**`, `src/security/**`).
@@ -92,13 +95,13 @@ Keep publishing conservative by default:
 
 ### 6. Optional blocks
 
-Only enable these when the operator asked for them (each field is documented in full in [reference.md](reference.md)):
+Touch these only when the operator asked for them (each field is documented in full in [reference.md](reference.md)). Two are already on after `install` — `supervisor` (`enabled: true`) and `memory` (`enabled: true`) — so for those the question is whether to turn them off, not on:
 
 - `orchestrator` — the `watch` loop cadence (`poll_interval_seconds`), the instance `queue` selector, and `auto_mode` task chaining.
 - `paths` — `tasks_dir`, the repo-relative home of the task lifecycle (rename only to avoid clashing with an existing `tasks/`).
 - `telegram` — real human-in-the-loop and notifications.
-- `skills` — repo-local `.claude/skills` inventory for planning.
-- `supervisor` — non-default model/reasoning for the read-only oversight layer.
+- `skills` — how discovered skills attach to flow nodes. Discovery itself is automatic and whole-repo (every tracked `**/SKILL.md`, wherever it sits), so this block only carries `dynamic` and `strict`.
+- `supervisor` — the read-only oversight layer, **on by default**. This is where you turn it off (`enabled: false`) or set per-phase model/effort under `observe` / `finalize` / `handoff`.
 - `logging` — operator log `level` and per-attempt artifact retention (`artifacts`).
 - `memory` — persistent, repo-scoped memory (`enabled` plus retrieval/promotion/cleanup caps).
 - `prompt_audit` — prompt recording for debugging or compliance.
@@ -119,7 +122,7 @@ If the repo already answers the question (`origin`, current branch, `pyproject.t
 ## What not to do
 
 - Do not put tokens, passwords, chat ids, or secret values in `config.yaml`.
-- Do not invent provider ids, stage names, or model ids.
+- Do not invent provider ids, flow node ids, or model ids.
 - Do not weaken security through `extra_args`.
 - Do not make `skip_if_unavailable: true` the default for required test suites.
 - Do not turn on `auto_merge` just to reduce friction.
@@ -128,8 +131,10 @@ If the repo already answers the question (`origin`, current branch, `pyproject.t
 
 After editing the config:
 
-1. Run `worc preflight`.
-2. Fix every reported provider, isolation, flow, or Telegram issue.
-3. If the package was upgraded, run `worc upgrade-config` first so the file has the current schema shape.
+1. If the package was upgraded, run `worc upgrade-config` first so the file has the current schema shape.
+2. Run `worc preflight`. Fix every reported provider, credential, isolation, `gh`, or Telegram issue.
+3. Run `worc validate-flow --all` — preflight does not look at flows, and a config edit can invalidate one (a node pinned to a provider you just removed from `agents.allowed`). It checks the operator flows under `.worc/flows/` only.
 
-[reference.md](reference.md) is the complete field reference — you should not need anything outside this guide to configure the orchestrator. The orchestrator repository's `docs/configuration.md` and `docs/operations.md` carry the same material with extra contributor-facing detail (design rationale, internals); reach for them only if you are working on the orchestrator itself.
+The config is done when both are green.
+
+[reference.md](reference.md) is the complete field reference — it documents every key, so this guide is all you need to configure the orchestrator. The orchestrator's own repository adds contributor-facing material on top of the same fields (design rationale, internals); that is only worth reading if you are working on the orchestrator itself.

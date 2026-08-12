@@ -1,4 +1,4 @@
-"""MemoryConfig (01.2): absent => disabled defaults; present parses; unknown key rejected."""
+"""MemoryConfig: absent => disabled defaults; present parses; unknown key rejected."""
 
 from __future__ import annotations
 
@@ -14,14 +14,14 @@ _BODY = (
 
 
 def test_absent_memory_block_yields_disabled_defaults() -> None:
-    # AC-S5: an older config without the block loads with safe defaults (no fatal error) — disabled.
+    # An older config without the block loads with safe defaults (no fatal error) — disabled.
     cfg = loads_config(_BODY).config
     assert cfg.memory == MemoryConfig()
     assert cfg.memory.enabled is False
 
 
 def test_memory_disabled_explicitly_parses() -> None:
-    # AC-S4 groundwork: enabled:false parses and is the guard the later phases check.
+    # enabled:false parses and is the guard the write/read paths check.
     cfg = loads_config(f"{_BODY}memory:\n  enabled: false\n").config
     assert cfg.memory.enabled is False
 
@@ -57,6 +57,6 @@ def test_wrong_typed_memory_value_is_rejected() -> None:
 
 
 def test_packaged_example_ships_memory_enabled(packaged_config_text: str) -> None:
-    # Q10: a fresh install (the packaged template) ships memory enabled: true.
+    # A fresh install (the packaged template) ships memory enabled: true.
     cfg = loads_config(packaged_config_text).config
     assert cfg.memory.enabled is True

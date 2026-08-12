@@ -8,14 +8,14 @@ the provider references by path).
 
 Invariant this module preserves: it produces only stdin prompt *text*. It never touches provider
 argv, CLI syntax, the sandbox/approvals, denied commands/reads, the env allowlist, or fallback
-policy. A template cannot weaken any of those (backlog).
+policy. A template cannot weaken any of those.
 """
 
 from __future__ import annotations
 
 import re
 
-# The only names a template may interpolate (backlog). Everything is metadata or an artifact
+# The only names a template may interpolate. Everything is metadata or an artifact
 # *path*; large content is never injected. An unknown ``{name}`` is left verbatim, so a template
 # carrying code/JSON braces renders unchanged.
 ALLOWED_PROMPT_VARS: frozenset[str] = frozenset(

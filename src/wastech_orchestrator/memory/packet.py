@@ -1,16 +1,16 @@
-"""PacketBuilder — deterministic, model-free per-node retrieval packets (design §6).
+"""PacketBuilder — deterministic, model-free per-node retrieval packets.
 
 The read-path counterpart to the write funnel. Given a node and its task context, it selects and
 ranks the stored records that belong in that node's packet (the **stage-1 deterministic filter**
-only — the optional semantic rerank is V3, gated by the eval baseline), renders them into a small
+only — an optional semantic rerank is deferred), renders them into a small
 capped brief, and writes it to the per-task packet file. Defining invariants:
 
 * **Model-free & pure.** No LLM call anywhere; selection reads only the store + the injected
-  ``PacketContext``, so the same inputs yield the same ordered packet (AC-R3).
-* **Precision over recall.** Hard per-node caps (Q5 / NFR4); over the line backstop it drops whole
+  ``PacketContext``, so the same inputs yield the same ordered packet.
+* **Precision over recall.** Hard per-node caps; over the line backstop it drops whole
   lowest-ranked records, never partial ones, so a packet always stays coherent.
 * **Path, not root.** The caller is handed the per-node packet file path, never the memory root
-  (AC-R1); a node with no relevant memory gets **no file** — never a fabricated one (AC-R4).
+  a node with no relevant memory gets **no file** — never a fabricated one.
 """
 
 from __future__ import annotations
@@ -38,20 +38,20 @@ _TRUST_RANK: dict[str, int] = {
     TrustLevel.EXTERNAL_UNTRUSTED.value: 0,
 }
 
-# Serialized trust/kind values used to surface still-"held" durable lessons from quarantine (F43): a
+# Serialized trust/kind values used to surface still-"held" durable lessons from quarantine: a
 # durable repo-observed/reviewer lesson that has not yet recurred waits in quarantine, which the
 # packet otherwise never reads — so it is write-only noise. Only DURABLE-trust, lesson-kind held
 # records are surfaced (never agent-inferred / external-untrusted, which stay quarantined).
 _DURABLE_TRUST_VALUES: frozenset[str] = frozenset(t.value for t in DURABLE_TRUST_LEVELS)
 _LONG_TERM_KIND_VALUES: frozenset[str] = frozenset(k.value for k in LongTermKind)
 
-# Nodes whose role naturally prefers reviewer-kind lessons (design §6: "review → more reviewer").
+# Nodes whose role naturally prefers reviewer-kind lessons ("review → more reviewer").
 _REVIEWER_PREF_NODES: frozenset[str] = frozenset({"review", "fixing"})
-# Nodes that lean on entity cards — they get a small entity-cap bump (design §6).
+# Nodes that lean on entity cards — they get a small entity-cap bump.
 _ENTITY_HEAVY_NODES: frozenset[str] = frozenset({"implementation"})
 _ENTITY_CAP_BUMP = 2
 
-# Evidence whose ``ref`` rots and so is never rendered as a "see …" pointer (memory V2 ADR, move 2):
+# Evidence whose ``ref`` rots and so is never rendered as a "see …" pointer:
 # a task id / commit SHA is gone after a squash-merge, a ``.worc/logs/<task>`` dir is cleaned up.
 _EPHEMERAL_EVIDENCE_TYPES: frozenset[str] = frozenset({"task", "commit", "diff"})
 _COMMIT_SHA = re.compile(r"[0-9a-f]{7,40}$")
@@ -59,13 +59,13 @@ _COMMIT_SHA = re.compile(r"[0-9a-f]{7,40}$")
 
 @dataclass(frozen=True)
 class PacketContext:
-    """The deterministic inputs to one packet build — no clock, no randomness (AC-R3).
+    """The deterministic inputs to one packet build — no clock, no randomness.
 
     ``node_id`` is the flow node about to run; ``touched_paths`` / ``touched_symbols`` are POSIX
     repo-relative and drive path-scoped retrieval (empty when nothing is touched yet, e.g. at
     planning before any edit). ``task_type`` is the flow dispatch key, carried as a retrieval signal
-    (not a ranking input today — the episodic tier it ranked was de-injected in V2; reserved for the
-    V3 semantic rerank).
+    (not a ranking input today — the episodic tier it ranked is no longer injected; reserved for a
+    future semantic rerank).
     """
 
     node_id: str
@@ -78,8 +78,8 @@ class PacketContext:
 class SelectedPacket:
     """The records chosen for one packet (already filtered, ranked, and count-capped).
 
-    Episodes are deliberately absent: the episodic tier is a write-only shell in V2 and is never
-    rendered into an agent's context (memory V2 ADR, move 1).
+    Episodes are deliberately absent: the episodic tier is write-only and is never
+    rendered into an agent's context.
     """
 
     long_term: tuple[dict[str, Any], ...] = ()
@@ -94,7 +94,7 @@ class PacketBuilder:
     """Build a per-node memory packet from the canonical store (deterministic, model-free).
 
     Reads through :class:`MemoryService`'s read API only; it never mutates the store and never calls
-    a model. ``config`` supplies the per-node caps (Q5).
+    a model. ``config`` supplies the per-node caps.
     """
 
     def __init__(self, service: MemoryService, config: MemoryConfig) -> None:
@@ -106,7 +106,7 @@ class PacketBuilder:
     def build(self, context: PacketContext) -> SelectedPacket:
         """Select + rank + count-cap the records for ``context`` (the stage-1 deterministic filter).
 
-        Empty store / no matches → an empty :class:`SelectedPacket` (AC-R4). The line backstop is
+        Empty store / no matches → an empty :class:`SelectedPacket`. The line backstop is
         applied later, at render time, so this stays a pure selection step.
         """
         lt_cap, entity_cap = self._caps(context.node_id)
@@ -129,7 +129,7 @@ class PacketBuilder:
         """Build + render the packet for one node and write it atomically to ``dest``.
 
         Returns ``dest`` when a packet was written, or ``None`` when there is no relevant memory —
-        in which case **no file is created**, so ``{memory_path}`` renders empty (AC-R4). This is
+        in which case **no file is created**, so ``{memory_path}`` renders empty. This is
         the seam the node-prompt builder calls; it constructs the :class:`PacketContext` itself so
         the caller need not depend on the memory record shapes.
         """
@@ -142,11 +142,11 @@ class PacketBuilder:
         atomic_write_text(dest, _format(packet))
         return dest
 
-    # --- selection (stage-1 deterministic filter, design §6) -------------------
+    # --- selection (stage-1 deterministic filter) ------------------------------
 
     def _select_long_term(self, ctx: PacketContext) -> list[dict[str, Any]]:
         rows = [row for row in self._all_long_term() if _is_active(row) and _node_ok(row, ctx)]
-        # F43: also surface durable lessons still "held" in quarantine (awaiting recurrence) — the
+        # Also surface durable lessons still "held" in quarantine (awaiting recurrence) — the
         # packet is otherwise their only, never-taken read path. Durable trust only; the ranking and
         # per-node caps below bound them exactly like promoted long-term records.
         rows += [row for row in self._durable_quarantine() if _node_ok(row, ctx)]
@@ -175,7 +175,7 @@ class PacketBuilder:
         return rows
 
     def _durable_quarantine(self) -> list[dict[str, Any]]:
-        """Durable, lesson-kind records still held in quarantine (F43).
+        """Durable, lesson-kind records still held in quarantine.
 
         A durable long-term lesson that has not yet recurred waits in ``quarantine/pending.jsonl``;
         the promotion gate keeps it there, but it is real repo knowledge, so the packet surfaces the
@@ -189,7 +189,7 @@ class PacketBuilder:
             and str(row.get("kind") or "") in _LONG_TERM_KIND_VALUES
         ]
 
-    # --- caps + line backstop (Q5 / NFR4, design §6) ---------------------------
+    # --- caps + line backstop -------------------------------------------------
 
     def _caps(self, node_id: str) -> tuple[int, int]:
         entity = self._config.packet_max_entity
@@ -198,7 +198,7 @@ class PacketBuilder:
         return self._config.packet_max_long_term, entity
 
     def _fit(self, packet: SelectedPacket) -> SelectedPacket:
-        """Drop whole lowest-ranked records until the brief is within the line backstop (NFR4).
+        """Drop whole lowest-ranked records until the brief is within the line backstop.
 
         Never truncates a record (that would strip its provenance) — it drops the lowest-value tier
         first (entity → lesson) and, within a tier, the lowest-ranked (last) record.
@@ -327,7 +327,7 @@ def _entity_bullet(row: dict[str, Any]) -> str:
 def _first_durable_evidence_ref(evidence: Any) -> str | None:
     """The first evidence ref safe to render — a resolvable pointer (repo file, doc, named check).
 
-    Rotting pointers are never shown as a "see …" link (memory V2 ADR, move 2 / question 2): a task
+    Rotting pointers are never shown as a "see …" link: a task
     id, a commit SHA (squash-merge deletes it), or a ``.worc/logs/<task>`` dir is a dead reference.
     Such refs stay in the store as internal provenance and still feed the deterministic trust
     classifier — the filter is render-time only.

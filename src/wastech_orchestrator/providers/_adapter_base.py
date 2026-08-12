@@ -8,8 +8,8 @@ two adapters carry only what genuinely differs: the argv they build, their stder
 and how they parse their own event stream.
 
 **This module deliberately knows no CLI syntax.** It never names a flag, subcommand, or sandbox
-value — that is the inviolable boundary the per-provider subclasses sit on the other side of
-(architecture.md). A subclass supplies the syntax through the four hooks (``_build_argv`` /
+value — that is the inviolable boundary the per-provider subclasses sit on the other side of.
+A subclass supplies the syntax through the four hooks (``_build_argv`` /
 ``_parse`` / ``_signatures`` / ``_executable_label``); the base supplies the rest.
 """
 
@@ -39,6 +39,7 @@ from wastech_orchestrator.providers.base import (
     MAX_TURNS_SUBTYPE,
     AgentRunRequest,
     AgentRunResult,
+    AuthProbe,
     ErrorClass,
     NormalizedError,
     NormalizedUsage,
@@ -57,6 +58,7 @@ from wastech_orchestrator.providers.redaction import (
     REDACTED,
     normalized_session_id,
     read_denied_secrets,
+    redact_jsonl,
     redact_mapping,
     redact_text,
     secret_env_values,
@@ -73,6 +75,22 @@ RunProcess = Callable[..., ProcessResult]
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def _iso_instant(epoch_seconds: float | None) -> str | None:
+    """A provider-reported Unix instant as an ISO-8601 UTC string, else ``None``.
+
+    The single point where a CLI's epoch becomes the orchestrator's wall-clock spelling, so nothing
+    downstream does timezone arithmetic and the carried field stays provider-neutral. A value the
+    platform cannot represent as a datetime yields ``None``: a missing wake instant costs one blind
+    retry, while a wrong one would defer a task nobody is waiting on.
+    """
+    if epoch_seconds is None:
+        return None
+    try:
+        return datetime.fromtimestamp(epoch_seconds, tz=UTC).isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
 
 
 @dataclass(frozen=True)
@@ -97,11 +115,15 @@ class ParsedEvents:
     # ``task_failure`` but a transient infra event: the finalize step RAISES ``RATE_LIMITED`` (so
     # the Router falls over / the orchestrator parks) instead of returning a quality failure.
     rate_limited: bool = False
+    # The Unix instant the provider said its limit window reopens, when the terminal event carried
+    # one. Epoch here and ISO on the raised error: each adapter owns its own CLI's spelling, and
+    # exactly one place converts. ``None`` when the CLI reports no reset instant at all.
+    rate_limit_resets_at: float | None = None
 
 
 @dataclass(frozen=True)
 class IsolationCapabilityReport:
-    """A provider's live, no-model isolation capability-probe verdict for ``worc preflight`` (H7).
+    """A provider's live, no-model isolation capability-probe verdict for ``worc preflight``.
 
     ``ok`` is pass/fail; ``status`` a short machine label (e.g. ``passed``/``unsupported``/
     ``policy-failed``); ``detail`` a secret-free operator line. ``fatal`` marks a result that must
@@ -129,7 +151,7 @@ def coerce_usage_cost(value: object) -> float | None:
     """A ``float`` USD cost from a raw value, or ``None`` for an absent / non-numeric / bool value.
 
     Shared by the adapters mapping a provider-reported dollar figure (e.g. Claude's stream-json
-    ``total_cost_usd``) into :class:`NormalizedUsage.cost` (VF-8). Accepts an ``int`` or ``float``;
+    ``total_cost_usd``) into :class:`NormalizedUsage.cost`. Accepts an ``int`` or ``float``;
     ``bool`` is rejected because ``isinstance(True, int)`` is true.
     """
     if isinstance(value, bool) or not isinstance(value, (int, float)):
@@ -209,7 +231,7 @@ class BaseCliProvider:
         self._config = config
         self._security = security
         self._artifacts_root = Path(artifacts_root)
-        # WRI-002/003: the internal read-deny set (private/control homes, secrets, provider auth
+        # The internal read-deny set (private/control homes, secrets, provider auth
         # homes, frozen bundles) the adapter projects into its tool/OS-sandbox deny policy. On the
         # base so both adapters project the same set; ``None`` in unit harnesses that don't test it.
         self._deny_policy = deny_policy
@@ -265,7 +287,7 @@ class BaseCliProvider:
     def _stdin_text(self, request: AgentRunRequest) -> str:
         """The text fed to the CLI on stdin: the Core prompt + the context-files footer.
 
-        Both adapters use this as-is — neither injects repository instructions (VF-5): the agent
+        Both adapters use this as-is — neither injects repository instructions: the agent
         reads the repo's root instruction files itself (Codex via native ``AGENTS.md`` discovery,
         Claude via its Read tool), so stdin carries only the flow prompt + the context-file paths.
         """
@@ -305,13 +327,13 @@ class BaseCliProvider:
 
         Runs on the same augmented ``env`` the real launch uses. A subclass raises
         :class:`ProviderError` to fail closed pre-model (e.g. Codex proves its generated permission
-        profile is actually enforced with a ``codex sandbox`` canary — WRI-003). Default: no-op, so
+        profile is actually enforced with a ``codex sandbox`` canary). Default: no-op, so
         no paid model call is a structural guarantee for providers that need no pre-launch proof.
         """
         return None
 
     def isolation_capability_smoke(self, *, home_dir: Path) -> IsolationCapabilityReport | None:
-        """Subclass hook: a live, no-model isolation capability probe for ``worc preflight`` (H7).
+        """Subclass hook: a live, no-model isolation capability probe for ``worc preflight``.
 
         Default ``None`` — no live probe (the offline ``isolation_reasons`` gate already covers the
         provider). A subclass (Codex) stands up a throwaway fixture under *home_dir* — which MUST be
@@ -324,7 +346,7 @@ class BaseCliProvider:
     # --- shared lifecycle ----------------------------------------------------------------------
 
     def preflight(self) -> ProviderHealth:
-        """Detect the executable and parse its version (auth is best-effort/offline in P2)."""
+        """Detect the executable, parse its version, and ask the CLI about its own credentials."""
         label = self._executable_label()
         env = self._augment_child_env(build_child_env(self._security.allowed_environment))
         with tempfile.TemporaryDirectory() as scratch:
@@ -339,12 +361,13 @@ class BaseCliProvider:
             )
             stdout_text = read_text(stdout_path)
 
+        # A CLI that could not run makes no credential claim at all, so ``auth`` is left unset on
+        # every unhealthy path below rather than being guessed in either direction.
         if proc.launch_error is not None:
             return ProviderHealth(
                 provider_id=self.id,
                 executable_found=False,
                 version=None,
-                authenticated=False,
                 supports_required_features=False,
                 message=f"{label} executable not found",
             )
@@ -353,18 +376,18 @@ class BaseCliProvider:
                 provider_id=self.id,
                 executable_found=True,
                 version=None,
-                authenticated=False,
                 supports_required_features=False,
                 message=f"{label} was found but '{label} --version' did not succeed",
             )
         version = _parse_version(stdout_text)
         capability_error = self._preflight_capability_error(env)
         if capability_error is not None:
+            # This path already fails preflight, so a second reason buys nothing and probing here
+            # would only spend another child-process launch.
             return ProviderHealth(
                 provider_id=self.id,
                 executable_found=True,
                 version=version,
-                authenticated=True,
                 supports_required_features=False,
                 message=capability_error,
             )
@@ -372,11 +395,11 @@ class BaseCliProvider:
             provider_id=self.id,
             executable_found=True,
             version=version,
-            authenticated=True,
             supports_required_features=version is not None,
             message=f"{label} {version or 'unknown version'} available"
             f"{self._preflight_healthy_detail(env)}",
             degraded_reasons=self._preflight_degraded_reasons(env),
+            auth=self._preflight_auth_state(env),
         )
 
     def _preflight_capability_error(self, env: Mapping[str, str]) -> str | None:
@@ -398,6 +421,19 @@ class BaseCliProvider:
         CLI syntax; it does not know ``agents.allowed``). Default: none.
         """
         return ()
+
+    def _preflight_auth_state(self, env: Mapping[str, str]) -> AuthProbe | None:
+        """Subclass hook: report what this CLI says about its own stored credentials.
+
+        Runs through :meth:`_probe`, so it inherits the preflight timeout and the allowlisted
+        environment and never launches the model. The base knows no CLI syntax: only the subclass
+        knows the verb and how to read the answer — and it must copy nothing out of that answer
+        beyond the login state and the credential mechanism, because a credential answer can carry
+        an account identity and everything placed on the returned record is printable.
+
+        Default ``None``: an adapter with no such verb makes no claim rather than guessing one.
+        """
+        return None
 
     def _preflight_healthy_detail(self, env: Mapping[str, str]) -> str:
         """Subclass hook: extra detail appended to the healthy preflight message (e.g. a resolved
@@ -447,7 +483,7 @@ class BaseCliProvider:
         self._write_request(paths, request, argv=argv)
 
         env = self._augment_child_env(build_child_env(self._security.allowed_environment))
-        # Deterministic no-model pre-launch check on the real launch env (WRI-003 Codex canary): a
+        # Deterministic no-model pre-launch check on the real launch env (the Codex canary): a
         # ProviderError here fails closed BEFORE any model call. The request artifact is already
         # written; a subclass may record its own evidence under ``paths``.
         self._pre_launch_check(request, argv, env, paths)
@@ -478,16 +514,20 @@ class BaseCliProvider:
 
         # Redact every captured sink before it is written: a leaked secret must never land
         # in stdout.log or events.jsonl. Parsing uses the in-memory raw stream for correctness.
+        # Both stdout sinks are JSON-lines streams, so they are redacted per DECODED line
+        # (``redact_jsonl``): scrubbing the serialized characters instead used to consume the
+        # backslash of an escaped quote and leave a line that no longer parses, which silently cost
+        # the audit trail whole tool results. stderr is plain text and stays on ``redact_text``.
         extra_secrets = self._extra_secrets(request)
         raw_stdout = read_text(paths.stdout_path)
-        redacted_stdout = redact_text(raw_stdout, extra_secrets=extra_secrets)
+        redacted_stdout = redact_jsonl(raw_stdout, extra_secrets=extra_secrets)
         Path(paths.stdout_path).write_text(redacted_stdout, encoding="utf-8")
         Path(paths.stderr_path).write_text(
             redact_text(proc.stderr_text, extra_secrets=extra_secrets), encoding="utf-8"
         )
         Path(paths.events_path).write_text(redacted_stdout, encoding="utf-8")
 
-        # WRI-012 quiescence barrier: before ANY output is parsed or trusted, the provider process
+        # Quiescence barrier: before ANY output is parsed or trusted, the provider process
         # tree must be proven quiescent. If ``run_process`` could not prove the containment empty, a
         # background/detached descendant may still be writing the repo/exchange — a fail-closed
         # SECURITY condition, never a quality failure and never a fallback. Finalize the failed
@@ -536,7 +576,7 @@ class BaseCliProvider:
             self._finalize_failure(paths, request, started_at, finished_at, proc, error)
             raise
 
-        # The raw session id lives ONLY in state.db (durable sessions, P2.2). The resume id was
+        # The raw session id lives ONLY in state.db (durable sessions). The resume id was
         # already redacted via ``extra_secrets``; scrub the freshly emitted id from the on-disk
         # streams too, while keeping the raw id on the in-memory result for the lineage store.
         if parsed.session_id:
@@ -553,13 +593,20 @@ class BaseCliProvider:
             # failure: RAISE ``RATE_LIMITED`` so the Router falls over to the other provider and, on
             # exhaustion, the orchestrator parks the task (resumable) instead of burning the queue /
             # a fix budget. Persist the failed-attempt artifact first, like the other raise paths.
-            error = NormalizedError(ErrorClass.RATE_LIMITED, message_for(ErrorClass.RATE_LIMITED))
+            error = NormalizedError(
+                ErrorClass.RATE_LIMITED,
+                message_for(ErrorClass.RATE_LIMITED),
+                resets_at=_iso_instant(parsed.rate_limit_resets_at),
+            )
             self._finalize_failure(paths, request, started_at, finished_at, proc, error)
-            raise ProviderError(error.error_class, error.message)
+            # Set on the raised exception too, not only on the recorded error: the Router rebuilds
+            # its own normalized error from what was RAISED, so an instant living only here would be
+            # dropped before the Core ever saw it.
+            raise ProviderError(error.error_class, error.message, resets_at=error.resets_at)
 
         if not parsed.succeeded and _produced_no_work(parsed, request):
-            # EXPERIMENTAL(no-work-infra) — trial block; revert this whole `if` to fall back to the
-            # plain TASK_FAILURE return below if we drop the ADR.
+            # EXPERIMENTAL(no-work-infra) — trial block; revert this whole `if` to fall back to
+            # the plain TASK_FAILURE return below if the trial is dropped.
             # The GENERIC no-work net: a parseable terminal event that did NOTHING (zero output
             # tokens, no structured output, not error_max_turns) is a no-progress INFRA failure,
             # not a quality task_failure. RAISE ``AGENT_NO_PROGRESS`` (fallback-eligible) so the
@@ -624,11 +671,21 @@ class BaseCliProvider:
     # --- shared internals ----------------------------------------------------------------------
 
     def _scrub_raw_session(self, paths: ArtifactPaths, raw_session_id: str) -> None:
-        """Replace a raw session id with :data:`REDACTED` in the on-disk stdout/events streams."""
+        """Replace a raw session id with :data:`REDACTED` in the on-disk stdout/events streams.
+
+        Word-bounded, like the literal path in ``redact_text``: an unbounded substring replace is
+        the very defect that boundary exists to prevent, and here it would rewrite every occurrence
+        of a short session id *inside* other words — shredding the JSON structure of the very sinks
+        this method rewrites.
+        """
+        if not raw_session_id:
+            return
+        pattern = re.compile(rf"(?<!\w){re.escape(raw_session_id)}(?!\w)")
         for path in (paths.stdout_path, paths.events_path):
             existing = read_text(path)
-            if raw_session_id and raw_session_id in existing:
-                Path(path).write_text(existing.replace(raw_session_id, REDACTED), encoding="utf-8")
+            scrubbed = pattern.sub(REDACTED, existing)
+            if scrubbed != existing:
+                Path(path).write_text(scrubbed, encoding="utf-8")
 
     def _write_request(
         self, paths: ArtifactPaths, request: AgentRunRequest, *, argv: list[str] | None
@@ -647,6 +704,7 @@ class BaseCliProvider:
             "check_artifacts_path": request.check_artifacts_path,
             "review_artifacts_path": request.review_artifacts_path,
             "human_input_path": request.human_input_path,
+            "supervisor_packet_path": request.supervisor_packet_path,
             "skill_reference_paths": list(request.skill_reference_paths) or None,
         }
         representation: dict[str, Any] = {
@@ -697,7 +755,7 @@ class BaseCliProvider:
 
     def _extra_secrets(self, request: AgentRunRequest) -> tuple[str, ...]:
         """Literal secrets to redact: secret-named parent env values + denied-read file contents +
-        the raw resume session id (durable sessions, P2.2 — it must never leave state.db, so it is
+        the raw resume session id (durable sessions — it must never leave state.db, so it is
         scrubbed from the request argv / stdout / stderr / events / result)."""
         session = (request.session_id,) if request.session_id else ()
         return (

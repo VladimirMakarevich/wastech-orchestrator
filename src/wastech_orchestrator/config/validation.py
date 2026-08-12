@@ -2,8 +2,8 @@
 
 Enforces every semantic rule so an unsafe or contradictory config never reaches the
 pipeline. This is the config-time half of the "security cannot be weakened" invariant
-(.agents/rules/security.md): ``extra_args`` that would disable the sandbox/approvals are
-rejected here. The adversarial test matrix lives in P6.
+``extra_args`` that would disable the sandbox/approvals are
+rejected here.
 
 All problems are collected and raised together via the typed :class:`ConfigError` from the loader.
 """
@@ -43,7 +43,7 @@ def _check_extra_args(pid: ProviderId, args: tuple[str, ...], issues: list[str])
 
 
 def _check_sandbox_field(pid: ProviderId, sandbox: str | None, issues: list[str]) -> None:
-    """Reject a legacy ``sandbox: read-only|workspace-write`` (WRI-003).
+    """Reject a legacy ``sandbox: read-only|workspace-write``.
 
     A Codex node's isolation is now the generated permission profile selected by
     ``permission_profile``; the ``sandbox`` field survives only as the ``danger-full-access`` escape
@@ -87,7 +87,7 @@ def _global_primary(config: OrchestratorConfig) -> ProviderId | None:
     return primaries[0] if len(primaries) == 1 else None
 
 
-# Recognized model-name prefixes per vendor, for the F39 advisory model↔provider warning ONLY. A
+# Recognized model-name prefixes per vendor, for the advisory model↔provider warning ONLY. A
 # deliberately conservative heuristic: an unrecognized model yields no vendor (no false positive),
 # matching the codebase's stance that model ids are otherwise passed through unverified.
 _MODEL_VENDOR_PREFIXES: tuple[tuple[ProviderId, tuple[str, ...]], ...] = (
@@ -193,6 +193,7 @@ def validate_config(config: OrchestratorConfig) -> list[str]:
     _validate_telegram(config, issues)
     _validate_confirmation_gates(config, issues)
     _validate_supervisor(config, issues, warnings)
+    _validate_skills(config, warnings)
     _validate_security(config, issues)
     _validate_paths(config, issues)
 
@@ -225,10 +226,36 @@ def _validate_paths(config: OrchestratorConfig, issues: list[str]) -> None:
         )
 
 
+#: Named once so the warning below and the early return it guards cannot drift apart.
+_INERT_SUPERVISOR_KEYS = "role_file / provider / observe / finalize / handoff"
+
+
+def _validate_skills(config: OrchestratorConfig, warnings: list[str]) -> None:
+    """A dynamic skill map needs the layer that proposes it.
+
+    A warning rather than a fatal issue, because the dynamic layer is fail-open by design (a
+    proposal naming a skill that does not resolve is filtered out, never an error): "each node
+    gets only the
+    skills pinned on it in the flow" is a correct degradation, not a lost guarantee. It is silent,
+    though, which is what earns the warning.
+
+    Worded about the **resolved** value on purpose: a ``skills:`` block written without a
+    ``dynamic:`` key resolves to true (the loader's default for a present block), so this can
+    fire for
+    an operator who never typed the word.
+    """
+    if config.skills.dynamic and not config.supervisor.enabled:
+        warnings.append(
+            "skills.dynamic resolves to true but supervisor.enabled is false — the once-per-task "
+            "node→skills proposal is a supervisor turn, so each node gets only the skills pinned "
+            "on it in the flow YAML"
+        )
+
+
 def _validate_supervisor(
     config: OrchestratorConfig, issues: list[str], warnings: list[str]
 ) -> None:
-    """The supervisor layer is validated under the same ceiling as a flow node (P2.1).
+    """The supervisor layer is validated under the same ceiling as a flow node.
 
     ``permission_profile`` is forced ``read-only`` in code (the layer never writes). ``provider``
     (when set) must be in ``agents.allowed`` and ``reasoning`` must be supported by the resolved
@@ -237,30 +264,55 @@ def _validate_supervisor(
     that ``role_file`` has no path traversal (``..`` or an absolute path) — the flow validator's
     containment rule for a node ``role_file``.
 
-    F39: when ``provider`` is unset, ``supervisor.model`` is sent to the inherited global primary. A
-    model whose vendor plainly clashes with that primary (a ``claude-*`` model under a ``codex``
+    One ``provider`` serves the whole layer, but model and effort are per phase, so every check
+    below runs once per phase block (``observe`` / ``finalize`` / ``handoff``) against that one
+    resolved provider.
+
+    When ``provider`` is unset, each phase's model is sent to the inherited global primary. A model
+    whose vendor plainly clashes with that primary (a ``claude-*`` model under a ``codex``
     primary, say) 400s on every supervisor turn at runtime, silently masked by the cross-provider
     fallback. We can't verify a model in general, but a recognized cross-vendor prefix is a strong
     signal — surfaced as a WARNING, not fatal (the run still degrades via fallback; "fatal only when
     no runtime fallback"). The check fires only on the inherited path; an explicit provider is the
     operator's call and is validated for ``agents.allowed`` membership above.
+
+    With the layer switched off none of these values is ever read: no provider is resolved, no model
+    is sent, and no role file is opened, so refusing a config over a model that will never be called
+    would only punish an operator who left the block behind. It becomes one warning instead. Nothing
+    is actually lost by that — ``read_role_file`` enforces flow-dir containment unconditionally at
+    read time and the router re-checks ``agents.allowed`` at route resolution; these are the early,
+    friendly copies of both.
     """
-    provider = config.supervisor.provider
+    supervisor = config.supervisor
+    if not supervisor.enabled:
+        warnings.append(
+            "supervisor.enabled: false — the rest of the supervisor block "
+            f"({_INERT_SUPERVISOR_KEYS}) is inert and is not validated"
+        )
+        return
+    provider = supervisor.provider
     if provider is not None and provider not in frozenset(config.agents.allowed):
         issues.append(f"supervisor.provider {provider.value!r} is not in agents.allowed")
     resolved = provider or _global_primary(config)
+    phases = (
+        ("observe", supervisor.observe.model, supervisor.observe.reasoning),
+        ("finalize", supervisor.finalize.model, supervisor.finalize.reasoning),
+        ("handoff", supervisor.handoff.model, supervisor.handoff.reasoning),
+    )
     if resolved is not None:
-        _check_reasoning(
-            where="supervisor.reasoning",
-            provider=resolved,
-            reasoning=config.supervisor.reasoning,
-            issues=issues,
-        )
-        if provider is None:
-            vendor = _infer_model_vendor(config.supervisor.model)
+        for phase, model, reasoning in phases:
+            _check_reasoning(
+                where=f"supervisor.{phase}.reasoning",
+                provider=resolved,
+                reasoning=reasoning,
+                issues=issues,
+            )
+            if provider is not None:
+                continue
+            vendor = _infer_model_vendor(model)
             if vendor is not None and vendor != resolved:
                 warnings.append(
-                    f"supervisor.model {config.supervisor.model!r} looks like a {vendor.value} "
+                    f"supervisor.{phase}.model {model!r} looks like a {vendor.value} "
                     f"model, but supervisor.provider is unset so it inherits the global primary "
                     f"{resolved.value!r}; this will fail at runtime and fall back. Pin "
                     f"supervisor.provider to {vendor.value!r} or set a {resolved.value} model."
@@ -298,7 +350,7 @@ def _validate_telegram(config: OrchestratorConfig, issues: list[str]) -> None:
 
 
 def _validate_confirmation_gates(config: OrchestratorConfig, issues: list[str]) -> None:
-    """An enabled operator-confirmation gate requires a Telegram transport (idea 27 / 29).
+    """An enabled operator-confirmation gate requires a Telegram transport.
 
     Both gates resolve to STOP on silence; an enabled gate with no transport could never reach the
     operator and would be a silently-failing safety control, so it is a misconfiguration rather than

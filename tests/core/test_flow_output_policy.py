@@ -1,4 +1,4 @@
-"""P3.2 — output / network policies: write containment, private-report publish, network grant.
+"""Output / network policies: write containment, private-report publish, network grant.
 
 The after-stage write guard confines a flow's writing nodes to its resolved report directory, the
 ``private_control_workspace_report`` publish stores the report without touching git (fail-closed if

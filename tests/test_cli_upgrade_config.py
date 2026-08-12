@@ -97,3 +97,46 @@ def test_newer_schema_version_is_refused(
     rc = cli.main(["--config", str(cfg), "upgrade-config"])
     assert rc == 2
     assert "newer than this orchestrator" in capsys.readouterr().out
+
+
+def test_upgrade_migrates_a_config_whose_removed_key_the_loader_now_rejects(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The command's whole purpose. v33 removed the flat `supervisor.model`/`reasoning`, and the
+    # loader rejects them fail-closed — so the fail-closed read-back of the operator's own file has
+    # to look past exactly the keys being stripped, or `upgrade-config` would refuse every config it
+    # exists to migrate and the operator would have no automated path off the old schema.
+    m = packaged_template_mapping()
+    m["schema_version"] = 32
+    m["supervisor"] = {"role_file": "roles/supervisor.md", "model": "opus", "reasoning": "xhigh"}
+    cfg = _write(tmp_path, yaml.safe_dump(m, sort_keys=False))
+
+    assert cli.main(["--config", str(cfg), "upgrade-config"]) == 0
+    out = capsys.readouterr().out
+    assert "- supervisor.model (removed in this schema version)" in out
+    assert "- supervisor.reasoning (removed in this schema version)" in out
+
+    data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+    assert "model" not in data["supervisor"] and "reasoning" not in data["supervisor"]
+    # The replacement blocks arrived from the template, so the result is complete and loads clean.
+    config = load_config(cfg).config
+    assert config.supervisor.observe.mode.value == "events"
+    assert config.supervisor.finalize.reasoning == "medium"
+    validate_config(config)
+
+
+def test_upgrade_still_refuses_a_config_it_cannot_read(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The relaxation above is scoped to removed keys only: any other structural problem still
+    # refuses before the file is touched ("never upgrade a config we cannot read").
+    m = packaged_template_mapping()
+    m["schema_version"] = 32
+    m["agents"]["not_a_real_key"] = 1
+    cfg = _write(tmp_path, yaml.safe_dump(m, sort_keys=False))
+    original = cfg.read_text(encoding="utf-8")
+
+    assert cli.main(["--config", str(cfg), "upgrade-config"]) == 2
+    assert "not_a_real_key" in capsys.readouterr().out
+    assert cfg.read_text(encoding="utf-8") == original  # untouched
+    assert list(tmp_path.glob("config.yaml.bak-*")) == []

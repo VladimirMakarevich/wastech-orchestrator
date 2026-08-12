@@ -1,14 +1,20 @@
-"""StateStoreRunRecorder + resume hydration (flow-engine P1.2)."""
+"""StateStoreRunRecorder, the deterministic step record, and resume hydration."""
 
 from __future__ import annotations
 
 import json
 from pathlib import Path
 
-from wastech_orchestrator.core.flow.recorder import StateStoreRunRecorder, hydrate_run_state
+from wastech_orchestrator.core.flow.recorder import (
+    StateStoreRunRecorder,
+    collect_step_facts,
+    fell_back_from,
+    hydrate_run_state,
+)
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import AgentNode
 from wastech_orchestrator.core.state_machine import Status
+from wastech_orchestrator.providers.artifacts import node_run_dir
 from wastech_orchestrator.state_store import EvaluationRow, NodeRunRow, StateStore, TaskRow
 
 
@@ -65,7 +71,7 @@ def test_recorder_writes_flow_neutral_failure_report(tmp_path: Path) -> None:
 
 
 def test_recorder_failure_report_carries_findings_and_diff(tmp_path: Path) -> None:
-    # F50: the stuck report must carry the REAL last in-flow review findings and working-tree diff,
+    # The stuck report must carry the REAL last in-flow review findings and working-tree diff,
     # not the old hardcoded (none)/(empty) — so a terminal is diagnosable without hand-recovery.
     store = _store(tmp_path)
     store.record_evaluation(
@@ -97,6 +103,81 @@ def test_recorder_failure_report_carries_findings_and_diff(tmp_path: Path) -> No
     assert "schema drift" in stuck
 
 
+def _run(**overrides: object) -> NodeRunRow:
+    fields: dict = {"task_id": "t1", "node_id": "implementation", "node_kind": "agent"}
+    fields.update(overrides)
+    return NodeRunRow(**fields)
+
+
+def test_fallback_is_derived_only_from_a_real_route_divergence() -> None:
+    # The one derivation of "this step did not land where it was routed": the finalize packet's step
+    # record and the observation cadence's `fallback` trigger both read it here.
+    assert fell_back_from(_run(provider_used="codex", route_primary="claude")) == "claude"
+    assert fell_back_from(_run(provider_used="claude", route_primary="claude")) is None
+    # Non-agent kinds leave both route columns NULL — that is not a fallback.
+    assert fell_back_from(_run(provider_used=None, route_primary=None)) is None
+    assert fell_back_from(_run(provider_used="codex", route_primary=None)) is None
+    assert fell_back_from(_run(provider_used=None, route_primary="claude")) is None
+
+
+def test_step_record_carries_each_run_in_execution_order_with_its_own_message(
+    tmp_path: Path,
+) -> None:
+    store = _store(tmp_path)
+    first = store.record_node_run(
+        NodeRunRow(task_id="t1", node_id="planning", node_kind="agent", status="passed")
+    )
+    second = store.record_node_run(
+        NodeRunRow(
+            task_id="t1",
+            node_id="implementation",
+            node_kind="agent",
+            status="passed",
+            outcome="done",
+            stage_attempts=2,
+            provider_used="codex",
+            route_primary="claude",
+            subtask_order=1,
+        )
+    )
+    out = node_run_dir(tmp_path, "t1", "implementation", second)
+    out.mkdir(parents=True)
+    (out / "implementation.out.md").write_text("wired the adapter", encoding="utf-8")
+
+    facts = collect_step_facts(store.get_node_runs("t1"), tmp_path, "t1")
+    assert [f.node_id for f in facts] == ["planning", "implementation"]
+    assert facts[0].message is None  # the run wrote no closing message
+    assert facts[1].message == "wired the adapter"
+    assert facts[1].fallback_from == "claude"
+    assert facts[1].stage_attempts == 2
+    assert facts[1].subtask_order == 1
+    assert first != second
+
+
+def test_step_record_message_is_verbatim_so_bounding_stays_with_the_renderer(
+    tmp_path: Path,
+) -> None:
+    # The record is the fact; truncating here would make the truncation permanent for every reader.
+    store = _store(tmp_path)
+    run_id = store.record_node_run(
+        NodeRunRow(task_id="t1", node_id="planning", node_kind="agent", status="passed")
+    )
+    out = node_run_dir(tmp_path, "t1", "planning", run_id)
+    out.mkdir(parents=True)
+    (out / "planning.out.md").write_text("x" * 900, encoding="utf-8")
+
+    facts = collect_step_facts(store.get_node_runs("t1"), tmp_path, "t1")
+    assert facts[0].message == "x" * 900
+
+
+def test_step_record_survives_a_run_with_no_id(tmp_path: Path) -> None:
+    # A row with no id has no artifact directory to name, and the packet build swallows exceptions —
+    # so an unguarded read here would degrade a finalize to "unseeded" with only a log line.
+    facts = collect_step_facts([_run(status="passed")], tmp_path, "t1")
+    assert len(facts) == 1
+    assert facts[0].message is None
+
+
 def test_hydrate_returns_none_when_flow_never_ran(tmp_path: Path) -> None:
     store = _store(tmp_path)
     assert hydrate_run_state(store, "t1") is None
@@ -126,7 +207,7 @@ def test_hydrate_rebuilds_checkpoint_from_saved_snapshot(tmp_path: Path) -> None
 def test_recovery_does_not_rereresolve_flow(tmp_path: Path) -> None:
     # hydrate_run_state takes only the store + task id — no config/registry — so resume can never
     # re-resolve the flow from live config; it returns exactly the persisted snapshot fingerprint
-    # (the P1.2 recovery invariant; the orchestrator-level recovery dispatch lands in P1.4).
+    # (the recorder's recovery invariant; the orchestrator dispatches recovery itself).
     store = _store(tmp_path)
     StateStoreRunRecorder(store, "t1", artifacts_root=tmp_path).save_checkpoint(
         FlowRunState(flow_fingerprint="snap-abc123", current_node="review")

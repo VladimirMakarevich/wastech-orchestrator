@@ -1,4 +1,4 @@
-"""Flow schema — Python types for the YAML flow document (P0.2).
+"""Flow schema — Python types for the YAML flow document.
 
 The flow-graph document as frozen dataclasses.
 Pure: no IO, no YAML parsing, no fingerprinting — only types.
@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Literal
 
+from wastech_orchestrator.config.schema import ObserveMode
 from wastech_orchestrator.core.flow.contracts import (
     NetworkPolicy,
     OutputPolicy,
@@ -59,6 +60,14 @@ class AgentNode:
     #: this node alone; ``None`` (default) inherits the flow's ``network_policy`` default. Toggles
     #: only the network dimension — never the filesystem permission ceiling.
     network_access: bool | None = None
+    #: ask for the read-only git verbs so this node can inspect delivery history (an audit node
+    #: citing a commit rather than grepping a changelog). ``True`` requests the grant; ``False`` and
+    #: ``None`` (default) do not. The request is only ever honored when the operator's
+    #: ``security.allow_git_evidence`` is on — with it off a declaring node is accepted and inert,
+    #: which is what keeps a flow from widening the envelope on its own. Grants reading only: the
+    #: verbs cannot mutate, the sandbox write-denies the clone, and publishing stays the
+    #: orchestrator's.
+    git_evidence: bool | None = None
     #: which provider runs this node; None → the config's global primary (PRE.1). Validated against
     #: ``agents.allowed`` at preflight; never relaxes the security ceiling.
     provider: ProviderId | None = None
@@ -67,8 +76,15 @@ class AgentNode:
     timeout_seconds: int | None = None
     output_schema: str | None = None  # JSON-encoded when present
     #: optional well-known artifact slot the agent's output is persisted to and threaded downstream
-    #: (``enriched_spec`` / ``plan`` / ``summary``); the core writes it after the node runs (P1.4).
+    #: (``enriched_spec`` / ``plan`` / ``summary``); the core writes it after the node runs.
     output_artifact: str | None = None
+    #: the file this node *produces*, named by the flow: when set, that file's content — not the
+    #: node's closing message — is what the ``{<node_id>_path}`` channel carries downstream. One
+    #: portable filename (no separators, no ``..``), resolved inside the flow's ``output_policy``
+    #: report directory, or the repository root for a policy without one. A node whose real product
+    #: is a written document otherwise publishes only its own summary of it. Absent, or the file is
+    #: missing/unreadable after the node runs, the channel keeps carrying the message.
+    output_file: str | None = None
     #: a best-effort node tolerates an infrastructure failure (no provider could run it): the engine
     #: continues instead of failing the task (the summary stage — minimal-summary fallback).
     best_effort: bool = False
@@ -94,6 +110,9 @@ class EvaluatorNode:
     #: per-node override of the flow-wide network grant (see :class:`AgentNode`); ``None`` inherits
     #: the flow's ``network_policy`` default. Toggles only the network dimension.
     network_access: bool | None = None
+    #: ask for the read-only git verbs (see :class:`AgentNode`); honored only when the operator's
+    #: ``security.allow_git_evidence`` is on. An evaluator stays read-only either way.
+    git_evidence: bool | None = None
     blocking: bool = True
     #: Per-instance rework ceiling for a NON-blocking evaluator (e.g. ``test_quality``): after this
     #: many rework verdicts it accepts (→ continue) instead of looping. Ignored when ``blocking`` is
@@ -113,17 +132,26 @@ class EvaluatorNode:
     when: WhenPredicate | None = None
 
 
+#: Filename the ``citation`` checker looks for in the flow's report dir when the node does not name
+#: one. A flow whose writing node names its manifest anything else used to get a silent
+#: ``uncheckable: missing`` and a gate that did nothing, because the name was a literal in the node.
+DEFAULT_CITATION_MANIFEST = "sources.json"
+
+
 @dataclass(frozen=True, slots=True)
 class ChecksNode:
     id: str
     kind: Literal["checks"]
     checker: Literal["command_profile", "citation", "dependency_scan"]
+    #: ``citation`` only: the manifest filename inside the flow's report dir. A single path segment
+    #: (no separators, no ``..``) — it names a file the flow's own writing node produced.
+    manifest: str = DEFAULT_CITATION_MANIFEST
     when: WhenPredicate | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class ToolNode:
-    """A custom operator tool node (P5): runs an operator executable out-of-process.
+    """A custom operator tool node: runs an operator executable out-of-process.
 
     Unlike :class:`ChecksNode` (whose ``checker`` is a closed core-owned ``Literal``), ``tool`` is a
     **free string** naming an operator executable registered under ``<repo>/.worc/tools/`` — the
@@ -192,8 +220,23 @@ class DecompositionConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class SupervisorObserveBlock:
+    """Flow-local observation cadence — the same key path as the global one.
+
+    ``supervisor.observe.mode`` reads identically in ``config.yaml`` and in a flow YAML, so there is
+    one name to learn. ``None`` (the key absent) inherits the global mode; a declared mode may only
+    *narrow* it (``none < events < selected < all``), which the config-aware validator enforces
+    before any node runs. Nested rather than flat so the cadence's other knobs
+    (``include_nodes``, ``triggers``) have a home if a flow ever needs them, without a second
+    rename.
+    """
+
+    mode: ObserveMode | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class SupervisorBlock:
-    """Flow-local supervisor prompt overrides + the follow-ups opt-in (prompt-and-supervisor ADR).
+    """Flow-local supervisor prompt overrides, the follow-ups opt-in, and the observation cadence.
 
     The supervisor is a constant layer above any flow; this block lets a flow reshape *its wording*
     without touching global config. Only wording moves into files — the structured-output schemas
@@ -201,13 +244,15 @@ class SupervisorBlock:
     machine contract the orchestrator parses.
 
     * ``role_file`` — the observe lens, overriding the global ``config.supervisor.role_file``.
+      Unused when the cadence resolves to ``none``: nothing observes, so no lens is ever loaded.
     * ``finalize_role_file`` — the final-summary emphasis (no global counterpart — YAGNI).
-    * ``handoff_role_file`` — the intra-task subtask handoff brief (subtask-context-handoff ADR; no
-      global counterpart). A third supervisor prompt, same contract: wording in a file, schema in
-      code.
+    * ``handoff_role_file`` — the intra-task subtask handoff brief (no global counterpart). A third
+      supervisor prompt, same contract: wording in a file, schema in code.
     * ``emit_follow_ups`` — opt the flow's finalize turn into the structured ``{summary,
       follow_ups}`` contract (a per-flow, code-oriented capability; default off). Memory is
       orthogonal (the same turn additionally emits ``memory_delta`` when memory is enabled).
+    * ``observe`` — how often this flow's steps are worth an LLM note. This is where a per-flow
+      cadence default belongs: the engine never maps a flow name to a mode.
 
     All prompt paths are validated as flow-dir-contained (fatal on traversal), like a node
     ``role_file``.
@@ -217,6 +262,7 @@ class SupervisorBlock:
     finalize_role_file: str | None = None
     handoff_role_file: str | None = None
     emit_follow_ups: bool = False
+    observe: SupervisorObserveBlock | None = None
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,4 +1,4 @@
-"""Audit log + snapshots (01.4): AC-SF3 (audited, hash-chained, append-only), AC-SF4 (restore)."""
+"""Audit log + snapshots: audited, hash-chained, append-only; and snapshot restore."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ def _semantic(statement: str, memory_id: str = "ltm1") -> LongTermRecord:
 
 
 def test_each_append_writes_one_audit_row_with_hashes(tmp_path: Path) -> None:
-    # AC-SF3: every mutation writes exactly one audit row with pre/post hashes + rationale.
+    # Every mutation writes exactly one audit row with pre/post hashes + rationale.
     service = MemoryService(MemoryLayout(tmp_path / ".worc"))
     service.append(_semantic("first"), audit=_AUDIT)
     rows = service.audit.rows()
@@ -70,7 +70,7 @@ def test_audit_log_is_append_only(tmp_path: Path) -> None:
 
 
 def test_snapshot_mutate_restore_is_byte_identical(tmp_path: Path) -> None:
-    # AC-SF4: snapshot → mutate → restore returns byte-identical pre-state.
+    # Snapshot → mutate → restore returns byte-identical pre-state.
     service = MemoryService(MemoryLayout(tmp_path / ".worc"))
     service.append(_semantic("original"), audit=_AUDIT)
     semantic_file = tmp_path / ".worc" / "memory" / "long_term" / "semantic.jsonl"
@@ -105,7 +105,7 @@ def test_content_hash_is_deterministic() -> None:
 
 
 def test_marker_is_emitted_per_mutation_with_task_id(tmp_path: Path) -> None:
-    # 02.6 (AC-SF3): every memory mutation mirrors into a best-effort secondary marker.
+    # Every memory mutation mirrors into a best-effort secondary marker.
     markers: list[dict[str, Any]] = []
     service = MemoryService(MemoryLayout(tmp_path / ".worc"), marker=markers.append)
     audit = AuditContext(timestamp="2026-06-30T00:00:00Z", task_id="task-7")
@@ -117,7 +117,7 @@ def test_marker_is_emitted_per_mutation_with_task_id(tmp_path: Path) -> None:
 
 
 def test_marker_failure_does_not_break_the_write(tmp_path: Path) -> None:
-    # FR8: a failing secondary marker (e.g. state.db down) must never fail the memory write.
+    # A failing secondary marker (e.g. state.db down) must never fail the memory write.
     def boom(_row: Any) -> None:
         raise RuntimeError("marker sink down")
 

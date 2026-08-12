@@ -13,15 +13,15 @@ A live task belongs in the repo's own `tasks/pending/` directory (committed and 
 
 ## `task_type` — choose the flow
 
-`task_type` selects which **flow** (the fixed pipeline of stages) carries the task. Omit it and the task runs the default `implementation` flow (`planning → implementation → testing → review → fixing → documentation → publish`, with `refinement` skipped automatically when the task is complete) — what almost every coding task wants. Set it to run a different flow:
+`task_type` selects which **flow** (the fixed pipeline of stages) carries the task. Omit it and the task runs the default `implementation` flow (`refinement → planning → implementation → testing → review → fixing → documentation → publish`, with `refinement` skipped automatically when the task is complete) — what almost every coding task wants. Set it to run a different flow:
 
 ```yaml
 task_type: deep_research # or: security_audit, implementation (default), or a custom operator flow
 ```
 
-Built-in flows: `implementation` (default coding pipeline), `deep_research`, `security_audit` — `install` seeds editable copies into `<repo>/.worc/flows/`. An operator can add more by dropping a `<task_type>.yaml` there (the file's own `flow.task_type` must match its name), or replace a built-in by editing its seeded copy. `.worc/flows/` is the only place flows resolve from, so a `task_type` with no file there fails the task at flow resolution, before any branch is created.
+Built-in flows: `implementation` (default coding pipeline), `deep_research`, `security_audit`, `merge`, `blog_article`, `blog_article_revise`, `content_chapter`, `content_translate` — `install` seeds editable copies into `<repo>/.worc/flows/`. An operator can add more by dropping a `<task_type>.yaml` there (the file's own `flow.task_type` must match its name), or replace a built-in by editing its seeded copy. `.worc/flows/` is the only place flows resolve from, so a `task_type` with no file there fails the task at flow resolution, before any branch is created.
 
-The task only **names** the flow — it never edits the graph, its nodes, or their providers/models. Picking a different built-in is the one task-side choice. To change _which_ stages run for a single task, the only per-task knob is disabling a node (see below); to reshape the pipeline or retune a stage's provider/model, edit the flow YAML under `.worc/flows/` (an operator/flow-authoring change, not a task field).
+The task only **names** the flow — it never edits the graph: the stages, their edges, and their gating are the flow's. Picking a different built-in is the main task-side choice. Two narrow per-task knobs act on the resolved flow, both keyed by node id: disabling a node and overriding a node's provider/model/reasoning (see below). To reshape the pipeline itself, or to retune a stage durably, edit the flow YAML under `.worc/flows/` (an operator/flow-authoring change, not a task field).
 
 ## Decomposition — split a large task
 
@@ -29,7 +29,7 @@ Whether a large task is broken into sequential subtasks (on one branch, one PR) 
 
 ## `branch_name` — override the task branch
 
-By default the orchestrator creates `<repo.branch_prefix>/<task-id>-<slug(title)>`, usually `worc/<task-id>-<slug>`. Set `branch_name` when the target project or customer requires a different branch convention:
+By default the orchestrator creates `<repo.branch_prefix>/<epoch>-<task-id>-<slug(title)>`, usually `worc/<epoch>-<task-id>-<slug>` — the epoch is the attempt's Unix timestamp, so a fresh rerun never collides with the previous attempt's branch (the slug is truncated, or dropped entirely, to keep the name within the branch-name length budget). Set `branch_name` when the target project or customer requires a different branch convention:
 
 ```yaml
 title: "Add a bounded retry budget to webhook delivery"
@@ -82,7 +82,9 @@ It never lowers the hard ceiling (env-allowlist, the `--dangerously-*`/bypass ba
 
 ## Disabling nodes — `nodes.<node-id>.enabled: false`
 
-Disable a node only when it adds no value for this task. Keys are flow **node ids**; any node in the task's resolved flow may be disabled. The ids below are the default `implementation` flow's; a custom flow exposes its own (e.g. `code_review`). `refinement` is skipped automatically when the task is already complete (see "Refinement" below).
+Disable a node only when it adds no value for this task. Keys are flow **node ids**; any node in the task's resolved flow may be disabled. The ids below are the default `implementation` flow's; a custom flow exposes its own (e.g. `code_review`). `refinement` is skipped automatically when the task is already complete (see "Refinement" below) — with one flow-specific exception: `deep_research`'s `refinement` is a _scoping_ pass carrying no completeness predicate, so it runs on every task and disabling it here is the only way to skip it.
+
+Disabling a `checks` node is also the sanctioned way to make a quality gate not run for one task. Do not reach for a set's `skip_if_unavailable` instead: that only turns a missing toolchain into a loud skip, and a set that was the _only_ one the diff selected then leaves the gate with nothing run — which parks the task at `manual_action_required`, the same place the launch failure would have.
 
 ```yaml
 nodes:
@@ -101,11 +103,24 @@ What disabling the default-flow nodes does:
 | `review` | Commit with **no agent review gate**. |
 | `fixing` | A test/review failure spins the fix loop as a no-op to its cap, then `manual_action_required`. |
 
-**Disabling `review` is high-risk** — it removes the only agent quality gate before commit/PR. There is no config gate for it (no `agents.allow_review_skip`): which nodes are safe to disable is the operator's flow-authoring responsibility. Node-disable is per-task only (`nodes.<node-id>.enabled: false`); `enabled` is the **only** valid per-node key. Naming an id absent from the task's flow ends the task `failed` (a controlled error at flow resolution).
+**Disabling `review` is high-risk** — it removes the only agent quality gate before commit/PR. There is no config gate for it (no `agents.allow_review_skip`): which nodes are safe to disable is the operator's flow-authoring responsibility. Node-disable is per-task only (`nodes.<node-id>.enabled: false`); the valid per-node keys are `enabled`, `model`, `reasoning`, and `provider` — any other sub-key rejects the task (`invalid_node_override`). Naming an id absent from the task's flow ends the task `failed` (a controlled error at flow resolution).
 
-## Provider / model / reasoning — not a task knob
+Also note what disabling **does not** reach: the whole-task summary is not a graph node, so no `nodes` entry removes it. Removing that oversight layer is the operator's config switch `supervisor.enabled: false`, after which the pull-request body is rendered deterministically from the run's own recorded facts.
 
-Which provider runs a stage, and with which model and reasoning effort, is decided by the **flow** (each flow node declares its own `provider`/`model`/`reasoning`, or defaults to the operator's global primary provider) — never by the task. A task cannot repoint a stage's provider or set its model. If a stage needs a stronger model, that is an operator/flow change, not a task front-matter field.
+## Provider / model / reasoning — a per-run overlay, not a redesign
+
+Which provider runs a stage, and with which model and reasoning effort, is the **flow's** decision: each node declares its own `provider`/`model`/`reasoning`, falling back to the operator's global provider defaults. A task may overlay that for one run, per node:
+
+```yaml
+nodes:
+  review:
+    provider: claude # this run only; the flow's declaration is unchanged
+    reasoning: high
+```
+
+The resolution chain is task node override → flow node declaration → provider config default. The overrides are deliberately **best-effort**: the validation gate checks only that each is a non-empty string, and one the resolved flow or config cannot honor (a `provider` outside `agents.allowed`, a `reasoning` the provider does not support) is warned and skipped at run time, falling back to the flow's value — the task is never aborted for it. `model` is passed through unchecked, because model names have no reliable tier ordering. Use this to run one task at a different effort or on the other agent; when a stage needs a stronger model _every_ time, change the flow YAML instead — that is the durable fix.
+
+With the operator's `prompt_audit` flag on, the effective post-override provider, model, and reasoning are recorded per node under `logs/<task-id>/prompt-audit/` — that is where you confirm an overlay was honored rather than warned and skipped.
 
 ## `auto_merge` — danger
 
@@ -118,6 +133,8 @@ You cannot flag a task to skip refinement. The orchestrator skips it automatical
 ## Where task files live
 
 There is a single canonical layout. Compose your task file in the repo's `tasks/preparing/` staging folder — the watcher never scans it, so an in-progress draft is invisible to the daemon — then run `worc promote <id>` (or the `promote` verb inside `worc shell`) to move it atomically into `tasks/pending/`, where it is git-tracked, committed, and pushed and a watching orchestrator picks it up. (`enqueue <file>` in the shell is a fast path for an already-complete external file: it lands straight in `tasks/pending/`, atomically.) Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home; only the `tasks/` lifecycle directories (`preparing`/`pending`/`done`/`failed`) stay at the repo root and are tracked. On a terminal outcome the orchestrator commits the task file and its `<id>.summary.md` as an audit trail: `done` moves it to `tasks/done/`, `failed` to `tasks/failed/`, and a rejected task is quarantined under `.worc/tasks/rejected`.
+
+One-shot verbs such as `rerun` execute on a worker when invoked from `worc shell`, so the console's log tail remains live and synchronous transports such as Telegram behave exactly as they do when the verb is run directly. The console forwards `--non-interactive` to `rerun`, `down`, and `restart` (a confirmation prompt would fight the REPL's own stdin reader), so a verb that would have asked instead refuses with instructions: answer `rerun` up front with `-y`, and a busy daemon's `down`/`restart` with `--force` or `--force-full`.
 
 ## When a task needs manual action
 

@@ -90,7 +90,12 @@ flow:
       role: critic
       role_file: blog_article_revise/tone_style.md
       blocking: true
-      # gate_severity: low  # block on ANY finding (default high); raise `style_fix` to match
+      # A style critic judges whether the piece is GOOD ENOUGH, so it has no natural way to emit
+      # `high`/`critical`; at the built-in default (`high`) its findings are recorded and dropped.
+      # This node is `blocking: true`, so a gating finding loops `style_fix` until that budget is
+      # spent and then parks the task in manual_action_required — raise `style_fix` if you lower this
+      # further (`low` = block on ANY finding).
+      gate_severity: medium
     - id: polish
       kind: agent
       role_file: blog_article_revise/polish.md
@@ -135,6 +140,13 @@ flow:
     length_fix: 5
     style_fix: 10
 
+  # `observe.mode: none` — this flow's quality is held by its own blocking gates, not by advisory
+  # notes: nothing downstream reads them, so a per-step observation was a full LLM turn per step for
+  # no effect on the deliverable. The whole-task summary is unaffected (`finalize` is seeded by a
+  # deterministic packet of the run's facts), which is what makes `none` safe here. Consequence worth
+  # knowing: at `none` the observe lens above is never loaded — only `finalize_role_file` is in force.
   supervisor:
     role_file: blog_article_revise/supervisor.md
     finalize_role_file: blog_article_revise/summary.md
+    observe:
+      mode: none

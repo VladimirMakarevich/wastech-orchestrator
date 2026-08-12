@@ -10,7 +10,7 @@ import pytest
 
 from wastech_orchestrator.config.schema import BranchMode, OrchestratorConfig, PublishScope
 from wastech_orchestrator.observability.logging import LOGGER_NAME
-from wastech_orchestrator.task.model import NodeOverride
+from wastech_orchestrator.task.model import REQUIRED_TASK_FIELDS, NodeOverride
 from wastech_orchestrator.task.parser import ParsedSource
 from wastech_orchestrator.task.validation_gate import (
     Completeness,
@@ -118,6 +118,26 @@ def test_unknown_top_level_field(config: OrchestratorConfig) -> None:
 
 def test_missing_required_title(config: OrchestratorConfig) -> None:
     text = "---\nid: task-001\n---\n\n## Description\n\nx\n"
+    result = _gate(config).validate(_src(text))
+    assert result.reason is ValidationReason.MISSING_REQUIRED_FIELD
+    assert result.detail == "title"
+
+
+@pytest.mark.parametrize("omitted", sorted(REQUIRED_TASK_FIELDS))
+def test_every_required_field_is_enforced(config: OrchestratorConfig, omitted: str) -> None:
+    # The gate reads REQUIRED_TASK_FIELDS, so the constant is the whole required set — not a
+    # docstring beside two hard-coded literals. Adding a key there must make this fail without it.
+    frontmatter = {"id": "task-001", "title": "T"}
+    del frontmatter[omitted]
+    fields = "".join(f"{key}: {value}\n" for key, value in frontmatter.items())
+    result = _gate(config).validate(_src(f"---\n{fields}---\n\n## Description\n\nx\n"))
+    assert result.reason is ValidationReason.MISSING_REQUIRED_FIELD
+    assert result.detail == omitted
+
+
+def test_blank_title_is_missing_not_present(config: OrchestratorConfig) -> None:
+    # Presence alone is not enough for `title`: it names the branch and the summary.
+    text = '---\nid: task-001\ntitle: "   "\n---\n\n## Description\n\nx\n'
     result = _gate(config).validate(_src(text))
     assert result.reason is ValidationReason.MISSING_REQUIRED_FIELD
     assert result.detail == "title"
@@ -325,7 +345,7 @@ def test_duplicate_task_id_in_ledger(config: OrchestratorConfig) -> None:
 
 
 def test_validation_reject_only_ledger_id_is_resubmittable(config: OrchestratorConfig) -> None:
-    # F6: an id whose only ledger trace is a validation reject (no tasks row) does NOT count as a
+    # An id whose only ledger trace is a validation reject (no tasks row) does NOT count as a
     # duplicate — the "rejected → fix → re-submit under the same id" loop works.
     result = _gate(config, ledger_ids={"task-001"}, validation_reject_ids={"task-001"}).validate(
         _src(_GOOD)
@@ -334,7 +354,7 @@ def test_validation_reject_only_ledger_id_is_resubmittable(config: OrchestratorC
 
 
 def test_validation_reject_but_also_claimed_still_duplicate(config: OrchestratorConfig) -> None:
-    # F6 regression: if a real tasks row also exists, the id is still reserved (a real attempt),
+    # Regression: if a real tasks row also exists, the id is still reserved (a real attempt),
     # even though a validation-reject ledger record is present.
     result = _gate(
         config,
@@ -630,7 +650,7 @@ def test_nodes_unknown_subkey_rejected(config: OrchestratorConfig) -> None:
 
 @pytest.mark.parametrize("key", ["disable_read_isolation", "strict_isolation"])
 def test_nodes_security_isolation_subkey_rejected(config: OrchestratorConfig, key: str) -> None:
-    # VF-6 / security invariant: read-isolation (and strict_isolation) are operator-config ONLY —
+    # Security invariant: read-isolation (and strict_isolation) are operator-config ONLY —
     # a task node override can never set them (only enabled/model/reasoning/provider are accepted).
     block = f"nodes:\n  planning:\n    {key}: true\n"
     result = _gate(config).validate(_src(_nodes_task(block)))
@@ -894,7 +914,7 @@ def test_branch_name_over_byte_ceiling_rejected(config: OrchestratorConfig) -> N
     assert result.reason is ValidationReason.INVALID_BRANCH_NAME
 
 
-# --- branch mode / branch_ref / publish (branch-mode ADR) --------------------------------
+# --- branch mode / branch_ref / publish --------------------------------------------------
 
 _BODY = "\n\n## Description\n\nDo it.\n"
 
@@ -950,7 +970,7 @@ def test_depends_on_with_existing_branch_ref_warns_but_passes(
     caplog: pytest.LogCaptureFixture,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # F40: combining depends_on with a pinned pre-existing branch can deadlock when that branch is a
+    # Combining depends_on with a pinned pre-existing branch can deadlock when that branch is a
     # dependency's own unmerged PR branch — an advisory warning, not a reject (can be legitimate).
     monkeypatch.setattr(logging.getLogger(LOGGER_NAME), "propagate", True)  # so caplog sees it
     with caplog.at_level(logging.WARNING):

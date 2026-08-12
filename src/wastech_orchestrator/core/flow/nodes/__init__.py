@@ -1,11 +1,11 @@
-"""Core-owned node-kind runners for the flow engine (P1.3).
+"""Core-owned node-kind runners for the flow engine.
 
 Each node kind is a thin adapter from a :class:`~wastech_orchestrator.core.flow.engine.NodeRunner`
 to an existing core capability, so executing a node yields the same result as the direct call:
 
 * :class:`~.agent.AgentNodeRunner` -> :class:`~wastech_orchestrator.routing.router.AgentRouter`
 * :class:`~.evaluator.EvaluatorNodeRunner` -> the router + structured-verdict parsing (the minimal
-  ``role=review`` evaluator; supervisor/critic/verifier are P2)
+  ``role=review`` evaluator, plus the supervisor/critic/verifier roles)
 * :class:`~.checks.ChecksNodeRunner` -> :class:`~wastech_orchestrator.check_runner.CheckRunner`
 
 The ``publish`` runner (git publishing), the agent-node embedded HITL round-trip + dangerous-diff

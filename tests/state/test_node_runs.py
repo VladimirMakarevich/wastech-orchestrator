@@ -1,4 +1,4 @@
-"""node_runs table + FlowRunState checkpoint columns (schema v4, flow-engine P1.2)."""
+"""node_runs table + FlowRunState checkpoint columns (schema v4)."""
 
 from __future__ import annotations
 
@@ -81,7 +81,7 @@ def test_node_runs_ordered_by_execution(tmp_path: Path) -> None:
 
 
 def test_reconcile_open_node_runs_closes_orphans(tmp_path: Path) -> None:
-    # VF-13: a hard operator stop strands a node run 'running'/finished_at NULL; a terminal
+    # A hard operator stop strands a node run 'running'/finished_at NULL; a terminal
     # transition closes it to 'aborted' with the reason and returns the pre-update rows so the
     # caller can bill the killed provider attempt from ``route_primary``.
     store = _store(tmp_path)
@@ -118,7 +118,7 @@ def test_reconcile_open_node_runs_closes_orphans(tmp_path: Path) -> None:
 
 
 def test_reconcile_open_node_runs_noop_when_all_finished(tmp_path: Path) -> None:
-    # VF-13: a clean terminal (every node finalized) reconciles nothing — empty list, no writes.
+    # A clean terminal (every node finalized) reconciles nothing — empty list, no writes.
     store = _store(tmp_path)
     rid = store.record_node_run(NodeRunRow(task_id="t1", node_id="a", node_kind="agent"))
     store.complete_node_run(rid, status="succeeded", outcome="done", finished_at="t-end")

@@ -41,7 +41,7 @@ _BRANCH_FORBIDDEN_CHARS = frozenset(" ~^:?*[\\")
 # warned + skipped, never fatal — see :class:`NodeOverride`). ``decomposition:`` and the planning
 # gate still decide splitting; refinement-skip is deterministic (completeness classification).
 # ``task_type`` is the dispatch key — it selects the flow (``implementation`` / ``deep_research`` /
-# ``security_audit`` / an operator flow), never anything about *how* a node runs (P0.4).
+# ``security_audit`` / an operator flow), never anything about *how* a node runs.
 ALLOWED_TASK_KEYS: frozenset[str] = frozenset(
     {
         "id",
@@ -63,13 +63,17 @@ ALLOWED_TASK_KEYS: frozenset[str] = frozenset(
         "nodes",
     }
 )
+# The front-matter keys a task must carry, enforced by ``task.validation_gate`` (which additionally
+# rejects a blank ``title`` and an empty ``Description`` section). Not operator-configurable: ``id``
+# becomes a branch fragment, a run directory, and a state-store key, so a config able to drop it
+# would break identity rather than relax a policy (config v35 removed the key that pretended to).
 REQUIRED_TASK_FIELDS: frozenset[str] = frozenset({"id", "title"})
 
 # The queue tag partitions a git-distributed task pool across several worc instances: an instance
 # only picks a pending task when ``task.queue == instance.queue`` (config ``orchestrator.queue``).
 # Both sides default to ``"default"``, so an untagged pool with one untagged instance behaves
 # exactly as before. Unlike ``priority`` (fail-open), the task field is **fail-closed**: a malformed
-# value (non-string, or empty/whitespace) rejects the task. See the multi-instance-task-queues ADR.
+# value (non-string, or empty/whitespace) rejects the task.
 DEFAULT_QUEUE = "default"
 
 # Scheduling priority for the eligibility queue. Unlike the other constrained task fields (which
@@ -164,19 +168,19 @@ class NormalizedTask:
     id: str
     title: str
     description: str
-    # Dispatch key → flow (P0.4): ``None`` defers to the registry default (``implementation``). The
+    # Dispatch key → flow: ``None`` defers to the registry default (``implementation``). The
     # task never selects the flow from prose and never patches the graph — it only names the flow.
     task_type: str | None = None
     # Full task branch override. ``None`` uses repo.branch_prefix + task id + slug. Ignored (a
     # validation warning) outside ``new`` branch mode — nothing to name in existing/current.
     branch_name: str | None = None
-    # Where this task's git operations point (branch-mode ADR). ``None`` defers to the instance
+    # Where this task's git operations point. ``None`` defers to the instance
     # default ``repo.branch_mode`` (itself defaulting to ``new``); a task value wins outright.
     branch_mode: BranchMode | None = None
     # The existing branch to work in — required iff the resolved mode is ``existing``, a validation
     # reject otherwise. Must already exist locally or on the remote (checked at the preflight).
     branch_ref: str | None = None
-    # Downgrade-only cap on the publish node (branch-mode ADR): commit/push/pull_request. ``None``
+    # Downgrade-only cap on the publish node: commit/push/pull_request. ``None``
     # defers to the flow's policy. A cap, never an escalation — effective scope is
     # ``min(flow_policy, publish)``; a no-op on a flow with no PR-publishing node.
     publish: PublishScope | None = None

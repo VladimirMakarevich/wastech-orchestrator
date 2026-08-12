@@ -1,4 +1,4 @@
-"""Flow registry — resolves task_type → validated FlowSnapshot (P0.4).
+"""Flow registry — resolves task_type → validated FlowSnapshot.
 
 Flows resolve from exactly one place: the operator's ``<repo>/.worc/flows/<task_type>.yaml``. The
 bundled ``packaged/flows/`` tree is **delivery-only** — ``worc install`` copies it into ``.worc/``
@@ -18,7 +18,7 @@ Resolution rules:
 - :func:`~.validator.validate_flow` is always called before returning the snapshot; a
   flow that violates graph or ceiling rules raises
   :class:`~.validator.FlowValidationError`. When the registry is constructed with a *config*,
-  :func:`~.validator.validate_flow_against_config` runs too (P4.2 config-aware layer): node
+  :func:`~.validator.validate_flow_against_config` runs too (the config-aware layer): node
   providers/reasoning ∈ allowlist, ``permission_ceiling`` ≤ a configured provider, PR-publishing
   needs git, and ``budgets`` ≤ the config safety caps.
 """
@@ -66,7 +66,7 @@ class FlowRegistry:
     Flows live in the operator's ``<repo>/.worc/flows/`` — the sole resolution source. The bundled
     ``packaged/`` tree is delivery-only (``worc install`` copies it into ``.worc/``) and is never
     read here. When constructed with a *config*, every resolved snapshot also passes the
-    config-aware validator (P4.2); without one, only the config-free graph + ceiling layers run
+    config-aware validator; without one, only the config-free graph + ceiling layers run
     (used by unit tests that have no config).
     """
 

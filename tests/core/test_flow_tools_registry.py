@@ -1,4 +1,4 @@
-"""Operator tool registry + config-aware / preflight validation (P5.2).
+"""Operator tool registry + config-aware / preflight validation.
 
 The ``ToolRegistry`` is the fail-closed boundary for the free-string ``tool`` name: it resolves only
 a contained, existing, executable file under ``.worc/tools/`` and rejects everything else before any
@@ -253,7 +253,7 @@ def test_check_flows_validates_tools(tmp_path: Path) -> None:
 
 
 def test_packaged_content_flows_require_delivered_check_chapter(tmp_path: Path) -> None:
-    # The §5 coupling: the packaged content flows contain a `tool: check_chapter` node, so a task
+    # The coupling: the packaged content flows contain a `tool: check_chapter` node, so a task
     # dispatching one resolves config-aware and needs that tool in `.worc/tools/` — which `worc
     # install` delivers. Preflight no longer validates flows; the coupling is enforced at dispatch
     # by `resolve` (and on demand by `worc validate-flow` for operator copies).

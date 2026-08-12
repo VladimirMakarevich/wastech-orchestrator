@@ -33,7 +33,7 @@ def _new_task(task_id: str = "task-001") -> TaskRow:
 
 
 def test_no_memory_tables_in_state_db(store: StateStore) -> None:
-    # AC-S3: the memory subsystem is files-first — its tiers/audit/quarantine live under
+    # The memory subsystem is files-first — its tiers/audit/quarantine live under
     # .worc/memory/, NEVER in state.db. Guard the exact table set so an accidental memory table is
     # caught; the subsystem's only state.db touch is the reused `evaluations` marker row
     # (kind="memory_write"), not a new table. (Update this set consciously when a table is added.)
@@ -121,6 +121,33 @@ def test_blocked_since_round_trips_and_clears(store: StateStore) -> None:
     assert store.get_task("task-001").blocked_since is None  # type: ignore[union-attr]
 
 
+def test_blocked_until_round_trips_and_clears(store: StateStore) -> None:
+    # The provider-reported wake instant defaults to None (meaning "attempt on the next tick", so
+    # it can only ever shorten a wait), is rewritten on every park, and is cleared at terminal.
+    store.insert_task(_new_task())
+    assert store.get_task("task-001").blocked_until is None  # type: ignore[union-attr]
+    store.update_task("task-001", blocked_until="2026-06-27T07:10:00+00:00")
+    assert store.get_task("task-001").blocked_until == "2026-06-27T07:10:00+00:00"  # type: ignore[union-attr]
+    store.update_task("task-001", blocked_until=None)
+    assert store.get_task("task-001").blocked_until is None  # type: ignore[union-attr]
+
+
+def test_continue_clears_the_wake_instant_so_an_operator_is_not_deferred(
+    store: StateStore,
+) -> None:
+    # An operator asking for a task to run now must not be silently deferred by a stale window from
+    # an earlier park — the resume would return non-terminal and do nothing at all.
+    store.insert_task(_new_task())
+    store.update_task(
+        "task-001",
+        status=Status.FAILED.value,
+        blocked_since="2026-06-27T00:00:00+00:00",
+        blocked_until="2026-06-27T07:10:00+00:00",
+    )
+    store.revive_task_for_continue("task-001", Status.RUNNING)
+    assert store.get_task("task-001").blocked_until is None  # type: ignore[union-attr]
+
+
 def test_find_active_tasks_excludes_terminal_and_pending(store: StateStore) -> None:
     store.insert_task(TaskRow(task_id="a", title="a", status=Status.RUNNING))
     store.insert_task(TaskRow(task_id="b", title="b", status=Status.PENDING))
@@ -197,7 +224,7 @@ def test_counters_round_trip(store: StateStore) -> None:
     counters = store.get_counters("task-001")
     assert counters.test_fix_cycles == 2
     assert counters.review_fix_cycles == 1
-    # F49: the cumulative totals round-trip alongside the consecutive counters.
+    # The cumulative totals round-trip alongside the consecutive counters.
     assert counters.test_fix_total == 4
     assert counters.review_fix_total == 7
     assert counters.fix_iterations == 3
@@ -312,7 +339,7 @@ def test_provider_attempt_usage_columns_default_null(store: StateStore) -> None:
 
 
 def test_provider_attempts_for_task_includes_supervisor_layer(store: StateStore) -> None:
-    # VF-8: a whole-task roll-up keyed off ``task_id`` sees both a flow node's attempt AND the
+    # A whole-task roll-up keyed off ``task_id`` sees both a flow node's attempt AND the
     # constant supervisor layer's (``node_run_id`` NULL), so the summed cost/usage is complete.
     store.insert_task(_new_task())
     run_id = store.record_node_run(
@@ -337,6 +364,86 @@ def test_provider_attempts_for_task_includes_supervisor_layer(store: StateStore)
     assert supervisor[0].usage_cost == 0.02
     # The by-node getter still returns only that node's attempt (not the supervisor row).
     assert [r.node_run_id for r in store.get_provider_attempts(run_id)] == [run_id]
+
+
+def test_supervisor_function_round_trips_and_is_null_for_a_graph_node(store: StateStore) -> None:
+    store.insert_task(_new_task())
+    run_id = store.record_node_run(
+        NodeRunRow(task_id="task-001", node_id="implement", node_kind="agent", status="running")
+    )
+    store.record_provider_attempt(
+        ProviderAttemptRow(task_id="task-001", node_run_id=run_id, provider="claude", attempt=1)
+    )
+    for function in ("observe", "finalize", "handoff", "skill"):
+        store.record_provider_attempt(
+            ProviderAttemptRow(
+                task_id="task-001",
+                node_run_id=None,
+                supervisor_function=function,
+                provider="claude",
+                attempt=1,
+            )
+        )
+    rows = store.get_provider_attempts_for_task("task-001")
+    # The label and the NULL ``node_run_id`` are two views of the same fact, so they must never
+    # disagree: a labelled row is the supervisor layer's, an unlabelled one is a graph node's.
+    for row in rows:
+        assert (row.supervisor_function is not None) is (row.node_run_id is None)
+    assert [r.supervisor_function for r in rows] == [
+        None,
+        "observe",
+        "finalize",
+        "handoff",
+        "skill",
+    ]
+
+
+def test_per_function_usage_reconciles_with_the_task_total_in_one_query(store: StateStore) -> None:
+    # The point of one nullable column instead of a side table: the phases and the graph nodes are
+    # buckets of the SAME rows, so a single GROUP BY sums back to the task total with no join.
+    store.insert_task(_new_task())
+    run_id = store.record_node_run(
+        NodeRunRow(task_id="task-001", node_id="implement", node_kind="agent", status="running")
+    )
+    store.record_provider_attempt(
+        ProviderAttemptRow(
+            task_id="task-001",
+            node_run_id=run_id,
+            provider="claude",
+            attempt=1,
+            usage_input_total=200_000,
+        )
+    )
+    for function, tokens in (("observe", 30_000), ("observe", 40_000), ("finalize", 20_000)):
+        store.record_provider_attempt(
+            ProviderAttemptRow(
+                task_id="task-001",
+                node_run_id=None,
+                supervisor_function=function,
+                provider="claude",
+                attempt=1,
+                usage_input_total=tokens,
+            )
+        )
+    buckets = store._conn.execute(
+        "SELECT COALESCE(supervisor_function, 'node') AS fn, COUNT(*) AS calls, "
+        "SUM(usage_input_total) AS input FROM provider_attempts WHERE task_id = ? "
+        "GROUP BY fn ORDER BY fn",
+        ("task-001",),
+    ).fetchall()
+
+    assert {r["fn"]: (r["calls"], r["input"]) for r in buckets} == {
+        "finalize": (1, 20_000),
+        "node": (1, 200_000),
+        "observe": (2, 70_000),
+    }
+    total = store._conn.execute(
+        "SELECT COUNT(*) AS calls, SUM(usage_input_total) AS input FROM provider_attempts "
+        "WHERE task_id = ?",
+        ("task-001",),
+    ).fetchone()
+    assert sum(r["calls"] for r in buckets) == total["calls"]
+    assert sum(r["input"] for r in buckets) == total["input"]
 
 
 def test_check_run_and_artifact(store: StateStore) -> None:
@@ -628,7 +735,7 @@ def test_insert_task_upsert_refreshes_registration_fields(store: StateStore) -> 
     assert row.created_at == created  # creation timestamp preserved
 
 
-# --- editing_lineage (durable sessions, P2.2) ---------------------------------------------
+# --- editing_lineage (durable sessions) ---------------------------------------------------
 
 
 def test_editing_lineage_roundtrip_and_one_per_lineage(store: StateStore) -> None:

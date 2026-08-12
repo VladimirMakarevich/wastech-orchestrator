@@ -4,7 +4,7 @@ Builds a plain dict mirroring the packaged ``config.example.yaml`` — only the 
 absolute native paths, exactly one global ``primary`` provider, and **immutable safe security
 defaults** — then renders it with PyYAML. ``build_and_validate`` round-trips the rendered text back
 through the loader and the semantic validator, so the installer can never emit a config that is
-structurally broken, contradictory, or that weakens the sandbox (.agents/rules/security.md).
+structurally broken, contradictory, or that weakens the sandbox.
 No secrets are ever written.
 """
 
@@ -93,7 +93,7 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
     """Assemble the config as a primitive dict (str/int/bool/None only) ready for YAML."""
     providers = _ordered_providers(spec.providers)
     primary_pid = _global_primary(providers)
-    # Rejected runtime tasks live under the private home (WRI-004); routed through the layout so no
+    # Rejected runtime tasks live under the private home; routed through the layout so no
     # bare ``.worc`` literal is reconstructed here.
     private_home = RuntimeLayout.default(spec.repo_local_path).private_home
     quarantine = str(private_home / "tasks" / "rejected")
@@ -143,18 +143,21 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "allowed_environment": list(default_allowed_environment()),
             "denied_read_paths": [".env", "secrets/**"],
             "denied_commands": ["git commit", "git push", "gh pr create", "gh pr merge"],
-            # Fresh installs default to "auto" (routine in-repo deletions/renames no longer gate);
-            # the schema dataclass default stays "strict" as the absent-block safe fallback.
+            # Written explicitly at the one default "auto" carries everywhere (dataclass, loader,
+            # and here): routine in-repo deletions/renames never gate — only a `protected_paths`
+            # match asks.
             "trust_level": "auto",
             "protected_paths": [],
+            # Seeded off, and seeded *explicitly*: the read-only git-evidence grant is an opt-in the
+            # operator should find in their own config rather than discover as a hidden default. Off
+            # means a flow node asking for it runs exactly as it does without the declaration.
+            "allow_git_evidence": False,
         },
         "validation": {
             "max_task_bytes": 262144,
             "max_task_lines": 5000,
             "max_line_bytes": 8192,
             "max_control_ratio": 0.01,
-            "required_fields": ["id", "title"],
-            "reject_unknown_fields": True,
             "quarantine_folder": quarantine,
         },
         "checks": {
@@ -184,37 +187,52 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "bot_token_env": "TELEGRAM_BOT_TOKEN",
             "chat_id_env": "TELEGRAM_CHAT_ID",
             "ask_timeout_s": 28800,
-            # F3: surface the documented per-message HITL trace knob (schema v21) in the delivered
+            # Surface the documented per-message HITL trace knob (schema v21) in the delivered
             # config so the operator sees it without reading the source; off by default.
             "trace": False,
         },
         "skills": {
-            # F1: off out of the box — the dynamic layer adds a once-per-task supervisor turn even
+            # Off out of the box — the dynamic layer adds a once-per-task supervisor turn even
             # when the repo has no skills. The operator opts in with `dynamic: true`.
             "dynamic": False,
             "strict": False,
         },
-        # F2: resolve concrete, visible supervisor model/reasoning/provider rather than an implicit
+        # Resolve concrete, visible supervisor model/reasoning/provider rather than an implicit
         # "inherit from primary" (null). The oversight layer writes summary / follow-ups /
         # memory-delta, so its model+effort should be transparent. `reasoning` is deliberately NOT a
-        # max tier — xhigh makes the structured finalize turn fragile (F7b). `provider` is pinned to
+        # max tier — xhigh makes the structured finalize turn fragile. `provider` is pinned to
         # the primary so it stays aligned with `model` (also the primary's default) by construction
-        # (F39) — an operator flipping the primary keeps a self-consistent supervisor.
+        # so an operator flipping the primary keeps a self-consistent supervisor.
+        # Effort is per phase: `observe` is advisory and can fire on every step of a deep fix loop,
+        # so it gets the cheap tier; `finalize` writes summary.md (the pull-request body) and
+        # `handoff` briefs the next subtask, so both keep the considered `high`. `observe.mode`
+        # is written explicitly at the global default — deviations only, so a run pays for
+        # observations in proportion to what actually went wrong rather than to its length.
         "supervisor": {
+            # Written explicitly at the default so an operator finds the whole-layer switch in their
+            # own config rather than in the reference — the same reason `skills.dynamic` and
+            # `observe.mode` are seeded rather than left implicit.
+            "enabled": True,
             "role_file": "roles/supervisor.md",
-            "model": _PROVIDER_DEFAULTS[primary_pid][0],
-            "reasoning": "high",
             "provider": primary_pid.value,
+            "observe": {
+                "mode": "events",
+                "model": _PROVIDER_DEFAULTS[primary_pid][0],
+                "reasoning": "low",
+            },
+            "finalize": {"model": _PROVIDER_DEFAULTS[primary_pid][0], "reasoning": "high"},
+            "handoff": {"model": _PROVIDER_DEFAULTS[primary_pid][0], "reasoning": "high"},
         },
         "logging": {
             "level": "info",
             "artifacts": "standard",
+            "clean_runs_on_success": True,
         },
         # Persistent repo-scoped memory is on out of the box. Omit the block (or set enabled: false)
         # for the pre-memory behavior. The tunable knobs default per the schema — the annotated
         # config.example.yaml installed alongside this file documents each one.
         "memory": {"enabled": True},
-        # Custom tool-node default timeout (P5). Written at the schema default for discoverability;
+        # Custom tool-node default timeout. Written at the schema default for discoverability;
         # a per-node `timeout_seconds` in a flow overrides it. Omit the block for the same 3600s.
         "tools": {"default_timeout_seconds": DEFAULT_TOOL_TIMEOUT_SECONDS},
         "prompt_audit": False,

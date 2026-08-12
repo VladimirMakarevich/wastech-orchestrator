@@ -1,28 +1,31 @@
-"""Seal terminal exchanges and restore only for continue (WRI-007).
+"""Seal terminal exchanges and restore only for continue.
 
 The exchange ``<repo>/.worc-io/<task-id>/`` is an agent-readable, in-repository surface. The
 single-active-exchange model requires that, immediately before any provider launch, the exchange
 root holds at most the current task's verified active exchange — a terminal task must not leave its
-curated plan/diff/findings visible to the next task. WRI-001 shipped an interim teardown that simply
+curated plan/diff/findings visible to the next task. The interim teardown simply
 ``rmtree``-d the exchange at terminal, discarding the audit trail; this module replaces it with the
 real sealing protocol and adds the restore-for-continue path.
 
 Four operations, owned by the artifact/lifecycle layer:
 
-* :func:`seal_exchange` — after WRI-012 has proven the provider tree quiescent, build and verify a
+* :func:`seal_exchange` — after the quiescence barrier has proven the provider tree empty, build
+  and verify a
   checksum manifest of the active exchange, copy it into a fresh versioned private snapshot
-  (``<private_home>/exchange-seals/<task-id>/seal-<NNNNNN>/`` + ``manifest.json``), re-verify, then
+  (``<private_home>/runs/exchange-seals/<task-id>/seal-<NNNNNN>/`` + ``manifest.json``), re-verify,
+  then
   remove the active in-repo directory. Cross-volume safe (copy → verify → atomic rename → remove).
 * :func:`restore_for_continue` — restore the latest verified sealed snapshot into a clean active
   exchange for an authorized ``rerun --continue`` of a terminal resumable task.
 * :func:`ensure_current_exchange` — the resume decision seam: a parked/crashed nonterminal task
   verifies and reuses its still-active exchange; a terminal resumable task restores the latest seal;
   a contaminated or unsafe task is refused (fresh/restart required).
-* :func:`quarantine_contaminated` — when WRI-002 reports an agent-side exchange mutation, move the
+* :func:`quarantine_contaminated` — when the tamper check reports an agent-side exchange
+  mutation, move the
   tree to a clearly contaminated private evidence location with the parent-held expected and
   observed manifests; it is never sealed and never restore-eligible.
 
-Identity is enforced by reusing the WRI-001 no-follow inspector, the shared containment belt
+Identity is enforced by reusing the exchange's no-follow inspector, the shared containment belt
 (:func:`~wastech_orchestrator.providers.artifacts.assert_contained_path`), and the exchange manifest
 (:func:`~wastech_orchestrator.providers.exchange.build_exchange_manifest`, which already refuses a
 symlink/reparse point, hard link, special file, or NTFS alternate data stream) — no new identity
@@ -60,6 +63,7 @@ from wastech_orchestrator.providers.exchange import (
 from wastech_orchestrator.runtime_layout import (
     EXCHANGE_QUARANTINE_DIRNAME,
     EXCHANGE_SEAL_DIRNAME,
+    runs_root,
 )
 
 #: Bump when the on-disk snapshot layout / manifest schema changes (an older snapshot then fails to
@@ -116,13 +120,13 @@ class RestoreResult:
 
 
 def exchange_seal_root(private_home: str | Path, task_id: str) -> Path:
-    """The per-task private root holding every sealed snapshot (a provider deny target, WRI-007)."""
-    return Path(private_home) / EXCHANGE_SEAL_DIRNAME / task_id
+    """The per-task private root holding every sealed snapshot (a provider deny target)."""
+    return runs_root(private_home) / EXCHANGE_SEAL_DIRNAME / task_id
 
 
 def exchange_quarantine_root(private_home: str | Path, task_id: str) -> Path:
-    """The per-task private root holding quarantined contaminated exchange evidence (WRI-007)."""
-    return Path(private_home) / EXCHANGE_QUARANTINE_DIRNAME / task_id
+    """The per-task private root holding quarantined contaminated exchange evidence."""
+    return runs_root(private_home) / EXCHANGE_QUARANTINE_DIRNAME / task_id
 
 
 def _next_index(root: Path, prefix: str) -> int:
@@ -159,7 +163,10 @@ def _latest_seal_dir(seals_root: Path) -> tuple[int, Path] | None:
 
 
 def _manifest_digest(manifest: ExchangeManifest) -> str:
-    """A stable identity digest over the manifest's ``(relname, sha256)`` pairs (reuses WRI-010)."""
+    """A stable identity digest over the manifest's ``(relname, sha256)`` pairs.
+
+    Shares the control bundle's digest helper, so both surfaces hash identically.
+    """
     return digest_entries([(e.relname, e.sha256) for e in manifest.entries])
 
 
@@ -415,7 +422,7 @@ def ensure_current_exchange(
     """Establish the verified current-task exchange before a resume launch (the decision seam).
 
     * ``active_unsafe`` — a prior seal/removal was blocked; refuse until the operator resolves it.
-    * ``contaminated`` — WRI-002 flagged an agent-side mutation; continue is refused (rerun fresh).
+    * ``contaminated`` — the tamper check flagged an agent-side mutation; continue is refused.
     * a still-active exchange (parked/crashed nonterminal continue) is verified and reused unchanged
       — never overwritten from an older seal.
     * otherwise (terminal resumable continue) restore the latest verified sealed snapshot.

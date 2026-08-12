@@ -1,11 +1,12 @@
-"""Data-driven per-node post-processing (P1.4) — mechanics the engine post-node hook runs.
+"""Data-driven per-node post-processing — mechanics the engine post-node hook runs.
 
 Two mechanisms, both triggered by **declared data**, never a stage name:
 
 * :func:`apply_output_artifact` — when an agent node declares ``output_artifact: <slot>``, write
   the agent's output to that slot file, register it, and thread the path into the downstream
-  :class:`NodeInputs` (so the next node gets ``{plan_path}`` / ``{summary_body_path}``). The slot
-  vocabulary is core-fixed (validated at load); the flow only picks *which* node fills it.
+  :class:`NodeInputs` field the slot names (``plan_path``, read by the next node's ``{plan_path}``;
+  ``summary_body_path``, read by the ``publish`` node for the PR body — not a prompt variable). The
+  slot vocabulary is core-fixed (validated at load); the flow only picks *which* node fills it.
 * :func:`read_decomposition` — read the ``decompose`` / ``subtasks`` contract off the
   ``decomposition.proposed_by`` node's output and apply the deterministic gate. The agent
   *recommends*; the core decides (no flow weakens ``max_subtasks`` or the linear-dependency rule).
@@ -16,7 +17,7 @@ decomposition driver (slice 5), which calls :func:`read_decomposition` then orch
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from wastech_orchestrator.core.flow.nodes.exchange_publish import (
     publish_artifact,
     publish_node_run_file,
 )
+from wastech_orchestrator.core.flow.output_policy import is_within
 from wastech_orchestrator.core.flow.schema import AgentNode
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
 from wastech_orchestrator.providers.redaction import redact_text
@@ -42,12 +44,12 @@ class _Slot:
     #: slot not fed to any prompt (the enriched spec has no ``{...}`` variable).
     inputs_field: str | None
     #: whether this slot is agent-facing and its ``inputs_field`` must resolve to the redacted
-    #: exchange copy (WRI-001). Only ``plan`` feeds a downstream provider path; ``enriched_spec`` is
+    #: exchange copy. Only ``plan`` feeds a downstream provider path; ``enriched_spec`` is
     #: audit-only and ``summary`` is an orchestrator publish input — both stay private.
     exchange: bool = False
     #: whether this slot is written into the flow's private ``output_policy`` report directory
     #: (redacted) instead of the task artifact dir. The ``report`` slot migrates the security_audit
-    #: node off its old agent-written ``.worc/security-reports/`` contract (WRI-001): the agent now
+    #: node off any agent-written report contract: the agent now
     #: returns the report as structured output and the orchestrator writes it here privately.
     report: bool = False
 
@@ -81,7 +83,7 @@ def apply_output_artifact(
     ``final_message`` (the free-form summary agent), via :func:`_slot_content`. An agent-facing slot
     (``plan``) also publishes a redacted copy to the exchange and points its ``inputs_field`` at it;
     a ``report`` slot is written (redacted) into the flow's private ``report_dir`` instead of the
-    task artifact dir. The private slot file stays the audit record (WRI-001).
+    task artifact dir. The private slot file stays the audit record.
     """
     slot_name = node.output_artifact
     if slot_name is None:
@@ -125,26 +127,30 @@ def write_node_output(
     register: RegisterArtifact,
     extra_secrets: Iterable[str] = (),
     exchange_root: str = "",
+    produced_dir: Path | None = None,
+    warn: Callable[[str], None] | None = None,
 ) -> str | None:
     """Persist a node's output to ``<artifacts>/<node_id>.out.md``; return the path or ``None``.
 
-    The generic node-output channel (node-output ADR): every agent node's output is written and
+    The generic node-output channel: every agent node's output is written and
     exposed downstream as ``{<node_id>_path}`` (a *path*, never inlined content). The content is the
-    same as a slot (``structured_output["content"]`` or ``final_message``, via ``_slot_content``);
-    it is **redaction-scrubbed** before writing — a node's raw output can echo a secret, and unlike
+    same as a slot (``structured_output["content"]`` or ``final_message``, via ``_slot_content``) —
+    unless the node declares ``output_file``, in which case the file it produced under
+    ``produced_dir`` is the content (:func:`_produced_content`). Either way it is
+    **redaction-scrubbed** before writing — a node's raw output can echo a secret, and unlike
     ``final_message`` (redacted by the adapter) ``structured_output`` is not. Local/uncommitted, and
     registered as an artifact so it doubles as a per-node audit record.
 
     No-op (returns ``None``) when:
 
-    * the node fills one of the three special slots via ``output_artifact`` — that slot *is* its
+    * the node fills one of the :data:`OUTPUT_SLOTS` via ``output_artifact`` — that slot *is* its
       output channel (``{plan_path}`` etc.), so no duplicate ``.out.md`` is written (one node = one
       output); or
     * there is no content to persist (a best-effort node that produced nothing).
     """
     if node.output_artifact is not None:
         return None  # special-slot node: its slot is the channel, no duplicate generic output
-    content = _slot_content(outcome)
+    content = _produced_content(node, produced_dir, warn) or _slot_content(outcome)
     if not content:
         return None
     # Per-run dir keyed by the reserved node_run_id: a node that re-runs in a loop keeps every
@@ -156,7 +162,7 @@ def write_node_output(
     path.write_text(redacted, encoding="utf-8")
     register(task_id, "node_output", str(path))
     # The private .out.md stays the audit record; the redacted exchange copy is what the downstream
-    # {<node_id>_path} fan-in resolves (WRI-001).
+    # {<node_id>_path} fan-in resolves.
     publish_node_run_file(
         exchange_root,
         task_id,
@@ -190,3 +196,43 @@ def _slot_content(outcome: NodeOutcome) -> str:
         if isinstance(content, str):
             return content
     return outcome.final_message or ""
+
+
+def _produced_content(
+    node: AgentNode, produced_dir: Path | None, warn: Callable[[str], None] | None
+) -> str:
+    """The declared produced file's text, or ``""`` to fall back to the node's own message.
+
+    A node whose real product is a written document used to publish only its closing summary of it,
+    so the artifact stopped at the node and the next one worked from a pointer thinner than the
+    thing it pointed at. ``output_file`` names that document; here it is read back so the file
+    itself is what crosses the edge.
+
+    Falls back (and says so, once, on the operator log) when the declared file did not appear, is
+    not a regular file, is empty, or is not text: losing the channel entirely would be worse than
+    carrying the message. The filename is validated at load and joined onto a directory the
+    orchestrator resolved, and the join is re-checked here — the agent supplies no part of the path.
+    """
+    if node.output_file is None or produced_dir is None:
+        return ""
+    path = produced_dir / node.output_file
+    reason = ""
+    if not is_within(produced_dir, path) or not path.is_file():
+        reason = "it was not produced"
+    else:
+        try:
+            content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            reason = f"it could not be read as text ({type(exc).__name__})"
+        else:
+            # An empty file is "not produced" as far as the handoff goes, and earns the same
+            # warning: a declared channel that silently carries nothing is the worst outcome here.
+            reason = "" if content else "it is empty"
+            if content:
+                return content
+    if warn is not None:
+        warn(
+            f"node {node.id!r} declares output_file {node.output_file!r} but {reason} — "
+            "downstream nodes get this node's closing message instead of the file"
+        )
+    return ""

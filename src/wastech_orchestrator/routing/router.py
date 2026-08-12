@@ -11,7 +11,7 @@ The layer between the Orchestrator Core and the provider adapters. For each node
 * counts ``stage_attempts`` across the fallback, bounded by ``agents.max_stage_attempts``;
 * exposes the partial-change diff to the fallback without ever rolling back.
 
-Invariants (.agents/rules/architecture.md): the Router depends **only** on the ``AgentProvider``
+Invariants: the Router depends **only** on the ``AgentProvider``
 contract — no CLI syntax, no provider internals — and it changes no state-machine state. It is
 stateless beyond the :class:`StageOutcome` it returns; persistence and transitions are the Core's
 job. A quality ``AgentRunResult(status=failed)`` is never a fallback trigger; only a raised
@@ -24,6 +24,7 @@ import logging
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
+from datetime import datetime
 from enum import StrEnum
 
 from wastech_orchestrator.config.loader import ConfigError
@@ -51,7 +52,7 @@ _LOG = logging.getLogger(__name__)
 # Error classes whose fallback is CONDITIONAL, decided here (not in providers.base):
 # * authorization_failed / permission_denied — only when the fallback provider runs in the same or a
 #   stricter permission profile (never relaxing the policy);
-# * capability_unavailable (WRI-002) — only when the fallback is same-or-stricter AND can itself
+# * capability_unavailable — only when the fallback is same-or-stricter AND can itself
 #   enforce the required isolation for the node on this host (``fallback_can_isolate``), so the
 #   Router never recovers a missing-sandbox refusal by falling over to an equally-unisolable
 # provider.
@@ -89,6 +90,22 @@ def fallback_allowed(
             return same_or_stricter and fallback_can_isolate
         return same_or_stricter
     return False
+
+
+def _earlier(current: str | None, candidate: str | None) -> str | None:
+    """The earlier of two ISO-8601 reset instants, tolerating absent or unparseable input.
+
+    Provider input, so an instant that cannot be compared is dropped rather than allowed to hide a
+    usable one: the result is always either a parseable instant or ``None``.
+    """
+    if candidate is None:
+        return current
+    if current is None:
+        return candidate
+    try:
+        return min(current, candidate, key=datetime.fromisoformat)
+    except ValueError:
+        return current
 
 
 def _resolve_global_primary(config: OrchestratorConfig) -> ProviderId:
@@ -177,7 +194,7 @@ class AgentRouter:
         # Set only by the watch daemon: True once an operator stop was requested. Checked before any
         # fallback/retry so a stop-killed agent is never respawned on another provider.
         self._is_cancelled = is_cancelled
-        # WRI-002: the offline ProviderId→isolation-check table (the same one composition binds), so
+        # The offline ProviderId→isolation-check table (the same one composition binds), so
         # a ``CAPABILITY_UNAVAILABLE`` fallback is allowed only to a provider that can itself
         # isolate
         # the node on this host. The router imports no concrete adapter — the table is injected.
@@ -279,6 +296,13 @@ class AgentRouter:
         # (Option A) must not consume that hop budget.
         audit_attempt = 0
         last_error: NormalizedError | None = None
+        # The EARLIEST reset instant any attempt reported, tracked across the whole stage rather
+        # than read off whichever attempt happened to settle. The settling attempt is normally
+        # the fallback, and a fallback that failed for an unrelated reason reports no instant, so
+        # taking the last one would discard the primary's known window in the case that matters
+        # most. Earliest rather than latest because waking early costs one cheap re-park, while
+        # waking late is the blind wait this exists to remove.
+        earliest_reset: str | None = None
         partial: PartialChange | None = None
 
         for index, pid in enumerate(sequence):
@@ -307,7 +331,10 @@ class AgentRouter:
                 result = self._providers[pid].run(req)
             except ProviderError as exc:
                 duration = round(self._monotonic() - attempt_started, 3)
-                last_error = NormalizedError(error_class=exc.error_class, message=str(exc))
+                earliest_reset = _earlier(earliest_reset, exc.resets_at)
+                last_error = NormalizedError(
+                    error_class=exc.error_class, message=str(exc), resets_at=exc.resets_at
+                )
                 attempts.append(
                     ProviderAttempt(
                         provider=pid,
@@ -334,10 +361,12 @@ class AgentRouter:
                     last_error = NormalizedError(
                         error_class=ErrorClass.CANCELLED,
                         message="stop requested; agent cancelled, not falling back",
+                        # Deliberately carries no reset instant: a stopped task resumes when the
+                        # operator says so, not when some provider's window happens to reopen.
                     )
                     log.info("cancelled; not falling back", extra={"provider": pid.value})
                     break
-                # Resume safety net (durable sessions, P2.2): the requested session is gone
+                # Resume safety net (durable sessions): the requested session is gone
                 # (``session_unavailable``) → retry the SAME provider once with a fresh session.
                 # This is infrastructure, not a quality failure: it never falls back to another
                 # provider and never charges a fix iteration (the fix loop is engine-owned; this
@@ -358,8 +387,11 @@ class AgentRouter:
                     try:
                         result = self._providers[pid].run(fresh_req)
                     except ProviderError as fresh_exc:
+                        earliest_reset = _earlier(earliest_reset, fresh_exc.resets_at)
                         last_error = NormalizedError(
-                            error_class=fresh_exc.error_class, message=str(fresh_exc)
+                            error_class=fresh_exc.error_class,
+                            message=str(fresh_exc),
+                            resets_at=fresh_exc.resets_at,
                         )
                         attempts.append(
                             ProviderAttempt(
@@ -420,6 +452,9 @@ class AgentRouter:
                     last_error = NormalizedError(
                         error_class=last_class,
                         message=f"transient retries exhausted on {pid.value}",
+                        # Structurally unreachable today (a rate limit is not transient-retryable),
+                        # carried anyway so no path here can silently drop a reported instant.
+                        resets_at=exc.resets_at,
                     )
                     exc = ProviderError(last_class, str(last_error.message))  # fallback uses this
                 has_next = index + 1 < len(sequence)
@@ -484,6 +519,11 @@ class AgentRouter:
                 partial_change=partial,
             )
 
+        # A stop is the one park that must not inherit a provider window: it resumes when the
+        # operator says so. Every other exhausted stage surfaces the earliest instant ANY attempt
+        # reported, so a fallback failing for an unrelated reason cannot discard the primary's.
+        if last_error is not None and last_error.error_class is not ErrorClass.CANCELLED:
+            last_error = replace(last_error, resets_at=earliest_reset)
         return StageOutcome(
             route=route,
             result=None,

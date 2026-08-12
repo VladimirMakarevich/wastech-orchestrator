@@ -10,18 +10,22 @@ Transport exceptions are logged with token + chat id redacted and are never re-r
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
 import threading
 import time
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Coroutine, Iterator, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol
 
 from wastech_orchestrator.config.schema import TelegramConfig
 from wastech_orchestrator.notify.interface import (
+    TRACE_READ_ONLY_GIT_DRIFT,
+    TRACE_READ_ONLY_WRITE,
     TRACE_REWORK_EXHAUSTED,
     AskHandle,
     AskKind,
@@ -404,7 +408,7 @@ def check_telegram_preflight(
 
 
 # Maps a terminal status to a glanceable severity glyph for the operator-facing notification
-# (VF-22). 🛑 (a human is required; the branch is preserved) is deliberately distinct from a clean
+# 🛑 (a human is required; the branch is preserved) is deliberately distinct from a clean
 # ✅ finish, per the operator's request for a strong needs-attention marker, and from the trace
 # vocabulary's ⚠️. Mirrors the _TRACE_EMOJI pattern used for the live per-node trace.
 _STATUS_EMOJI: dict[str, str] = {
@@ -414,7 +418,7 @@ _STATUS_EMOJI: dict[str, str] = {
 }
 
 # Statuses whose terminal notification expands into the enriched body when details are available; a
-# clean `done` stays terse (VF-22 item 7 — a successful task must not become noisy).
+# clean `done` stays terse — a successful task must not become noisy.
 _ATTENTION_STATUSES = frozenset({"manual_action_required", "failed"})
 
 # One-line cap for the agent-authored blocking-finding reason echoed into the chat. Redaction still
@@ -453,7 +457,7 @@ def _format_terminal_message(
     if contacts:
         parts.append(f"contacts={' '.join(contacts)}")
     if governance_changed:
-        # VF-20: a non-blocking notice — this run edited its own governance/instruction files.
+        # A non-blocking notice — this run edited its own governance/instruction files.
         parts.append(f"governance={','.join(governance_changed)}")
     return " ".join(parts)
 
@@ -469,7 +473,7 @@ def _format_attention_message(
     governance_changed: tuple[str, ...],
     details: TerminalDetails,
 ) -> str:
-    """The enriched multi-line body for a needs-attention terminal (VF-22).
+    """The enriched multi-line body for a needs-attention terminal.
 
     Plain text + emoji (no parse_mode): id + severity glyph, then title, where it stopped, a prose
     reason, the top blocking finding + its paths, and the on-disk report to open next. Every section
@@ -519,7 +523,7 @@ def _stopped_line(details: TerminalDetails) -> str | None:
 
 
 def _one_line(text: str, *, limit: int = _FINDING_REASON_LIMIT) -> str:
-    """Collapse to a single bounded line for an agent-authored finding reason (VF-22)."""
+    """Collapse to a single bounded line for an agent-authored finding reason."""
     collapsed = " ".join(text.split())
     if len(collapsed) <= limit:
         return collapsed
@@ -528,9 +532,11 @@ def _one_line(text: str, *, limit: int = _FINDING_REASON_LIMIT) -> str:
 
 # Maps a node's edge-selecting outcome (NodeOutcome.kind) to a glanceable emoji. The distinct
 # leading glyph also keeps a trace line visually separable from HITL gate prompts in the same chat.
-# TRACE_REWORK_EXHAUSTED is the one synthetic label (not a raw NodeOutcome.kind): a non-blocking
-# evaluator that accepted only because its max_rework_per_stage budget ran out, rendered ⚠️ so it
-# reads as "moved on, may need follow-up" rather than a clean pass.
+# Three labels here are synthetic (not raw NodeOutcome.kinds), all rendered ⚠️ so they read as
+# "moved on, may need follow-up" rather than a clean pass: TRACE_REWORK_EXHAUSTED is a non-blocking
+# evaluator that accepted only because its max_rework_per_stage budget ran out,
+# TRACE_READ_ONLY_WRITE is a read-only node with a granted shell that changed the working tree, and
+# TRACE_READ_ONLY_GIT_DRIFT is the same node class changing git control state.
 _TRACE_EMOJI: dict[str, str] = {
     "done": "✅",
     "accept": "✅",
@@ -538,6 +544,8 @@ _TRACE_EMOJI: dict[str, str] = {
     "rework": "🔁",
     "fail": "❌",
     TRACE_REWORK_EXHAUSTED: "⚠️",
+    TRACE_READ_ONLY_WRITE: "⚠️",
+    TRACE_READ_ONLY_GIT_DRIFT: "⚠️",
 }
 
 
@@ -575,20 +583,34 @@ def _default_client_factory(secrets: _Secrets, _cfg: TelegramConfig) -> _Telegra
     return _HttpTelegramClient(bot_token=secrets.bot_token)
 
 
+def _run_sync[T](factory: Callable[[], Coroutine[Any, Any, T]]) -> T:
+    """Run one fresh coroutine behind the synchronous notifier contract.
+
+    A caller that already owns an asyncio loop cannot use :func:`asyncio.run` on that thread. In
+    that case the coroutine is constructed and run on a dedicated worker; otherwise the direct path
+    avoids the thread. A factory is required so no coroutine object crosses event-loop boundaries.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(factory())
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="worc-telegram") as pool:
+        return pool.submit(lambda: asyncio.run(factory())).result()
+
+
 class _HttpTelegramClient:
     """Thin synchronous wrapper around ``python-telegram-bot``'s HTTP surface.
 
     ``python-telegram-bot`` 21+ is asynchronous. Each synchronous entry point owns a short-lived
-    event loop and uses ``Bot`` as an async context manager, which initializes and shuts down its
-    HTTP client correctly. Exceptions propagate to the notifier, which logs and swallows them.
+    event loop, moved to a worker when the caller already has a running loop, and uses ``Bot`` as an
+    async context manager, which initializes and shuts down its HTTP client correctly. Exceptions
+    propagate to the notifier, which logs and swallows them.
     """
 
     def __init__(self, *, bot_token: str) -> None:
         self._bot_token = bot_token
 
     def send_message(self, *, chat_id: str, text: str) -> None:
-        import asyncio
-
         from telegram import Bot
 
         async def send() -> None:
@@ -596,11 +618,9 @@ class _HttpTelegramClient:
                 await bot.send_message(chat_id=chat_id, text=text)
 
         with _suppress_transport_request_logs():
-            asyncio.run(send())
+            _run_sync(send)
 
     def get_me(self) -> str:
-        import asyncio
-
         from telegram import Bot
 
         async def fetch() -> str:
@@ -609,11 +629,9 @@ class _HttpTelegramClient:
                 return me.username or me.first_name
 
         with _suppress_transport_request_logs():
-            return asyncio.run(fetch())
+            return _run_sync(fetch)
 
     def get_chat(self, *, chat_id: str) -> str:
-        import asyncio
-
         from telegram import Bot
 
         async def fetch() -> str:
@@ -622,11 +640,9 @@ class _HttpTelegramClient:
                 return chat.title or chat.full_name or chat.type
 
         with _suppress_transport_request_logs():
-            return asyncio.run(fetch())
+            return _run_sync(fetch)
 
     def get_webhook_url(self) -> str:
-        import asyncio
-
         from telegram import Bot
 
         async def fetch() -> str:
@@ -635,11 +651,9 @@ class _HttpTelegramClient:
                 return info.url or ""
 
         with _suppress_transport_request_logs():
-            return asyncio.run(fetch())
+            return _run_sync(fetch)
 
     def check_polling(self) -> None:
-        import asyncio
-
         from telegram import Bot
         from telegram.error import Conflict
 
@@ -656,7 +670,7 @@ class _HttpTelegramClient:
                     ) from exc
 
         with _suppress_transport_request_logs():
-            asyncio.run(check())
+            _run_sync(check)
 
     def send_prompt(
         self,
@@ -666,8 +680,6 @@ class _HttpTelegramClient:
         kind: AskKind,
         interaction_id: str,
     ) -> _SentPrompt:
-        import asyncio
-
         from telegram import Bot, ForceReply, InlineKeyboardButton, InlineKeyboardMarkup
 
         async def send() -> _SentPrompt:
@@ -702,7 +714,7 @@ class _HttpTelegramClient:
                 return _SentPrompt(message_id=message.message_id, update_offset=offset)
 
         with _suppress_transport_request_logs():
-            return asyncio.run(send())
+            return _run_sync(send)
 
     async def _drain_pending(self, bot: Any) -> int | None:
         offset: int | None = None
@@ -739,8 +751,6 @@ class _HttpTelegramClient:
         kind: AskKind,
         deadline_monotonic: float,
     ) -> _ClientReply | None:
-        import asyncio
-
         from telegram import Bot
 
         target_chat = int(chat_id)
@@ -851,7 +861,7 @@ class _HttpTelegramClient:
                             )
 
         with _suppress_transport_request_logs():
-            return asyncio.run(poll())
+            return _run_sync(poll)
 
 
 @contextmanager

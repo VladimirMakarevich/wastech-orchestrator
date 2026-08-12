@@ -24,16 +24,16 @@ _FAKE_AGENT = Path(__file__).resolve().parent / "fakes" / "fake_agent.py"
 
 @pytest.fixture(autouse=True)
 def _assume_bash_sandbox_available(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Make the deterministic suite host-independent by assuming a sandbox-capable host (WRI-002).
+    """Make the deterministic suite host-independent by assuming a sandbox-capable host.
 
     The Claude Bash-sandbox capability depends on the real host (macOS Seatbelt / a Linux+WSL2 with
     bubblewrap+socat), so a bwrap-less CI would otherwise flag every workspace-write
     ``isolation_reasons``
     / ``check_isolation`` / provider run. The deterministic suite cannot prove the real host
     boundary
-    anyway (no real Claude) — the real proof is the WRI-006 native gate — so we pin the default
+    anyway (no real Claude) — the real proof is the native-Windows CI gate — so we pin the default
     probe
-    to "available"; the WRI-002 platform-branch tests inject a concrete ``SandboxCapability`` to
+    to "available"; the platform-branch tests inject a concrete ``SandboxCapability`` to
     exercise the native-Windows / missing-deps branches.
     """
     monkeypatch.setattr(
@@ -41,6 +41,19 @@ def _assume_bash_sandbox_available(monkeypatch: pytest.MonkeyPatch) -> None:
         "default_sandbox_probe",
         lambda *a, **k: _claude.SandboxCapability.LINUX_AVAILABLE,
     )
+
+
+@pytest.fixture
+def no_provider_auth_gate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disarm the startup credential gate for command tests that are not about credentials.
+
+    ``run``/``watch``/``rerun`` probe every allowed provider's CLI before starting, and the shared
+    test config names the real ``claude``/``codex`` commands — so without this a test about PID
+    files or a confirmation prompt would spawn the operator's actual CLIs and its result would
+    depend on whether this host happens to be logged in. The gate's own behavior is covered directly
+    by the tests asserting on it, so switching it off here removes a host dependency, not coverage.
+    """
+    monkeypatch.setattr("wastech_orchestrator.cli.require_provider_auth", lambda _config: None)
 
 
 # The packaged built-in flows tree (source-tree/wheel path). ``worc install`` copies this into an
@@ -59,7 +72,7 @@ def seed_builtin_flows(clone: Path) -> None:
     flow-content tests like
     ``validate-flow`` keep full control of ``.worc/flows/``). ``.worc/``/``.worc-io/`` are excluded
     via the clone-local ``.git/info/exclude`` (as ``worc install`` does), so seeding never dirties
-    git and even a merge's ``git add -A`` skips them (WRI-009's commit gate refuses a staged
+    git and even a merge's ``git add -A`` skips them (the commit gate refuses a staged
     ``.worc``). Idempotent.
     """
     worc_flows = clone / ".worc" / "flows"
@@ -176,9 +189,33 @@ def build_git_config(
     tasks_dir: str = "tasks",
     telegram_trace: bool = False,
     memory_enabled: bool = False,
+    allow_git_evidence: bool = False,
+    allow_native_memory: bool = False,
+    trust_level: str | None = None,
     checkout_base_on_cleanup: bool | None = None,
+    clean_runs_on_success: bool = True,
+    supervisor_observe: str | None = None,
+    supervisor_include_nodes: Sequence[str] = (),
+    supervisor_enabled: bool | None = None,
+    skills_dynamic: bool | None = None,
 ) -> OrchestratorConfig:
-    """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks."""
+    """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks.
+
+    ``clean_runs_on_success`` mirrors the shipped default (a successful task evicts its own
+    ``.worc/runs/`` subtree). Pass ``False`` in a test that inspects a finished task's frozen
+    bundles or sealed exchange — the same switch an operator flips to analyze runs.
+
+    ``supervisor_observe`` sets the global observation cadence (absent → the schema default,
+    ``events``). Note that it only reaches a run whose flow declares no cadence of its own: a
+    flow's own ``supervisor.observe.mode`` narrows this, so a test driving a specific mode end to
+    end should use a flow with no ``supervisor:`` block.
+
+    ``supervisor_enabled=False`` removes the whole layer. Two consequences a test must expect: a
+    flow's own cadence is no longer checked against the global one (there is nothing to widen), and
+    ``memory_enabled=True`` is quenched by the loader to ``False`` for the run — so the config this
+    returns has ``memory.enabled is False``. The warning that says so is on
+    ``loads_config(...).warnings``, which this helper drops; assert it through ``loads_config``.
+    """
     env_lines = "\n".join(f"    - {e}" for e in _TEST_ALLOWED_ENV)
     cleanup_line = (
         f"  checkout_base_on_cleanup: {str(checkout_base_on_cleanup).lower()}\n"
@@ -186,6 +223,8 @@ def build_git_config(
         else ""
     )
     paths_block = f"paths:\n  tasks_dir: {tasks_dir!r}\n" if tasks_dir != "tasks" else ""
+    # Absent => the shipped default `auto`; pass "strict" in a test that drives the diff-shape gate.
+    trust_level_line = f"  trust_level: {trust_level}\n" if trust_level is not None else ""
     # ``checks`` (shell-string commands) map to one always-on ``default`` command set (v15).
     if checks:
         cmd_lines = "\n".join(f"        - {{ argv: {shlex.split(c)!r} }}" for c in checks)
@@ -195,6 +234,20 @@ def build_git_config(
     validation_block = f"validation:\n  quarantine_folder: {quarantine!r}\n" if quarantine else ""
     telegram_block = "telegram:\n  trace: true\n" if telegram_trace else ""
     memory_block = "memory:\n  enabled: true\n" if memory_enabled else ""
+    logging_block = (
+        "logging:\n  clean_runs_on_success: false\n" if not clean_runs_on_success else ""
+    )
+    skills_block = (
+        f"skills:\n  dynamic: {str(skills_dynamic).lower()}\n" if skills_dynamic is not None else ""
+    )
+    supervisor_lines = []
+    if supervisor_enabled is not None:
+        supervisor_lines.append(f"  enabled: {str(supervisor_enabled).lower()}\n")
+    if supervisor_observe is not None:
+        supervisor_lines.append(f"  observe:\n    mode: {supervisor_observe}\n")
+        if supervisor_include_nodes:
+            supervisor_lines.append(f"    include_nodes: {list(supervisor_include_nodes)!r}\n")
+    supervisor_block = "supervisor:\n" + "".join(supervisor_lines) if supervisor_lines else ""
     text = f"""
 orchestrator:
   auto_mode:
@@ -215,10 +268,12 @@ repo:
     claude:
       command: "claude"
       primary: true
+      allow_native_memory: {str(allow_native_memory).lower()}
     codex:
       command: "codex"
 security:
-  allowed_environment:
+  allow_git_evidence: {str(allow_git_evidence).lower()}
+{trust_level_line}  allowed_environment:
 {env_lines}
 {validation_block}{telegram_block}checks:
 {checks_block}  timeout_seconds: 30
@@ -232,7 +287,7 @@ git:
     audit_commit_message: "chore(orchestrator): audit trail for {{task_id}}"
     audit_on_branch: {audit_on_branch}
 prompt_audit: {str(prompt_audit).lower()}
-{memory_block}"""
+{memory_block}{logging_block}{skills_block}{supervisor_block}"""
     return loads_config(text).config
 
 

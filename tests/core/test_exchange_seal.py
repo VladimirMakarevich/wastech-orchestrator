@@ -1,10 +1,10 @@
-"""Tests for the terminal-exchange sealing protocol (WRI-007).
+"""Tests for the terminal-exchange sealing protocol.
 
 Exercises :mod:`wastech_orchestrator.core.flow.exchange_seal` directly against a real temp exchange
 + private home: seal → verified private snapshot + removed active dir; restore-for-continue; the
 resume decision seam (reuse / restore / empty); contaminated-tree quarantine; and the cross-platform
 failure paths (checksum mismatch, corrupt manifest, symlink escape, injected Windows lock + retry
-exhaustion) driven deterministically so they run on any host (the real Windows attrs are the WRI-006
+exhaustion) driven deterministically so they run on any host (the real Windows attrs are the native
 gate's job).
 """
 

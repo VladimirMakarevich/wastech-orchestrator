@@ -1,4 +1,4 @@
-"""Custom tool node — schema + loader + graph validation (P5.1).
+"""Custom tool node — schema + loader + graph validation.
 
 Exercises the ``tool`` node kind at load/validate time: it parses as a first-class node, enforces a
 flat-scalar ``args`` contract, rejects unknown fields fail-closed, guards its id against the

@@ -16,10 +16,12 @@ from typing import Any
 import pytest
 
 from wastech_orchestrator.config.schema import ProviderConfig, SecurityConfig
+from wastech_orchestrator.providers import codex as codex_mod
 from wastech_orchestrator.providers.base import (
     FALLBACK_ELIGIBLE,
     AgentProvider,
     AgentRunRequest,
+    AuthState,
     ErrorClass,
     ProviderError,
     RunStatus,
@@ -31,6 +33,19 @@ from wastech_orchestrator.runtime_layout import InternalDenyPolicy
 
 FIXED_TIME = datetime(2026, 6, 11, 12, 0, 0, tzinfo=UTC)
 FAKE_GH_TOKEN = "ghp_" + "abcdef0123456789abcdef0123"
+
+
+@pytest.fixture(autouse=True)
+def _off_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pin the platform seam so this module's assertions do not depend on the host OS.
+
+    On a Windows host, `preflight` also demands that `codex-windows-sandbox-setup.exe` be
+    discoverable for the `workspace-write` profile these tests configure. There is no such helper
+    next to a fake binary, so every preflight here reported that instead of the `-c/--config` or
+    resume-grammar verdict under test. Nothing in this module is about that branch — it is covered
+    on any host by `test_codex_windows_helper.py`, which injects the same seam the other way.
+    """
+    monkeypatch.setattr(codex_mod.platform, "system", lambda: "Linux")
 
 
 def _success_stream(status: str = "success") -> str:
@@ -149,7 +164,7 @@ def test_canary_passes_then_run_proceeds_and_writes_evidence(
     tmp_path: Path,
     make_request: Callable[..., AgentRunRequest],
 ) -> None:
-    # WRI-003 + H4: with a deny set present, the pre-launch canary runs; the frozen exchange task
+    # With a deny set present, the pre-launch canary runs; the frozen exchange task
     # packet is the mandatory positive control. Probe order: private-read, private-shell-read,
     # exchange-read (allowed), exchange-write (denied). When they hold, the real launch proceeds.
     fake = FakeRun(stdout=_success_stream(), last_message='{"summary":"ok"}')
@@ -261,7 +276,7 @@ def test_stdin_is_plain_prompt_without_injection(
     tmp_path: Path,
     make_request: Callable[..., AgentRunRequest],
 ) -> None:
-    # VF-5: Codex no longer injects a repository-instruction block — stdin is just the flow prompt
+    # Codex no longer injects a repository-instruction block — stdin is just the flow prompt
     # (+ context-file footer); the agent reads the repo's root files itself via native discovery.
     provider = _provider(codex_config, security_config, tmp_path, FakeRun())
     stdin = provider._stdin_text(make_request(prompt="just the task"))
@@ -297,7 +312,7 @@ def test_schema_requested_structured_output_from_last_message(
     tmp_path: Path,
     make_request: Callable[..., AgentRunRequest],
 ) -> None:
-    # F19 (codex-cli 0.139.0 smoke-tested behavior): a schema-constrained run's terminal
+    # Smoke-tested against codex-cli 0.139.0: a schema-constrained run's terminal
     # `turn.completed` event carries only `{type, usage}` — no `output` field — so the schema
     # result must come from the `--output-last-message` file instead.
     stream = "\n".join(
@@ -652,7 +667,7 @@ def test_raw_session_id_redacted_in_artifacts(
     tmp_path: Path,
     make_request: Callable[..., AgentRunRequest],
 ) -> None:
-    # Durable sessions (P2.2): the raw session id lives ONLY in state.db. The resume id we pass via
+    # Durable sessions: the raw session id lives ONLY in state.db. The resume id we pass via
     # ``exec resume <id>`` and the freshly emitted id (``sess-99``) must not appear verbatim in any
     # artifact (request argv / stdout / events / result.json) — but the in-memory result keeps the
     # raw emitted id so the orchestrator can persist it to the editing_lineage store.
@@ -697,11 +712,24 @@ def test_preflight_missing_binary(
 class _ProbingFakeRun:
     """A fake runner answering ``--version``, ``exec --help`` and ``exec resume --help`` by argv."""
 
-    def __init__(self, *, help_has_config: bool, resume_help: str | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        help_has_config: bool,
+        resume_help: str | None = None,
+        login_status: str = "Logged in using ChatGPT\n",
+        login_status_on_stderr: bool = False,
+        login_status_exit_code: int = 0,
+    ) -> None:
         self._help_has_config = help_has_config
         # Canned ``codex exec resume --help`` text; None => the healthy 0.142.x form advertising the
-        # -m/--model and -c/--config options this adapter places after ``resume`` (F38 probe).
+        # -m/--model and -c/--config options this adapter places after ``resume`` (probe).
         self._resume_help = resume_help
+        # ``codex login status`` prints its answer on stdout when logged in and on STDERR with a
+        # non-zero exit when logged out, so both channels are modelled.
+        self._login_status = login_status
+        self._login_status_on_stderr = login_status_on_stderr
+        self._login_status_exit_code = login_status_exit_code
         self.argvs: list[list[str]] = []
 
     def __call__(
@@ -716,8 +744,15 @@ class _ProbingFakeRun:
         monotonic: Any = None,
     ) -> ProcessResult:
         self.argvs.append(list(argv))
+        exit_code, stderr_text = 0, ""
         if "--version" in argv:
             out = "codex-cli 0.139.0\n"
+        elif argv[1:3] == ["login", "status"]:
+            exit_code = self._login_status_exit_code
+            if self._login_status_on_stderr:
+                out, stderr_text = "", self._login_status
+            else:
+                out = self._login_status
         elif "exec" in argv and "resume" in argv and "--help" in argv:
             # Must be checked before the plain ``exec --help`` branch (that also matches).
             if self._resume_help is None:
@@ -735,12 +770,12 @@ class _ProbingFakeRun:
             out = ""
         Path(stdout_path).write_text(out, encoding="utf-8")
         return ProcessResult(
-            exit_code=0,
+            exit_code=exit_code,
             timed_out=False,
             launch_error=None,
             duration_seconds=0.1,
             stdout_path=str(stdout_path),
-            stderr_text="",
+            stderr_text=stderr_text,
         )
 
 
@@ -809,7 +844,7 @@ def test_preflight_probes_config_support_when_reasoning_unset(
 def test_preflight_no_resume_grammar_drift_on_current_codex(
     codex_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
 ) -> None:
-    # F38: `codex exec resume --help` advertising -m/--model and -c/--config (the 0.142.x form)
+    # `codex exec resume --help` advertising -m/--model and -c/--config (the 0.142.x form)
     # yields no degradation — the resume argv this adapter builds is valid.
     fake = _ProbingFakeRun(help_has_config=True)
     provider = CodexProvider(
@@ -828,7 +863,7 @@ def test_preflight_no_resume_grammar_drift_on_current_codex(
 def test_preflight_flags_resume_grammar_drift(
     codex_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
 ) -> None:
-    # F38: a future `codex exec resume --help` that no longer advertises -m/-c means the options the
+    # A future `codex exec resume --help` that no longer advertises -m/-c means the options the
     # adapter places after `resume` would be rejected — surfaced as an advisory degradation (fatal
     # only without a fallback; `run_preflight` decides). It is NOT a hard capability block.
     fake = _ProbingFakeRun(
@@ -845,3 +880,69 @@ def test_preflight_flags_resume_grammar_drift(
     assert health.supports_required_features is True  # not a hard block on its own
     assert health.degraded_reasons
     assert "resume" in health.degraded_reasons[0]
+
+
+# --- Codex credential probe (codex login status) -------------------------------------------------
+
+
+def _probing_codex(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    fake: _ProbingFakeRun,
+) -> CodexProvider:
+    return CodexProvider(
+        codex_config,
+        security=security_config,
+        artifacts_root=tmp_path,
+        clock=lambda: FIXED_TIME,
+        run_process=fake,
+    )
+
+
+def test_preflight_auth_reports_logged_in_from_the_status_sentence(
+    codex_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    fake = _ProbingFakeRun(help_has_config=True)
+    health = _probing_codex(codex_config, security_config, tmp_path, fake).preflight()
+    assert health.auth is not None
+    assert health.auth.state is AuthState.LOGGED_IN
+    # The answer is prose, so no mechanism is pattern-matched out of it.
+    assert health.auth.method is None
+    assert ["codex", "login", "status"] in fake.argvs
+
+
+def test_preflight_auth_reports_logged_out_from_stderr_and_a_nonzero_exit(
+    codex_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # The real logged-out answer is a NON-ZERO exit printing on stderr, so the probe must read the
+    # combined output rather than gating on a clean exit — otherwise this state reads as unknown and
+    # the whole verdict silently becomes a no-op.
+    fake = _ProbingFakeRun(
+        help_has_config=True,
+        login_status="Not logged in\n",
+        login_status_on_stderr=True,
+        login_status_exit_code=1,
+    )
+    health = _probing_codex(codex_config, security_config, tmp_path, fake).preflight()
+    assert health.auth is not None
+    assert health.auth.state is AuthState.LOGGED_OUT
+    assert "codex login" in health.auth.detail
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [
+        "Signed in as someone\n",  # a reworded sentence this probe must not guess at
+        "",
+    ],
+)
+def test_preflight_auth_is_unknown_when_the_sentence_is_unrecognized(
+    codex_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path, answer: str
+) -> None:
+    # Exit 0 plus unrelated text is neither claim. This is the guard that keeps a presence probe
+    # from drifting into an assertion the CLI never made.
+    fake = _ProbingFakeRun(help_has_config=True, login_status=answer)
+    health = _probing_codex(codex_config, security_config, tmp_path, fake).preflight()
+    assert health.auth is not None
+    assert health.auth.state is AuthState.UNKNOWN

@@ -89,7 +89,9 @@ model {
       engine = component 'B28 Flow Engine' 'Drives the node graph: routes outcomes, owns budgets, writes checkpoints' {
         #spine
       }
-      supervisor = component 'B31 Supervisor' 'Constant read-only advisory layer; writes the PR summary at task close' {
+      supervisor = component 'B31 Supervisor' 'Read-only advisory layer (on by default, removable); observes at a configured cadence, writes the PR summary at close' {
+      }
+      report = component 'Summary Report' 'Deterministic PR body from state.db + artifacts when no provider prose reached disk' {
       }
       state = component 'B07 State Store' 'State machine + persistence in SQLite' {
       }
@@ -104,6 +106,16 @@ model {
       resolver = component 'B23 Check Resolution' 'Normalize command_sets; diff-select which sets run (no discovery)' {
       }
       checks = component 'B24 Checks' 'Run all selected command sets; launch-fail / quality-fail / skip' {
+      }
+      tools = component 'B32 Flow Checkers + Tools' 'citation / dependency_scan checkers; operator tool nodes from .worc/tools/ (UTF-8 stdout contract)' {
+      }
+      exchange = component 'Exchange Publisher' 'The single redaction + path-safety boundary onto .worc-io/ (WRI-001); terminal seal / quarantine' {
+        #crosscutting
+      }
+      frozen = component 'Frozen Bundles' 'Per-task immutable control + instruction snapshots under runs/ (WRI-010/011); post-attempt digest re-check' {
+        #crosscutting
+      }
+      memory = component 'Memory' 'Persistent repo-scoped store: packet build (read), supervisor-proposed delta (write), bounded idle curation' {
       }
       gitmgr = component 'B22 Git Manager' 'The only component that does commit/push/PR (idempotent)' {
       }
@@ -122,21 +134,27 @@ model {
       // Remaining blocks — components of the same proc; added by the same pattern:
       // B03 Installer, B04 Config-discovery, B08 Ledger, B09 Fix-loop, B10 Recovery,
       // B11 Decomposition, B12 HITL, B13 Skills, B14 Dangerous-diff, B15 Prompts, B20 Artifact-layout,
-      // B29 Flow-definition/validation, B30 Flow-node-runners, B32 Flow-checkers.
+      // B29 Flow-definition/validation, B30 Flow-node-runners.
+      // Components added after the B01–B32 taxonomy was closed carry descriptive names rather than
+      // invented numbers: Summary Report, Exchange Publisher, Frozen Bundles, Memory.
     }
 
-    db = store 'State Store (state.db)' 'tasks, node_runs, provider_attempts, check_runs, …' {
+    db = store 'State Store (state.db)' 'tasks, node_runs, provider_attempts, check_runs, evaluations, lineages, publish_operations (schema v20)' {
       #datastore
       technology 'SQLite'
     }
-    artifacts = store 'Artifact Store (.worc/)' 'config / state.db / logs / checks / HITL / ledger' {
+    artifacts = store 'Private home (.worc/)' 'config / flows / tools / guide · state.db · logs (+ ledger, daemon logs) · memory · security-reports · runs/ (frozen bundles, seals, quarantine)' {
+      #datastore
+      technology 'Filesystem'
+    }
+    exchangeRoot = store 'Agent exchange (.worc-io/)' 'The only provider-readable orchestration surface: redacted current-task copies (WRI-001)' {
       #datastore
       technology 'Filesystem'
     }
   }
 
   // --- Relationships (verified against code; backbone, without all cross-cutting edges) ---
-  operator -> cli 'Subcommands: run / watch / rerun / finalize / status'
+  operator -> cli 'Subcommands: run / watch / rerun / finalize / status / validate-flow / logs · runs · memory'
   telegram -> human 'Request / response'
 
   cli -> config 'Load + validate (discovered from .worc/)'
@@ -149,23 +167,37 @@ model {
   pipeline -> state 'Status transitions (transactional)'
   state -> db 'Read / write'
   pipeline -> resolver 'Normalize command_sets (preflight)'
+  pipeline -> frozen 'Freeze control + instruction inputs at task start'
   pipeline -> engine 'drive_flow (hand off the validated graph)'
-  supervisor -> engine 'Observes each completed step (read-only)'
+  supervisor -> engine 'Observes completed steps read-only, at the configured cadence'
+  supervisor -> report 'No prose on disk (off / no-prose terminal / failed / collapsed) → deterministic body'
+  report -> db 'Render from recorded facts (byte-identical across renders)'
+  supervisor -> memory 'Proposes the candidate delta on its closing turn'
+  engine -> memory 'Per-node retrieval packet ({memory_path})'
+  memory -> artifacts 'Store + audit + snapshots under .worc/memory/'
   engine -> router 'Agent / evaluator nodes'
+  engine -> frozen 'Reads the frozen copies; post-attempt digest re-check'
   router -> providers 'AgentProvider.run'
-  providers -> subprocess 'run_process'
+  providers -> subprocess 'run_process (containment + quiescence barrier)'
   providers -> codex 'Launch (argv, no shell)'
   providers -> claude 'Launch (argv, no shell)'
-  providers -> security 'Profile / env / forbidden'
+  providers -> security 'Profile / env / forbidden / git-evidence grant'
   providers -> redaction 'Stream redaction'
   engine -> checks 'Checks nodes (testing)'
+  engine -> tools 'Checker + tool nodes'
+  tools -> subprocess 'run_process (UTF-8 stdout)'
   checks -> subprocess 'run_process'
-  pipeline -> gitmgr 'Branch prep / terminal cleanup'
+  engine -> exchange 'Publish each context path (redacted, contained)'
+  exchange -> exchangeRoot 'Atomic LF-stable writes'
+  exchange -> artifacts 'Terminal seal / quarantine under runs/'
+  codex -> exchangeRoot 'Reads context paths'
+  claude -> exchangeRoot 'Reads context paths'
+  pipeline -> gitmgr 'Branch prep / terminal cleanup / git control-state fingerprint'
   engine -> gitmgr 'Publish node (commit / push / PR)'
   gitmgr -> subprocess 'run_process'
   gitmgr -> github 'git / gh'
   gitmgr -> db 'publish_operations (idempotency)'
-  pipeline -> notifier 'HITL / notifications'
+  pipeline -> notifier 'HITL / notifications / ⚠️ traces'
   notifier -> telegram 'send / getUpdates'
 
   providers -> artifacts 'request / result / logs'
@@ -195,9 +227,15 @@ views {
   }
 
   view crosscutting {
-    title 'Cross-cutting: security, redaction, observability'
-    include security, redaction, observ, providers, gitmgr, checks, subprocess, gate, db, artifacts
-    autoLayout
+    title 'Cross-cutting: security, redaction, isolation boundaries, observability'
+    include security, redaction, observ, exchange, frozen, providers, gitmgr, checks, subprocess, gate, db, artifacts, exchangeRoot
+    autoLayout TopBottom
+  }
+
+  view isolation {
+    title 'Isolation boundaries: what the agent may read, and what is frozen'
+    include frozen, exchange, security, providers, codex, claude, artifacts, exchangeRoot
+    autoLayout LeftRight
   }
 
   dynamic view happyPath {
@@ -207,31 +245,37 @@ views {
     pipeline -> gate '§19 validation'
     pipeline -> state 'acquire slot, NEW→VALIDATED'
     pipeline -> resolver 'normalize command_sets (preflight)'
+    pipeline -> frozen 'freeze control + instruction inputs'
     pipeline -> gitmgr 'branch preparation'
     pipeline -> engine 'drive_flow'
     engine -> router 'implementation / planning'
     router -> providers 'AgentProvider.run'
     providers -> codex 'argv (no shell)'
+    engine -> exchange 'publish redacted context paths'
     engine -> checks 'testing'
     engine -> router 'review'
-    supervisor -> engine 'observes each step (read-only)'
+    supervisor -> engine 'observes deviations (read-only, cadence: events)'
+    engine -> router 'documentation (docs follow the code)'
+    supervisor -> report 'summary.md, else the deterministic body'
     engine -> gitmgr 'commit / push / PR'
     gitmgr -> github 'gh pr create'
+    exchange -> artifacts 'seal the terminal exchange under runs/'
     pipeline -> notifier 'outcome notification'
   }
 
   dynamic view implementationFlow {
     title 'Implementation flow: the node graph with the bounded fix loop'
     pipeline -> engine 'drive_flow (validated graph)'
-    engine -> router 'refinement (opt.) · planning (+ decomposition)'
+    engine -> router 'refinement (when derived.needs_refinement) · planning (+ decomposition)'
     engine -> router 'implementation (+ dangerous-diff guard B14)'
     engine -> checks 'testing (diff-selected command sets)'
     checks -> engine 'quality failure → fixing'
-    engine -> router 'fixing (bounded loops B09)'
+    engine -> router 'fixing (bounded loops B09; resumes the editing lineage)'
     engine -> checks 'back to testing — ping-pong'
-    engine -> router 'review (read-only evaluator)'
+    engine -> router 'review (read-only evaluator, findings gate)'
     router -> engine 'blocking findings → fixing'
-    supervisor -> engine 'observes each step; writes summary at close'
+    engine -> router 'documentation (once per task, after review accepts)'
+    supervisor -> engine 'observes deviations; writes the summary at close'
     engine -> gitmgr 'publish: commit / push / PR'
     gitmgr -> github 'gh pr create'
   }

@@ -1,4 +1,4 @@
-"""Frozen control bundle (WRI-010) — a per-task immutable snapshot of the effective control plane.
+"""Frozen control bundle — a per-task immutable snapshot of the effective control plane.
 
 The operator control plane (``<repo>/.worc`` = ``control_home``: the flow YAML, role/supervisor
 prompts, and ``tools/`` executables) lives under the provider working directory. Every consumer
@@ -7,21 +7,24 @@ prompt or a tool executable mid-run and a *later* orchestrator node would then r
 provider-chosen bytes outside the provider sandbox with the orchestrator's own authority.
 
 At task start the orchestrator freezes the exact effective control inputs referenced by the task's
-flow into a private, immutable bundle under ``<private_home>/control-bundles/<task-id>/`` and binds
+flow into a private, immutable bundle under ``<private_home>/runs/control-bundles/<task-id>/`` and
+binds
 all later flow/supervisor/tool consumers to it. The bundle is never written to the exchange and is a
 provider deny target (:class:`~wastech_orchestrator.runtime_layout.InternalDenyPolicy`).
 
 Three operations:
 
-* :func:`freeze_control_bundle` — copy the referenced flow YAML, role files, and tool executables
-  into the bundle (regular single-link files only), record a manifest, and return the bound handle.
+* :func:`freeze_control_bundle` — copy the referenced flow YAML, role files, and complete supported
+  tool launch sets into the bundle (regular single-link files only), record a manifest, and return
+  the bound handle.
 * :func:`verify_bundle_integrity` — re-hash the frozen bundle against its recorded digest (used on
   ``continue``/resume, which must reuse the original frozen bytes, never re-freeze).
 * :func:`digest_live_control_inputs` — re-hash the **live** control inputs with the same identity
   checks; the orchestrator compares this to the frozen baseline after every provider attempt (once
-  WRI-012 has proven the provider tree quiescent). Any drift is a non-fallback security violation.
+  the quiescence barrier has proven the provider tree empty). Any drift is a non-fallback
+  security violation.
 
-Identity is enforced by reusing the WRI-001 no-follow inspector
+Identity is enforced by reusing the exchange's no-follow inspector
 (:func:`~wastech_orchestrator.providers.exchange.default_file_inspector`), the shared containment
 belt (:func:`~wastech_orchestrator.providers.artifacts.assert_contained_path`), and the chunked
 digest (:func:`~wastech_orchestrator.providers.artifacts.sha256_file`) — no new identity code. A
@@ -60,7 +63,7 @@ MANIFEST_NAME = "manifest.json"
 
 #: Bump when the on-disk bundle layout / manifest schema changes (an old bundle then fails to
 #: verify and the task is treated as needing a fresh/restart).
-_BUNDLE_FORMAT = 1
+_BUNDLE_FORMAT = 2
 
 
 class ControlBundleError(FrozenBundleError):
@@ -96,10 +99,10 @@ def _referenced_inputs(snapshot: FlowSnapshot, flow_dir: Path, tools: ToolRegist
     """Enumerate the exact control inputs the flow references, in a deterministic order.
 
     The flow YAML, every node ``role_file``, the supervisor block's three role files, and the
-    executable each ``tool`` node resolves to (via the **live** registry — a resolution failure is
-    a mutation/misconfig and fails closed). Role files are keyed by their flow-relative path so the
-    frozen copy resolves identically under the bundle ``flows/`` dir; tools by their resolved
-    filename so the per-task registry finds them with the same candidate logic.
+    complete supported launch set for each ``tool`` node (via the **live** registry — a resolution
+    failure is a mutation/misconfig and fails closed). Role files are keyed by their flow-relative
+    path so the frozen copy resolves identically under the bundle ``flows/`` dir; tools by their
+    registry-relative candidate paths so a Windows launcher keeps its same-name payload beside it.
     """
     if snapshot.source_path is None:
         raise ControlBundleError("flow snapshot has no source path; cannot freeze control plane")
@@ -126,10 +129,12 @@ def _referenced_inputs(snapshot: FlowSnapshot, flow_dir: Path, tools: ToolRegist
     tool_names = sorted({node.tool for node in snapshot.doc.nodes if node.kind == "tool"})
     for name in tool_names:
         try:
-            resolved = tools.resolve(name)
+            candidates = tools.existing_candidates(name)
         except ToolResolutionError as exc:
             raise ControlBundleError(f"tool {name!r} no longer resolves: {exc}") from exc
-        refs.append(_Ref(f"{_TOOLS_SUBDIR}/{resolved.name}", resolved))
+        for candidate in candidates:
+            relative = candidate.relative_to(tools.tools_dir).as_posix()
+            refs.append(_Ref(f"{_TOOLS_SUBDIR}/{relative}", candidate))
     return refs
 
 
@@ -266,7 +271,7 @@ def digest_live_control_inputs(
     """Re-hash the **live** control inputs the frozen bundle was built from, same order/keys.
 
     The orchestrator captures this at freeze time (it equals ``bundle_digest``) and recomputes it
-    after every provider attempt once WRI-012 has proven the provider tree quiescent. A mismatch —
+    after every provider attempt once the quiescence barrier has proven the tree empty. A mismatch —
     or a planted symlink/hard-link surfaced by :func:`_inspect_source` — means a live control file
     changed under the running task: a non-fallback security violation.
     """

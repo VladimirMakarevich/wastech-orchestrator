@@ -1,4 +1,4 @@
-"""Core-owned ``checks``-node checkers beyond the command profile (P3.1).
+"""Core-owned ``checks``-node checkers beyond the command profile.
 
 Two deterministic, non-LLM checkers that make the ``checks`` node usable for research / audit flows:
 

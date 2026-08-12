@@ -49,7 +49,7 @@ def _codex_after_upgrade(operator_codex: dict[str, object]) -> dict[str, object]
 
 
 def test_migrates_safe_codex_sandbox_to_permission_profile() -> None:
-    # WRI-003: a legacy safe `sandbox` folds into the neutral `permission_profile` and is dropped.
+    # A legacy safe `sandbox` folds into the neutral `permission_profile` and is dropped.
     codex = _codex_after_upgrade({"sandbox": "read-only"})
     assert "sandbox" not in codex
     assert codex["permission_profile"] == "read-only"
@@ -99,6 +99,25 @@ def test_removed_checks_keys_are_stripped() -> None:
     assert "discovery" not in merged["checks"]
     assert "commands" not in merged["checks"]
     assert merged["checks"]["timeout_seconds"] == 60  # operator's value preserved
+
+
+def test_removed_validation_keys_are_stripped() -> None:
+    # v35: `validation.required_fields` / `reject_unknown_fields` are removed (both were read by
+    # nothing). `upgrade-config` strips them and leaves every live sibling value untouched.
+    template = {"validation": {"max_task_lines": 5000}}
+    operator = {
+        "validation": {
+            "required_fields": ["id", "title"],
+            "reject_unknown_fields": True,
+            "max_task_lines": 4000,
+        }
+    }
+    merged, _, removed = upgrade_config_mapping(template, operator)
+    assert "required_fields" not in merged["validation"]
+    assert "reject_unknown_fields" not in merged["validation"]
+    assert merged["validation"]["max_task_lines"] == 4000  # operator's value preserved
+    assert "validation.required_fields" in removed
+    assert "validation.reject_unknown_fields" in removed
 
 
 def test_schema_version_forced_to_current() -> None:
@@ -180,9 +199,26 @@ def test_adds_logging_block_from_packaged_template() -> None:
     template = packaged_template_mapping()
     operator = {"schema_version": 22, "prompt_audit": True}
     merged, added, _ = upgrade_config_mapping(template, operator)
-    assert merged["logging"] == {"level": "info", "artifacts": "standard"}
+    assert merged["logging"] == {
+        "level": "info",
+        "artifacts": "standard",
+        "clean_runs_on_success": True,
+    }
     assert merged["prompt_audit"] is True  # operator value preserved
     assert "logging" in added
+
+
+def test_adds_run_cleanup_key_into_an_existing_logging_block() -> None:
+    # v32 add: the new sub-key must reach a config that already HAS a `logging` block, or the switch
+    # is undiscoverable for every existing install (the loader defaults it either way, so this is
+    # about the operator being able to see and flip it).
+    template = packaged_template_mapping()
+    operator = {"schema_version": 31, "logging": {"level": "debug", "artifacts": "full"}}
+    merged, added, _ = upgrade_config_mapping(template, operator)
+    assert merged["logging"]["clean_runs_on_success"] is True
+    assert merged["logging"]["level"] == "debug"  # operator values untouched
+    assert merged["logging"]["artifacts"] == "full"
+    assert "logging.clean_runs_on_success" in added
 
 
 def test_adds_memory_block_from_packaged_template() -> None:
@@ -199,18 +235,33 @@ def test_adds_memory_block_from_packaged_template() -> None:
 
 def test_adds_supervisor_provider_from_packaged_template() -> None:
     # v27 add: an operator supervisor block predating `provider` gains it from the packaged template
-    # (added under the existing block), while keeping its own model/reasoning.
+    # (added under the existing block), while keeping its own role_file.
     template = packaged_template_mapping()
-    operator = {
-        "schema_version": 26,
-        "supervisor": {"role_file": "roles/supervisor.md", "model": "sonnet", "reasoning": "high"},
-    }
+    operator = {"schema_version": 26, "supervisor": {"role_file": "roles/mine.md"}}
     merged, added, _ = upgrade_config_mapping(template, operator)
     assert (
         merged["supervisor"]["provider"] == "claude"
     )  # from template (packaged primary is claude)
-    assert merged["supervisor"]["model"] == "sonnet"  # operator value preserved
+    assert merged["supervisor"]["role_file"] == "roles/mine.md"  # operator value preserved
     assert "supervisor.provider" in added
+
+
+def test_v33_strips_flat_supervisor_model_and_adds_the_phase_blocks() -> None:
+    # v33 split one model/reasoning pair into three phase blocks. The flat keys are stripped (not
+    # migrated: one value, two plausible homes) and reported, while the new blocks arrive from the
+    # template — so the operator sees exactly what they have to re-declare.
+    template = packaged_template_mapping()
+    operator = {
+        "schema_version": 32,
+        "supervisor": {"role_file": "roles/supervisor.md", "model": "opus", "reasoning": "xhigh"},
+    }
+    merged, added, removed = upgrade_config_mapping(template, operator)
+    assert "model" not in merged["supervisor"] and "reasoning" not in merged["supervisor"]
+    assert removed == ["supervisor.model", "supervisor.reasoning"]
+    assert merged["supervisor"]["observe"]["mode"] == "events"  # from template
+    assert merged["supervisor"]["finalize"]["reasoning"] == "medium"
+    assert {"supervisor.observe", "supervisor.finalize", "supervisor.handoff"} <= set(added)
+    assert merged["supervisor"]["role_file"] == "roles/supervisor.md"  # untouched top-level key
 
 
 def test_strips_legacy_prompts_block() -> None:
@@ -282,3 +333,26 @@ def test_render_round_trips_through_parse() -> None:
     text = render(mapping)
     assert text.startswith("# Regenerated by")
     assert parse_mapping(text) == mapping
+
+
+def test_new_supervisor_enabled_key_is_topped_up_from_the_template() -> None:
+    # A purely additive sub-key under an existing block: the merge recurses, so the key arrives with
+    # its template value and the operator's siblings are untouched.
+    template = {
+        "schema_version": CONFIG_SCHEMA_VERSION,
+        "supervisor": {"enabled": True, "role_file": "roles/supervisor.md", "provider": "claude"},
+    }
+    operator = {"schema_version": 33, "supervisor": {"role_file": "roles/mine.md"}}
+    merged, added, removed = upgrade_config_mapping(template, operator)
+    assert "supervisor.enabled" in added
+    assert merged["supervisor"]["enabled"] is True
+    assert merged["supervisor"]["role_file"] == "roles/mine.md"  # operator value wins
+    assert not any(key.startswith("supervisor.") for key in removed)  # nothing removed with it
+
+
+def test_an_operator_who_already_switched_the_layer_off_keeps_it_off() -> None:
+    template = {"schema_version": CONFIG_SCHEMA_VERSION, "supervisor": {"enabled": True}}
+    operator = {"schema_version": 33, "supervisor": {"enabled": False}}
+    merged, added, _removed = upgrade_config_mapping(template, operator)
+    assert merged["supervisor"]["enabled"] is False
+    assert "supervisor.enabled" not in added

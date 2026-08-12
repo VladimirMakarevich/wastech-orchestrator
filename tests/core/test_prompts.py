@@ -69,7 +69,7 @@ def test_allowlist_matches_documented_variables() -> None:
         "task_id",
         "stage",
         "repo_path",
-        "repo",  # flow-engine alias for repo_path (flow-engine P1.3)
+        "repo",  # flow-engine alias for repo_path
         "task_path",
         "plan_path",
         "diff_path",
@@ -133,7 +133,7 @@ def test_render_only_substitutes_the_given_allowed_set() -> None:
 
 def test_memory_path_conditional_block_kept_and_dropped() -> None:
     # The packaged role prompts wrap the memory reference in {?memory_path}...{/memory_path} so it
-    # is present only when a packet was built, and disappears cleanly when memory is empty (AC-R4).
+    # is present only when a packet was built, and disappears cleanly when memory is empty.
     template = "plan {?memory_path}see brief at {memory_path}{/memory_path} done"
     assert render_prompt(template, {"memory_path": "/logs/t1/memory/planning.md"}) == (
         "plan see brief at /logs/t1/memory/planning.md done"
@@ -144,8 +144,8 @@ def test_memory_path_conditional_block_kept_and_dropped() -> None:
 
 @pytest.mark.parametrize("role", ["planning", "implementation", "review", "fixing"])
 def test_packaged_default_role_prompts_reference_memory_path(role: str) -> None:
-    # 03.4 / AC-R1: the four default role prompts reference {memory_path} inside a conditional block
-    # so they render the reference when memory is on and drop it cleanly when memory is off (AC-R4).
+    # The four default role prompts reference {memory_path} inside a conditional block
+    # so they render the reference when memory is on and drop it cleanly when memory is off.
     template = (
         resources.files("wastech_orchestrator")
         .joinpath("packaged", "flows", "implementation", f"{role}.md")

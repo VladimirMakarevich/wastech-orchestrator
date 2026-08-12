@@ -68,7 +68,7 @@ def _schema_output(cli_name: str, cli_args: list[str]) -> dict[str, object]:
             "decompose": False,
             "subtasks": [],
         }
-    # F19: every in-flow evaluator (review/verifier/critic) requests the mandatory findings
+    # Every in-flow evaluator (review/verifier/critic) requests the mandatory findings
     # schema — a well-formed empty array is a clean, accepting verdict.
     if isinstance(required, list) and "findings" in required:
         return {"findings": []}
@@ -283,12 +283,30 @@ def _run_claude(scenario: str, cli_args: list[str]) -> int:
     return 2
 
 
+def _run_auth_status(cli_name: str) -> int:
+    """Model the credential-status verb each CLI answers at preflight.
+
+    Deliberately **scenario-independent** and always logged in: the startup gate refuses to run at
+    all against a logged-out provider, so every scenario below it must get past this probe for the
+    scenario itself to be what the test exercises. A test wanting the logged-out answer drives the
+    adapter directly rather than through this stand-in.
+
+    Each dialect answers in its real shape — Claude a JSON object keyed ``loggedIn``, Codex a fixed
+    sentence — so the parsers are exercised rather than bypassed.
+    """
+    if cli_name == "claude":
+        sys.stdout.write(json.dumps({"loggedIn": True, "authMethod": "claude.ai"}) + "\n")
+        return 0
+    sys.stdout.write("Logged in using ChatGPT\n")
+    return 0
+
+
 def _run_codex_sandbox(cli_args: list[str]) -> int:
-    """Model ``codex sandbox -P`` for the WRI-003 no-model canary.
+    """Model ``codex sandbox -P`` for the no-model canary.
 
     Faithfully simulates the orchestrator's generated permission profile: a read of the exchange
     (``.worc-io``) is allowed and any write is denied; a read of the private home (``.worc``) is
-    denied under read-isolation but ALLOWED when the profile downgrades it to ``read`` (VF-6
+    denied under read-isolation but ALLOWED when the profile downgrades it to ``read`` (the
     ``read_isolation_off`` — the shipped default), so the canary's private-read positive control
     succeeds under both postures. Deliberately **scenario-independent** — the canary must pass so
     the real ``exec`` scenario below plays out; genuine OS enforcement is proven by the host smoke,
@@ -301,7 +319,7 @@ def _run_codex_sandbox(cli_args: list[str]) -> int:
     is_write = ">>" in probe_str
     reads_exchange = ".worc-io" in probe_str  # exchange subtree (not a substring of `.worc/…`)
     reads_private = ".worc" in probe_str and not reads_exchange  # private-home subtree
-    # VF-6: with read-isolation OFF the generated profile downgrades the private home from ``deny``
+    # With read-isolation OFF the generated profile downgrades the private home from ``deny``
     # to ``read``, so a private-home read becomes a positive control the canary expects to SUCCEED.
     # Detect that posture from the profile the canary passed (``.worc" = "read"`` — the quote after
     # ``.worc`` excludes the ``.worc-io`` exchange entry).
@@ -361,11 +379,16 @@ def main() -> int:
     with contextlib.suppress(OSError):
         sys.stdin.read()
 
-    # WRI-003: the Codex adapter runs a no-model ``codex sandbox -P`` canary BEFORE ``exec``. Model
+    # The Codex adapter runs a no-model ``codex sandbox -P`` canary BEFORE ``exec``. Model
     # it scenario-independently (exchange readable, private/writes denied) so the canary passes and
     # the ``exec`` scenario below is what the test actually exercises.
     if cli_name == "codex" and cli_args and cli_args[0] == "sandbox":
         return _run_codex_sandbox(cli_args)
+
+    # Preflight asks each CLI about its own stored credentials before anything else runs. Answered
+    # ahead of the scenario dispatch for the same reason as the canary above: it gates the run.
+    if cli_args[:2] in (["auth", "status"], ["login", "status"]):
+        return _run_auth_status(cli_name)
 
     # ``success_edit`` behaves like ``success`` but also makes a deterministic code change in the
     # working directory (the clone), so a pipeline run has something to commit (phases 4–5 e2e).

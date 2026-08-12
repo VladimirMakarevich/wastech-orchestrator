@@ -1,4 +1,4 @@
-"""Lifecycle decision helpers (02.4): trust assignment, promotion gate, subject normalization."""
+"""Lifecycle decision helpers: trust assignment, promotion gate, subject normalization."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ from wastech_orchestrator.memory.lifecycle import (
         ("review", TrustLevel.REVIEW_VERIFIED),
         ("repo_doc", TrustLevel.REPO_OBSERVED),
         ("check", TrustLevel.ARTIFACT_BACKED),
-        # F29: the tokens the supervisor actually emits for a repo file / a git commit must ground
+        # The tokens the supervisor actually emits for a repo file / a git commit must ground
         # durable classes, not fall through to agent-inferred (which quarantined every repo lesson).
         ("file", TrustLevel.REPO_OBSERVED),
         ("commit", TrustLevel.ARTIFACT_BACKED),
@@ -50,7 +50,7 @@ def test_assign_entity_trust_keys_off_paths() -> None:
 
 
 def test_assign_entity_trust_validates_paths_when_predicate_given() -> None:
-    # F1/NFR2: with a live-repo predicate, repo-observed requires every named path present; any
+    # With a live-repo predicate, repo-observed requires every named path present; any
     # missing path downgrades the whole card off durable trust (the write funnel quarantines it).
     present = {"src/real.py", "src/also.py"}.__contains__
 
@@ -74,14 +74,14 @@ def _promote(
 
 
 def test_promotion_requires_durable_trust_and_evidence_and_no_contradiction() -> None:
-    assert _promote(TrustLevel.AGENT_INFERRED, recur=5) is False  # AC-SF2
-    assert _promote(TrustLevel.EXTERNAL_UNTRUSTED, recur=5) is False  # AC-W4
-    assert _promote(TrustLevel.HUMAN_CURATED, ev=False) is False  # AC-W2
+    assert _promote(TrustLevel.AGENT_INFERRED, recur=5) is False  # agent-inferred is not durable
+    assert _promote(TrustLevel.EXTERNAL_UNTRUSTED, recur=5) is False  # external is not durable
+    assert _promote(TrustLevel.HUMAN_CURATED, ev=False) is False  # durable still needs evidence
     assert _promote(TrustLevel.HUMAN_CURATED, recur=5, has_contradiction=True) is False
 
 
 def test_repo_human_and_review_trust_auto_promote() -> None:
-    # Memory V2 (move 3): repo-observed joins human/review as first-sight promotable — repo-verified
+    # Repo-observed joins human/review as first-sight promotable — repo-verified
     # durable knowledge no longer starves in quarantine waiting to recur.
     assert _promote(TrustLevel.REPO_OBSERVED, recur=1) is True
     assert _promote(TrustLevel.HUMAN_CURATED, recur=1) is True
@@ -89,8 +89,8 @@ def test_repo_human_and_review_trust_auto_promote() -> None:
 
 
 def test_artifact_backed_needs_recurrence() -> None:
-    # Durable but NOT auto-promote (memory V2 keeps its recurrence gate as the interim stand-in for
-    # its unbuilt validator): one short of recurrence stays short-term (Q3).
+    # Durable but NOT auto-promote (the recurrence gate is the interim stand-in for
+    # its unbuilt validator): one short of recurrence stays short-term.
     assert _promote(TrustLevel.ARTIFACT_BACKED, recur=1, mn=2) is False
     assert _promote(TrustLevel.ARTIFACT_BACKED, recur=2, mn=2) is True
 

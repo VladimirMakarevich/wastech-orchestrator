@@ -30,7 +30,7 @@ def test_well_formed_stream_populates_all_fields() -> None:
 
 
 def test_codex_exec_resume_parses_thread_started() -> None:
-    # Durable sessions (P2.2): ``codex exec`` emits ``thread.started`` carrying the resumable
+    # Durable sessions: ``codex exec`` emits ``thread.started`` carrying the resumable
     # thread id, which the adapter normalizes into ``session_id``.
     stream = _stream(
         {"type": "thread.started", "thread_id": "thread-abc"},
@@ -87,7 +87,7 @@ def test_fully_malformed_stream_is_invalid_output() -> None:
 
 
 def test_usage_read_from_terminal_event() -> None:
-    # F22: codex-cli 0.139.0's terminal `turn.completed` event carries `usage` directly (no
+    # Codex-cli 0.139.0's terminal `turn.completed` event carries `usage` directly (no
     # separate `usage`/`token_count` event) — mirrors claude.py's parse_stream_json.
     stream = _stream({"type": "turn.completed", "usage": {"input_tokens": 7, "output_tokens": 3}})
     parsed = parse_events(stream)
@@ -117,7 +117,7 @@ def test_normalized_usage_is_cumulative_with_derived_uncached() -> None:
     assert nu.uncached_input == 141464 - 76288
     assert nu.output_total == 8329
     assert nu.reasoning_output == 5935
-    assert nu.cost is None  # VF-8: Codex emits no dollar figure → cost stays None
+    assert nu.cost is None  # Codex emits no dollar figure → cost stays None
 
 
 def test_normalized_usage_absent_when_no_usage_emitted() -> None:
@@ -127,7 +127,7 @@ def test_normalized_usage_absent_when_no_usage_emitted() -> None:
 
 
 def test_schema_requested_falls_back_to_last_message_json() -> None:
-    # F19: on codex-cli 0.139.0 a schema-constrained run's `turn.completed` carries no `output`
+    # On codex-cli 0.139.0 a schema-constrained run's `turn.completed` carries no `output`
     # field at all — the structured result instead lands in the last-message file. When a schema
     # was requested and the event stream had no `output`, parse the last message as the result.
     stream = _stream({"type": "turn.completed", "status": "success"})

@@ -26,7 +26,7 @@ from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import NamedTuple, TextIO
 
-from wastech_orchestrator import __version__, preflight, process_control
+from wastech_orchestrator import __version__, preflight, process_control, runs_retention
 from wastech_orchestrator.composition import (
     ISOLATION_CHECKS,
     build_orchestrator,
@@ -78,8 +78,8 @@ from wastech_orchestrator.notify.telegram import check_telegram_preflight
 from wastech_orchestrator.observability.logging import configure_logging, set_log_level
 from wastech_orchestrator.preflight import preflight_gh
 from wastech_orchestrator.providers import process as agent_process
-from wastech_orchestrator.providers.base import ProviderId
-from wastech_orchestrator.runtime_layout import CONTROL_HOME_DIRNAME, RuntimeLayout
+from wastech_orchestrator.providers.base import AuthProbe, AuthState, ProviderId
+from wastech_orchestrator.runtime_layout import CONTROL_HOME_DIRNAME, RuntimeLayout, runs_root
 from wastech_orchestrator.security.isolation import check_isolation
 from wastech_orchestrator.state_store import IncompatibleStateError, StateStore, TaskRow
 from wastech_orchestrator.task.model import DEFAULT_QUEUE, priority_rank
@@ -157,9 +157,9 @@ def _add_stop_force_flags(parser: argparse.ArgumentParser) -> None:
     """The stop-ladder force flags shared by ``stop`` and ``restart`` (mutually exclusive).
 
     No flag → idle stops with no prompt; a busy daemon refuses (interactive: confirm ``YES``).
-    ``--force`` → soft stop at the next flow-node boundary (with timeout escalation).
-    ``--force-full`` → hard stop: kill the active process tree/group now. See
-    ``_resolve_stop_level``.
+    ``--force`` → soft stop at the next flow-node boundary (never escalates; a timeout leaves the
+    stop pending). ``--force-full`` → hard stop **whether or not a task is active**: kill the
+    daemon's process tree/group now. See ``_resolve_stop_level``.
     """
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
@@ -171,7 +171,8 @@ def _add_stop_force_flags(parser: argparse.ArgumentParser) -> None:
         "--force-full",
         dest="force_full",
         action="store_true",
-        help="hard stop now: kill the daemon and active agent (POSIX groups / Windows tree)",
+        help="hard stop now, idle or busy: kill the daemon and any active agent (POSIX groups / "
+        "Windows tree). The rung for a wedged or suspended watcher a soft stop cannot reach",
     )
     parser.add_argument(
         "--non-interactive",
@@ -535,7 +536,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="never prompt: any confirmation that isn't already resolved by --yes/"
         "--reset-fix-budget/--no-reset-fix-budget is refused (exit 1) instead of asked. Used by "
-        "scripts/CI and by 'worc shell' (a prompt would fight the REPL's stdin, H1)",
+        "scripts/CI and by 'worc shell' (a prompt would fight the REPL's stdin)",
     )
 
     finalize_cmd = sub.add_parser(
@@ -631,20 +632,46 @@ def build_parser() -> argparse.ArgumentParser:
     logs_sub = logs_cmd.add_subparsers(dest="logs_action", required=True)
     logs_clean = logs_sub.add_parser(
         "clean",
-        help="remove task artifact directories under .worc/logs/ (the ledger is kept by default)",
+        help="sweep .worc/logs/: task artifact dirs + the daemon logs (the ledger is kept by "
+        "default). Refuses while a task is active; keeps the daemon logs while a daemon runs",
     )
     logs_clean.add_argument(
         "--keep",
         type=int,
         metavar="N",
-        help="keep the N most recently modified task dirs, remove the rest (no prompt unless N=0)",
+        help="keep the N most recently modified task dirs, remove the rest (no prompt unless N=0); "
+        "the daemon logs are removed either way",
     )
     logs_clean.add_argument(
         "--all",
         action="store_true",
-        help="also remove the ledger (completed.jsonl); always confirms unless --yes",
+        help="also remove the ledger (completed.jsonl); combines with --keep N",
     )
     logs_clean.add_argument("-y", "--yes", action="store_true", help="skip the confirmation prompt")
+
+    runs_cmd = sub.add_parser(
+        "runs", help="manage per-task runtime state under .worc/runs/ (frozen bundles + seals)"
+    )
+    runs_sub = runs_cmd.add_subparsers(dest="runs_action", required=True)
+    runs_clean = runs_sub.add_parser(
+        "clean",
+        help="remove per-task frozen bundles and sealed exchanges under .worc/runs/. Refuses while "
+        "a task is active; quarantined evidence is kept unless --include-quarantine",
+    )
+    runs_clean.add_argument(
+        "--keep",
+        type=int,
+        metavar="N",
+        help="keep the N most recently touched tasks, remove the rest (no prompt unless N=0)",
+    )
+    runs_clean.add_argument(
+        "--include-quarantine",
+        dest="include_quarantine",
+        action="store_true",
+        help="also remove quarantined exchange evidence (written only when mutation detection "
+        "caught an agent-side write to the read-only exchange — read it before deleting it)",
+    )
+    runs_clean.add_argument("-y", "--yes", action="store_true", help="skip the confirmation prompt")
 
     memory_cmd = sub.add_parser(
         "memory", help="inspect and curate the persistent memory store (.worc/memory/)"
@@ -739,18 +766,51 @@ def _copy_worc_docs(dest_root: Path, *, overwrite: bool, dry: bool) -> tuple[lis
 
 
 def _flows_root() -> Traversable:
-    """The packaged built-in flows (``implementation``/``deep_research``/``security_audit``) and
-    their per-node role-prompt templates under each flow's own subdir (works from a source tree or a
-    wheel).
+    """Every packaged built-in flow and its per-node role-prompt templates, under each flow's own
+    subdir (works from a source tree or a wheel).
+
+    Deliberately *not* enumerated here: the shipped set is whatever ``packaged/flows/*.yaml``
+    contains, and a name list in a docstring only drifts behind it (it already had). Read the
+    directory for the current set.
 
     ``install`` copies this whole tree into ``.worc/flows/`` so the operator gets editable, *active*
-    copies: the registry prefers ``<repo>/.worc/flows/<task_type>.yaml`` over the packaged built-in,
-    and a node's ``role_file`` resolves under its flow-owned dir ``.worc/flows/<task_type>/``.
-    Unlike the generated ``guide/``, these are operator-editable, so a plain re-run never clobbers
-    them (see
-    ``_copy_packaged_flows`` / ``_backup_flows_dir``).
+    copies — which is the only reason a built-in is runnable at all: the registry resolves
+    ``<repo>/.worc/flows/<task_type>.yaml`` and nothing else, so this tree is delivery-only and is
+    never read at task-execution time (an unresolved ``task_type`` is an error, not a fall-back to
+    the bundled copy). A node's ``role_file`` resolves under its flow-owned dir
+    ``.worc/flows/<task_type>/``. Unlike the generated ``guide/``, these are operator-editable, so a
+    plain re-run never clobbers them (see ``_copy_packaged_flows`` / ``_backup_flows_dir``).
     """
     return resources.files("wastech_orchestrator").joinpath("packaged", "flows")
+
+
+# How many of the orchestrator's own `--reconfigure` snapshots survive per kind. What the
+# orchestrator writes, it also reclaims: `flows.bak-*` / `tools.bak-*` are whole-directory copies
+# taken on every refresh, so an unbounded series is the one that actually costs disk. Three is
+# enough to undo a bad refresh and still notice it a few runs later. Not a config knob.
+_INSTALL_BACKUP_KEEP = 3
+
+# The exact shape `_install_backup_config` / `_backup_flows_dir` / `_backup_tools_dir` stamp:
+# `%Y%m%dT%H%M%SZ`. Matching the stamp rather than a bare `bak-*` keeps the prune to what the
+# orchestrator itself wrote — an operator's hand-named `config.yaml.bak-before-upgrade` (and
+# anything under `state.db*.bak*`) is not ours to delete.
+_INSTALL_BACKUP_STAMP_GLOB = "????????T??????Z"
+
+
+def _prune_install_backups(worc_home: Path, prefix: str) -> None:
+    """Keep only the newest :data:`_INSTALL_BACKUP_KEEP` ``<prefix>.bak-<UTC>`` snapshots.
+
+    The UTC stamp is fixed-width, so the name sorts chronologically without a single ``stat`` — and
+    ordering by name means the prune matches the order the operator sees the directory listed in.
+    Files and whole-directory snapshots are both handled; a failure to remove one is ignored, since
+    a locked stale backup must never turn an ``install --reconfigure`` into an error.
+    """
+    pattern = f"{prefix}.bak-{_INSTALL_BACKUP_STAMP_GLOB}"
+    for stale in sorted(worc_home.glob(pattern), reverse=True)[_INSTALL_BACKUP_KEEP:]:
+        if stale.is_dir():
+            shutil.rmtree(stale, ignore_errors=True)
+        else:
+            stale.unlink(missing_ok=True)
 
 
 def _copy_packaged_flows(
@@ -781,7 +841,7 @@ def _backup_flows_dir(worc_home: Path) -> Path | None:
     """Snapshot an existing ``.worc/flows/`` to a timestamped sibling before ``--reconfigure``
     refreshes it, so operator edits (and any custom flows) stay recoverable. Returns the backup
     path, or ``None`` when there is nothing to back up. The backup lives under the gitignored
-    ``.worc/`` home, so it never shows up in ``git status``.
+    ``.worc/`` home, so it never shows up in ``git status``, and only the newest few are kept.
     """
     flows = worc_home / "flows"
     if not flows.is_dir() or not any(flows.iterdir()):
@@ -789,6 +849,7 @@ def _backup_flows_dir(worc_home: Path) -> Path | None:
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     backup = flows.with_name(f"flows.bak-{stamp}")
     shutil.copytree(flows, backup)
+    _prune_install_backups(worc_home, "flows")
     return backup
 
 
@@ -837,8 +898,8 @@ def _copy_packaged_tools(
 def _backup_tools_dir(worc_home: Path) -> Path | None:
     """Snapshot an existing ``.worc/tools/`` to a timestamped sibling before ``--reconfigure``
     refreshes it (mirror of _backup_flows_dir), so any operator-added tools stay recoverable. The
-    backup lives under the gitignored ``.worc/`` home. Returns the backup path, or ``None`` when
-    there is nothing to back up.
+    backup lives under the gitignored ``.worc/`` home and only the newest few are kept. Returns the
+    backup path, or ``None`` when there is nothing to back up.
     """
     tools = worc_home / "tools"
     if not tools.is_dir() or not any(tools.iterdir()):
@@ -846,6 +907,7 @@ def _backup_tools_dir(worc_home: Path) -> Path | None:
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     backup = tools.with_name(f"tools.bak-{stamp}")
     shutil.copytree(tools, backup)
+    _prune_install_backups(worc_home, "tools")
     return backup
 
 
@@ -876,10 +938,17 @@ def _install_write_config_example(worc_home: Path, *, overwrite: bool) -> bool:
 
 def _load_config(path: str) -> OrchestratorConfig:
     """Load and semantically validate the config (fail-closed; non-fatal findings are logged)."""
-    config = load_config(path).config
-    for warning in validate_config(config):
+    loaded = load_config(path)
+    # Two channels, one voice: the loader's warnings say what the file resolved TO (a key whose
+    # value another key overrode), the validator's say what it MEANS. Two loops, not one
+    # concatenation:
+    # `validate_config` raises on a fatal issue, and a config with both problems must still report
+    # the resolution rather than dying before it is printed.
+    for warning in loaded.warnings:
         _LOG.warning("config warning: %s", warning)
-    return config
+    for warning in validate_config(loaded.config):
+        _LOG.warning("config warning: %s", warning)
+    return loaded.config
 
 
 def resolve_config_path(args: argparse.Namespace) -> str | None:
@@ -972,8 +1041,20 @@ def cmd_upgrade_config(args: argparse.Namespace) -> int:
     path = Path(path_str).resolve()
     text = path.read_text(encoding="utf-8")
     # Fail-closed: a structural problem or a newer-than-supported schema_version raises ConfigError
-    # (handled in main with a clean message + exit 2) — never upgrade a config we cannot read.
-    load_config(path)
+    # (handled in main with a clean message + exit 2) — never upgrade a config we cannot read. The
+    # read-back runs against a throwaway copy with the removed keys already stripped: a key this
+    # command exists to drop is rejected by the current loader (v33's flat `supervisor.model`, say),
+    # and refusing on it would leave the operator no automated path off the old schema. Every other
+    # problem still refuses here, and the regenerated file is validated again below before we write.
+    probe = config_upgrade.parse_mapping(text)
+    config_upgrade.strip_removed_keys(probe)
+    probed = loads_config(config_upgrade.render(probe), source=str(path))
+    # This is the command that REWRITES the config, so an operator who never reads `run`'s log
+    # has to see it here. Printed like every other line this command emits (a log record
+    # would be filtered by `logging.level`), and taken from the probe rather than the merged copy
+    # because the "already up to date" path below returns before the merge is rendered.
+    for warning in probed.warnings:
+        print(f"upgrade-config: warning: {warning}")
 
     operator = config_upgrade.parse_mapping(text)
     template = config_upgrade.packaged_template_mapping()
@@ -1090,7 +1171,7 @@ def load_config_for(args: argparse.Namespace) -> OrchestratorConfig | None:
 
 
 def layout_for(config: OrchestratorConfig) -> RuntimeLayout:
-    """The one provider-neutral :class:`RuntimeLayout` for the configured repo (WRI-004).
+    """The one provider-neutral :class:`RuntimeLayout` for the configured repo.
 
     Built here at the CLI composition boundary and injected into consumers so each declares which
     surface it owns. ``control_home`` and ``private_home`` both resolve to ``<repo>/.worc`` today.
@@ -1105,7 +1186,7 @@ def worc_home_for(config: OrchestratorConfig) -> Path:
     ``workspace/``, ``checks/``, the resolved check profile, validation reports, the memory store —
     lives here. It is the private-surface accessor; control-plane consumers
     (config/flows/tools/guide) use ``layout_for(config).control_home`` instead. The two coincide
-    until WRI-005 relocates the private home.
+    until the private home is relocated.
     """
     return layout_for(config).private_home
 
@@ -1167,10 +1248,15 @@ def _display_status(row: TaskRow, *, daemon_alive: bool) -> str:
     A ``running`` row with no live daemon is parked at its checkpoint, awaiting resume — not
     executing — so it reads as ``parked (no daemon)``. This dominates the B-lite ``(paused)``
     marker, which only makes sense while the daemon is alive and waiting out a provider outage.
+
+    A pause carrying a provider-reported wake instant names it, because otherwise a daemon correctly
+    waiting out a limit is indistinguishable from a hung one.
     """
     if row.status is Status.RUNNING and not daemon_alive:
         return "parked (no daemon)"
     if row.status is Status.RUNNING and row.blocked_since:
+        if row.blocked_until:
+            return f"{row.status.value} (paused until {row.blocked_until})"
         return f"{row.status.value} (paused)"
     return row.status.value
 
@@ -1209,6 +1295,11 @@ def _configure_runtime_logging(args: argparse.Namespace) -> None:
         level=level,
         fmt=getattr(args, "log_format", "logfmt"),
         file_path=getattr(args, "log_file", None),
+        # A detached daemon's raw stderr is captured into a startup log that nothing rotates or
+        # caps, so keeping the terminal handler once the rotating --log-file exists would grow that
+        # file forever as a byte-for-byte duplicate. Everything written before this point (argparse
+        # errors, import failures, a preflight abort) still lands there, which is what it is for.
+        console=os.environ.get(agent_process.STARTUP_CAPTURE_ENV) != "1",
     )
 
 
@@ -1276,7 +1367,7 @@ class _PendingScan(NamedTuple):
     depends_on: tuple[str, ...]
     priority_rank: int
     queue: str
-    # Front-matter ``title`` (or ``None``) — shown in the next-task confirmation prompt (idea 27),
+    # Front-matter ``title`` (or ``None``) — shown in the next-task confirmation prompt,
     # alongside the id. Allowlisted for the prompt; never carries diff/prompt content.
     title: str | None = None
 
@@ -1450,7 +1541,7 @@ def _confirm_next_task(
     task_id: str | None,
     title: str | None,
 ) -> bool:
-    """Ask the operator (Telegram) to approve claiming the next pending task (idea 27).
+    """Ask the operator (Telegram) to approve claiming the next pending task.
 
     Returns ``True`` only on an explicit approval; deny / timeout / no transport → ``False``
     (fail-closed STOP — the task stays pending, the operator decides later). Non-durable by design:
@@ -1567,7 +1658,7 @@ def watch_once(
         if config.orchestrator.auto_mode.confirm_next_task and not _confirm_next_task(
             orchestrator, config, task_id, scan.title
         ):
-            break  # operator denied / silent → leave pending, stop chaining this cycle (idea 27)
+            break  # operator denied / silent → leave pending, stop chaining this cycle
         result = orchestrator.run_task(str(task_file))
         results.append(result)
         if result.final_status is Status.MANUAL_ACTION_REQUIRED:
@@ -1580,11 +1671,11 @@ def watch_once(
 def _build_cleanup_hook(config: OrchestratorConfig) -> Callable[[], None] | None:
     """A rate-limited memory-cleanup callable for the ``watch_loop`` idle gap, or ``None``.
 
-    Returns ``None`` when memory is disabled (Q10) — then no cleanup is ever scheduled. Otherwise a
+    Returns ``None`` when memory is disabled — then no cleanup is ever scheduled. Otherwise a
     best-effort closure that runs one bounded :meth:`CleanupJob.run_once` at most every
-    ``cleanup_min_interval_s`` (Q1), building a fresh store view + ``DerivedIndex`` each pass so the
+    ``cleanup_min_interval_s``, building a fresh store view + ``DerivedIndex`` each pass so the
     repo-introspection never goes stale across a long-lived daemon. A failure is logged and
-    swallowed — cleanup must never crash the watcher or delay the next task pickup (AC-C2)."""
+    swallowed — cleanup must never crash the watcher or delay the next task pickup."""
     if not config.memory.enabled:
         return None
     min_interval = float(config.memory.cleanup_min_interval_s)
@@ -1669,7 +1760,7 @@ def watch_loop(
         iteration += 1
         # Idle-gap memory cleanup: the single-slot invariant guarantees no active task here, but
         # double-check (a RUNNING soft-pause still holds the slot) so cleanup never races a task or
-        # delays the next pickup (AC-C2). Rate-limiting + bounds live inside the hook.
+        # delays the next pickup. Rate-limiting + bounds live inside the hook.
         if cleanup_hook is not None and not has_active_task(config):
             cleanup_hook()
         if poll_interval <= 0:
@@ -1702,10 +1793,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     config = load_config_for(args)
     if config is None:
         return 2
-    preflight.require_git_control()  # WRI-009: git must honor `core.hooksPath` (>= 2.9)
+    preflight.require_git_control()  # git must honor `core.hooksPath` (>= 2.9)
     if config.git.create_pull_request:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
         preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
+    # A node may route to ANY allowed provider, so one that cannot start is refused up front
+    # rather than discovered at the first fallback with a stage's work already spent.
+    require_provider_auth(config)
     orchestrator = build_orchestrator(
         config,
         layout=layout_for(config),
@@ -1729,7 +1823,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"{result.task_id}: paused — provider unavailable, will resume")
         return _EXIT_BY_STATUS[Status.RUNNING]
     if result.validation_reason:
-        # F5a: a gate reject prints the machine reason AND the field+cause detail, so the operator
+        # A gate reject prints the machine reason AND the field+cause detail, so the operator
         # sees WHICH front-matter field and WHY without opening the JSON validation report.
         detail = f" ({result.validation_detail})" if result.validation_detail else ""
         print(f"{result.task_id}: rejected — {result.validation_reason}{detail}", file=sys.stderr)
@@ -1902,15 +1996,18 @@ def cmd_rerun(args: argparse.Namespace) -> int:
         _report_rerun_plan(plan)
         return 0
 
-    preflight.require_git_control()  # WRI-009: git must honor `core.hooksPath` (>= 2.9)
+    preflight.require_git_control()  # git must honor `core.hooksPath` (>= 2.9)
     if config.git.create_pull_request:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
         preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
+    # A node may route to ANY allowed provider, so one that cannot start is refused up front
+    # rather than discovered at the first fallback with a stage's work already spent.
+    require_provider_auth(config)
 
     for note in plan.notes:
         print(f"rerun: note: {note}")
     # --non-interactive (also forced by a non-TTY stdin) never calls input(): a nested blocking
-    # input() fights 'worc shell's own stdin reader (H1: the single-stdin-reader rule) — the same
+    # input() fights 'worc shell's own stdin reader (the single-stdin-reader rule) — the same
     # class of bug already fixed for 'stop'/'restart'. Refuse-with-instructions instead of hanging.
     non_interactive = getattr(args, "non_interactive", False) or not sys.stdin.isatty()
     # The prompt names what actually happens in each mode. --continue reuses the existing branch in
@@ -2261,13 +2358,26 @@ def cmd_tasks(args: argparse.Namespace) -> int:
 def _task_log_dirs(logs_root: Path) -> list[Path]:
     """Per-task artifact dirs under ``.worc/logs/`` (direct subdirectories), newest first.
 
-    ``completed.jsonl`` is a file, so it is naturally excluded. Sorted by mtime descending so
-    ``--keep N`` retains the most recently modified runs.
+    Sorted by mtime descending so ``--keep N`` retains the most recently modified runs.
     """
     if not logs_root.is_dir():
         return []
     dirs = [p for p in logs_root.iterdir() if p.is_dir()]
     return sorted(dirs, key=lambda p: p.stat().st_mtime, reverse=True)
+
+
+def _daemon_log_files(logs_root: Path, *, ledger_path: Path) -> list[Path]:
+    """Every non-directory entry at the root of ``.worc/logs/`` except the ledger.
+
+    These are the daemon's own runtime noise — the rotating operator log, its numbered backups, and
+    the startup capture of a console-spawned daemon — which sit beside the per-task dirs rather than
+    inside one. Selected by *shape* (anything that is not a task dir and not the ledger) rather than
+    by filename, so a rotated backup or a future daemon-written file is reclaimable the day it
+    appears instead of surviving a command whose name promises a clean logs root.
+    """
+    if not logs_root.is_dir():
+        return []
+    return sorted(p for p in logs_root.iterdir() if not p.is_dir() and p != ledger_path)
 
 
 def cmd_logs(args: argparse.Namespace) -> int:
@@ -2282,53 +2392,174 @@ def cmd_logs(args: argparse.Namespace) -> int:
 
 
 def _cmd_logs_clean(args: argparse.Namespace, config: OrchestratorConfig) -> int:
-    """Remove task artifact dirs under ``.worc/logs/`` to reclaim disk.
+    """Sweep the whole ``.worc/logs/`` root: per-task artifact dirs plus the daemon's own logs.
 
     ``--keep N`` retains the N newest task dirs (no prompt unless N=0); bare ``clean`` removes every
-    task dir; ``--all`` additionally removes the ledger. The ledger (``completed.jsonl``) is the
-    audit trail and is preserved unless ``--all``. Running this while a task is active is
-    unsupported.
+    task dir. Either way the daemon logs beside them go too — they are runtime noise, and leaving
+    them behind is what made "clean" fail to mean a clean logs root. The ledger
+    (``completed.jsonl``) is the audit trail: it survives unless ``--all``, and the output names the
+    flag that takes it rather than reporting a bare "kept".
+
+    Refuses outright while a task is active, and holds the daemon logs back while a watch daemon is
+    live — both refusals are reported distinctly, because an active task and a live daemon are
+    different things for the operator to clear.
     """
+    if has_active_task(config):
+        print("logs clean: a task is active — refusing; run when the orchestrator is idle")
+        return 1
     logs_root = worc_home_for(config) / "logs"
     ledger_path = Ledger(logs_root).path
     task_dirs = _task_log_dirs(logs_root)
-    if not task_dirs and not (args.all and ledger_path.exists()):
+    if args.keep is not None and args.keep < 0:
+        print("logs clean: --keep must be >= 0")
+        return 2
+    kept_dirs, doomed_dirs = (
+        (task_dirs[: args.keep], task_dirs[args.keep :])
+        if args.keep is not None
+        else ([], task_dirs)
+    )
+    # The daemon's rotating handler keeps daemon.log open, and its startup capture is the child's
+    # own stdout descriptor: on Windows both unlinks fail while POSIX unlinks them happily, and a
+    # cleanup command whose result depends on the host OS is not acceptable. So the daemon logs wait
+    # for the daemon to stop, on every platform.
+    daemon_alive = _daemon_alive(config)
+    doomed_files = [] if daemon_alive else _daemon_log_files(logs_root, ledger_path=ledger_path)
+    take_ledger = bool(args.all) and ledger_path.exists()
+
+    notes: list[str] = []
+    if daemon_alive:
+        notes.append(
+            "logs clean: kept the daemon logs — a watch daemon is running; stop it and re-run"
+        )
+    if not args.all and ledger_path.exists():
+        notes.append(
+            f"logs clean: kept the ledger ({ledger_path.name}) — 'logs clean --all' removes it too"
+        )
+
+    if not doomed_dirs and not doomed_files and not take_ledger:
         print("logs clean: nothing to remove")
+        for note in notes:
+            print(note)
         return 0
 
-    if args.keep is not None:
-        if args.keep < 0:
-            print("logs clean: --keep must be >= 0")
-            return 2
-        kept, doomed = task_dirs[: args.keep], task_dirs[args.keep :]
-        # N=0 is equivalent to delete-all → confirm like the bare form.
-        if (
-            args.keep == 0
-            and not args.yes
-            and not _confirm(
-                f"Remove all {len(doomed)} task log dir(s) under {logs_root.as_posix()}? [y/N] "
-            )
-        ):
-            print("logs clean: aborted")
-            return 0
-        for path in doomed:
-            shutil.rmtree(path, ignore_errors=True)
-        print(f"logs clean: removed {len(doomed)} task dir(s); kept {len(kept)}")
-        return 0
-
-    # Bare clean (optionally --all): a full sweep — always confirm unless --yes.
-    target = "all task logs and the ledger" if args.all else "all task logs"
-    if not args.yes and not _confirm(f"Remove {target} under {logs_root.as_posix()}? [y/N] "):
+    # A bounded --keep N>0 is a routine prune; anything that empties the root confirms first.
+    bounded_prune = args.keep is not None and args.keep > 0
+    confirmed = (
+        bounded_prune
+        or args.yes
+        or _confirm(
+            f"Remove {_clean_plan_phrase(doomed_dirs, doomed_files, ledger=take_ledger)} "
+            f"under {logs_root.as_posix()}? [y/N] "
+        )
+    )
+    if not confirmed:
         print("logs clean: aborted")
         return 0
-    for path in task_dirs:
+
+    for path in doomed_dirs:
         shutil.rmtree(path, ignore_errors=True)
-    removed_ledger = False
-    if args.all and ledger_path.exists():
-        ledger_path.unlink()
-        removed_ledger = True
-    suffix = " and the ledger" if removed_ledger else " (ledger kept)"
-    print(f"logs clean: removed {len(task_dirs)} task dir(s){suffix}")
+    for path in doomed_files:
+        path.unlink(missing_ok=True)
+    if take_ledger:
+        ledger_path.unlink(missing_ok=True)
+    removed = _clean_plan_phrase(doomed_dirs, doomed_files, ledger=take_ledger)
+    kept = f"; kept {len(kept_dirs)} task dir(s)" if args.keep is not None else ""
+    print(f"logs clean: removed {removed}{kept}")
+    for note in notes:
+        print(note)
+    return 0
+
+
+def _clean_plan_phrase(dirs: Sequence[Path], files: Sequence[Path], *, ledger: bool) -> str:
+    """Operator-facing description of a ``logs clean`` target set (shared by prompt and report).
+
+    The counts are always both named, even at zero: "0 daemon log file(s)" is how the operator sees
+    that the sweep did cover them, which is the whole point of the wider default.
+    """
+    parts = [f"{len(dirs)} task dir(s)", f"{len(files)} daemon log file(s)"]
+    if ledger:
+        parts.append("the ledger")
+    return ", ".join(parts[:-1]) + f" and {parts[-1]}"
+
+
+def cmd_runs(args: argparse.Namespace) -> int:
+    """Dispatch the ``runs`` subcommands (currently only ``clean``)."""
+    _configure_runtime_logging(args)
+    config = load_config_for(args)
+    if config is None:
+        return 2
+    if args.runs_action == "clean":
+        return _cmd_runs_clean(args, config)
+    raise SystemExit(f"Unknown runs action '{args.runs_action}'.")
+
+
+def _cmd_runs_clean(args: argparse.Namespace, config: OrchestratorConfig) -> int:
+    """Reclaim per-task frozen bundles and sealed exchanges under ``.worc/runs/``.
+
+    The manual half of run retention: with ``logging.clean_runs_on_success`` on, a successful task
+    already evicts its own subtree and this verb rarely finds anything; with it off every run keeps
+    its frozen inputs and seals for analysis, and this is how they are reclaimed. ``--keep N``
+    retains the N most recently touched tasks.
+
+    Quarantined exchange evidence needs ``--include-quarantine``: it exists only when an agent wrote
+    the read-only exchange, so it is never swept up by a routine cleanup. Refuses while a task is
+    active — the same guard, and the same reason, as ``logs clean``.
+    """
+    if has_active_task(config):
+        print("runs clean: a task is active — refusing; run when the orchestrator is idle")
+        return 1
+    if args.keep is not None and args.keep < 0:
+        print("runs clean: --keep must be >= 0")
+        return 2
+    private_home = worc_home_for(config)
+    include_quarantine = bool(args.include_quarantine)
+    task_ids = runs_retention.run_task_ids(private_home, include_quarantine=include_quarantine)
+    kept, doomed = (
+        (task_ids[: args.keep], task_ids[args.keep :]) if args.keep is not None else ((), task_ids)
+    )
+    runs_home = runs_root(private_home)
+    # Only worth mentioning when there is evidence sitting there to keep.
+    quarantine_note = (
+        not include_quarantine and (runs_home / runs_retention.QUARANTINE_ROOT).is_dir()
+    )
+
+    def report_kept_quarantine() -> None:
+        if quarantine_note:
+            print(
+                "runs clean: quarantined exchange evidence is kept — "
+                "'runs clean --include-quarantine' removes it too"
+            )
+
+    if not doomed:
+        print("runs clean: nothing to remove")
+        report_kept_quarantine()
+        return 0
+
+    # A bounded --keep N>0 is a routine prune of caches and skips the prompt. Quarantined evidence
+    # is not a cache — it exists only because an agent wrote a surface it was told not to — so
+    # touching it always confirms, whatever the scope, unless the operator says --yes.
+    bounded_prune = args.keep is not None and args.keep > 0 and not include_quarantine
+    target = f"the run artifacts of {len(doomed)} task(s)" + (
+        " including quarantined evidence" if include_quarantine else ""
+    )
+    if (
+        not bounded_prune
+        and not args.yes
+        and not _confirm(f"Remove {target} under {runs_home.as_posix()}? [y/N] ")
+    ):
+        print("runs clean: aborted")
+        return 0
+    removed_dirs = sum(
+        len(
+            runs_retention.remove_task_runs(
+                private_home, task_id, include_quarantine=include_quarantine
+            )
+        )
+        for task_id in doomed
+    )
+    kept_note = f"; kept {len(kept)} task(s)" if args.keep is not None else ""
+    print(f"runs clean: removed {removed_dirs} dir(s) across {len(doomed)} task(s){kept_note}")
+    report_kept_quarantine()
     return 0
 
 
@@ -2336,8 +2567,8 @@ def cmd_memory(args: argparse.Namespace) -> int:
     """Dispatch the ``memory`` subcommands: show / validate (read-only) | compact / restore.
 
     Disabled memory (``memory.enabled: false`` or the block absent) is a clean no-op for every verb
-    (Q10). The mutating verbs (compact / restore) refuse while a task is active and offer
-    ``--dry-run`` to print their plan first (AC-C1)."""
+    The mutating verbs (compact / restore) refuse while a task is active and offer
+    ``--dry-run`` to print their plan first."""
     _configure_runtime_logging(args)
     config = load_config_for(args)
     if config is None:
@@ -2420,7 +2651,7 @@ def _cmd_memory_validate(config: OrchestratorConfig, layout: MemoryLayout) -> in
 
 
 def _cmd_memory_compact(config: OrchestratorConfig, layout: MemoryLayout, *, dry_run: bool) -> int:
-    """Run a fuller (uncapped) cleanup pass now — refused while a task is active (FR6/AC-C2)."""
+    """Run a fuller (uncapped) cleanup pass now — refused while a task is active."""
     if has_active_task(config):
         print("memory compact: a task is active — refusing; run when the orchestrator is idle")
         return 1
@@ -2449,7 +2680,7 @@ def _cmd_memory_compact(config: OrchestratorConfig, layout: MemoryLayout, *, dry
 def _cmd_memory_restore(
     config: OrchestratorConfig, layout: MemoryLayout, *, snapshot: str | None, dry_run: bool
 ) -> int:
-    """Roll the store back to an audit snapshot — refused while a task is active (AC-SF4)."""
+    """Roll the store back to an audit snapshot — refused while a task is active."""
     if has_active_task(config):
         print("memory restore: a task is active — refusing; run when the orchestrator is idle")
         return 1
@@ -2557,6 +2788,80 @@ def _snapshot_labels(layout: MemoryLayout) -> list[str]:
     return sorted(p.name for p in snaps.iterdir() if p.is_dir())
 
 
+def _auth_report_field(auth: AuthProbe | None) -> str:
+    """The ``auth=…`` fragment of a provider's preflight health line.
+
+    Empty when nothing was probed, so a provider whose adapter implements no credential verb prints
+    no auth claim at all rather than an invented one.
+    """
+    if auth is None:
+        return ""
+    method = f" ({auth.method})" if auth.method else ""
+    return f", auth={auth.state.value}{method}"
+
+
+def _logged_out_refusal(pid: ProviderId, auth: AuthProbe) -> str:
+    """The operator-facing refusal for an allowed provider whose CLI reports no credentials.
+
+    Shared by the preflight report and the startup gate so both name the same levers. It names
+    ``agents.allowed`` because that is the second lever: the verdict does not care whether the
+    provider is anyone's primary, so a host that only ever uses one CLI has to say so in the config
+    rather than leaving a provider listed that no node can actually reach. And it names the
+    environment allowlist because that list *replaces* its default — a host whose CLI resolves
+    credentials through a variable the allowlist no longer passes reports logged out while being
+    logged in, and that failure looks identical to a real one.
+    """
+    return (
+        f"{auth.detail}; {pid.value} is in agents.allowed, so a node may route to it — log in or "
+        f"remove it from agents.allowed (if this host IS logged in, check that "
+        f"security.allowed_environment still passes the variables the CLI needs to reach its "
+        f"credential store)"
+    )
+
+
+def _auth_verdict(pid: ProviderId, auth: AuthProbe | None) -> tuple[bool, str | None]:
+    """The blocking verdict and any extra report line for one provider's credential probe.
+
+    A logged-out provider is fatal **whatever its role in any route** — a deliberate inversion of
+    the fallback-aware rule governing an advisory degradation, because "a fallback will cover" is
+    precisely the assumption a dead fallback breaks, and its silence is only discovered at the
+    moment it is needed. A probe that could not answer warns instead, on the same principle that
+    already governs the logged-out ``gh`` advisory: a flaky or drifted probe must never stop a run.
+    """
+    if auth is None or auth.state is AuthState.LOGGED_IN:
+        return True, None
+    if auth.state is AuthState.LOGGED_OUT:
+        return False, f"{pid.value}: FAIL — {_logged_out_refusal(pid, auth)}"
+    return True, f"{pid.value}: WARN — {auth.detail} (a probe that cannot answer must not block)"
+
+
+def require_provider_auth(config: OrchestratorConfig) -> None:
+    """Refuse to start when an allowed provider's CLI reports no stored credentials.
+
+    The unattended counterpart to the preflight auth line: a daemon has no operator to read a
+    warning, and a provider that cannot start is otherwise discovered only once a node routes to
+    it — by which point a stage's work is already spent. Deliberately narrower than
+    :func:`run_preflight`, which also gates Telegram, ``gh``, the isolation policy and the live
+    capability smoke: none of those may decide whether a task starts.
+
+    Only an explicit logged-out answer blocks. A provider with no probe, an unreadable answer, or
+    no configured adapter never does — refusing on a probe that could not answer would trade a rare
+    wasted run for a daemon that will not start at all. Auth is the whole scope: a missing
+    executable is a strictly worse condition, deliberately still left to surface at first use.
+
+    Every allowed provider is probed through ``preflight()``, the only channel to a credential
+    answer, so this costs a handful of short, timeout-bounded child-process launches per invocation.
+
+    :raises ProviderNotLoggedInError: an allowed provider reported no credentials.
+    """
+    providers = build_providers(config, layout=layout_for(config))
+    for pid in config.agents.allowed:
+        provider = providers.get(pid)
+        auth = provider.preflight().auth if provider is not None else None
+        if auth is not None and auth.state is AuthState.LOGGED_OUT:
+            raise preflight.ProviderNotLoggedInError(_logged_out_refusal(pid, auth))
+
+
 def run_preflight(
     config: OrchestratorConfig, *, env_file: Path | None = None, capability_smoke: bool = False
 ) -> tuple[bool, list[str]]:
@@ -2570,7 +2875,7 @@ def run_preflight(
     as a health line here — the only place the ``.env`` notice appears.
 
     ``capability_smoke`` (set only by ``worc preflight``, never the installer's auto-run) opts into
-    each healthy provider's live no-model isolation capability probe (H7): Codex runs a real
+    each healthy provider's live no-model isolation capability probe: Codex runs a real
     ``codex sandbox`` smoke of the generated profile so an old CLI / missing sandbox helper /
     mis-generated policy surfaces here rather than mid-run. A proven policy leak fails preflight
     unconditionally; an undemonstrable sandbox degrades like a capability gap (fatal only with no
@@ -2590,8 +2895,15 @@ def run_preflight(
         ok = ok and healthy
         lines.append(
             f"{pid.value}: {'OK' if healthy else 'FAIL'} — {health.message} "
-            f"(version={health.version or 'unknown'}, authenticated={health.authenticated})"
+            f"(version={health.version or 'unknown'}{_auth_report_field(health.auth)})"
         )
+        # A logged-out provider is fatal in ANY role, unlike the fallback-aware degradations below.
+        # Kept off ``healthy`` deliberately: that flag also gates the opt-in capability smoke, and
+        # an OK version line followed by its own FAIL reason is the shape already set below.
+        auth_ok, auth_line = _auth_verdict(pid, health.auth)
+        ok = ok and auth_ok
+        if auth_line is not None:
+            lines.append(auth_line)
         # Advisory degradations are fatal only when this provider has no fallback (it is the sole
         # allowed provider), else a warning — a fallback provider will cover the degraded nodes.
         has_fallback = any(other != pid for other in config.agents.allowed)
@@ -2602,7 +2914,7 @@ def run_preflight(
                 ok = False
                 lines.append(f"{pid.value}: FAIL — {reason} (no fallback provider)")
 
-        # H7: live no-model isolation capability smoke (Codex ``codex sandbox``), opt-in via
+        # Live no-model isolation capability smoke (Codex ``codex sandbox``), opt-in via
         # ``worc preflight`` and only for a healthy provider under strict isolation. A proven leak
         # is unconditionally fatal (non-fallback security result); an undemonstrable sandbox
         # degrades like a capability gap (fatal only with no fallback provider).
@@ -2630,7 +2942,7 @@ def run_preflight(
         enforced = "enforced" if config.security.strict_isolation else "strict_isolation=false"
         lines.append(f"isolation: OK ({enforced})")
 
-    # VF-6: loudly surface the operator's read-isolation escape hatch — never a silent weakening.
+    # Loudly surface the operator's read-isolation escape hatch — never a silent weakening.
     if config.security.read_isolation_off:
         why = (
             "security.disable_read_isolation=true"
@@ -2642,6 +2954,15 @@ def run_preflight(
             "discovery (Claude CLAUDE.md + project settings/hooks/MCP/skills; Codex user + .codex "
             "config/hooks/rules) and the private read-deny projection is lifted; the write-guard, "
             "commit/staging gates, PR control, and denied_read_paths blacklist stay in force"
+        )
+
+    # Same principle for the git-evidence grant: an operator reading preflight should see which
+    # optional capabilities are live, not have to infer them from the config file.
+    if config.security.allow_git_evidence:
+        lines.append(
+            "git-evidence: ON (security.allow_git_evidence=true) — a flow node declaring "
+            "git_evidence may run the read-only git verbs to inspect delivery history; the "
+            "repository stays unwritable (sandbox) and commit/push/PR stay the orchestrator's"
         )
 
     lines.extend(_summarize_command_sets(config))
@@ -2673,7 +2994,7 @@ def cmd_preflight(args: argparse.Namespace) -> int:
     if config is None:
         return 2
     env_file, _ = resolve_env_file_path(args)
-    # ``worc preflight`` opts into the live no-model capability smoke (H7); the installer's
+    # ``worc preflight`` opts into the live no-model capability smoke; the installer's
     # auto-preflight (``_install_run_preflight``) keeps the default (offline) to stay fast.
     ok, lines = run_preflight(config, env_file=env_file, capability_smoke=True)
     for line in lines:
@@ -2796,10 +3117,13 @@ def cmd_watch(args: argparse.Namespace) -> int:
     config = load_config_for(args)
     if config is None:
         return 2
-    preflight.require_git_control()  # WRI-009: git must honor `core.hooksPath` (>= 2.9)
+    preflight.require_git_control()  # git must honor `core.hooksPath` (>= 2.9)
     if config.git.create_pull_request:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
         preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
+    # A node may route to ANY allowed provider, so one that cannot start is refused up front
+    # rather than discovered at the first fallback with a stage's work already spent.
+    require_provider_auth(config)
     poll = (
         args.poll_seconds
         if args.poll_seconds is not None
@@ -2809,7 +3133,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     pid_path = process_control.pid_file_path(worc_home_for(config))
     stop_path = process_control.stop_file_path(worc_home_for(config))
     children_path = process_control.children_file_path(worc_home_for(config))
-    cleanup_hook = _build_cleanup_hook(config)  # None when memory is disabled (Q10)
+    cleanup_hook = _build_cleanup_hook(config)  # None when memory is disabled
 
     # Single pass: no PID file, no signal handler, no stop wiring — and NO agent-handle recorder, so
     # it never clobbers a concurrent daemon's children file. A hung single-pass agent is still
@@ -2918,16 +3242,19 @@ class _StopDecision(NamedTuple):
 def _resolve_stop_level(
     config: OrchestratorConfig, *, force: bool, force_full: bool, interactive: bool
 ) -> _StopDecision:
-    """The stop ladder, keyed on whether a task is active (a read-only ``find_active_tasks`` probe).
+    """The stop ladder: an explicit ``--force-full`` first, then whether a task is active.
 
-    Idle → ordinary (soft) stop, no prompt, any form. Busy + no flag → refuse (interactive: confirm
-    the literal ``YES`` → soft; non-interactive: exit non-zero, require a flag). Busy + ``--force``
-    → soft; busy + ``--force-full`` → hard (full).
+    ``--force-full`` → hard (full), idle or busy: the flag is the operator naming the hardest rung,
+    and it outranks the activity probe because a daemon that needs it is usually **idle** — wedged,
+    suspended, or stuck in a syscall — so keying the rung on activity removes it exactly where it is
+    needed. Otherwise, keyed on a read-only ``find_active_tasks`` probe: idle → ordinary (soft)
+    stop, no prompt; busy + no flag → refuse (interactive: confirm the literal ``YES`` → soft;
+    non-interactive: exit non-zero, require a flag); busy + ``--force`` → soft.
     """
+    if force_full:
+        return _StopDecision(proceed=True, level="full")  # explicit hardest rung; never downgraded
     if not has_active_task(config):
         return _StopDecision(proceed=True, level="soft")  # nothing in flight: any form just stops
-    if force_full:
-        return _StopDecision(proceed=True, level="full")
     if force:
         return _StopDecision(proceed=True, level="soft")
     if interactive:
@@ -2957,7 +3284,7 @@ def _gated_stop(
         force_full=getattr(args, "force_full", False),
         # --non-interactive forces the refuse-with-instructions path (no _confirm_yes/input()). The
         # console always passes it so a busy 'down'/'restart' never blocks on input() inside the
-        # prompt_toolkit REPL (H1: the single-stdin-reader rule).
+        # prompt_toolkit REPL (the single-stdin-reader rule).
         interactive=sys.stdin.isatty() and not getattr(args, "non_interactive", False),
     )
     if not decision.proceed:
@@ -2989,11 +3316,20 @@ def _timed_out_stop_message(pid: int | None, timeout: float, *, is_windows: bool
     hard-kill seam is available. The PID and stop-file remain intact, so the daemon still exits at
     its next node boundary, a second watcher cannot start, and ``--force-full`` remains the only
     immediate interrupt.
+
+    Where the state is free to read (Linux ``/proc``), a watcher still stopped after the soft path's
+    own SIGCONT is named as such rather than left to read as "busy" — the operator's own
+    ``kill -CONT`` is then the cheapest resolution, and it exits cleanly instead of being killed.
     """
     base = (
         f"stop: watcher {pid} did not confirm shutdown in {timeout:g}s; "
         "graceful stop is still pending (kept its PID file)"
     )
+    if pid is not None and process_control.read_process_state(pid) == "T":
+        return (
+            f"{base}; it is suspended (state T), not busy — resume it with `kill -CONT {pid}` "
+            "and the pending stop completes, or use --force-full to kill it"
+        )
     if is_windows:
         return f"{base}; retry with --force-full to kill its process tree"
     return f"{base}; retry with --force-full to interrupt now and reap the agent subtree"
@@ -3288,6 +3624,8 @@ class _ActiveView(NamedTuple):
     fix_iterations: int
     subtask: str | None  # "2/5" for a decomposed task, else None
     parked_since: str | None  # tasks.blocked_since (ISO) when parked, else None
+    # tasks.blocked_until (ISO) when a provider named its own reset instant, else None.
+    parked_until: str | None
     gate_pending: bool  # a durable HITL gate is waiting on the operator
 
 
@@ -3357,6 +3695,7 @@ def build_top_snapshot(
         except KeyError:
             current_node = None  # row vanished between the two reads (terminal race)
         parked = row.blocked_since if (row.status is Status.RUNNING and row.blocked_since) else None
+        parked_until = row.blocked_until if parked else None
         subtask = (
             f"{row.active_subtask}/{row.subtask_count}"
             if row.active_subtask is not None and row.subtask_count is not None
@@ -3373,6 +3712,7 @@ def build_top_snapshot(
                 fix_iterations=row.fix_iterations,
                 subtask=subtask,
                 parked_since=parked,
+                parked_until=parked_until,
                 gate_pending=_has_pending_gate(worc_home, row.task_id),
             )
         )
@@ -3436,7 +3776,10 @@ def render_top(snapshot: TopSnapshot) -> str:
                 meta.append(f"branch={view.branch}")
             lines.append("    " + "  ".join(meta))
             if view.parked_since:
-                lines.append(f"    paused — every provider unavailable since {view.parked_since}")
+                paused = f"    paused — every provider unavailable since {view.parked_since}"
+                if view.parked_until:
+                    paused += f"; next attempt at {view.parked_until}"
+                lines.append(paused)
             if view.gate_pending:
                 lines.append("    awaiting operator (gate pending)")
 
@@ -3647,7 +3990,7 @@ def _list_ids(store: StateStore | None, scope: str | None) -> int:
 
 
 def _print_section_ids(sections: list[tuple[str, list[dict[str, str | None]]]]) -> int:
-    """Print the bare ids of the focused sections (F4): the same disk+DB source as the table view,
+    """Print the bare ids of the focused sections: the same disk+DB source as the table view,
     so `--pending --format ids` lists queued tasks that have no DB row yet. An unparseable pending
     file has no id and is skipped (there is no usable id to print)."""
     ids = {tid for _, items in sections for e in items if (tid := e.get("task_id"))}
@@ -3671,7 +4014,7 @@ def cmd_list(args: argparse.Namespace) -> int:
     fmt = "ids" if args.scope else args.format
     db_path = Path(worc_home_for(config)) / "state.db"
     store = StateStore.open_readonly(db_path) if db_path.is_file() else None
-    # F4: when a section focus flag is combined with `--format ids`, derive the ids from the same
+    # When a section focus flag is combined with `--format ids`, derive the ids from the same
     # source as the table view (disk pending files + DB) instead of DB-only — a freshly-queued
     # pending task has no DB row yet, so the DB-only path printed nothing. `--scope` stays
     # DB-derived (it is completion-facing, about rerun/status eligibility, which is a DB property).
@@ -3850,10 +4193,15 @@ def _install_atomic_write(path: Path, text: str) -> None:
 
 
 def _install_backup_config(path: Path) -> Path:
-    """Copy an existing config to a timestamped ``.bak-<UTC>`` sibling and return that path."""
+    """Copy an existing config to a timestamped ``.bak-<UTC>`` sibling and return that path.
+
+    Only the newest few snapshots of this config are kept — the series is written by the
+    orchestrator, so bounding it is the orchestrator's job.
+    """
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     backup = path.with_name(f"{path.name}.bak-{stamp}")
     backup.write_bytes(path.read_bytes())
+    _prune_install_backups(path.parent, path.name)
     return backup
 
 
@@ -4065,13 +4413,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_tasks(args)
         if args.command == "logs":
             return cmd_logs(args)
+        if args.command == "runs":
+            return cmd_runs(args)
         if args.command == "memory":
             return cmd_memory(args)
-    except (ConfigError, IncompatibleStateError, preflight.GhNotAvailableError) as exc:
+    except (
+        ConfigError,
+        IncompatibleStateError,
+        preflight.GhNotAvailableError,
+        preflight.ProviderNotLoggedInError,
+    ) as exc:
         print(f"error: {exc}")
         return 2
     except ManualActionRequired as exc:
-        # A foreground command (e.g. `rerun`'s reset-to-base filter refuse-gate, M5) hit a condition
+        # A foreground command (e.g. `rerun`'s reset-to-base filter refuse-gate) hit a condition
         # that needs an operator to act. Surface it as a clean message + exit 2, not a traceback. In
         # the daemon/run paths catch ManualActionRequired internally and map it to a status,
         # so it never reaches here.

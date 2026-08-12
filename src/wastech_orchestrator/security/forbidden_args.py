@@ -1,4 +1,4 @@
-"""Forbidden CLI flag detector (.agents/rules/security.md).
+"""Forbidden CLI flag detector.
 
 The single source of truth for "an option that bypasses the sandbox/approvals". It is called from
 two places so the security invariant is enforced in depth:
@@ -82,7 +82,7 @@ def find_full_access_args(args: Sequence[str]) -> list[str]:
     Unlike :func:`find_forbidden_args` these are *not* absolutely forbidden: an operator may opt in
     under ``security.strict_isolation: false`` and owns the risk. The ``strict_isolation`` gate
     (provider preflight and the flow validator) uses this to reject them while the default
-    ``strict_isolation: true`` holds — preserving the fail-closed posture (security rule #3).
+    ``strict_isolation: true`` holds — preserving the fail-closed posture.
     """
     reasons: list[str] = []
     for index, token in enumerate(args):

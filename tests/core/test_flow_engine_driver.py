@@ -1,4 +1,4 @@
-"""End-to-end engine driver: real engine + node runners + state-store recorder (P1.4 step A).
+"""End-to-end engine driver: real engine + node runners + state-store recorder (step A).
 
 Exercises a tiny but valid packaged-shape flow (refine -> impl -> testing -> publish) through
 ``drive_flow`` with fake provider/check/git collaborators and the real
@@ -64,7 +64,7 @@ class _FakeRouter:
         self, request: Any, route: ResolvedRoute, *, snapshot: Any = None
     ) -> StageOutcome:
         self.requests[request.node_id] = request
-        # F19: the review evaluator requires a well-formed findings array; a well-formed empty one
+        # The review evaluator requires a well-formed findings array; a well-formed empty one
         # is a clean, accepting verdict.
         structured = {"findings": []} if request.node_id == "review" else None
         result = AgentRunResult(

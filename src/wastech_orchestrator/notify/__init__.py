@@ -9,6 +9,8 @@ so the pipeline behaves exactly as it did before.
 from __future__ import annotations
 
 from wastech_orchestrator.notify.interface import (
+    TRACE_READ_ONLY_GIT_DRIFT,
+    TRACE_READ_ONLY_WRITE,
     TRACE_REWORK_EXHAUSTED,
     AskFailure,
     AskHandle,
@@ -23,6 +25,8 @@ from wastech_orchestrator.notify.interface import (
 from wastech_orchestrator.notify.telegram import TelegramNotifier, build_notifier
 
 __all__ = [
+    "TRACE_READ_ONLY_GIT_DRIFT",
+    "TRACE_READ_ONLY_WRITE",
     "TRACE_REWORK_EXHAUSTED",
     "AskFailure",
     "AskHandle",

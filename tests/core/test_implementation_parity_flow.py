@@ -1,4 +1,4 @@
-"""The implementation parity fixture loads, validates, and has the expected pipeline shape (P1.4).
+"""The implementation parity fixture loads, validates, and has the expected pipeline shape.
 
 The golden-harness dual-run consumes it in step B.
 """
@@ -31,7 +31,7 @@ def test_parity_flow_validates_with_expected_nodes() -> None:
         "summary",
         "publish",
     }
-    # Deliberately NO supervisor / testing_quality (those are P2 target features).
+    # Deliberately NO supervisor / testing_quality node in this fixture.
     assert "supervise_impl" not in snap.nodes_by_id
     assert "testing_quality" not in snap.nodes_by_id
 

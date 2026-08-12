@@ -12,7 +12,7 @@ This module owns *structural* parsing only. The cross-field semantic rules live 
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -22,6 +22,7 @@ import yaml
 from wastech_orchestrator.config.schema import (
     CONFIG_SCHEMA_VERSION,
     DEFAULT_TOOL_TIMEOUT_SECONDS,
+    OBSERVE_TRIGGERS,
     TRUST_LEVELS,
     AgentsConfig,
     AuditBranch,
@@ -36,6 +37,7 @@ from wastech_orchestrator.config.schema import (
     LoggingConfig,
     MemoryConfig,
     MergeStrategy,
+    ObserveMode,
     OrchestratorConfig,
     OrchestratorRuntimeConfig,
     PathsConfig,
@@ -45,6 +47,8 @@ from wastech_orchestrator.config.schema import (
     SecurityConfig,
     SkillsConfig,
     SupervisorConfig,
+    SupervisorObserveConfig,
+    SupervisorTurnConfig,
     TelegramConfig,
     ToolsConfig,
     ValidationConfig,
@@ -65,6 +69,16 @@ _DEFAULT_DENIED_COMMANDS: tuple[str, ...] = (
     "git push",
     "gh pr create",
     "gh pr merge",
+)
+
+# Emitted when a config asks for memory under a switched-off supervisor layer. The quench itself
+# is invisible in the resolved config, so this text has to close the gap the file leaves open:
+# name BOTH keys, say memory is off for this run, and say how to make the file honest.
+_MEMORY_WITHOUT_SUPERVISOR_WARNING = (
+    "`supervisor.enabled: false` turns memory off for this run (`memory.enabled: true` in the "
+    "config is ignored): the supervisor's finalize turn is the only path that adds anything memory "
+    "can later read back, so with the layer off memory would keep adding packets to every prompt "
+    "without ever learning. Set `memory.enabled: false` to make the config say what runs."
 )
 
 
@@ -533,6 +547,7 @@ def _build_security(raw: Any, issues: list[str]) -> SecurityConfig:
         {
             "strict_isolation",
             "disable_read_isolation",
+            "allow_git_evidence",
             "allowed_environment",
             "denied_read_paths",
             "denied_commands",
@@ -542,16 +557,19 @@ def _build_security(raw: Any, issues: list[str]) -> SecurityConfig:
         where,
         issues,
     )
-    trust_level = _str(m, "trust_level", "strict", where, issues)
+    trust_level = _str(m, "trust_level", "auto", where, issues)
     if trust_level not in TRUST_LEVELS:
         issues.append(
             f"{where}.trust_level: invalid value {trust_level!r}, "
             f"expected one of {sorted(TRUST_LEVELS)}"
         )
-        trust_level = "strict"
+        # Unreachable in effect — a recorded issue fails the load — but keeps the value inside
+        # TRUST_LEVELS for the construction below, and matches the default above.
+        trust_level = "auto"
     return SecurityConfig(
         strict_isolation=_bool(m, "strict_isolation", True, where, issues),
         disable_read_isolation=_bool(m, "disable_read_isolation", True, where, issues),
+        allow_git_evidence=_bool(m, "allow_git_evidence", False, where, issues),
         allowed_environment=_str_tuple(
             m, "allowed_environment", default_allowed_environment(), where, issues
         ),
@@ -578,20 +596,21 @@ def _build_validation(raw: Any, issues: list[str]) -> ValidationConfig:
             "max_task_lines",
             "max_line_bytes",
             "max_control_ratio",
-            "required_fields",
-            "reject_unknown_fields",
             "quarantine_folder",
         },
         where,
         issues,
+        # ``required_fields`` / ``reject_unknown_fields`` (removed v35) are tolerated, not accepted:
+        # both were read by nothing (the task gate owns the requirement and the unknown-key deny),
+        # and every config ``install`` wrote carries them, so rejecting them would brick those
+        # files. ``upgrade-config`` strips both.
+        tolerated={"required_fields", "reject_unknown_fields"},
     )
     return ValidationConfig(
         max_task_bytes=_int(m, "max_task_bytes", 262144, where, issues),
         max_task_lines=_int(m, "max_task_lines", 5000, where, issues),
         max_line_bytes=_int(m, "max_line_bytes", 8192, where, issues),
         max_control_ratio=_float(m, "max_control_ratio", 0.01, where, issues),
-        required_fields=_str_tuple(m, "required_fields", ("id", "title"), where, issues),
-        reject_unknown_fields=_bool(m, "reject_unknown_fields", True, where, issues),
         quarantine_folder=_str(m, "quarantine_folder", "./.worc/tasks/rejected", where, issues),
     )
 
@@ -699,19 +718,87 @@ def _build_skills(raw: Any, issues: list[str]) -> SkillsConfig:
     )
 
 
-def _build_supervisor(raw: Any, issues: list[str]) -> SupervisorConfig:
-    where = "supervisor"
-    if raw is None:
-        return SupervisorConfig()
-    m = _mapping(raw, where, issues)
-    _check_keys(m, {"role_file", "model", "reasoning", "provider"}, where, issues)
+def _reasoning(m: Mapping[str, Any], where: str, issues: list[str]) -> str | None:
+    """A ``reasoning`` value checked against the provider-agnostic union of levels.
+
+    The syntactic half of the check; ``config.validation`` re-checks it against the *resolved*
+    provider's own set. Shared by the three supervisor phase blocks.
+    """
     reasoning = _opt_str(m, "reasoning", where, issues)
     if reasoning is not None and reasoning not in _REASONING_LEVELS:
         issues.append(
             f"{where}.reasoning: invalid value {reasoning!r}, "
             f"expected one of {sorted(_REASONING_LEVELS)}"
         )
-        reasoning = None
+        return None
+    return reasoning
+
+
+def _build_supervisor_observe(raw: Any, issues: list[str]) -> SupervisorObserveConfig:
+    where = "supervisor.observe"
+    if raw is None:
+        return SupervisorObserveConfig()
+    m = _mapping(raw, where, issues)
+    _check_keys(m, {"mode", "triggers", "include_nodes", "model", "reasoning"}, where, issues)
+    default = SupervisorObserveConfig()
+    triggers = _str_tuple(m, "triggers", default.triggers, where, issues)
+    unknown = sorted(set(triggers) - OBSERVE_TRIGGERS)
+    if unknown:
+        issues.append(
+            f"{where}.triggers: unknown trigger(s) {unknown}, "
+            f"expected a subset of {sorted(OBSERVE_TRIGGERS)}"
+        )
+        triggers = default.triggers
+    return SupervisorObserveConfig(
+        mode=_enum(m.get("mode"), ObserveMode, f"{where}.mode", issues, default.mode),
+        triggers=triggers,
+        include_nodes=_str_tuple(m, "include_nodes", (), where, issues),
+        model=_opt_str(m, "model", where, issues),
+        reasoning=_reasoning(m, where, issues),
+    )
+
+
+def _build_supervisor_turn(raw: Any, where: str, issues: list[str]) -> SupervisorTurnConfig:
+    if raw is None:
+        return SupervisorTurnConfig()
+    m = _mapping(raw, where, issues)
+    _check_keys(m, {"model", "reasoning"}, where, issues)
+    return SupervisorTurnConfig(
+        model=_opt_str(m, "model", where, issues),
+        reasoning=_reasoning(m, where, issues),
+    )
+
+
+#: v33: the flat pair each phase block replaced, mapped to where its value now belongs. Rejected
+#: fail-closed by name (not as a generic "unknown key") because the operator has to *choose* a
+#: destination — the old single value cannot be copied into both without either re-inflating the
+#: cheap notes or guessing intent.
+_SUPERVISOR_MOVED_KEYS = {
+    "model": "supervisor.observe.model / supervisor.finalize.model",
+    "reasoning": "supervisor.observe.reasoning / supervisor.finalize.reasoning",
+}
+
+
+def _build_supervisor(raw: Any, issues: list[str]) -> SupervisorConfig:
+    where = "supervisor"
+    if raw is None:
+        return SupervisorConfig()
+    m = _mapping(raw, where, issues)
+    for key, destination in _SUPERVISOR_MOVED_KEYS.items():
+        if key in m:
+            issues.append(
+                f"{where}.{key}: moved — set {destination} instead (each supervisor phase now "
+                "carries its own model and reasoning). The value is not migrated; run "
+                "'wastech-orchestrator upgrade-config' to strip the old key."
+            )
+    _check_keys(
+        m,
+        {"enabled", "role_file", "provider", "observe", "finalize", "handoff"},
+        where,
+        issues,
+        # Named above with a destination; `_check_keys` would only add a vaguer duplicate.
+        tolerated=set(_SUPERVISOR_MOVED_KEYS),
+    )
     provider_raw = _opt_str(m, "provider", where, issues)
     provider: ProviderId | None = None
     if provider_raw is not None:
@@ -720,10 +807,12 @@ def _build_supervisor(raw: Any, issues: list[str]) -> SupervisorConfig:
         except ValueError:
             issues.append(f"{where}.provider: unknown provider {provider_raw!r}")
     return SupervisorConfig(
+        enabled=_bool(m, "enabled", True, where, issues),
         role_file=_str(m, "role_file", "roles/supervisor.md", where, issues),
-        model=_opt_str(m, "model", where, issues),
-        reasoning=reasoning,
         provider=provider,
+        observe=_build_supervisor_observe(m.get("observe"), issues),
+        finalize=_build_supervisor_turn(m.get("finalize"), "supervisor.finalize", issues),
+        handoff=_build_supervisor_turn(m.get("handoff"), "supervisor.handoff", issues),
     )
 
 
@@ -736,7 +825,7 @@ def _build_logging(raw: Any, issues: list[str]) -> LoggingConfig:
     if raw is None:
         return LoggingConfig()
     m = _mapping(raw, where, issues)
-    _check_keys(m, {"level", "artifacts"}, where, issues)
+    _check_keys(m, {"level", "artifacts", "clean_runs_on_success"}, where, issues)
     level = _str(m, "level", "info", where, issues)
     if level not in _LOG_LEVELS:
         issues.append(
@@ -750,13 +839,17 @@ def _build_logging(raw: Any, issues: list[str]) -> LoggingConfig:
             f"expected one of {sorted(_ARTIFACT_LEVELS)}"
         )
         artifacts = "standard"
-    return LoggingConfig(level=level, artifacts=artifacts)
+    return LoggingConfig(
+        level=level,
+        artifacts=artifacts,
+        clean_runs_on_success=_bool(m, "clean_runs_on_success", True, where, issues),
+    )
 
 
 def _build_memory(raw: Any, issues: list[str]) -> MemoryConfig:
     where = "memory"
     if raw is None:
-        return MemoryConfig()  # absent => disabled defaults (Q10): today's behavior exactly
+        return MemoryConfig()  # absent => disabled defaults
     m = _mapping(raw, where, issues)
     _check_keys(
         m,
@@ -798,7 +891,7 @@ def _build_memory(raw: Any, issues: list[str]) -> MemoryConfig:
 def _build_tools(raw: Any, issues: list[str]) -> ToolsConfig:
     where = "tools"
     if raw is None:
-        return ToolsConfig()  # absent => the built-in 3600s default (P5)
+        return ToolsConfig()  # absent => the built-in 3600s default
     m = _mapping(raw, where, issues)
     _check_keys(m, {"default_timeout_seconds"}, where, issues)
     return ToolsConfig(
@@ -853,6 +946,19 @@ def _parse(raw: Mapping[str, Any], issues: list[str], warnings: list[str]) -> Or
     # fail-open and ``upgrade-config`` strips the dead block.
     _check_keys(raw, _TOP_LEVEL_KEYS, "<root>", issues, tolerated={"prompts"})
     _check_schema_version(raw, issues)
+    # Hoisted out of the constructor call below because these two are not independent — the only
+    # pair of sections whose resolved values depend on each other.
+    supervisor = _build_supervisor(raw.get("supervisor"), issues)
+    memory = _build_memory(raw.get("memory"), issues)
+    if not supervisor.enabled and memory.enabled:
+        # One mode, not two orthogonal keys: with no layer, the only writer of content memory can
+        # ever read back is gone, while the read side would keep injecting a packet into every
+        # prompt. Settled here — the single place both sections exist — so that every memory
+        # consumer keeps reading exactly one flag and none of them grows a second condition.
+        # ``replace`` rather than a fresh ``MemoryConfig``: the operator's TTL / packet / cleanup
+        # tuning must survive being switched off.
+        memory = replace(memory, enabled=False)
+        warnings.append(_MEMORY_WITHOUT_SUPERVISOR_WARNING)
     return OrchestratorConfig(
         orchestrator=_build_orchestrator(raw.get("orchestrator"), issues),
         repo=_build_repo(raw.get("repo"), issues),
@@ -863,10 +969,10 @@ def _parse(raw: Mapping[str, Any], issues: list[str], warnings: list[str]) -> Or
         git=_build_git(raw.get("git"), issues),
         telegram=_build_telegram(raw.get("telegram"), issues),
         skills=_build_skills(raw.get("skills"), issues),
-        supervisor=_build_supervisor(raw.get("supervisor"), issues),
+        supervisor=supervisor,
         paths=_build_paths(raw.get("paths"), issues),
         logging=_build_logging(raw.get("logging"), issues),
-        memory=_build_memory(raw.get("memory"), issues),
+        memory=memory,
         tools=_build_tools(raw.get("tools"), issues),
         prompt_audit=_bool(raw, "prompt_audit", False, "<root>", issues),
     )

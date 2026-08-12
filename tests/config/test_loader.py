@@ -282,16 +282,17 @@ def test_unknown_checks_key_is_rejected() -> None:
     assert any("retries" in issue for issue in exc.value.issues)
 
 
-def test_trust_level_defaults_to_strict_and_protected_empty() -> None:
+def test_trust_level_defaults_to_auto_and_protected_empty() -> None:
     result = loads_config(_LEGACY)
-    assert result.config.security.trust_level == "strict"
+    assert result.config.security.trust_level == "auto"
     assert result.config.security.protected_paths == ()
 
 
 def test_trust_level_loads() -> None:
-    text = _LEGACY + "security:\n  trust_level: auto\n"
+    # `strict` is the non-default level, so this proves the key is read rather than defaulted.
+    text = _LEGACY + "security:\n  trust_level: strict\n"
     result = loads_config(text)
-    assert result.config.security.trust_level == "auto"
+    assert result.config.security.trust_level == "strict"
 
 
 def test_trust_level_invalid_value_is_rejected() -> None:
@@ -507,6 +508,26 @@ def test_legacy_prompts_block_is_tolerated() -> None:
     assert not hasattr(cfg, "prompts")
 
 
+# --- legacy validation knobs (removed in config v35) ---
+
+
+def test_legacy_validation_knobs_are_tolerated() -> None:
+    # config v35 removed `validation.required_fields` / `reject_unknown_fields`: both were parsed
+    # and written by `install`, yet read by nothing (the task gate hard-codes the required front
+    # matter and denies an unknown key unconditionally). Every config `install` wrote carries them,
+    # so they must load fail-open — ignored, never stored — and `upgrade-config` strips them.
+    text = _LEGACY + (
+        "validation:\n"
+        "  required_fields: ['id', 'title', 'owner']\n"
+        "  reject_unknown_fields: false\n"
+        "  max_task_lines: 4000\n"
+    )
+    cfg = loads_config(text).config
+    assert not hasattr(cfg.validation, "required_fields")
+    assert not hasattr(cfg.validation, "reject_unknown_fields")
+    assert cfg.validation.max_task_lines == 4000  # the live sibling key still applies
+
+
 # --- agents.retry (transient provider-failure recovery, config v20) ---
 
 
@@ -551,7 +572,7 @@ def test_unknown_retry_subkey_is_rejected() -> None:
     assert any("agents.retry" in i and "nonsense" in i for i in exc.value.issues)
 
 
-# --- repo.branch_mode (branch-mode ADR) ---
+# --- repo.branch_mode ---------------------
 
 _REPO_WITH_MODE = (
     'repo:\n  url: "git@example.com:o/r.git"\n  branch_mode: {mode}\n'
@@ -575,7 +596,7 @@ def test_repo_branch_mode_invalid_is_rejected() -> None:
     assert any("branch_mode" in issue for issue in exc.value.issues)
 
 
-# --- repo.checkout_base_on_cleanup (branch-mode ADR) ---
+# --- repo.checkout_base_on_cleanup ---------------------
 
 _REPO_WITH_CLEANUP = (
     'repo:\n  url: "git@example.com:o/r.git"\n  checkout_base_on_cleanup: {flag}\n'
@@ -599,3 +620,63 @@ def test_repo_checkout_base_on_cleanup_non_bool_is_rejected() -> None:
     with pytest.raises(ConfigError) as exc:
         loads_config(_REPO_WITH_CLEANUP.format(flag='"nope"'))
     assert any("checkout_base_on_cleanup" in issue for issue in exc.value.issues)
+
+
+# --- supervisor.enabled + the memory quench (P3) --------------------------------
+
+
+def test_supervisor_enabled_defaults_to_true() -> None:
+    # Absent block and present-but-empty block resolve identically: the layer is the default.
+    assert loads_config(_LEGACY).config.supervisor.enabled is True
+    assert loads_config(_claude("supervisor: {}\n")).config.supervisor.enabled is True
+
+
+def test_supervisor_enabled_is_read_when_present() -> None:
+    assert (
+        loads_config(_claude("supervisor:\n  enabled: false\n")).config.supervisor.enabled is False
+    )
+
+
+def test_supervisor_enabled_non_bool_is_rejected() -> None:
+    with pytest.raises(ConfigError) as exc:
+        loads_config(_claude('supervisor:\n  enabled: "no"\n'))
+    assert any("supervisor.enabled" in issue for issue in exc.value.issues)
+
+
+def test_memory_is_quenched_when_the_supervisor_layer_is_off() -> None:
+    # Not two orthogonal keys but one mode: with no layer there is no writer of anything memory can
+    # read back, while the read side would keep injecting a packet into every prompt. Resolved here
+    # so no memory consumer needs a second "is the layer on?" condition.
+    result = loads_config(_claude("supervisor:\n  enabled: false\nmemory:\n  enabled: true\n"))
+    assert result.config.memory.enabled is False
+    assert len(result.warnings) == 1
+    # The text has to close the file-versus-runtime gap it creates: both keys named, plus the fix.
+    warning = result.warnings[0]
+    assert "supervisor.enabled: false" in warning
+    assert "memory.enabled: true" in warning
+    assert "Set `memory.enabled: false` to make the config say what runs." in warning
+
+
+def test_the_quench_preserves_the_operators_other_memory_settings() -> None:
+    # `replace`, not a fresh MemoryConfig: switching memory off must not also discard the tuning.
+    result = loads_config(
+        _claude(
+            "supervisor:\n  enabled: false\n"
+            "memory:\n  enabled: true\n  short_term_ttl_days: 7\n  packet_max_lines: 42\n"
+        )
+    )
+    assert result.config.memory.enabled is False
+    assert result.config.memory.short_term_ttl_days == 7
+    assert result.config.memory.packet_max_lines == 42
+
+
+def test_the_quench_is_silent_unless_both_keys_disagree() -> None:
+    # A newly-live warnings channel that speaks on ordinary configs is one operators learn to
+    # ignore, so it fires ONLY on the actual conflict.
+    for body in (
+        "",  # neither key
+        "supervisor:\n  enabled: false\n",  # layer off, memory already off
+        "memory:\n  enabled: true\n",  # memory on, layer on
+        "supervisor:\n  enabled: true\nmemory:\n  enabled: true\n",  # both on
+    ):
+        assert loads_config(_claude(body)).warnings == (), body

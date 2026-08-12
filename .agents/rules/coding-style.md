@@ -16,6 +16,18 @@
 - Do not add comments that merely restate names, types, assignments, loops, or conditionals.
 - When behavior is non-obvious, surprising, or constrained by a real limitation, capture that reason next to the relevant code path.
 - Comments must be self-contained and independent. Never reference project documents, tickets, ADRs, PRs, backlog items, or other files in a comment (no "see docs/...", "per the ADR", "as described in ...") — those move, get renamed, or are deleted, leaving the comment dangling. State the actual `why` inline so the comment stands on its own without any external artifact.
+- **A bare document identifier is a reference too, and is forbidden the same way.** Task, finding, requirement, and section tags — `WRI-009`, `VF-18`, `F19`, `P2.1`, `AC-W1`, `DR-2`, `Q10`, `§P2.1`, `(rule #14)`, `(idea 29)` — carry no meaning to anyone without the document they index, and that document is usually gone: the backlog folder they came from gets merged and deleted, so the tag decays into noise that makes the code look explained when it is not. This applies everywhere the text outlives the document, not just in `#` comments: docstrings, log records, exception messages, and every operator-facing string under `src/wastech_orchestrator/packaged/` (flows, role prompts, `guide/`, `config.example.yaml`), where the reader has no access to our backlog at all. A tag does mark something real — that the line is shaped by a decision — so when removing it, keep the reason and drop only the identifier; never leave a stub that states only the mechanism. If the tag was never explained and the reason cannot be recovered from the code, delete the tag and leave the rest of the text as it is rather than inventing a rationale. External identifiers that are not our documents (`CVE-…`, `RFC …`, upstream issue numbers, CLI flag names) are not affected.
+
+  ```python
+  # Before — the tag is the only rationale, and its document no longer exists:
+  # F19: findings schema mandatory; fail-closed if not honored.
+  # After — the rationale is in the code, so the deleted document costs nothing:
+  # The findings schema is mandatory: a role prompt that asked for findings "in
+  # prose" was unenforceable, because extraction reads only structured_output and
+  # no provider filled it without an output_schema — the gate silently
+  # fail-OPENED and accepted on every real run.
+  ```
+
 - Historical narrative in comments is forbidden. Comments document the current design and intent only; do not leave "used to be", "changed from", or compatibility-tombstone commentary behind after a rewrite.
 - If a block is hard to justify with a short why-comment, simplify or restructure it until the intent and rationale are clear.
 
@@ -52,6 +64,7 @@ Every feature must work on **Windows, Linux, and macOS**. This is a release requ
 - **Paths via `pathlib.Path`** — never hardcode `/` or `\`, and never assume `os.sep`. When a path is **stored, compared, displayed, or asserted as a string** (audit logs, prompts, persisted state, test assertions), normalize it with `Path.as_posix()` so it is identical on every OS. `Path("a/b")` still opens correctly on Windows, so `as_posix()` is safe for round-tripping.
 - **Text files that are committed or byte-compared**: open with `newline=""` (or write bytes) so `\n` is preserved — default text mode rewrites `\n`→`\r\n` on Windows, which corrupts byte-equal comparisons and adds CRLF noise to git-tracked content.
 - **Signals and process control are POSIX-shaped — do not assume them on Windows.** `signal.SIGKILL` is absent (guard with `getattr(signal, "SIGKILL", …)`); `os.kill(pid, sig)` opens the target with `OpenProcess(PROCESS_ALL_ACCESS)` and **cannot probe or signal a process the caller holds no handle to**, so cross-process control (a `stop` command signalling a separate daemon) must **not** rely on `os.kill`/signals — prefer OS-neutral coordination (a sentinel file, the daemon's self-managed PID file). A missing PID on Windows raises a bare `OSError` (winerror 87), not `ProcessLookupError`.
+- **Win32 calls through `ctypes` must declare `restype`/`argtypes` — never rely on the defaults.** The default `restype` is `c_int`, which silently truncates a 64-bit `HANDLE` to 32 bits. Kernel handles survive that by luck (Win32 documents them as 32-bit-significant), but a pointer-width value such as a `FindFirstStreamW` find-handle does not: the truncated handle both defeats the `INVALID_HANDLE_VALUE` guard (a truncated `-1` never equals the 64-bit sentinel, so the error path becomes dead code) and faults with an access violation the moment it is handed back to the next call. Declare the prototypes once, next to the `WinDLL` load.
 - **Branch platform differences explicitly** (`os.name == "nt"` / `sys.platform`) and make the seam injectable so **both** branches are unit-tested on any host (see [testing.md](testing.md)).
 - **No POSIX-only filesystem assumptions**: no `/proc`, `/tmp`, `/dev/null`, `fork`, `fcntl`, executable-bit, or symlink dependencies in core paths; use the stdlib cross-platform equivalents (`tempfile`, `os.replace`, `pathlib`). Degrade gracefully where a capability is Linux-only (document the fallback).
 - The argv/no-`shell=True` rule above is itself a portability rule — keep it.

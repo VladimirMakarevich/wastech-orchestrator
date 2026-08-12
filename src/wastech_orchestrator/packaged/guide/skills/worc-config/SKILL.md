@@ -30,10 +30,11 @@ Before drafting or changing any field, consult `reference.md` in the packaged co
    - whether auto-merge is allowed here;
    - which checks are mandatory for safe delivery;
    - whether Telegram should stay disabled.
-3. Start from the existing `.worc/config.yaml` when present. If there is no installed config yet, draft one in the packaged block order (`schema_version`, `orchestrator`, `repo`, `paths`, `agents`, `security`, `validation`, `checks`, `git`, `telegram`, `skills`, `supervisor`, `logging`, `memory`, `tools`, `prompt_audit`) — only `schema_version`, `repo`, `agents`, and `security` are required; omit any optional block to take its defaults.
+3. Start from the existing `.worc/config.yaml` when present. If there is no installed config yet, draft one in the packaged block order (`schema_version`, `orchestrator`, `repo`, `paths`, `agents`, `security`, `validation`, `checks`, `git`, `telegram`, `skills`, `supervisor`, `logging`, `memory`, `tools`, `prompt_audit`). The only thing a config **must** carry is `agents.providers` with exactly one `primary: true` — every other block, `schema_version` and `repo` and `security` included, takes its defaults when omitted, and a file carrying that one block alone loads and validates clean. So write the blocks this repository actually needs rather than a full skeleton of defaults.
 4. Keep the safe defaults unless the operator overrides them deliberately.
-   - exactly one provider is `primary: true`;
+   - exactly one provider is `primary: true`, and it is listed in `agents.allowed` — both are hard validation rules, not preferences: zero or two primaries refuses the config outright;
    - `strict_isolation: true`;
+   - `allow_git_evidence: false` unless a flow here audits delivery history;
    - `auto_merge: false`;
    - no forbidden `extra_args`;
    - secrets stay in env vars, not YAML.

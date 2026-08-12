@@ -1,4 +1,4 @@
-"""Durable human round-trip for the flow runners (P1.4 step B).
+"""Durable human round-trip for the flow runners.
 
 :class:`HumanGate` is the shared primitive behind the embedded refinement/planning HITL and the
 dangerous-diff approval: it sends one correlated prompt, persists a durable ``waiting`` interaction

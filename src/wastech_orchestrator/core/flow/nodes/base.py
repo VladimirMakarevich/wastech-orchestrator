@@ -1,4 +1,4 @@
-"""Shared contracts for the node-kind runners (P1.3).
+"""Shared contracts for the node-kind runners.
 
 :class:`NodeServices` — the collaborators a runner needs, constructed once per orchestrator and
 shared across units. :class:`NodeInputs` — the per-execution-unit data bundle (artifact paths,
@@ -52,19 +52,46 @@ RunProcess = Callable[..., ProcessResult]
 class NodeInfraError(Exception):
     """A node could not run because of an infrastructure failure (not a quality result).
 
-    Agent infra-exhaustion (no provider could complete the stage even after fallback) and a check
-    *launch* failure both raise this; the orchestrator maps it to terminal ``failed`` — it never
-    routes to fixing (no code change can fix infrastructure).
+    Raised when the Router exhausted every provider for a stage (no provider could complete it, even
+    after fallback) and when a provider did not honor a mandatory structured-output contract. Never
+    routed to fixing — no code change can repair infrastructure.
 
-    ``error_class`` carries the normalized terminal error class (``None`` when unknown — e.g. a
-    check launch failure) so the orchestrator can tell a *transient* exhaustion
-    (PROVIDER_UNAVAILABLE / NETWORK_UNAVAILABLE — both providers down) apart from a hard infra
-    failure: the former parks the task as resumable (B-lite), the latter goes terminal.
+    ``error_classes`` is every class that was *raised* across the stage's attempts — the primary,
+    its same-provider transient retries, and the fallback — in attempt order. It is what the
+    park/manual/terminal decision reads, because the last attempt's class alone lets a fallback
+    provider that failed worse than the primary mask a park-eligible failure of the primary, making
+    the task's survival depend on a provider that never ran a token of work.
+
+    ``error_class`` is the single *representative*: the class the Router settled on, used for
+    messages, logs and the per-node audit row. It is also the only source of the operator-stop
+    distinction — a stop replaces the representative with ``CANCELLED`` while the killed attempt's
+    own row still reads as a process crash.
+
+    A caller that legitimately knows exactly one class (an unparseable structured output, a
+    synthesized cancellation) passes only ``error_class`` and the set is derived from it.
+
+    ``resets_at`` is the provider's own claim about when a retry could succeed (ISO-8601 UTC), when
+    one was reported. Untrusted input the Core validates and clamps before scheduling on it;
+    ``None`` for every error carrying no such claim.
     """
 
-    def __init__(self, message: str, *, error_class: ErrorClass | None = None) -> None:
+    def __init__(
+        self,
+        message: str,
+        *,
+        error_class: ErrorClass | None = None,
+        error_classes: Sequence[ErrorClass] = (),
+        resets_at: str | None = None,
+    ) -> None:
         super().__init__(message)
         self.error_class = error_class
+        self.resets_at = resets_at
+        # An empty set falls back to the representative on purpose: a caller that knows one class,
+        # and an exhausted stage whose attempt rows were never populated, must both decide on the
+        # class they do have rather than fail closed on a set they never intended to leave empty.
+        self.error_classes: tuple[ErrorClass, ...] = tuple(error_classes) or (
+            () if error_class is None else (error_class,)
+        )
 
 
 class EvaluatorInfraError(NodeInfraError):
@@ -118,7 +145,7 @@ class CheckRunnerPort(Protocol):
         task_id: str,
         subtask: int | None = None,
         selected: Sequence[ResolvedCheckSet] | None = None,
-        clock: Callable[[], str] = ...,  # VF-12: wall-clock for the check_runs interval
+        clock: Callable[[], str] = ...,  # wall-clock for the check_runs interval
     ) -> CheckOutcome: ...
 
 
@@ -207,7 +234,7 @@ class PacketBuilderPort(Protocol):
 
 
 class ToolResolverPort(Protocol):
-    """Resolve an operator ``tool`` name → its executable path (P5).
+    """Resolve an operator ``tool`` name → its executable path.
 
     The concrete :class:`~wastech_orchestrator.core.flow.tools_registry.ToolRegistry` satisfies it
     structurally; a test passes a fake. ``None`` on :class:`NodeServices` means no operator tool
@@ -237,7 +264,7 @@ class GitPort(Protocol):
         self, task_id: str, *, task_packet_digest: str | None = None
     ) -> str | None: ...
 
-    #: WRI-009: fingerprint the Git control state before a workspace-write attempt and compare it
+    #: Fingerprint the Git control state before a workspace-write attempt and compare it
     #: after (the agent node runner brackets ``run_stage`` with these); drift is a policy violation.
     def capture_git_control_state(self) -> GitControlState: ...
 
@@ -247,10 +274,10 @@ class GitPort(Protocol):
     #: instruction closure it freezes for the per-run audit digest).
     def list_tracked_files(self, *pathspecs: str) -> tuple[str, ...]: ...
 
-    #: WRI-002/003: absolute Git-control + ``tasks/`` roots a workspace-write attempt must
+    #: The absolute Git-control + ``tasks/`` roots a workspace-write attempt must
     #: Write/Edit-deny; the agent node runner threads it onto ``AgentRunRequest.write_guard``.
     #: Repository governance/instruction files are intentionally not denied — editing them is
-    #: ordinary repository work, reported to the operator rather than blocked (VF-20).
+    #: ordinary repository work, reported to the operator rather than blocked.
     def resolve_control_paths(
         self, exchange_root: str | None = None
     ) -> ProviderWriteGuardPolicy: ...
@@ -280,7 +307,7 @@ class NodeServices:
     repo_dir: str
     artifacts_root: str
     clock: Callable[[], str]
-    #: the provider-readable exchange root ``<repo>/.worc-io`` (WRI-001). Node runners publish their
+    #: the provider-readable exchange root ``<repo>/.worc-io``. Node runners publish their
     #: agent-facing artifacts here through :mod:`~wastech_orchestrator.providers.exchange` and
     #: resolve the exchange fan-in from it. Empty in a unit harness that does no publication.
     exchange_root: str = ""
@@ -292,7 +319,7 @@ class NodeServices:
     #: durable HITL transport (refinement/planning embedded HITL + dangerous-diff approval).
     notifier: NotifierPort | None = None
     ask_timeout_s: int = 0
-    #: Claude max-turns gate (idea 29): when true, a node run that exhausts ``max_turns`` pauses for
+    #: Claude max-turns gate: when true, a node run that exhausts ``max_turns`` pauses for
     #: a durable operator continue/stop decision (via ``notifier``) instead of failing immediately.
     #: Resolved by the orchestrator from ``agents.providers.claude.max_turns_gate``; off everywhere
     #: else (unit harnesses, codex-only setups). Requires a ``notifier``, guaranteed by preflight.
@@ -301,7 +328,7 @@ class NodeServices:
     #: ``--heartbeat-seconds`` value, the same one driving the provider/git/check heartbeats. ``0``
     #: disables it (the unit-test default); the wait still logs its entry/resolution either way.
     ask_heartbeat_seconds: float = 0.0
-    #: observability (P1.4): whether the prompt-audit JSON is written (per-task/global gate resolved
+    #: Observability: whether the prompt-audit JSON is written (per-task/global gate resolved
     #: by the orchestrator), the denied-read secrets to scrub from stored prompts, and the artifact
     #: register callback. ``register_artifact=None`` disables the on-disk audit artifacts.
     prompt_audit: bool = False
@@ -311,7 +338,7 @@ class NodeServices:
     #: lifecycle folder + write the committed ``<id>.summary.md`` (so both enter the audit commit),
     #: returning that summary path (used as the PR body). ``None`` → no finalize (e.g. a unit test).
     finalize: Callable[[], str | None] | None = None
-    #: WRI-009: the frozen task-packet sha256 (WRI-011) the publish node passes to ``commit_audit``
+    #: The frozen task-packet sha256 the publish node passes to ``commit_audit``
     #: so it verifies the lifecycle ``<id>.md`` was not rewritten under the run. ``None`` in a
     #: flow with no frozen packet (a unit harness / the ephemeral merge flow).
     task_packet_digest: str | None = None
@@ -324,11 +351,16 @@ class NodeServices:
     #: effective approval policy for the dangerous-diff gate (``config.security.trust_level`` with
     #: any per-task override applied). ``strict`` gates any deletion/dependency diff; ``auto`` gates
     #: only a ``protected_paths`` match.
-    trust_level: str = "strict"
+    trust_level: str = "auto"
     #: operator allowlist (repo-relative globs) of paths that ALWAYS require approval on any change,
     #: regardless of ``trust_level`` (``config.security.protected_paths``). Empty = no floor.
     protected_paths: tuple[str, ...] = ()
-    #: VF-7 defense-in-depth: the Core-owned orchestrator security contract prepended to every
+    #: whether the operator enabled the read-only git-evidence grant
+    #: (``config.security.allow_git_evidence``). A node's own ``git_evidence: true`` is only honored
+    #: when this is on, so a flow can ask for the capability but never grant it to itself. ``False``
+    #: everywhere it is not wired (unit harnesses), which is also the production default.
+    allow_git_evidence: bool = False
+    #: Defense-in-depth: the Core-owned orchestrator security contract prepended to every
     #: provider prompt (advisory, NOT enforcement). Resolved once by the orchestrator
     #: (``build_orchestrator_security_preamble``) and set on each request's ``security_preamble``.
     #: ``None`` in a unit harness → no preamble (today's prompt byte-for-byte).
@@ -337,7 +369,7 @@ class NodeServices:
     #: prompt references ``{memory_path}``. ``None`` when memory is disabled (the default) — then no
     #: packet is built and ``{memory_path}`` renders empty (today's behavior).
     packet_builder: PacketBuilderPort | None = None
-    #: operator tool registry (P5): resolves a ``tool`` node's name → its executable under
+    #: operator tool registry: resolves a ``tool`` node's name → its executable under
     #: ``<repo>/.worc/tools/``. ``None`` = no operator tool layer wired (a unit harness or a
     #: tool-less setup); a ``tool`` node then fails closed to manual at run time.
     tool_registry: ToolResolverPort | None = None
@@ -365,7 +397,7 @@ class NodeInputs:
     skill_paths_by_node: dict[str, tuple[str, ...]] = field(default_factory=dict)
     subtask_count: int | None = None
     subtask_spec_path: str | None = None
-    #: the intra-task subtask handoff brief path (subtask-context-handoff ADR), set by the
+    #: the intra-task subtask handoff brief path, set by the
     #: orchestrator per subtask that has ``depends_on`` predecessors; ``None`` outside a decompose
     #: region or for a subtask with no predecessors. Injected as ``{predecessor_context}`` into the
     #: region's ``implementation`` node only when its template references it (node-driven opt-in).
@@ -376,7 +408,7 @@ class NodeInputs:
     #: publish inputs (set for the unit that reaches a publish node).
     branch: str | None = None
     #: the task's effective branch mode — governs whether ``push`` may target the base branch
-    #: (branch-mode ADR). Defaults to ``new`` (an orchestrator-owned branch).
+    #: Defaults to ``new`` (an orchestrator-owned branch).
     branch_mode: BranchMode = BranchMode.NEW
     #: the per-task downgrade-only publish cap (``commit``/``push``/``pull_request``), or ``None``
     #: to defer to the flow's ``PublishingPolicy``. A downgrade cap (:class:`PublishScope`).

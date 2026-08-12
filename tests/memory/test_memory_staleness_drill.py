@@ -1,7 +1,7 @@
-"""Safety drill 05.3 — removed/renamed targets are detected and quarantined, never deleted (AC-C4).
+"""Safety drill — removed/renamed targets are detected and quarantined, never deleted.
 
 Adversarial: seed entity cards, then make their referenced files vanish or move, run the real
-``CleanupJob`` pass, and prove the design §5 / Q2 rule — rename-remap first, else mark-stale →
+``CleanupJob`` pass, and prove the rule — rename-remap first, else mark-stale →
 quarantine, **never** a silent delete, and never a judgment-based drop.
 """
 
@@ -96,7 +96,7 @@ def test_ambiguous_move_quarantines_rather_than_guessing(tmp_path: Path) -> None
 
 def test_pathless_lesson_is_never_dropped_on_judgment(tmp_path: Path) -> None:
     # The auto-drop boundary: a lesson with no scope.paths has no existence signal, so cleanup never
-    # drops it on judgment (the contradiction-based drop is a deferred V2 item, no ledger in V1).
+    # drops it on judgment (the contradiction-based drop is deferred; there is no ledger yet).
     service = _service(tmp_path)
     _lesson(service, "ltm_live")  # no scope.paths
     report = _job(service, tracked={"src/present.py"}, repo=tmp_path).run_once(audit=_AUDIT)
@@ -106,7 +106,7 @@ def test_pathless_lesson_is_never_dropped_on_judgment(tmp_path: Path) -> None:
 
 
 def test_lesson_scoped_to_present_path_is_kept(tmp_path: Path) -> None:
-    # F2: a lesson whose scope.paths still exist is left fully intact (active, not quarantined).
+    # A lesson whose scope.paths still exist is left fully intact (active, not quarantined).
     service = _service(tmp_path)
     _lesson(service, "ltm_live", paths=("src/present.py",))
     report = _job(service, tracked={"src/present.py"}, repo=tmp_path).run_once(audit=_AUDIT)
@@ -117,7 +117,7 @@ def test_lesson_scoped_to_present_path_is_kept(tmp_path: Path) -> None:
 
 
 def test_lesson_scoped_to_vanished_path_is_quarantined_not_deleted(tmp_path: Path) -> None:
-    # F2: a lesson scoped to a since-removed path is quarantined (kept), never silently deleted.
+    # A lesson scoped to a since-removed path is quarantined (kept), never silently deleted.
     service = _service(tmp_path)
     _lesson(service, "ltm_stale", paths=("src/removed.py",))
     report = _job(service, tracked=set(), repo=tmp_path).run_once(audit=_AUDIT)

@@ -5,7 +5,7 @@ description: Author a new custom flow for wastech-orchestrator — a validated g
 
 # worc-flow
 
-Help an operator author a brand-new flow: the pipeline a task runs through, written as data — a validated graph of typed nodes (`agent`, `evaluator`, `checks`, `tool`, `publish`) joined by outcome-labelled edges. A task's `task_type` selects its flow. Speak in the user's language (default to the language they wrote in).
+Help an operator author a brand-new flow: the pipeline a task runs through, written as data — a validated graph of typed nodes (`agent`, `evaluator`, `checks`, `tool`, `hitl`, `publish`) joined by outcome-labelled edges. A task's `task_type` selects its flow. Speak in the user's language (default to the language they wrote in).
 
 ## When to use
 
@@ -23,9 +23,9 @@ Before drafting anything, read the packaged flow guide — `.worc/guide/flows/RE
    - `permission_ceiling` — the hard cap for every node; set it as low as the flow needs (`read-only` unless a node must edit).
 3. Create the dispatch file `.worc/flows/<task_type>.yaml` — **the file stem must equal `task_type`** — and put every node prompt in the sibling folder `.worc/flows/<task_type>/*.md`. `role_file` values are relative to `.worc/flows/` (e.g. `role_file: <task_type>/implement.md`), no `..`.
 4. Wire the graph:
-   - Give each step a typed node (`agent` / `evaluator` / `checks` / `tool` / `publish`).
+   - Give each step a typed node (`agent` / `evaluator` / `checks` / `tool` / `hitl` / `publish`).
    - Join them with edges carrying the source kind's allowed `outcome` labels.
-   - **Bound every `fail`/`rework` loop with a `budget`.** Exactly one entry node (no incoming edges); every node must be able to reach a terminal.
+   - **Bound every `fail`/`rework` edge**: it must carry either an inline `budget:` or a named `loop:` that the flow's `budgets:` block declares (the built-ins use the named form — `loop: test_fix` with `budgets.test_fix`). An unbounded one fails validation. Exactly one entry node (no incoming edges); at least one terminal, and every node must be able to reach one.
    - Chain results by name: an `agent`/`tool` node's output is exposed to later nodes as `{<node_id>_path}`.
 5. Write the node prompts. Defer the prompt wording and the per-node output contract to **worc-flow-role** (`.worc/guide/flows/roles.md` + `.worc/guide/flows/prompt-variables.md`).
 6. If the flow has a `checks` node with `checker: command_profile`, make sure `.worc/config.yaml` actually defines matching `checks.command_sets` — otherwise there is no quality gate to run. Use **worc-config** for that.
@@ -38,12 +38,13 @@ Before drafting anything, read the packaged flow guide — `.worc/guide/flows/RE
 - Keep the graph as small as the deliverable needs — every node is a launch, a budget, and a failure mode.
 - Prefer the built-in node output contracts over a custom `output_schema`; reach for a custom schema only when you genuinely need a different shape.
 - Reuse `{<node_id>_path}` to hand one node's result to the next instead of inventing new plumbing. One node exposes exactly one output — split into several nodes to publish several results.
+- When a node's real deliverable is a file it writes, declare that file with `output_file:` so the channel carries the document instead of the node's closing summary of it. Otherwise the next node works from the smaller half.
 
 ## What not to do
 
 - Do not pick `output_policy` by what the deliverable "sounds like". A brand-new document that is not a `docs/research/*` sources bundle (e.g. a blog post under `blog/`) is a `code_change`, **not** a `repository_document` — choosing `repository_document` confines every write to `docs/research/<task_id>/` and the flow hard-stops at `manual_action_required` on the first real write.
 - Do not set a custom `output_schema` without making **every** object in it (top level and nested) `additionalProperties: false` — Codex rejects a non-strict schema with a hard 400 and the node fails on every run.
 - Do not leave an `evaluator` node with a prose-only "looks good" prompt — an evaluator is **fail-closed**: it must emit the findings result or the task routes to `manual_action_required`.
-- Do not raise `permission_ceiling` above what the flow needs, and do not grant `workspace-write` to a node that only reads. A Codex `workspace-write` node with network access is rejected — split external fetches into a `read-only` node.
+- Do not raise `permission_ceiling` above what the flow needs, and do not grant `workspace-write` to a node that only reads. A read-only node that needs to read git history takes `git_evidence: true`, not `workspace-write`. A Codex `workspace-write` node with network access is rejected — split external fetches into a `read-only` node.
 - Do not point a `role_file` outside the flow's own `<task_type>/` folder, and never use `..`.
-- Do not leave a `fail`/`rework` loop unbounded — every loop needs a `budget` or validation fails.
+- Do not leave a `fail`/`rework` edge unbounded — it needs an inline `budget:` or a named `loop:` declared in `budgets:`, or validation fails. A named loop missing from `budgets:` fails the same way.

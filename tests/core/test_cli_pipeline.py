@@ -22,7 +22,10 @@ from wastech_orchestrator.state_store import StateStore, TaskRow
 from wastech_orchestrator.task.model import DEFAULT_QUEUE
 
 # Every test here is a slow integration test (real git / subprocess / process tree).
-pytestmark = pytest.mark.slow
+# ``run``/``watch``/``rerun`` probe every allowed provider's credentials before starting. These
+# tests are about command orchestration, not credentials, and the config names the real CLIs — so
+# the gate is disarmed module-wide and asserted on directly by its own tests instead.
+pytestmark = [pytest.mark.slow, pytest.mark.usefixtures("no_provider_auth_gate")]
 
 
 @pytest.fixture(autouse=True)
@@ -49,7 +52,7 @@ class _FakeOrch:
         self.run_calls: list[str] = []
         self.resume_calls = 0
         self.refresh_calls = 0
-        self.notifier = notifier  # the next-task gate (idea 27) reads this
+        self.notifier = notifier  # the next-task gate reads this
         self._settled = dict(settled or {})  # task_id -> TaskRow (scanner terminal-skip guard)
 
     def resume(self):
@@ -178,7 +181,7 @@ def test_watch_resume_parked_blocks_continuation(make_git_config, git_repo, tmp_
 
 
 def test_watch_rate_limit_park_pauses_queue(make_git_config, git_repo, tmp_path: Path) -> None:
-    # F5 queue circuit-breaker: when the first task parks on a rate limit (run_task → RUNNING), the
+    # Queue circuit-breaker: when the first task parks on a rate limit (run_task → RUNNING), the
     # parked task holds the single slot, so acquire_slot() denies the next pending task and
     # watch_once stops the chain — no separate breaker; it falls out of the single-slot park.
     config = make_git_config(git_repo.clone, auto_mode=True)
@@ -216,7 +219,7 @@ def test_summarize_watch_labels_parked_and_exit_code() -> None:
     assert cli._EXIT_BY_STATUS[Status.RUNNING] == 3
 
 
-# --- next-task confirmation gate (idea 27) -----------------------------------------------
+# --- next-task confirmation gate ---------------------------------------------------------
 
 
 class _GateNotifier:
@@ -713,7 +716,7 @@ def test_cmd_status_running_without_daemon_shows_parked(
     git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # A RUNNING row with no live daemon is parked at its checkpoint, awaiting resume — status must
-    # say so instead of a bare "running" that reads as "executing now" (the ADR's core gap).
+    # say so instead of a bare "running" that reads as "executing now".
     project = tmp_path / "project"
     project.mkdir()
     config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
@@ -862,7 +865,7 @@ def test_cmd_list_pending_file_without_id_shown_by_filename(
 def test_cmd_list_pending_format_ids_reads_disk_queue(
     git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # F4: `--pending --format ids` composes the section focus with the id format — it lists queued
+    # `--pending --format ids` composes the section focus with the id format — it lists queued
     # pending files (disk-derived) that have no DB row yet, matching the table view. The DB-only
     # `_list_ids` path printed nothing for them before.
     project = tmp_path / "project"
@@ -936,7 +939,7 @@ def test_cmd_list_pending_matches_top_and_watch_order_and_queue_filter(
 def test_cmd_list_all_format_ids_unions_disk_and_db(
     git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # F4: `--all --format ids` is consistent with the table's `--all` scope (DB tasks); a plain
+    # `--all --format ids` is consistent with the table's `--all` scope (DB tasks); a plain
     # `--format ids` (no section) stays DB-derived as before (covered by the bare test above).
     project = tmp_path / "project"
     project.mkdir()
@@ -1006,7 +1009,7 @@ def test_cmd_run_rejected_task(git_repo, tmp_path: Path) -> None:
 
 
 def test_cmd_run_rejects_existing_branch_mode_with_missing_ref(git_repo, tmp_path: Path) -> None:
-    # branch-mode ADR (fail-closed preflight): `existing` with a branch_ref that exists neither
+    # Fail-closed preflight: `existing` with a branch_ref that exists neither
     # locally nor on the remote is rejected before any slot/branch is taken (no auto-create).
     project = tmp_path / "project"
     project.mkdir()

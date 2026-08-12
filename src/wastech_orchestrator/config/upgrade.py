@@ -39,9 +39,17 @@ from wastech_orchestrator.config.schema import CONFIG_SCHEMA_VERSION
 # v25: ``security.deletion_approval_exempt_paths`` is gone — replaced by the ``trust_level`` policy
 # (added from template) plus the always-ask ``security.protected_paths`` floor; the old allowlist
 # has no equivalent under the new model, so it is stripped (not migrated).
-# v31 (WRI-003): a Codex ``sandbox: read-only|workspace-write`` is not removed but *folded* into
+# v31: a Codex ``sandbox: read-only|workspace-write`` is not removed but *folded* into
 # ``permission_profile`` (a conditional value transform, see ``_migrate_codex_sandbox``);
 # ``danger-full-access`` is kept as the operator escape.
+# v33: the flat ``supervisor.model``/``supervisor.reasoning`` are gone — each phase carries its own
+# pair under ``supervisor.observe``/``.finalize``/``.handoff`` (added from template). Deliberately
+# stripped, not migrated: one old value has two new homes, and copying it into both would put the
+# expensive model back on the cheap per-step notes. The operator re-declares what they want; the
+# loss is visible in this command's report, so there is no silent drift.
+# v35: ``validation.required_fields``/``reject_unknown_fields`` are gone — both were read by nothing
+# (the task gate hard-codes the required front matter and denies an unknown key unconditionally), so
+# stripping them removes a knob that never did anything rather than changing any behavior.
 # The parent-path may be dotted (walked segment by segment).
 _REMOVED_KEYS: tuple[tuple[str, str], ...] = (
     ("", "prompts"),
@@ -58,6 +66,10 @@ _REMOVED_KEYS: tuple[tuple[str, str], ...] = (
     ("skills", "scan_root"),
     ("skills", "exclude"),
     ("security", "deletion_approval_exempt_paths"),
+    ("supervisor", "model"),
+    ("supervisor", "reasoning"),
+    ("validation", "required_fields"),
+    ("validation", "reject_unknown_fields"),
 )
 
 _UPGRADE_HEADER = (
@@ -100,14 +112,14 @@ def upgrade_config_mapping(
     """
     added: list[str] = []
     merged = _merge(template, operator, prefix="", added=added)
-    removed = _strip_removed_keys(merged)
+    removed = strip_removed_keys(merged)
     _migrate_codex_sandbox(merged)
     merged["schema_version"] = CONFIG_SCHEMA_VERSION
     return merged, added, removed
 
 
 def _migrate_codex_sandbox(merged: dict[str, Any]) -> None:
-    """v31 (WRI-003): fold a Codex ``sandbox`` into the neutral ``permission_profile``, in place.
+    """v31: fold a Codex ``sandbox`` into the neutral ``permission_profile``, in place.
 
     A legacy ``agents.providers.codex.sandbox: read-only|workspace-write`` becomes
     ``permission_profile`` (an explicit operator value wins) and the ``sandbox`` key
@@ -124,8 +136,13 @@ def _migrate_codex_sandbox(merged: dict[str, Any]) -> None:
         del codex["sandbox"]
 
 
-def _strip_removed_keys(merged: dict[str, Any]) -> list[str]:
-    """Drop :data:`_REMOVED_KEYS` from *merged* in place; return the dotted paths removed."""
+def strip_removed_keys(merged: dict[str, Any]) -> list[str]:
+    """Drop :data:`_REMOVED_KEYS` from *merged* in place; return the dotted paths removed.
+
+    Public because the CLI also strips them from a throwaway copy *before* its fail-closed
+    read-back of the operator's file: a removed key that the current loader rejects would otherwise
+    make ``upgrade-config`` refuse the very configs it exists to migrate.
+    """
     removed: list[str] = []
     for parent, key in _REMOVED_KEYS:
         container: Any = merged

@@ -1,6 +1,6 @@
-"""Task layer: the normalized task model (P1).
+"""Task layer: the normalized task model.
 
-The Task Parser and the validation gate are deferred to P5 (they need the State Store + ledger).
+The Task Parser and the validation gate need the State Store + ledger, so they live alongside them.
 """
 
 from __future__ import annotations

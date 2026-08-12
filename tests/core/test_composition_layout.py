@@ -1,4 +1,4 @@
-"""WRI-004 wiring proof: the one :class:`RuntimeLayout` reaches every consumer's correct surface.
+"""Wiring proof: the one :class:`RuntimeLayout` reaches every consumer's correct surface.
 
 The layout here uses **distinct** control/private/exchange directories (not the coincident
 ``.worc`` default) so each assertion proves the consumer read the field it owns, not that the paths
@@ -16,6 +16,11 @@ from wastech_orchestrator.composition import (
     build_orchestrator,
     build_providers,
 )
+from wastech_orchestrator.core.flow.exchange_seal import (
+    exchange_quarantine_root,
+    exchange_seal_root,
+)
+from wastech_orchestrator.core.flow.instruction_bundle import instruction_bundle_dir
 from wastech_orchestrator.runtime_layout import RuntimeLayout
 
 
@@ -40,7 +45,7 @@ def test_providers_are_rooted_at_private_home(git_repo, make_git_config, tmp_pat
 def test_providers_receive_the_internal_deny_policy(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # WRI-002 wiring guard: build_providers must project the internal deny policy into EVERY
+    # Wiring guard: build_providers must project the internal deny policy into EVERY
     # provider
     # so a wiring bug can never silently disable the read/write-deny projection. The provider's own
     # ``_build_argv`` reads ``self._deny_policy`` — an absent one would emit no internal denies.
@@ -57,7 +62,7 @@ def test_providers_receive_the_internal_deny_policy(
 def test_providers_receive_read_isolation_off_flag(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # VF-6 wiring guard: the operator's security config (incl. disable_read_isolation) flows into
+    # Wiring guard: the operator's security config (incl. disable_read_isolation) flows into
     # EVERY provider, so each adapter's _build_argv reads the effective read_isolation_off (the
     # formula lives once on SecurityConfig; the adapter never recomputes it).
     base = make_git_config(git_repo.clone, checks=["pytest"])
@@ -70,7 +75,7 @@ def test_providers_receive_read_isolation_off_flag(
 
 
 def test_router_receives_isolation_checks(git_repo, make_git_config, tmp_path: Path) -> None:
-    # WRI-002 wiring guard: the router's CAPABILITY_UNAVAILABLE host-verified fallback gate needs
+    # Wiring guard: the router's CAPABILITY_UNAVAILABLE host-verified fallback gate needs
     # the
     # offline isolation-check table; build_orchestrator must inject it (else _can_isolate fails
     # closed
@@ -94,7 +99,7 @@ def test_orchestrator_consumers_receive_the_right_field(
     # Private surface: artifacts root.
     assert orch._layout is layout
     assert orch._artifacts_root == tmp_path / "priv"
-    # Exchange surface (explicit but unused by WRI-004).
+    # Exchange surface (named by the layout, resolved by its consumers).
     assert orch._exchange_root == tmp_path / "xchg"
     # Control surface: flows/tools live under control_home, never private_home.
     assert orch._flow_registry._operator_dir == tmp_path / "ctrl" / "flows"
@@ -123,22 +128,32 @@ def test_deny_policy_includes_configured_provider_homes(
     )
 
 
-def test_deny_policy_includes_frozen_control_bundle_root(
+def test_deny_policy_names_the_per_task_runs_root(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # WRI-010 (cluster-exit hook for WRI-002/003): the frozen-control-bundle root under private_home
-    # is a named deny target so the provider projection denies it by name, not by coincidence of
-    # location — and it survives WRI-005 relocating private_home.
+    # The per-task runtime root under private_home is a *named* deny target so the provider
+    # projection denies it by name, not by coincidence of location — and it survives a later
+    # relocation of private_home. Asserting the entry itself (not merely that it sits under
+    # private_home) is what makes this fail if the entry is ever dropped.
     config = make_git_config(git_repo.clone, checks=["pytest"])
     layout = _distinct_layout(git_repo.clone, tmp_path)
     policy = build_internal_deny_policy(config, layout, env_file=None)
-    bundle_root = layout.private_home / "control-bundles"
-    assert policy.frozen_control_bundle == bundle_root
-    assert bundle_root in policy.denied_paths
+    runs_home = layout.private_home / "runs"
+    assert policy.runs_home == runs_home
+    assert runs_home in policy.denied_paths
+    # One named entry covers all four per-task roots because each resolver puts its root *under*
+    # it — a resolver that drifted back to a private_home sibling would escape the named deny.
+    resolved = (
+        exchange_seal_root(layout.private_home, "t1"),
+        exchange_quarantine_root(layout.private_home, "t1"),
+        instruction_bundle_dir(layout.private_home, "t1"),
+    )
+    for path in resolved:
+        assert path.is_relative_to(runs_home), path.as_posix()
 
 
 def test_cli_layout_for_reproduces_default_paths(git_repo, make_git_config) -> None:
-    # Path-for-path: the CLI composition boundary resolves the byte-identical pre-WRI-004 home.
+    # Path-for-path: the CLI composition boundary resolves the same home.
     config = make_git_config(git_repo.clone, checks=["pytest"])
     layout = cli.layout_for(config)
     assert layout.control_home == Path(config.repo.local_path) / ".worc"

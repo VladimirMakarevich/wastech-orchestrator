@@ -1,4 +1,4 @@
-"""Unit tests for the PID-file + graceful-shutdown plumbing (backlog: stop/restart).
+"""Unit tests for the PID-file + graceful-shutdown plumbing.
 
 Pure: every OS seam (``os.kill``, ``signal.signal``, sleeping, the clock) is injected, so nothing
 here touches a real process or signal.
@@ -9,6 +9,8 @@ from __future__ import annotations
 import signal
 from pathlib import Path
 
+import pytest
+
 from wastech_orchestrator import process_control as pc
 
 # Hermetic, OS-independent signal sentinels. ``SIGKILL`` is absent on Windows, so the hard-kill
@@ -16,6 +18,7 @@ from wastech_orchestrator import process_control as pc
 # the state machine needs (the real ``stop_process`` falls back the same way).
 TERM = signal.SIGTERM
 KILL = getattr(signal, "SIGKILL", 9)
+CONT = getattr(signal, "SIGCONT", 18)  # the soft path's wake-up signal; absent on Windows too
 
 
 def _start(_pid: int) -> str | None:
@@ -251,10 +254,10 @@ def test_stop_process_recycled_pid_is_not_signaled(tmp_path: Path) -> None:
     assert not path.exists()
 
 
-def test_stop_process_graceful_sends_sigterm_only(tmp_path: Path) -> None:
+def test_stop_process_graceful_sends_sigterm_then_sigcont(tmp_path: Path) -> None:
     path = tmp_path / "orchestrator.pid"
     pc.write_pid_file(path, pid=4242, start_time_fn=_start)
-    fake = FakeProcess(dies_after=2)  # alive through the soft signal, gone after one poll
+    fake = FakeProcess(dies_after=2)  # alive through the soft signals, gone after one poll
     sleeps: list[float] = []
     outcome = pc.stop_process(
         path,
@@ -262,6 +265,7 @@ def test_stop_process_graceful_sends_sigterm_only(tmp_path: Path) -> None:
         poll=0.2,
         term_sig=TERM,
         kill_sig=KILL,
+        cont_sig=CONT,
         kill_fn=fake,
         sleep_fn=sleeps.append,
         now_fn=lambda: 0.0,  # never reaches the deadline
@@ -270,7 +274,9 @@ def test_stop_process_graceful_sends_sigterm_only(tmp_path: Path) -> None:
     )
     assert outcome.signaled is True
     assert outcome.killed is False
-    assert fake.signals == [TERM]
+    # Order is the assertion: SIGTERM is queued *first*, so a process the SIGCONT resumes takes it
+    # on its first return to userspace and cannot re-stop (SIGTTIN re-arms) before it arrives.
+    assert fake.signals == [TERM, CONT]
     assert sleeps == [0.2]  # exercised the poll-then-recheck path exactly once
     assert not path.exists()
 
@@ -288,6 +294,7 @@ def test_stop_process_soft_timeout_stays_pending(tmp_path: Path) -> None:
         timeout=0.0,  # deadline == now: the grace period expires on the first check
         term_sig=TERM,
         kill_sig=KILL,
+        cont_sig=CONT,
         stop_file=stop_file,
         kill_fn=fake,
         sleep_fn=sleeps.append,
@@ -298,14 +305,14 @@ def test_stop_process_soft_timeout_stays_pending(tmp_path: Path) -> None:
     assert outcome.signaled is True
     assert outcome.killed is False  # soft never hard-kills, even on timeout
     assert outcome.timed_out is True
-    assert fake.signals == [TERM]  # SIGTERM only; no SIGKILL to the watcher
+    assert fake.signals == [TERM, CONT]  # the soft pair only; no SIGKILL to the watcher
     assert sleeps == []
     assert path.exists()  # PID file kept: duplicate-watcher protection + a --force-full target
     assert stop_file.exists()  # stop sentinel kept: the daemon still exits at its node boundary
 
 
 def test_stop_process_soft_timeout_never_reaps_the_agent_subtree(tmp_path: Path) -> None:
-    # Regression (P0 down-command gap): the POSIX soft-timeout must not reach the recorded active
+    # Regression: the POSIX soft-timeout must not reach the recorded active
     # agent's subtree and must leave the children handle intact for a later --force-full.
     path = tmp_path / "orchestrator.pid"
     stop_path = tmp_path / "orchestrator.stop"
@@ -320,6 +327,7 @@ def test_stop_process_soft_timeout_never_reaps_the_agent_subtree(tmp_path: Path)
         timeout=0.0,
         term_sig=TERM,
         kill_sig=KILL,
+        cont_sig=CONT,
         stop_file=stop_path,
         children_file=children_path,
         subtree_kill_fn=lambda pid, pgid: subtree_calls.append((pid, pgid)),
@@ -330,12 +338,153 @@ def test_stop_process_soft_timeout_never_reaps_the_agent_subtree(tmp_path: Path)
         can_signal=True,
     )
     assert subtree_calls == []  # the recorded agent subtree is never reaped on a soft timeout
-    assert fake.signals == [TERM]  # no SIGKILL to the watcher PID
+    assert fake.signals == [TERM, CONT]  # no SIGKILL to the watcher PID
     assert outcome.killed is False
     assert outcome.timed_out is True
     assert path.exists()  # PID, stop sentinel, and child handle all survive (pending stop)
     assert stop_path.exists()
     assert children_path.exists()
+
+
+class StoppedProcess:
+    """A daemon in state ``T``: alive to the probe, deaf to a queued SIGTERM until SIGCONT lands.
+
+    Models the live incident. ``kill_fn(pid, 0)`` succeeds (a stopped process exists and is
+    signalable), a ``SIGTERM`` is only *queued* because the process runs no instructions, and the
+    resume delivers it — after which the process exits cooperatively.
+    """
+
+    def __init__(self) -> None:
+        self.alive = True
+        self.signals: list[int] = []
+        self._term_pending = False
+
+    def __call__(self, pid: int, sig: int) -> None:
+        if sig == 0:  # liveness probe: a stopped process reads as alive
+            if not self.alive:
+                raise ProcessLookupError
+            return
+        self.signals.append(sig)
+        if sig == TERM:
+            self._term_pending = True  # queued, never delivered while the process is stopped
+        elif sig == CONT and self._term_pending:
+            self.alive = False  # resumed → the pending SIGTERM fires → cooperative exit
+
+
+def test_soft_stop_resumes_a_stopped_daemon_and_confirms_shutdown(tmp_path: Path) -> None:
+    # The incident: a watcher suspended (Ctrl-Z / SIGTTIN) sees neither the sentinel nor the
+    # SIGTERM. The SIGCONT resumes it, the queued SIGTERM is delivered, and it exits through the
+    # confirmed-terminal branch — reaping its own handles, which a SIGKILL never would.
+    path = tmp_path / "orchestrator.pid"
+    stop_file = pc.stop_file_path(tmp_path)
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+    fake = StoppedProcess()
+    outcome = pc.stop_process(
+        path,
+        timeout=30.0,
+        term_sig=TERM,
+        kill_sig=KILL,
+        cont_sig=CONT,
+        stop_file=stop_file,
+        kill_fn=fake,
+        sleep_fn=lambda _s: None,
+        now_fn=lambda: 0.0,
+        start_time_fn=_start,
+        can_signal=True,
+    )
+    assert fake.signals == [TERM, CONT]
+    assert outcome.timed_out is False  # not slow — the stop actually happened
+    assert outcome.already_dead is False
+    assert outcome.killed is False  # cooperative exit, never a kill
+    assert not path.exists() and not stop_file.exists()  # confirmed terminal: handles reaped
+
+
+def test_soft_stop_without_the_resume_times_out_against_a_stopped_daemon(tmp_path: Path) -> None:
+    # The defect, pinned: with no wake-up signal (``cont_sig=None`` — also the Windows default,
+    # where SIGCONT does not exist) the same daemon runs out the whole grace period and the PID
+    # file survives, which is what blocks a replacement watcher.
+    path = tmp_path / "orchestrator.pid"
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+    fake = StoppedProcess()
+    outcome = pc.stop_process(
+        path,
+        timeout=0.0,
+        term_sig=TERM,
+        kill_sig=KILL,
+        cont_sig=None,
+        kill_fn=fake,
+        sleep_fn=lambda _s: None,
+        now_fn=lambda: 0.0,
+        start_time_fn=_start,
+        can_signal=True,
+    )
+    assert fake.signals == [TERM]  # nothing resumed it
+    assert outcome.timed_out is True
+    assert path.exists()
+
+
+def test_soft_stop_sigcont_racing_to_exit_reads_as_already_dead(tmp_path: Path) -> None:
+    # The daemon exits between the SIGTERM and the SIGCONT: the ESRCH from the *second* signal must
+    # land in the existing raced-to-exit branch, not escape as an error.
+    path = tmp_path / "orchestrator.pid"
+    stop_file = pc.stop_file_path(tmp_path)
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+    signals: list[int] = []
+
+    def kill_fn(pid: int, sig: int) -> None:
+        if sig == 0:
+            return  # the initial probe still sees it alive
+        signals.append(sig)
+        if sig == CONT:
+            raise ProcessLookupError
+
+    outcome = pc.stop_process(
+        path,
+        term_sig=TERM,
+        kill_sig=KILL,
+        cont_sig=CONT,
+        stop_file=stop_file,
+        kill_fn=kill_fn,
+        sleep_fn=lambda _s: None,
+        now_fn=lambda: 0.0,
+        start_time_fn=_start,
+        can_signal=True,
+    )
+    assert signals == [TERM, CONT]
+    assert outcome.already_dead is True
+    assert outcome.signaled is False
+    assert not path.exists() and not stop_file.exists()
+
+
+# --- process state (Linux /proc; enriches the soft-timeout message only) --------------------------
+
+
+def test_read_process_state_parses_field_three_past_a_tricky_comm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # comm may contain spaces and parens, which is why the parse splits after the *final* ')'.
+    # Getting the offset wrong would make the CLI claim a state the process is not in.
+    stat = "4242 (my proc (x)) T 4241 4242 0 0 -1 " + " ".join(str(i) for i in range(30))
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr(Path, "read_text", lambda _self, **_kw: stat)
+    assert pc.read_process_state(4242) == "T"
+
+
+def test_read_process_state_is_none_off_linux(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("sys.platform", "darwin")
+    assert pc.read_process_state(4242) is None  # no source → the caller must claim nothing
+
+
+def test_read_process_state_is_none_when_proc_entry_is_gone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The realistic race: the watcher exits between the stop timeout and the message being built.
+    def raise_oserror(_self: Path, **_kw: object) -> str:
+        raise FileNotFoundError
+
+    monkeypatch.setattr("sys.platform", "linux")
+    monkeypatch.setattr(Path, "read_text", raise_oserror)
+    assert pc.read_process_state(4242) is None
 
 
 # --- stop-file IPC (cross-platform graceful stop) -------------------------------------------------

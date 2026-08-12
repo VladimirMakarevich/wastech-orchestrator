@@ -233,7 +233,6 @@ class _FakeProvider:
             provider_id=self.id,
             executable_found=True,
             version="1",
-            authenticated=True,
             supports_required_features=True,
             message="ok",
         )
@@ -256,7 +255,7 @@ class _FakeProvider:
                 "subtasks": [],
             }
         elif request.node_id == "review":
-            # F19: the review evaluator requires a well-formed findings array; a well-formed empty
+            # The review evaluator requires a well-formed findings array; a well-formed empty
             # one is a clean, accepting verdict.
             structured = {"findings": []}
         return AgentRunResult(
@@ -440,7 +439,7 @@ def test_resume_interrupted_cleanup_notifies_after_ledger(
 def test_resume_blocked_cleanup_returns_none_and_keeps_queue_scanning(
     git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:
-    # VF-21: a terminal manual_action_required task whose cleanup cannot complete (a dirty tree it
+    # A terminal manual_action_required task whose cleanup cannot complete (a dirty tree it
     # does not own) must NOT freeze the queue. resume() returns None — the task is terminal and owns
     # no slot — so watch_once falls through to scan pending/. The cleanup stays re-elected each tick
     # (self-heals once the operator clears the tree), so a second tick still returns None rather
@@ -480,7 +479,7 @@ def test_resume_blocked_cleanup_returns_none_and_keeps_queue_scanning(
 def test_resume_cleanup_preserves_own_wip_on_manual_park(
     git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:
-    # VF-21/VF-1: a resumable manual_action_required park carrying the task's OWN uncommitted work
+    # A resumable manual_action_required park carrying the task's OWN uncommitted work
     # (a publish node ran, so the dirty tree is the task's output — its --continue resume input) is
     # preserved on the resume path exactly as the primary terminal path does: cleanup leaves HEAD on
     # the branch and reports safe instead of fail-closing on "unaccounted changes". Without the fix
@@ -528,7 +527,7 @@ def _seed_control_bundle(
     *,
     skill_packages: tuple[tuple[str, str, list[str]], ...] = (),
 ) -> None:
-    """Seed the WRI-010 control + WRI-011 instruction bundle an interrupted task left on disk.
+    """Seed the control + instruction bundles an interrupted task left on disk.
 
     A resume verifies both frozen bundles against their persisted digests before reusing them; these
     recovery tests seed the checkpoint directly (bypassing the fresh run that freezes), so they must
@@ -674,7 +673,7 @@ def test_resume_continues_persisted_checkpoint(
         assert all(request.node_id != "implementation" for request in all_requests)
     if current_node == "fixing":
         # Recovery re-publishes the failed check log into the exchange and points {checks_path}
-        # there (WRI-001); the private log stays the audit record.
+        # there; the private log stays the audit record.
         expected_checks = (
             exchange_task_dir(orch._exchange_root, task_id) / "checks" / "001.log"
         ).as_posix()
@@ -847,7 +846,7 @@ def test_resume_waits_on_persisted_planning_prompt_without_resending(
     planning_requests = providers[ProviderId.CLAUDE].requests
     assert planning_requests[0].node_id == "planning"
     # The provider receives only the sanitized answer-only exchange packet, never the durable record
-    # (WRI-001): human_input_path points under the exchange, not at the durable interaction file.
+    # human_input_path points under the exchange, not at the durable interaction file.
     # (The active exchange is torn down at the terminal outcome; the packet's answer-only shape is
     # unit-tested in test_hitl.py::test_sanitized_answer_packet_is_answer_only.)
     exchange_hitl = (

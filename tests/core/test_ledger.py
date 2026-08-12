@@ -1,4 +1,8 @@
-"""Unit tests for the ledger, failure report, and minimal summary."""
+"""Unit tests for the ledger and the failure report.
+
+The whole-task summary is not here: when no provider authored one it is rendered by
+``core/summary_report.py``, covered in ``test_summary_report.py``.
+"""
 
 from __future__ import annotations
 
@@ -6,11 +10,12 @@ import json
 from pathlib import Path
 
 from wastech_orchestrator.ledger import (
+    INFRA_LOOP,
     DecomposedFailureInfo,
     Ledger,
     LedgerRecord,
+    NodeFailureEvidence,
     write_failure_report,
-    write_minimal_summary,
 )
 
 
@@ -29,7 +34,7 @@ def test_append_is_append_only(tmp_path: Path) -> None:
 
 
 def test_governance_changed_field_round_trips(tmp_path: Path) -> None:
-    # VF-20: the completed-ledger record carries the governance/instruction paths a run edited.
+    # The completed-ledger record carries the governance/instruction paths a run edited.
     ledger = Ledger(tmp_path)
     ledger.append(
         LedgerRecord(
@@ -56,7 +61,7 @@ def test_has_task_id(tmp_path: Path) -> None:
 
 
 def test_only_validation_rejects(tmp_path: Path) -> None:
-    # F6: an id whose only record carries a validation_reason is a gate reject, not a real attempt.
+    # An id whose only record carries a validation_reason is a gate reject, not a real attempt.
     ledger = Ledger(tmp_path)
     assert ledger.only_validation_rejects("a") is False  # absent → not a reject-only id
     ledger.append(
@@ -166,6 +171,55 @@ def test_write_failure_report(tmp_path: Path) -> None:
     stuck = Path(stuck_path).read_text(encoding="utf-8")
     assert "review" in stuck
     assert "max_total_fix_iterations" in stuck
+    # A fix-loop terminal spent a budget, not a provider: its artifact carries no attempt evidence
+    # and gains no orphan heading, so the machine key is present-but-empty rather than absent.
+    assert data["provider_attempts"] == []
+    assert "## Provider attempts" not in stuck
+
+
+def test_write_failure_report_infra_names_every_attempt(tmp_path: Path) -> None:
+    # An infra terminal exhausted no fix-loop budget, so the opening line must not claim one — and
+    # the attempts are the only evidence it has (counters empty, no check log, no findings).
+    report_path, stuck_path = write_failure_report(
+        tmp_path,
+        "task-002",
+        loop=INFRA_LOOP,
+        limit_name="agent node 'implementation': no provider could complete it (auth_failed)",
+        counters={},
+        last_check_log=None,
+        last_review_findings=None,
+        final_diff="",
+        failing_node=NodeFailureEvidence(
+            node_id="implementation",
+            provider_attempts=(
+                {
+                    "provider": "claude",
+                    "attempt": 1,
+                    "error_class": "rate_limited",
+                    "exit_code": None,
+                    "started_at": "2026-08-06T06:36:23+00:00",
+                },
+                {
+                    "provider": "codex",
+                    "attempt": 2,
+                    "error_class": "authentication_failed",
+                    "exit_code": 1,
+                    "started_at": "2026-08-06T06:36:40+00:00",
+                },
+            ),
+        ),
+    )
+    data = json.loads(Path(report_path).read_text(encoding="utf-8"))
+    assert data["node_id"] == "implementation"
+    assert [a["provider"] for a in data["provider_attempts"]] == ["claude", "codex"]
+    assert data["provider_attempts"][0]["error_class"] == "rate_limited"
+
+    stuck = Path(stuck_path).read_text(encoding="utf-8")
+    assert stuck.startswith("# Task task-002 stuck\n\nThis task could not run: agent node")
+    assert "fix loop exhausted" not in stuck
+    assert "## Provider attempts" in stuck
+    assert "claude · attempt 1 · rate_limited · exit n/a · 2026-08-06T06:36:23+00:00" in stuck
+    assert "codex · attempt 2 · authentication_failed · exit 1 · 2026-08-06T06:36:40+00:00" in stuck
 
 
 def test_write_failure_report_decomposed(tmp_path: Path) -> None:
@@ -185,69 +239,3 @@ def test_write_failure_report_decomposed(tmp_path: Path) -> None:
     data = json.loads(Path(report_path).read_text(encoding="utf-8"))
     assert data["decomposed"]["failing_subtask"] == 2
     assert data["decomposed"]["committed_shas"] == ["abc"]
-
-
-def test_write_minimal_summary(tmp_path: Path) -> None:
-    md_path, json_path = write_minimal_summary(
-        tmp_path,
-        "task-001",
-        title="Add validation",
-        diff_stat=" src/app.py | 4 +++-\n 1 file changed, 3 insertions(+), 1 deletion(-)",
-        task_ref="task-001.md",
-    )
-    summary = json.loads(Path(json_path).read_text(encoding="utf-8"))
-    # The summary.json contract keeps exactly these four keys.
-    assert set(summary) == {"what", "how", "integration", "why"}
-    assert summary["what"] == "Add validation"
-    assert "task-001.md" in summary["why"]  # links to the task file, never the pasted description
-    md = Path(md_path).read_text(encoding="utf-8")
-    assert "## What" in md and "## Why" in md
-    assert "## Changes" in md and "1 file changed" in md
-    assert "logs/task-001/current.diff" in md  # pointer to the full (redacted) patch
-    assert md_path.endswith("summary.md")
-
-
-def test_minimal_summary_is_compact_and_inlines_no_patch(tmp_path: Path) -> None:
-    """The fallback must stay small: no full diff body, no pasted task description."""
-    md_path, _ = write_minimal_summary(
-        tmp_path,
-        "task-002",
-        title="Big change",
-        diff_stat=" a.py | 2 +-\n 1 file changed",
-        task_ref="task-002.md",
-    )
-    md = Path(md_path).read_text(encoding="utf-8")
-    assert "diff --git" not in md and "@@" not in md  # no raw patch body inlined
-    assert md.count("\n") < 30  # compact, unlike the old ~580-line fallback
-
-
-def test_minimal_summary_without_task_ref(tmp_path: Path) -> None:
-    md_path, _ = write_minimal_summary(tmp_path, "t", title="X", diff_stat="")
-    md = Path(md_path).read_text(encoding="utf-8")
-    assert "See the task file for the full description." in md
-    assert "(no changes detected)" in md
-
-
-def test_minimal_summary_degraded_marks_body_and_json(tmp_path: Path) -> None:
-    """A synthesis that was expected but failed is marked loud — a callout + a JSON flag."""
-    md_path, json_path = write_minimal_summary(
-        tmp_path,
-        "task-003",
-        title="Add validation",
-        diff_stat=" a.py | 2 +-\n 1 file changed",
-        task_ref="task-003.md",
-        degraded=True,
-    )
-    md = Path(md_path).read_text(encoding="utf-8")
-    assert "Fallback summary" in md  # the visible degradation callout
-    assert md.index("Fallback summary") < md.index("## What")  # prepended, not buried
-    summary = json.loads(Path(json_path).read_text(encoding="utf-8"))
-    assert summary["degraded"] is True
-
-
-def test_minimal_summary_not_degraded_by_default(tmp_path: Path) -> None:
-    """The legitimate no-synthesis case (e.g. a failed terminal) carries no degraded marker."""
-    md_path, json_path = write_minimal_summary(tmp_path, "t", title="X", diff_stat="")
-    md = Path(md_path).read_text(encoding="utf-8")
-    assert "Fallback summary" not in md
-    assert "degraded" not in json.loads(Path(json_path).read_text(encoding="utf-8"))

@@ -94,7 +94,7 @@ class ShellContext:
     """Everything a dispatched command needs; the seams (``spawn_fn``/``run_cli``/``out``) make the
     dispatcher headless-testable without a TTY, a real daemon, or prompt_toolkit.
 
-    ``log_path`` is the daemon log resolved once at entry (``--log-file`` or the M2 default), so the
+    ``log_path`` is the daemon log resolved once at entry (``--log-file`` or the default), so the
     live tail follows the queue whether a daemon is attached at entry or started later with ``up`` —
     the file is written to that path either way. ``daemon`` is ``None`` when the shell is idle (no
     daemon serving the queue): entry is passive and never auto-spawns.
@@ -122,9 +122,9 @@ def _argv(ctx: ShellContext, command: str, rest: Sequence[str]) -> list[str]:
 
 
 def daemon_log_path(config: OrchestratorConfig, log_file: str | None) -> Path:
-    """The daemon log the console spawns-with and tails: ``--log-file`` or the M2 default.
+    """The daemon log the console spawns-with and tails: ``--log-file`` or the default.
 
-    Defaulting to ``.worc/logs/daemon.log`` (not ``None``) is M2: the tail always has a path, so
+    Defaulting to ``.worc/logs/daemon.log`` (not ``None``) means the tail always has a path, so
     attach/``up`` can follow the queue without the operator hand-coordinating a log path.
     """
     return Path(log_file) if log_file else cli.worc_home_for(config) / "logs" / "daemon.log"
@@ -161,7 +161,7 @@ def attach_watch(
     """Attach to a live ``watch`` daemon if one is running, else return ``None`` (idle) — no spawn.
 
     Passive entry (the Decision): a live PID file → attach and leave it running on exit. We tail the
-    M2 default log path (or ``--log-file``) — the convention a console-spawned daemon writes to — so
+    default log path (or ``--log-file``) — the convention a console-spawned daemon writes to — so
     an attached daemon started the same way is tailable without extra coordination.
     """
     out = out if out is not None else sys.stdout
@@ -189,7 +189,7 @@ def _wait_until_alive(
     Returns the live PID once the daemon records it, or ``None`` if the child exits first (fast-fail
     on ``proc.poll()``) or the timeout elapses. The PID file is the signal because the daemon writes
     it only after passing preflight and entering the loop — its presence means "actually serving",
-    which a bare "process launched" cannot promise (the exact P4 false-positive this closes).
+    which a bare "process launched" cannot promise.
     """
     poll_proc: Callable[[], int | None] = getattr(proc, "poll", lambda: None)
     deadline = now_fn() + timeout
@@ -278,7 +278,7 @@ def _split_verb(line: str) -> tuple[str, str]:
     """``(verb, raw remainder)`` — the verb is the first whitespace-delimited token; the remainder
     is the rest of the line verbatim (stripped).
 
-    Keeping the remainder raw (not tokenized) is the M1 fix for the path-taking verbs: a Windows
+    Keeping the remainder raw (not tokenized) is what makes the path-taking verbs work: a Windows
     absolute path (``enqueue C:\\Users\\x\\task.md``) survives intact, where POSIX ``shlex`` would
     strip its backslashes and split on any embedded space. Multi-argument verbs re-tokenize the
     remainder OS-aware via :func:`_tokens`.
@@ -291,7 +291,7 @@ def _split_verb(line: str) -> tuple[str, str]:
 
 
 def _tokens(remainder: str) -> list[str]:
-    """Tokenize a command's argument string OS-aware (M1): POSIX-mode ``shlex`` on POSIX (escapes,
+    """Tokenize a command's argument string OS-aware: POSIX-mode ``shlex`` on POSIX (escapes,
     quotes) and non-POSIX on Windows (keeps ``\\`` literal). For id/flag-taking verbs only —
     path-taking verbs use the raw remainder (:func:`_split_verb`)."""
     return shlex.split(remainder, posix=os.name != "nt")
@@ -304,6 +304,25 @@ def _unquote(arg: str) -> str:
     return arg
 
 
+def _run_cli_command(ctx: ShellContext, argv: list[str]) -> ShellResult:
+    """Run one nested CLI command without letting its parser terminate the containing console.
+
+    ``argparse`` reports help and usage errors by raising :class:`SystemExit`. That exit belongs to
+    the submitted command, while only the console's explicit ``quit``/``exit`` verbs own the REPL
+    lifetime. Integer exit codes are preserved; a non-integer payload is printed because catching
+    it prevents the Python entry point from doing so.
+    """
+    try:
+        return ShellResult(exit_code=ctx.run_cli(argv))
+    except SystemExit as exc:
+        if exc.code is None:
+            return ShellResult()
+        if isinstance(exc.code, int):
+            return ShellResult(exit_code=exc.code)
+        print(f"shell: {exc.code}", file=ctx.out)
+        return ShellResult(exit_code=1)
+
+
 def dispatch(line: str, ctx: ShellContext) -> ShellResult:
     """Map one console line onto an existing verb or a thin helper. Adds no orchestration logic."""
     command, remainder = _split_verb(line)
@@ -314,7 +333,7 @@ def dispatch(line: str, ctx: ShellContext) -> ShellResult:
     if command in ("help", "?"):
         print(_HELP, file=ctx.out)
         return ShellResult()
-    # Path-taking verbs: the argument is the raw (unquoted) remainder — never POSIX-tokenized (M1).
+    # Path-taking verbs: the argument is the raw (unquoted) remainder — never POSIX-tokenized.
     if command == "enqueue":
         return _do_enqueue(ctx, _unquote(remainder))
     if command == "promote":
@@ -335,21 +354,30 @@ def dispatch(line: str, ctx: ShellContext) -> ShellResult:
         return ShellResult()
     if command == "down":
         # The stop ladder lives in cmd_stop; forward flags verbatim, but --non-interactive so a busy
-        # daemon is refused-with-instructions rather than dropping into input() in the REPL (H1).
-        return ShellResult(exit_code=ctx.run_cli(_argv(ctx, "stop", ["--non-interactive", *rest])))
+        # daemon is refused-with-instructions rather than dropping into input() in the REPL.
+        return _run_cli_command(ctx, _argv(ctx, "stop", ["--non-interactive", *rest]))
     if command == "restart":
-        return ShellResult(
-            exit_code=ctx.run_cli(_argv(ctx, "restart", ["--non-interactive", *rest]))
-        )
+        return _run_cli_command(ctx, _argv(ctx, "restart", ["--non-interactive", *rest]))
     if command == "rerun":
         # rerun's confirmation prompt fights the REPL's own stdin reader exactly like down/restart
-        # (H1); forward --non-interactive so it refuses-with-instructions (pass --yes) instead of
+        # forward --non-interactive so it refuses-with-instructions (pass --yes) instead of
         # blocking inside input().
-        return ShellResult(exit_code=ctx.run_cli(_argv(ctx, "rerun", ["--non-interactive", *rest])))
+        return _run_cli_command(ctx, _argv(ctx, "rerun", ["--non-interactive", *rest]))
     if command in _FORWARD_VERBS:
-        return ShellResult(exit_code=ctx.run_cli(_argv(ctx, command, rest)))
+        return _run_cli_command(ctx, _argv(ctx, command, rest))
     print(f"shell: unknown command {command!r} (try 'help')", file=ctx.out)
     return ShellResult()
+
+
+async def _dispatch_interactive(line: str, ctx: ShellContext) -> ShellResult:
+    """Dispatch a REPL command without blocking or nesting work on its asyncio loop.
+
+    Nested CLI verbs are intentionally synchronous, and may use synchronous adapters that create
+    their own short-lived event loops. Running the whole dispatch in a worker keeps those adapters
+    valid while the REPL's log-tailer task remains schedulable. The synchronous :func:`dispatch`
+    stays as the headless and scripted entry point.
+    """
+    return await asyncio.to_thread(dispatch, line, ctx)
 
 
 def _do_enqueue(ctx: ShellContext, arg: str) -> ShellResult:
@@ -369,7 +397,7 @@ def _do_enqueue(ctx: ShellContext, arg: str) -> ShellResult:
 
 
 def _do_promote(ctx: ShellContext, remainder: str) -> ShellResult:
-    # Path/id-taking like enqueue (raw remainder, not POSIX-tokenized — Windows paths, M1); `--all`
+    # Path/id-taking like enqueue (raw remainder, not POSIX-tokenized — Windows paths); `--all`
     # is the one recognized flag. The move lives in cli.promote_tasks (single source of truth).
     all_files = remainder.strip() == "--all"
     target = None if all_files else _unquote(remainder)
@@ -523,7 +551,7 @@ class _Prompter(Protocol):
 def _quit_warning(ctx: ShellContext) -> str | None:
     """A loud warning to print on quit while a daemon is still serving, or ``None`` if it is safe.
 
-    ``quit`` detaches by design (M3) — the daemon keeps polling and picks up the next task file.
+    ``quit`` detaches by design — the daemon keeps polling and picks up the next task file.
     Uses the live PID check (the ``_do_up`` idiom), not the possibly-stale ``ctx.daemon`` handle, so
     a daemon started or stopped mid-session shows up. Distinguishes an actively-running task from an
     idle-but-serving daemon (the pickup risk exists in both cases).
@@ -545,7 +573,7 @@ def _quit_warning(ctx: ShellContext) -> str | None:
 async def _confirm_quit(ctx: ShellContext, session: _Prompter) -> bool:
     """Gate quit/exit while a daemon serves: warn, then confirm via the REPL's own PromptSession.
 
-    Reusing the live session's ``prompt_async`` keeps the single-stdin-reader rule (H1) — no nested
+    Reusing the live session's ``prompt_async`` keeps the single-stdin-reader rule — no nested
     ``input()`` fighting the REPL. Returns ``True`` to exit, ``False`` to stay; no daemon → exit
     silently; EOF/Ctrl-C at the confirm prompt → stay (treated as a decline).
     """
@@ -603,7 +631,7 @@ def _run_interactive(ctx: ShellContext) -> int:
                         line = (await session.prompt_async()).strip()
                     except (EOFError, KeyboardInterrupt):
                         break
-                    if dispatch(line, ctx).quit:
+                    if (await _dispatch_interactive(line, ctx)).quit:
                         if await _confirm_quit(ctx, session):
                             break
                         print("shell: quit cancelled — daemon still serving.", file=ctx.out)
@@ -617,12 +645,12 @@ def _run_interactive(ctx: ShellContext) -> int:
 
 
 def _shutdown_daemon(ctx: ShellContext) -> None:
-    """Detach on quit: leave the daemon (and any in-flight task) running (the Decision — M3).
+    """Detach on quit: leave the daemon (and any in-flight task) running — by design.
 
-    ``quit`` never stops the daemon — a long P4-style task survives closing the panel and reopening
+    ``quit`` never stops the daemon — a long-running task survives closing the panel and reopening
     ``worc shell`` reattaches. Stopping is only the explicit ``down`` (soft) / ``down --force-full``
     (hard). Idle (nothing serving) → nothing to say. This is print-only; it never blocks on input (a
-    prompt here would violate the REPL's single-stdin-reader rule — H1).
+    prompt here would violate the REPL's single-stdin-reader rule).
     """
     daemon = ctx.daemon
     if daemon is None:

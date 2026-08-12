@@ -1,6 +1,6 @@
 """POSIX-gated real-topology tests for the reliable-stop subtree kill (no orphaned agents).
 
-The acceptance gate for the ADR: spawn a real agent that leads its OWN process group and itself
+The acceptance gate: spawn a real agent that leads its OWN process group and itself
 spawns a grandchild in a SEPARATE group (the "broke away" case the field failure hit), then confirm
 every stop route reaps the grandchild too — not just the direct child. These launch real processes,
 so they are skipped on Windows (no ``setsid``/``killpg``; that path is the injected-seam tests +

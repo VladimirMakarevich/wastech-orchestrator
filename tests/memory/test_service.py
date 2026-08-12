@@ -1,4 +1,4 @@
-"""MemoryService (01.3/01.4): redaction chokepoint, tier routing, round-trip, audited update."""
+"""MemoryService: redaction chokepoint, tier routing, round-trip, audited update."""
 
 from __future__ import annotations
 
@@ -109,7 +109,7 @@ def test_append_entity_round_trips(service: MemoryService) -> None:
 
 @pytest.mark.parametrize("secret", [FAKE_GH, FAKE_OPENAI, FAKE_AWS])
 def test_planted_token_is_redacted_before_disk(tmp_path: Path, secret: str) -> None:
-    # AC-SF1: a secret-shaped string in any record field never lands in a memory file.
+    # A secret-shaped string in any record field never lands in a memory file.
     service = MemoryService(MemoryLayout(tmp_path / ".worc"))
     service.append(
         LongTermRecord(

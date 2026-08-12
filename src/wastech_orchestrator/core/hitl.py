@@ -290,7 +290,7 @@ def turn_gate_interaction_path(
     *,
     subtask: int | None = None,
 ) -> Path:
-    """Durable artifact for a node's max-turns continue/stop gate (idea 29), keyed by node id.
+    """Durable artifact for a node's max-turns continue/stop gate, keyed by node id.
 
     One file per node (no cycle index): with no resume cap there is nothing to count, so each
     continue/stop round-trip reuses and overwrites this artifact (``mark_consumed`` after each
@@ -393,7 +393,7 @@ def write_answer(path: Path, result: AskResult) -> None:
 
 
 def sanitized_answer_packet(persisted: Mapping[str, Any]) -> dict[str, Any]:
-    """The answer-only projection of a durable HITL record, for the exchange (WRI-001).
+    """The answer-only projection of a durable HITL record, for the exchange.
 
     Contains only what a rerun needs — the request ``kind``/``question`` and the operator's
     ``answer``/``approved``, all already redacted upstream — and never the durable transport

@@ -4,7 +4,7 @@ The lint scans each flow's role files for ``{name}`` / ``{?name}`` tokens outsid
 valid-set (core allowlist ∪ node-output names) and reports each as rendering verbatim. It is a
 warning, never fatal — a verbatim render is the safe-renderer fallback (code/JSON braces must pass
 through). The valid-set is a *function of the flow graph*, so it grows as nodes are added (the seam
-the node-output ADR extends without reworking the lint).
+the node-output channel extends without reworking the lint).
 """
 
 from __future__ import annotations
@@ -96,18 +96,18 @@ flow:
 """
 
 
-def test_lint_evaluator_gets_no_generic_node_var(tmp_path: Path) -> None:
-    # The {<id>_path} channel is agent-only. An evaluator referencing {scan_path} renders it
-    # verbatim (its allowlist is the static core set), so the node-kind-aware lint flags it — while
-    # the agent node referencing {task_id} is clean.
+def test_lint_evaluator_may_read_a_node_output_var(tmp_path: Path) -> None:
+    # An evaluator resolves the {<id>_path} channel too (it judges an upstream node's work,
+    # so it must be able to open it), so {scan_path} in an evaluator role is NOT flagged — while an
+    # id naming no node still is.
     flow_dir = tmp_path / "flows"
     (flow_dir / "e").mkdir(parents=True)
     (flow_dir / "e.yaml").write_text(_EVAL_FLOW, encoding="utf-8")
     (flow_dir / "e" / "scan.md").write_text("scan {task_id}", encoding="utf-8")
-    (flow_dir / "e" / "judge.md").write_text("judge {scan_path}", encoding="utf-8")
+    (flow_dir / "e" / "judge.md").write_text("judge {scan_path} not {ghost_path}", encoding="utf-8")
 
     warnings = lint_prompt_variables(load_flow(flow_dir / "e.yaml"))
-    assert [(w.role_file, w.token) for w in warnings] == [("e/judge.md", "scan_path")]
+    assert [(w.role_file, w.token) for w in warnings] == [("e/judge.md", "ghost_path")]
 
 
 _SUPERVISOR_FLOW = """\

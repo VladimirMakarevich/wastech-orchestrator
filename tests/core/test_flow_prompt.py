@@ -1,4 +1,4 @@
-"""Flow prompt assembly from role_file (P1.3)."""
+"""Flow prompt assembly from role_file."""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ def test_packaged_role_subtask_clause_is_conditional(role_file: str) -> None:
     assert "{subtask" not in decomposed  # no unsubstituted placeholders left
 
 
-# VF-17(b): each optional context item carries its OWN heading inside its own `{?…}` block, so a
+# Each optional context item carries its OWN heading inside its own `{?…}` block, so a
 # heading can never render without its content (an orphan) and content can never render without its
 # heading — no Core-side sentinel guesses at "will this section be empty". Per role file: the
 # (variable, heading) pairs it ships.
@@ -120,7 +120,7 @@ def test_no_packaged_role_prompt_uses_a_core_side_context_sentinel() -> None:
 
 
 def test_packaged_implementation_plan_clause_is_conditional() -> None:
-    # VF-17(a): the opening "by following the plan" clause renders only when a plan artifact exists.
+    # The opening "by following the plan" clause renders only when a plan artifact exists.
     no_plan = render_role_prompt(_IMPL_ROLES, "implementation.md", {})
     assert "following the plan" not in no_plan
     assert "in the working tree. Make the smallest" in no_plan
@@ -129,7 +129,7 @@ def test_packaged_implementation_plan_clause_is_conditional() -> None:
 
 
 def test_packaged_review_plan_clauses_are_conditional() -> None:
-    # VF-17(a): both plan references in the reviewer prompt are gated on the plan's presence.
+    # Both plan references in the reviewer prompt are gated on the plan's presence.
     no_plan = render_role_prompt(_IMPL_ROLES, "review.md", {})
     assert "against the task. Report" in no_plan
     assert "against the task and plan" not in no_plan

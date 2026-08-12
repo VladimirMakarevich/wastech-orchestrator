@@ -18,9 +18,9 @@ Scope = only changed documents, from the run's diff artifact (`paths.diff_path`)
 task-text fallback like `check_chapter` has. A blog/article task body routinely names reference docs
 (a tone-of-voice guide, an idea doc) that are not the deliverable; falling back to "any `.md` named
 in the task text" on an empty diff would measure THOSE instead and report a misleading pass/fail on
-files the run never touched (this happened in the field — the 2026-07-14 codex-Windows-sandbox
-post-mortem, finding F3). So an absent/empty diff is always a
-vacuous pass here: nothing to validate, never a guess.
+files the run never touched — this happened in the field: a run whose diff came back empty graded a
+reference doc named in the task text and reported a confident pass. So an absent/empty diff is always
+a vacuous pass here: nothing to validate, never a guess.
 
 Args (`args.min_chars`, `args.min_paragraphs`) are both OPTIONAL minimum-size floors — never a
 ceiling, so a longer document always passes. Omitting either, or passing `0`, disables that
@@ -114,7 +114,20 @@ def _resolve_scope(paths: dict[str, object]) -> tuple[Path, list[str]]:
     return repo, []
 
 
+def _pin_stdio_to_utf8() -> None:
+    """Read stdin and write stdout as UTF-8 regardless of the host's locale encoding.
+
+    Cross-platform requirement, not a nicety: this script emits `ensure_ascii=False` JSON carrying
+    the checked repo paths and its own em-dashed messages. A Windows host hands a piped child
+    `cp1252`, which cannot encode every character either can contain — the script would die on
+    `print` and the tool node would see an empty stdout instead of the verdict it asked for.
+    """
+    for stream in (sys.stdin, sys.stdout):
+        stream.reconfigure(encoding="utf-8", errors="replace")
+
+
 def main() -> int:
+    _pin_stdio_to_utf8()
     try:
         payload = json.loads(sys.stdin.read() or "{}")
     except (json.JSONDecodeError, ValueError) as exc:

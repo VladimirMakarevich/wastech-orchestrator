@@ -1,6 +1,7 @@
-"""Frozen instruction bundle (WRI-011) — a per-task immutable snapshot of the agent inputs.
+"""Frozen instruction bundle — a per-task immutable snapshot of the agent inputs.
 
-WRI-010 froze the *control plane* (flow YAML, role prompts, tool executables). This module freezes
+The control bundle freezes the *control plane* (flow YAML, role prompts, tool executables). This
+module freezes
 the *agent inputs* whose identity must stay stable for the task: the validated **task packet**, the
 selected **skill packages**, and the root **repository instruction files** (``AGENTS.md`` /
 ``AGENTS.override.md`` / ``CLAUDE.md``). Without this, a workspace-write node could edit its own
@@ -9,8 +10,8 @@ resumed / fallback call would receive different instructions than were validated
 agent silently rewriting its own rules.
 
 At task start the orchestrator freezes these inputs into a private, immutable bundle under
-``<private_home>/instruction-bundles/<task-id>/`` (a provider deny target — see
-:class:`~wastech_orchestrator.runtime_layout.InternalDenyPolicy.frozen_instruction_bundle`), records
+``<private_home>/runs/instruction-bundles/<task-id>/`` (a provider deny target — see
+:class:`~wastech_orchestrator.runtime_layout.InternalDenyPolicy.runs_home`), records
 one composite ``instruction_manifest_digest``, and publishes **redacted** agent-readable copies to
 the exchange. Providers read only the frozen exchange copies (never the live files), native project
 instruction discovery is disabled by the adapters, and continue/resume verifies the manifest digest
@@ -22,7 +23,7 @@ Unlike the control bundle, a live edit here is **not** a security violation (it 
 proposed diff), so there is no post-node live-mutation gate — the frozen copy is simply what the
 task uses.
 
-Identity/hash/collision primitives are the shared WRI-010/011 helpers in
+Identity/hash/collision primitives are the shared frozen-bundle helpers in
 :mod:`~wastech_orchestrator.core.flow.frozen_bundle`; containment and the chunked digest come from
 the ``providers`` interface leaves; the canonical copy is always a fresh regular file
 (``shutil.copy2``), never a hard/symlink back to live data. ``core.flow`` may import those leaves
@@ -47,7 +48,7 @@ from wastech_orchestrator.globmatch import path_matches_any
 from wastech_orchestrator.providers.artifacts import assert_contained_path, sha256_file
 from wastech_orchestrator.providers.exchange import FileInspector, default_file_inspector
 
-#: Bundle layout (all under ``<private_home>/instruction-bundles/<task-id>/``).
+#: Bundle layout (all under ``<private_home>/runs/instruction-bundles/<task-id>/``).
 _TASK_SUBDIR = "task"
 _SKILLS_SUBDIR = "skills"
 _INSTRUCTIONS_SUBDIR = "instructions"
@@ -59,18 +60,18 @@ TASK_PACKET_KEY = f"{_TASK_SUBDIR}/task.md"
 #: Bump when the on-disk bundle layout / manifest schema changes.
 _BUNDLE_FORMAT = 1
 
-#: The root repository instruction files WRI-011 freezes, in fixed injection/precedence order
-#: (root-only per the ADR scope decision — no nested discovery, no ``@``-reference closure).
+#: The root repository instruction files this bundle freezes, in fixed injection/precedence order
+#: (root-only by design — no nested discovery, no ``@``-reference closure).
 REPO_INSTRUCTION_NAMES: tuple[str, ...] = ("AGENTS.md", "AGENTS.override.md", "CLAUDE.md")
 
 #: Repo-relative globs for the *other* governance content: the versioned agent-rules tree. Together
 #: with :data:`REPO_INSTRUCTION_NAMES` this is the fixed governance set whose edits are reported to
-#: the operator (VF-20). A constant, never a config key — notification is not gated.
+#: the operator. A constant, never a config key — notification is not gated.
 GOVERNANCE_PATH_GLOBS: tuple[str, ...] = (".agents/rules/**",)
 
 
 def governance_changed_paths(paths: Iterable[str]) -> tuple[str, ...]:
-    """The sorted subset of repo-relative ``paths`` that are governance/instruction files (VF-20).
+    """The sorted subset of repo-relative ``paths`` that are governance/instruction files.
 
     Governance = the root instruction files (:data:`REPO_INSTRUCTION_NAMES`, matched by exact
     repo-root name) plus anything under :data:`GOVERNANCE_PATH_GLOBS` (``.agents/rules/**``). These
@@ -92,7 +93,7 @@ MAX_SKILL_FILES = 64
 MAX_SKILL_FILE_BYTES = 262_144
 MAX_SKILL_TOTAL_BYTES = 2_097_152
 
-#: The synthetic composite-digest entry that folds the WRI-010 control-bundle digest into the
+#: The synthetic composite-digest entry that folds the control-bundle digest into the
 #: instruction manifest digest (In-scope bullet #4) without re-freezing the control plane.
 _CONTROL_DIGEST_KEY = "control::bundle_digest"
 
@@ -118,20 +119,20 @@ class LoadedInstructionBundle:
     manifest_digest: str
     #: Every frozen ``(bundle-key, sha256)`` file entry (task packet, repository instructions, and
     #: skill packages) recomputed during verification — the synthetic control-digest entry is
-    #: excluded. Lets a resumed run repopulate ``instruction_entries`` so the WRI-009 lifecycle-vs-
-    #: packet audit check runs on resume exactly as on the fresh path (H3).
+    #: excluded. Lets a resumed run repopulate ``instruction_entries`` so the lifecycle-vs-
+    #: packet audit check runs on resume exactly as on the fresh path.
     entries: tuple[tuple[str, str], ...] = ()
 
 
 def instruction_bundle_dir(private_home: Path, task_id: str) -> Path:
-    """The private per-task frozen-instruction-bundle dir (a provider deny target, WRI-011)."""
-    from wastech_orchestrator.runtime_layout import INSTRUCTION_BUNDLE_DIRNAME
+    """The private per-task frozen-instruction-bundle dir (a provider deny target)."""
+    from wastech_orchestrator.runtime_layout import INSTRUCTION_BUNDLE_DIRNAME, runs_root
 
-    return private_home / INSTRUCTION_BUNDLE_DIRNAME / task_id
+    return runs_root(private_home) / INSTRUCTION_BUNDLE_DIRNAME / task_id
 
 
 def assert_no_required_secret(text: str, *, extra_secrets: tuple[str, ...], label: str) -> None:
-    """Fail closed if a *required* instruction input contains a KNOWN secret value (AC7).
+    """Fail closed if a *required* instruction input contains a KNOWN secret value.
 
     A task/skill/repository-instruction input must not carry a real secret: if it did, the redacted
     exchange copy the agent reads would replace that secret with ``[REDACTED]`` — silently changing
@@ -189,10 +190,10 @@ def freeze_repository_instructions(
 
     Each source is inspected no-follow, copied under ``instructions/src/`` for audit and digested;
     the returned ``(bundle-key, sha256)`` entries fold into the composite manifest digest, so
-    editing any source file changes the digest (AC3). Returns ``[]`` when the repo defines no
+    editing any source file changes the digest. Returns ``[]`` when the repo defines no
     tracked root instruction files.
 
-    VF-5: no concatenated payload is built and nothing is injected — the agent reads the live root
+    No concatenated payload is built and nothing is injected — the agent reads the live root
     files itself (they are write-denied for the run, so what it reads is immutable). The frozen
     copies here are the private audit/reproducibility record, never an agent-facing surface.
     """
@@ -221,7 +222,7 @@ def freeze_skill_package(
     *,
     inspect: FileInspector | None = None,
 ) -> FrozenSkillPackage:
-    """Freeze one selected skill's *package closure* into ``skills/<name>/...`` (WRI-011).
+    """Freeze one selected skill's *package closure* into ``skills/<name>/...``.
 
     ``skill_md_rel`` is the repo-relative POSIX path of the skill's ``SKILL.md``; its parent is the
     package directory. ``package_files_rel`` is the tracked-file closure of that directory. Only
@@ -292,7 +293,8 @@ def write_instruction_manifest(
     """Write ``manifest.json`` and return the composite ``instruction_manifest_digest``.
 
     ``entries`` are every frozen ``(bundle-key, sha256)`` pair (task packet, repository
-    instructions, and skill packages). The WRI-010 ``control_digest`` is folded in as a synthetic
+    instructions, and skill packages). The control bundle's ``control_digest`` is folded in as a
+    synthetic
     entry so one digest binds all of the task's frozen context (In-scope bullet #4). The manifest is
     an audit record — it never contains config/env contents.
     """
@@ -343,7 +345,7 @@ def load_instruction_bundle(
     Re-hashes every manifest entry file with the same no-follow identity checks and recomputes the
     composite digest (including the synthetic control-digest entry). A missing/altered file, a
     planted symlink, or a digest mismatch is fail-closed — the caller routes it to
-    ``manual_action_required`` and refuses to resume the provider session (AC9). ``expected_digest``
+    ``manual_action_required`` and refuses to resume the provider session. ``expected_digest``
     is the parent-held (state-store) value, so a provider that rewrote both a file and the manifest
     is still caught.
     """

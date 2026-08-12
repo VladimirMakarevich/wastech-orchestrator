@@ -1,4 +1,4 @@
-"""Argv dependency scanners (P3.1) — evidence, not a gate.
+"""Argv dependency scanners — evidence, not a gate.
 
 Runs the core-owned set of dependency / advisory scanners as argv child processes (never a shell
 string) through the safe process runner — mandatory timeout, allowlisted environment — and
@@ -25,7 +25,7 @@ RunProcess = Callable[..., ProcessResult]
 
 
 def _utc_now_iso() -> str:
-    """Wall-clock UTC ISO timestamp for a scanner's ``check_runs`` interval (VF-12)."""
+    """Wall-clock UTC ISO timestamp for a scanner's ``check_runs`` interval."""
     return datetime.now(UTC).isoformat()
 
 
@@ -47,7 +47,7 @@ class ScannerRun:
     timed_out: bool
     launched: bool  # False → the scanner binary is not installed (no findings, not a failure)
     report_path: str
-    # VF-12: the scanner's real wall-clock interval, bracketing its process launch.
+    # The scanner's real wall-clock interval, bracketing its process launch.
     started_at: str
     finished_at: str
 
@@ -81,7 +81,7 @@ def run_dependency_scan(
     runs: list[ScannerRun] = []
     for name, argv in scanners:
         report_path = out / f"{name}.json"
-        started_at = clock()  # VF-12: wall-clock bracket for the scanner's check_runs interval
+        started_at = clock()  # wall-clock bracket for the scanner's check_runs interval
         result = run_process(
             list(argv),
             cwd=repo_dir,

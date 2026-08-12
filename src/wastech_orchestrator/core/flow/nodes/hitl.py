@@ -1,4 +1,4 @@
-"""Standalone HITL gate node runner (P1.4 step B).
+"""Standalone HITL gate node runner.
 
 A ``hitl`` node is a bare human gate with no agent stage and no prompt: it pauses the flow for one
 durable human round-trip via :class:`~.human_gate.HumanGate` (the same primitive behind the embedded

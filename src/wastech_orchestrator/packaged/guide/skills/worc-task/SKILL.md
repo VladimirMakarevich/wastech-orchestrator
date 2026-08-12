@@ -5,7 +5,7 @@ description: Convert a raw, free-form task into a valid wastech-orchestrator tas
 
 # worc-task
 
-Turn an informal task description into **one** valid wastech-orchestrator task file. The orchestrator is not a chat agent: it takes a single task file and drives it through a fixed pipeline (refinement → planning → implementation → testing → review → fixing → summary → publishing), then commits a branch and opens a PR. **One task = one branch = one PR.** Your job here is to translate the user's raw text into a file that passes the validation gate on the first try.
+Turn an informal task description into **one** valid wastech-orchestrator task file. The orchestrator is not a chat agent: it takes a single task file and drives it through a fixed pipeline (refinement → planning → implementation → testing → review → fixing → documentation → publishing; the whole-task summary is written by the supervisor layer, not by a graph node), then commits a branch and opens a PR. **One task = one branch = one PR.** Your job here is to translate the user's raw text into a file that passes the validation gate on the first try.
 
 Speak in the user's language (default to the language they wrote in).
 
@@ -18,8 +18,8 @@ Speak in the user's language (default to the language they wrote in).
 
 1. **Read the raw text.** Draft the task from it directly. Ask **at most** a couple of clarifying questions, and only when a required field genuinely cannot be derived, or when you would otherwise have to invent acceptance criteria. Prefer to draft and let the user adjust.
 2. **Derive the fields:**
-   - `id` — a stable, lowercase slug of the title. **Must match** `^[a-z0-9][a-z0-9._-]{0,63}$` (starts with a letter/digit; then letters, digits, `.`, `_`, `-`; 1–64 chars). No spaces, no uppercase, no leading separator. Invalid ids are **rejected, never sanitized**.
-   - `title` — a short, specific, non-empty imperative line. Used for the branch slug (`agent/<id>-<slug>`) and reports.
+   - `id` — a stable, lowercase slug of the title. **Must match** `^[a-z0-9][a-z0-9._-]{0,63}$` (starts with a letter/digit; then letters, digits, `.`, `_`, `-`; 1–64 chars). No spaces, no uppercase, no leading separator. It must also have **no trailing dot** and not be a Windows device name (`con`/`prn`/`aux`/`nul`/`com1`–`com9`/`lpt1`–`lpt9`, extension included: `con.md` counts) — the id becomes a directory and a branch fragment, so both are rejected on every OS, not just Windows. Invalid ids are **rejected, never sanitized**.
+   - `title` — a short, specific, non-empty imperative line. Used for the branch slug (`<repo.branch_prefix>/<epoch>-<id>-<slug>`, e.g. `worc/1765432100-task-001-add-retry-budget`) and reports.
    - `## Description` — concrete and **non-empty**: what changes, why, and the end-state behavior.
    - `## Acceptance criteria` — a testable checklist (see below). Include it unless you deliberately want refinement to enrich the task.
    - `## Constraints` — do-not-touch areas, dependency limits, compatibility/migration limits.
@@ -51,8 +51,8 @@ Only these keys are allowed. **Any other key makes the task rejected** (`unknown
 | --- | --: | --- | --- |
 | `id` | **yes** | string | Stable id. Must match `^[a-z0-9][a-z0-9._-]{0,63}$`. |
 | `title` | **yes** | string | Short, non-empty human title. Branch slug + reports. |
-| `task_type` | no | string | Flow selector. Omit ⇒ `implementation` (the default coding pipeline). Built-ins: `implementation`, `deep_research`, `security_audit`; operators add more as `<repo>/.worc/flows/<task_type>.yaml`. An unknown type (no matching flow) fails the task before any branch is created. The task only _names_ the flow — it never edits it. |
-| `pr_title` | no | string \| null | PR title override, used verbatim instead of `title`. Does not change the branch name or commit messages. Omit to auto-generate. |
+| `task_type` | no | string | Flow selector. Omit ⇒ `implementation` (the default coding pipeline). Built-ins seeded by `install` into `<repo>/.worc/flows/`: `implementation`, `deep_research`, `security_audit`, `blog_article`, `blog_article_revise`, `content_chapter`, `content_translate`; operators add or replace any of them there. That directory is the only place flows resolve from, so an unknown type fails the task before any branch is created. The task only _names_ the flow — it never edits it. |
+| `branch_name` | no | string \| null | Full branch-name override. Omit for the auto-generated name; a value over 50 chars is warned and falls back to it, and one equal to `repo.base_branch` rejects the task. Ignored in `existing`/`current` mode. |
 | `branch_mode` | no | `new` \| `existing` \| `current` | Where task git ops point. `new` (default) forks a fresh branch from base; `existing` works in `branch_ref`; `current` uses the current checkout as-is. Overrides `repo.branch_mode`. |
 | `branch_ref` | no | string | Branch to check out — **required iff** `branch_mode: existing`; must already exist (never auto-created). Ignored for other modes. |
 | `publish` | no | `commit` \| `push` \| `pull_request` | Downgrade-only cap on where the publish node stops (`min(flow_policy, publish)`). Omit ⇒ the flow's policy; no-op on a flow with no publish node. |
@@ -63,19 +63,32 @@ Only these keys are allowed. **Any other key makes the task rejected** (`unknown
 | `contacts` | no | list of strings | Plain-text mentions in Telegram notifications/HITL prompts. Cosmetic only — no access control, no chat routing. |
 | `depends_on` | no | list of strings | Other **task ids** that must be **merged** before this task starts (non-blocking, merge-gated). For _separate_ tasks that build on each other. |
 | `subtasks` | no | list of strings | Operator-authored decomposition (one root + ordered subtask spec files → one PR). **Use worc-deco-task to author this**, not by hand. |
-| `nodes` | no | mapping | Per-node disable toggle, keyed by flow node id: `nodes.<node-id>.enabled: false`. `enabled` is the **only** valid sub-key. |
+| `priority` | no | `low` \| `mid` \| `high` | Scheduling order under `watch`: eligible tasks run `high → mid → low`, ties by natural filename order. Fail-open — anything unrecognised folds to `mid`, never a reject. `depends_on` is always stronger. |
+| `queue` | no | non-empty string | Routes the task to the worc instance whose `orchestrator.queue` selector equals it (plain string equality). Omit ⇒ `"default"`. **Fail-closed**: a non-string or empty value rejects the task. Operator concern — leave it off unless told otherwise. |
+| `nodes` | no | mapping | Per-node front matter, keyed by flow node id. Valid sub-keys: `enabled` (disable toggle) plus the best-effort `model` / `reasoning` / `provider` overrides. |
 
 Body sections: `## Description` (required, non-empty) · `## Acceptance criteria` (present ⇒ refinement auto-skipped) · `## Constraints`. If there are no `##` sections at all, the whole body is treated as the description.
 
-### `nodes` (per-node disable)
+### `nodes` (per-node disable + per-run overrides)
 
-The only per-node knob is `enabled: false`, keyed by a flow **node id**. The default `implementation` flow's node ids are `planning`, `implementation`, `testing`, `review`, `fixing` (and `refinement`, which is skipped automatically when the task is complete — not via `nodes`). Disabling effects: `planning` → stub plan, single unit; `testing` → straight to review, no checks; `review` → **commit with no agent review gate (high-risk)**; `fixing` → a failure spins the fix loop to its cap, then `manual_action_required`.
+Keyed by a flow **node id**. The default `implementation` flow's node ids are `planning`, `implementation`, `testing`, `review`, `fixing`, `documentation`, `publish` (and `refinement`, which is skipped automatically when the task is complete — not via `nodes`). Disabling effects: `planning` → no plan artifact, and the task runs as a single unit (decomposition is proposed by that node); `testing` → straight to review, no checks; `review` → **commit with no agent review gate (high-risk)**; `fixing` → a failure spins the fix loop to its cap, then `manual_action_required`. Naming an id absent from the task's flow — or one whose skip would leave the graph with no forward edge — ends the task `failed` at flow resolution, before any branch.
 
 ```yaml
 nodes:
   testing:
     enabled: false # only for a repo with no meaningful test suite
 ```
+
+The other three sub-keys overlay the flow node's declared executor **for this run only**:
+
+```yaml
+nodes:
+  review:
+    provider: claude # this run only; the flow's declaration is unchanged
+    reasoning: high
+```
+
+They are **best-effort**: the gate checks only that each is a non-empty string, and one the resolved flow or config cannot honor (a provider outside `agents.allowed`, a reasoning level the provider does not support) is warned and skipped at run time, falling back to the flow's value — never a task failure. `model` is passed through unchecked. When a stage needs a stronger model _every_ time, that belongs in the flow YAML, not in a task.
 
 ## Hard rules — never emit a task that breaks these
 
@@ -85,12 +98,12 @@ The validation gate rejects a task **before** any branch or agent runs. To alway
 2. `id` and `title` are present; `id` matches the regex above.
 3. `## Description` (or the body) is **non-empty**.
 4. **Only** the allowed front-matter keys appear; types match the table.
-5. `nodes` overrides carry **only** `enabled` (a boolean), keyed by a flow node id. Any other sub-key (including `model`/`reasoning`) is rejected (`invalid_node_override`).
+5. `nodes` overrides carry **only** the sub-keys `enabled` (a boolean), `model`, `reasoning`, `provider` (each a non-empty string), keyed by a flow node id. Any other sub-key is rejected (`invalid_node_override`).
 6. **No secrets** (tokens, keys, passwords) anywhere in the file. Credentials live in the operator's environment, never in a task.
 7. **Front-matter values are plain text.** No value may look like a CLI argument: a value that **starts with `-`** or contains an **argv-shaped token** (a backtick `` ` ``, `;`, `|`, `$(`, or a newline) is rejected as `injection_suspected`. This applies to **every** field, `title` and `contacts` included (the gate does not exempt display fields). Front matter is scanned defensively even though the body never builds CLI arguments — so put code, shell snippets, or punctuation-heavy phrasing in the **body**, and keep front-matter values to short plain labels (e.g. title `Fix parse() on empty input`, not ``Fix `parse()` on empty input``).
 8. Keep it reasonably sized (the gate caps file size, line count, and per-line length).
 
-**Provider, model, and reasoning are not task fields** — they live on the flow node (the operator's flow + config). A task cannot repoint a stage's provider or set its model. Never add `provider`, `model`, `reasoning`, or `agents` keys.
+**Provider, model, and reasoning are never _top-level_ task fields** — they are declared on the flow node (the operator's flow + config), and a task may only overlay them per node under `nodes.<node-id>`, for one run, best-effort. A bare top-level `provider`, `model`, `reasoning`, or `agents` key gets the task rejected as `unknown_top_level_field`.
 
 ## Skeleton (copy and fill in)
 
@@ -119,7 +132,7 @@ Webhook delivery should stop retrying after a bounded number of failed attempts.
 
 ## What not to do
 
-- Don't invent `provider`, `model`, `reasoning`, or `agents` keys — they are flow concerns and get the task rejected.
+- Don't put `provider`, `model`, `reasoning`, or `agents` at the **top level** — they get the task rejected. Provider/model/reasoning belong on the flow node; a per-run overlay goes under `nodes.<node-id>`, and `agents` is not a task key at all.
 - Don't add any front-matter key outside the allowed table.
 - Don't embed secrets, and don't put CLI-flag-shaped or shell-punctuation values in **any** front-matter field (including `title`/`contacts`) — a leading `-` or a `` ` ``/`;`/`|`/`$(` gets the task rejected. Put such content in the body.
 - Don't try to add, replace, or relax checks, or weaken the sandbox — those are operator config, not task fields.

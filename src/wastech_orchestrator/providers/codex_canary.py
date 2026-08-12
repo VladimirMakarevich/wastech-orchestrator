@@ -1,4 +1,4 @@
-"""No-model effective-policy canary for the Codex permission profile (WRI-003).
+"""No-model effective-policy canary for the Codex permission profile.
 
 Before ``codex exec`` starts, prove the generated profile is actually enforced on THIS host/CLI by
 running the *same* profile under ``codex sandbox -P`` (a no-model sandbox runner) and
@@ -6,7 +6,7 @@ checking that internal paths are denied and the exchange is read-only. ``codex s
 exactly the profile ``codex exec`` selects via ``default_permissions`` — one definition, two
 selectors — so a pass here is real OS-enforcement evidence, not prompt hygiene.
 
-Classification (mirrors WRI-002's error-class split):
+Classification (mirrors the provider error-class split):
 
 * a **denied path that turned out readable/writable** (a real leak) → ``CONFIGURATION_ERROR``, a
   non-fallback security result: the profile is not enforcing and no other provider should be tried;
@@ -23,11 +23,13 @@ curated exchange.
 
 from __future__ import annotations
 
+import ntpath
 import platform
 import shlex
 import shutil
 import tempfile
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -61,6 +63,8 @@ _CANARY_UNRUNNABLE = "canary-sandbox-unrunnable"
 _CAPABILITY_MARKERS: tuple[str, ...] = (
     _CANARY_UNRUNNABLE,
     "refusing to run unsandboxed",
+    "restricted read-only access requires the elevated windows sandbox backend",
+    "helper copy failed",
     "missing codex-linux-sandbox",
     "sandbox helper",
     "orchestrator_helper_launch_failed",
@@ -133,22 +137,52 @@ def default_canary_runner(argv: list[str], cwd: str, env: Mapping[str, str]) -> 
     return rc, stdout + result.stderr_text
 
 
+# Every Windows probe keeps the path as its **own argv member** rather than pre-formatting it into a
+# single `cmd /c "<command line>"` string. The safe runner quotes an individual argument correctly,
+# but `cmd /c` re-parses a one-string command line and splits it on spaces — so a workspace under,
+# say, `C:\Users\First Last\...` made the probe fail for a *malformed command*, not because the
+# sandbox denied it. On an `expect_denied=True` probe that reads as enforcement and masks
+# non-enforcement, which is why this must stay argv-shaped (inner `"..."` quoting does not help:
+# `cmd` then chokes on the nested quotes added around the whole string).
+
+
+def _native(path: str, system: str) -> str:
+    """Normalize a probe path to the target OS's separators.
+
+    Probe paths reach the canary in mixed form: the private probe is a native path, while the
+    exchange probe (``AgentRunRequest.task_path``) is POSIX-shaped even on Windows. ``cmd`` resolves
+    neither ``type C:/a/b`` nor ``echo x >> C:/a/b`` — it reports the file as missing — so an
+    unnormalized path fails the probe for a *malformed command* rather than a policy verdict: the
+    required read reads as a capability gap, and the paired ``expect_denied=True`` write reads as
+    enforcement, masking a real leak. Keyed on the injected ``system``, not the host, so the
+    deterministic suite exercises the Windows shape from any platform.
+    """
+    return ntpath.normpath(path) if system == "Windows" else path
+
+
 def _read_cmd(path: str, system: str) -> list[str]:
     if system == "Windows":
-        return ["cmd", "/c", "type", path]
+        return ["cmd", "/c", "type", _native(path, system)]
     return ["/bin/cat", path]
 
 
 def _shell_read_cmd(path: str, system: str) -> list[str]:
-    """A shell-mediated read — proves the OS layer blocks *any* program, not one tool."""
+    """A shell-mediated read — proves the OS layer blocks *any* program, not one tool.
+
+    On Windows this coincides with :func:`_read_cmd`: ``cmd`` *is* the shell there and ``type`` is
+    one of its builtins, so the read is already shell-mediated and there is no separate direct-exec
+    form to contrast it with (the POSIX pair contrasts ``/bin/cat`` with ``/bin/sh -c cat``).
+    """
     if system == "Windows":
-        return ["cmd", "/c", f"type {path}"]
+        return ["cmd", "/c", "type", _native(path, system)]
     return ["/bin/sh", "-c", f"cat {shlex.quote(path)}"]
 
 
 def _write_cmd(path: str, system: str) -> list[str]:
     if system == "Windows":
-        return ["cmd", "/c", f"echo x>> {path}"]
+        # `>>` carries no space, so it survives `cmd`'s re-parse as a redirection operator while the
+        # path stays a separately quoted argv member.
+        return ["cmd", "/c", "echo", "x", ">>", _native(path, system)]
     return ["/bin/sh", "-c", f"printf x >> {shlex.quote(path)}"]
 
 
@@ -173,7 +207,7 @@ def build_canary_probes(
     ``read-only``). The exchange, when a file is available, must be readable but not writable — and
     also serves as a positive control on the per-attempt path where no *repo_probe* is supplied.
 
-    ``private_readable`` (VF-6, read-isolation OFF) flips the private-read expectation: the private
+    ``private_readable`` (read-isolation OFF) flips the private-read expectation: the private
     set is now READABLE (the reads become positive controls) but a private WRITE must still be
     denied, so a ``private-write-denied`` probe is added to prove the profile keeps the control
     plane immutable.
@@ -261,6 +295,24 @@ def build_canary_command(
     ]
 
 
+@contextmanager
+def _sandbox_probe_env(env: Mapping[str, str], system: str) -> Iterator[dict[str, str]]:
+    """Yield the environment in which ``codex sandbox`` can exercise the generated profile.
+
+    Native Windows stores the sandbox accounts, helper, credentials, and capability grants in
+    ``CODEX_HOME``. Replacing that home would remove the grant substrate the canary is meant to
+    test. The generated ``permissions.worc`` table is still supplied as an inline ``-c`` override
+    and selected explicitly with ``-P``, so operator configuration cannot replace the tested
+    profile. POSIX sandbox backends keep no such state in ``CODEX_HOME`` and retain the stronger
+    empty-home isolation from operator configuration.
+    """
+    if system == "Windows":
+        yield dict(env)
+        return
+    with tempfile.TemporaryDirectory(prefix="worc-codexhome-") as codex_home:
+        yield {**dict(env), "CODEX_HOME": codex_home}
+
+
 def run_codex_canary(
     *,
     command: str,
@@ -281,13 +333,13 @@ def run_codex_canary(
     undemonstrable sandbox is a ``CAPABILITY_UNAVAILABLE``. Records each probe's verdict as
     redaction-safe evidence (paths only, never file contents).
 
-    Two hardening guarantees (final-review H4): (1) the probes run under a throwaway ``CODEX_HOME``
-    so the operator's ``~/.codex/config.toml`` cannot alter profile resolution — ``codex sandbox``
-    has no ``--ignore-user-config`` flag, so an empty home reproduces the ``exec`` config layering
-    (no model / no network → no credentials needed); (2) the canary refuses to return ``ok`` unless
-    at least one **positive control** — an ``expect_denied=False`` read — actually succeeded, so a
-    broken probe harness (every command failing) can never be mistaken for a fully-enforcing
-    sandbox.
+    Two hardening guarantees: (1) on POSIX the probes run under a throwaway
+    ``CODEX_HOME`` so the operator's ``~/.codex/config.toml`` cannot alter profile resolution; on
+    native Windows they retain the caller's home because it contains the sandbox grant substrate,
+    while the inline ``-c permissions.worc={...}`` override and explicit ``-P worc`` selection keep
+    the generated profile authoritative; (2) the canary refuses to return ``ok`` unless at least
+    one **positive control** — an ``expect_denied=False`` read — actually succeeded, so a broken
+    probe harness (every command failing) can never be mistaken for a fully-enforcing sandbox.
     """
     evidence: list[dict[str, object]] = []
     probes = build_canary_probes(
@@ -301,8 +353,7 @@ def run_codex_canary(
         repo_writable=extra.repo_writable,
     )
     saw_positive_control = False
-    with tempfile.TemporaryDirectory(prefix="worc-codexhome-") as codex_home:
-        probe_env = {**dict(env), "CODEX_HOME": codex_home}
+    with _sandbox_probe_env(env, system) as probe_env:
         for probe in probes:
             argv = build_canary_command(command, profile_arg, working_directory, probe)
             try:
@@ -319,13 +370,17 @@ def run_codex_canary(
             evidence.append(
                 {"probe": probe.label, "expect_denied": probe.expect_denied, "denied": denied}
             )
-            if any(marker in lowered for marker in _CAPABILITY_MARKERS):
+            capability_marker = next(
+                (marker for marker in _CAPABILITY_MARKERS if marker in lowered), None
+            )
+            if capability_marker is not None:
                 return CanaryOutcome(
                     ok=False,
                     error_class=ErrorClass.CAPABILITY_UNAVAILABLE,
                     message=(
                         f"codex sandbox could not enforce the permission profile on this host "
-                        f"(probe {probe.label!r}); the requested isolation cannot be demonstrated"
+                        f"(probe {probe.label!r}); the requested isolation cannot be demonstrated "
+                        f"({capability_marker})"
                     ),
                     evidence=tuple(evidence),
                 )
@@ -364,13 +419,13 @@ def run_codex_canary(
     return CanaryOutcome(ok=True, evidence=tuple(evidence))
 
 
-# --- No-model capability smoke (worc preflight / host gate; final-review H4/H7, WRI-006) ---------
+# --- No-model capability smoke (worc preflight / host gate) -------------------------------------
 
 #: Smoke verdicts. ``passed`` = the profile is OS-enforced here; ``unsupported`` = the sandbox could
 #: not run / demonstrate the policy on this host (maps to the pre-model ``CAPABILITY_UNAVAILABLE``
 #: classification); ``policy-failed`` = a denied path was actually read/written (maps to the
 #: non-fallback ``CONFIGURATION_ERROR`` security result). Kept distinct so preflight never silently
-#: downgrades strict isolation (WRI-006 acceptance criterion).
+#: downgrades strict isolation.
 CAPABILITY_PASSED = "passed"
 CAPABILITY_UNSUPPORTED = "unsupported"
 CAPABILITY_POLICY_FAILED = "policy-failed"
@@ -401,7 +456,7 @@ def _inventory_via_runner(
     """Run ``codex mcp list`` through the sandbox *runner* under a throwaway ``CODEX_HOME``.
 
     With the user config isolated (empty home), a strict-isolation Codex run must resolve **no** MCP
-    servers; this records the effective inventory as evidence (WRI-006 tool-surface inspection).
+    servers; this records the effective inventory as evidence for tool-surface inspection.
     Reusing the *runner* seam keeps the whole smoke deterministic when a fake runner is injected.
     """
     with tempfile.TemporaryDirectory(prefix="worc-mcp-home-") as home:
@@ -439,14 +494,14 @@ def run_codex_capability_smoke(
     read/write), then records a no-model tool-surface inventory (``codex mcp list``). Returns a
     :class:`CapabilitySmokeReport` whose ``status`` distinguishes ``passed`` / ``unsupported``
     (``CAPABILITY_UNAVAILABLE``) / ``policy-failed`` (``CONFIGURATION_ERROR``) — never silently
-    downgrading. Reusable by ``worc preflight`` (H7) and the local/manual host smoke; the
+    downgrading. Reusable by ``worc preflight`` and the local/manual host smoke; the
     deterministic suite injects a scripted *runner* + *inventory_probe* so no real sandbox spawns.
     """
     sys_name = system if system is not None else platform.system()
     root = Path(tempfile.mkdtemp(prefix="worc-cap-smoke-", dir=str(home_dir)))
     try:
         repo = root / "repo"
-        # Runtime-home dirnames come from runtime_layout (WRI-004 AST guard: no hand-joined
+        # Runtime-home dirnames come from runtime_layout (an AST guard forbids hand-joined
         # ``.worc`` / ``.worc-io`` literal), so the fixture mirrors the real layout by construction.
         control = repo / CONTROL_HOME_DIRNAME
         exchange = repo / EXCHANGE_HOME_DIRNAME

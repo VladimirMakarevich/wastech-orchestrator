@@ -1,4 +1,4 @@
-"""Memory store layout (01.1): tree creation, idempotent seeding, gitignore, POSIX paths."""
+"""Memory store layout: tree creation, idempotent seeding, gitignore, POSIX paths."""
 
 from __future__ import annotations
 
@@ -50,7 +50,7 @@ def test_ensure_store_is_idempotent_and_never_clobbers(tmp_path: Path) -> None:
 
 
 def test_memory_tree_is_covered_by_existing_worc_gitignore(tmp_path: Path) -> None:
-    # AC-S2: no new rule — the whole `.worc/` home is already ignored wholesale, which covers both
+    # No new rule — the whole `.worc/` home is already ignored wholesale, which covers both
     # the canonical store and the per-task packets under `.worc/logs/`. Assert coverage, not a rule.
     assert ".worc/" in RUNTIME_GITIGNORE_LINES
     append_runtime_excludes(tmp_path)
@@ -62,7 +62,7 @@ def test_memory_tree_is_covered_by_existing_worc_gitignore(tmp_path: Path) -> No
 
 
 def test_stored_path_strings_use_posix_form(tmp_path: Path) -> None:
-    # AC-X1: stored/compared path strings are POSIX (forward slashes) on every OS.
+    # Stored/compared path strings are POSIX (forward slashes) on every OS.
     layout = MemoryLayout(tmp_path / ".worc")
     root_posix = layout.as_posix()
     assert "\\" not in root_posix

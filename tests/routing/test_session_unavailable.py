@@ -1,4 +1,4 @@
-"""Router resume safety net — ``session_unavailable`` fresh-retry (durable sessions, P2.2).
+"""Router resume safety net — ``session_unavailable`` fresh-retry (durable sessions).
 
 When a resume attempt fails because the provider can no longer find the session, the Router retries
 the SAME provider once with a fresh session. This is infrastructure, not a quality failure: it never
@@ -34,7 +34,6 @@ class _SessionAwareProvider:
             provider_id=self.id,
             executable_found=True,
             version="1",
-            authenticated=True,
             supports_required_features=True,
             message="ok",
         )

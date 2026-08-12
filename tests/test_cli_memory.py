@@ -1,4 +1,4 @@
-"""`worc memory` CLI (04.1): show / validate (read-only); compact / restore (mutating)."""
+"""`worc memory` CLI: show / validate (read-only); compact / restore (mutating)."""
 
 from __future__ import annotations
 
@@ -147,7 +147,7 @@ def test_restore_dry_run_then_rollback(
     assert service.read_long_term(LongTermKind.SEMANTIC) == []  # dry-run changed nothing
 
     assert cli._cmd_memory_restore(config, layout, snapshot=None, dry_run=False) == 0  # type: ignore[arg-type]
-    assert len(service.read_long_term(LongTermKind.SEMANTIC)) == 1  # rolled back (AC-SF4)
+    assert len(service.read_long_term(LongTermKind.SEMANTIC)) == 1  # rolled back
 
 
 def test_restore_no_snapshots(
@@ -206,3 +206,15 @@ def test_disabled_memory_is_a_noop(
     args = argparse.Namespace(memory_action="show", log_level=None)
     assert cli.cmd_memory(args) == 0
     assert "disabled" in capsys.readouterr().out
+
+
+def test_disabled_supervisor_layer_makes_memory_a_no_op(clone: Path) -> None:
+    # The cost the quench accepts, pinned as behavior: the operator's file says `memory.enabled:
+    # true`, and every memory path reads the resolved `false` instead. The warning that closes
+    # that gap is on the load result, which `build_git_config` drops; see test_loader.
+    config = build_git_config(clone, memory_enabled=True, supervisor_enabled=False)
+    assert config.memory.enabled is False
+
+
+def test_memory_stays_on_when_the_layer_is_on(clone: Path) -> None:
+    assert build_git_config(clone, memory_enabled=True).memory.enabled is True

@@ -50,7 +50,7 @@ def test_list_item_is_scanned_with_indexed_key() -> None:
 
 @pytest.mark.parametrize("value", ["Fix `parse()` on empty input", "a | b table", "wat; now"])
 def test_display_fields_are_scanned_too_no_exemption(value: str) -> None:
-    # F5a decision: the scan stays uniform — `title` (and `contacts`) are NOT exempt. A backtick /
+    # The scan stays uniform — `title` (and `contacts`) are NOT exempt. A backtick /
     # pipe / semicolon in a display field is rejected; the rule "front-matter values are plain text"
     # is documented in the authoring guides instead of weakening the scan.
     assert scan_frontmatter({"id": "task-1", "title": value}) is not None

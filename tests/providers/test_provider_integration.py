@@ -192,7 +192,7 @@ def test_session_limit_raises_rate_limited(
     # The subscription/session-limit terminal must be RAISED as RATE_LIMITED (so the Router can fall
     # over / the orchestrator can park), NOT returned as a quality TASK_FAILURE. Claude surfaces it
     # structurally on stdout (HTTP 429 / rate_limit_event / banner, empty stderr); codex only on
-    # stderr. Both must classify identically — the exact failure that both post-mortems mis-labeled.
+    # stderr. Both must classify identically — the exact failure that was mis-labeled in the field.
     provider = _build(
         provider_name, fake_cli("session_limit", provider_name), integration_security, tmp_path
     )
@@ -294,3 +294,47 @@ def test_implements_agent_provider_protocol(
     provider = _build(provider_name, provider_name, integration_security, tmp_path)
     assert isinstance(provider, AgentProvider)
     assert provider.id == provider_name
+
+
+@pytest.mark.parametrize("provider_name", PROVIDERS)
+def test_read_only_git_evidence_end_to_end_argv(
+    provider_name: str,
+    fake_cli: Callable[..., str],
+    integration_security: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    """A granted read-only node launches cleanly on both adapters, each in its own dialect.
+
+    The point is not a symmetric argv — the two providers reach the same observable contract
+    (history readable, repository unchangeable, nothing published) by different means. Claude scopes
+    a shell to the read-only verbs and leans on its OS sandbox; Codex needs no verb list at all,
+    because its ``read-only`` sandbox mounts the workspace read and disables the network, so every
+    mutating verb already fails. This asserts each side's real, launched argv.
+    """
+    import json
+
+    provider = _build(
+        provider_name, fake_cli("success", provider_name), integration_security, tmp_path
+    )
+    request = make_request(permission_profile="read-only", git_evidence=True)
+    assert provider.run(request).status is RunStatus.SUCCEEDED
+    attempt = (
+        tmp_path / "logs" / "task-001" / "stages" / "planning" / "run-000001" / f"1-{provider_name}"
+    )
+    argv = json.loads((attempt / "request.json").read_text(encoding="utf-8"))["argv"]
+
+    if provider_name == "claude":
+        tools = argv[argv.index("--tools") + 1].split(",")
+        allowed = argv[argv.index("--allowedTools") + 1].split(",")
+        assert "Bash" in tools  # the existence gate takes bare names
+        assert "Bash" not in allowed  # ...but never a bare shell in the auto-approve list
+        assert "Bash(git log:*)" in allowed  # only the scoped read-only verbs are approved
+        # The floor is unchanged and beats any allow: publishing stays the orchestrator's.
+        assert "Bash(git commit:*)" in argv[argv.index("--disallowedTools") + 1]
+    else:
+        # Codex carries no verb dimension. What holds the node to reading is the profile it selects.
+        profile = next(a for a in argv if a.startswith("permissions.worc="))
+        assert '"extends" = ":read-only"' in profile
+        assert '"network" = { "enabled" = false }' in profile
+        assert "git log" not in profile  # no allowlist here, by design

@@ -14,7 +14,7 @@ from wastech_orchestrator.install.detect import gh_auth_ok, git_version, has_gh
 
 _LOG = logging.getLogger(__name__)
 
-#: The minimum git ``(major, minor)`` for the WRI-009 hook-neutralization: ``core.hooksPath`` (git
+#: The minimum git ``(major, minor)`` for the hook-neutralization: ``core.hooksPath`` (git
 #: 2.9, 2016) is the override every orchestrator git command relies on to keep a target-repo hook
 #: from executing. Older git silently ignores it, so the control would be ineffective.
 _MIN_GIT_VERSION = (2, 9)
@@ -31,11 +31,20 @@ class GhNotAvailableError(OSError):
 
 
 class GitControlUnavailableError(OSError):
-    """Git is too old to enforce the WRI-009 git-control neutralization (needs >= 2.9)."""
+    """Git is too old to enforce the git-control neutralization (needs >= 2.9)."""
+
+
+class ProviderNotLoggedInError(OSError):
+    """An allowed agent provider's CLI reports no stored credentials, so a run must not start.
+
+    Raised by the CLI's startup gate rather than here: the check needs the config and the provider
+    composition, which this module deliberately knows nothing about. Only the exception type lives
+    beside its siblings, so every startup refusal is handled as one family.
+    """
 
 
 def require_git_control() -> None:
-    """Fail fast unless git honors the WRI-009 hook-neutralization (``core.hooksPath``, git 2.9+).
+    """Fail fast unless git honors the hook-neutralization (``core.hooksPath``, git 2.9+).
 
     Every orchestrator git command runs with ``-c core.hooksPath=<private empty dir>`` so a
     target-repo hook can never execute in an orchestrator git process. Git older than 2.9 silently
@@ -46,9 +55,11 @@ def require_git_control() -> None:
     version = git_version()
     if version is not None and version < _MIN_GIT_VERSION:
         raise GitControlUnavailableError(
-            f"git {version[0]}.{version[1]} is too old for orchestrator isolation: the WRI-009 "
-            f"`core.hooksPath` hook-neutralization needs git >= {_MIN_GIT_VERSION[0]}."
-            f"{_MIN_GIT_VERSION[1]} (2016). Upgrade git."
+            f"git {version[0]}.{version[1]} is too old for orchestrator isolation: every "
+            f"orchestrator git command runs with `-c core.hooksPath=<empty dir>` so a hook in the "
+            f"target repository can never execute, and git below "
+            f"{_MIN_GIT_VERSION[0]}.{_MIN_GIT_VERSION[1]} (2016) silently ignores that key, which "
+            f"would leave repository hooks live. Upgrade git."
         )
 
 

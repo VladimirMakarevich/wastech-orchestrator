@@ -1,4 +1,4 @@
-"""`watch` reads its pending queue from the configured artifact root (backlog: interactive
+"""`watch` reads its pending queue from the configured artifact root (interactive
 installer) — under the in-repo footprint that is the bound repo itself, not the cwd."""
 
 from __future__ import annotations
@@ -16,7 +16,10 @@ from wastech_orchestrator.install.config_writer import InstallSpec, build_and_va
 from wastech_orchestrator.providers.base import ProviderId
 
 # Slow integration tests: real watch-daemon lifecycle (pid files, process control).
-pytestmark = pytest.mark.slow
+# ``run``/``watch``/``rerun`` probe every allowed provider's credentials before starting. These
+# tests are about command orchestration, not credentials, and the config names the real CLIs — so
+# the gate is disarmed module-wide and asserted on directly by its own tests instead.
+pytestmark = [pytest.mark.slow, pytest.mark.usefixtures("no_provider_auth_gate")]
 
 
 def test_pending_dir_is_under_the_bound_repo(tmp_path: Path) -> None:
@@ -34,7 +37,7 @@ def test_pending_dir_is_under_the_bound_repo(tmp_path: Path) -> None:
     assert cli.pending_dir(config) == repo / "tasks" / "pending"
 
 
-# --- stop / restart daemon control (backlog: stop/restart) ----------------------------------------
+# --- stop / restart daemon control ---------------------------------------------------------------
 
 
 class _FakeOrch:
@@ -167,7 +170,7 @@ def test_watch_loop_event_present_honors_stop_file(
     assert orch.refresh_calls == 1  # stop-file noticed in the interruptible wait; no second tick
 
 
-# --- idle-gap memory cleanup hook (04.3 / AC-C2) --------------------------------------------------
+# --- idle-gap memory cleanup hook -----------------------------------------------------------------
 
 
 def test_idle_cleanup_runs_when_no_task_active(
@@ -188,7 +191,7 @@ def test_idle_cleanup_runs_when_no_task_active(
 def test_idle_cleanup_skipped_while_task_active(
     in_repo_config: OrchestratorConfig, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # AC-C2: a busy slot (RUNNING soft-pause) must never trigger cleanup.
+    # A busy slot (RUNNING soft-pause) must never trigger cleanup.
     monkeypatch.setattr(cli, "has_active_task", lambda _config: True)
     calls: list[int] = []
     cli.watch_loop(
@@ -204,7 +207,7 @@ def test_idle_cleanup_skipped_while_task_active(
 def test_build_cleanup_hook_none_when_disabled(
     in_repo_config: OrchestratorConfig,
 ) -> None:
-    # Memory disabled (Q10) → no cleanup is ever scheduled.
+    # Memory disabled → no cleanup is ever scheduled.
     assert cli._build_cleanup_hook(in_repo_config) is None
 
 

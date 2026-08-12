@@ -7,7 +7,12 @@ from dataclasses import replace
 import pytest
 
 from wastech_orchestrator.config.loader import ConfigError, loads_config
-from wastech_orchestrator.config.schema import OrchestratorConfig, PathsConfig
+from wastech_orchestrator.config.schema import (
+    OrchestratorConfig,
+    PathsConfig,
+    SupervisorObserveConfig,
+    SupervisorTurnConfig,
+)
 from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.providers.base import ProviderId
 
@@ -39,7 +44,7 @@ def test_packaged_config_validates_clean(base_config: OrchestratorConfig) -> Non
 def test_legacy_codex_sandbox_value_is_rejected(
     base_config: OrchestratorConfig, value: str
 ) -> None:
-    # WRI-003: the access level lives in permission_profile; a safe legacy `sandbox` is rejected.
+    # The access level lives in permission_profile; a safe legacy `sandbox` is rejected.
     cfg = _with_codex(base_config, sandbox=value)
     with pytest.raises(ConfigError) as exc:
         validate_config(cfg)
@@ -66,7 +71,7 @@ def test_protected_paths_globs_validate_clean(base_config: OrchestratorConfig) -
 def test_read_isolation_off_formula(
     base_config: OrchestratorConfig, strict: bool, disable: bool, expected_off: bool
 ) -> None:
-    # VF-6: effective read-isolation = disable_read_isolation OR NOT strict_isolation, defined once
+    # Effective read-isolation = disable_read_isolation OR NOT strict_isolation, defined once
     # on SecurityConfig.read_isolation_off (strict_isolation always wins toward relaxation).
     cfg = _with_security(base_config, strict_isolation=strict, disable_read_isolation=disable)
     assert cfg.security.read_isolation_off is expected_off
@@ -75,7 +80,7 @@ def test_read_isolation_off_formula(
 def test_disable_read_isolation_default_and_validates(
     base_config: OrchestratorConfig,
 ) -> None:
-    # VF-6: the packaged/shipped default is now True (read-isolation OFF out of the box); both the
+    # The packaged/shipped default is now True (read-isolation OFF out of the box); both the
     # default and an explicit False validate cleanly.
     assert base_config.security.disable_read_isolation is True
     assert validate_config(_with_security(base_config, disable_read_isolation=False)) == []
@@ -146,7 +151,7 @@ def _codex_primary(config: OrchestratorConfig) -> OrchestratorConfig:
 
 
 def test_supervisor_provider_not_in_allowed_is_rejected(base_config: OrchestratorConfig) -> None:
-    # F39: an explicit supervisor.provider is validated ∈ agents.allowed, symmetric with flow nodes.
+    # An explicit supervisor.provider is validated ∈ agents.allowed, symmetric with flow nodes.
     cfg = replace(
         _with_agents(base_config, allowed=(ProviderId.CLAUDE,)),
         supervisor=replace(base_config.supervisor, provider=ProviderId.CODEX),
@@ -157,11 +162,15 @@ def test_supervisor_provider_not_in_allowed_is_rejected(base_config: Orchestrato
 
 
 def test_supervisor_reasoning_valid_for_pinned_provider(base_config: OrchestratorConfig) -> None:
-    # F39: reasoning is checked against the pinned provider (codex), not the primary (claude).
+    # Reasoning is checked against the pinned provider (codex), not the primary (claude).
     # `minimal` is codex-only, so it is valid here even though the primary is claude.
     cfg = replace(
         base_config,
-        supervisor=replace(base_config.supervisor, provider=ProviderId.CODEX, reasoning="minimal"),
+        supervisor=replace(
+            base_config.supervisor,
+            provider=ProviderId.CODEX,
+            finalize=SupervisorTurnConfig(reasoning="minimal"),
+        ),
     )
     assert validate_config(cfg) == []
 
@@ -169,30 +178,38 @@ def test_supervisor_reasoning_valid_for_pinned_provider(base_config: Orchestrato
 def test_supervisor_reasoning_rejected_against_pinned_provider(
     base_config: OrchestratorConfig,
 ) -> None:
-    # F39: primary=codex but the supervisor is pinned to claude; `minimal` is codex-only, so it is
+    # Primary=codex but the supervisor is pinned to claude; `minimal` is codex-only, so it is
     # rejected against the RESOLVED supervisor provider (claude) — proving reasoning no longer
     # resolves through the global primary (which would have accepted it).
     cfg = replace(
         _codex_primary(base_config),
-        supervisor=replace(base_config.supervisor, provider=ProviderId.CLAUDE, reasoning="minimal"),
+        supervisor=replace(
+            base_config.supervisor,
+            provider=ProviderId.CLAUDE,
+            finalize=SupervisorTurnConfig(reasoning="minimal"),
+        ),
     )
     with pytest.raises(ConfigError) as exc:
         validate_config(cfg)
-    assert any("supervisor.reasoning" in issue for issue in exc.value.issues)
+    assert any("supervisor.finalize.reasoning" in issue for issue in exc.value.issues)
 
 
 def test_inherited_supervisor_model_vendor_mismatch_warns(base_config: OrchestratorConfig) -> None:
-    # F39: a claude-looking supervisor.model with provider unset under a codex primary 400s at
+    # A claude-looking supervisor.model with provider unset under a codex primary 400s at
     # runtime (masked by fallback). validate_config WARNS (fallback exists → not fatal), catching
     # the silent mismatch that a `ready` preflight otherwise missed.
     cfg = replace(
         _codex_primary(base_config),
         supervisor=replace(
-            base_config.supervisor, provider=None, model="claude-opus-5", reasoning=None
+            base_config.supervisor,
+            provider=None,
+            observe=SupervisorObserveConfig(),
+            finalize=SupervisorTurnConfig(model="claude-opus-5"),
         ),
     )
     warnings = validate_config(cfg)
-    assert any("supervisor.model" in w and "codex" in w for w in warnings)
+    # Named per phase: with three models to check, "supervisor.model" alone would not say which.
+    assert any("supervisor.finalize.model" in w and "codex" in w for w in warnings)
 
 
 def test_inherited_supervisor_unknown_model_does_not_warn(base_config: OrchestratorConfig) -> None:
@@ -201,7 +218,13 @@ def test_inherited_supervisor_unknown_model_does_not_warn(base_config: Orchestra
     cfg = replace(
         _codex_primary(base_config),
         supervisor=replace(
-            base_config.supervisor, provider=None, model="custom-inhouse-1", reasoning=None
+            base_config.supervisor,
+            provider=None,
+            # All three phases: the vendor check runs per phase, so leaving one at a claude model
+            # would (correctly) warn about that phase and mask what this test is about.
+            observe=SupervisorObserveConfig(model="custom-inhouse-1"),
+            finalize=SupervisorTurnConfig(model="custom-inhouse-1"),
+            handoff=SupervisorTurnConfig(model="custom-inhouse-1"),
         ),
     )
     assert validate_config(cfg) == []
@@ -284,10 +307,17 @@ def test_claude_minimal_reasoning_is_rejected(base_config: OrchestratorConfig) -
 def test_supervisor_reasoning_uses_global_primary_provider(
     base_config: OrchestratorConfig,
 ) -> None:
-    bad = replace(base_config, supervisor=replace(base_config.supervisor, reasoning="minimal"))
+    bad = replace(
+        base_config,
+        supervisor=replace(
+            base_config.supervisor, observe=SupervisorObserveConfig(reasoning="minimal")
+        ),
+    )
     with pytest.raises(ConfigError) as exc:
         validate_config(bad)
-    assert any("supervisor.reasoning" in issue and "claude" in issue for issue in exc.value.issues)
+    assert any(
+        "supervisor.observe.reasoning" in issue and "claude" in issue for issue in exc.value.issues
+    )
 
 
 def test_negative_poll_interval_is_rejected(base_config: OrchestratorConfig) -> None:
@@ -391,7 +421,7 @@ def test_retry_disable_via_zero_attempts_validates_clean(base_config: Orchestrat
     assert validate_config(cfg) == []
 
 
-# --- operator confirmation gates (idea 27 / 29): on requires telegram (fail-closed) ----------
+# --- operator confirmation gates: on requires telegram (fail-closed) -------------------------
 
 
 def _with_auto_mode(config: OrchestratorConfig, **changes: object) -> OrchestratorConfig:
@@ -429,3 +459,96 @@ def test_confirmation_gates_with_telegram_validate_clean(base_config: Orchestrat
     cfg = _with_auto_mode(cfg, confirm_next_task=True)
     cfg = _with_claude_gate(cfg, on=True)
     assert validate_config(cfg) == []
+
+
+def test_allow_git_evidence_defaults_off_and_validates(base_config: OrchestratorConfig) -> None:
+    # The git-evidence grant is opt-in: absent the key, a flow that declares git_evidence gets
+    # nothing. Both the default and an explicit True validate cleanly.
+    assert base_config.security.allow_git_evidence is False
+    assert validate_config(_with_security(base_config, allow_git_evidence=True)) == []
+
+
+def test_loader_parses_allow_git_evidence(packaged_config_text: str) -> None:
+    # A key the loader does not know is a key that is silently ignored, so parse it from the
+    # packaged security block explicitly: shipped `false`, and an explicit `true` honored.
+    assert loads_config(packaged_config_text).config.security.allow_git_evidence is False
+    text = packaged_config_text.replace("allow_git_evidence: false", "allow_git_evidence: true")
+    assert "allow_git_evidence: true" in text  # guard: the packaged key still exists
+    assert loads_config(text).config.security.allow_git_evidence is True
+
+
+# --- supervisor.enabled: false (P3) ------------------------------------------
+
+
+def test_disabled_layer_reports_its_inert_keys_as_one_warning(
+    base_config: OrchestratorConfig,
+) -> None:
+    config = replace(base_config, supervisor=replace(base_config.supervisor, enabled=False))
+    warnings = validate_config(config)
+    inert = [w for w in warnings if "supervisor.enabled: false" in w]
+    assert len(inert) == 1
+    assert "role_file / provider / observe / finalize / handoff" in inert[0]
+    assert "not validated" in inert[0]
+
+
+def test_disabled_layer_warns_instead_of_refusing_a_config_it_would_reject(
+    base_config: OrchestratorConfig,
+) -> None:
+    # The whole contract of the early return, in one pair. This config is fatal three ways with the
+    # layer on — a provider outside `agents.allowed`, a traversing `role_file`, and a reasoning
+    # level the resolved provider rejects. With the layer off none of the three values is ever read,
+    # so refusing would only punish an operator who left the block behind.
+    broken = replace(
+        base_config.supervisor,
+        provider=ProviderId.CODEX,
+        role_file="../escape.md",
+        finalize=replace(base_config.supervisor.finalize, reasoning="nonsense"),
+    )
+    on = replace(
+        base_config,
+        agents=replace(base_config.agents, allowed=(ProviderId.CLAUDE,)),
+        supervisor=replace(broken, enabled=True),
+    )
+    with pytest.raises(ConfigError) as exc:
+        validate_config(on)
+    assert any("supervisor.provider" in i for i in exc.value.issues)
+    assert any("role_file" in i for i in exc.value.issues)
+    assert any("finalize.reasoning" in i for i in exc.value.issues)
+
+    off = replace(on, supervisor=replace(broken, enabled=False))
+    assert any("supervisor.enabled: false" in w for w in validate_config(off))  # never raises
+
+
+def test_dynamic_skills_without_the_layer_warns(base_config: OrchestratorConfig) -> None:
+    # Fail-open, not fatal: "only the operator's flow pins" is a correct degradation. But it is
+    # silent, which is what earns the warning.
+    config = replace(
+        base_config,
+        skills=replace(base_config.skills, dynamic=True),
+        supervisor=replace(base_config.supervisor, enabled=False),
+    )
+    warnings = [w for w in validate_config(config) if "skills.dynamic" in w]
+    assert len(warnings) == 1
+    assert "supervisor.enabled is false" in warnings[0]
+    assert "pinned" in warnings[0]
+
+
+def test_dynamic_skills_with_the_layer_on_is_silent(base_config: OrchestratorConfig) -> None:
+    config = replace(base_config, skills=replace(base_config.skills, dynamic=True))
+    assert not [w for w in validate_config(config) if "skills.dynamic" in w]
+
+
+def test_a_bare_skills_block_also_triggers_the_dynamic_warning() -> None:
+    # `dynamic` resolves to TRUE for a present block without the key (the loader's documented
+    # default), so this warning can fire for an operator who never typed the word. Pinned here so a
+    # future change to that default fails loudly rather than silently muting the warning.
+    text = (
+        'repo:\n  url: "git@example.com:o/r.git"\n'
+        "agents:\n  allowed: [claude]\n  providers:\n"
+        '    claude:\n      command: "claude"\n      primary: true\n'
+        "skills:\n  strict: false\n"
+        "supervisor:\n  enabled: false\n"
+    )
+    config = loads_config(text).config
+    assert config.skills.dynamic is True
+    assert any("skills.dynamic" in w for w in validate_config(config))

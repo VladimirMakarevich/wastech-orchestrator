@@ -6,19 +6,21 @@
 # match the change just shipped (workspace-write, resuming the implementation editing lineage), and
 # its edits join the same diff the orchestrator commits. Refinement is skipped deterministically
 # (`when: derived.needs_refinement`); any other node can be disabled per task via
-# `nodes.<id>.enabled: false` (driven by node id, not a `when` fact — the bounded per-task exception,
-# PRE.3).
+# `nodes.<id>.enabled: false` — the one place a task may name a node id instead of stating a `when`
+# fact, deliberately bounded to this on/off switch.
 #
-# Layered on across P2: durable sessions (P2.2 `editing_lineage`), review-as-evaluator (P2.3), and
-# the core-owned commit-candidate mutation guard on `checks` (P2.4 — active whenever a `checks` node
-# is present, not declared here). An optional non-blocking `testing_quality` evaluator (the shared
+# Three behaviors here are not visible in the YAML: `implement`/`fixing` share one durable session
+# (`editing_lineage`), `review` is an evaluator (findings gate the graph, they are not advisory), and
+# the core enforces the commit-candidate mutation guard whenever a `checks` node is present — it is
+# not declared here. An optional non-blocking `testing_quality` evaluator (the shared
 # evaluator runner already supports its self-cap) is NOT shipped in this default flow: it is a pure
 # graph-shape choice — an operator who wants it adds the node to their own flow YAML.
 #
-# NOTE: the supervisor is NOT a graph node. It is a constant orchestrator layer ABOVE any flow
+# NOTE: the supervisor is NOT a graph node. It is an orchestrator layer ABOVE any flow
 # (summary + per-step advisory oversight, configured in config.yaml: supervisor). There is NO
-# `summary` node here: the constant supervisor layer writes the summary at whole-task close (before
-# publish) and observes every completed step.
+# `summary` node here: the whole-task summary is written at close, before publish — by the
+# supervisor layer at the cadence config.yaml sets, and deterministically from the run's own
+# recorded facts when that layer is switched off (`supervisor.enabled: false`).
 #
 # ----------------------------------------------------------------------------------------------------
 # Per-node tuning (ALL fields below are OPTIONAL — omit one to inherit the default). Every
@@ -165,15 +167,22 @@ flow:
     test_fix: 15
     review_fix: 15
 
-  # Flow-local supervisor prompts + the tech-debt/follow-ups opt-in (prompt-and-supervisor ADR). The
+  # Flow-local supervisor prompts + the tech-debt/follow-ups opt-in. The
   # supervisor is a constant layer above the flow, not a node; this block only reshapes ITS wording
   # (the structured-output schemas stay in code). `role_file` overrides the global observe lens;
   # `finalize_role_file` is the final-summary emphasis; `emit_follow_ups` opts the finalize turn into
   # the evidence-gated `follow_ups` array (a code-oriented capability — research/prose flows omit it).
+  # `observe.mode: events` is stated here rather than inherited so this flow's cadence is visible where
+  # its prompts are: `emit_follow_ups: true` means the finalize turn's follow-ups and the memory delta
+  # are worth grounding in observed deviations, so `none` would starve them — but a note on every
+  # ordinary step bought nothing. `events` observes only a rework loop, a failed step, or a provider
+  # fallback, which is exactly what a reviewer of a long implementation run needs flagged.
   supervisor:
     role_file: implementation/supervisor.md
     finalize_role_file: implementation/summary.md
     emit_follow_ups: true
+    observe:
+      mode: events
 
   decomposition:
     proposed_by: planning

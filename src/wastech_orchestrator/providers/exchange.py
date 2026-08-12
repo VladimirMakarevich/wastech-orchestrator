@@ -1,4 +1,4 @@
-"""Exchange publication boundary (WRI-001, .agents/rules/security.md).
+"""Exchange publication boundary — the only provider-readable orchestration surface.
 
 The exchange root ``<repo>/.worc-io/<task-id>/`` is the **only** provider-readable orchestration
 surface. Everything that crosses into it does so through :func:`publish_to_exchange`, a single
@@ -13,9 +13,10 @@ redaction + path-safety seam:
 * the write is atomic (temp + :func:`os.replace`) and LF byte-stable.
 
 :func:`build_exchange_manifest` re-derives the clean-surface fingerprint (file type, link
-identity/count, relative name, size, content digest) and is the seam WRI-002/WRI-007 diff pre/post
-attempt and on seal. Per-OS filesystem inspection is behind the injectable :data:`FileInspector`
-seam so both the POSIX and native-Windows fail-closed branches are unit-testable on any host.
+identity/count, relative name, size, content digest) and is the seam the tamper check diffs
+pre/post attempt and on seal. Per-OS filesystem inspection is behind the injectable
+:data:`FileInspector` seam so both the POSIX and native-Windows fail-closed branches are
+unit-testable on any host.
 
 This module is a leaf (``.importlinter`` ``providers-are-leaf``): it must not import ``core`` /
 ``memory``, so it carries its own small atomic writer rather than reusing ``memory._io`` /
@@ -35,6 +36,7 @@ import unicodedata
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from wastech_orchestrator.providers.artifacts import (
     PathIdentityError,
@@ -87,7 +89,7 @@ def posix_file_facts(path: Path) -> FileFacts:
 def windows_file_facts(path: Path) -> FileFacts:
     """:data:`FileInspector` for native Windows — reparse points, hard-link count, and NTFS ADS.
 
-    Exercised on a real Windows host by the WRI-006 cross-platform gate; on other hosts the fake
+    Exercised on a real Windows host by the cross-platform gate; on other hosts the fake
     inspector drives the same fail-closed branches. Fails closed (:class:`ExchangeError`) rather
     than guessing when a Win32 query cannot be completed on a regular file.
     """
@@ -250,7 +252,7 @@ class ExchangeEntry:
 
 @dataclass(frozen=True)
 class ExchangeManifest:
-    """The clean-surface fingerprint of one task's exchange (WRI-002/WRI-007 diff two of these)."""
+    """The clean-surface fingerprint of one task's exchange (the tamper check diffs two)."""
 
     task_id: str
     entries: tuple[ExchangeEntry, ...]
@@ -283,8 +285,8 @@ def diff_exchange_manifests(before: ExchangeManifest, after: ExchangeManifest) -
     Empty means the curated exchange is byte-for-byte unchanged. Compares by relative name and
     content digest (plus regular-file identity), so a content edit, an add/delete/rename, or a
     hard-link/identity swap is reported — but a timestamp-only touch is **not** (mtime is not in the
-    fingerprint). WRI-002 diffs a pre-attempt manifest against a post-attempt one; any change is a
-    non-fallback policy violation and the changed copy is never consumed downstream.
+    fingerprint). The orchestrator diffs a pre-attempt manifest against a post-attempt one; any
+    change is a non-fallback policy violation and the changed copy is never consumed downstream.
     """
     before_by_name = {entry.relname: entry for entry in before.entries}
     after_by_name = {entry.relname: entry for entry in after.entries}
@@ -363,7 +365,7 @@ def assert_exchange_current_task_only(
 
     The pre-launch invariant: the exchange root is a real (non-symlink) directory whose only child
     is ``<task_id>`` (a real directory), or it is absent/empty. A foreign task dir, a stray file, or
-    a symlinked root/task dir fails closed. Terminal sealing/restoration is WRI-007.
+    a symlinked root/task dir fails closed. Sealing a terminal exchange is a separate step.
     """
     inspector = inspect or default_file_inspector()
     root = Path(exchange_root)
@@ -400,6 +402,7 @@ def assert_orchestration_paths_contained(
             ("check_artifacts_path", request.check_artifacts_path),
             ("review_artifacts_path", request.review_artifacts_path),
             ("human_input_path", request.human_input_path),
+            ("supervisor_packet_path", request.supervisor_packet_path),
         )
         if value
     ]
@@ -422,16 +425,62 @@ def assert_orchestration_paths_contained(
 def clear_exchange_task_dir(exchange_root: str | Path, task_id: str) -> None:
     """Remove a task's active exchange dir (fresh/restart start clean; interim terminal reset).
 
-    Interim helper: WRI-007 replaces the terminal use with a quiescence-gated seal → checksum-verify
-    into private audit → remove, plus contaminated-tree quarantine. Robust Windows read-only/locked
-    handling is likewise WRI-007's; here a failure surfaces rather than being swallowed.
+    Interim helper: the terminal path is instead a quiescence-gated seal → checksum-verify into
+    private audit → remove, plus contaminated-tree quarantine. Robust Windows read-only/locked
+    handling belongs to that sealing path too; here a failure surfaces rather than being swallowed.
     """
     task_dir = exchange_task_dir(exchange_root, task_id)
     if os.path.lexists(task_dir):
         shutil.rmtree(task_dir)
 
 
-# --- Native-Windows helpers (exercised on a real Windows host by WRI-006) ------------------------
+# --- Native-Windows helpers (exercised on a real Windows host by the CI gate) ---------------------
+
+
+def _kernel32() -> Any:
+    """``kernel32`` with explicit prototypes for every call the helpers below make.
+
+    Declaring ``restype``/``argtypes`` is a correctness requirement, not documentation: the ctypes
+    default ``restype`` is ``c_int``, which silently truncates a 64-bit ``HANDLE`` to 32 bits. A
+    ``FindFirstStreamW`` find-handle is a pointer-width value, so the truncated handle both defeats
+    the ``INVALID_HANDLE_VALUE`` guard (a truncated ``-1`` never equals the 64-bit sentinel) and
+    faults with an access violation once handed back to ``FindNextStreamW``.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    # `unused-ignore`: typeshed exposes `WinDLL` only when `sys.platform == "win32"`, so the ignore
+    # is required on the Linux CI runner and redundant when mypy runs natively on Windows.
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined,unused-ignore]
+    k32.CreateFileW.restype = wintypes.HANDLE
+    k32.CreateFileW.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    k32.GetFileInformationByHandle.restype = wintypes.BOOL
+    k32.GetFileInformationByHandle.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+    k32.FindFirstStreamW.restype = wintypes.HANDLE
+    k32.FindFirstStreamW.argtypes = [
+        wintypes.LPCWSTR,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+    ]
+    k32.FindNextStreamW.restype = wintypes.BOOL
+    k32.FindNextStreamW.argtypes = [wintypes.HANDLE, ctypes.c_void_p]
+    # A stream-enumeration handle is a *find* handle: it must be released with `FindClose`.
+    # `CloseHandle` rejects it (ERROR_INVALID_HANDLE) and leaks it, which keeps a handle open on the
+    # enumerated file and makes a later rename of a parent directory fail with ERROR_ACCESS_DENIED.
+    k32.FindClose.restype = wintypes.BOOL
+    k32.FindClose.argtypes = [wintypes.HANDLE]
+    k32.CloseHandle.restype = wintypes.BOOL
+    k32.CloseHandle.argtypes = [wintypes.HANDLE]
+    return k32
 
 
 def _windows_link_count(path: Path) -> int:
@@ -439,7 +488,7 @@ def _windows_link_count(path: Path) -> int:
     import ctypes
     from ctypes import wintypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32 = _kernel32()
     generic_read = 0x80000000
     file_share_all = 0x1 | 0x2 | 0x4
     open_existing = 3
@@ -485,7 +534,7 @@ def _windows_alt_streams(path: Path) -> tuple[str, ...]:
     import ctypes
     from ctypes import wintypes
 
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+    kernel32 = _kernel32()
     find_first_stream_info_standard = 0
 
     class _StreamData(ctypes.Structure):
@@ -509,5 +558,5 @@ def _windows_alt_streams(path: Path) -> tuple[str, ...]:
             if not kernel32.FindNextStreamW(handle, ctypes.byref(data)):
                 break
     finally:
-        kernel32.CloseHandle(handle)
+        kernel32.FindClose(handle)
     return tuple(streams)

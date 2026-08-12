@@ -2,7 +2,7 @@
 
 This cookbook shows common ways to use **wastech-orchestrator**. It is written for operators who run the orchestrator and for developers who want a practical path from "empty workspace" to "task processed into a Pull Request".
 
-The canonical product reference remains the code and [worc_architecture.md](worc_architecture.md). The full CLI surface (`install`, `preflight`, `telegram-test`, `run`, `rerun`, `finalize`, `prs`, `merge-task`, `watch`, `stop`, `restart`, `status`, `top`, `shell`, `list`, `tasks`, `completion`, `logs`, `upgrade-config`, `upgrade-docs`) exists in the current codebase; this guide focuses on the everyday subset.
+The canonical product reference remains the code and [worc_architecture.md](worc_architecture.md). The full CLI surface (`install`, `preflight`, `validate-flow`, `telegram-test`, `run`, `promote`, `rerun`, `finalize`, `prs`, `merge-task`, `watch`, `stop`, `restart`, `status`, `top`, `shell`, `list`, `tasks`, `completion`, `clear`, `logs`, `runs`, `memory`, `upgrade-config`, `upgrade-docs`) exists in the current codebase; this guide focuses on the everyday subset.
 
 ## 1. Install Into A Repository
 
@@ -33,7 +33,9 @@ worc install .                 # interactive wizard (same on macOS)
 worc install . --non-interactive --provider codex --no-create-pr
 ```
 
-Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, the agent task-authoring `guide/` (the packaged `worc/` docs copied to `.worc/guide/`), the editable `flows/` copies (built-in flows + their per-flow prompt dirs), SQLite `state.db` (with `-wal`/`-shm`), `orchestrator.pid`, `logs/`, and `workspace/`, plus the `tasks/rejected` quarantine. (Check logs are not a top-level directory — they live under `logs/<task-id>/checks/`.) `install` appends two lines — `.worc/` and the sibling gitignored `.worc-io/` exchange — to the repo's tracked `.gitignore`. The only things kept tracked outside `.worc/`/`.worc-io/` are the `tasks/` lifecycle dirs (`pending/`/`done/`/`failed/`) at the repo root — they are intentionally git-tracked, and the task file plus its `<id>.summary.md` (in `done/` or `failed/`) are the audit trail the orchestrator commits.
+Everything the orchestrator generates lives under a single gitignored `<repo>/.worc/` home: `config.yaml`, the agent task-authoring `guide/` (the packaged `guide/` docs copied to `.worc/guide/`), the editable `flows/` copies (built-in flows + their per-flow prompt dirs), the `tools/` copies (executables the packaged `tool` nodes resolve against), SQLite `state.db` (with `-wal`/`-shm`), `orchestrator.pid`, `logs/`, `runs/` (per-task frozen bundles + sealed exchanges), `memory/`, and `workspace/`, plus the `tasks/rejected` quarantine — which also lives under `.worc/`, so a rejected task is never swept into the audit commit. (Check logs are not a top-level directory — they live under `logs/<task-id>/checks/`.) `install` appends the `.worc/` and sibling `.worc-io/` (exchange) ignore lines to the repo's tracked `.gitignore`, skipping either one an existing rule already covers. The only things kept tracked outside `.worc/`/`.worc-io/` are the `tasks/` lifecycle dirs (`preparing/`/`pending/`/`done/`/`failed/`) at the repo root — they are intentionally git-tracked, and the task file plus its `<id>.summary.md` (in `done/` or `failed/`) are the audit trail the orchestrator commits. `preparing/` is a staging area the `watch` scanner never looks in, so a task file can be composed there without being picked up mid-write; `promote` moves it into `pending/`.
+
+`install` also drops two reference files beside `config.yaml`: `config.example.yaml` (a fully commented copy, never read at runtime) and `.env.example`. Copy the latter to `.worc/.env` and fill it in — that is where secrets belong (the Telegram bot token and chat id today). The orchestrator auto-loads `<repo>/.worc/.env` at startup, an already-exported environment variable always wins over the file, and because the whole `.worc/` home is gitignored the real `.env` is never committed.
 
 Re-running is idempotent (existing files are skipped and `config.yaml` is never overwritten); `--reconfigure` backs up and regenerates; `--dry-run` writes nothing. See [configuration.md](configuration.md) for the discovery order and [operations.md](operations.md) for the full wizard. The remaining recipes all run from inside the repo without `--config`.
 
@@ -91,7 +93,7 @@ Recommended preparation:
 6. Keep `orchestrator.auto_mode.enabled: false` for the first run.
 7. Use a unique task id and a small, fully specified task before attempting a larger backlog item.
 
-Run the first experiment against a disposable fork or test remote. `create_pull_request: false` skips `gh pr create`, but the current publishing pipeline still commits and pushes the task branch. There is no no-push dry-run mode yet.
+Run the first experiment against a disposable fork or test remote. `create_pull_request: false` skips `gh pr create`, but the publishing pipeline still commits and pushes the task branch. To stop before the push as well, cap a single task with front-matter `publish: commit` — the per-task scope is downgrade-only (`commit < push < pull_request`), so it can shorten the flow's publishing policy but never extend it.
 
 ## 3. Run Preflight
 
@@ -101,17 +103,26 @@ Before processing tasks, run:
 python -m wastech_orchestrator preflight
 ```
 
-Preflight checks each allowed provider and the configured isolation policy. A healthy run looks like:
+Preflight checks each allowed provider (executable, version, and what its CLI says about its own stored credentials), the configured isolation policy, and — when `git.create_pull_request` is on — that `gh` is installed and logged in. It also echoes the configured check command sets, so an empty quality gate is visible before the first run rather than after it. A healthy run looks like:
 
 ```text
-env: OK - loaded 2 variable(s) from .worc/.env
-claude: OK - claude 2.1.210 available (version=2.1.210, authenticated=True)
-codex: OK - codex 0.144.4 available (version=0.144.4, authenticated=True)
+env: OK — loaded 2 variable(s) from .worc/.env
+claude: OK — claude 2.1.210 available (version=2.1.210, auth=logged_in (claude.ai))
+codex: OK — codex 0.144.4 available (version=0.144.4, auth=logged_in)
+codex: isolation smoke OK — codex workspace-write sandbox: OS-enforced (empty MCP inventory)
 isolation: OK (enforced)
+checks: 1 command set(s):
+  repo (paths: always): ruff check .; mypy src; .venv/bin/python -m pytest
+gh: OK
+telegram: SKIP (disabled)
 preflight: ready
 ```
 
-If preflight fails, fix the reported environment or configuration problem before running tasks. Do not work around failures by weakening sandbox or approval settings; the validator rejects known unsafe `extra_args`.
+`worc preflight` is the only caller that opts into the live no-model **isolation capability smoke** (the `isolation smoke` line above): Codex runs a real `codex sandbox` probe of the generated permission profile, so an old CLI, a missing sandbox helper, or a mis-generated policy surfaces here instead of mid-run. The installer's own post-write preflight stays offline and prints no such line. A proven policy leak fails preflight unconditionally; an undemonstrable sandbox is fatal only when there is no fallback provider.
+
+Preflight deliberately does **not** validate flows — that is `worc validate-flow <name>` (or `--all`), a separate read-only check over your `.worc/flows/`. Every dispatched flow is validated fatally at task time anyway, so a broken flow fails that task rather than the whole gate.
+
+Exit code is `0` when ready and `1` when not. If preflight fails, fix the reported environment or configuration problem before running tasks. Do not work around failures by weakening sandbox or approval settings; the validator rejects known unsafe `extra_args`.
 
 Run these diagnostics in the same shell that will start the orchestrator:
 
@@ -176,13 +187,14 @@ python -m wastech_orchestrator --log-file ./logs/orchestrator.log run tasks/pend
 
 Exit codes:
 
-| Exit | Meaning                                    |
-| ---: | ------------------------------------------ |
-|  `0` | The task reached `done`.                   |
-|  `1` | The task reached `failed`.                 |
-|  `2` | The task reached `manual_action_required`. |
+| Exit | Meaning |
+| --: | --- |
+| `0` | The task reached `done`. |
+| `1` | The task reached `failed`. |
+| `2` | The task reached `manual_action_required` — or the run was refused before it started (unreadable/too-new config, a dependency that is not merged yet). |
+| `3` | Paused, not terminal: every provider was transiently unavailable. The task stays resumable and the next `run`/`watch`/restart continues it from its checkpoint. Distinguishing this from `1` is the point — a CI job should retry, not triage. |
 
-A successful task runs through validation, branch preparation, optional refinement, planning, implementation, checks (testing), review, fixing if needed, then publishing — commit, push, and PR creation — followed by terminal cleanup back to `repo.base_branch`. The plain-language summary that becomes the PR body is **not** a separate stage: the constant supervisor layer writes it at task close (see [configuration.md](configuration.md#supervisor)).
+A successful task runs through validation, branch preparation, optional refinement, planning, implementation, checks (testing), review, fixing if needed, the whole-task `documentation` pass, then publishing — commit, push, and PR creation — followed by terminal cleanup back to `repo.base_branch`. The plain-language summary that becomes the PR body is **not** a separate stage: the supervisor layer writes it at task close (see [configuration.md](configuration.md#supervisor)) — and with that layer switched off, the deterministic report is the body instead.
 
 ### Find a task to act on (`list`) + Tab-completion
 
@@ -204,9 +216,10 @@ worc rerun task-001 --yes            # fresh attempt from the current base_branc
 worc rerun task-001 --continue --yes # infra failure you fixed: reuse the branch, re-enter at the failed stage
 worc rerun task-001 --continue --reset-fix-budget --yes   # fix loop exhausted: grant a fresh fix budget
 worc rerun task-001 --continue --from implementation --yes # re-enter at a chosen node
+worc rerun task-001 --force-reset-remote --yes            # fresh: also delete the prior remote branch
 ```
 
-Use **fresh** (default) for a quality failure or a clean redo (the branch is reset to base and prior `.worc/logs/<id>/` is archived to `.worc/logs/<id>/attempt-<N>/`); use **`--continue`** when you fixed an environment/infra problem by hand (a missing tool, `PATH`, a dropped Telegram approval) and want to pick up where it stopped — on `--continue` the task's own uncommitted work is tolerated once it reached review/fixing/publish. Add **`--reset-fix-budget`** when the fix loop was exhausted (`max_fix_cycles`) — it resets the consecutive fix counters while keeping the global `max_total_fix_iterations` backstop, so termination stays bounded; if you resume into an already-exhausted budget without passing `--reset-fix-budget`/`--no-reset-fix-budget`, `rerun` asks interactively (never skipped by `--yes`). Add **`--from <node>`** to re-enter at a chosen node of the checkpoint's flow — it resumes through any flow drift since the checkpoint (the node just needs to exist today). Each re-attempt appends a ledger record linked to the prior one. See [operations.md](operations.md) "Re-attempting a terminal task" for the full rules.
+Use **fresh** (default) for a quality failure or a clean redo (the branch is reset to base and prior `.worc/logs/<id>/` is archived to `.worc/logs/<id>/attempt-<N>/`); use **`--continue`** when you fixed an environment/infra problem by hand (a missing tool, `PATH`, a dropped Telegram approval) and want to pick up where it stopped — on `--continue` the task's own uncommitted work is tolerated once it reached review/fixing/publish. Add **`--reset-fix-budget`** when the fix loop was exhausted (`max_fix_cycles`) — it resets the consecutive fix counters while keeping the global `max_total_fix_iterations` backstop, so termination stays bounded; if you resume into an already-exhausted budget without passing `--reset-fix-budget`/`--no-reset-fix-budget`, `rerun` asks interactively (never skipped by `--yes`). Add **`--from <node>`** to re-enter at a chosen node of the checkpoint's flow — it resumes through any flow drift since the checkpoint (the node just needs to exist today). Add **`--force-reset-remote`** (fresh mode only) when the prior attempt already pushed and opened a PR and you want that branch deleted — which closes the PR — instead of a second one racing it. Each re-attempt appends a ledger record linked to the prior one. In a script or CI, pass **`--non-interactive`** so any confirmation not already answered by `--yes`/`--reset-fix-budget`/`--no-reset-fix-budget` is refused with exit `1` rather than blocking on a prompt (`worc shell` passes it for the same reason). See [operations.md](operations.md) "Re-attempting a terminal task" for the full rules.
 
 ### Record a task you handled by hand (`finalize`)
 
@@ -262,6 +275,8 @@ orchestrator:
 
 Auto mode does not introduce concurrency. There is a single active task slot, and terminal cleanup (checkout back to `repo.base_branch`, or staying on the working branch per `repo.checkout_base_on_cleanup` / the branch mode) must complete before the next task can start.
 
+To run several `worc` instances against one git-distributed task pool without them colliding, give each one a queue: `orchestrator.queue` (default `"default"`, overridable per launch with `worc watch --queue NAME`) is matched by plain string equality against a task's own `queue` front-matter field, and an instance only ever claims tasks that match. An untagged task carries `"default"`, so a single untagged instance behaves exactly as it does with no queues at all.
+
 ### Monitor a running task
 
 For a long run, write the safe operator trace to a rotating file:
@@ -274,7 +289,7 @@ python -m wastech_orchestrator \
   watch
 ```
 
-Global options must appear before `run`, `watch`, `preflight`, or `status`. The file rotates at 10 MB and keeps five backups. Use `--log-format logfmt` for a human-readable `key=value` file, or `json` for ingestion by tools. `--heartbeat-seconds 30` emits safe progress records while a provider, check, or Git command is still running; set it to `0` to disable heartbeats.
+Global options (`--config`, `--env-file`, `--log-level`, `--log-format`, `--log-file`, `--heartbeat-seconds`) must appear **before** the subcommand — `worc watch --log-file …` is an argparse error, not a working command. The file rotates at 10 MB and keeps five backups. Use `--log-format logfmt` for a human-readable `key=value` file, or `json` for ingestion by tools. `--heartbeat-seconds` (default `30`) emits safe progress records while a provider, check, or Git command is still running; set it to `0` to disable heartbeats.
 
 Follow the live trace from another terminal:
 
@@ -291,14 +306,16 @@ python -m wastech_orchestrator --config ./config.yaml status
 python -m wastech_orchestrator --config ./config.yaml status task-001
 ```
 
-Without a task id, `status` shows active tasks or the most recently updated task. It reports the persisted status, current stage when applicable, configured primary provider, branch, subtask, fix counter, last update time, and elapsed time since that update. It opens `state.db` read-only.
+Without a task id, `status` shows active tasks or the most recently updated task. It reports the task id and title, the persisted status, the flow checkpoint node (where the engine would resume), branch, subtask, fix counter, last update time, elapsed time since that update, and the last cleanup error if there is one — then the same configured-command-set summary `preflight` prints. It opens `state.db` read-only.
 
 For a single attended surface instead of re-running `status`, use `worc top` — a live, read-only monitor that auto-refreshes the active task + flow node, a parked/gate-pending marker, the queue (filtered to the served queue and priority-sorted, exactly as the daemon runs it), recent terminal tasks, and a tail of the daemon log. Point it at the daemon's log file and quit with `q`:
 
 ```bash
-worc watch --log-file ./logs/daemon.jsonl &      # daemon writes its log here
-worc top --log-file ./logs/daemon.jsonl          # live monitor; q (then Enter) to quit
+worc --log-file ./logs/daemon.jsonl watch &      # global flag, so it comes BEFORE `watch`
+worc top --log-file ./logs/daemon.jsonl          # subcommand flag: which log to tail; q (then Enter) to quit
 ```
+
+The two `--log-file` flags are not the same option and sit on opposite sides of the subcommand. The global one (before `watch`) is a **sink** the daemon writes to; `top`'s and `shell`'s are the log to **tail** (`shell` defaults to `.worc/logs/daemon.log`). `top` never opens it for writing, so it cannot race the daemon's rotating handler. `worc top --poll-seconds N` sets the refresh interval (default `2`) and `--recent N` how many terminal tasks to list (default `10`).
 
 `worc top` is stdlib-only (no extra). For an interactive console that also drives commands — `enqueue` a task, `ps`, `logs`, `down` the daemon — install the `[shell]` extra and run `worc shell`. Entry is passive: it attaches to a live daemon or opens idle (the queue is not served until you type `up`). `up` spawns the daemon and verifies it came up (surfacing the real error if it does not); `quit` detaches and leaves the daemon running:
 
@@ -340,9 +357,45 @@ Review for security first. Reject the change unless:
 
 Notes:
 
-- Variables are metadata/paths only — e.g. `{repo_path}`, `{diff_path}`, `{plan_path}`. Large content stays in the artifact files the agent reads by path. Unknown `{...}` and literal braces pass through unchanged.
-- The exact text sent each run is saved (redacted) to `.worc/logs/<task-id>/stages/<node-id>/rendered-prompt.md` so you can verify what the agent received.
+- Variables are metadata/paths only — e.g. `{repo_path}`, `{diff_path}`, `{plan_path}`. Large content stays in the artifact files the agent reads by path. The set is a fixed allowlist (`task_id`, `stage`, `repo_path`/`repo`, `task_path`, `plan_path`, `diff_path`, `checks_path`, `review_path`, `subtask_order`, `subtask_count`, `subtask_spec_path`, `skills_path`, `memory_path`, `predecessor_context`) **plus** one `{<node-id>_path}` per node in your flow, so a downstream node can name an upstream node's output — a node `static-scan` publishes `{static-scan_path}`. Unknown `{...}` and literal braces pass through unchanged, so a prompt containing JSON or code never breaks.
+- Wrap optional prose in `{?name}…{/name}`: the block survives only when `name` is an allowlisted variable with a non-empty value, otherwise the whole block (markers included) is dropped — no dangling empty placeholder when, say, there is no subtask.
+- The exact text sent each run is saved (redacted) to `.worc/logs/<task-id>/stages/<node-id>/run-<node-run-id>/rendered-prompt.md` — one per node run, so a re-running node keeps every pass.
 - A template is prompt text only: it cannot change the provider, sandbox/approvals, denied commands, or enable `git`/`gh` publishing.
+
+## 7b. Run A Different Flow (`deep_research`)
+
+A task selects its pipeline with one front-matter field. Nothing else changes — same engine, same gates, same supervisor layer:
+
+```markdown
+---
+id: task-042
+title: "How does provider fallback actually decide?"
+task_type: deep_research
+---
+```
+
+`task_type` resolves to `.worc/flows/<task_type>.yaml` and nowhere else — an unknown value is a hard resolution error, not a silent fall back to the default. Omitting the field means `implementation`. `install` delivers these:
+
+| `task_type` | Deliverable |
+| --- | --- |
+| `implementation` (default) | A code change, published as a pull request. |
+| `deep_research` | A research report under `docs/research/<task-id>/`. |
+| `security_audit` | A security review. It declares `publishing: none`, and its report lands in the gitignored `.worc/security-reports/<task-id>/` — never in a commit. |
+| `blog_article` / `blog_article_revise` | A new authorial article written from scratch, or an improvement pass over one that already exists. |
+| `content_chapter` / `content_translate` | A long-form chapter reworked in place, or a source-language chapter adapted into English. |
+| `merge` | Not selected by a task: this is the conflict-resolution flow `merge-task` runs (`git.merge_flow`). |
+
+They are ordinary YAML under `.worc/flows/`, so a copy with a new name and a matching `task_type:` field inside is a new flow. `worc validate-flow --all` checks them before a task does.
+
+`deep_research` is worth knowing in outline because its shape differs from the coding flow in three ways an operator notices:
+
+- **The repository analysis is three sequential passes, not one**, each with a fresh context window and a narrow mandatory remit (`analysis_core` → `analysis_surfaces` → `analysis_docs_tests`). One node asked to walk everything self-triages: it goes deep on what it recognises and labels the rest "no findings". The remit is what forces even depth. For a narrow question, disable the passes you do not need **per task** (`nodes.analysis_surfaces: { enabled: false }`) rather than editing the graph.
+- **A `coverage_gate` measures the audit instead of reading it.** Every subsystem the task declares must show a traced property, not a bare "no findings" label; its rework edge re-enters at `analysis_core`, because a gap can sit in any of the three remits. That catches a thin pass before `synthesis` writes a conclusion on top of it.
+- **Two `checks` nodes run before the expensive evaluators**: the deterministic `citation` checker over the sources manifest (its report records the `manifest_path` it validated, so the fact-verification evaluator can open the same file), and a `command_profile` node running _your_ `checks.command_sets` over the Markdown about to be committed. That second one costs nothing until you configure a matching set — and once you do, it changes how the flow can fail (see the catch-all note in §8).
+
+`refinement` here is a **scoping** pass and runs on every task: it decomposes the question into sub-questions and anchors each to where its evidence lives. (It used to be gated on `derived.needs_refinement`, which is only true for an ill-formed task file — so on any well-formed task the scoping pass never ran. A complete task file and a scoped question are different things.) Skip it per task when the question is narrow enough.
+
+**What the deliverable directory contains.** `deep_research` declares `output_policy: repository_document`, so every write is confined to `docs/research/<task-id>/` and the bundle must produce `report.md` + `sources.json`. The organizing pass before the writer (`architecture_design`) deliberately writes **no file** — it returns its blueprint as its output and the writer consumes it. An intermediate blueprint written into the report directory ships in the pull request next to the deliverable, and the run that proved this shipped two documents that disagreed about coverage. So the report directory holds the deliverable and nothing else.
 
 ## 8. Configure Checks
 
@@ -384,6 +437,25 @@ checks:
 
 An **empty diff** runs nothing (the checks node passes vacuously); a changed path claimed by **no** set runs no set on its account (cover shared/root files with a no-`paths` catch-all set). A skipped `skip_if_unavailable` set is recorded loudly and **blocks `git.auto_merge`** even when the node passes. See [configuration.md](configuration.md#checks) for every field and [operations.md](operations.md#command-set-diagnostics) for the `preflight`/`status` command-set summary.
 
+Two things about that catch-all worth knowing before you rely on it:
+
+- **It fires on a Markdown-only diff too.** A no-`paths` set runs on _any_ non-empty diff, so once you also run a document-producing flow (`deep_research`, or the content/blog flows), that research run pays for the whole code gate — and a command that **rewrites** files rather than checking them parks the run on the green-but-dirtying guard. Either scope the catch-all's `paths` to code, or keep it and add a documents set running a format **check**:
+
+  ```yaml
+  checks:
+    command_sets:
+      code:
+        paths: ["src/**", "tests/**", "pyproject.toml"] # scoped, not catch-all
+        commands:
+          - { name: lint, argv: ["ruff", "check", "."] }
+      docs:
+        paths: ["**/*.md"]
+        commands: # a CHECK, never a formatter
+          - { name: prose, argv: ["npx", "prettier@3", "--check", "**/*.md"] }
+  ```
+
+- **`skip_if_unavailable` is not an escape hatch.** It converts a launch failure into a loud skip, nothing more — and a set that was the _only_ one the diff selected and is then skipped leaves the gate with nothing run, which parks the task at `manual_action_required` exactly where the launch failure would have. When you actually want a gate not to run, disable the node per task: `nodes.testing: { enabled: false }`.
+
 ## 9. Configure The Audit Commit
 
 There is one canonical layout: the orchestrator's runtime home is the gitignored `<repo>/.worc/` (config, `logs/`, `state.db`, `workspace/`, ...), and the `tasks/` lifecycle dirs live git-tracked at the repo root. The _code_ commit uses scoped staging and excludes `.worc/`; a separate task-scoped **audit commit** records `tasks/` — the task file moved to `done/`/`failed/` plus its `<id>.summary.md`. Everything under `.worc/` (plan, review, diffs, `summary.json`) stays local and is never committed.
@@ -393,7 +465,7 @@ There is one canonical layout: the orchestrator's runtime home is the gitignored
 ```yaml
 git:
   footprint:
-    audit_commit_message: "chore: archive task {task_id}"
+    audit_commit_message: "chore(orchestrator): audit trail for {task_id}" # the default
     audit_on_branch: task # task (default) | sibling
 ```
 
@@ -403,6 +475,8 @@ git:
 | --- | --- |
 | `task` (default) | The task + its summary committed onto the task branch, beside the code change. |
 | `sibling` | The audit commit goes onto a separate `<branch>-audit` branch, keeping the task branch limited to the code change. |
+
+`{task_id}` is the only placeholder the message template takes.
 
 The audit commit exists to answer a different question than the code commit:
 
@@ -430,23 +504,32 @@ The most useful files are:
 
 ```text
 .worc/logs/
-  completed.jsonl
+  completed.jsonl                 # the ledger: one record per terminal task
+  daemon.log                      # the watch daemon's live stream (+ rotated backups)
+  daemon-startup.log              # only the daemon's pre-configuration output
   <task-id>/
     validation_report.json
     task.normalized.json
     task.enriched.md
     plan.md
     current.diff
-    review/findings.json
     checks/
-    stages/
-    summary.md
+    hitl/
+    memory/
+    stages/<node-id>/
+      history.jsonl               # one line per run of this node
+      run-<node-run-id>/          # every re-run kept: rendered-prompt.md, findings.json, <id>.out.md, …
+    summary.md / summary.json
     failure_report.json
     stuck.md
     publish/
 ```
 
 Use `completed.jsonl` as the index of terminal tasks. Use `stuck.md` and `failure_report.json` when the result is `manual_action_required`. Provider stdout/stderr/event files are redacted; the full process environment and secrets must not be stored.
+
+Note that a node's per-run artifacts are **not** at a fixed path — an evaluator's findings live under `stages/<node-id>/run-<node-run-id>/findings.json`, one directory per run, so a `review → fixing → testing → review` loop keeps every pass instead of clobbering the last. Read `stages/<node-id>/history.jsonl` for the chronological index.
+
+Per-task **runtime** state (frozen control + instruction bundles, sealed exchanges) is a separate tree under `.worc/runs/`, cleaned automatically for a successful task and on demand with `worc runs clean`; the log tree above is cleaned with `worc logs clean` (which also sweeps the daemon logs).
 
 Do not live-tail provider `stdout.log` or `stderr.log`: provider output is finalized and redacted after the subprocess exits. Use the operator log and `status` while work is in progress, then inspect provider artifacts after the attempt completes.
 
@@ -456,9 +539,13 @@ Do not live-tail provider `stdout.log` or `stderr.log`: provider output is final
 
 | Cause | Action |
 | --- | --- |
-| Fix budget exhausted | Read `stuck.md`, inspect the final diff, and decide whether to fix manually or refine the task. |
+| Fix budget exhausted | Read `stuck.md`, inspect the final diff, and decide whether to fix manually, refine the task, or grant a fresh budget with `worc rerun <id> --continue --reset-fix-budget`. |
+| Checks gate incomplete (required toolchain absent, or every selected set skipped) | Install the toolchain, narrow the selecting `paths`, or disable that checks node for the task. A fix loop cannot install toolchains, so this never routes to `fixing`. |
+| A green check mutated the working tree | A passing check that rewrote commit-candidate files (an auto-formatter, a codegen step) fails closed rather than passing silently. Replace it with the tool's check-only mode (`--check`, `--dry-run`), then `rerun --continue`. |
+| An evaluator could not run (infra or misconfiguration) | The already-green diff is deliberately preserved on the branch instead of being failed — review and publish it by hand, or fix the evaluator's node and `rerun --continue`. |
 | Terminal cleanup unsafe | Inspect `repo.local_path` with `git status`, reconcile the branch, and return to `repo.base_branch`. |
 | More than one active task on restart | Decide which task is authoritative, then repair state before rerunning. |
+| Git control state drifted across an attempt (WRI-009) | Inspect `git status` plus the repo-local config/hooks, reconcile, then `rerun --continue`. On a `read-only` node holding the git-evidence grant this only warns and continues. |
 
 After resolving the problem, run:
 
@@ -481,10 +568,20 @@ agents:
       command: "codex"
       model: ""
       timeout_seconds: 7200
-      sandbox: "workspace-write"
-      permission_profile: "workspace-write"
+      permission_profile: "workspace-write" # the access level — there is no `sandbox` key here
       extra_args: []
       primary: true # the global primary (exactly one; must be in agents.allowed)
+```
+
+`sandbox: read-only` / `sandbox: workspace-write` is **rejected at config load** — the access level lives on `permission_profile`, and `sandbox` now only accepts the full-access escape `danger-full-access` (`upgrade-config` folds a legacy value across for you).
+
+Run without the oversight layer (cheapest possible run; the PR body becomes the deterministic report):
+
+```yaml
+supervisor:
+  enabled: false
+memory:
+  enabled: false # otherwise it is forced false for the run, with a warning
 ```
 
 No automatic PR creation:
@@ -510,11 +607,11 @@ checks:
         - { name: types, argv: ["npm", "run", "typecheck"] }
 ```
 
-Smaller fix budget for conservative runs:
+Smaller fix budget for conservative runs (the defaults are `3` / `15` / `30`, so these are genuine reductions):
 
 ```yaml
 agents:
-  max_stage_attempts: 3
-  max_fix_cycles: 15
-  max_total_fix_iterations: 30
+  max_stage_attempts: 2 # provider attempts for ONE node before the stage fails
+  max_fix_cycles: 5 # iterations of ONE fix loop (review/test -> fixing -> back)
+  max_total_fix_iterations: 10 # global cap across all fix loops; rejected at load if < max_fix_cycles
 ```

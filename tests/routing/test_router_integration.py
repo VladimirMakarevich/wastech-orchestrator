@@ -1,7 +1,8 @@
 """Router integration scenarios (phase doc "Tests").
 
 Two scenarios run the **real** Codex/Claude adapters over the deterministic fake CLI (building on
-the P2/P3 harness) to prove end-to-end wiring: a successful infra-fallback, and fallback denied on a
+the provider harness) to prove end-to-end wiring: a successful infra-fallback, and fallback denied
+on a
 quality failure. The third — an infra failure after files changed — asserts the contract on the
 request the router hands the fallback, so it uses recording in-memory providers (the diff-passing is
 a router/Core data-exchange concern, best observed on the ``AgentRunRequest`` itself).
@@ -103,9 +104,10 @@ def test_codex_review_succeeds_under_findings_schema_no_fallback(
     make_request: Callable[..., AgentRunRequest],
     tmp_path: Path,
 ) -> None:
-    # F24/F28: with _FINDINGS_SCHEMA now strict, the real codex adapter runs the review under
+    # With _FINDINGS_SCHEMA now strict, the real codex adapter runs the review under
     # --output-schema and returns findings — the router accepts it on attempt 1 and never falls back
-    # to claude. Before A1 the schema 400-crashed every codex review (process_crashed) and the
+    # to claude. Before the strictness fix the schema 400-crashed every codex review
+    # (process_crashed) and the
     # same-vendor claude fallback silently reviewed instead, so cross-provider review never ran.
     codex = _build_provider("codex", fake_cli("success", "codex"), integration_security, tmp_path)
     claude = _build_provider(
@@ -406,7 +408,7 @@ def test_session_limit_stdout_falls_back(
 ) -> None:
     # Claude's STRUCTURAL stdout session-limit (429 / rate_limit_event / banner, empty stderr) is
     # RAISED as RATE_LIMITED, so the Router falls over to codex (a separate quota) and finishes.
-    # This is the path both post-mortems needed: a *raised* limit, not a returned task_failure.
+    # This is the path the field failures needed: a *raised* limit, not a returned task_failure.
     claude = _build_provider(
         "claude", fake_cli("session_limit", "claude"), integration_security, tmp_path
     )

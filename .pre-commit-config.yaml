@@ -35,6 +35,19 @@ repos:
         language: system
         pass_filenames: false
         files: (\.py$|^\.importlinter$)
+      # The Markdown corpus (~110 files, about two seconds), so a broken link or an oversized document
+      # is caught before the commit that introduced it. No explicit filenames: the gate's own config
+      # defines the corpus, and the graph rules need all of it to decide whether a document is
+      # reachable. This hook is currently the ONLY place the corpus is checked — the linter lives in a
+      # separate repository that is not published yet, so there is no CI job behind it. When the linter
+      # is not available locally the hook prints how to enable it and passes, which is the trade-off
+      # for not requiring a Node toolchain to commit a docstring fix.
+      - id: mdlint
+        name: markdown context (wastech-mdlint)
+        entry: python tools/mdlint.py
+        language: system
+        pass_filenames: false
+        files: (\.md$|^wastech-mdlint.*\.json$)
       # Heavier gates on push (not every commit): the maintainability ratchets + full test suite.
       - id: interrogate
         name: interrogate (docstring coverage)

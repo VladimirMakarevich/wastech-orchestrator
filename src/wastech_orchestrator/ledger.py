@@ -1,4 +1,4 @@
-"""Completed-tasks ledger + failure report + minimal summary.
+"""Completed-tasks ledger + failure report.
 
 The ledger is an **append-only** file (``logs/completed.jsonl``) outside SQLite: one JSON record per
 terminal transition (``done`` / ``failed`` / ``manual_action_required``), never rewritten. SQLite
@@ -6,8 +6,9 @@ remains the authoritative state; the ledger is a convenience index of what has b
 duplicate-id source for the gate.
 
 This module also writes the two stuck artifacts — ``failure_report.json`` (machine) and ``stuck.md``
-(human) — and the deterministic minimal summary the Core falls back to when no provider can produce
-the ``summary`` stage.
+(human). The whole-task summary that becomes the pull-request body is not here: when no provider
+authored one it is rendered by :mod:`~wastech_orchestrator.core.summary_report` from the run's
+recorded facts.
 """
 
 from __future__ import annotations
@@ -23,8 +24,11 @@ from wastech_orchestrator.providers.artifacts import task_artifact_dir
 COMPLETED_FILENAME = "completed.jsonl"
 FAILURE_REPORT_FILENAME = "failure_report.json"
 STUCK_FILENAME = "stuck.md"
-SUMMARY_MD_FILENAME = "summary.md"
-SUMMARY_JSON_FILENAME = "summary.json"
+
+#: The ``loop`` value for a terminal that exhausted no fix-loop budget at all — the infrastructure
+#: could not run the node. Shared with the caller that writes such a report so the artifact's first
+#: line never claims a loop and a limit that do not exist.
+INFRA_LOOP = "infra"
 
 
 @dataclass(frozen=True)
@@ -61,7 +65,7 @@ class LedgerRecord:
     manual: bool = False
     note: str | None = None
     outcome: str | None = None
-    # VF-20: repo-relative governance/instruction paths (``AGENTS.md``, ``.agents/rules/**``, …)
+    # Repo-relative governance/instruction paths (``AGENTS.md``, ``.agents/rules/**``, …)
     # this task's diff changed. Empty on ordinary runs — a non-blocking operator notice, the
     # completed ledger's durable record of which runs edited their own rules. Old records omit it
     # harmlessly.
@@ -128,7 +132,7 @@ class Ledger:
 
     def only_validation_rejects(self, task_id: str) -> bool:
         """True iff ``task_id`` appears in the ledger and **every** record for it is a validation
-        reject (F6).
+        reject.
 
         A gate reject appends a ``failed`` record carrying a ``validation_reason`` before the task
         was ever claimed — there is no ``tasks`` row and no branch. Such a record must not reserve
@@ -150,6 +154,23 @@ class DecomposedFailureInfo:
     committed_shas: tuple[str, ...] = field(default_factory=tuple)
 
 
+@dataclass(frozen=True)
+class NodeFailureEvidence:
+    """Which node run a terminal came from, and what its providers actually did.
+
+    ``provider_attempts`` is one secret-free mapping per attempt (``provider`` / ``attempt`` /
+    ``error_class`` / ``exit_code`` / ``started_at``), in attempt order. Empty for a fix-loop
+    terminal, where a budget rather than a provider ran out. Kept as plain mappings so this writer
+    stays independent of the storage row type, the same way review findings are passed.
+
+    Grouped with ``node_id`` rather than added as another parameter because the two are read
+    together: the attempts only mean anything once you know which node run produced them.
+    """
+
+    node_id: str | None = None
+    provider_attempts: tuple[Mapping[str, Any], ...] = ()
+
+
 def write_failure_report(
     artifacts_root: str | Path,
     task_id: str,
@@ -161,23 +182,29 @@ def write_failure_report(
     last_review_findings: Sequence[Mapping[str, Any]] | None,
     final_diff: str,
     decomposed: DecomposedFailureInfo | None = None,
-    node_id: str | None = None,
+    failing_node: NodeFailureEvidence | None = None,
 ) -> tuple[str, str]:
     """Write ``failure_report.json`` + ``stuck.md``; return both paths.
 
-    Flow-neutral (flow-engine P1.2): the base fields (``task_id``/``node_id``/``loop``/``counters``)
+    Flow-neutral: the base fields (``task_id``/``node_id``/``loop``/``counters``)
     are always written; the implementation-specific sections (``last_check_log``,
     ``last_review_findings``, ``final_diff``) stay empty when the flow has no such nodes.
+
+    A ``loop`` of :data:`INFRA_LOOP` marks a terminal where no fix-loop budget was spent at all, and
+    the human artifact opens by stating that instead of naming a loop that does not exist.
     """
     task_dir = task_artifact_dir(artifacts_root, task_id)
     task_dir.mkdir(parents=True, exist_ok=True)
+    evidence = failing_node or NodeFailureEvidence()
 
     report: dict[str, Any] = {
         "task_id": task_id,
-        "node_id": node_id,
+        "node_id": evidence.node_id,
         "loop": loop,
         "limit_exhausted": limit_name,
         "counters": dict(counters),
+        # Always emitted, empty when there is nothing to attribute, so a consumer never branches.
+        "provider_attempts": [dict(a) for a in evidence.provider_attempts],
         "last_check_log": last_check_log,
         "last_review_findings": [dict(f) for f in (last_review_findings or [])],
         "final_diff": final_diff,
@@ -204,10 +231,28 @@ def write_failure_report(
             f"- subtasks committed: {decomposed.subtasks_completed} "
             f"({', '.join(decomposed.committed_shas) or 'none'})\n"
         )
+    if loop == INFRA_LOOP:
+        # No fix loop ran and no budget was spent, so the most-read line in the artifact must not
+        # claim otherwise — it states what actually stopped the task.
+        headline = f"This task could not run: {limit_name}\n\n"
+    else:
+        headline = f"The **{loop}** fix loop exhausted its limit (`{limit_name}`).\n\n"
+    # Leads the artifact when present: for a terminal the infrastructure caused, the counters are
+    # empty and there is no check log or findings, so the attempts are the only evidence there is.
+    attempts_md = ""
+    if evidence.provider_attempts:
+        attempts_md = "\n## Provider attempts\n\n" + "".join(
+            f"- {a.get('provider', 'unknown')} · attempt {a.get('attempt', '?')} · "
+            f"{a.get('error_class') or 'no error class'} · "
+            f"exit {a.get('exit_code') if a.get('exit_code') is not None else 'n/a'} · "
+            f"{a.get('started_at') or 'n/a'}\n"
+            for a in evidence.provider_attempts
+        )
     stuck_md = (
         f"# Task {task_id} stuck\n\n"
-        f"The **{loop}** fix loop exhausted its limit (`{limit_name}`).\n\n"
-        f"## Counters\n\n"
+        + headline
+        + attempts_md
+        + "\n## Counters\n\n"
         + "\n".join(f"- {k}: {v}" for k, v in counters.items())
         + "\n"
         + decomposed_md
@@ -218,79 +263,3 @@ def write_failure_report(
     stuck_path = task_dir / STUCK_FILENAME
     stuck_path.write_text(stuck_md, encoding="utf-8")
     return str(report_path), str(stuck_path)
-
-
-def write_minimal_summary(
-    artifacts_root: str | Path,
-    task_id: str,
-    *,
-    title: str,
-    diff_stat: str,
-    task_ref: str | None = None,
-    degraded: bool = False,
-) -> tuple[str, str]:
-    """Write a *compact* deterministic ``summary.md`` + ``summary.json``.
-
-    The Core's fallback when no provider can produce the ``summary`` stage — a reviewed, passing
-    change is never blocked by the prose step. Deliberately small: it links to the task file and
-    shows a ``git diff --stat`` (files + line counts) instead of inlining the full task description
-    and the entire patch. Inlining bloated the committed summary (a real run produced a ~580-line
-    file that was almost all raw diff) and risked an unredacted diff landing in git; the full,
-    already-redacted patch stays in ``logs/<task-id>/current.diff``.
-
-    ``task_ref`` is a short pointer to the task file (e.g. ``<id>.md``, a sibling of the committed
-    summary); when ``None`` a generic line is used.
-
-    ``degraded`` marks the case where a real provider-authored summary was *expected* but could not
-    be produced (the supervisor synthesis failed on the publish path — e.g. an unresumable session
-    on a revived task): a blockquote callout is prepended to the body and ``degraded: true`` is set
-    in the JSON, so the operator never mistakes this stub for the full synthesis. It stays ``False``
-    for the legitimate no-synthesis cases (a failed/manual-action terminal), where the minimal
-    summary is the expected artifact, not a degradation.
-    """
-    task_dir = task_artifact_dir(artifacts_root, task_id)
-    task_dir.mkdir(parents=True, exist_ok=True)
-
-    what = title
-    how = "No provider-authored summary was available; see the changed-files summary below."
-    integration = "Derived deterministically from the task and its diff stat."
-    why = (
-        f"See the task file `{task_ref}` for the full description."
-        if task_ref
-        else "See the task file for the full description."
-    )
-
-    summary_json: dict[str, object] = {
-        "what": what,
-        "how": how,
-        "integration": integration,
-        "why": why,
-    }
-    if degraded:
-        summary_json["degraded"] = True
-    json_path = task_dir / SUMMARY_JSON_FILENAME
-    json_path.write_text(
-        json.dumps(summary_json, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
-    )
-
-    changes = diff_stat.strip() or "(no changes detected)"
-    callout = (
-        "> ⚠️ **Fallback summary — not a provider-authored synthesis.** The supervisor's "
-        "whole-task summary could not be produced for this run; this is the deterministic minimal "
-        "summary derived from the task and its diff.\n\n"
-        if degraded
-        else ""
-    )
-    md = (
-        f"# {what}\n\n"
-        f"{callout}"
-        f"## What\n\n{what}\n\n"
-        f"## How\n\n{how}\n\n"
-        f"## Integration\n\n{integration}\n\n"
-        f"## Why\n\n{why}\n\n"
-        f"## Changes\n\n```\n{changes}\n```\n\n"
-        f"_Full diff: `logs/{task_id}/current.diff`._\n"
-    )
-    md_path = task_dir / SUMMARY_MD_FILENAME
-    md_path.write_text(md, encoding="utf-8")
-    return str(md_path), str(json_path)
