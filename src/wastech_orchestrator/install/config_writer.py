@@ -141,6 +141,11 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             # crashes at startup). We write the host OS's set only — the other OS's names are never
             # dragged in. See wastech_orchestrator.security.env.default_allowed_environment.
             "allowed_environment": list(default_allowed_environment()),
+            # Seeded empty and seeded *explicitly*, like the switches below: the key that ASSIGNS a
+            # variable (toolchain root, cache path) belongs in the operator's own config where they
+            # will find it, not as a hidden default they have to read the reference to discover.
+            # Empty => the child environment is exactly what forwarding alone produces.
+            "extra_environment": {},
             "denied_read_paths": [".env", "secrets/**"],
             "denied_commands": ["git commit", "git push", "gh pr create", "gh pr merge"],
             # Written explicitly at the one default "auto" carries everywhere (dataclass, loader,

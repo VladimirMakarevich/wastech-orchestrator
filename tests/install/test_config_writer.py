@@ -106,6 +106,10 @@ def test_safe_security_defaults_are_written(tmp_path: Path) -> None:
     assert cfg.security.allow_git_evidence is False
     assert "allow_git_evidence: false" in build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))
     assert "git push" in cfg.security.denied_commands
+    # Assigned variables are seeded empty and, for the same reason as the grant above, explicitly:
+    # a fresh install shows the key exists rather than leaving it to be discovered in the reference.
+    assert cfg.security.extra_environment == {}
+    assert "extra_environment" in build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))
     assert "gh pr create" in cfg.security.denied_commands
     assert "gh pr merge" in cfg.security.denied_commands
     assert cfg.agents.providers[ProviderId.CODEX].permission_profile == "workspace-write"

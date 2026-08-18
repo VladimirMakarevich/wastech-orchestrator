@@ -710,7 +710,7 @@ class CodexProvider(BaseCliProvider):
         """
         if not self._security.strict_isolation or self._config.sandbox == FORBIDDEN_SANDBOX_VALUE:
             return None
-        env = self._augment_child_env(build_child_env(self._security.allowed_environment))
+        env = self._augment_child_env(build_child_env(self._security))
         report = run_codex_capability_smoke(
             command=self._config.command,
             home_dir=home_dir,

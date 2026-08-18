@@ -2975,6 +2975,17 @@ def run_preflight(
         ok = False
         lines.append(f"allowed-environment: FAIL — {env_issue}")
 
+    # Assigned variables are announced by NAME only. The values are in the operator's own config
+    # already, and printing them would hand a secret that landed there against the guide's advice a
+    # second surface (a terminal, a CI log) to leak from.
+    if config.security.extra_environment:
+        names = ", ".join(config.security.extra_environment)
+        lines.append(
+            f"extra-environment: {len(config.security.extra_environment)} assigned "
+            f"({names}) — every child process (agent CLI, checks, scanners, git) receives these; "
+            "values are not printed"
+        )
+
     lines.extend(_summarize_command_sets(config))
 
     # Preflight is a run-surface health gate — it deliberately does not validate flows. Flow

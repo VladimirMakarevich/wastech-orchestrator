@@ -5533,3 +5533,38 @@ def test_disabled_layer_still_writes_the_deterministic_handoff_floor(
     assert brief.exists() and brief.read_text("utf-8").strip()
     body = brief.read_text("utf-8")
     assert "01-first.md" in body and "crit-one" in body and "Changed files" in body
+
+
+def test_assigned_environment_reaches_node_services(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    """AC0.2.1 (orchestrator call site): the env handed to the flow's own child processes.
+
+    `NodeServices.process_env` is what the `dependency_scan` checker and every `tool` node launch
+    their argv with. It is assembled here rather than by the Check Runner, so it is its own delivery
+    point — and the whole reason Т0.5 exists is that these two must not drift apart.
+    """
+    from wastech_orchestrator.core.decomposition import DecompositionDecision
+    from wastech_orchestrator.core.loop_control import LoopCounters
+    from wastech_orchestrator.core.orchestrator import _Pipeline
+    from wastech_orchestrator.security.env import build_child_env
+    from wastech_orchestrator.task.model import NormalizedTask
+
+    orch, _store, _ledger, _art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers={ProviderId.CLAUDE: FakeProvider("claude")},
+        check_verdicts=[0],
+        config_kwargs={"extra_environment": {"NUGET_PACKAGES": "/repo/.toolcache/nuget"}},
+    )
+    pipeline = _Pipeline(
+        task=NormalizedTask(id="task-001", title="T", description="d"),
+        task_file="task-001.md",
+        status=Status.PENDING,
+        counters=LoopCounters(),
+        decomposition=DecompositionDecision(accepted=False, reason="single unit", n=1),
+    )
+    services = orch._build_engine_services(pipeline, finalize=None)
+    assert services.process_env["NUGET_PACKAGES"] == "/repo/.toolcache/nuget"
+    assert services.process_env == build_child_env(orch._config.security)

@@ -8,7 +8,7 @@ import shutil
 import stat
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -198,6 +198,7 @@ def build_git_config(
     supervisor_include_nodes: Sequence[str] = (),
     supervisor_enabled: bool | None = None,
     skills_dynamic: bool | None = None,
+    extra_environment: Mapping[str, str] | None = None,
 ) -> OrchestratorConfig:
     """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks.
 
@@ -217,6 +218,15 @@ def build_git_config(
     ``loads_config(...).warnings``, which this helper drops; assert it through ``loads_config``.
     """
     env_lines = "\n".join(f"    - {e}" for e in _TEST_ALLOWED_ENV)
+    # Variables the orchestrator ASSIGNS to every child process (security.extra_environment).
+    # Absent => the key is omitted entirely, which is what most tests want: the child environment
+    # then has to be byte-for-byte the pre-key one.
+    extra_env_block = (
+        "  extra_environment:\n"
+        + "".join(f"    {name}: {value!r}\n" for name, value in extra_environment.items())
+        if extra_environment
+        else ""
+    )
     cleanup_line = (
         f"  checkout_base_on_cleanup: {str(checkout_base_on_cleanup).lower()}\n"
         if checkout_base_on_cleanup is not None
@@ -273,7 +283,7 @@ repo:
       command: "codex"
 security:
   allow_git_evidence: {str(allow_git_evidence).lower()}
-{trust_level_line}  allowed_environment:
+{trust_level_line}{extra_env_block}  allowed_environment:
 {env_lines}
 {validation_block}{telegram_block}checks:
 {checks_block}  timeout_seconds: 30

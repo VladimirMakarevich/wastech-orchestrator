@@ -137,7 +137,7 @@ class CheckRunner:
         else:
             sets = list(normalize_command_sets(self._config.checks.command_sets))
         global_timeout = self._config.checks.timeout_seconds
-        env = build_child_env(self._config.security.allowed_environment)
+        env = build_child_env(self._config.security)
         checks_dir = task_artifact_dir(artifacts_root, task_id) / "checks"
         checks_dir.mkdir(parents=True, exist_ok=True)
 

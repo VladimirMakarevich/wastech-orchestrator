@@ -195,7 +195,14 @@ from wastech_orchestrator.providers.base import ProviderId
 # names, run dirs, and state store all depend on. Removing the keys is therefore the fix, not wiring
 # them up. Both are tolerated (ignored) on load — every config `install` wrote carries them, so they
 # must not become a hard unknown-key error — and `upgrade-config` strips them.
-CONFIG_SCHEMA_VERSION = 35
+# v36 (2026-08-18, full-tool-access step 0 phase 0.2): adds `security.extra_environment` (mapping
+# `name -> string value`, default empty) — the orchestrator *assigns* these variables to every child
+# process, where `allowed_environment` only forwards a name whose value comes from the operator's
+# shell. Additive and back-compatible: an absent key is an empty mapping, so the child environment
+# stays byte-for-byte what it is today; `upgrade-config` adds it from the template. It carries a
+# version bump anyway because a config using it, loaded by an older orchestrator, would be rejected
+# as an unknown key rather than silently under-delivering.
+CONFIG_SCHEMA_VERSION = 36
 
 
 class AuditBranch(StrEnum):
@@ -427,6 +434,19 @@ class SecurityConfig:
     # confines the shell to those verbs and write-denies the whole clone in its OS sandbox, Codex's
     # read-only sandbox already forbids every mutation, and ``denied_commands`` stays the floor.
     allow_git_evidence: bool = False
+    # Environment variables the orchestrator **assigns** to every child process it starts, as
+    # ``name -> value``. The complement of ``allowed_environment``, which only *forwards* a name and
+    # therefore inherits whatever the operator's shell happened to export — unset on another
+    # machine, different on the next, and a forgotten ``export`` is silently skipped. Toolchain
+    # roots and cache paths (``DOTNET_ROOT``, ``NUGET_PACKAGES``, ``npm_config_cache``) need a
+    # pinned value, so this key writes it. No default: an absent key is an empty mapping and the env
+    # is byte-for-byte what it is today. Applied AFTER forwarding, so a name in both wins here, and
+    # key order is deterministic (allowlist order, then this mapping's config order). Validated
+    # fail-closed: ``PATH`` (any case) is refused — reassigning it is how you substitute every
+    # binary — as is a secret-looking name and a name outside ``[A-Za-z_][A-Za-z0-9_]*``. The
+    # **value** cannot be checked for secrecy and sits in plaintext in ``config.yaml``, so
+    # credentials never go here; that is a documented contract, not an enforced one.
+    extra_environment: dict[str, str] = field(default_factory=dict)
 
     @property
     def read_isolation_off(self) -> bool:

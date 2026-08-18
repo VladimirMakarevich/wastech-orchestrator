@@ -139,6 +139,102 @@ def test_allowed_environment_path_match_is_exact(base_config: OrchestratorConfig
     assert any("security.allowed_environment" in issue for issue in exc.value.issues)
 
 
+@pytest.mark.parametrize("name", ["PATH", "path", "Path"])
+def test_extra_environment_cannot_assign_path(base_config: OrchestratorConfig, name: str) -> None:
+    # И-3: reassigning PATH substitutes every binary the child resolves. Case-insensitive because a
+    # Windows child honors `Path` exactly as it honors `PATH`.
+    cfg = _with_security(base_config, extra_environment={name: "/tmp/evil"})
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("PATH cannot be assigned" in issue for issue in exc.value.issues)
+
+
+@pytest.mark.parametrize("name", ["GITHUB_TOKEN", "MY_API_KEY", "npm_password"])
+def test_extra_environment_rejects_secret_names(base_config: OrchestratorConfig, name: str) -> None:
+    # И-2: one definition of "secret name" (is_sensitive_key), no second list of masks.
+    cfg = _with_security(base_config, extra_environment={name: "x"})
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("secret-bearing" in issue for issue in exc.value.issues)
+
+
+@pytest.mark.parametrize("name", ["HAS SPACE", "WITH=EQUALS", "1LEADING_DIGIT", "", "with-dash"])
+def test_extra_environment_rejects_names_outside_the_grammar(
+    base_config: OrchestratorConfig, name: str
+) -> None:
+    cfg = _with_security(base_config, extra_environment={name: "x"})
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("not a valid environment variable name" in issue for issue in exc.value.issues)
+
+
+def test_extra_environment_rejects_names_differing_only_in_case(
+    base_config: OrchestratorConfig,
+) -> None:
+    # On Windows the environment is case-insensitive, so this config has no defined meaning: which
+    # value the child saw would depend on the order the mapping was read in.
+    cfg = _with_security(base_config, extra_environment={"DOTNET_ROOT": "/a", "dotnet_root": "/b"})
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("only in case" in issue for issue in exc.value.issues)
+
+
+def test_extra_environment_accepts_a_toolchain_recipe(base_config: OrchestratorConfig) -> None:
+    # The shape the guide recommends, plus an empty value — a real assignment that forwarding cannot
+    # express at all, and therefore NOT an error.
+    cfg = _with_security(
+        base_config,
+        extra_environment={
+            "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
+            "NUGET_PACKAGES": "/repo/.toolcache/nuget",
+            "npm_config_cache": "/repo/.toolcache/npm",
+            "DOTNET_NOLOGO": "",
+        },
+    )
+    assert validate_config(cfg) == []
+
+
+def _config_text(security_block: str) -> str:
+    return f"""
+repo:
+  url: "git@example.com:o/r.git"
+agents:
+  allowed: [claude]
+  providers:
+    claude:
+      command: "claude"
+      primary: true
+security:
+{security_block}
+"""
+
+
+@pytest.mark.parametrize("value", ["1", "1.10", "true", "null"])
+def test_extra_environment_non_string_value_is_a_loader_error(value: str) -> None:
+    # Fail-closed with a hint instead of coercing: `1` is a YAML int, `true` a bool, `1.10` a float
+    # that would lose its trailing zero, `null` a None. Quoting is the fix and the message says so.
+    with pytest.raises(ConfigError) as exc:
+        loads_config(_config_text(f"  extra_environment:\n    DOTNET_NOLOGO: {value}"))
+    assert any(
+        "expected a string" in issue and "quote the value" in issue for issue in exc.value.issues
+    )
+
+
+def test_extra_environment_must_be_a_mapping() -> None:
+    # A scalar or a list where a mapping belongs is a structural error, not something to interpret.
+    with pytest.raises(ConfigError) as exc:
+        loads_config(_config_text('  extra_environment: "DOTNET_NOLOGO=1"'))
+    assert any("expected a mapping" in issue for issue in exc.value.issues)
+
+
+def test_extra_environment_absent_key_is_an_empty_mapping(packaged_config_text: str) -> None:
+    # И-5: the key is optional and its absence is not a special case — it is the empty mapping, so
+    # the child environment stays exactly what forwarding alone produces.
+    text = packaged_config_text.replace("  extra_environment: {}", "", 1)
+    assert "  extra_environment: {}" not in text  # guard: the packaged key really was removed
+    assert loads_config(text).config.security.extra_environment == {}
+
+
 def test_global_primary_not_in_allowed_is_rejected(base_config: OrchestratorConfig) -> None:
     # claude is the global primary in the packaged config; shrinking allowed to codex breaks it.
     bad = _with_agents(base_config, allowed=(ProviderId.CODEX,))

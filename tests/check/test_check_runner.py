@@ -15,6 +15,7 @@ from wastech_orchestrator.config.loader import loads_config
 from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.observability import logging as obslog
 from wastech_orchestrator.providers.process import ProcessResult
+from wastech_orchestrator.security.env import build_child_env
 
 
 @pytest.fixture(autouse=True)
@@ -31,7 +32,9 @@ def _reset_package_logger() -> Iterator[None]:
     obslog._configured = False
 
 
-def _config(*, timeout: int = 1800, command_sets: str = "") -> OrchestratorConfig:
+def _config(
+    *, timeout: int = 1800, command_sets: str = "", extra_environment: str = ""
+) -> OrchestratorConfig:
     text = f"""
 repo:
   url: "git@example.com:o/r.git"
@@ -40,6 +43,9 @@ agents:
   providers:
     codex:
       command: "codex"
+security:
+  extra_environment:
+{extra_environment or "    {}"}
 checks:
   command_sets:
 {command_sets or "    {}"}
@@ -82,7 +88,13 @@ class _FakeProc:
         stdin_text: str | None = None,
     ) -> ProcessResult:
         self.calls.append(
-            {"argv": list(argv), "cwd": cwd, "timeout": timeout_seconds, "stdout": stdout_path}
+            {
+                "argv": list(argv),
+                "cwd": cwd,
+                "timeout": timeout_seconds,
+                "stdout": stdout_path,
+                "env": dict(env),
+            }
         )
         Path(stdout_path).write_text("check output\n", encoding="utf-8")  # simulate child stdout
         return self._results[len(self.calls) - 1]
@@ -393,3 +405,25 @@ def test_skipped_check_has_instant_interval(tmp_path: Path) -> None:
     (run,) = outcome.runs
     assert run.skipped is True
     assert run.started_at == run.finished_at == "2026-07-25T00:00:00+00:00"
+
+
+def test_assigned_environment_reaches_every_check_process(tmp_path: Path) -> None:
+    """AC0.2.1 (Check Runner call site) + Т0.5: the quality gate sees what the agent sees.
+
+    The failure this guards against is the expensive one: the agent builds the project with
+    `NUGET_PACKAGES` pointing into the clone, the checks run without it, and the task dies on "SDK
+    not found" *after* the agent already succeeded.
+    """
+    fake = _FakeProc([_ok()])
+    config = _config(extra_environment='    NUGET_PACKAGES: "/repo/.toolcache/nuget"\n')
+    runner = CheckRunner(config, run_process=fake)
+    runner.run(
+        clone_dir=tmp_path,
+        artifacts_root=tmp_path,
+        task_id="t1",
+        selected=(_set("a", _check("pytest", ("pytest",))),),
+    )
+    assert fake.calls[0]["env"]["NUGET_PACKAGES"] == "/repo/.toolcache/nuget"
+    # Т0.5 as an equality, not an overlap: the checks environment IS the agent-attempt environment
+    # for the same config, so no variable can reach one and miss the other.
+    assert fake.calls[0]["env"] == build_child_env(config.security)

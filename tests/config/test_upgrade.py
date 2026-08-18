@@ -356,3 +356,19 @@ def test_an_operator_who_already_switched_the_layer_off_keeps_it_off() -> None:
     merged, added, _removed = upgrade_config_mapping(template, operator)
     assert merged["supervisor"]["enabled"] is False
     assert "supervisor.enabled" not in added
+
+
+def test_adds_extra_environment_from_packaged_template() -> None:
+    # v36 add (AC0.2.6): a pre-v36 config gains `security.extra_environment` from the template with
+    # nothing else in the block disturbed — the operator's trimmed allowlist above all stays theirs.
+    template = packaged_template_mapping()
+    operator = {
+        "schema_version": 35,
+        "security": {"allowed_environment": ["PATH", "HOME"], "strict_isolation": False},
+    }
+    merged, added, _ = upgrade_config_mapping(template, operator)
+    assert merged["security"]["extra_environment"] == {}
+    assert "security.extra_environment" in added
+    assert merged["security"]["allowed_environment"] == ["PATH", "HOME"]  # untouched
+    assert merged["security"]["strict_isolation"] is False  # untouched
+    assert merged["schema_version"] == CONFIG_SCHEMA_VERSION

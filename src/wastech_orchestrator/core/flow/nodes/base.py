@@ -344,7 +344,7 @@ class NodeServices:
     task_packet_digest: str | None = None
     #: the ``dependency_scan`` checker's process runner + its allowlisted child env + per-scanner
     #: timeout. ``process_env`` is the same allowlisted env the Check Runner uses
-    #: (``build_child_env(config.security.allowed_environment)``); empty in unit harnesses.
+    #: (``build_child_env(config.security)``); empty in unit harnesses.
     run_process: RunProcess = run_process
     process_env: Mapping[str, str] = field(default_factory=dict)
     scan_timeout_s: int = 600

@@ -146,6 +146,14 @@ _GIT_HARDENING_ENV: dict[str, str] = {
     "GIT_EDITOR": "false",
     "GIT_SEQUENCE_EDITOR": "false",
     "GCM_INTERACTIVE": "Never",
+    # This module classifies outcomes by reading English strings out of git/gh output — whether a
+    # push failure is transient (`_TRANSIENT_GIT_STDERR_MARKERS`), whether a conflict marker was
+    # left behind, whether a PR was already merged (`_ALREADY_MERGED_MARKERS`). Git is localized, so
+    # an operator setting `LANG` (a legitimate `security.extra_environment` value, and the very
+    # example the design used) would turn a retryable network blip into a final task failure with no
+    # trace of why. Pinned here because this mapping is applied ON TOP of `build_child_env`, so no
+    # config value can override it, and it already covers both `git` and `gh`.
+    "LC_ALL": "C",
 }
 
 # Repo-local/worktree config keys whose *value is a program* git would execute during a
@@ -580,7 +588,7 @@ class GitManager:
         # Orchestrator-injected no-prompt/no-editor git env on top of the security
         # allowlist; applies to both `git` (`_run`) and `gh` (`_gh`), which shells out to git.
         self._env = {
-            **build_child_env(config.security.allowed_environment),
+            **build_child_env(config.security),
             **_GIT_HARDENING_ENV,
         }
         # An empty hooks dir every git command points at (see `_harden_git_argv`), so no

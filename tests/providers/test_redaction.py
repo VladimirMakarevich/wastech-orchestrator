@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
+from wastech_orchestrator.config.schema import ProviderConfig, SecurityConfig
+from wastech_orchestrator.providers.codex import CodexProvider
 from wastech_orchestrator.providers.redaction import (
     REDACTED,
     redact_jsonl,
@@ -252,3 +256,27 @@ def test_secret_env_values_harvests_only_non_allowlisted_secret_names(
     assert "/usr/bin" not in harvested
     assert "exportedonpurpose1" not in harvested
     assert "x" not in harvested
+
+
+def test_assigned_variables_never_shrink_the_harvest(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """И-4: the redaction literal set may only grow, never shrink, as the env policy widens.
+
+    The harvester exempts a name **because it is on the forward allowlist** — an allowlisted secret
+    is exported on purpose, not a value to scrub. `security.extra_environment` must not buy the same
+    exemption: assigning `MY_API_KEY` in `config.yaml` says nothing about the parent process's
+    variable of that name, and treating the union as allowlisted would lift redaction off it. Driven
+    through the adapter's real call site, because passing the union is the obvious-looking refactor
+    and it would not fail a test that calls the harvester directly.
+    """
+    monkeypatch.setenv("MY_API_KEY", "supersecretvalue123")
+    provider = CodexProvider(
+        codex_config,
+        security=replace(security_config, extra_environment={"MY_API_KEY": "assigned"}),
+        artifacts_root=tmp_path,
+    )
+    assert "supersecretvalue123" in provider._secret_env_values()

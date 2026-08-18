@@ -11,6 +11,7 @@ All problems are collected and raised together via the typed :class:`ConfigError
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 
 from wastech_orchestrator.checks.model import (
     CheckCommandError,
@@ -23,6 +24,7 @@ from wastech_orchestrator.config.loader import ConfigError
 from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.providers.capabilities import is_reasoning_supported, reasoning_levels_for
+from wastech_orchestrator.providers.redaction import is_sensitive_key
 from wastech_orchestrator.security.forbidden_args import (
     FORBIDDEN_SANDBOX_VALUE,
     find_forbidden_args,
@@ -347,6 +349,47 @@ def _validate_security(config: OrchestratorConfig, issues: list[str]) -> None:
             "the default wholesale, and without it a child process finds neither the agent CLI "
             "nor git"
         )
+    _validate_extra_environment(config.security.extra_environment, issues)
+
+
+def _validate_extra_environment(extra: Mapping[str, str], issues: list[str]) -> None:
+    """Validate the ``name`` half of ``security.extra_environment`` (the loader owns the values).
+
+    Four rules, each closing a way the key could otherwise weaken or silently misfire:
+
+    * ``PATH`` in **any** case is refused — assigning it substitutes every binary the child
+      resolves, so only an adapter's ``_augment_child_env`` may touch its value. Case-insensitive
+      because a Windows child would honor ``Path`` just as well as ``PATH``.
+    * a secret-looking name is refused, by the one policy that defines "secret name"
+      (:func:`is_sensitive_key`) rather than a second list of masks that would drift from it.
+    * a name outside the POSIX environment grammar is refused: a stray space or ``=`` is an operator
+      typo that the OS would reject much later, or accept and never expose to the child.
+    * two names differing only in case are refused: Windows environments are case-insensitive, so
+      which one survived would depend on the order the config was read in.
+    """
+    seen: dict[str, str] = {}
+    for name in extra:
+        where = f"security.extra_environment.{name}"
+        if name.upper() == "PATH":
+            issues.append(
+                f"{where}: PATH cannot be assigned (in any case) — it is how every binary the "
+                "child runs is resolved; forward it via security.allowed_environment instead"
+            )
+        elif is_sensitive_key(name):
+            issues.append(
+                f"{where}: looks like a secret-bearing name — credentials are never configured in "
+                "the orchestrator; the agent CLIs read their own credentials from their own stores"
+            )
+        if not _ENV_NAME_RE.fullmatch(name):
+            issues.append(
+                f"{where}: not a valid environment variable name (expected [A-Za-z_][A-Za-z0-9_]*)"
+            )
+        first = seen.setdefault(name.upper(), name)
+        if first != name:
+            issues.append(
+                f"{where}: differs from {first!r} only in case — environment names are "
+                "case-insensitive on Windows, so which value survived would depend on read order"
+            )
 
 
 def _validate_telegram(config: OrchestratorConfig, issues: list[str]) -> None:

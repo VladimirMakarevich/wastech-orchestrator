@@ -348,7 +348,7 @@ class BaseCliProvider:
     def preflight(self) -> ProviderHealth:
         """Detect the executable, parse its version, and ask the CLI about its own credentials."""
         label = self._executable_label()
-        env = self._augment_child_env(build_child_env(self._security.allowed_environment))
+        env = self._augment_child_env(build_child_env(self._security))
         with tempfile.TemporaryDirectory() as scratch:
             stdout_path = str(Path(scratch) / "version.out")
             proc = self._run_process(
@@ -482,7 +482,7 @@ class BaseCliProvider:
 
         self._write_request(paths, request, argv=argv)
 
-        env = self._augment_child_env(build_child_env(self._security.allowed_environment))
+        env = self._augment_child_env(build_child_env(self._security))
         # Deterministic no-model pre-launch check on the real launch env (the Codex canary): a
         # ProviderError here fails closed BEFORE any model call. The request artifact is already
         # written; a subclass may record its own evidence under ``paths``.

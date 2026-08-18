@@ -2,7 +2,7 @@
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 # This is the packaged copy used by `wastech-orchestrator init` (the only example config; nothing else to sync).
 
-schema_version: 35                  # config format version; the orchestrator refuses newer configs
+schema_version: 36                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -180,6 +180,28 @@ security:
     - "TMPDIR"
     - "LD_LIBRARY_PATH"
     - "DYLD_LIBRARY_PATH"
+  extra_environment: {}               # Variables the orchestrator ASSIGNS to every child process it
+                                      #   starts — the agent CLI, the Check Runner, the dependency
+                                      #   scanners, git/gh. The complement of allowed_environment,
+                                      #   which only forwards a name and inherits whatever your shell
+                                      #   exported (unset on the next machine, and a forgotten
+                                      #   `export` is skipped in silence). Use it to pin a toolchain
+                                      #   root or a cache path, e.g.:
+                                      #     extra_environment:
+                                      #       DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+                                      #       NUGET_PACKAGES: "/abs/path/to/repo/.toolcache/nuget"
+                                      #   Values MUST be quoted strings (`1` is a YAML int and is
+                                      #   refused, with a hint). An empty string is a valid value.
+                                      #   Applied after forwarding, so a name in both wins here.
+                                      #   Refused: `PATH` in any case (assigning it substitutes every
+                                      #   binary the child runs — forward it instead), a
+                                      #   secret-looking name, a name outside [A-Za-z_][A-Za-z0-9_]*,
+                                      #   and two names differing only in case (Windows environment
+                                      #   names are case-insensitive).
+                                      #   NEVER put credentials here: the value sits in this file in
+                                      #   plaintext, and nothing can check a value for secrecy. The
+                                      #   agent CLIs read their own credentials from their own stores.
+                                      #   `worc preflight` prints the NAMES you set, never the values.
   denied_read_paths:                  # REPLACES (does not extend) the default (.env, secrets/**). Globs
                                       #   the agent CLI may never read — enforced as --disallowedTools so
                                       #   a task can't exfiltrate secrets. Same glob dialect as protected_paths.

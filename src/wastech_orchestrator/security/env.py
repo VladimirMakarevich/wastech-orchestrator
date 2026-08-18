@@ -2,8 +2,9 @@
 
 A child process started by the orchestrator receives **only** the environment variables named in
 ``security.allowed_environment`` that are present in the parent environment — never the parent's
-full environment. No secret or token is ever forwarded implicitly; git/agent credentials are
-configured outside the orchestrator.
+full environment — plus the ones the operator **assigns** outright in
+``security.extra_environment``. Both halves are name-gated policy: no secret or token is ever
+forwarded implicitly, and git/agent credentials are configured outside the orchestrator.
 
 The **default** allowlist is OS-aware: on top of a cross-platform base it adds the OS-launch
 essentials a freshly spawned process needs to start at all on the host OS (see
@@ -18,6 +19,8 @@ from __future__ import annotations
 import os
 import platform
 from collections.abc import Mapping, Sequence
+
+from wastech_orchestrator.config.schema import SecurityConfig
 
 # Cross-platform base: the few names every OS needs for the agent CLIs to find their binaries
 # (PATH), their home/config dirs, and their credentials. ``USER`` is the macOS Keychain login
@@ -119,15 +122,28 @@ def launch_critical_env_issue(
 
 
 def build_child_env(
-    allowed_keys: Sequence[str],
+    security: SecurityConfig,
     parent_env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Build the child environment from only the allowlisted keys present in the parent.
+    """Build the child environment: forwarded allowlisted names, then assigned extras.
 
-    :param allowed_keys: the ``security.allowed_environment`` allowlist, in order.
+    Takes the whole :class:`SecurityConfig` rather than the two fields it reads, and that is a
+    deliberate contract: the failure mode this key introduces is *partial* delivery — the agent sees
+    a toolchain variable and the Check Runner does not, so a task dies on the quality gate after the
+    agent already succeeded. A call site that must pass a policy object cannot build an environment
+    that silently omits half the policy, which makes a new call site a type error rather than a code
+    review someone has to catch.
+
+    :param security: the operator's security policy; ``allowed_environment`` names what is forwarded
+        from *parent_env*, ``extra_environment`` names what is assigned outright.
     :param parent_env: the environment to draw from; defaults to the live ``os.environ``.
-    :returns: a fresh dict containing exactly the allowlisted keys that exist in ``parent_env``,
-        in allowlist order. A key absent from the parent is skipped (never added as empty).
+    :returns: a fresh dict holding the allowlisted keys that exist in *parent_env* in allowlist
+        order, then the assigned names in config order. A forwarded key absent from the parent is
+        skipped (never added as empty); an assigned name in both wins, keeping its forwarded
+        position. The order is part of the contract — the result is compared in tests, and an
+        unordered result would make a run's environment irreproducible.
     """
     source: Mapping[str, str] = os.environ if parent_env is None else parent_env
-    return {key: source[key] for key in allowed_keys if key in source}
+    child = {key: source[key] for key in security.allowed_environment if key in source}
+    child.update(security.extra_environment)
+    return child

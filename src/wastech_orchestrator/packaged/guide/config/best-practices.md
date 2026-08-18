@@ -46,6 +46,7 @@ Do not use it to paper over a broken default developer environment. If a check i
 
 - Secret values belong in environment variables or `.worc/.env`, never in YAML.
 - `allowed_environment` should name variables, not embed their contents.
+- `extra_environment` is the one place a **value** enters the config, and it is in plaintext: put toolchain roots and cache paths there (`NUGET_PACKAGES`, `npm_config_cache`) and never a credential. Nothing can check a value for secrecy, so this rule is a contract, not a gate — the load-time refusal only covers secret-looking *names*. Every child process the orchestrator starts receives these, `worc preflight` prints their names, and the agent CLIs get their own credentials from their own stores, so a token is never needed here.
 - Avoid host-specific absolute paths unless the orchestrator really runs on a single fixed machine.
 - Leave `agents.providers.claude.allow_native_memory` off (its default) unless you deliberately accept the risk: turning it on lets Claude's own auto-memory write to a HOME store that is **outside** the orchestrator's redaction net and audit trail. It is off by default and `install` never writes it — enable it only as a conscious choice.
 

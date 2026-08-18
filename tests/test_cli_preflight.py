@@ -365,6 +365,37 @@ def test_preflight_ready_on_linux_without_systemroot(
     assert "preflight: ready" in out
 
 
+def test_preflight_names_assigned_variables_without_their_values(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Т0.2.8: an operator reading preflight should see which variables every child process receives.
+    # NAMES only — the values are already in their config, and printing them would give a secret
+    # that landed there against the guide's advice one more surface to leak from (a CI log).
+    config = make_git_config(
+        git_repo.clone,
+        extra_environment={"NUGET_PACKAGES": "/repo/.toolcache/nuget", "DOTNET_NOLOGO": "1"},
+    )
+    _patch_providers(monkeypatch, config)
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "extra-environment: 2 assigned" in out
+    assert "NUGET_PACKAGES" in out and "DOTNET_NOLOGO" in out
+    assert "/repo/.toolcache/nuget" not in out
+
+
+def test_preflight_is_silent_about_an_empty_extra_environment(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # No key, no line: preflight reports what is in effect, and the empty default is not a state
+    # worth a line of the operator's attention.
+    _patch_providers(monkeypatch, make_git_config(git_repo.clone))
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "extra-environment" not in out
+
+
 # --- The live no-model Codex isolation capability smoke surfaced in `worc preflight` ------------
 
 

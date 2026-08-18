@@ -2304,7 +2304,7 @@ class Orchestrator:
             # The dependency_scan checker launches its argv scanners through the same safe runner
             # and allowlisted env the Check Runner uses (a test's fake runner drives both).
             run_process=self._checks.run_process,
-            process_env=build_child_env(self._config.security.allowed_environment),
+            process_env=build_child_env(self._config.security),
             scan_timeout_s=self._config.checks.timeout_seconds,
             # Per-task override wins outright; otherwise the global default (config_writer ships
             # "auto"). protected_paths is global-only (no per-task override).

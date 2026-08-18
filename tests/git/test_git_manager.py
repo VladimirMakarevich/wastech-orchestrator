@@ -62,6 +62,7 @@ def _manager(
     tasks_dir: str = "tasks",
     checkout_base_on_cleanup: bool | None = None,
     gh_runner=None,
+    extra_environment: dict[str, str] | None = None,
 ) -> GitManager:
     config = make_git_config(
         git_repo.clone,
@@ -69,6 +70,7 @@ def _manager(
         audit_on_branch=audit_on_branch,
         tasks_dir=tasks_dir,
         checkout_base_on_cleanup=checkout_base_on_cleanup,
+        extra_environment=extra_environment,
     )
     return GitManager(config, store=store, artifacts_root=str(artifacts_root), gh_runner=gh_runner)
 
@@ -2269,3 +2271,96 @@ def test_resolve_control_paths_linked_worktree_splits_gitdir_and_common(
     # Both distinct roots appear in the write-deny set.
     resolved = {p.resolve() for p in wg.denied_write_paths}
     assert wg.git_dir.resolve() in resolved and wg.git_common_dir.resolve() in resolved
+
+
+def test_assigned_environment_reaches_git_and_gh_processes(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    """AC0.2.1 (Git Manager call site): git/gh are child processes too.
+
+    Not academic: `gh` resolves the token through the operator's own environment, and a repo whose
+    hooks or LFS filters need a toolchain root sees it only if the assignment reaches here.
+    """
+    gm = _manager(
+        git_repo,
+        store,
+        tmp_path / "art",
+        make_git_config,
+        extra_environment={"NUGET_PACKAGES": "/repo/.toolcache/nuget"},
+    )
+    assert gm._env["NUGET_PACKAGES"] == "/repo/.toolcache/nuget"
+
+
+def test_locale_pin_cannot_be_overridden_by_the_config(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    """Т0.6.1: `LC_ALL=C` is pinned ON TOP of the config, so no assignment can localize git.
+
+    This module decides whether a push failure is retryable, whether a conflict marker was left
+    behind and whether a PR was already merged by matching English strings in git/gh output. A
+    localized git would not match any of them — and the damage is silent: a retryable network blip
+    becomes a final task failure. `LANG` is the very example the design proposed for the new key, so
+    the collision is the default case, not an exotic one.
+    """
+    gm = _manager(
+        git_repo,
+        store,
+        tmp_path / "art",
+        make_git_config,
+        extra_environment={"LANG": "ru_RU.UTF-8", "LC_ALL": "ru_RU.UTF-8"},
+    )
+    assert gm._env["LC_ALL"] == "C"
+    # The operator's LANG is still delivered — the pin narrows the message locale, it does not
+    # discard the assignment (LC_ALL outranks LANG for the child, which is the point).
+    assert gm._env["LANG"] == "ru_RU.UTF-8"
+
+
+def test_transient_push_classification_survives_a_localized_config(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    """AC0.6.1: the retry decision still fires with a localizing config in place."""
+    gm = _manager(
+        git_repo,
+        store,
+        tmp_path / "art",
+        make_git_config,
+        extra_environment={"LANG": "ru_RU.UTF-8"},
+    )
+    gm._sleep = lambda _d: None  # type: ignore[assignment]
+    calls = {"n": 0}
+    real = gm._git_checked
+
+    def flaky(*args: str) -> str:
+        if args[:1] == ("push",):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise GitCommandError("fatal: Unable to create '.git/index.lock': File exists")
+        return real(*args)
+
+    gm._git_checked = flaky  # type: ignore[assignment]
+    assert gm._git_checked_retryable("push", "origin", "main") is not None
+    assert calls["n"] == 2  # classified as transient, retried, then succeeded
+
+
+def test_non_ascii_commit_message_and_path_survive_the_locale_pin(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    """AC0.6.2: `LC_ALL=C` changes the message locale, not byte handling.
+
+    The mandated safety net for Т0.6: if the pin had broken non-ASCII, the fallback was to narrow it
+    to `LC_MESSAGES=C`. It does not — git stores paths and messages as bytes, and `core.quotepath`
+    (not the locale) governs how a non-ASCII path is displayed.
+    """
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    (git_repo.clone / "документация.md").write_text("привет\n", encoding="utf-8")
+
+    sha = gm.commit_code("task-001", "feat: добавил документацию")
+    assert sha is not None
+    message = git_run(["show", "-s", "--format=%B", sha], git_repo.clone)
+    assert "добавил документацию" in message
+    committed = git_run(
+        ["show", "--name-only", "--format=", "-z", sha], git_repo.clone
+    )  # -z: no path quoting, so the raw UTF-8 name comes back
+    assert "документация.md" in committed

@@ -1,9 +1,10 @@
-"""Tests for the environment allowlist."""
+"""Tests for the environment allowlist and the assigned-variable half of the policy."""
 
 from __future__ import annotations
 
 import pytest
 
+from wastech_orchestrator.config.schema import SecurityConfig
 from wastech_orchestrator.security import env as env_mod
 from wastech_orchestrator.security.env import (
     build_child_env,
@@ -13,47 +14,105 @@ from wastech_orchestrator.security.env import (
 )
 
 
+def _security(*forwarded: str, assigned: dict[str, str] | None = None) -> SecurityConfig:
+    """A policy carrying only the two fields the env builder reads."""
+    return SecurityConfig(
+        strict_isolation=True,
+        allowed_environment=forwarded,
+        denied_read_paths=(),
+        denied_commands=(),
+        extra_environment=dict(assigned or {}),
+    )
+
+
 def test_only_allowlisted_keys_survive() -> None:
     parent = {"PATH": "/usr/bin", "HOME": "/home/u", "SECRET_TOKEN": "shh", "AWS_KEY": "x"}
-    child = build_child_env(("PATH", "HOME"), parent)
+    child = build_child_env(_security("PATH", "HOME"), parent)
     assert child == {"PATH": "/usr/bin", "HOME": "/home/u"}
 
 
 def test_secrets_in_parent_never_forwarded() -> None:
     parent = {"PATH": "/usr/bin", "OPENAI_API_KEY": "sk-secret", "GITHUB_TOKEN": "ghp_x"}
-    child = build_child_env(("PATH", "HOME", "CODEX_HOME"), parent)
+    child = build_child_env(_security("PATH", "HOME", "CODEX_HOME"), parent)
     assert "OPENAI_API_KEY" not in child
     assert "GITHUB_TOKEN" not in child
 
 
 def test_missing_keys_are_skipped_not_blanked() -> None:
     parent = {"PATH": "/usr/bin"}
-    child = build_child_env(("PATH", "HOME", "CODEX_HOME"), parent)
+    child = build_child_env(_security("PATH", "HOME", "CODEX_HOME"), parent)
     assert child == {"PATH": "/usr/bin"}
     assert "HOME" not in child
 
 
 def test_empty_allowlist_yields_empty_env() -> None:
-    assert build_child_env((), {"PATH": "/usr/bin"}) == {}
+    assert build_child_env(_security(), {"PATH": "/usr/bin"}) == {}
 
 
 def test_allowlist_order_is_preserved() -> None:
     parent = {"HOME": "/home/u", "PATH": "/usr/bin", "CODEX_HOME": "/c"}
-    child = build_child_env(("PATH", "CODEX_HOME", "HOME"), parent)
+    child = build_child_env(_security("PATH", "CODEX_HOME", "HOME"), parent)
     assert list(child) == ["PATH", "CODEX_HOME", "HOME"]
 
 
 def test_defaults_to_os_environ(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("WASTECH_ENV_SENTINEL", "present")
     monkeypatch.delenv("WASTECH_ENV_ABSENT", raising=False)
-    child = build_child_env(("WASTECH_ENV_SENTINEL", "WASTECH_ENV_ABSENT"))
+    child = build_child_env(_security("WASTECH_ENV_SENTINEL", "WASTECH_ENV_ABSENT"))
     assert child == {"WASTECH_ENV_SENTINEL": "present"}
 
 
 def test_input_parent_mapping_not_mutated() -> None:
     parent = {"PATH": "/usr/bin", "SECRET": "x"}
-    build_child_env(("PATH",), parent)
+    build_child_env(_security("PATH"), parent)
     assert parent == {"PATH": "/usr/bin", "SECRET": "x"}
+
+
+# --- assigned variables (security.extra_environment) --------------------------------------------
+
+
+def test_assigned_variable_reaches_the_child_without_being_in_the_parent() -> None:
+    # The whole point of the key: forwarding can only pass on a value the parent already has.
+    child = build_child_env(
+        _security("PATH", assigned={"NUGET_PACKAGES": "/repo/.toolcache/nuget"}),
+        {"PATH": "/usr/bin"},
+    )
+    assert child == {"PATH": "/usr/bin", "NUGET_PACKAGES": "/repo/.toolcache/nuget"}
+
+
+def test_assigned_value_wins_over_the_forwarded_one() -> None:
+    child = build_child_env(
+        _security("PATH", "LANG", assigned={"LANG": "C.UTF-8"}),
+        {"PATH": "/usr/bin", "LANG": "ru_RU.UTF-8"},
+    )
+    assert child["LANG"] == "C.UTF-8"
+    # The name keeps its forwarded position: assignment overrides a value, it does not re-order.
+    assert list(child) == ["PATH", "LANG"]
+
+
+def test_key_order_is_forwarded_then_assigned() -> None:
+    # Compared as a list, not a set: a run's environment has to be reproducible between runs, and
+    # `os.environ` iteration order is not.
+    child = build_child_env(
+        _security("PATH", "HOME", assigned={"B_VAR": "2", "A_VAR": "1"}),
+        {"HOME": "/home/u", "PATH": "/usr/bin"},
+    )
+    assert list(child) == ["PATH", "HOME", "B_VAR", "A_VAR"]
+
+
+def test_empty_assigned_value_is_a_real_assignment() -> None:
+    # Not the same as absent, and something forwarding cannot express at all.
+    child = build_child_env(_security("PATH", assigned={"DOTNET_NOLOGO": ""}), {"PATH": "/usr/bin"})
+    assert child["DOTNET_NOLOGO"] == ""
+
+
+def test_no_assigned_variables_reproduces_the_forward_only_environment() -> None:
+    # И-5: absent key => today's behavior byte for byte, including key order.
+    parent = {"PATH": "/usr/bin", "HOME": "/home/u", "CODEX_HOME": "/c"}
+    forwarded = _security("PATH", "HOME", "CODEX_HOME")
+    child = build_child_env(forwarded, parent)
+    assert child == parent
+    assert list(child) == list(parent)
 
 
 def test_windows_essentials_include_systemroot() -> None:

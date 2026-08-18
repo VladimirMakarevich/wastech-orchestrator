@@ -196,6 +196,35 @@ def _str_tuple(
     return tuple(out)
 
 
+def _str_mapping(m: Mapping[str, Any], key: str, where: str, issues: list[str]) -> dict[str, str]:
+    """Parse a ``name -> string value`` mapping, preserving config order.
+
+    Fail-closed on a non-string value rather than coercing it: ``DOTNET_NOLOGO: 1`` is a YAML int,
+    and silently stringifying it would teach the operator that quoting is optional right up to the
+    value where it is not (``NO: 1`` is a bool, ``VERSION: 1.10`` loses its trailing zero). The hint
+    names the fix. An empty string is a legitimate value — assigning an empty variable is something
+    forwarding cannot express at all — so only the type is checked here.
+    """
+    if key not in m:
+        return {}
+    raw = m[key]
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        issues.append(f"{where}.{key}: expected a mapping, got {type(raw).__name__}")
+        return {}
+    out: dict[str, str] = {}
+    for name, value in raw.items():
+        if not isinstance(value, str):
+            issues.append(
+                f"{where}.{key}.{name}: expected a string, got {type(value).__name__} — "
+                f'quote the value (e.g. {name}: "{value}")'
+            )
+            continue
+        out[str(name)] = value
+    return out
+
+
 def _command_spec(m: Mapping[str, Any], where: str, issues: list[str]) -> CheckCommandSpec | None:
     """Parse one ``{name, argv, cwd?}`` command mapping (structural only; the ``cwd`` traversal
     check lives in ``config.validation``, the ``shlex``/argv normalization in ``checks.model``)."""
@@ -549,6 +578,7 @@ def _build_security(raw: Any, issues: list[str]) -> SecurityConfig:
             "disable_read_isolation",
             "allow_git_evidence",
             "allowed_environment",
+            "extra_environment",
             "denied_read_paths",
             "denied_commands",
             "trust_level",
@@ -573,6 +603,7 @@ def _build_security(raw: Any, issues: list[str]) -> SecurityConfig:
         allowed_environment=_str_tuple(
             m, "allowed_environment", default_allowed_environment(), where, issues
         ),
+        extra_environment=_str_mapping(m, "extra_environment", where, issues),
         denied_read_paths=_str_tuple(m, "denied_read_paths", (".env", "secrets/**"), where, issues),
         denied_commands=_str_tuple(
             m,

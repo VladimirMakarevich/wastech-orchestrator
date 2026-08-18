@@ -125,9 +125,12 @@ class FakeCanary:
     results: list[tuple[int, str]]
     calls: int = 0
 
+    captured_env: dict[str, str] = field(default_factory=dict)
+
     def __call__(self, argv: list[str], cwd: str, env: Mapping[str, str]) -> tuple[int, str]:
         idx = min(self.calls, len(self.results) - 1)
         self.calls += 1
+        self.captured_env = dict(env)
         return self.results[idx]
 
 
@@ -946,3 +949,59 @@ def test_preflight_auth_is_unknown_when_the_sentence_is_unrecognized(
     health = _probing_codex(codex_config, security_config, tmp_path, fake).preflight()
     assert health.auth is not None
     assert health.auth.state is AuthState.UNKNOWN
+
+
+# --- AC0.2.1: the three provider-side build_child_env call sites --------------------------------
+#
+# Each of the three asserts one thing: the environment this call site hands to its child process was
+# built from the whole security policy, so an assigned variable is in it. The other three sites are
+# covered next to their own modules (Check Runner, Git Manager, orchestrator node services).
+
+_ASSIGNED = {"NUGET_PACKAGES": "/repo/.toolcache/nuget"}
+
+
+def test_assigned_environment_reaches_the_agent_run(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    fake = FakeRun(stdout=_success_stream(), last_message='{"summary":"ok"}')
+    provider = _provider(
+        codex_config, replace(security_config, extra_environment=_ASSIGNED), tmp_path, fake
+    )
+    provider.run(make_request())
+    assert fake.captured["env"]["NUGET_PACKAGES"] == "/repo/.toolcache/nuget"
+
+
+def test_assigned_environment_reaches_preflight(
+    codex_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # `<cli> --version` is a child process like any other: an agent CLI installed through a
+    # toolchain manager may not resolve without the assignment, and preflight then misleads.
+    fake = FakeRun(stdout="codex-cli 1.2.3\n", exit_code=0)
+    provider = _provider(
+        codex_config, replace(security_config, extra_environment=_ASSIGNED), tmp_path, fake
+    )
+    provider.preflight()
+    assert fake.captured["env"]["NUGET_PACKAGES"] == "/repo/.toolcache/nuget"
+
+
+def test_assigned_environment_reaches_the_capability_smoke(
+    codex_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # The no-model `codex sandbox` probe must run under the same environment as the real launch, or
+    # it proves the sandbox for an environment no attempt will ever use.
+    fake = FakeRun(stdout="", exit_code=0)
+    canary = FakeCanary(results=[(1, "denied")])
+    provider = CodexProvider(
+        codex_config,
+        security=replace(security_config, extra_environment=_ASSIGNED),
+        artifacts_root=tmp_path,
+        clock=lambda: FIXED_TIME,
+        run_process=fake,
+        canary_runner=canary,
+    )
+    provider.isolation_capability_smoke(home_dir=tmp_path)
+    assert canary.calls > 0  # guard: the probe really ran, so the assertion below means something
+    assert canary.captured_env["NUGET_PACKAGES"] == "/repo/.toolcache/nuget"
