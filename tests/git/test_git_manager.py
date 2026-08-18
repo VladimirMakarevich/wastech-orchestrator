@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import os
 import subprocess
 from collections.abc import Callable, Sequence
@@ -495,6 +494,22 @@ def test_ensure_path_excluded_adds_one_anchored_rule_and_repeats_cleanly(
     # The tracked .gitignore stays untouched: this is orchestrator bookkeeping, not a repo decision.
     gitignore = git_repo.clone / ".gitignore"
     assert not gitignore.exists() or ".toolcache" not in gitignore.read_text(encoding="utf-8")
+
+
+def test_ensure_path_excluded_accepts_an_equivalent_spelling_of_the_clone(
+    git_repo, tmp_path: Path, git_run: GitRunner
+) -> None:
+    # The caller decides "inside the clone" from RESOLVED paths, so this must agree with it. A raw
+    # string comparison does not: a symlinked repo root — or anything under `/tmp` on macOS, where
+    # `/tmp` links to `/private/tmp` — makes the spellings differ while naming one directory. The
+    # mismatch reported a perfectly good config as a failure, blaming ignore rules for it.
+    link = tmp_path / "clone-via-link"
+    link.symlink_to(git_repo.clone)
+    assert ensure_path_excluded(link, git_repo.clone / ".toolcache" / "nuget")
+    git_run(["check-ignore", "-q", ".toolcache/nuget"], git_repo.clone)
+    # And the mirror image: the clone named directly, the value reached through the link.
+    assert ensure_path_excluded(git_repo.clone, link / ".toolcache" / "cargo")
+    git_run(["check-ignore", "-q", ".toolcache/cargo"], git_repo.clone)
 
 
 def test_ensure_path_excluded_refuses_a_path_outside_the_clone(git_repo, tmp_path: Path) -> None:
@@ -1551,7 +1566,7 @@ def test_create_pr_reuse_body_edit_failure_is_surfaced_not_fatal(
     store: StateStore,
     tmp_path: Path,
     make_git_config: ConfigFactory,
-    caplog: pytest.LogCaptureFixture,
+    package_log_text: Callable[[], str],
 ) -> None:
     # A failing title/body update on a reused PR must not block publish — the reuse already
     # succeeded — but it is surfaced (a clear warning), not silently swallowed.
@@ -1570,10 +1585,10 @@ def test_create_pr_reuse_body_edit_failure_is_surfaced_not_fatal(
         return GitResult(0, stdout, "", timed_out=False, launch_error=None)
 
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
-    with caplog.at_level(logging.WARNING):
-        url = gm.create_pr("task-001", "feature/shared", title="T", body_path="x")
+    url = gm.create_pr("task-001", "feature/shared", title="T", body_path="x")
     assert url == "https://x/pull/9"  # reuse still returns the PR; edit failure is non-fatal
-    assert "reused PR" in caplog.text and "network error" in caplog.text
+    logged = package_log_text()
+    assert "reused PR" in logged and "network error" in logged
 
 
 def test_create_pr_creates_new_when_no_open_pr(

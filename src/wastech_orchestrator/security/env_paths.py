@@ -25,6 +25,7 @@ from __future__ import annotations
 import contextlib
 import os
 import platform
+import posixpath
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -183,8 +184,16 @@ def _lexical(raw: str) -> PurePosixPath:
     Backslashes become separators so a Windows-style value is compared component-wise rather than as
     one opaque name — the same normalization the config validator already applies to a role-file
     path, and the reason ``C:\\repo\\.worc`` is caught on a POSIX host too.
+
+    ``..`` is collapsed, because otherwise it is a one-character bypass of this whole level:
+    ``<clone>/.toolcache/../.worc`` shares no component prefix with ``<clone>/.worc`` and would be
+    accepted at load, leaving only the canonical level to catch it. Collapsing is done textually,
+    which is the *wrong* answer when a component is a symlink (``/a/link/../b`` is not ``/a/b``
+    then) — and exactly the right answer here, because a level that must give the same verdict on
+    every machine cannot ask the filesystem which components are links. The canonical half resolves
+    the same value properly.
     """
-    return PurePosixPath(raw.replace("\\", "/"))
+    return PurePosixPath(posixpath.normpath(raw.replace("\\", "/")))
 
 
 def _canonical(raw: str, *, fold: bool) -> PurePosixPath:

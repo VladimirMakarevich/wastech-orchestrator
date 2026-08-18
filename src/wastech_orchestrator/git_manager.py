@@ -49,6 +49,7 @@ from wastech_orchestrator.runtime_layout import (
     ProviderWriteGuardPolicy,
 )
 from wastech_orchestrator.security.env import build_child_env
+from wastech_orchestrator.security.env_paths import assigned_path_elements, is_inside
 from wastech_orchestrator.state_store import PublishOpRow, StateStore
 from wastech_orchestrator.task.model import BRANCH_NAME_MAX_LEN
 from wastech_orchestrator.task.parser import slugify_bounded
@@ -250,7 +251,12 @@ def ensure_path_excluded(repo_root: str | Path, target: str | Path) -> bool:
     clone, when git cannot be asked, or when the path is still not ignored afterwards (a tracked
     path, or an operator's own negation rule) — a caller reports that instead of assuming.
     """
-    root, path = Path(repo_root), Path(target)
+    # Both sides are resolved before they are compared: the caller decides "inside the clone" from
+    # resolved paths, and comparing raw strings here would disagree with it whenever the clone path
+    # and the value are spelled through different but equivalent prefixes — a symlinked repo root,
+    # or anything under `/tmp` on macOS, where `/tmp` is a link to `/private/tmp`. That disagreement
+    # produced a FAIL on a perfectly good config, blamed on ignore rules that were never the cause.
+    root, path = Path(repo_root).expanduser().resolve(), Path(target).expanduser().resolve()
     try:
         probe = path.relative_to(root).as_posix()
     except ValueError:
@@ -1167,6 +1173,31 @@ class GitManager:
             return
         exclude_path = Path(rel) if Path(rel).is_absolute() else Path(self._clone) / rel
         _append_missing_lines(exclude_path, lines)
+
+    def ensure_assigned_cache_excludes(self) -> None:
+        """Ensure every in-clone path assigned via ``security.extra_environment`` is git-ignored.
+
+        The sibling of :meth:`ensure_runtime_excludes`, and for the same reason: the guarantee has
+        to hold on the path where the damage happens, not only where the operator was asked to look.
+        ``worc preflight`` repairs and verifies these rules too, but nothing forces an operator to
+        run it after editing a cache path — and an unignored toolchain cache puts thousands of
+        untracked files into the task's diff, which trips a review gate that has nothing to do with
+        caches, after the agent's expensive work is already done.
+
+        A path that is still not ignored afterwards is a warning, not a task failure: the run can
+        proceed and the diff gates will speak for themselves, while failing a task over an ignore
+        rule would invent a terminal condition out of a repository's own configuration.
+        """
+        for name, value in self._config.security.extra_environment.items():
+            for element in assigned_path_elements(value):
+                if is_inside(element, Path(self._clone)) and not ensure_path_excluded(
+                    self._clone, Path(element).expanduser()
+                ):
+                    _LOG.warning(
+                        "assigned path for %s points into the clone but git does not ignore it — a "
+                        "filled cache will show up in this task's diff",
+                        name,
+                    )
 
     # --- SnapshotHook --------------------------------------------------------------
 

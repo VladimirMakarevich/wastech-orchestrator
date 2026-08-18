@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import shlex
 import shutil
 import stat
 import subprocess
 import sys
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -86,6 +87,34 @@ def seed_builtin_flows(clone: Path) -> None:
     missing = [ln for ln in (".worc/", ".worc-io/") if ln not in present]
     if missing:
         exclude.write_text("\n".join([*present, *missing]) + "\n", encoding="utf-8")
+
+
+@pytest.fixture
+def package_log_text() -> Iterator[Callable[[], str]]:
+    """Return a reader for the ``wastech_orchestrator`` log text emitted during the test.
+
+    ``caplog`` cannot be used for these records: the product's logging setup detaches the package
+    logger from the root (``propagate = False``), so a root-attached capture handler sees nothing —
+    and whether the setup has run yet depends on which test touched it first in this worker, which
+    turns any ``caplog`` assertion on orchestrator output into an order-dependent flake. Attaching
+    to the package logger directly is order-independent.
+    """
+    records: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record.getMessage())
+
+    logger = logging.getLogger("wastech_orchestrator")
+    handler = _Collect(level=logging.DEBUG)
+    logger.addHandler(handler)
+    prior_level = logger.level
+    logger.setLevel(logging.DEBUG)
+    try:
+        yield lambda: "\n".join(records)
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(prior_level)
 
 
 # A broad-but-explicit env allowlist so git runs under the orchestrator's allowlisted environment on

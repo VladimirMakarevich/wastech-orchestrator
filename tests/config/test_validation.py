@@ -282,6 +282,33 @@ def test_a_value_that_is_not_a_path_is_not_examined(
     assert validate_config(_assigning(base_config, DOTNET_NOLOGO=value)) == []
 
 
+@pytest.mark.parametrize(
+    "value",
+    [
+        "{clone}/.toolcache/../.worc/cache",
+        "{clone}/a/b/../../.git/objects",
+        "{clone}/./.worc/cache",
+    ],
+)
+def test_a_traversal_cannot_walk_into_a_protected_path(
+    base_config: OrchestratorConfig, value: str
+) -> None:
+    # `..` shares no component prefix with the protected path, so without collapsing it this level
+    # is bypassed by one token and only the canonical check in preflight is left — which is exactly
+    # the host-dependent verdict the two-level split exists to avoid.
+    cfg = _assigning(base_config, NUGET_PACKAGES=value.format(clone=_CLONE))
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("security.extra_environment.NUGET_PACKAGES" in issue for issue in exc.value.issues)
+
+
+def test_a_traversal_that_stays_clear_is_not_refused(base_config: OrchestratorConfig) -> None:
+    # Collapsing `..` must not turn every indirect path into a refusal: this one resolves to a
+    # perfectly ordinary cache directory.
+    cfg = _assigning(base_config, NUGET_PACKAGES=f"{_CLONE}/build/../.toolcache/nuget")
+    assert validate_config(cfg) == []
+
+
 def test_a_cache_beside_the_protected_paths_validates_clean(
     base_config: OrchestratorConfig,
 ) -> None:

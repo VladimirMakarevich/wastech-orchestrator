@@ -131,7 +131,7 @@ Secrets are read from the environment (keep them in a gitignored `.env` or `expo
 
 ```text
 worc install [repo]     set up the orchestrator in a repository
-worc preflight          check the agent CLIs and isolation policy (read-only)
+worc preflight          check the agent CLIs and isolation policy (runs no task)
 worc validate-flow      validate one flow in .worc/flows/, or --all (preflight does not)
 worc promote <id>       move a staged task from tasks/preparing/ into tasks/pending/
 worc run <task-file>    process exactly one task end to end

@@ -3861,8 +3861,12 @@ class Orchestrator:
     def _prepare_branch(self, p: _Pipeline) -> None:
         """Complete the persisted ``preparing`` checkpoint and attach the task branch (per mode)."""
         # Guarantee the `.worc/` runtime home is gitignored in this clone, regardless of how it was
-        # scaffolded, so it never leaks into the operator's git status (no branch exists yet).
+        # scaffolded, so it never leaks into the operator's git status (no branch exists yet). The
+        # same guarantee for an assigned toolchain cache inside the clone: `worc preflight` also
+        # repairs those rules, but an operator who edits the path afterwards would otherwise
+        # carry an unignored cache into this task's diff.
         self._git.ensure_runtime_excludes()
+        self._git.ensure_assigned_cache_excludes()
         p.slug = slugify(p.task.title)
         epoch = int(time.time())  # makes a fresh attempt's branch unique (re-run never collides)
         mode = self._branch_mode(p.task)

@@ -9,7 +9,7 @@ plus the single ``record_rework`` accounting path.
 from __future__ import annotations
 
 import json
-import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -569,7 +569,7 @@ def test_finalize_sanitizes_leaked_structured_dump(tmp_path: Path) -> None:
 
 
 def test_finalize_discards_a_collapsed_summary_instead_of_publishing_it(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, package_log_text: Callable[[], str]
 ) -> None:
     # A finalize turn that fights the response schema can collapse to a minimal probe. One did — it
     # wrote a full synthesis three times, was rejected three times for a missing required property,
@@ -580,12 +580,12 @@ def test_finalize_discards_a_collapsed_summary_instead_of_publishing_it(
     router, store = FakeRouter([_ok("s1", "test")]), _store(tmp_path)
     sup = _supervisor(tmp_path, router, store)
 
-    with caplog.at_level(logging.WARNING):
-        result = sup.finalize(task_id=_TASK, task_title="T")
+    result = sup.finalize(task_id=_TASK, task_title="T")
 
     assert result.summary_path is None
     assert not (Path(task_artifact_dir(tmp_path / "art", _TASK)) / "summary.md").exists()
-    assert f"below the {_SUMMARY_MIN_CHARS}-char floor" in caplog.text and "'test'" in caplog.text
+    logged = package_log_text()
+    assert f"below the {_SUMMARY_MIN_CHARS}-char floor" in logged and "'test'" in logged
     payload = json.loads(
         (Path(task_artifact_dir(tmp_path / "art", _TASK)) / "summary.json").read_text("utf-8")
     )

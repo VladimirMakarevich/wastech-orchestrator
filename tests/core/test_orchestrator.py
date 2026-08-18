@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import subprocess
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
@@ -2530,6 +2531,42 @@ def test_environment_patterns_are_announced_once_per_run(
     assert "NUGET_* \u2192 1 name(s) (NUGET_PACKAGES)" in announced[0]
     assert "1 dropped as secret-named (NUGET_API_KEY)" in announced[0]
     assert "oy2-secret" not in announced[0]  # names, never values
+
+
+def test_a_run_excludes_an_assigned_in_clone_cache_without_preflight(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    """The cache exclusion has to hold on the path where the damage happens, not only in preflight.
+
+    `worc preflight` repairs and verifies these rules, but nothing forces an operator to run it
+    after editing a cache path — and an unignored toolchain cache puts thousands of untracked
+    files into this task's diff, tripping a review gate that has nothing to do with caches. Branch
+    preparation therefore guarantees it too, exactly as it does for the `.worc/` runtime home.
+    """
+    cache = git_repo.clone / ".toolcache" / "nuget"
+    orch, _store, _ledger, _art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        config_kwargs={"extra_environment": {"NUGET_PACKAGES": str(cache)}},
+    )
+    exclude = git_repo.clone / ".git" / "info" / "exclude"
+    before = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+    assert "/.toolcache/nuget" not in before  # no preflight ran
+
+    assert orch.run_task(_complete_task(tmp_path, "task-cacheign")).final_status is Status.DONE
+
+    after = exclude.read_text(encoding="utf-8")
+    assert after.count("/.toolcache/nuget") == 1
+    # And it really takes: a cache filled during the run stays out of the working tree's status.
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / "package.nupkg").write_text("binary", encoding="utf-8")
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=git_repo.clone, capture_output=True, text=True
+    )
+    assert ".toolcache" not in status.stdout
 
 
 def test_a_config_without_patterns_announces_nothing(

@@ -360,7 +360,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser(
-        "preflight", help="check both CLIs' health and the strict_isolation policy (read-only)"
+        "preflight",
+        help="check both CLIs' health and the strict_isolation policy (runs no task)",
     )
     validate_flow_cmd = sub.add_parser(
         "validate-flow",
@@ -2987,7 +2988,12 @@ def _assigned_path_lines(
 def run_preflight(
     config: OrchestratorConfig, *, env_file: Path | None = None, capability_smoke: bool = False
 ) -> tuple[bool, list[str]]:
-    """Compute the read-only preflight verdict + report lines; no task is processed.
+    """Compute the preflight verdict + report lines; no task is processed.
+
+    Read-only with one deliberate exception: an assigned toolchain cache inside the clone has its
+    exclusion repaired in that clone's untracked ``.git/info/exclude``. Reporting "your cache will
+    pollute the diff" without fixing what the orchestrator can fix would put the work on the
+    operator for no reason. Nothing tracked is touched, so no diff or pull request changes.
 
     Runs every allowed provider's ``preflight()`` (``<cli> --version``) and the deterministic
     ``check_isolation`` policy check. Returns ``(ready, lines)`` where ``ready`` is true iff every
