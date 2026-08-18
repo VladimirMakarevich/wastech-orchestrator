@@ -47,6 +47,7 @@ from wastech_orchestrator.core.flow.schema import (
 )
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.core.follow_ups import evaluator_finding_follow_ups
+from wastech_orchestrator.git_manager import PushOutcome
 from wastech_orchestrator.providers.artifacts import node_run_dir
 from wastech_orchestrator.providers.base import (
     AgentRunResult,
@@ -101,8 +102,10 @@ class FakeRouter:
 class FakeCheckRunner:
     def __init__(self, outcome: CheckOutcome) -> None:
         self._outcome = outcome
+        self.runs: list[dict[str, Any]] = []  # one entry per invocation, for re-run assertions
 
     def run(self, **kwargs: Any) -> CheckOutcome:
+        self.runs.append(kwargs)
         return self._outcome
 
 
@@ -2833,6 +2836,10 @@ class FakeGit:
         self.calls: list[tuple[str, ...]] = []
         self._changed = changed
         self._changed_seq = changed_seq
+        # Commits `push` reports having merged in from the remote (П3.6/П3.5 paths); the notice
+        # `create_pr` was handed, so a test can assert what a reviewer would read.
+        self.adopted: tuple[str, ...] = ()
+        self.pr_notice: str | None = None
 
     def commit_code(self, task_id: str, message: str) -> str | None:
         self.calls.append(("commit_code", task_id, message))
@@ -2862,12 +2869,21 @@ class FakeGit:
             tasks_dir=Path("/x/tasks"),
         )
 
-    def push(self, task_id: str, branch: str, **kw: object) -> bool:
+    def push(self, task_id: str, branch: str, **kw: object) -> PushOutcome:
         self.calls.append(("push", task_id, branch, kw.get("mode")))
-        return True
+        return PushOutcome(pushed=True, adopted_commits=self.adopted)
 
-    def create_pr(self, task_id: str, branch: str, *, title: str, body_path: str) -> str | None:
+    def create_pr(
+        self,
+        task_id: str,
+        branch: str,
+        *,
+        title: str,
+        body_path: str,
+        notice: str | None = None,
+    ) -> str | None:
         self.calls.append(("create_pr", task_id, branch, title, body_path))
+        self.pr_notice = notice
         return "https://example/pr/1"
 
     def write_current_diff(self, task_id: str) -> str:
@@ -3057,7 +3073,7 @@ def test_publish_git_failure_after_finalize_raises_manual(tmp_path: Path) -> Non
     publish_logger.addHandler(capture)
 
     class FailingPushGit(FakeGit):
-        def push(self, task_id: str, branch: str, **_: object) -> bool:
+        def push(self, task_id: str, branch: str, **_: object) -> PushOutcome:
             self.calls.append(("push", task_id, branch))
             raise GitCommandError("simulated push failure")
 
@@ -3625,3 +3641,84 @@ def test_the_write_check_is_skipped_for_a_node_without_the_grant(tmp_path: Path)
     )
     result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.unexpected_write is False
+
+
+# --- publishing after adopting commits the orchestrator did not make ---------------------------
+
+
+class _AdoptingGit(FakeGit):
+    """A FakeGit whose push reports foreign commits merged in, over a diff a set can select."""
+
+    def __init__(self, adopted: tuple[str, ...]) -> None:
+        super().__init__()
+        self.adopted = adopted
+
+    def changed_code_paths_since_base(self) -> list[str]:
+        return ["src/x.py"]  # non-empty, so a command set is actually selected
+
+
+def test_publish_reruns_checks_over_adopted_commits_and_declares_them_in_the_pr(
+    tmp_path: Path,
+) -> None:
+    # AC3.5 — what the gate passed was "our commits on top of base"; what is published is a
+    # combination it never saw, so the gate runs again. The PR says so too: its diff is measured
+    # from the base, so without the notice it silently describes someone else's work as this task's.
+    node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
+    git, store = _AdoptingGit(("abc1234", "def5678")), FakeStore()
+    checks = FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),)))
+    services = _services(FakeRouter(_result()), store, checks, git=git)
+    inputs = _inputs(
+        tmp_path,
+        branch="worc/task-1-x",
+        pull_request_title="My PR",
+        summary_body_path="/s/summary.md",
+        check_sets=_one_set(),
+    )
+    result = PublishNodeRunner(services, inputs).run(node, _ctx(node))
+
+    assert result.outcome.kind == "done"
+    assert len(checks.runs) == 1  # the gate ran again, after the push that adopted them
+    assert store.check_runs  # and the re-run is on the audit trail
+    assert git.pr_notice is not None
+    assert "abc1234" in git.pr_notice and "def5678" in git.pr_notice
+
+
+def test_publish_parks_when_the_checks_over_adopted_commits_fail(tmp_path: Path) -> None:
+    # A failure here is not this task's work going bad — it is an untested combination — so it
+    # parks for a human with the adopted state on disk, never falling into the fixing loop.
+    node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
+    git, store = _AdoptingGit(("abc1234",)), FakeStore()
+    checks = FakeCheckRunner(
+        CheckOutcome(passed=False, runs=(_run(False),), any_quality_failed=True)
+    )
+    services = _services(FakeRouter(_result()), store, checks, git=git)
+    inputs = _inputs(
+        tmp_path,
+        branch="worc/task-1-x",
+        pull_request_title="My PR",
+        summary_body_path="/s/summary.md",
+        check_sets=_one_set(),
+    )
+    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
+
+    with pytest.raises(NodeManualRequired) as excinfo:
+        PublishNodeRunner(services, inputs).run(node, _ctx(node))
+    assert "abc1234" in str(excinfo.value)
+    assert [c[0] for c in git.calls] == ["commit_code", "commit_audit", "push"]  # no PR opened
+
+
+def test_publish_does_not_rerun_checks_when_nothing_was_adopted(tmp_path: Path) -> None:
+    # The ordinary path pays nothing: no foreign commits, no second gate run, no PR notice.
+    node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
+    git, store = FakeGit(), FakeStore()
+    checks = FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),)))
+    services = _services(FakeRouter(_result()), store, checks, git=git)
+    inputs = _inputs(
+        tmp_path,
+        branch="worc/task-1-x",
+        pull_request_title="My PR",
+        summary_body_path="/s/summary.md",
+        check_sets=_one_set(),
+    )
+    PublishNodeRunner(services, inputs).run(node, _ctx(node))
+    assert checks.runs == [] and git.pr_notice is None

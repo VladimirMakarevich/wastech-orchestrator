@@ -1,8 +1,10 @@
 # Residues of the read-only git-evidence grant
 
-Status: **proposed** Date: 2026-07-27 Owner: Vladimir Makarevich
+Status: **закрыт — оба residue реализованы** (B — [Пре-3](full-tool-access/phase-pre-3-diff-gate.md) 2026-08-18, A — [Пре-2](full-tool-access/phase-pre-2-remote-side.md) 2026-08-19) Date: 2026-07-27 Owner: Vladimir Makarevich
 
-Two unclosed gaps left by the read-only git-evidence grant, both consciously deferred on 2026-07-27 during the `deep_research` post-mortem walkthrough. Extracted here because the campaign folder that recorded them is deleted once its items land, and neither gap is closed by anything shipped.
+Two gaps left by the read-only git-evidence grant, both consciously deferred on 2026-07-27 during the `deep_research` post-mortem walkthrough, and both since closed. The designs below are kept as the record of what was built and why.
+
+**A** shipped with Пре-2: the push destination is captured at branch prep and re-read immediately before `push`/`push_branch_update`, and a change refuses with `ManualActionRequired` and a credential-stripped URL. **B** shipped with Пре-3, wider than proposed here: the bracket now keys on whether the attempt actually has a shell rather than on the declared grant, and it covers `tool` nodes as well as `evaluator` ones.
 
 Background: a `read-only` node that declares `git_evidence: true` gets a **shell** on Claude (scoped to read-only git verbs) while the OS sandbox write-denies the whole clone. Both halves are required — the node's declaration and the operator's `security.allow_git_evidence`, off by default. The same 2026-07-27 operator decision that produced these residues also settled that such a node **never parks the task**: a stray working-tree write and Git control-state drift are both reported (console warning + ⚠️ trace) and the run continues.
 
@@ -30,7 +32,7 @@ Note what this deliberately is **not**: banning the keys, which would break a le
 
 Originally recorded (P1.4a) as covering only the working-tree half; on 2026-07-27 the same bracket gained the control-state comparison, so **both** signals are now missing for evaluators, not one.
 
-**Proposed design.** Lift the bracket to a place both runners share, or duplicate the three calls in the evaluator runner. The signal fields already exist on `NodeOutcome` (`read_only_write`, `read_only_git_drift`) and the orchestrator's post-node hook already renders both, so this is the capture/compare pair and nothing else.
+**Proposed design.** Lift the bracket to a place both runners share, or duplicate the three calls in the evaluator runner. The signal fields already exist on `NodeOutcome` and the orchestrator's post-node hook already renders both, so this is the capture/compare pair and nothing else. (As shipped, those fields are `unexpected_write` and `git_control_drift` — renamed with Пре-3, when the channel stopped being read-only-specific.)
 
 **Why deferred.** No packaged flow grants an evaluator the verbs, so today it is dead coverage. Worth adding the first time one does — which is a flow-authoring decision, not a code one, so it can arrive without warning.
 

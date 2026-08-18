@@ -135,7 +135,17 @@ def _utc_now_iso() -> str:
 # about the deletions its first subtask already got approved. Additive, ``_migrate`` adds it on a
 # brand-new (``0``) database; an older versioned DB is still refused fail-closed and recreated
 # (greenfield).
-DB_SCHEMA_VERSION = 22
+# v23 (pushed-branch identity): added the **additive** nullable ``publish_operations.pushed_sha``
+# column — the commit the orchestrator actually left on the remote when it pushed. Push recorded
+# the branch *name* in both ``fingerprint`` and ``result_ref``, so nothing on our side said what
+# the remote ref should hold, and a branch someone else moved was indistinguishable from the one
+# we put there — which is what let an unexpected remote state be recorded as our own success.
+# NULL is its real meaning ("we have not pushed this branch"), which is the honest state before a
+# first push and for every operation that is not a push, so no default. ``fingerprint`` is
+# deliberately left alone: it keys push idempotency, and reusing it would change the very
+# short-circuit this column exists to fix. Additive, ``_migrate`` adds it on a brand-new (``0``)
+# database; an older versioned DB is still refused fail-closed and recreated (greenfield).
+DB_SCHEMA_VERSION = 23
 
 
 class IncompatibleStateError(Exception):
@@ -195,6 +205,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # ("the task's diff base"), not a placeholder, so no default.
     if "gate_reference_sha" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN gate_reference_sha TEXT")
+    # v23: the commit a push left on the remote. Nullable — NULL is its real meaning ("not pushed
+    # by us"), not a placeholder, so no default.
+    publish_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(publish_operations)")}
+    if "pushed_sha" not in publish_cols:
+        conn.execute("ALTER TABLE publish_operations ADD COLUMN pushed_sha TEXT")
     _migrate_usage_columns(conn)
 
 
@@ -404,6 +419,7 @@ CREATE TABLE IF NOT EXISTS publish_operations (
     subtask_order INTEGER NOT NULL DEFAULT -1,
     fingerprint TEXT NOT NULL,
     result_ref TEXT,
+    pushed_sha TEXT,
     status TEXT NOT NULL,
     created_at TEXT NOT NULL,
     UNIQUE(task_id, kind, subtask_order)
@@ -606,6 +622,10 @@ class PublishOpRow:
     status: str
     subtask_order: int | None = None
     result_ref: str | None = None
+    #: For a ``push``: the commit this orchestrator left on the remote branch. It is what the
+    #: remote ref is compared against on the next publish, so an unexpected remote state can be
+    #: told apart from our own. ``None`` for every other kind and before the first push.
+    pushed_sha: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1468,14 +1488,25 @@ class StateStore:
             c.execute(
                 """
                 INSERT INTO publish_operations (
-                    task_id, kind, subtask_order, fingerprint, result_ref, status, created_at
-                ) VALUES (?,?,?,?,?,?,?)
+                    task_id, kind, subtask_order, fingerprint, result_ref, pushed_sha, status,
+                    created_at
+                ) VALUES (?,?,?,?,?,?,?,?)
                 ON CONFLICT(task_id, kind, subtask_order) DO UPDATE SET
                     fingerprint = excluded.fingerprint,
                     result_ref = excluded.result_ref,
+                    pushed_sha = excluded.pushed_sha,
                     status = excluded.status
                 """,
-                (op.task_id, op.kind, subtask, op.fingerprint, op.result_ref, op.status, now),
+                (
+                    op.task_id,
+                    op.kind,
+                    subtask,
+                    op.fingerprint,
+                    op.result_ref,
+                    op.pushed_sha,
+                    op.status,
+                    now,
+                ),
             )
 
     def get_publish_op(
@@ -1496,7 +1527,24 @@ class StateStore:
             status=row["status"],
             subtask_order=None if row["subtask_order"] == _NO_SUBTASK else row["subtask_order"],
             result_ref=row["result_ref"],
+            pushed_sha=row["pushed_sha"],
         )
+
+    def publish_ref_recorded(self, kind: str, result_ref: str) -> bool:
+        """True iff *result_ref* is one this orchestrator recorded for *kind* — for any task.
+
+        Deliberately not scoped to a single task: a chain of tasks on one branch converges on one
+        PR, so the second task must recognise the first task's PR as ours. What it separates is
+        ours from everyone's — a PR opened by a person (or by an agent that got hold of ``gh``)
+        appears in no row, and publishing must not write into it.
+        """
+        if not result_ref:
+            return False
+        cur = self._conn.execute(
+            "SELECT 1 FROM publish_operations WHERE kind = ? AND result_ref = ? LIMIT 1",
+            (kind, result_ref),
+        )
+        return cur.fetchone() is not None
 
     def clear_publish_operations(
         self, task_id: str, conn: sqlite3.Connection | None = None

@@ -17,7 +17,12 @@ from wastech_orchestrator.config.loader import loads_config
 from wastech_orchestrator.config.schema import MergeStrategy
 from wastech_orchestrator.core.orchestrator import PipelineFailed
 from wastech_orchestrator.core.state_machine import Status
-from wastech_orchestrator.git_manager import KIND_PR, KIND_PR_MERGE, GitResult
+from wastech_orchestrator.git_manager import (
+    KIND_PR,
+    KIND_PR_MERGE,
+    GitResult,
+    ManualActionRequired,
+)
 from wastech_orchestrator.runtime_layout import RuntimeLayout
 from wastech_orchestrator.state_store import PublishOpRow, StateStore, TaskRow
 
@@ -283,3 +288,28 @@ def test_plan_merge_is_read_only(git_repo, fake_cli, git_run, tmp_path: Path) ->
     assert not plan.refusals
     assert gh.merge_called is False
     assert orch._store.get_publish_op("m1", KIND_PR_MERGE, None) is None  # nothing written
+
+
+def test_a_staging_gate_refusal_still_aborts_the_merge(
+    git_repo, fake_cli, git_run, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `commit_merge_resolution`'s own gates raise ManualActionRequired, not GitCommandError, and
+    # used to escape past the abort — leaving the clone mid-merge, which blocks cleanup and the
+    # next task. The tree must be restored, and the outcome must keep its class (a block for a
+    # human), not be downgraded to a pipeline failure.
+    gh = FakeGh("OPEN")
+    orch = _build(git_repo, fake_cli, tmp_path, scenario="success", gh=gh)
+    _seed_task(orch._store)
+    _setup_branch(git_run, git_repo.clone, conflict=False)
+
+    def refuse(task_id: str, message: str) -> str | None:
+        assert orch._git.merge_in_progress() is True  # a merge really is in flight here
+        raise ManualActionRequired("a staged entry needs a human")
+
+    monkeypatch.setattr(orch._git, "commit_merge_resolution", refuse)
+
+    with pytest.raises(ManualActionRequired):
+        orch.merge_task("m1", strategy=MergeStrategy.SQUASH, wait_for_checks=False)
+
+    assert orch._git.merge_in_progress() is False  # restored, not wedged mid-merge
+    assert gh.merge_called is False

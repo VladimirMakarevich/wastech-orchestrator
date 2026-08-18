@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 
+from wastech_orchestrator.checks.selection import select_check_sets
 from wastech_orchestrator.config.schema import PublishScope
 from wastech_orchestrator.core.flow.contracts import PublishingPolicy
 from wastech_orchestrator.core.flow.engine import NodeContext, NodeOutcome, NodeResult
@@ -35,13 +36,37 @@ from wastech_orchestrator.git_manager import GitCommandError
 from wastech_orchestrator.observability.logging import bind
 from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.providers.redaction import redact_text
-from wastech_orchestrator.state_store import NodeRunRow
+from wastech_orchestrator.state_store import CheckRunRow, NodeRunRow
 
 _LOG = logging.getLogger(__name__)
 
 _PR_POLICIES = frozenset(
     {PublishingPolicy.PULL_REQUEST, PublishingPolicy.DOCUMENTATION_PULL_REQUEST}
 )
+
+#: How many adopted commits a PR notice lists before it stops enumerating.
+_NOTICE_COMMIT_CAP = 10
+
+
+def _adoption_notice(branch: str | None, adopted: tuple[str, ...]) -> str | None:
+    """A PR-body line naming the commits publishing merged in, or ``None`` when there were none.
+
+    The reported diff is measured from the base branch, so once foreign commits are in it the diff
+    no longer describes this task alone. A reviewer has to be told that in the PR itself.
+    """
+    if not adopted:
+        return None
+    shown = ", ".join(f"`{sha}`" for sha in adopted[:_NOTICE_COMMIT_CAP])
+    more = (
+        ""
+        if len(adopted) <= _NOTICE_COMMIT_CAP
+        else f" (+{len(adopted) - _NOTICE_COMMIT_CAP} more)"
+    )
+    return (
+        f"> **Adopted {len(adopted)} commit(s) from `origin/{branch}` that this orchestrator did "
+        f"not make:** {shown}{more}. The diff below is measured from the base branch, so it covers "
+        "those commits as well as this task's work."
+    )
 
 
 class PublishConfigError(Exception):
@@ -161,7 +186,12 @@ class PublishNodeRunner:
         git.commit_audit(ctx.task_id, task_packet_digest=self._s.task_packet_digest)
         if scope is PublishScope.COMMIT:
             return None
-        git.push(ctx.task_id, self._in.branch, mode=self._in.branch_mode)
+        pushed = git.push(ctx.task_id, self._in.branch, mode=self._in.branch_mode)
+        if pushed.adopted_commits:
+            # The branch carried commits nobody here made. What the quality gate passed was "our
+            # commits on top of base"; what is published now is a combination it never saw, so ask
+            # the Core's Check Runner for it again before this goes any further.
+            self._recheck_adopted(node, ctx, pushed.adopted_commits)
         if scope is PublishScope.PUSH:
             return None
         return git.create_pr(
@@ -169,6 +199,55 @@ class PublishNodeRunner:
             self._in.branch,
             title=self._in.pull_request_title or ctx.task_id,
             body_path=body_path or "",
+            notice=_adoption_notice(self._in.branch, pushed.adopted_commits),
+        )
+
+    def _recheck_adopted(
+        self, node: PublishNode, ctx: NodeContext, adopted: tuple[str, ...]
+    ) -> None:
+        """Re-run the quality gate over the adopted combination; park when it does not pass.
+
+        A failure here is not this task's work going bad — it is an untested combination that a
+        human has to look at — so it parks with the adopted state on disk and never falls back or
+        enters the fixing loop.
+        """
+        git = self._s.git
+        changed = git.changed_code_paths_since_base() if git is not None else None
+        selected = select_check_sets(self._in.check_sets, changed)
+        log = bind(_LOG, task_id=ctx.task_id, node=node.id)
+        if not selected:
+            log.info("no check set covers the adopted commits; nothing to re-run")
+            return
+        outcome = self._s.check_runner.run(
+            clone_dir=self._s.repo_dir,
+            artifacts_root=self._s.artifacts_root,
+            task_id=ctx.task_id,
+            subtask=ctx.subtask_order,
+            selected=selected,
+            clock=self._s.clock,
+        )
+        for run in outcome.runs:
+            self._s.store.record_check_run(
+                CheckRunRow(
+                    task_id=ctx.task_id,
+                    subtask_order=ctx.subtask_order,
+                    command=run.command,
+                    exit_code=run.exit_code,
+                    timed_out=run.timed_out,
+                    passed=run.passed,
+                    log_path=run.log_path,
+                    skipped=run.skipped,
+                    started_at=run.started_at,
+                    finished_at=run.finished_at,
+                )
+            )
+        if outcome.passed and not (outcome.any_launch_failed or outcome.nothing_ran):
+            log.info("checks re-run over the adopted commits and passed")
+            return
+        raise NodeManualRequired(
+            f"publish node {node.id!r}: this branch carried {len(adopted)} commit(s) this "
+            f"orchestrator did not make ({', '.join(adopted[:5])}), and the checks over the "
+            "combined tree did not pass — the combination is untested and needs a human"
         )
 
     def _store_private_report(self, ctx: NodeContext) -> str | None:

@@ -24,7 +24,12 @@ from wastech_orchestrator.config.schema import (
     BranchMode,
     PublishScope,
 )
-from wastech_orchestrator.git_manager import ChangedPath, GitControlDrift, GitControlState
+from wastech_orchestrator.git_manager import (
+    ChangedPath,
+    GitControlDrift,
+    GitControlState,
+    PushOutcome,
+)
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult
 from wastech_orchestrator.providers.base import AgentRunRequest, ErrorClass, ProviderId
 from wastech_orchestrator.providers.process import ProcessResult, run_process
@@ -292,9 +297,23 @@ class GitPort(Protocol):
         self, exchange_root: str | None = None
     ) -> ProviderWriteGuardPolicy: ...
 
-    def push(self, task_id: str, branch: str, *, mode: BranchMode = BranchMode.NEW) -> bool: ...
+    #: Publishes the task branch and reports what it had to do to get there — including any
+    #: commits it merged in because the remote branch had moved on without us.
+    def push(
+        self, task_id: str, branch: str, *, mode: BranchMode = BranchMode.NEW
+    ) -> PushOutcome: ...
 
-    def create_pr(self, task_id: str, branch: str, *, title: str, body_path: str) -> str | None: ...
+    #: ``notice`` is prepended to the PR body — used to declare commits publishing had to adopt,
+    #: without which the PR's base-measured diff would silently describe someone else's work too.
+    def create_pr(
+        self,
+        task_id: str,
+        branch: str,
+        *,
+        title: str,
+        body_path: str,
+        notice: str | None = None,
+    ) -> str | None: ...
 
     def write_current_diff(self, task_id: str) -> str: ...
 

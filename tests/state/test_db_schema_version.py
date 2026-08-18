@@ -108,3 +108,46 @@ def test_the_gate_reference_column_is_added_to_a_pre_versioning_database(tmp_pat
     finally:
         store.close()
     assert _user_version(db) == DB_SCHEMA_VERSION
+
+
+def test_the_pushed_sha_column_is_added_to_a_pre_versioning_database(tmp_path: Path) -> None:
+    # v23 is additive on `publish_operations`, so the one database `_migrate` may reshape — a
+    # `0`-stamped, pre-versioning one — gains `pushed_sha` and keeps the publish rows it had.
+    db = tmp_path / "prev.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE tasks (task_id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL, "
+        "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "CREATE TABLE publish_operations (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "task_id TEXT NOT NULL REFERENCES tasks(task_id), kind TEXT NOT NULL, "
+        "subtask_order INTEGER NOT NULL DEFAULT -1, fingerprint TEXT NOT NULL, result_ref TEXT, "
+        "status TEXT NOT NULL, created_at TEXT NOT NULL, UNIQUE(task_id, kind, subtask_order))"
+    )
+    conn.execute(
+        "INSERT INTO tasks (task_id, title, status, created_at, updated_at) VALUES (?,?,?,?,?)",
+        ("task-001", "kept", "new", "t0", "t0"),
+    )
+    conn.execute(
+        "INSERT INTO publish_operations (task_id, kind, subtask_order, fingerprint, result_ref, "
+        "status, created_at) VALUES (?,?,?,?,?,?,?)",
+        ("task-001", "push", -1, "worc/task-001", "worc/task-001", "completed", "t0"),
+    )
+    conn.commit()
+    conn.close()
+    assert _user_version(db) == 0
+
+    store = StateStore.open(db)
+    try:
+        columns = {
+            str(row[1]) for row in store._conn.execute("PRAGMA table_info(publish_operations)")
+        }
+        assert "pushed_sha" in columns
+        op = store.get_publish_op("task-001", "push")
+        assert op is not None
+        assert op.result_ref == "worc/task-001"  # the pre-existing publish row survived
+        assert op.pushed_sha is None  # NULL means "we have no record of what we pushed"
+    finally:
+        store.close()
+    assert _user_version(db) == DB_SCHEMA_VERSION

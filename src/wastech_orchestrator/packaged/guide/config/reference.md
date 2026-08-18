@@ -38,7 +38,7 @@ The reference is split by concern, so a page you open to answer one question is 
 
 | Field | Type / values | Default | Constraint | When to use |
 | --- | --- | --- | --- | --- |
-| `repo.url` | string | `""` | — | The Git remote the orchestrator pushes to. |
+| `repo.url` | string | `""` | — | The Git remote the orchestrator pushes to. `install` fills it in from your clone's `origin`. It is also what pins every `gh` call to a repository (`--repo owner/name`), so a rewritten `~/.config/gh/hosts.yml` or `url.*.insteadOf` cannot retarget a pull request; when it names no hosted repository the clone's `origin` answers instead, read once before any agent starts. |
 | `repo.local_path` | string | `"./workspace/repo"` | — | The local clone the orchestrator operates in. |
 | `repo.base_branch` | string | `"main"` | — | Branch tasks fork from, and (by default) return to after cleanup. |
 | `repo.branch_prefix` | string | `"worc"` | — | Task branch naming: `worc/<task-id>-<slug>`. Leave default unless the project mandates another prefix. |
@@ -63,6 +63,17 @@ The reference is split by concern, so a page you open to answer one question is 
 | `git.merge_flow` | string | `"merge"` | The flow `worc merge-task` runs to resolve base-merge conflicts (seeded at `.worc/flows/merge.yaml`). Clean merges are mechanical; only a conflicting base-merge runs it. |
 | `git.footprint.audit_commit_message` | string | `"chore(orchestrator): audit trail for {task_id}"` | Template for the separate audit commit (the task file + its `<id>.summary.md`, not a second code commit). |
 | `git.footprint.audit_on_branch` | `task` \| `sibling` | `task` | `task` = audit commit on the same branch as the code; `sibling` = on `<branch>-audit`. |
+
+### When the task branch already exists on the remote
+
+Publishing does not assume the branch on `origin` got there by us. What it holds decides what happens:
+
+- **It matches our commit** — nothing is sent, and the operation is recorded as done.
+- **It is behind us** — an ordinary push. (This is the case that used to be recorded as published with nothing sent, which mattered most when `branch_name` came from the task file or you chose the branch yourself.)
+- **It diverged, and it is exactly the commit we recorded pushing** — a lease-guarded force-push replaces our own stale push, and nothing else.
+- **It diverged from something we never pushed** — those commits are merged in, the quality gate is run again over the combination, and the pull request says which commits were adopted. A merge conflict here stops the task for you instead: resolving one needs an agent, and publishing runs after the agent is gone, so the working tree is restored and the task is parked (`worc merge-task` is the way through).
+
+A push is also refused outright if the destination of `origin` changed during the task — a rewritten remote URL, `insteadOf`/`pushInsteadOf` or `pushurl`. The message names the host and path it would have gone to, with any credentials stripped.
 
 ## Cross-field rules and gotchas (read before you finish)
 

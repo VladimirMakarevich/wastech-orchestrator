@@ -24,6 +24,7 @@ from wastech_orchestrator.core.flow.registry import FlowRegistry
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import ChecksNode, EvaluatorNode, FlowNode
 from wastech_orchestrator.core.state_machine import Status
+from wastech_orchestrator.git_manager import PushOutcome
 from wastech_orchestrator.providers.base import AgentRunResult, ProviderId, RunStatus
 from wastech_orchestrator.providers.process import ProcessResult
 from wastech_orchestrator.routing.router import ResolvedRoute, RouteSource, StageOutcome
@@ -135,9 +136,9 @@ class _Git:
         self.calls.append("commit_audit")
         return "sha"
 
-    def push(self, *a: Any, **k: Any) -> bool:
+    def push(self, *a: Any, **k: Any) -> PushOutcome:
         self.calls.append("push")
-        return True
+        return PushOutcome(pushed=True, adopted_commits=())
 
     def create_pr(self, *a: Any, **k: Any) -> str | None:
         self.calls.append("create_pr")

@@ -1692,10 +1692,12 @@ class Orchestrator:
         via the merge flow), then merge the PR. The human-in-the-loop counterpart to ``auto_merge``.
 
         Holds the single slot for its duration and cleans up after itself, so it needs no new task
-        status. Transactional: on any failure it runs ``git merge --abort``, leaves the PR open, and
-        raises :class:`PipelineFailed` (a ``DONE`` task is never downgraded). Idempotent: a PR that
-        is already merged (through us earlier, or out of band) is recorded and succeeds without
-        re-merging. ``resolve=False`` aborts on a conflict instead of launching the merge flow."""
+        status. Transactional: on any failure it runs ``git merge --abort`` and leaves the PR open.
+        Git/pipeline failures surface as :class:`PipelineFailed` (a ``DONE`` task is never
+        downgraded); a staging gate that demands a human keeps its own class and is re-raised.
+        Idempotent: a PR that is already merged (through us earlier, or out of band) is recorded
+        and succeeds without re-merging. ``resolve=False`` aborts on a conflict instead of
+        launching the merge flow."""
         row = self._store.get_task(task_id)
         if row is None:
             raise PipelineFailed(f"unknown task id '{task_id}'")
@@ -1748,6 +1750,13 @@ class Orchestrator:
         except (GitCommandError, PipelineFailed) as exc:
             self._git.merge_abort()  # transactional: restore the tree, leave the PR open
             raise PipelineFailed(f"merge-task failed: {exc}") from exc
+        except Exception:
+            # The staging gates inside `commit_merge_resolution` raise ManualActionRequired, not
+            # GitCommandError, and used to escape past the abort — leaving the tree mid-merge, which
+            # blocks cleanup and the next task. Abort here too and re-raise unchanged, so the class
+            # of the outcome (a block a human must clear) is preserved rather than downgraded.
+            self._git.merge_abort()
+            raise
         return self._merge_finalize(row, pr_url)
 
     def _merge_finalize(self, row: TaskRow, pr_url: str) -> PipelineResult:

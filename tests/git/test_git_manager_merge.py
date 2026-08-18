@@ -18,6 +18,7 @@ from wastech_orchestrator.git_manager import (
     KIND_PR_MERGE,
     GitCommandError,
     GitManager,
+    GitResult,
 )
 from wastech_orchestrator.state_store import StateStore, TaskRow
 
@@ -33,11 +34,32 @@ def store(tmp_path: Path) -> StateStore:
     return StateStore.open(tmp_path / "state.db")
 
 
+def _offline_gh(argv: Sequence[str]) -> GitResult:
+    """Default ``gh`` for these tests: answers the fingerprint's PR probe, refuses anything else.
+
+    The per-attempt fingerprint asks ``gh pr list`` whether the task branch has an open PR, so
+    without a stub every capture would launch the real ``gh`` against whatever ``repo.url`` the
+    test config names — a network call inside a unit test. Any other verb fails loudly so a test
+    that actually needs ``gh`` wires its own runner instead of leaning on this one.
+    """
+    if list(argv[:2]) == ["pr", "list"]:
+        return GitResult(exit_code=0, stdout="[]", stderr="", timed_out=False, launch_error=None)
+    return GitResult(
+        exit_code=1,
+        stdout="",
+        stderr="no gh runner wired in this test",
+        timed_out=False,
+        launch_error=None,
+    )
+
+
 def _manager(
     git_repo, store: StateStore, artifacts_root: Path, make_git_config: ConfigFactory
 ) -> GitManager:
     config = make_git_config(git_repo.clone)
-    return GitManager(config, store=store, artifacts_root=str(artifacts_root))
+    return GitManager(
+        config, store=store, artifacts_root=str(artifacts_root), gh_runner=_offline_gh
+    )
 
 
 def _task(store: StateStore, task_id: str = "task-001") -> None:

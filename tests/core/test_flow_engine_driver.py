@@ -19,6 +19,7 @@ from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.snapshot import load_flow
 from wastech_orchestrator.core.flow.validator import validate_flow
 from wastech_orchestrator.core.state_machine import Status
+from wastech_orchestrator.git_manager import PushOutcome
 from wastech_orchestrator.providers.base import (
     AgentRunResult,
     ProviderId,
@@ -129,10 +130,18 @@ class _FakeGit:
             tasks_dir=Path("/x/tasks"),
         )
 
-    def push(self, task_id: str, branch: str, **_: object) -> bool:
-        return True
+    def push(self, task_id: str, branch: str, **_: object) -> PushOutcome:
+        return PushOutcome(pushed=True, adopted_commits=())
 
-    def create_pr(self, task_id: str, branch: str, *, title: str, body_path: str) -> str | None:
+    def create_pr(
+        self,
+        task_id: str,
+        branch: str,
+        *,
+        title: str,
+        body_path: str,
+        notice: str | None = None,
+    ) -> str | None:
         return "https://example/pr/1"
 
     def write_current_diff(self, task_id: str) -> str:

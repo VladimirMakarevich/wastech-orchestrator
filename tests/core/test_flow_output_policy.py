@@ -33,7 +33,7 @@ from wastech_orchestrator.core.flow.output_policy import (
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import AgentNode, FlowDoc, PublishNode
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
-from wastech_orchestrator.git_manager import ChangedPath
+from wastech_orchestrator.git_manager import ChangedPath, PushOutcome
 from wastech_orchestrator.providers.base import AgentRunResult, ProviderId, RunStatus
 from wastech_orchestrator.routing.router import ResolvedRoute, RouteSource, StageOutcome
 from wastech_orchestrator.runtime_layout import ProviderWriteGuardPolicy
@@ -144,11 +144,19 @@ class _Git:
             tasks_dir=Path("/x/tasks"),
         )
 
-    def push(self, task_id: str, branch: str, **_: object) -> bool:
+    def push(self, task_id: str, branch: str, **_: object) -> PushOutcome:
         self.calls.append("push")
-        return True
+        return PushOutcome(pushed=True, adopted_commits=())
 
-    def create_pr(self, task_id: str, branch: str, *, title: str, body_path: str) -> str | None:
+    def create_pr(
+        self,
+        task_id: str,
+        branch: str,
+        *,
+        title: str,
+        body_path: str,
+        notice: str | None = None,
+    ) -> str | None:
         self.calls.append("create_pr")
         return "url"
 

@@ -28,6 +28,16 @@ Two of these fields — `strict_isolation` and `disable_read_isolation` — desc
 
 One rule is shared by all of them and worth knowing before you read a report: **"nothing was written" is not a pass.** If not even the allowed control file appears, the probe cannot tell an enforced sandbox from a model that never attempted the write, so it reports `NOT DEMONSTRATED` — a warning when another provider can cover the work, a preflight failure when none can. A proven leak is always fatal.
 
+### What the per-attempt fingerprint watches
+
+Around every provider attempt the orchestrator fingerprints the Git control surfaces and compares them afterwards; a change is a policy violation that parks the task. Three parts of that are worth knowing because they are not inside the clone's `.git`:
+
+- **The remote side.** Denying the agent write access to `.git` stops only one publishing operation out of four — pushing an existing history writes nothing under `.git`, and `gh pr create`/`gh pr merge` write nothing locally at all. So the fingerprint also reads what `origin` holds for the task branch, where a push would actually go, and whether the branch has an open pull request. A task branch that appears or moves on `origin` while the agent is working parks the task. The **base** branch is deliberately outside this: it moves legitimately whenever someone merges their own PR.
+- **The agent's own CLI configuration.** The shipped defaults load the clone's `.claude/settings.json`, `.mcp.json` and `.codex/` on purpose — that is how hooks and MCP servers reach the agent — and the orchestrator's own git commands read your user git config (`~/.gitconfig`, `~/.config/git/config`). Each hands out code execution or redirects a push, so all of them are fingerprinted. They are kept as content digests, never values: these files carry tokens and key paths, and a drift report names the file, never what is in it.
+- **Where `gh` points.** Every `gh` call carries `--repo`, pinned from `repo.url` (or, when that names no hosted repository, from the clone's `origin` read once before any agent runs). Without it `gh` infers the repository from the clone, which is exactly the surface being watched.
+
+A push additionally re-reads its destination immediately before sending — the one moment an error reaches a real branch — and refuses when it changed.
+
 ### What the dangerous-diff gate measures from
 
 `trust_level` decides *which* diffs raise the approval gate; this is *what* the diff is measured against. The reference point is the last commit the orchestrator itself made for the task — or, until it has made one, the task's base. It is deliberately not `HEAD`: a commit made inside the task would then leave nothing for the gate to see, and the one question you are asked before publishing would go quiet exactly when something unusual happened. So if an agent commits its own work mid-run, its content still reaches the gate and you are still asked.

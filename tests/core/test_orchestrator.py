@@ -3892,6 +3892,11 @@ def _task_with_auto_merge(tmp_path: Path, value: bool, task_id: str = "task-001"
     return str(path)
 
 
+#: Every `gh` call is pinned to the repository with `--repo`, derived from the test config's
+#: `repo.url` (`git@example.com:o/r.git`) — so a rewritten hosts.yml/insteadOf cannot retarget it.
+_GH_PIN = ["--repo", "example.com/o/r"]
+
+
 def _merge_calls(calls: list[list[str]]) -> list[list[str]]:
     return [c for c in calls if c[:2] == ["pr", "merge"]]
 
@@ -3933,7 +3938,7 @@ def test_global_auto_merge_merges_pr(git_repo, make_git_config, tmp_path: Path) 
     _patch_impl_edit(providers, git_repo)
     result = orch.run_task(_complete_task(tmp_path))
     assert result.final_status is Status.DONE
-    assert _merge_calls(calls) == [["pr", "merge", "https://example/pr/1", "--squash"]]
+    assert _merge_calls(calls) == [["pr", "merge", "https://example/pr/1", "--squash", *_GH_PIN]]
     rec = ledger.records()[0]
     assert rec["auto_merged"] is True and rec["merge_outcome"] == "deadbeef"
     op = store.get_publish_op("task-001", "pr_merge")
@@ -4036,7 +4041,9 @@ def test_auto_merge_wait_for_checks_arms_native_auto(
     _patch_impl_edit(providers, git_repo)
     result = orch.run_task(_complete_task(tmp_path))
     assert result.final_status is Status.DONE
-    assert _merge_calls(calls) == [["pr", "merge", "https://example/pr/1", "--squash", "--auto"]]
+    assert _merge_calls(calls) == [
+        ["pr", "merge", "https://example/pr/1", "--squash", "--auto", *_GH_PIN]
+    ]
     assert ledger.records()[0]["merge_outcome"] == "armed"
 
 
