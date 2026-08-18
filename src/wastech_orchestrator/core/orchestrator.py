@@ -230,7 +230,11 @@ from wastech_orchestrator.runtime_layout import (
     InternalDenyPolicy,
     RuntimeLayout,
 )
-from wastech_orchestrator.security.env import build_child_env
+from wastech_orchestrator.security.env import (
+    build_child_env,
+    describe_expansions,
+    expand_allowed_environment,
+)
 from wastech_orchestrator.security.isolation import IsolationCheck, check_isolation
 from wastech_orchestrator.state_store import (
     ArtifactRow,
@@ -2491,6 +2495,33 @@ class Orchestrator:
         )
         return result.status is Status.DONE
 
+    def _announce_environment_patterns(self, p: _Pipeline) -> None:
+        """Announce what each ``allowed_environment`` prefix pattern resolved to — once, up front.
+
+        Once per run and before any child process, not once per process: the same expansion feeds
+        every agent turn, every check command and every git invocation, so repeating it would be
+        noise while omitting it would leave a pattern that quietly matched nothing (or quietly
+        matched more than the operator expected) invisible in the run's own record. ``worc
+        preflight``
+        prints the same lines from the same formatter; this is the copy that lands in the run log,
+        where a task is diagnosed after the fact.
+
+        A dropped name is a warning — the operator wrote a pattern that reaches a credential and the
+        filter refused it — while a clean expansion is informational. A config with no pattern says
+        nothing at all.
+        """
+        _, expansions = expand_allowed_environment(self._config.security.allowed_environment)
+        described = describe_expansions(expansions)
+        if not described:
+            return
+        log = self._log(p.task.id)
+        message = "allowed_environment prefix patterns resolved: " + "; ".join(described)
+        extra = {"patterns": [item.pattern for item in expansions]}
+        if any(item.dropped for item in expansions):
+            log.warning(message, extra=extra)
+        else:
+            log.info(message, extra=extra)
+
     def _drive_via_engine(self, p: _Pipeline, completeness: Completeness) -> PipelineResult:
         """Drive the task through the :class:`FlowEngine`.
 
@@ -2506,6 +2537,7 @@ class Orchestrator:
             # branch, so it is in place whether or not the planning ``proposed_by`` node runs (a
             # disabled planning node never fires the post-hook). Validated already at preflight.
             self._persist_decomposition(p, p.operator_decomposition, gate_on=True)
+        self._announce_environment_patterns(p)
         if self._config.security.read_isolation_off:
             # Never a silent weakening — announce that the operator's escape hatch is in
             # effect. Fires whether it came from ``disable_read_isolation: true`` or the master

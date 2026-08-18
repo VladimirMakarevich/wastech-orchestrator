@@ -202,7 +202,15 @@ from wastech_orchestrator.providers.base import ProviderId
 # stays byte-for-byte what it is today; `upgrade-config` adds it from the template. It carries a
 # version bump anyway because a config using it, loaded by an older orchestrator, would be rejected
 # as an unknown key rather than silently under-delivering.
-CONFIG_SCHEMA_VERSION = 36
+# v37 (2026-08-18, full-tool-access step 0 phase 0.3): an `security.allowed_environment` entry may
+# be a **prefix pattern** — a name plus one trailing `*` (`DOTNET_*`, `npm_config_*`) — resolved
+# against the parent environment, with the secret-name filter applied to every name it produces. Not
+# back-compatible in the silent direction, which is why it carries a bump: an older orchestrator
+# reading `DOTNET_*` treats it as an exact name, finds no such variable, and forwards *nothing* —
+# the symptom being a build that behaves differently than in a terminal, with no error anywhere. A
+# config
+# using only exact names is unaffected in either direction.
+CONFIG_SCHEMA_VERSION = 37
 
 
 class AuditBranch(StrEnum):
@@ -396,6 +404,9 @@ TRUST_LEVELS: frozenset[str] = frozenset({"strict", "auto"})
 @dataclass(frozen=True)
 class SecurityConfig:
     strict_isolation: bool
+    #: Names forwarded from the parent environment. An entry is an exact name or a prefix
+    #: pattern (``DOTNET_*``), resolved by
+    #: :func:`~wastech_orchestrator.security.env.expand_allowed_environment`.
     allowed_environment: tuple[str, ...]
     denied_read_paths: tuple[str, ...]
     denied_commands: tuple[str, ...]

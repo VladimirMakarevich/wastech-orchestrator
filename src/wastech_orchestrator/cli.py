@@ -80,7 +80,11 @@ from wastech_orchestrator.preflight import preflight_gh
 from wastech_orchestrator.providers import process as agent_process
 from wastech_orchestrator.providers.base import AuthProbe, AuthState, ProviderId
 from wastech_orchestrator.runtime_layout import CONTROL_HOME_DIRNAME, RuntimeLayout, runs_root
-from wastech_orchestrator.security.env import launch_critical_env_issue
+from wastech_orchestrator.security.env import (
+    describe_expansions,
+    expand_allowed_environment,
+    launch_critical_env_issue,
+)
 from wastech_orchestrator.security.isolation import check_isolation
 from wastech_orchestrator.state_store import IncompatibleStateError, StateStore, TaskRow
 from wastech_orchestrator.task.model import DEFAULT_QUEUE, priority_rank
@@ -2863,6 +2867,27 @@ def require_provider_auth(config: OrchestratorConfig) -> None:
             raise preflight.ProviderNotLoggedInError(_logged_out_refusal(pid, auth))
 
 
+def _allowed_environment_pattern_lines(config: OrchestratorConfig) -> list[str]:
+    """Preflight report lines for the ``allowed_environment`` prefix patterns (empty when none).
+
+    Host-specific by nature — the same pattern resolves to different names on different machines —
+    which is exactly why this belongs to preflight and not to ``validate_config``. The run itself
+    announces the same expansion once at start of flow, from the same formatter.
+    """
+    _, expansions = expand_allowed_environment(config.security.allowed_environment)
+    described = describe_expansions(expansions)
+    if not described:
+        return []
+    forwarded = sum(len(item.kept) for item in expansions)
+    dropped = sum(len(item.dropped) for item in expansions)
+    header = (
+        f"allowed-environment: {len(expansions)} prefix pattern(s) — {forwarded} name(s) forwarded"
+    )
+    if dropped:
+        header += f", {dropped} dropped as secret-named"
+    return [header, *(f"  - {line}" for line in described)]
+
+
 def run_preflight(
     config: OrchestratorConfig, *, env_file: Path | None = None, capability_smoke: bool = False
 ) -> tuple[bool, list[str]]:
@@ -2974,6 +2999,11 @@ def run_preflight(
     if env_issue is not None:
         ok = False
         lines.append(f"allowed-environment: FAIL — {env_issue}")
+
+    # What each prefix pattern actually matched ON THIS HOST — the one place the width of a pattern
+    # is visible before it is used. A pattern that resolved to nothing is the interesting case and
+    # is printed like the others; never a FAIL, since an uninstalled toolchain is legitimate.
+    lines.extend(_allowed_environment_pattern_lines(config))
 
     # Assigned variables are announced by NAME only. The values are in the operator's own config
     # already, and printing them would hand a secret that landed there against the guide's advice a

@@ -11,7 +11,7 @@ All problems are collected and raised together via the typed :class:`ConfigError
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 from wastech_orchestrator.checks.model import (
     CheckCommandError,
@@ -25,6 +25,7 @@ from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.providers.capabilities import is_reasoning_supported, reasoning_levels_for
 from wastech_orchestrator.providers.redaction import is_sensitive_key
+from wastech_orchestrator.security.env import env_name_is_covered, env_pattern_prefix
 from wastech_orchestrator.security.forbidden_args import (
     FORBIDDEN_SANDBOX_VALUE,
     find_forbidden_args,
@@ -330,12 +331,15 @@ def _validate_security(config: OrchestratorConfig, issues: list[str]) -> None:
     diff paths). Reject an absolute path, ``~``, or ``..`` traversal — the same containment rule
     applied to a check command's ``cwd``.
 
-    ``allowed_environment`` must name ``PATH``: the list replaces the OS-aware default wholesale, so
+    ``allowed_environment`` must cover ``PATH``: the list replaces the OS-aware default wholesale,
+    so
     an operator who edits it can silently drop the one name every child process needs. Only the
     host-independent half of that rule lives here (the same config must get the same verdict on
     every machine); the Windows-only ``SystemRoot`` half is a ``worc preflight`` FAIL
-    (:func:`~wastech_orchestrator.security.env.launch_critical_env_issue`). Matching is exact for
-    the same reason: ``Path`` would be forwarded on Windows and dropped on POSIX.
+    (:func:`~wastech_orchestrator.security.env.launch_critical_env_issue`). Matching is
+    case-sensitive for the same reason: ``Path`` would be forwarded on Windows and dropped on POSIX.
+    A prefix pattern counts as covering it — see :func:`_validate_allowed_environment` for the
+    grammar.
     """
     for index, pattern in enumerate(config.security.protected_paths):
         if not is_safe_relpath(pattern):
@@ -343,13 +347,63 @@ def _validate_security(config: OrchestratorConfig, issues: list[str]) -> None:
                 f"security.protected_paths[{index}] {pattern!r} must be a "
                 "repo-relative glob (no absolute path, no '~', no '..' traversal)"
             )
-    if "PATH" not in config.security.allowed_environment:
-        issues.append(
-            "security.allowed_environment must list 'PATH' (spelled exactly) — the list replaces "
-            "the default wholesale, and without it a child process finds neither the agent CLI "
-            "nor git"
-        )
+    _validate_allowed_environment(config.security.allowed_environment, issues)
     _validate_extra_environment(config.security.extra_environment, issues)
+
+
+def _validate_allowed_environment(names: Sequence[str], issues: list[str]) -> None:
+    """Validate the ``allowed_environment`` entry grammar, then that the list covers ``PATH``.
+
+    An entry is either an exact variable name or a **prefix pattern**: a name followed by one
+    trailing ``*`` (``DOTNET_*``). Only the patterns are checked here — an entry without a ``*`` is
+    left alone, because a name that matches nothing has always been inert and turning that into a
+    load error would reject configs that work today.
+
+    Three ways a pattern is refused, each closing a way it would otherwise misfire silently:
+
+    * a lone ``*`` — that is the *inversion* of the mechanism (every variable minus a deny-list),
+      which the environment allow-list deliberately does not offer: a value leaks by the mere fact
+      of being in a child process's environment, so the gate stays "named names only";
+    * ``*`` anywhere but at the end (``A*B``, ``*SUFFIX``, ``**``) — there is one wildcard position,
+      and a mid-string ``*`` would silently match nothing rather than what it reads like;
+    * a pattern whose own prefix looks secret-bearing (``SECRET_*``, ``TOKEN_*``) — the secret-name
+      filter runs *after* expansion, so such a pattern can only ever forward the empty set. Refusing
+      it says so, where accepting it would leave the operator sure the variables went through.
+    """
+    for index, entry in enumerate(names):
+        where = f"security.allowed_environment[{index}]"
+        prefix = env_pattern_prefix(entry)
+        if prefix is None:
+            if "*" in entry:
+                issues.append(
+                    f"{where} {entry!r}: '*' is only allowed as the single trailing character of a "
+                    "prefix pattern (e.g. 'DOTNET_*')"
+                )
+        elif not prefix:
+            issues.append(
+                f"{where}: a lone '*' is not supported — the environment gate is an allow-list by "
+                "name, never 'everything except a deny-list' (a value leaks by being present in a "
+                "child's environment at all). Name the variables, or use a prefix pattern like "
+                "'DOTNET_*'"
+            )
+        elif not _ENV_NAME_RE.fullmatch(prefix):
+            issues.append(
+                f"{where} {entry!r}: the pattern prefix {prefix!r} is not a valid environment "
+                "variable name (expected [A-Za-z_][A-Za-z0-9_]*)"
+            )
+        elif is_sensitive_key(prefix):
+            issues.append(
+                f"{where} {entry!r}: the prefix itself looks secret-bearing, and the secret-name "
+                "filter runs after expansion — so this pattern can only ever forward nothing. "
+                "Credentials are never configured in the orchestrator; the agent CLIs read their "
+                "own credentials from their own stores"
+            )
+    if not env_name_is_covered(names, "PATH"):
+        issues.append(
+            "security.allowed_environment must cover 'PATH' (spelled exactly, or via a prefix "
+            "pattern such as 'PATH*') — the list replaces the default wholesale, and without it a "
+            "child process finds neither the agent CLI nor git"
+        )
 
 
 def _validate_extra_environment(extra: Mapping[str, str], issues: list[str]) -> None:

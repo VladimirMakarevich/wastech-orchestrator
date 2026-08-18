@@ -139,6 +139,68 @@ def test_allowed_environment_path_match_is_exact(base_config: OrchestratorConfig
     assert any("security.allowed_environment" in issue for issue in exc.value.issues)
 
 
+@pytest.mark.parametrize("entry", ["DOTNET_*", "npm_config_*", "_*", "PATH*"])
+def test_allowed_environment_accepts_a_prefix_pattern(
+    base_config: OrchestratorConfig, entry: str
+) -> None:
+    # One trailing `*` after a valid variable name. `PATH*` is in the list deliberately: it is
+    # legitimate, and the phase-0.1 "PATH is mandatory" gate used to reject it.
+    assert validate_config(_with_security(base_config, allowed_environment=("PATH", entry))) == []
+
+
+def test_allowed_environment_pattern_can_satisfy_the_path_requirement(
+    base_config: OrchestratorConfig,
+) -> None:
+    # The seam with phase 0.1 in its sharpest form: `PATH*` is the ONLY entry, and it covers PATH.
+    assert validate_config(_with_security(base_config, allowed_environment=("PATH*",))) == []
+
+
+def test_allowed_environment_lone_star_is_rejected(base_config: OrchestratorConfig) -> None:
+    # И-1/Н0.1: a lone `*` is the inversion of the mechanism (everything minus a deny-list), which
+    # the environment gate deliberately does not offer — a value leaks by being present at all. The
+    # message has to say that, not just "invalid syntax".
+    cfg = _with_security(base_config, allowed_environment=("PATH", "*"))
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("allow-list by name" in issue for issue in exc.value.issues)
+
+
+@pytest.mark.parametrize("entry", ["A*B", "**", "*SUFFIX", "DOT*NET_*", "*"])
+def test_allowed_environment_misplaced_star_is_rejected(
+    base_config: OrchestratorConfig, entry: str
+) -> None:
+    # AC0.3.3. One wildcard, one position: anything else would read like a glob and silently match
+    # nothing.
+    cfg = _with_security(base_config, allowed_environment=("PATH", entry))
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("security.allowed_environment[1]" in issue for issue in exc.value.issues)
+
+
+@pytest.mark.parametrize("entry", ["SECRET_*", "TOKEN_*", "AWS_SECRET_*"])
+def test_allowed_environment_secret_prefix_pattern_is_rejected(
+    base_config: OrchestratorConfig, entry: str
+) -> None:
+    # AC0.3.2a / Т0.3.7. Such a pattern is not dangerous — the secret filter runs after expansion,
+    # so it can only ever forward the empty set. It is refused because accepting it would leave the
+    # operator certain the variables went through, and the message explains that mechanism.
+    cfg = _with_security(base_config, allowed_environment=("PATH", entry))
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any(
+        "secret-bearing" in issue and "after expansion" in issue for issue in exc.value.issues
+    )
+
+
+def test_allowed_environment_plain_name_grammar_is_left_alone(
+    base_config: OrchestratorConfig,
+) -> None:
+    # Deliberately NOT validated: a `*`-free entry that matches nothing has always been inert, and
+    # turning that into a load error would reject configs that work today (И-5).
+    cfg = _with_security(base_config, allowed_environment=("PATH", "not a name"))
+    assert validate_config(cfg) == []
+
+
 @pytest.mark.parametrize("name", ["PATH", "path", "Path"])
 def test_extra_environment_cannot_assign_path(base_config: OrchestratorConfig, name: str) -> None:
     # И-3: reassigning PATH substitutes every binary the child resolves. Case-insensitive because a

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
@@ -2495,6 +2496,53 @@ def _collected_warnings() -> Iterator[list[str]]:
     finally:
         logger.removeHandler(handler)
         logger.setLevel(prior_level)
+
+
+def test_environment_patterns_are_announced_once_per_run(
+    git_repo, make_git_config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC0.3.2 (run half): the pattern expansion reaches the run log ONCE, not per child process.
+
+    The run builds a child environment many times over — every agent turn, every check command,
+    every git invocation — so the announcement deliberately does not live in the builder. It fires
+    in the flow preamble, which is also the only place where "before any work" is true. A dropped
+    name is a WARNING because the operator wrote a pattern that reached a credential.
+    """
+    for name in [k for k in os.environ if k.startswith("NUGET_")]:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("NUGET_PACKAGES", "/repo/.toolcache/nuget")
+    monkeypatch.setenv("NUGET_API_KEY", "oy2-secret")
+    orch, _store, _ledger, _art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        config_kwargs={"allowed_environment_patterns": ["NUGET_*"]},
+    )
+
+    with _collected_warnings() as messages:
+        result = orch.run_task(_complete_task(tmp_path, "task-envpat"))
+
+    assert result.final_status is Status.DONE
+    announced = [m for m in messages if "allowed_environment prefix patterns resolved" in m]
+    assert len(announced) == 1, announced
+    assert "NUGET_* \u2192 1 name(s) (NUGET_PACKAGES)" in announced[0]
+    assert "1 dropped as secret-named (NUGET_API_KEY)" in announced[0]
+    assert "oy2-secret" not in announced[0]  # names, never values
+
+
+def test_a_config_without_patterns_announces_nothing(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # И-5: no pattern, no line. The announcement reports what is in effect, and the plain-name case
+    # is the one every existing config is in.
+    orch, _store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    with _collected_warnings() as messages:
+        assert orch.run_task(_complete_task(tmp_path, "task-nopat")).final_status is Status.DONE
+    assert not [m for m in messages if "prefix patterns" in m]
 
 
 def test_degraded_summary_is_loud_on_done_path(git_repo, make_git_config, tmp_path: Path) -> None:

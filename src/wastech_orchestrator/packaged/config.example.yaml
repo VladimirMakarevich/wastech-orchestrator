@@ -2,7 +2,7 @@
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 # This is the packaged copy used by `wastech-orchestrator init` (the only example config; nothing else to sync).
 
-schema_version: 36                  # config format version; the orchestrator refuses newer configs
+schema_version: 37                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -154,6 +154,24 @@ security:
                                         # it is a load error) and on Windows `SystemRoot` is a
                                         # `worc preflight` FAIL (without it claude.exe aborts at
                                         # startup with exit 0xC0000409, printing nothing).
+                                        # An entry may also be a PREFIX PATTERN — a name plus one
+                                        # trailing `*` — so a toolchain whose variable names you do
+                                        # not know in advance needs one line, not ten:
+                                        #     - "DOTNET_*"
+                                        #     - "NUGET_*"
+                                        #     - "npm_config_*"
+                                        # Still an allow-list by name: the pattern is resolved
+                                        # against YOUR environment, and every name it produces then
+                                        # passes the same secret-name filter — so `NUGET_*` forwards
+                                        # NUGET_PACKAGES and refuses NUGET_API_KEY. A pattern can
+                                        # never forward what a plain name could not. `*` is allowed
+                                        # ONLY as the single trailing character: a lone `*` (which
+                                        # would invert the allow-list), `A*B` and `**` are load
+                                        # errors, as is a pattern whose own prefix looks secret
+                                        # (`SECRET_*`) — it could only ever match names the filter
+                                        # drops. `worc preflight` prints what each pattern resolved
+                                        # to on this host, including a pattern that matched nothing
+                                        # (usually a typo, or a toolchain that is not installed).
     # Cross-platform base
     - "PATH"
     - "HOME"

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 from collections.abc import Iterator
 from dataclasses import replace
 from types import SimpleNamespace
@@ -363,6 +364,50 @@ def test_preflight_ready_on_linux_without_systemroot(
     assert rc == 0
     assert "SystemRoot" not in out
     assert "preflight: ready" in out
+
+
+def _with_allowed(config, *entries: str):
+    return replace(config, security=replace(config.security, allowed_environment=entries))
+
+
+def test_preflight_reports_what_each_prefix_pattern_matched_here(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # AC0.3.2b / Т0.3.8. The width of a pattern is host-specific, so this is the only place it can
+    # be shown before it is used — including the zero-match case, which is otherwise
+    # indistinguishable from one that worked, and the name the secret filter refused.
+    for name in [k for k in os.environ if k.startswith(("DOTNET_", "NUGET_"))]:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("DOTNET_ROOT", "/usr/share/dotnet")
+    monkeypatch.setenv("DOTNET_NOLOGO", "1")
+    monkeypatch.setenv("NUGET_PACKAGES", "/repo/.toolcache/nuget")
+    monkeypatch.setenv("NUGET_API_KEY", "oy2-secret")
+    config = _with_allowed(
+        make_git_config(git_repo.clone), "PATH", "DOTNET_*", "NUGET_*", "WASTECH_NO_SUCH_*"
+    )
+    _patch_providers(monkeypatch, config)
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 0  # a pattern report is never a FAIL on its own
+    assert "allowed-environment: 3 prefix pattern(s) — 3 name(s) forwarded" in out
+    assert "1 dropped as secret-named" in out
+    assert "DOTNET_* \u2192 2 name(s) (DOTNET_NOLOGO, DOTNET_ROOT)" in out
+    assert "NUGET_* \u2192 1 name(s) (NUGET_PACKAGES)" in out
+    assert "1 dropped as secret-named (NUGET_API_KEY)" in out
+    assert "WASTECH_NO_SUCH_* \u2192 0 name(s)" in out
+    for value in ("/usr/share/dotnet", "oy2-secret", "/repo/.toolcache/nuget"):
+        assert value not in out  # names only, exactly as for the assigned half
+
+
+def test_preflight_is_silent_when_no_entry_is_a_pattern(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # И-5: the fixture's allowlist holds plain names only, so preflight says nothing new.
+    _patch_providers(monkeypatch, make_git_config(git_repo.clone))
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "prefix pattern" not in out
 
 
 def test_preflight_names_assigned_variables_without_their_values(

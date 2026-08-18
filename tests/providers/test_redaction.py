@@ -280,3 +280,49 @@ def test_assigned_variables_never_shrink_the_harvest(
         artifacts_root=tmp_path,
     )
     assert "supersecretvalue123" in provider._secret_env_values()
+
+
+@pytest.mark.parametrize(
+    "patterns",
+    [
+        (),
+        ("MY_*",),
+        ("M*",),
+        ("MY_API_KE*",),
+        ("MY_*", "AWS_*", "GITHUB_*"),
+        ("*",),
+    ],
+)
+def test_prefix_patterns_never_shrink_the_harvest(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    patterns: tuple[str, ...],
+) -> None:
+    """AC0.3.5 (И-4 as a property): no set of prefix patterns shrinks the redaction literal set.
+
+    True by construction — the harvester exempts a name by **exact** membership in the allowlist,
+    and
+    a pattern string is never equal to a variable name, so `NUGET_*` in the list exempts nothing
+    while `NUGET_API_KEY` stays under redaction. Pinned anyway, because the one refactor that would
+    break it looks like an improvement: expanding the patterns before handing the list over, which
+    would quietly lift redaction off every secret a pattern happens to reach.
+
+    A lone `*` is in the parameter set deliberately. The validator refuses it, so no config can hold
+    it — but it is the worst case for exactly the mistake above, and this property must not depend
+    on
+    another layer's validation to hold.
+    """
+    monkeypatch.setenv("MY_API_KEY", "supersecretvalue123")
+    baseline = CodexProvider(codex_config, security=security_config, artifacts_root=tmp_path)
+    widened = CodexProvider(
+        codex_config,
+        security=replace(
+            security_config,
+            allowed_environment=(*security_config.allowed_environment, *patterns),
+        ),
+        artifacts_root=tmp_path,
+    )
+    assert set(baseline._secret_env_values()) <= set(widened._secret_env_values())
+    assert "supersecretvalue123" in widened._secret_env_values()

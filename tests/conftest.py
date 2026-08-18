@@ -199,6 +199,7 @@ def build_git_config(
     supervisor_enabled: bool | None = None,
     skills_dynamic: bool | None = None,
     extra_environment: Mapping[str, str] | None = None,
+    allowed_environment_patterns: Sequence[str] = (),
 ) -> OrchestratorConfig:
     """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks.
 
@@ -217,7 +218,9 @@ def build_git_config(
     returns has ``memory.enabled is False``. The warning that says so is on
     ``loads_config(...).warnings``, which this helper drops; assert it through ``loads_config``.
     """
-    env_lines = "\n".join(f"    - {e}" for e in _TEST_ALLOWED_ENV)
+    # Prefix patterns are APPENDED to the test allowlist rather than replacing it: a pattern test
+    # cares about what its own pattern resolves to, and dropping the base names would break git.
+    env_lines = "\n".join(f"    - {e}" for e in (*_TEST_ALLOWED_ENV, *allowed_environment_patterns))
     # Variables the orchestrator ASSIGNS to every child process (security.extra_environment).
     # Absent => the key is omitted entirely, which is what most tests want: the child environment
     # then has to be byte-for-byte the pre-key one.

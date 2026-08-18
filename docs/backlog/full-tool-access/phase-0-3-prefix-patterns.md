@@ -1,6 +1,6 @@
 # Фаза 0.3 — префиксные шаблоны в `allowed_environment`
 
-Status: **ready to implement** Date: 2026-08-13 Owner: Vladimir Makarevich Требования: Т0.3 из [requirements-step-0.md](requirements-step-0.md) `schema_version`: +1 Зависимости: [0.2](phase-0-2-extra-environment.md) — обе фазы правят одно место, и порядок избавляет от конфликта
+Status: **implemented 2026-08-18** (AC0.3.1–AC0.3.6 зелёные, включая живую пробу) Date: 2026-08-13 Owner: Vladimir Makarevich Требования: Т0.3 из [requirements-step-0.md](requirements-step-0.md) `schema_version`: 37 Зависимости: [0.2](phase-0-2-extra-environment.md) — обе фазы правят одно место, и порядок избавляет от конфликта
 
 Фазы 0.1 и 0.2 чинят сегодняшний список. Эта убирает причину обращений: чтобы пробросить переменную, её имя надо **знать заранее**. Дело не в стоимости правки конфига — она копеечная, — а в том, что у одного тулчейна имён десяток и они неочевидны: `DOTNET_ROOT`, `DOTNET_CLI_HOME`, `DOTNET_NOLOGO`, `DOTNET_MULTILEVEL_LOOKUP`, `NUGET_PACKAGES`, `NUGET_HTTP_CACHE_PATH`… Оператор перечислит три, забудет остальные, и симптом будет не «нет переменной», а «сборка ведёт себя не так, как в терминале».
 
@@ -37,6 +37,8 @@ security:
 
 **5a. Шаблоны — только для этого ключа.** `denied_read_paths` и `denied_commands` тоже «заменяют дефолт», но грамматику с ними не делим: там своя семантика (глобы путей, префиксы команд), общий синтаксис пришлось бы согласовывать с двумя разными смыслами, и цель об этом не просит.
 
+**5b. Найдено при реализации: у стыка две половины, не одна.** Тем же буквальным сравнением искал своё имя и host-специфичный вердикт `launch_critical_env_issue` — `any(entry.upper() == "SYSTEMROOT" ...)`, — поэтому легальный `SYSTEM*` дал бы переменную на Windows, а preflight всё равно поставил бы FAIL. Обе проверки переведены на одно общее правило (`env_name_is_covered`: имя даёт точное вхождение **или** какой-либо шаблон), и у каждой есть свой тест на шаблон. Правило решает покрытие **по конфигу**, а не по окружению хоста: иначе вердикт валидатора стал бы host-зависимым, что запрещено разделением из 0.1.
+
 **6. Схема и доки.** `CONFIG_SCHEMA_VERSION` +1: конфиг с шаблоном прошлая версия оркестратора поймёт неправильно — пробросит имя `DOTNET_*` буквально, то есть молча не пробросит ничего. Грамматика описывается в [`guide/config/reference.md`](../../../src/wastech_orchestrator/packaged/guide/config/reference.md) и в [`config.example.yaml`](../../../src/wastech_orchestrator/packaged/config.example.yaml) — вместе с тем, что фильтр секретов работает **после** раскрытия и потому шаблон никогда не «шире», чем политика имён.
 
 ## Тесты
@@ -53,6 +55,13 @@ security:
 ## Живая проба (часть DoD)
 
 На хосте, где в окружении есть и обычные `DOTNET_*`, и секретное имя под соседним префиксом (`NPM_TOKEN`, `AWS_SECRET_ACCESS_KEY`): узел печатает своё окружение — несекретные имена на месте, секретное отсутствует, предупреждение видно в логе прогона. Проба дешёвая и выполняется на любой ОС, поэтому «не доказано» здесь не ожидается.
+
+**Выполнена 2026-08-18 на macOS, результат — как ожидалось.** Окружение хоста: `DOTNET_ROOT`, `DOTNET_NOLOGO`, `DOTNET_CLI_TELEMETRY_OPTOUT`, `NUGET_PACKAGES` плюс `NUGET_API_KEY`, `NPM_TOKEN`, `AWS_SECRET_ACCESS_KEY`. Конфиг называл только шаблоны (`DOTNET_*`, `NUGET_*`, `NPM_*`, `AWS_*`, `WASTECH_NOT_INSTALLED_*`) — ни одного точного имени тулчейна.
+
+1. `worc preflight` напечатал раскрытие: `DOTNET_* → 3 name(s) (…)`, `NUGET_* → 1 name(s) (NUGET_PACKAGES), 1 dropped as secret-named (NUGET_API_KEY)`, `NPM_* → 0 name(s), 1 dropped as secret-named (NPM_TOKEN)`, `AWS_* → 0 name(s), 1 dropped …`, и `WASTECH_NOT_INSTALLED_* → 0 name(s) — nothing in this environment starts with that prefix`. Вердикт остался `preflight: ready` — отчёт о раскрытии сам по себе не FAIL.
+2. Реальный дочерний процесс, запущенный Check Runner-ом оркестратора (`command_sets`, argv печатает свои же имена переменных), получил `DOTNET_CLI_TELEMETRY_OPTOUT`, `DOTNET_NOLOGO`, `DOTNET_ROOT`, `NUGET_PACKAGES` — и не получил ни `NUGET_API_KEY`, ни `NPM_TOKEN`, ни `AWS_SECRET_ACCESS_KEY`.
+
+Единственное, что не проверено живьём, — та же строка в логе **платного** прогона агентского узла: в тесте прогон настоящий (`run_task` через весь флоу), но провайдеры фейковые. Это ровно тот же пробел, что уже записан за AC0.2.7, и он не про шаблоны: печатает их одна чистая функция, общая с preflight, где строка проверена живьём.
 
 ## Риск и откат
 
