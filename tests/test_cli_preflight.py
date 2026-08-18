@@ -429,6 +429,135 @@ def test_preflight_names_assigned_variables_without_their_values(
     assert "/repo/.toolcache/nuget" not in out
 
 
+def _with_assigned(config, **assigned: str):
+    return replace(config, security=replace(config.security, extra_environment=dict(assigned)))
+
+
+def test_preflight_excludes_an_in_clone_cache_from_git(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The recipe this phase ships: a cache inside the clone is writable by a workspace-write node,
+    # but its thousands of files would land in the next task's diff and trip a gate that has nothing
+    # to do with caches. Excluding it is the orchestrator's job, not the operator's — the rule goes
+    # into `.git/info/exclude`, which the agent cannot reach.
+    cache = git_repo.clone / ".toolcache" / "nuget"
+    config = _with_assigned(make_git_config(git_repo.clone), NUGET_PACKAGES=str(cache))
+    _patch_providers(monkeypatch, config)
+
+    assert cli.cmd_preflight(_args()) == 0
+    out = capsys.readouterr().out
+    assert "assigned-paths: OK — NUGET_PACKAGES points into the clone and git ignores it" in out
+    exclude = (git_repo.clone / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    assert "/.toolcache/nuget" in exclude
+
+    # Idempotent: a second run adds no second rule (an operator runs preflight repeatedly).
+    assert cli.cmd_preflight(_args()) == 0
+    capsys.readouterr()
+    reread = (git_repo.clone / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    assert reread.count("/.toolcache/nuget") == 1
+
+
+def test_preflight_fails_when_the_exclusion_does_not_take(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A tracked path cannot be ignored, whatever is appended to the exclude file. That is the honest
+    # broken case, and it has to FAIL here: discovering it later means discovering it after the
+    # agent has already done its expensive work, on a gate that will blame the diff.
+    tracked = next(p for p in git_repo.clone.rglob("*") if p.is_file() and ".git" not in p.parts)
+    config = _with_assigned(make_git_config(git_repo.clone), NUGET_PACKAGES=str(tracked))
+    _patch_providers(monkeypatch, config)
+
+    assert cli.cmd_preflight(_args()) == 1
+    out = capsys.readouterr().out
+    assert (
+        "assigned-paths: FAIL — NUGET_PACKAGES points into the clone but git still does not" in out
+    )
+    assert "preflight: NOT ready" in out
+
+
+def test_preflight_skips_the_exclusion_when_the_clone_is_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Preflight runs before any task, so the clone may legitimately not exist yet. A missing clone
+    # is nothing to exclude, not a failure — but it is said out loud, because the operator otherwise
+    # has no way to know the protection is not in place yet.
+    absent = tmp_path / "not-cloned-yet"
+    config = make_git_config(tmp_path)
+    config = replace(config, repo=replace(config.repo, local_path=str(absent)))
+    config = _with_assigned(config, NUGET_PACKAGES=str(absent / ".toolcache" / "nuget"))
+    _patch_providers(monkeypatch, config)
+
+    assert cli.cmd_preflight(_args()) == 0
+    out = capsys.readouterr().out
+    assert (
+        "assigned-paths: SKIP — NUGET_PACKAGES points into the clone, which is not on disk" in out
+    )
+
+
+def test_preflight_warns_but_does_not_fail_on_a_cache_outside_the_clone(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repo,
+    make_git_config,
+    tmp_path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The path may be perfectly deliberate, so this is not a refusal — but a sandboxed node cannot
+    # write there, and the build failure it produces reads like a broken toolchain rather than a
+    # misplaced cache.
+    outside = tmp_path / "shared-cache"
+    config = _with_assigned(make_git_config(git_repo.clone), NUGET_PACKAGES=str(outside))
+    _patch_providers(monkeypatch, config)
+
+    assert cli.cmd_preflight(_args()) == 0
+    out = capsys.readouterr().out
+    assert "assigned-paths: WARN — NUGET_PACKAGES points outside the clone" in out
+    assert "can only write inside the clone" in out
+    assert "preflight: ready" in out
+
+
+def test_preflight_fails_on_a_cache_that_reaches_a_protected_path_through_a_link(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The half only this side of the gate can decide: the value names an innocent path, and the
+    # config validator, which never touches the filesystem, cannot see where it leads.
+    worc = git_repo.clone / ".worc"
+    worc.mkdir(exist_ok=True)
+    link = git_repo.clone / "innocent"
+    link.symlink_to(worc)
+    config = _with_assigned(make_git_config(git_repo.clone), CARGO_HOME=str(link / "cargo"))
+    _patch_providers(monkeypatch, config)
+
+    assert cli.cmd_preflight(_args()) == 1
+    out = capsys.readouterr().out
+    assert "assigned-paths: FAIL — CARGO_HOME resolves onto" in out
+    assert "preflight: NOT ready" in out
+
+
+def test_the_assigned_path_report_never_prints_a_value(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repo,
+    make_git_config,
+    tmp_path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Same rule as the assigned-variable line itself: the operator reads values in their own config,
+    # and a value holding a secret against the guide's advice must not gain a terminal or a CI log
+    # to leak from. Every line names the variable; a FAIL also names the protected path it hit —
+    # orchestrator-owned, and the one thing the operator cannot infer.
+    config = _with_assigned(
+        make_git_config(git_repo.clone),
+        NUGET_PACKAGES=str(tmp_path / "telltale-outside-cache"),
+        CARGO_HOME=str(git_repo.clone / ".toolcache" / "telltale-inside-cache"),
+    )
+    _patch_providers(monkeypatch, config)
+
+    assert cli.cmd_preflight(_args()) == 0
+    out = capsys.readouterr().out
+    assert "NUGET_PACKAGES" in out and "CARGO_HOME" in out
+    assert "telltale-outside-cache" not in out
+    assert "telltale-inside-cache" not in out
+
+
 def test_preflight_is_silent_about_an_empty_extra_environment(
     monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
 ) -> None:

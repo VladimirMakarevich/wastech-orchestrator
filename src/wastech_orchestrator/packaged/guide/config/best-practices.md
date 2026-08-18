@@ -52,6 +52,31 @@ Do not use it to paper over a broken default developer environment. If a check i
 
 If several operators share the same repo, a config with fewer machine assumptions survives longer.
 
+## 5a. Redirect toolchain caches into the clone
+
+`dotnet build`, `cargo build` and `npm ci` fail on a `workspace-write` node for a reason that has nothing to do with the tool being allowed: they write to `~/.nuget/packages`, `~/.cargo`, `~/.npm`, and the sandbox permits writes only inside the clone. Point those caches at the clone and the problem disappears — the clone is writable, and the orchestrator never runs `git clean`, so the cache survives from one task to the next instead of being re-downloaded.
+
+```yaml
+security:
+  extra_environment:
+    NUGET_PACKAGES: "/abs/path/to/repo/.toolcache/nuget"
+    CARGO_HOME: "/abs/path/to/repo/.toolcache/cargo"
+    npm_config_cache: "/abs/path/to/repo/.toolcache/npm"
+    GOMODCACHE: "/abs/path/to/repo/.toolcache/go"
+```
+
+`.toolcache/` is this guide's suggested name and nothing more — any path inside the clone works. Write the path out in full: there is no `{repo}` substitution, so it has to match `repo.local_path`, and a mismatch is what `worc preflight` warns about.
+
+You do not have to add the cache to `.gitignore`. For a path inside the clone the orchestrator adds the exclusion itself, to the clone-local `.git/info/exclude` — untracked, so it never appears in a task's diff or its pull request, and out of reach of an agent that can rewrite `.gitignore` but cannot write inside `.git`. The exclusion follows the values you assign, one rule per path, so a cache you point somewhere else — on a command line, in a `.npmrc`, through a variable you did not put in `extra_environment` — is not covered: assign every cache you actually redirect. `worc preflight` reports `assigned-paths: OK` once git actually ignores the path, and FAIL if something in the repository's own ignore rules still exposes it. That FAIL is worth having: an un-ignored cache puts thousands of files into the next task's diff and trips a review gate that has nothing to do with caches, after the agent has already done its expensive work.
+
+Three limits to know before relying on this:
+
+- **Not under `.worc`** — nor `.git`, `.worc-io`, the tasks directory, or anything `denied_read_paths` covers. Those hold the orchestrator's own state, and a build writing into them corrupts the run or the repository. A value that overlaps one in either direction is refused when the config loads; `worc preflight` additionally refuses a symlink, or a Windows case/UNC alias, that reaches one — that check needs the filesystem, which is why it lives there and not at load time.
+- **A `read-only` node cannot use it,** and is not meant to: such nodes have no shell at all today, so there is nothing to build with.
+- **The cache grows without bound.** Nothing prunes it — not the `.worc/runs` retention, not task cleanup — because deleting a toolchain's cache is more dangerous than occupying disk. When gigabytes go missing, look here first.
+
+A path outside the clone is a warning rather than a refusal: it may be exactly what you meant, but a sandboxed node cannot write there, and the failure it produces reads like a broken toolchain instead of a misplaced cache.
+
 ## 6. Default to conservative Git behavior
 
 The safe default publish shape is:

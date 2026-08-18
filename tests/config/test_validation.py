@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 
 import pytest
@@ -15,6 +16,7 @@ from wastech_orchestrator.config.schema import (
 )
 from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.providers.base import ProviderId
+from wastech_orchestrator.security import env_paths
 
 
 @pytest.fixture
@@ -199,6 +201,95 @@ def test_allowed_environment_plain_name_grammar_is_left_alone(
     # turning that into a load error would reject configs that work today (И-5).
     cfg = _with_security(base_config, allowed_environment=("PATH", "not a name"))
     assert validate_config(cfg) == []
+
+
+# The shipped template's `local_path` is the relative placeholder `./workspace/repo`, against which
+# no absolute value can be compared without resolving it (which would make the verdict depend on the
+# process's working directory). `worc install` writes the resolved git root, so an absolute clone
+# path is what every real config holds — and what these tests use.
+_CLONE = "/srv/clones/target"
+
+
+def _assigning(config: OrchestratorConfig, **assigned: str) -> OrchestratorConfig:
+    config = replace(config, repo=replace(config.repo, local_path=_CLONE))
+    return _with_security(config, extra_environment=dict(assigned))
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [".worc", ".worc/cache", ".git", ".git/objects", ".worc-io", "tasks", "tasks/pending"],
+)
+def test_assigned_value_inside_a_protected_path_is_rejected(
+    base_config: OrchestratorConfig, suffix: str
+) -> None:
+    # The key exists to point a toolchain cache into the clone, so a wrong path is a plausible typo
+    # rather than an exotic case — and the damage is what it lands on: a build filling `.worc/`
+    # corrupts the run that launched it, one filling `.git/` corrupts the repository.
+    clone = _CLONE
+    cfg = _assigning(base_config, NUGET_PACKAGES=f"{clone}/{suffix}")
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("security.extra_environment.NUGET_PACKAGES" in issue for issue in exc.value.issues)
+
+
+def test_assigned_value_that_is_a_protected_path_parent_is_rejected(
+    base_config: OrchestratorConfig,
+) -> None:
+    # Symmetry matters: naming the clone root redirects the cache onto every protected directory
+    # inside it just as effectively as naming one of them.
+    cfg = _assigning(base_config, CARGO_HOME=_CLONE)
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("security.extra_environment.CARGO_HOME" in issue for issue in exc.value.issues)
+
+
+def test_a_list_value_is_rejected_by_its_offending_element(
+    base_config: OrchestratorConfig,
+) -> None:
+    # A list-shaped variable is the one that slips through an unsplit comparison: as a single string
+    # it matches no protected root at all, while the element in the middle of it lands on one.
+    clone = _CLONE
+    cfg = _assigning(base_config, PYTHONPATH=f"{clone}/.worc{os.pathsep}{clone}/src")
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("security.extra_environment.PYTHONPATH" in issue for issue in exc.value.issues)
+
+
+def test_the_rejection_names_what_was_hit_and_never_the_value(
+    base_config: OrchestratorConfig,
+) -> None:
+    # The operator reads the value in their own config; repeating it here would give a secret that
+    # landed in it against the guide's advice a second surface (a terminal, a CI log) to leak from.
+    clone = _CLONE
+    cfg = _assigning(base_config, NUGET_PACKAGES=f"{clone}/.worc/secret-looking-cache")
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    issue = next(i for i in exc.value.issues if "NUGET_PACKAGES" in i)
+    assert "control home" in issue or "runtime home" in issue
+    assert "secret-looking-cache" not in issue
+
+
+@pytest.mark.parametrize("value", ["1", "C.UTF-8", "true", ""])
+def test_a_value_that_is_not_a_path_is_not_examined(
+    base_config: OrchestratorConfig, value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Non-path values are the common case (`DOTNET_NOLOGO: "1"`), and the validator must neither
+    # guess at them nor resolve them: canonicalizing here would make the verdict host-dependent.
+    def explode(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a non-path value was canonicalized")
+
+    monkeypatch.setattr(env_paths, "_canonical", explode)
+    assert validate_config(_assigning(base_config, DOTNET_NOLOGO=value)) == []
+
+
+def test_a_cache_beside_the_protected_paths_validates_clean(
+    base_config: OrchestratorConfig,
+) -> None:
+    # The recipe itself has to pass: a directory of its own inside the clone is exactly right.
+    clone = _CLONE
+    assert (
+        validate_config(_assigning(base_config, NUGET_PACKAGES=f"{clone}/.toolcache/nuget")) == []
+    )
 
 
 @pytest.mark.parametrize("name", ["PATH", "path", "Path"])

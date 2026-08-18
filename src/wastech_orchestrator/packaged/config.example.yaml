@@ -208,6 +208,37 @@ security:
                                       #     extra_environment:
                                       #       DOTNET_CLI_TELEMETRY_OPTOUT: "1"
                                       #       NUGET_PACKAGES: "/abs/path/to/repo/.toolcache/nuget"
+                                      #       CARGO_HOME: "/abs/path/to/repo/.toolcache/cargo"
+                                      #       npm_config_cache: "/abs/path/to/repo/.toolcache/npm"
+                                      #       GOMODCACHE: "/abs/path/to/repo/.toolcache/go"
+                                      #   THE CACHE RECIPE. `dotnet build`, `cargo build` and `npm ci`
+                                      #   fail under the sandbox not because the tool is forbidden but
+                                      #   because they write to ~/.nuget, ~/.cargo, ~/.npm — outside the
+                                      #   clone. Redirect those caches INTO the clone and they work: the
+                                      #   clone is writable for a node with a shell, and nothing cleans
+                                      #   it between tasks, so the cache survives. `.toolcache/` is only
+                                      #   this guide's suggested name; any path inside the clone works.
+                                      #   Write the absolute path (there is no `{repo}` substitution) and
+                                      #   match repo.local_path exactly.
+                                      #   Three limits worth knowing before relying on it:
+                                      #     - NOT under .worc (nor .git, .worc-io, the tasks dir, or
+                                      #       anything denied_read_paths covers). Those hold the
+                                      #       orchestrator's own state, so a build writing there corrupts
+                                      #       the run or the repository. A value overlapping one in
+                                      #       either direction is refused at load, and `worc preflight`
+                                      #       also refuses a symlink or a Windows case/UNC alias that
+                                      #       reaches one.
+                                      #     - a `read-only` node cannot use it and is not meant to:
+                                      #       today such nodes have no shell at all.
+                                      #     - the cache grows without bound. Nothing prunes it — not the
+                                      #       .worc/runs retention, not task cleanup — because deleting a
+                                      #       toolchain's cache is more dangerous than occupying disk.
+                                      #       Look here first for missing gigabytes.
+                                      #   You do NOT have to gitignore it: for a path inside the clone
+                                      #   `worc preflight` adds the rule to .git/info/exclude itself
+                                      #   (untracked, so no diff and no PR noise) and reports FAIL if the
+                                      #   path is still not ignored afterwards. A path OUTSIDE the clone
+                                      #   gets a WARN instead — a sandboxed node cannot write there.
                                       #   Values MUST be quoted strings (`1` is a YAML int and is
                                       #   refused, with a hint). An empty string is a valid value.
                                       #   Applied after forwarding, so a name in both wins here.

@@ -30,6 +30,7 @@ from wastech_orchestrator.git_manager import (
     _bound_pr_body,
     _compact_pr_section,
     append_runtime_excludes,
+    ensure_path_excluded,
 )
 from wastech_orchestrator.providers.artifacts import sha256_file
 from wastech_orchestrator.providers.process import ProcessResult
@@ -476,6 +477,42 @@ def test_ensure_runtime_excludes_respects_operators_flows_tracking_scheme(
     with pytest.raises(subprocess.CalledProcessError):
         git_run(["check-ignore", "-q", str(flow_file.relative_to(git_repo.clone))], git_repo.clone)
     git_run(["check-ignore", "-q", ".worc/state.db"], git_repo.clone)
+
+
+def test_ensure_path_excluded_adds_one_anchored_rule_and_repeats_cleanly(
+    git_repo, git_run: GitRunner
+) -> None:
+    # A toolchain cache redirected into the clone fills it with thousands of untracked files, which
+    # would turn the next task's ordinary change into a dangerous-looking diff. The rule goes to
+    # the clone-local exclude, which an agent cannot rewrite, and is anchored so it cannot also
+    # swallow a same-named directory deeper in the tree.
+    cache = git_repo.clone / ".toolcache" / "nuget"
+    assert ensure_path_excluded(git_repo.clone, cache)
+    assert ensure_path_excluded(git_repo.clone, cache)  # idempotent — preflight runs repeatedly
+    exclude = (git_repo.clone / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    assert exclude.count("/.toolcache/nuget") == 1
+    git_run(["check-ignore", "-q", ".toolcache/nuget"], git_repo.clone)
+    # The tracked .gitignore stays untouched: this is orchestrator bookkeeping, not a repo decision.
+    gitignore = git_repo.clone / ".gitignore"
+    assert not gitignore.exists() or ".toolcache" not in gitignore.read_text(encoding="utf-8")
+
+
+def test_ensure_path_excluded_refuses_a_path_outside_the_clone(git_repo, tmp_path: Path) -> None:
+    # An exclude rule is repo-relative, so a path elsewhere cannot be expressed as one. Reporting
+    # that honestly is what lets preflight warn about it instead of claiming the cache is protected.
+    assert not ensure_path_excluded(git_repo.clone, tmp_path / "elsewhere")
+
+
+def test_ensure_path_excluded_reports_failure_for_a_tracked_path(
+    git_repo, git_run: GitRunner
+) -> None:
+    # A tracked file is never ignored, whatever the exclude file says. The caller has to learn that
+    # the protection did not take rather than assume the append was enough.
+    tracked = git_repo.clone / "tracked-cache-target.txt"
+    tracked.write_text("x\n", encoding="utf-8")
+    git_run(["add", "tracked-cache-target.txt"], git_repo.clone)
+    git_run(["commit", "-m", "add a tracked file"], git_repo.clone)
+    assert not ensure_path_excluded(git_repo.clone, tracked)
 
 
 def test_append_runtime_excludes_respects_operators_flows_tracking_scheme(

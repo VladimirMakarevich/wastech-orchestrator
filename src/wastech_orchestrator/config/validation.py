@@ -26,6 +26,7 @@ from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.providers.capabilities import is_reasoning_supported, reasoning_levels_for
 from wastech_orchestrator.providers.redaction import is_sensitive_key
 from wastech_orchestrator.security.env import env_name_is_covered, env_pattern_prefix
+from wastech_orchestrator.security.env_paths import internal_protected_paths, lexical_collision
 from wastech_orchestrator.security.forbidden_args import (
     FORBIDDEN_SANDBOX_VALUE,
     find_forbidden_args,
@@ -349,6 +350,7 @@ def _validate_security(config: OrchestratorConfig, issues: list[str]) -> None:
             )
     _validate_allowed_environment(config.security.allowed_environment, issues)
     _validate_extra_environment(config.security.extra_environment, issues)
+    _validate_assigned_paths(config, issues)
 
 
 def _validate_allowed_environment(names: Sequence[str], issues: list[str]) -> None:
@@ -444,6 +446,38 @@ def _validate_extra_environment(extra: Mapping[str, str], issues: list[str]) -> 
                 f"{where}: differs from {first!r} only in case — environment names are "
                 "case-insensitive on Windows, so which value survived would depend on read order"
             )
+
+
+def _validate_assigned_paths(config: OrchestratorConfig, issues: list[str]) -> None:
+    """Refuse an assigned value that points at the orchestrator's own control surface.
+
+    The key's whole purpose is redirecting a toolchain's cache into the clone, so a wrong path is a
+    plausible typo rather than an exotic case — and the damage is not the write itself but what it
+    lands on: a build filling ``.worc/`` corrupts the run that launched it, one filling ``.git/``
+    corrupts the repository, one pointed at the exchange rewrites what the next node is told.
+    Overlap counts in both directions: naming a protected directory's *parent* redirects a cache
+    onto it just as effectively as naming something inside it.
+
+    Only the half that needs no filesystem lives here, so one config file gets one verdict on every
+    machine. The rest — symlinks, ``~``, the case and UNC aliases of a path, and the provider homes
+    resolved from the environment — is a ``worc preflight`` FAIL.
+
+    The message names the variable and what it collided with, never the value: the operator reads
+    the value in their own config, and a value holding something secret against the guide's advice
+    must not gain a second surface to leak from — the same rule that keeps assigned values out of
+    the preflight report.
+    """
+    protected = internal_protected_paths(config)
+    for name, value in config.security.extra_environment.items():
+        entry = lexical_collision(value, protected)
+        if entry is None:
+            continue
+        issues.append(
+            f"security.extra_environment.{name}: the path it assigns overlaps {entry.label} "
+            f"({entry.path.as_posix()}) — the orchestrator's own state lives there, and a "
+            "toolchain writing into it corrupts the run or the repository. Point it at a directory "
+            "of its own inside the clone"
+        )
 
 
 def _validate_telegram(config: OrchestratorConfig, issues: list[str]) -> None:

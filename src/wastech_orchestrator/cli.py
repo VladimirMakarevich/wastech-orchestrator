@@ -29,6 +29,7 @@ from typing import NamedTuple, TextIO
 from wastech_orchestrator import __version__, preflight, process_control, runs_retention
 from wastech_orchestrator.composition import (
     ISOLATION_CHECKS,
+    build_internal_deny_policy,
     build_orchestrator,
     build_providers,
 )
@@ -60,6 +61,7 @@ from wastech_orchestrator.git_manager import (
     GitManager,
     ManualActionRequired,
     append_runtime_excludes,
+    ensure_path_excluded,
 )
 from wastech_orchestrator.install import config_writer, detect, wizard
 from wastech_orchestrator.ledger import Ledger
@@ -84,6 +86,13 @@ from wastech_orchestrator.security.env import (
     describe_expansions,
     expand_allowed_environment,
     launch_critical_env_issue,
+)
+from wastech_orchestrator.security.env_paths import (
+    ProtectedPath,
+    assigned_path_elements,
+    canonical_collision,
+    internal_protected_paths,
+    is_inside,
 )
 from wastech_orchestrator.security.isolation import check_isolation
 from wastech_orchestrator.state_store import IncompatibleStateError, StateStore, TaskRow
@@ -2888,6 +2897,93 @@ def _allowed_environment_pattern_lines(config: OrchestratorConfig) -> list[str]:
     return [header, *(f"  - {line}" for line in described)]
 
 
+def _assigned_path_lines(
+    config: OrchestratorConfig, *, env_file: Path | None
+) -> tuple[bool, list[str]]:
+    """The host-specific verdict on where ``security.extra_environment`` values point.
+
+    Three things only this side of the gate can decide, because each needs the filesystem or the
+    environment of *this* machine:
+
+    * a value that reaches a protected directory through a **symlink**, a Windows case variant, or a
+      drive-letter/UNC alias of the same path — and the provider config/credential homes, which are
+      read from ``$CODEX_HOME`` / ``$CLAUDE_CONFIG_DIR`` and so are host state, not config. The
+      plain-path half of this is a load error already, so a config cannot be valid-here-only;
+    * a value pointing **into the clone**, which is the recipe that makes a toolchain cache work at
+      all: the orchestrator excludes it from git itself, and only reports a failure if the path is
+      still not ignored afterwards. Without that the cache's thousands of files land in the next
+      task's diff and trip a gate that has nothing to do with caches. No clone on disk yet, nothing
+      to exclude — the step is skipped, and says so;
+    * a value pointing **outside** the clone, which is a warning rather than a failure: the path may
+      be perfectly deliberate, but a sandboxed node cannot write there, so a build using it fails
+      with a permission error that reads like a broken toolchain.
+
+    Every line names the *variable*, never its value — an operator reads the value in their own
+    config file, and a value holding a secret against the guide's advice must not gain a terminal or
+    a CI log to leak from. A line does name the protected path it collided with, which is
+    orchestrator-owned and is the one thing the operator cannot infer.
+    """
+    protected: tuple[ProtectedPath, ...] = (
+        *internal_protected_paths(config),
+        *(
+            ProtectedPath("a provider's own config or credential home", path)
+            for path in build_internal_deny_policy(
+                config, layout_for(config), env_file=env_file
+            ).denied_paths
+        ),
+    )
+    clone = Path(config.repo.local_path)
+    clone_present = clone.is_dir()
+    ok = True
+    lines: list[str] = []
+    for name, value in config.security.extra_environment.items():
+        entry = canonical_collision(value, protected)
+        if entry is not None:
+            ok = False
+            lines.append(
+                f"assigned-paths: FAIL — {name} resolves onto {entry.label} "
+                f"({entry.path.as_posix()}), or inside it; the orchestrator's own state lives "
+                "there and a toolchain writing into it corrupts the run or the repository"
+            )
+            continue
+        inside = [element for element in assigned_path_elements(value) if is_inside(element, clone)]
+        outside = len(assigned_path_elements(value)) - len(inside)
+        if outside:
+            lines.append(
+                f"assigned-paths: WARN — {name} points outside the clone; a node running under the "
+                "sandbox can only write inside the clone, so a build using that path fails with a "
+                "permission error that looks like a broken toolchain"
+            )
+        if not inside:
+            continue
+        if not clone_present:
+            lines.append(
+                f"assigned-paths: SKIP — {name} points into the clone, which is not on disk yet, "
+                "so it cannot be excluded from git; re-run this check once the first task has "
+                "cloned the repository"
+            )
+            continue
+        excluded = [
+            element
+            for element in inside
+            if not ensure_path_excluded(clone, Path(element).expanduser())
+        ]
+        if excluded:
+            ok = False
+            lines.append(
+                f"assigned-paths: FAIL — {name} points into the clone but git still does not "
+                "ignore it, so a filled cache would land in the task's diff. A tracked path, or a "
+                "negation rule in the repository's ignore files, overrides the exclusion — move "
+                "the cache to a path of its own"
+            )
+        else:
+            lines.append(
+                f"assigned-paths: OK — {name} points into the clone and git ignores it (excluded "
+                "via .git/info/exclude), so a filled cache stays out of the task's diff"
+            )
+    return ok, lines
+
+
 def run_preflight(
     config: OrchestratorConfig, *, env_file: Path | None = None, capability_smoke: bool = False
 ) -> tuple[bool, list[str]]:
@@ -3015,6 +3111,9 @@ def run_preflight(
             f"({names}) — every child process (agent CLI, checks, scanners, git) receives these; "
             "values are not printed"
         )
+        paths_ok, path_lines = _assigned_path_lines(config, env_file=env_file)
+        ok = ok and paths_ok
+        lines.extend(path_lines)
 
     lines.extend(_summarize_command_sets(config))
 

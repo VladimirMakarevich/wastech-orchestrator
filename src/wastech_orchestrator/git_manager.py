@@ -107,6 +107,13 @@ _RUNTIME_IGNORE_ROOTS: tuple[tuple[str, str], ...] = (
     (f"{EXCHANGE_HOME_DIRNAME}/probe", f"{EXCHANGE_HOME_DIRNAME}/"),
 )
 
+# Header for the exclude lines the orchestrator appends for an assigned toolchain cache living
+# inside the clone. Named after the command that writes it, so an operator reading
+# `.git/info/exclude` knows what put the rule there and what to re-run after changing the path.
+_ASSIGNED_CACHE_IGNORE_COMMENT = (
+    "# wastech-orchestrator: assigned toolchain cache in this clone (added by `worc preflight`)"
+)
+
 # The full ignore block (comment + both roots), kept as the public constant install/docs reference.
 RUNTIME_GITIGNORE_LINES: tuple[str, ...] = (
     _RUNTIME_IGNORE_COMMENT,
@@ -199,6 +206,67 @@ def _git_path_ignored(repo_root: str | Path, probe: str) -> bool:
             stdout_path=str(stdout_path),
         )
     return result.exit_code == 0
+
+
+def _git_stdout(repo_root: str | Path, *args: str) -> str:
+    """Run a read-only ``git`` verb in ``repo_root``, returning its stdout or ``""`` on failure.
+
+    A module-level twin of the per-instance runner, for the call sites that hold a repo path but no
+    configured :class:`GitManager` — the installer and ``worc preflight`` — so neither has to build
+    one just to ask git where a file lives.
+    """
+    with tempfile.TemporaryDirectory() as scratch:
+        stdout_path = Path(scratch) / "stdout"
+        result = run_process(
+            ["git", *args],
+            cwd=repo_root,
+            env=dict(os.environ),
+            timeout_seconds=30,
+            stdout_path=str(stdout_path),
+        )
+        if result.exit_code != 0:
+            return ""
+        return stdout_path.read_text(encoding="utf-8", errors="replace").strip()
+
+
+def ensure_path_excluded(repo_root: str | Path, target: str | Path) -> bool:
+    """Idempotently make git ignore ``target`` inside ``repo_root``; report whether it now does.
+
+    The rule goes to the clone-local, untracked ``.git/info/exclude``, never the tracked
+    ``.gitignore``, for three reasons pointing the same way: the tracked file belongs to the target
+    repository, so editing it would put orchestrator bookkeeping into a task's diff and its pull
+    request; a workspace-write agent can rewrite ``.gitignore`` but cannot write inside ``.git``,
+    which both the sandbox and the write-guard deny; and the exclude file is per-clone, the exact
+    scope of a cache path that names one clone.
+
+    The reason to do this at all is the diff, not the write. A toolchain cache redirected into the
+    clone fills it with thousands of untracked files, which turns the next task's ordinary change
+    into a dangerous-looking diff and trips a gate that has nothing to do with caches — after the
+    agent has already done its expensive work.
+
+    The rule is anchored with a leading ``/`` so it matches from the repository root rather than a
+    same-named directory deeper in the tree, and carries no trailing ``/`` so it holds whether the
+    toolchain creates a directory or a file. Returns ``False`` when the target lies outside the
+    clone, when git cannot be asked, or when the path is still not ignored afterwards (a tracked
+    path, or an operator's own negation rule) — a caller reports that instead of assuming.
+    """
+    root, path = Path(repo_root), Path(target)
+    try:
+        probe = path.relative_to(root).as_posix()
+    except ValueError:
+        return False
+    if not probe or probe == ".":
+        return False
+    if not _git_path_ignored(root, probe):
+        rel_exclude = _git_stdout(root, "rev-parse", "--git-path", "info/exclude")
+        if not rel_exclude:
+            return False
+        exclude = Path(rel_exclude)
+        _append_missing_lines(
+            exclude if exclude.is_absolute() else root / exclude,
+            [_ASSIGNED_CACHE_IGNORE_COMMENT, f"/{probe}"],
+        )
+    return _git_path_ignored(root, probe)
 
 
 def _missing_runtime_ignore_lines(is_ignored: Callable[[str], bool]) -> list[str]:
