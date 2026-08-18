@@ -144,8 +144,16 @@ security:
                                       #   Operator-config ONLY (never a task/flow/extra_args key).
   allowed_environment:                  # REPLACES (does not extend) the default — keep the OS-launch
                                         # essentials for YOUR OS or the spawned CLI may fail to start.
-                                        # A name absent from the host OS is simply skipped, so this
-                                        # cross-platform list is safe to keep as-is on any OS.
+                                        # A name absent from the host OS is simply skipped, so the
+                                        # cross-platform union below is safe to keep as-is on any OS.
+                                        # This TEMPLATE ships the union (22 names); the config.yaml
+                                        # `worc install` generates carries only the host OS default
+                                        # (9 names on Linux/macOS, 19 on Windows), and
+                                        # `worc upgrade-config` merges from this template. Two names
+                                        # are checked for you: `PATH` is mandatory (a config without
+                                        # it is a load error) and on Windows `SystemRoot` is a
+                                        # `worc preflight` FAIL (without it claude.exe aborts at
+                                        # startup with exit 0xC0000409, printing nothing).
     # Cross-platform base
     - "PATH"
     - "HOME"

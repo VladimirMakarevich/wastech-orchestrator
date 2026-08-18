@@ -86,6 +86,38 @@ def default_allowed_environment(system: str | None = None) -> tuple[str, ...]:
     return _BASE_ALLOWED_ENV + os_essential_env(system)
 
 
+def launch_critical_env_issue(
+    allowed_environment: Sequence[str], system: str | None = None
+) -> str | None:
+    """The host-specific reason ``allowed_environment`` cannot launch a child CLI, or ``None``.
+
+    Only one name qualifies, and only on one OS: without ``SystemRoot`` the Windows CLI aborts
+    before printing anything (see :data:`_WINDOWS_ESSENTIAL_ENV`), so the operator sees "CLI did not
+    succeed" and nothing else. The remaining OS-launch essentials only degrade a child (no temp dir,
+    no extension resolution), so they are not asserted here.
+
+    The verdict depends on the host, which is why it belongs to ``worc preflight`` and never to
+    ``validate_config``: the same config file must get the same verdict on every machine. The
+    host-independent half of the same rule — ``PATH`` is mandatory everywhere — is a validator
+    error.
+
+    Matching is case-insensitive because it is Windows-only and Windows environment names are: a
+    config spelling the name ``SYSTEMROOT`` forwards it just as well, so failing it would be a false
+    alarm.
+    """
+    name = system if system is not None else platform.system()
+    if name != "Windows":
+        return None
+    if any(entry.upper() == "SYSTEMROOT" for entry in allowed_environment):
+        return None
+    return (
+        "security.allowed_environment omits 'SystemRoot' (the list replaces the default wholesale) "
+        "— on Windows the Node-based claude.exe aborts at startup with exit 0xC0000409 before "
+        "printing anything, so a run would only report that the CLI did not succeed. "
+        "Add 'SystemRoot' to the list."
+    )
+
+
 def build_child_env(
     allowed_keys: Sequence[str],
     parent_env: Mapping[str, str] | None = None,

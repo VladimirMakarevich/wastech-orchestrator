@@ -113,6 +113,32 @@ def test_protected_paths_absolute_path_is_rejected(base_config: OrchestratorConf
     assert any("protected_paths" in issue for issue in exc.value.issues)
 
 
+def test_allowed_environment_without_path_is_rejected(base_config: OrchestratorConfig) -> None:
+    # The list replaces the OS-aware default wholesale, so an operator who edits it can drop the one
+    # name every child needs. Today that surfaces as "CLI did not succeed" at run time.
+    cfg = _with_security(base_config, allowed_environment=("HOME", "TMPDIR"))
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any(
+        "security.allowed_environment" in issue and "PATH" in issue for issue in exc.value.issues
+    )
+
+
+def test_allowed_environment_with_path_validates_clean(base_config: OrchestratorConfig) -> None:
+    # `PATH` alone is enough for the validator on every host: the Windows-only `SystemRoot` half of
+    # the rule belongs to preflight, so that one config file gets the same verdict everywhere.
+    assert validate_config(_with_security(base_config, allowed_environment=("PATH",))) == []
+
+
+def test_allowed_environment_path_match_is_exact(base_config: OrchestratorConfig) -> None:
+    # A host-independent verdict has to be the strictest reading: `Path` is forwarded on Windows
+    # (its environment is case-insensitive) and silently dropped on POSIX, so it is not `PATH`.
+    cfg = _with_security(base_config, allowed_environment=("Path", "HOME"))
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("security.allowed_environment" in issue for issue in exc.value.issues)
+
+
 def test_global_primary_not_in_allowed_is_rejected(base_config: OrchestratorConfig) -> None:
     # claude is the global primary in the packaged config; shrinking allowed to codex breaks it.
     bad = _with_agents(base_config, allowed=(ProviderId.CODEX,))

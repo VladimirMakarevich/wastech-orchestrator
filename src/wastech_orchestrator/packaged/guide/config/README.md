@@ -60,7 +60,7 @@ Treat this block as a guardrail, not a convenience area:
 
 - Keep `strict_isolation: true` unless the operator consciously accepts full-access runs.
 - Know that `disable_read_isolation` defaults to `true` — read-isolation is **off** out of the box, and `install` does not write the key. Set it `false` to turn read-isolation on; the write side (commit/staging gates, PR control, `denied_read_paths`) is in force either way.
-- Pass only names in `allowed_environment`; secret **values** never belong in the file.
+- Pass only names in `allowed_environment`; secret **values** never belong in the file. The list replaces the default wholesale, so keep `PATH` (a config without it is rejected at load) and, on Windows, `SystemRoot` (`worc preflight` fails without it — the CLI would abort at startup printing nothing). What `install` generated is the host OS default; the longer list in `config.example.yaml` is the cross-platform union.
 - Keep `denied_commands` complete; it replaces the default list rather than extending it.
 - `allow_git_evidence` (default `false`) is the master switch for the read-only git-evidence grant: only with it on does a flow node's `git_evidence: true` actually give that node the read-only git verbs. It never makes a node writable — the sandbox still denies every write and `denied_commands` still applies — but leave it off unless a flow you run genuinely audits delivery history.
 - Do not add `extra_args` that disable sandboxing, approvals, or rule enforcement.

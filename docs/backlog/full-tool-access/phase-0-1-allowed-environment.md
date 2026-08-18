@@ -1,6 +1,6 @@
 # Фаза 0.1 — сломанный `allowed_environment` виден до запуска
 
-Status: **ready to implement** Date: 2026-08-13 Owner: Vladimir Makarevich Требования: Т0.1 из [requirements-step-0.md](requirements-step-0.md) `schema_version`: без изменения Зависимости: нет — фаза идёт первой
+Status: **implemented 2026-08-18** (AC0.1.1–AC0.1.3 зелёные; AC0.1.4 — живая проба на Windows **не доказана**, хоста нет; запись в разделе поправок [README.md](README.md)) Date: 2026-08-13 Owner: Vladimir Makarevich Требования: Т0.1 из [requirements-step-0.md](requirements-step-0.md) `schema_version`: без изменения Зависимости: нет — фаза идёт первой
 
 Самая дешёвая фаза Шага 0 и единственная, которая ничего не разрешает: она чинит диагностику. Ключ `allowed_environment` **заменяет** дефолт целиком, а дефолт OS-зависимый, поэтому оператор, вычеркнувший одно имя, ломает запуск CLI и видит это как «CLI did not succeed» — на Windows ещё и без единой строки вывода, потому что Node-овый `claude.exe` падает с `0xC0000409` до печати чего-либо.
 

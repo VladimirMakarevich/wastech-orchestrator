@@ -27,6 +27,7 @@ from wastech_orchestrator.providers.base import (
     ProviderHealth,
     ProviderId,
 )
+from wastech_orchestrator.security import env as env_mod
 
 # The default credential answer for a healthy fake, so the ~15 tests that predate the auth probe
 # keep printing an OK auth field instead of tripping the logged-out refusal.
@@ -310,6 +311,58 @@ def test_preflight_fails_on_isolation(
     assert rc == 1
     assert "isolation: FAIL" in out
     assert "codex: sandbox is forbidden" in out
+
+
+# --- The host-dependent half of the allowed_environment gate ------------------------------------
+
+
+def _without_systemroot(config):
+    kept = tuple(
+        name for name in config.security.allowed_environment if name.upper() != "SYSTEMROOT"
+    )
+    return replace(config, security=replace(config.security, allowed_environment=kept))
+
+
+def test_preflight_fails_on_windows_when_systemroot_is_missing(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The platform is substituted, not read off the machine — the check must be exercised on every
+    # host. FAIL, not WARN: claude.exe aborts before printing anything, so the run would report
+    # nothing but "CLI did not succeed".
+    monkeypatch.setattr(env_mod.platform, "system", lambda: "Windows")
+    _patch_providers(monkeypatch, _without_systemroot(make_git_config(git_repo.clone)))
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "allowed-environment: FAIL" in out
+    assert "SystemRoot" in out
+    assert "0xC0000409" in out
+    assert "preflight: NOT ready" in out
+
+
+def test_preflight_ready_on_windows_when_systemroot_is_listed(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(env_mod.platform, "system", lambda: "Windows")
+    _patch_providers(monkeypatch, make_git_config(git_repo.clone))  # the fixture lists SYSTEMROOT
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "allowed-environment" not in out
+    assert "preflight: ready" in out
+
+
+def test_preflight_ready_on_linux_without_systemroot(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The same config that fails above is fine here, and the Windows-only name is never mentioned.
+    monkeypatch.setattr(env_mod.platform, "system", lambda: "Linux")
+    _patch_providers(monkeypatch, _without_systemroot(make_git_config(git_repo.clone)))
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "SystemRoot" not in out
+    assert "preflight: ready" in out
 
 
 # --- The live no-model Codex isolation capability smoke surfaced in `worc preflight` ------------

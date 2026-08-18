@@ -80,6 +80,7 @@ from wastech_orchestrator.preflight import preflight_gh
 from wastech_orchestrator.providers import process as agent_process
 from wastech_orchestrator.providers.base import AuthProbe, AuthState, ProviderId
 from wastech_orchestrator.runtime_layout import CONTROL_HOME_DIRNAME, RuntimeLayout, runs_root
+from wastech_orchestrator.security.env import launch_critical_env_issue
 from wastech_orchestrator.security.isolation import check_isolation
 from wastech_orchestrator.state_store import IncompatibleStateError, StateStore, TaskRow
 from wastech_orchestrator.task.model import DEFAULT_QUEUE, priority_rank
@@ -2964,6 +2965,15 @@ def run_preflight(
             "git_evidence may run the read-only git verbs to inspect delivery history; the "
             "repository stays unwritable (sandbox) and commit/push/PR stay the orchestrator's"
         )
+
+    # The host-dependent half of the ``allowed_environment`` gate — its host-independent half
+    # (``PATH`` is mandatory) is a validator error, because one config file must get the same
+    # verdict on every machine. FAIL rather than WARN: the CLI would not start at all, and this is
+    # the one place where learning that costs nothing.
+    env_issue = launch_critical_env_issue(config.security.allowed_environment)
+    if env_issue is not None:
+        ok = False
+        lines.append(f"allowed-environment: FAIL — {env_issue}")
 
     lines.extend(_summarize_command_sets(config))
 

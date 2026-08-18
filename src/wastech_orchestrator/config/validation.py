@@ -326,13 +326,27 @@ def _validate_supervisor(
 def _validate_security(config: OrchestratorConfig, issues: list[str]) -> None:
     """The protected-paths allowlist holds repo-relative globs (it matches against repo-relative
     diff paths). Reject an absolute path, ``~``, or ``..`` traversal — the same containment rule
-    applied to a check command's ``cwd``."""
+    applied to a check command's ``cwd``.
+
+    ``allowed_environment`` must name ``PATH``: the list replaces the OS-aware default wholesale, so
+    an operator who edits it can silently drop the one name every child process needs. Only the
+    host-independent half of that rule lives here (the same config must get the same verdict on
+    every machine); the Windows-only ``SystemRoot`` half is a ``worc preflight`` FAIL
+    (:func:`~wastech_orchestrator.security.env.launch_critical_env_issue`). Matching is exact for
+    the same reason: ``Path`` would be forwarded on Windows and dropped on POSIX.
+    """
     for index, pattern in enumerate(config.security.protected_paths):
         if not is_safe_relpath(pattern):
             issues.append(
                 f"security.protected_paths[{index}] {pattern!r} must be a "
                 "repo-relative glob (no absolute path, no '~', no '..' traversal)"
             )
+    if "PATH" not in config.security.allowed_environment:
+        issues.append(
+            "security.allowed_environment must list 'PATH' (spelled exactly) — the list replaces "
+            "the default wholesale, and without it a child process finds neither the agent CLI "
+            "nor git"
+        )
 
 
 def _validate_telegram(config: OrchestratorConfig, issues: list[str]) -> None:
