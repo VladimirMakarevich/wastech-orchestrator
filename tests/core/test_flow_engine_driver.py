@@ -54,6 +54,16 @@ class _FakeRouter:
         self.route_overrides: dict[str, Any] = {}  # node_id -> provider override seen
         self.requests: dict[str, Any] = {}  # node_id -> AgentRunRequest built for it
 
+    def route_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: Any = None, git_evidence: bool = False
+    ) -> bool:
+        # The real Router asks the adapters whether this attempt gets a shell. The double
+        # answers from the node's grant — a Claude-shaped answer — unless a test sets
+        # ``grants_shell`` to model a provider whose profile carries a shell on its own
+        # (Codex ``read-only``) or a host where it was dropped.
+        override = getattr(self, "grants_shell", None)
+        return git_evidence if override is None else bool(override)
+
     def resolve_route(self, node_id: str, override: Any = None) -> ResolvedRoute:
         self.route_overrides[node_id] = override
         return ResolvedRoute(
@@ -128,7 +138,7 @@ class _FakeGit:
     def write_current_diff(self, task_id: str) -> str:
         return "/art/current.diff"
 
-    def changed_code_entries(self) -> tuple[Any, ...]:
+    def changed_code_entries(self, task_id: str = "task-1") -> tuple[Any, ...]:
         return ()
 
     def changed_code_paths(self) -> list[str]:

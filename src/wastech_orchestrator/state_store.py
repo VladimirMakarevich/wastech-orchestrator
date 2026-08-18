@@ -123,7 +123,19 @@ def _utc_now_iso() -> str:
 # adds
 # it on a brand-new (``0``) database; an older versioned DB is still refused fail-closed and
 # recreated (greenfield — no production data to migrate).
-DB_SCHEMA_VERSION = 21
+# v22 (dangerous-diff gate reference point): added the **additive** nullable
+# ``tasks.gate_reference_sha`` column — the commit the dangerous-diff gate measures the task's
+# change from. The gate used to diff against ``HEAD``, which measures "what is not committed yet"
+# rather than "what this task did", so any commit inside the task (an agent's own, on a node the
+# profile bracket does not park) emptied the one question a human is asked before publishing. NULL
+# means "the task's diff base", which is what a run has until the orchestrator commits —
+# deliberately not a frozen base SHA, because the base branch legitimately moves and a frozen SHA
+# would start asking about other people's deletions. Each orchestrator commit that carries code
+# (code / subtask / merge) stamps its SHA here, which is what keeps a decomposed run from re-asking
+# about the deletions its first subtask already got approved. Additive, ``_migrate`` adds it on a
+# brand-new (``0``) database; an older versioned DB is still refused fail-closed and recreated
+# (greenfield).
+DB_SCHEMA_VERSION = 22
 
 
 class IncompatibleStateError(Exception):
@@ -179,6 +191,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE tasks ADD COLUMN exchange_active_unsafe INTEGER NOT NULL DEFAULT 0"
         )
+    # v22: the commit the dangerous-diff gate measures from. Nullable — NULL is its real meaning
+    # ("the task's diff base"), not a placeholder, so no default.
+    if "gate_reference_sha" not in task_cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN gate_reference_sha TEXT")
     _migrate_usage_columns(conn)
 
 
@@ -293,7 +309,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     control_bundle_digest TEXT,
     instruction_manifest_digest TEXT,
     exchange_contaminated INTEGER NOT NULL DEFAULT 0,
-    exchange_active_unsafe INTEGER NOT NULL DEFAULT 0
+    exchange_active_unsafe INTEGER NOT NULL DEFAULT 0,
+    gate_reference_sha TEXT
 );
 
 CREATE TABLE IF NOT EXISTS node_runs (
@@ -1249,6 +1266,39 @@ class StateStore:
         if row is None:
             raise KeyError(task_id)
         return bool(row["exchange_contaminated"]), bool(row["exchange_active_unsafe"])
+
+    def get_gate_reference(self, task_id: str) -> str | None:
+        """The commit the dangerous-diff gate measures this task's change from, or ``None``.
+
+        ``None`` means the orchestrator has not committed anything for this task yet, so the gate
+        falls back to the task's diff base — the same point the reported diff uses. A task row that
+        does not exist answers ``None`` too: the gate's reference is a refinement of "measure from
+        the base", never a precondition for measuring at all.
+        """
+        cur = self._conn.execute(
+            "SELECT gate_reference_sha FROM tasks WHERE task_id = ?", (task_id,)
+        )
+        row = cur.fetchone()
+        if row is None:
+            return None
+        value = row["gate_reference_sha"]
+        return str(value) if value else None
+
+    def set_gate_reference(
+        self, task_id: str, sha: str, conn: sqlite3.Connection | None = None
+    ) -> None:
+        """Stamp the commit the gate measures from — every orchestrator commit that carries code.
+
+        Called by the Git Manager right after such a commit lands, so the next node's gate asks
+        only about what happened *since* it. That is what keeps a decomposed run from re-asking
+        about the deletions its first subtask already got approved, while still showing the human
+        everything an agent committed on its own.
+        """
+        with self._writer(conn) as c:
+            c.execute(
+                "UPDATE tasks SET gate_reference_sha = ?, updated_at = ? WHERE task_id = ?",
+                (sha, self._clock(), task_id),
+            )
 
     def record_provider_attempt(
         self, attempt: ProviderAttemptRow, conn: sqlite3.Connection | None = None

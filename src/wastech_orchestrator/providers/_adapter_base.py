@@ -121,6 +121,17 @@ class ParsedEvents:
     rate_limit_resets_at: float | None = None
 
 
+#: Isolation-probe verdicts, shared by both adapters so one vocabulary describes both probes (the
+#: no-model Codex sandbox smoke and the paid Claude one). ``passed`` = the policy was demonstrated
+#: here; ``unsupported`` = it could not be demonstrated (a host gap, or a probe that never ran) —
+#: deliberately NOT a pass, because "no evidence" and "the floor holds" are the two answers a floor
+#: claim must never confuse; ``policy-failed`` = a denied path was actually written, the
+#: non-fallback security result.
+CAPABILITY_PASSED = "passed"
+CAPABILITY_UNSUPPORTED = "unsupported"
+CAPABILITY_POLICY_FAILED = "policy-failed"
+
+
 @dataclass(frozen=True)
 class IsolationCapabilityReport:
     """A provider's live, no-model isolation capability-probe verdict for ``worc preflight``.

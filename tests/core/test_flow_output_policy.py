@@ -63,6 +63,16 @@ class _Router:
             node_id=node_id, primary=ProviderId.CODEX, fallback=None, source=RouteSource.CONFIG
         )
 
+    def route_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: Any = None, git_evidence: bool = False
+    ) -> bool:
+        # The real Router asks the adapters whether this attempt gets a shell. The double answers
+        # from the node's grant — a Claude-shaped answer — unless a test sets ``grants_shell`` to
+        # model a provider whose profile carries a shell on its own (Codex ``read-only``) or a host
+        # where it was dropped.
+        override = getattr(self, "grants_shell", None)
+        return git_evidence if override is None else bool(override)
+
     def run_stage(
         self, request: Any, route: ResolvedRoute, *, snapshot: Any = None
     ) -> StageOutcome:
@@ -105,7 +115,7 @@ class _Git:
     def write_current_diff(self, task_id: str) -> str:
         return "/art/current.diff"
 
-    def changed_code_entries(self) -> tuple[ChangedPath, ...]:
+    def changed_code_entries(self, task_id: str = "task-1") -> tuple[ChangedPath, ...]:
         return self._changed
 
     def commit_code(self, task_id: str, message: str) -> str | None:

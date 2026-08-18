@@ -17,6 +17,7 @@ only as file paths.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import platform
 import re
@@ -26,7 +27,9 @@ from pathlib import Path
 from typing import Any
 
 from wastech_orchestrator.config.schema import ProviderConfig
+from wastech_orchestrator.observability.logging import bind
 from wastech_orchestrator.providers._adapter_base import (
+    CAPABILITY_POLICY_FAILED,
     BaseCliProvider,
     IsolationCapabilityReport,
     ParsedEvents,
@@ -49,11 +52,12 @@ from wastech_orchestrator.providers.base import (
 )
 from wastech_orchestrator.providers.capabilities import normalize_codex_reasoning
 from wastech_orchestrator.providers.codex_canary import (
-    CAPABILITY_POLICY_FAILED,
     CanaryRunner,
+    ExtraProbes,
     default_canary_runner,
     run_codex_canary,
     run_codex_capability_smoke,
+    write_guard_probe_paths,
 )
 from wastech_orchestrator.providers.codex_profile import (
     PROFILE_NAME,
@@ -74,10 +78,12 @@ from wastech_orchestrator.security.forbidden_args import (
     find_forbidden_args,
     find_full_access_args,
 )
+from wastech_orchestrator.security.shell_reach import ShellQuery
 
 __all__ = [
     "CodexProvider",
     "ParsedEvents",
+    "attempt_has_shell",
     "build_codex_argv",
     "build_context_footer",
     "build_effective_prompt",
@@ -85,6 +91,8 @@ __all__ = [
     "parse_events",
     "resolve_codex_resources_dir",
 ]
+
+_LOG = logging.getLogger(__name__)
 
 _DEFAULT_PROFILE = "workspace-write"
 _LAST_MESSAGE_FILENAME = "last-message.txt"
@@ -518,6 +526,20 @@ def isolation_reasons(config: ProviderConfig) -> list[str]:
     return reasons
 
 
+def attempt_has_shell(config: ProviderConfig, query: ShellQuery) -> bool:
+    """Whether a Codex attempt can execute commands — always true, on every profile.
+
+    Pure and offline (no CLI launched), so it can drive the core's per-attempt detection bracket
+    (:mod:`wastech_orchestrator.security.shell_reach`). Codex has no shell-less mode: the generated
+    ``read-only`` profile forbids every mutation but still permits command execution (a
+    ``read-only`` node can run ``git log`` today), ``workspace-write`` adds the write grant, and the
+    full-access escape removes the sandbox entirely. So neither the node's ceiling nor the
+    git-evidence grant changes the answer — the grant exists for the provider whose read-only
+    profile carries no shell, and Codex needs nothing from it.
+    """
+    return True
+
+
 def _normalize_codex_usage(usage: Mapping[str, Any] | None) -> NormalizedUsage | None:
     """Map Codex's raw ``usage`` to the provider-neutral cumulative record.
 
@@ -662,10 +684,13 @@ class CodexProvider(BaseCliProvider):
         """Prove the generated permission profile is OS-enforced before ``codex exec``.
 
         Runs the *same* profile under ``codex sandbox -P`` (no model, no network) and checks the
-        private home is denied (direct and shell-mediated) and the exchange is read-only, on real
-        launch env. Skipped when there is no internal deny set to prove (a unit harness with no
-        ``deny_policy``) or on the full-access escape (no profile emitted). A leak fails closed as a
-        non-fallback security error; an undemonstrable sandbox as ``CAPABILITY_UNAVAILABLE``.
+        private home is denied (direct and shell-mediated), the exchange is read-only, and every
+        Git-control / lifecycle root the profile write-denies actually refuses a write — the
+        product's central claim, which no probe tested before. On real launch env. Skipped when
+        there is no
+        internal deny set to prove (a unit harness with no ``deny_policy``) or on the full-access
+        escape (no profile emitted). A leak fails closed as a non-fallback security error; an
+        undemonstrable sandbox as ``CAPABILITY_UNAVAILABLE``.
         """
         if self._deny_policy is None:
             return
@@ -684,6 +709,7 @@ class CodexProvider(BaseCliProvider):
             system=platform.system(),
             runner=self._canary_runner,
             private_readable=self._security.read_isolation_off,
+            extra=ExtraProbes(write_guard_probes=self._write_guard_probes(request)),
         )
         Path(paths.attempt_dir, "canary.json").write_text(
             json.dumps(
@@ -696,6 +722,30 @@ class CodexProvider(BaseCliProvider):
         if not outcome.ok:
             assert outcome.error_class is not None  # set whenever ok is False
             raise ProviderError(outcome.error_class, outcome.message)
+
+    def _write_guard_probes(self, request: AgentRunRequest) -> tuple[tuple[str, str], ...]:
+        """The write-deny probes for this attempt's Git-control roots (empty when it has none).
+
+        The roots come from the request the Core built, so the probes test the profile that is about
+        to launch rather than a re-derived guess. Roots that cannot be probed are said out loud
+        instead of quietly reducing the probe set: a collapsed one names the ancestor that covers
+        it (debug — the coverage is intended), a missing directory names itself at warning level,
+        because a write into a directory that does not exist would fail for want of a parent and
+        read as an enforced deny.
+        """
+        if request.write_guard is None:
+            return ()
+        targets = write_guard_probe_paths(request.write_guard.denied_write_paths)
+        log = bind(_LOG, task_id=request.task_id, component="canary")
+        for root, ancestor in targets.covered:
+            log.debug("write-guard probe for %s covered by its probed parent %s", root, ancestor)
+        for root in targets.missing:
+            log.warning(
+                "write-guard root %s has no directory on disk, so no probe can demonstrate its "
+                "deny — a write there would fail for want of a parent, which is not enforcement",
+                root,
+            )
+        return targets.probes
 
     def isolation_capability_smoke(self, *, home_dir: Path) -> IsolationCapabilityReport | None:
         """Prove the generated profile is OS-enforced on this host, no model.

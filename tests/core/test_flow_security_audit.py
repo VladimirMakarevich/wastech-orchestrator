@@ -87,6 +87,16 @@ class _Router:
             node_id=node_id, primary=ProviderId.CODEX, fallback=None, source=RouteSource.CONFIG
         )
 
+    def route_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: Any = None, git_evidence: bool = False
+    ) -> bool:
+        # The real Router asks the adapters whether this attempt gets a shell. The double answers
+        # from the node's grant — a Claude-shaped answer — unless a test sets ``grants_shell`` to
+        # model a provider whose profile carries a shell on its own (Codex ``read-only``) or a host
+        # where it was dropped.
+        override = getattr(self, "grants_shell", None)
+        return git_evidence if override is None else bool(override)
+
     def run_stage(
         self, request: Any, route: ResolvedRoute, *, snapshot: Any = None
     ) -> StageOutcome:
@@ -114,7 +124,7 @@ class _Git:
     def __init__(self) -> None:
         self.calls: list[str] = []
 
-    def changed_code_entries(self) -> tuple[Any, ...]:
+    def changed_code_entries(self, task_id: str = "task-1") -> tuple[Any, ...]:
         return ()  # .worc/ is gitignored → the private report never shows as a tracked change
 
     def commit_code(self, *a: Any, **k: Any) -> str | None:

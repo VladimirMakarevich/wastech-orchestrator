@@ -1515,10 +1515,33 @@ class GitManager:
             paths.append(path)
         return paths
 
-    def changed_code_entries(self) -> tuple[ChangedPath, ...]:
-        """Return tracked and untracked code changes for deterministic output guardrails."""
+    def gate_reference(self, task_id: str) -> str:
+        """The commit this task's change is measured from by the dangerous-diff gate.
+
+        The last commit the **orchestrator** made for this task, or — until it has made one — the
+        task's diff base, the same point :meth:`write_current_diff` reports from. So the two
+        definitions of "what changed" that used to live side by side (the gate measured against
+        ``HEAD``, the report against the base) coincide inside one subtask, and a commit made
+        *inside* the task can no longer empty the gate: whoever made it, its content is still on the
+        far side of this reference and the human is still asked.
+
+        Not a frozen base SHA: the base branch legitimately moves when someone merges their own PR,
+        and pinning it at task start would make the gate ask about their deletions. Once the
+        orchestrator commits (per subtask, or after merging the moved base in), that commit becomes
+        the reference — which is also what stops a decomposed run from re-asking about the deletions
+        its first subtask already got approved.
+        """
+        return self._store.get_gate_reference(task_id) or self._diff_base()
+
+    def changed_code_entries(self, task_id: str) -> tuple[ChangedPath, ...]:
+        """Return tracked and untracked code changes for deterministic output guardrails.
+
+        Measured from :meth:`gate_reference` — the task's own change, committed or not — rather than
+        from ``HEAD``, which only ever showed what was still uncommitted.
+        """
         entries: list[ChangedPath] = []
-        tracked = self._git("diff", "--name-status", "-z", "HEAD", "--").stdout
+        reference = self.gate_reference(task_id)
+        tracked = self._git("diff", "--name-status", "-z", reference, "--").stdout
         for status, path, previous in _parse_name_status_z(tracked):
             if self._is_artifact_path(path):
                 continue
@@ -1745,13 +1768,51 @@ class GitManager:
     def commit_code(self, task_id: str, message: str) -> str | None:
         """Stage the agent's code paths and make one commit. Idempotent. Returns the commit SHA.
 
-        Returns the current HEAD when there is nothing to commit (e.g. a decomposed task whose code
-        was already committed per subtask).
+        Returns the current HEAD when there is nothing to commit: a decomposed task whose code
+        was already committed per subtask, or a state committed inside the run by someone other than
+        the orchestrator — which is recorded rather than passed over in silence (see
+        :meth:`_adopt_committed_head`).
         """
         paths = self.changed_code_paths()
         if not paths:
-            return self._git("rev-parse", "HEAD").stdout.strip() or None
+            return self._adopt_committed_head(task_id)
         return self._commit(task_id, KIND_CODE_COMMIT, None, message, paths)
+
+    def _adopt_committed_head(self, task_id: str) -> str | None:
+        """Record the already-committed ``HEAD`` as this task's published code state.
+
+        Reached when the working tree has nothing left to commit. Two very different situations
+        look identical from here, and the gate's reference point tells them apart: in a decomposed
+        run the orchestrator's own subtask commits already moved the reference to ``HEAD``, so there
+        is nothing to say. If ``HEAD`` sits **beyond** the reference, commits the orchestrator did
+        not make are part of what is about to be published — an agent's own ``git commit``, or an
+        operator's.
+
+        Publishing is not blocked: their content did go through the dangerous-diff gate, which
+        measures from the reference rather than from ``HEAD``, so a human was asked about every
+        deletion and manifest edit in it. What was missing before was the *record* — the method
+        returned ``HEAD`` and wrote nothing, so the run reported a successful code commit it
+        never made. Now the operator gets a loud line naming how many such commits there are, and
+        ``publish_operations`` gets the code-commit row with the adopted SHA, so the audit trail
+        says what was published instead of nothing at all. Message and authorship stay the
+        committer's — rewriting them is not this phase's decision to make.
+        """
+        head = self._git("rev-parse", "HEAD").stdout.strip()
+        if not head:
+            return None
+        reference = self._git("rev-parse", self.gate_reference(task_id)).stdout.strip()
+        if not reference or head == reference:
+            return head
+        count = self._git("rev-list", "--count", f"{reference}..{head}").stdout.strip() or "?"
+        bind(_LOG, task_id=task_id, component="commit").warning(
+            "publishing a code state the orchestrator did not commit: %s commit(s) between the "
+            "gate reference and HEAD (%s) were made by the agent or the operator. The change "
+            "itself passed the dangerous-diff gate, but message and authorship are not ours",
+            count,
+            head[:12],
+        )
+        self._record_completed(task_id, KIND_CODE_COMMIT, head, head)
+        return head
 
     def commit_subtask(self, task_id: str, order: int, slug: str, message: str) -> str:
         """Make the single local commit for a completed subtask on the task branch."""
@@ -1805,6 +1866,7 @@ class GitManager:
                 result_ref=sha,
             )
         )
+        self._advance_gate_reference(kind, task_id, sha)
         return sha
 
     def commit_merge_resolution(self, task_id: str, message: str) -> str | None:
@@ -2221,6 +2283,20 @@ class GitManager:
                 result_ref=result_ref,
             )
         )
+        self._advance_gate_reference(kind, task_id, result_ref)
+
+    def _advance_gate_reference(self, kind: str, task_id: str, sha: str) -> None:
+        """Move the gate's reference to *sha* when the operation was a code-carrying commit.
+
+        Only the three that put this task's code on the task branch qualify. The audit commit does
+        not: its content is the lifecycle/log files the code diff excludes anyway, and under a
+        sibling audit branch its SHA is not even on the branch the gate measures — pointing the
+        reference at it would make the next diff describe the distance between two branches. Push
+        and PR operations carry no commit of ours at all.
+        """
+        if kind not in (KIND_CODE_COMMIT, KIND_SUBTASK_COMMIT, KIND_MERGE_COMMIT):
+            return
+        self._store.set_gate_reference(task_id, sha)
 
     # --- diffs ----------------------------------------------------------------------------
 
@@ -2239,8 +2315,11 @@ class GitManager:
         equals ``git diff HEAD``; for a ``existing``/``current`` chain branch the base is the branch
         tip at task start, so review/docs see only this task's change, not the whole unmerged
         chain (which previously showed every prior task — e.g. 35 files for ~5 changed). The
-        dangerous-diff guard classifies from :meth:`changed_code_entries` (HEAD-relative), not this
-        artifact, so the base here does not change what the guard gates.
+        dangerous-diff guard classifies from :meth:`changed_code_entries`, which measures from
+        :meth:`gate_reference` — the base until the orchestrator commits, its own last commit
+        after — so inside one subtask the guard and this artifact describe the same change, while
+        across a decomposed run this artifact keeps every subtask and the guard asks only about the
+        new one.
 
         Two completeness fixes: plain ``git diff`` never reports untracked files, so a brand
         new file was silently missing from the artifact — bracket the diff with a transient

@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from wastech_orchestrator.core.flow.context_paths import (
@@ -64,6 +65,7 @@ from wastech_orchestrator.core.flow.usage_accounting import (
     guard_output_baseline,
     snapshot_for_lineage,
 )
+from wastech_orchestrator.git_manager import ChangedPath, GitControlState
 from wastech_orchestrator.providers.artifacts import (
     exchange_latest_run_file,
     node_run_dir,
@@ -128,6 +130,14 @@ _FINDINGS_SCHEMA: dict[str, Any] = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class _EvaluatorControlBefore:
+    """What a shell-bearing evaluator attempt is judged against: control state + tree change set."""
+
+    control: GitControlState
+    tree: tuple[ChangedPath, ...]
+
+
 class EvaluatorNodeRunner:
     """Run an ``evaluator`` node through the router and map its verdict to accept/rework/done."""
 
@@ -163,6 +173,12 @@ class EvaluatorNodeRunner:
         # evaluator attempt so a provider mutation of the immutable surface is caught from
         # parent-held state after quiescence, before its findings are trusted downstream.
         exchange_before = capture_exchange_manifest(self._s.exchange_root, ctx.task_id)
+        # The same bracket the agent runner takes around an attempt that has a shell but no write
+        # access: an evaluator is read-only by construction, yet whether it can run commands is the
+        # provider's answer, not ours — a Codex reviewer has a shell today. Reported, never parked
+        # (operator decision 2). Skipped when the attempt has no shell, so no node pays for a check
+        # that cannot apply to it.
+        control_before = self._control_before(node, route, ctx.task_id)
         outcome = self._s.router.run_stage(request, route, snapshot=self._s.snapshot)
         raw_findings = (
             self._findings_or_none(outcome.result.structured_output)
@@ -209,6 +225,7 @@ class EvaluatorNodeRunner:
         assert_exchange_unchanged(
             exchange_before, self._s.exchange_root, ctx.task_id, node_id=node.id
         )
+        drift, wrote = self._control_drift(control_before, ctx.task_id)
         if raw_findings is None:
             # Fail closed: the provider did not honor the mandatory findings schema (missing
             # or malformed ``findings`` array) — never silently accept. There is nothing for
@@ -241,6 +258,8 @@ class EvaluatorNodeRunner:
                 kind,
                 findings=findings,
                 rework_exhausted=rework_exhausted,
+                unexpected_write=wrote,
+                git_control_drift=drift,
                 # Carry the provider's own prose, not just the typed findings. Without it the
                 # supervisor observed a bare `Outcome: accept` and its whole-task summary described
                 # an evaluator that emitted findings as a gate that "passed". The agent runner has
@@ -279,6 +298,46 @@ class EvaluatorNodeRunner:
             extra_secrets=self._s.prompt_secrets,
             private_path=str(findings_path),
         )
+
+    def _control_before(
+        self, node: EvaluatorNode, route: ResolvedRoute, task_id: str
+    ) -> _EvaluatorControlBefore | None:
+        """The Git-control + working-tree fingerprint taken before a shell-bearing evaluator runs.
+
+        ``None`` when there is no Git Manager or when the attempt gets no shell on either end of the
+        route — the signal to skip both comparisons entirely. The shell answer comes from the
+        adapters through the Router, because it is provider- and host-specific: a Codex evaluator
+        runs commands on its ``read-only`` profile, a Claude one only with the git-evidence grant.
+        """
+        git = self._s.git
+        if git is None:
+            return None
+        has_shell = self._s.router.route_grants_shell(
+            route,
+            permission_profile=node.permission_profile.value,
+            git_evidence=resolve_git_evidence(node.git_evidence, self._s.allow_git_evidence),
+        )
+        if not has_shell:
+            return None
+        return _EvaluatorControlBefore(
+            control=git.capture_git_control_state(), tree=git.changed_code_entries(task_id)
+        )
+
+    def _control_drift(
+        self, before: _EvaluatorControlBefore | None, task_id: str
+    ) -> tuple[str | None, bool]:
+        """``(redacted drift summary, wrote to the tree)`` for the attempt that just finished.
+
+        Before-vs-after rather than "is the tree dirty", so an earlier writing node's diff is never
+        blamed on this evaluator. Control state is compared first, so the ``git status`` behind the
+        tree comparison cannot land between the attempt and the fingerprint that judges it.
+        """
+        git = self._s.git
+        if before is None or git is None:
+            return None, False
+        control_drift = git.compare_git_control_state(before.control)
+        summary = control_drift.summary() if control_drift is not None else None
+        return summary, git.changed_code_entries(task_id) != before.tree
 
     def _verdict(
         self,

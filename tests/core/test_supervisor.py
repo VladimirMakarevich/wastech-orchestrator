@@ -97,6 +97,16 @@ class FakeRouter:
         self.route_providers: list[Any] = []  # the provider arg passed to resolve_route per call
         self._results = list(results) if results is not None else None
 
+    def route_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: Any = None, git_evidence: bool = False
+    ) -> bool:
+        # The real Router asks the adapters whether this attempt gets a shell. The double
+        # answers from the node's grant — a Claude-shaped answer — unless a test sets
+        # ``grants_shell`` to model a provider whose profile carries a shell on its own
+        # (Codex ``read-only``) or a host where it was dropped.
+        override = getattr(self, "grants_shell", None)
+        return git_evidence if override is None else bool(override)
+
     def resolve_route(self, node_id: str, provider: Any = None) -> ResolvedRoute:
         self.route_providers.append(provider)
         return ResolvedRoute(
@@ -1869,6 +1879,16 @@ class _AttemptsRouter:
         return ResolvedRoute(
             node_id=node_id, primary=self._primary, fallback=None, source=RouteSource.CONFIG
         )
+
+    def route_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: Any = None, git_evidence: bool = False
+    ) -> bool:
+        # The real Router asks the adapters whether this attempt gets a shell. The double answers
+        # from the node's grant — a Claude-shaped answer — unless a test sets ``grants_shell`` to
+        # model a provider whose profile carries a shell on its own (Codex ``read-only``) or a host
+        # where it was dropped.
+        override = getattr(self, "grants_shell", None)
+        return git_evidence if override is None else bool(override)
 
     def run_stage(
         self, request: Any, route: ResolvedRoute, *, snapshot: Any = None

@@ -121,9 +121,18 @@ class RouterPort(Protocol):
     Runners pass the flow node's declared ``provider`` to ``resolve_route``; ``None`` defaults to
     the config's global primary (PRE.1). ``node_id`` is carried for audit/logging only — it no
     longer selects the provider.
+
+    ``route_grants_shell`` answers whether an attempt on that route actually gets a shell — the
+    per-attempt fact the Git-control detection brackets key on. It belongs to the Router because
+    only the adapters can answer it (and both ends of a route must be asked), and to this protocol
+    because a runner must be able to ask before it builds a request.
     """
 
     def resolve_route(self, node_id: str, provider: ProviderId | None = None) -> ResolvedRoute: ...
+
+    def route_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: str | None, git_evidence: bool
+    ) -> bool: ...
 
     def run_stage(
         self,
@@ -252,7 +261,8 @@ class GitPort(Protocol):
 
     The publish operations are idempotent (keyed by ``publish_operations``), so a resumed run never
     repeats a commit/push/PR; ``write_current_diff``/``changed_code_entries`` capture the post-edit
-    diff for the dangerous-diff guard + ``{diff_path}``. Git is the orchestrator's sole
+    diff for the dangerous-diff guard + ``{diff_path}``, both measured from the same point in the
+    task. Git is the orchestrator's sole
     responsibility — providers and flows never touch it (the hard invariant).
     """
 
@@ -288,7 +298,9 @@ class GitPort(Protocol):
 
     def write_current_diff(self, task_id: str) -> str: ...
 
-    def changed_code_entries(self) -> tuple[ChangedPath, ...]: ...
+    #: The task's change — committed or not — measured from the gate's reference point, not from
+    #: ``HEAD``: a commit made inside the task must not be able to empty the dangerous-diff gate.
+    def changed_code_entries(self, task_id: str) -> tuple[ChangedPath, ...]: ...
 
     def changed_code_paths(self) -> list[str]: ...
 

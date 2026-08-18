@@ -1052,7 +1052,7 @@ def test_write_current_diff_includes_untracked_file(
     assert "new_module.py" in diff
     assert "return 1" in diff
     # The bracket restored the pre-existing untracked state — no persistent index mutation.
-    entries = gm.changed_code_entries()
+    entries = gm.changed_code_entries("task-001")
     assert any(e.status == "??" and e.path == "new_module.py" for e in entries)
 
 
@@ -1847,7 +1847,7 @@ def test_changed_code_entries_returns_literal_unicode_paths(
     untracked_name = "новый-файл.py"
     (git_repo.clone / untracked_name).write_text("y = 1\n", encoding="utf-8")
 
-    paths = {e.path for e in gm.changed_code_entries()}
+    paths = {e.path for e in gm.changed_code_entries("task-001")}
     assert tracked_name in paths
     assert untracked_name in paths
 
@@ -1868,7 +1868,7 @@ def test_changed_code_entries_unicode_rename(
     new_name = "новое имя (v2).txt"
     git_run(["mv", old_name, new_name], git_repo.clone)
 
-    entries = gm.changed_code_entries()
+    entries = gm.changed_code_entries("task-001")
     renamed = next(e for e in entries if e.status.startswith("R"))
     assert renamed.path == new_name
     assert renamed.previous_path == old_name
@@ -2416,3 +2416,156 @@ def test_non_ascii_commit_message_and_path_survive_the_locale_pin(
         ["show", "--name-only", "--format=", "-z", sha], git_repo.clone
     )  # -z: no path quoting, so the raw UTF-8 name comes back
     assert "документация.md" in committed
+
+
+# --- dangerous-diff gate reference point (П4.1 / AC4.1–AC4.4) ---------------------------------
+
+
+def test_the_gate_reference_starts_at_the_task_diff_base(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # Until the orchestrator commits, the gate measures from the same point the reported diff
+    # does. Deliberately the base *ref*, not a SHA frozen at task start: the base branch moves
+    # legitimately when somebody merges their own PR, and a frozen SHA would ask about their
+    # deletions.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    assert gm.gate_reference("task-001") == "main"
+    assert store.get_gate_reference("task-001") is None
+
+
+def test_an_agent_self_commit_does_not_hide_a_deletion_from_the_gate(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # AC4.1: the gate used to diff against HEAD, so a commit made inside the task — by an agent with
+    # a shell on a node the profile bracket does not park — emptied it. Measured from the reference,
+    # the deletion is still there to be asked about.
+    _task(store)
+    (git_repo.clone / "doomed.py").write_text("x = 1\n", encoding="utf-8")
+    git_run(["add", "doomed.py"], git_repo.clone)
+    git_run(["commit", "-m", "chore: seed a file to delete"], git_repo.clone)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+
+    # The agent deletes a file and commits it itself.
+    git_run(["rm", "--", "doomed.py"], git_repo.clone)
+    git_run(["commit", "-m", "wip: agent's own commit"], git_repo.clone)
+
+    entries = gm.changed_code_entries("task-001")
+    assert [(e.status, e.path) for e in entries] == [("D", "doomed.py")]
+    # And HEAD-relative — the old definition — sees nothing at all.
+    assert git_run(["diff", "--name-only", "HEAD"], git_repo.clone).strip() == ""
+
+
+def test_the_gate_and_the_reported_diff_measure_the_same_paths(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # AC4.4: two definitions of "changed" used to live side by side — the gate against HEAD, the
+    # report against the base. Inside one subtask they must describe the same change.
+    _task(store)
+    (git_repo.clone / "a.py").write_text("a = 1\n", encoding="utf-8")
+    git_run(["add", "a.py"], git_repo.clone)
+    git_run(["commit", "-m", "chore: seed"], git_repo.clone)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+
+    (git_repo.clone / "a.py").write_text("a = 2\n", encoding="utf-8")  # committed by the agent
+    git_run(["commit", "-am", "wip: agent's own commit"], git_repo.clone)
+    (git_repo.clone / "b.py").write_text("b = 1\n", encoding="utf-8")  # left uncommitted
+
+    gate_paths = {e.path for e in gm.changed_code_entries("task-001")}
+    diff = Path(gm.write_current_diff("task-001")).read_text(encoding="utf-8")
+    assert gate_paths == {"a.py", "b.py"}
+    assert "a.py" in diff and "b.py" in diff
+
+
+def test_a_subtask_commit_moves_the_reference_so_the_next_one_is_not_re_asked(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # AC4.2: the first subtask's approved deletion must not be put to the human again on the second.
+    # The reference moves to the commit that carries it, so the second subtask's gate sees only what
+    # the second subtask did — while the reported diff (from the base) still carries both.
+    _task(store)
+    (git_repo.clone / "doomed.py").write_text("x = 1\n", encoding="utf-8")
+    git_run(["add", "doomed.py"], git_repo.clone)
+    git_run(["commit", "-m", "chore: seed a file to delete"], git_repo.clone)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+
+    (git_repo.clone / "doomed.py").unlink()  # subtask 1: an approved deletion
+    sha = gm.commit_subtask("task-001", 1, "first", "feat: subtask 1")
+    assert store.get_gate_reference("task-001") == sha
+
+    (git_repo.clone / "new.py").write_text("n = 1\n", encoding="utf-8")  # subtask 2: something else
+    gate_paths = {e.path for e in gm.changed_code_entries("task-001")}
+    assert gate_paths == {"new.py"}  # the deletion is behind the reference now
+    diff = Path(gm.write_current_diff("task-001")).read_text(encoding="utf-8")
+    assert "doomed.py" in diff and "new.py" in diff  # the report keeps the whole task
+
+
+def test_the_audit_commit_does_not_move_the_gate_reference(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # Only commits that carry this task's code qualify. The audit commit carries the
+    # lifecycle/log files the code diff excludes anyway, and under a sibling audit branch its SHA is
+    # not even on the branch the gate measures — pointing the reference at it would make the next
+    # diff describe the distance between two branches.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    (git_repo.clone / "code.py").write_text("c = 1\n", encoding="utf-8")
+    code_sha = gm.commit_code("task-001", "feat: the code")
+    assert store.get_gate_reference("task-001") == code_sha
+
+    (git_repo.clone / "tasks" / "done").mkdir(parents=True, exist_ok=True)
+    (git_repo.clone / "tasks" / "done" / "task-001.md").write_text("done\n", encoding="utf-8")
+    gm.commit_audit("task-001")
+    assert store.get_gate_reference("task-001") == code_sha  # unmoved
+
+
+def test_commit_code_records_and_announces_a_state_it_did_not_commit(
+    git_repo,
+    store: StateStore,
+    tmp_path: Path,
+    make_git_config: ConfigFactory,
+    git_run: GitRunner,
+    package_log_text: Callable[[], str],
+) -> None:
+    # AC4.3: with the working tree clean, commit_code used to return HEAD and write nothing — so
+    # the run reported a code commit it never made. The state is still published (its content passed
+    # the gate), but the audit trail now says what was published and the operator is told whose
+    # commit it is.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    (git_repo.clone / "agent.py").write_text("a = 1\n", encoding="utf-8")
+    git_run(["add", "agent.py"], git_repo.clone)
+    git_run(["commit", "-m", "wip: agent's own commit"], git_repo.clone)
+    head = git_run(["rev-parse", "HEAD"], git_repo.clone).strip()
+
+    assert gm.commit_code("task-001", "feat: nothing left to stage") == head
+    op = store.get_publish_op("task-001", "code_commit")
+    assert op is not None and op.result_ref == head and op.status == "completed"
+    assert "publishing a code state the orchestrator did not commit" in package_log_text()
+    assert store.get_gate_reference("task-001") == head  # the gate moves on with it
+
+
+def test_a_decomposed_publish_says_nothing_about_its_own_subtask_commits(
+    git_repo,
+    store: StateStore,
+    tmp_path: Path,
+    make_git_config: ConfigFactory,
+    package_log_text: Callable[[], str],
+) -> None:
+    # The same clean-tree shape, but every commit is ours: the reference already sits at HEAD, so
+    # there is nothing to announce. Without that distinction the loud line would fire on every
+    # decomposed run and mean nothing.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    (git_repo.clone / "one.py").write_text("o = 1\n", encoding="utf-8")
+    sha = gm.commit_subtask("task-001", 1, "first", "feat: subtask 1")
+
+    assert gm.commit_code("task-001", "feat: nothing left to stage") == sha
+    assert "did not commit" not in package_log_text()

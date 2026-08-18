@@ -5315,7 +5315,7 @@ def test_read_only_node_that_writes_warns_operator_and_never_parks_the_task(
     # manual_action_required: the grant exists so an audit node can read delivery history, and
     # trading that for a stray file would be the wrong bargain.
     from wastech_orchestrator.core.flow.registry import FlowRegistry
-    from wastech_orchestrator.notify import TRACE_READ_ONLY_WRITE
+    from wastech_orchestrator.notify import TRACE_UNEXPECTED_WRITE
 
     flows = tmp_path / "flows"
     (flows / "roles").mkdir(parents=True)
@@ -5366,7 +5366,7 @@ def test_read_only_node_that_writes_warns_operator_and_never_parks_the_task(
 
     assert result.final_status is Status.DONE  # warned, not parked
     audit_traces = [c["outcome"] for c in notifier.trace_calls if c["node_id"] == "audit"]
-    assert audit_traces == [TRACE_READ_ONLY_WRITE]
+    assert audit_traces == [TRACE_UNEXPECTED_WRITE]
     assert any("changed the working tree" in m for m in messages)
 
 
@@ -5380,7 +5380,7 @@ def test_read_only_node_that_poisons_a_git_hook_warns_operator_and_never_parks_t
     # naming the drifted aspect plus the ⚠️ trace, and the run continues. A workspace-write node
     # doing the same is still terminal (see test_workspace_write_git_control_drift_is_manual).
     from wastech_orchestrator.core.flow.registry import FlowRegistry
-    from wastech_orchestrator.notify import TRACE_READ_ONLY_GIT_DRIFT
+    from wastech_orchestrator.notify import TRACE_GIT_CONTROL_DRIFT
 
     flows = tmp_path / "flows"
     (flows / "roles").mkdir(parents=True)
@@ -5430,7 +5430,7 @@ def test_read_only_node_that_poisons_a_git_hook_warns_operator_and_never_parks_t
 
     assert result.final_status is Status.DONE  # warned, not parked
     audit_traces = [c["outcome"] for c in notifier.trace_calls if c["node_id"] == "audit"]
-    assert audit_traces == [TRACE_READ_ONLY_GIT_DRIFT]
+    assert audit_traces == [TRACE_GIT_CONTROL_DRIFT]
     assert any("changed git control state" in m for m in messages)
 
 

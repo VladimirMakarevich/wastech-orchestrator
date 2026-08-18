@@ -2,7 +2,7 @@
 
 **You are an AI agent helping an operator assemble or tune `config.yaml` for wastech-orchestrator.** Use this folder as the compact, installable reference for configuration work. If you only have a moment, read this file first.
 
-- **[reference.md](reference.md)** — the complete field reference: for the meaning, allowed values, default, and constraints of _every_ `config.yaml` field, read this. This README is the how-to; `reference.md` is the what-each-field-does.
+- **[reference.md](reference.md)** — the entry page of the complete field reference: for the meaning, allowed values, default, and constraints of _every_ `config.yaml` field, start there. It carries the rules that apply everywhere, the core identity blocks and the cross-field gotchas, and links one page per concern ([agents.md](agents.md), [security.md](security.md), [checks.md](checks.md), [supervisor.md](supervisor.md), [runtime.md](runtime.md)). This README is the how-to; the reference is the what-each-field-does.
 - **[best-practices.md](best-practices.md)** — safe defaults, how to structure checks, and what mistakes to avoid.
 - **[../skills/worc-config/SKILL.md](../skills/worc-config/SKILL.md)** — a copy-ready skill that can interview the operator and draft a config.
 

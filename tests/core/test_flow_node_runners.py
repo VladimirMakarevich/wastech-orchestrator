@@ -81,6 +81,16 @@ class FakeRouter:
             node_id=node_id, primary=ProviderId.CODEX, fallback=None, source=RouteSource.CONFIG
         )
 
+    def route_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: Any = None, git_evidence: bool = False
+    ) -> bool:
+        # The real Router asks the adapters whether this attempt gets a shell. The double answers
+        # from the node's grant — a Claude-shaped answer — unless a test sets ``grants_shell`` to
+        # model a provider whose profile carries a shell on its own (Codex ``read-only``) or a host
+        # where it was dropped.
+        override = getattr(self, "grants_shell", None)
+        return git_evidence if override is None else bool(override)
+
     def run_stage(
         self, request: Any, route: ResolvedRoute, *, snapshot: Any = None
     ) -> StageOutcome:
@@ -683,6 +693,57 @@ def test_evaluator_request_carries_security_preamble(tmp_path: Path) -> None:
     node = _evaluator("review")
     EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert router.requests[0].security_preamble == "[Orchestrator security contract] baseline"
+
+
+def test_a_shell_bearing_evaluator_reports_git_control_drift(tmp_path: Path) -> None:
+    # П4.4: an evaluator had no fingerprint at all, though `git_evidence` is a valid field on it and
+    # a Codex reviewer runs commands on its read-only profile today. Reported, never parked — the
+    # same verdict a read-only agent node gets.
+    from wastech_orchestrator.git_manager import ChangedPath, GitControlDrift, GitControlDriftItem
+
+    class _DriftGit(FakeGit):
+        def compare_git_control_state(self, before: object) -> GitControlDrift:
+            return GitControlDrift((GitControlDriftItem("hooks", "hook 'pre-push' added"),))
+
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    router = FakeRouter(_result({"findings": []}))
+    router.grants_shell = True
+    git = _DriftGit(changed_seq=[(), (ChangedPath(status="??", path="stray.txt"),)])
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+        git=git,
+    )
+    node = _evaluator("review")
+    result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "accept"  # the verdict itself is untouched
+    assert result.outcome.git_control_drift == "hooks: hook 'pre-push' added"
+    assert result.outcome.unexpected_write is True
+
+
+def test_an_evaluator_without_a_shell_is_not_fingerprinted(tmp_path: Path) -> None:
+    # No node pays for a check that cannot apply to it: a Claude reviewer with no grant runs no
+    # commands, so the capture is skipped entirely rather than taken and discarded.
+    class _ExplodingGit(FakeGit):
+        def capture_git_control_state(self) -> object:
+            raise AssertionError("an evaluator with no shell must not be fingerprinted")
+
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    router = FakeRouter(_result({"findings": []}))
+    router.grants_shell = False
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+        git=_ExplodingGit(),
+    )
+    node = _evaluator("review")
+    result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.git_control_drift is None
+    assert result.outcome.unexpected_write is False
 
 
 def test_evaluator_carries_prior_rework_report_from_exchange(tmp_path: Path) -> None:
@@ -1375,6 +1436,98 @@ def test_agent_hitl_no_signal_proceeds(tmp_path: Path) -> None:
     assert result.outcome.kind == "done"
 
 
+def test_a_writing_hitl_node_passes_the_dangerous_diff_gate(tmp_path: Path) -> None:
+    # П4.4: the HITL path ran no post-edit guard on any exit, so a flow that declared `hitl` on a
+    # writing node deleted files and published without ever asking. The guard is core-owned and
+    # automatic — asking the operator a question is not an opt-out from it.
+    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
+    from wastech_orchestrator.git_manager import ChangedPath
+    from wastech_orchestrator.notify import AskResult
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(
+        id="impl",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+        hitl=HitlSettings(allow_question=True),
+    )
+    git = FakeGit(changed=(ChangedPath(status="D", path="src/core.py"),))  # always dangerous
+    notifier = FakeNotifier(AskResult(answered=True, approved=False))  # denial → fails closed
+    services = NodeServices(
+        router=FakeRouter(_result({"content": "ok", "human_input": None})),
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=FakeStore(),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        clock=lambda: "ts",
+        git=git,
+        notifier=notifier,
+        ask_timeout_s=60,
+        trust_level="strict",
+    )
+    with pytest.raises(NodeManualRequired):
+        AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert notifier.asks  # the deletion was put to a human, which is the whole point
+
+
+def test_a_writing_hitl_node_gates_after_the_round_trip_too(tmp_path: Path) -> None:
+    # The other returning exit of the same method: the agent asked, the operator answered, the
+    # stage re-ran — and it is the re-run's diff that gets published, so that is the one the guard
+    # must see.
+    from wastech_orchestrator.git_manager import ChangedPath
+    from wastech_orchestrator.notify import AskResult
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(
+        id="impl",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+        hitl=HitlSettings(allow_question=True),
+    )
+
+    class _AsksOnceRouter(FakeRouter):
+        def __init__(self) -> None:
+            super().__init__(None)
+            self._n = 0
+
+        def run_stage(self, request: Any, route: Any, *, snapshot: Any = None) -> Any:
+            self._n += 1
+            signal = (
+                {
+                    "kind": "question",
+                    "question": "Delete the legacy module?",
+                    "context": "",
+                    "risk": "clarification",
+                    "paths": [],
+                }
+                if self._n == 1
+                else None
+            )
+            return _stage_outcome(route, _result({"content": "ok", "human_input": signal}))
+
+    git = FakeGit(changed=(ChangedPath(status="D", path="src/core.py"),))
+    notifier = FakeNotifier(AskResult(answered=True, text="yes", approved=True))
+    services = NodeServices(
+        router=_AsksOnceRouter(),
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=FakeStore(),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        clock=lambda: "ts",
+        git=git,
+        notifier=notifier,
+        ask_timeout_s=60,
+        trust_level="strict",
+    )
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "done"
+    # Two asks: the node's own question, then the guard's approval for the deletion.
+    assert len(notifier.asks) == 2
+    assert notifier.asks[0] == "Delete the legacy module?"
+
+
 def test_agent_hitl_question_round_trip(tmp_path: Path) -> None:
     from wastech_orchestrator.notify import AskResult
 
@@ -1504,6 +1657,20 @@ def test_agent_hitl_round_trip_no_resume_when_first_run_used_fallback(tmp_path: 
         def __init__(self) -> None:
             super().__init__(None)
             self._n = 0
+
+        def route_grants_shell(
+            self,
+            route: ResolvedRoute,
+            *,
+            permission_profile: Any = None,
+            git_evidence: bool = False,
+        ) -> bool:
+            # The real Router asks the adapters whether this attempt gets a shell. The double
+            # answers from the node's grant — a Claude-shaped answer — unless a test sets
+            # ``grants_shell`` to model a provider whose profile carries a shell on its own
+            # (Codex ``read-only``) or a host where it was dropped.
+            override = getattr(self, "grants_shell", None)
+            return git_evidence if override is None else bool(override)
 
         def resolve_route(self, node_id: str, override: Any = None) -> ResolvedRoute:
             return ResolvedRoute(
@@ -2685,8 +2852,8 @@ class FakeGit:
         return ()
 
     def resolve_control_paths(self, exchange_root: str | None = None) -> ProviderWriteGuardPolicy:
-        # The node runner resolves this for every workspace-write attempt; the fake router
-        # never builds an argv, so dummy paths suffice.
+        # The node runner resolves this for every attempt that can mutate the clone — write tools
+        # or a shell; the fake router never builds an argv, so dummy paths suffice.
         return ProviderWriteGuardPolicy(
             exchange_root=None,
             git_dir=Path("/x/.git"),
@@ -2707,7 +2874,7 @@ class FakeGit:
         self.calls.append(("write_current_diff", task_id))
         return "/art/current.diff"
 
-    def changed_code_entries(self) -> tuple[Any, ...]:
+    def changed_code_entries(self, task_id: str = "task-1") -> tuple[Any, ...]:
         if self._changed_seq:
             return self._changed_seq.pop(0) if len(self._changed_seq) > 1 else self._changed_seq[0]
         return self._changed
@@ -2984,6 +3151,16 @@ class _GateRouter:
         self.requests: list[Any] = []
         self._n = 0
 
+    def route_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: Any = None, git_evidence: bool = False
+    ) -> bool:
+        # The real Router asks the adapters whether this attempt gets a shell. The double
+        # answers from the node's grant — a Claude-shaped answer — unless a test sets
+        # ``grants_shell`` to model a provider whose profile carries a shell on its own
+        # (Codex ``read-only``) or a host where it was dropped.
+        override = getattr(self, "grants_shell", None)
+        return git_evidence if override is None else bool(override)
+
     def resolve_route(self, node_id: str, override: Any = None) -> ResolvedRoute:
         return _claude_route(node_id)
 
@@ -3191,9 +3368,10 @@ def test_workspace_write_git_control_drift_is_manual(tmp_path: Path) -> None:
 
 
 def test_read_only_node_skips_git_control_capture(tmp_path: Path) -> None:
-    # A read-only attempt without the git-evidence grant has no shell at all, so it is neither
-    # captured nor compared — a git whose capture would explode is never called. (A *granted*
-    # read-only node does get fingerprinted, from the reporting bracket — see the section below.)
+    # An attempt the Router reports as shell-less is neither captured nor compared — a git whose
+    # capture would explode is never called. Here that is a Claude-shaped read-only node without the
+    # grant. (An attempt that *does* have a shell gets fingerprinted from the reporting bracket —
+    # see the section below, including the Codex read-only node that has one without any grant.)
     class _ExplodingGit(FakeGit):
         def capture_git_control_state(self) -> object:
             raise AssertionError("a read-only node must not capture git control state")
@@ -3265,7 +3443,7 @@ def test_a_write_by_a_granted_read_only_node_warns_and_still_finishes(tmp_path: 
     # The sandbox write-denies the whole clone for such a node, so a change means that enforcement
     # did not hold. It is reported, not acted on: the outcome stays `done` and the task is never
     # parked — the grant exists so an audit node can read history, and a stray file is not worth
-    # trading that capability for. `read_only_write` is what the post-node hook turns into the
+    # trading that capability for. `unexpected_write` is what the post-node hook turns into the
     # operator's console warning + ⚠️ trace.
     from wastech_orchestrator.git_manager import ChangedPath
 
@@ -3281,7 +3459,7 @@ def test_a_write_by_a_granted_read_only_node_warns_and_still_finishes(tmp_path: 
     )
     result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "done"
-    assert result.outcome.read_only_write is True
+    assert result.outcome.unexpected_write is True
     # The post-edit guard stays off for a read-only node: no diff is captured, so nothing downstream
     # is ever handed the stray change.
     assert not any(c[0] == "write_current_diff" for c in git.calls)
@@ -3313,7 +3491,99 @@ def test_git_control_drift_by_a_granted_read_only_node_warns_and_still_finishes(
     )
     result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "done"  # warned, not parked
-    assert result.outcome.read_only_git_drift == "hooks: hook 'post-commit' added"
+    assert result.outcome.git_control_drift == "hooks: hook 'post-commit' added"
+
+
+def test_a_read_only_node_with_a_provider_shell_is_bracketed_without_any_grant(
+    tmp_path: Path,
+) -> None:
+    # The rekey (П4.2): the bracket keys on "does this attempt have a shell", not on the declared
+    # git-evidence grant. A Codex `read-only` node runs commands today and declared nothing, so
+    # before this it was the one class with a shell and no fingerprint at all.
+    from wastech_orchestrator.git_manager import GitControlDrift, GitControlDriftItem
+
+    class _DriftGit(FakeGit):
+        def compare_git_control_state(self, before: object) -> GitControlDrift:
+            return GitControlDrift((GitControlDriftItem("hooks", "hook 'post-commit' added"),))
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(
+        id="audit", kind="agent", role_file="r.md", permission_profile=PermissionProfile.READ_ONLY
+    )
+    router = FakeRouter(_result())
+    router.grants_shell = True  # the provider's read-only profile permits commands
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=_DriftGit(),
+    )
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "done"  # warned, never parked — the verdict is unchanged
+    assert result.outcome.git_control_drift == "hooks: hook 'post-commit' added"
+
+
+def test_a_granted_node_on_a_host_without_a_shell_is_not_bracketed(tmp_path: Path) -> None:
+    # The other direction of the same rekey, and the reason the answer has to come from the
+    # provider: on native Windows under strict isolation the grant's shell is dropped for want of an
+    # OS sandbox. The declaration is still there, so keying on it would fingerprint an attempt that
+    # cannot run a single command.
+    class _ExplodingGit(FakeGit):
+        def capture_git_control_state(self) -> object:
+            raise AssertionError("an attempt with no shell must not be fingerprinted")
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    router = FakeRouter(_result())
+    router.grants_shell = False
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=_ExplodingGit(),
+        allow_git_evidence=True,
+    )
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(_audit_node(), _ctx(_audit_node()))
+    assert result.outcome.kind == "done"
+    assert result.outcome.git_control_drift is None
+
+
+def test_the_write_deny_roots_reach_a_shell_bearing_read_only_attempt(tmp_path: Path) -> None:
+    # The deny roots are what the pre-launch canary probes, so an attempt that can reach `.git`
+    # has to carry them even when it holds no write tools. Keyed on write access alone, a
+    # shell-bearing read-only attempt went to the provider with `write_guard=None` — nothing for the
+    # probes to take its paths from.
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(
+        id="audit", kind="agent", role_file="r.md", permission_profile=PermissionProfile.READ_ONLY
+    )
+    router = FakeRouter(_result())
+    router.grants_shell = True
+    services = _services(
+        router, FakeStore(), FakeCheckRunner(CheckOutcome(passed=True, runs=())), git=FakeGit()
+    )
+    AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert router.requests[0].write_guard is not None
+
+
+def test_the_write_deny_roots_reach_a_writer_whose_shell_was_dropped(tmp_path: Path) -> None:
+    # The other half of the same condition: on native Windows a workspace-write attempt loses Bash
+    # but keeps Edit/Write, so keying the roots on the shell alone would have removed the `.git`
+    # Write/Edit deny exactly where it is the only remaining barrier.
+    (tmp_path / "roles").mkdir(exist_ok=True)
+    (tmp_path / "roles" / "impl.md").write_text("Implement {task_path}", "utf-8")
+    node = AgentNode(
+        id="implementation",
+        kind="agent",
+        role_file="roles/impl.md",
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
+    router = FakeRouter(_result())
+    router.grants_shell = False
+    services = _services(
+        router, FakeStore(), FakeCheckRunner(CheckOutcome(passed=True, runs=())), git=FakeGit()
+    )
+    AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert router.requests[0].write_guard is not None
 
 
 def test_a_clean_granted_read_only_node_raises_no_warning(tmp_path: Path) -> None:
@@ -3331,13 +3601,14 @@ def test_a_clean_granted_read_only_node_raises_no_warning(tmp_path: Path) -> Non
         allow_git_evidence=True,
     )
     result = AgentNodeRunner(services, _inputs(tmp_path)).run(_audit_node(), _ctx(_audit_node()))
-    assert result.outcome.read_only_write is False
-    assert result.outcome.read_only_git_drift is None
+    assert result.outcome.unexpected_write is False
+    assert result.outcome.git_control_drift is None
 
 
 def test_the_write_check_is_skipped_for_a_node_without_the_grant(tmp_path: Path) -> None:
-    # No node pays for a check that cannot apply to it: without the grant there is no shell, so the
-    # tree is never inspected.
+    # No node pays for a check that cannot apply to it: this node declared no grant and the Router
+    # reports no shell for it, so the tree is never inspected. The operator switch being on changes
+    # nothing — the grant needs both halves.
     from wastech_orchestrator.git_manager import ChangedPath
 
     (tmp_path / "r.md").write_text("go", "utf-8")
@@ -3353,4 +3624,4 @@ def test_the_write_check_is_skipped_for_a_node_without_the_grant(tmp_path: Path)
         allow_git_evidence=True,
     )
     result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
-    assert result.outcome.read_only_write is False
+    assert result.outcome.unexpected_write is False

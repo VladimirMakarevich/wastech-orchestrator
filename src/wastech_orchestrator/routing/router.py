@@ -46,6 +46,11 @@ from wastech_orchestrator.providers.capabilities import map_reasoning_for_provid
 from wastech_orchestrator.routing.snapshots import PartialChange, SnapshotHook
 from wastech_orchestrator.security.isolation import IsolationCheck
 from wastech_orchestrator.security.profiles import is_same_or_stricter
+from wastech_orchestrator.security.shell_reach import (
+    ShellCheck,
+    ShellQuery,
+    any_provider_grants_shell,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -186,6 +191,7 @@ class AgentRouter:
         sleep: Callable[[float], None] = time.sleep,
         is_cancelled: Callable[[], bool] = lambda: False,
         isolation_checks: Mapping[ProviderId, IsolationCheck] | None = None,
+        shell_checks: Mapping[ProviderId, ShellCheck] | None = None,
     ) -> None:
         self._config = config
         self._providers = providers
@@ -199,6 +205,10 @@ class AgentRouter:
         # isolate
         # the node on this host. The router imports no concrete adapter — the table is injected.
         self._isolation_checks = isolation_checks or {}
+        # The offline ProviderId→"does this attempt get a shell?" table (also injected, same
+        # reason). Empty means every answer is fail-closed ``True``: a caller that cannot classify
+        # an attempt brackets it rather than leaving it unwatched.
+        self._shell_checks = shell_checks or {}
         self._global_primary = _resolve_global_primary(config)
 
     def _can_isolate(self, pid: ProviderId) -> bool:
@@ -215,6 +225,33 @@ class AgentRouter:
         if check is None or cfg is None:
             return False
         return not check(cfg)
+
+    def route_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: str | None, git_evidence: bool
+    ) -> bool:
+        """Whether this attempt gets a shell on any provider it may land on (offline; fail-closed).
+
+        Both ends of the route are asked because the caller takes its detection bracket *before* the
+        run, and an infra failure on the primary can move the attempt to the fallback — a different
+        CLI with its own answer. Command execution, not the permission profile, is what makes a
+        working-tree write or a ``.git`` mutation reachable, so this is the question a bracket that
+        watches for one has to key on; the per-provider answers live in the adapters and reach here
+        through the injected table (see
+        :mod:`wastech_orchestrator.security.shell_reach`).
+        """
+        providers = [route.primary]
+        if route.fallback is not None:
+            providers.append(route.fallback)
+        return any_provider_grants_shell(
+            providers,
+            self._config.agents.providers,
+            self._shell_checks,
+            ShellQuery(
+                permission_profile=permission_profile,
+                git_evidence=git_evidence,
+                strict_isolation=self._config.security.strict_isolation,
+            ),
+        )
 
     def resolve_route(
         self,

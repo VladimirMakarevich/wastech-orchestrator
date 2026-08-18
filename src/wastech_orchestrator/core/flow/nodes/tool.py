@@ -52,6 +52,7 @@ from wastech_orchestrator.core.flow.nodes.base import (
 from wastech_orchestrator.core.flow.nodes.exchange_publish import publish_node_run_file
 from wastech_orchestrator.core.flow.schema import FlowNode, ToolNode
 from wastech_orchestrator.core.flow.tools_registry import ToolResolutionError
+from wastech_orchestrator.git_manager import ChangedPath, GitControlState
 from wastech_orchestrator.providers.artifacts import (
     TOOL_STDERR_FILENAME,
     TOOL_STDOUT_FILENAME,
@@ -92,6 +93,14 @@ class ToolContract:
     data: Mapping[str, object] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _ControlBefore:
+    """What a tool run is judged against: Git control state plus the working-tree change set."""
+
+    control: GitControlState
+    tree: tuple[ChangedPath, ...]
+
+
 class ToolNodeRunner:
     """Run a ``tool`` node: resolve the operator executable, run it under the ceiling, gate on it.
 
@@ -126,6 +135,12 @@ class ToolNodeRunner:
         node_dir.mkdir(parents=True, exist_ok=True)
         stdout_path = node_dir / TOOL_STDOUT_FILENAME
 
+        # A tool node runs an operator program in the clone, so it has a shell by definition and no
+        # write access by design — the class the Git-control bracket exists for. Fingerprinted here
+        # like a shell-bearing agent attempt: the program is expected to report, not to rewrite a
+        # hook, `.git/config` or the index, and without this bracket nothing in the run would notice
+        # if it did. Reported, never parked (operator decision 2) — see the comparison below.
+        control_before = self._control_before(ctx.task_id)
         result = self._s.run_process(
             _launch_argv(tool_path),
             cwd=self._s.repo_dir,
@@ -198,15 +213,49 @@ class ToolNodeRunner:
             )
 
         self._complete(run_id, status=_run_status(contract.outcome), outcome=contract.outcome)
+        drift, wrote = self._control_drift(control_before, ctx.task_id)
         return NodeResult(
             node_id=node.id,
             outcome=NodeOutcome(
-                contract.outcome, findings=contract.findings, structured_output=contract.data
+                contract.outcome,
+                findings=contract.findings,
+                structured_output=contract.data,
+                unexpected_write=wrote,
+                git_control_drift=drift,
             ),
             node_run_id=run_id,
         )
 
     # -- helpers ---------------------------------------------------------------
+
+    def _control_before(self, task_id: str) -> _ControlBefore | None:
+        """The Git-control + working-tree fingerprint taken before the tool runs.
+
+        ``None`` when the unit has no Git Manager (a harness without a clone) — that is the signal
+        to skip the comparison entirely rather than to guess.
+        """
+        git = self._s.git
+        if git is None:
+            return None
+        return _ControlBefore(
+            control=git.capture_git_control_state(), tree=git.changed_code_entries(task_id)
+        )
+
+    def _control_drift(
+        self, before: _ControlBefore | None, task_id: str
+    ) -> tuple[str | None, bool]:
+        """``(redacted drift summary, wrote to the tree)`` for the run that just finished.
+
+        Before-vs-after rather than "is the tree dirty", so an earlier writing node's diff is never
+        blamed on this tool. Control state is compared first, so the ``git status`` behind the tree
+        comparison cannot land between the run and the fingerprint that judges it.
+        """
+        git = self._s.git
+        if before is None or git is None:
+            return None, False
+        control_drift = git.compare_git_control_state(before.control)
+        summary = control_drift.summary() if control_drift is not None else None
+        return summary, git.changed_code_entries(task_id) != before.tree
 
     def _resolve(self, node: ToolNode, run_id: int) -> Path:
         """Resolve the tool name → executable, fail-closed to manual if the registry can't.

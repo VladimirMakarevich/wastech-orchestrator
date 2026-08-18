@@ -186,7 +186,7 @@ class PublishNodeRunner:
         if self._s.git is not None:
             leaking = [
                 entry.path
-                for entry in self._s.git.changed_code_entries()
+                for entry in self._s.git.changed_code_entries(ctx.task_id)
                 if within_subdir(entry.path, resolved.report_subdir)
             ]
             if leaking:

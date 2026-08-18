@@ -27,6 +27,7 @@ from wastech_orchestrator.providers.process import AgentHandleRecorder
 from wastech_orchestrator.routing.router import AgentRouter
 from wastech_orchestrator.runtime_layout import InternalDenyPolicy, RuntimeLayout
 from wastech_orchestrator.security.isolation import IsolationCheck
+from wastech_orchestrator.security.shell_reach import ShellCheck
 from wastech_orchestrator.state_store import StateStore
 from wastech_orchestrator.task.validation_gate import ValidationGate
 
@@ -35,6 +36,14 @@ from wastech_orchestrator.task.validation_gate import ValidationGate
 ISOLATION_CHECKS: dict[ProviderId, IsolationCheck] = {
     ProviderId.CLAUDE: claude.isolation_reasons,
     ProviderId.CODEX: codex.isolation_reasons,
+}
+
+# ProviderId → offline "does this attempt get a shell?" check, bound here for the same reason: the
+# core's per-attempt detection bracket keys on command execution, and only the adapter knows whether
+# its resolved tool set keeps one on this host.
+SHELL_CHECKS: dict[ProviderId, ShellCheck] = {
+    ProviderId.CLAUDE: claude.attempt_has_shell,
+    ProviderId.CODEX: codex.attempt_has_shell,
 }
 
 # ProviderId → its config/credential home resolver, bound here (the composition root) so the
@@ -171,7 +180,11 @@ def build_orchestrator(
     store = StateStore.open(private_home / "state.db")
     ledger = Ledger(private_home / "logs")
     router = AgentRouter(
-        config, providers, is_cancelled=is_cancelled, isolation_checks=ISOLATION_CHECKS
+        config,
+        providers,
+        is_cancelled=is_cancelled,
+        isolation_checks=ISOLATION_CHECKS,
+        shell_checks=SHELL_CHECKS,
     )
     git = GitManager(
         config,

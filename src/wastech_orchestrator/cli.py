@@ -80,6 +80,7 @@ from wastech_orchestrator.notify.telegram import check_telegram_preflight
 from wastech_orchestrator.observability.logging import configure_logging, set_log_level
 from wastech_orchestrator.preflight import preflight_gh
 from wastech_orchestrator.providers import process as agent_process
+from wastech_orchestrator.providers._adapter_base import IsolationCapabilityReport
 from wastech_orchestrator.providers.base import AuthProbe, AuthState, ProviderId
 from wastech_orchestrator.runtime_layout import CONTROL_HOME_DIRNAME, RuntimeLayout, runs_root
 from wastech_orchestrator.security.env import (
@@ -359,9 +360,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="override orchestrator.queue for the new loop: only pick tasks whose `queue` is NAME",
     )
 
-    sub.add_parser(
+    preflight_cmd = sub.add_parser(
         "preflight",
         help="check both CLIs' health and the strict_isolation policy (runs no task)",
+    )
+    preflight_cmd.add_argument(
+        "--paid-isolation-probe",
+        action="store_true",
+        help="additionally spend ONE real model call per provider that supports it, letting an "
+        "agent try to write into .git and the control home; the verdict is read from the "
+        "filesystem (Claude has no no-model way to prove this)",
     )
     validate_flow_cmd = sub.add_parser(
         "validate-flow",
@@ -2985,8 +2993,42 @@ def _assigned_path_lines(
     return ok, lines
 
 
+def _append_isolation_probe_lines(
+    lines: list[str],
+    pid: ProviderId,
+    report: IsolationCapabilityReport | None,
+    ok: bool,
+    *,
+    has_fallback: bool,
+) -> bool:
+    """Render one isolation-probe verdict (free smoke or paid probe) and return the new ``ok``.
+
+    Shared by both so the two probes cannot drift into different severities for the same answer: a
+    proven policy leak is unconditionally fatal (a non-fallback security result), while a probe that
+    could not demonstrate the policy degrades like a capability gap — fatal only when this provider
+    has no fallback to cover it. ``None`` means the provider offers no such probe — not a verdict,
+    so nothing is printed.
+    """
+    if report is None:
+        return ok
+    if report.ok:
+        lines.append(f"{pid.value}: isolation probe OK — {report.detail}")
+        return ok
+    if report.fatal or not has_fallback:
+        lines.append(f"{pid.value}: FAIL — isolation probe: {report.detail}")
+        return False
+    lines.append(
+        f"{pid.value}: WARN — isolation probe: {report.detail} (a fallback provider will cover)"
+    )
+    return ok
+
+
 def run_preflight(
-    config: OrchestratorConfig, *, env_file: Path | None = None, capability_smoke: bool = False
+    config: OrchestratorConfig,
+    *,
+    env_file: Path | None = None,
+    capability_smoke: bool = False,
+    paid_isolation_probe: bool = False,
 ) -> tuple[bool, list[str]]:
     """Compute the preflight verdict + report lines; no task is processed.
 
@@ -3049,17 +3091,16 @@ def run_preflight(
         if capability_smoke and healthy and config.security.strict_isolation:
             smoke = getattr(provider, "isolation_capability_smoke", None)
             report = smoke(home_dir=Path.home()) if callable(smoke) else None
-            if report is not None:
-                if report.ok:
-                    lines.append(f"{pid.value}: isolation smoke OK — {report.detail}")
-                elif report.fatal or not has_fallback:
-                    ok = False
-                    lines.append(f"{pid.value}: FAIL — isolation smoke: {report.detail}")
-                else:
-                    lines.append(
-                        f"{pid.value}: WARN — isolation smoke: {report.detail} "
-                        "(a fallback provider will cover)"
-                    )
+            ok = _append_isolation_probe_lines(lines, pid, report, ok, has_fallback=has_fallback)
+
+        # The paid probe (Claude): a separate opt-in because it spends a real model call. Same
+        # verdict handling as the free smoke — a proven leak is fatal, an undemonstrable probe is
+        # advisory — and, crucially, "the agent wrote nothing at all" reports as undemonstrable
+        # rather than as a pass.
+        if paid_isolation_probe and healthy and config.security.strict_isolation:
+            paid = getattr(provider, "paid_isolation_probe", None)
+            report = paid(home_dir=Path.home()) if callable(paid) else None
+            ok = _append_isolation_probe_lines(lines, pid, report, ok, has_fallback=has_fallback)
 
     reasons = check_isolation(config, ISOLATION_CHECKS)
     if reasons:
@@ -3151,8 +3192,14 @@ def cmd_preflight(args: argparse.Namespace) -> int:
         return 2
     env_file, _ = resolve_env_file_path(args)
     # ``worc preflight`` opts into the live no-model capability smoke; the installer's
-    # auto-preflight (``_install_run_preflight``) keeps the default (offline) to stay fast.
-    ok, lines = run_preflight(config, env_file=env_file, capability_smoke=True)
+    # auto-preflight (``_install_run_preflight``) keeps the default (offline) to stay fast. The paid
+    # probe is a second, explicit opt-in: it spends a real model call, so nothing may imply it.
+    ok, lines = run_preflight(
+        config,
+        env_file=env_file,
+        capability_smoke=True,
+        paid_isolation_probe=bool(getattr(args, "paid_isolation_probe", False)),
+    )
     for line in lines:
         print(line)
     return 0 if ok else 1

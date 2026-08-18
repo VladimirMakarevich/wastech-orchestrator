@@ -29,7 +29,7 @@ from wastech_orchestrator.providers.base import (
 )
 from wastech_orchestrator.providers.codex import CodexProvider
 from wastech_orchestrator.providers.process import ProcessResult
-from wastech_orchestrator.runtime_layout import InternalDenyPolicy
+from wastech_orchestrator.runtime_layout import InternalDenyPolicy, ProviderWriteGuardPolicy
 
 FIXED_TIME = datetime(2026, 6, 11, 12, 0, 0, tzinfo=UTC)
 FAKE_GH_TOKEN = "ghp_" + "abcdef0123456789abcdef0123"
@@ -184,6 +184,93 @@ def test_canary_passes_then_run_proceeds_and_writes_evidence(
     assert canary.calls == 4  # 2 private-deny + exchange-read (positive control) + exchange-write
     canary_json = _attempt_dir(tmp_path) / "canary.json"
     assert json.loads(canary_json.read_text())["ok"] is True
+
+
+def test_the_canary_probes_the_write_guard_roots_from_the_request(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # Пре-1: the roots come from the request the Core built, so the probes test the profile that is
+    # about to launch. Four probes as before, plus one per probed deny root — the count is asserted
+    # because a silently shrinking probe set is exactly how a floor claim stops being tested.
+    from wastech_orchestrator.providers.codex_canary import WRITE_GUARD_SENTINEL
+
+    fake = FakeRun(stdout=_success_stream(), last_message='{"summary":"ok"}')
+    canary = FakeCanary(results=[(1, "denied"), (1, "denied"), (0, "task"), (1, "denied")])
+    clone = tmp_path / "clone"
+    (clone / ".git" / "hooks").mkdir(parents=True)
+    (clone / "tasks").mkdir(parents=True)
+    exchange_root = clone / ".worc-io"
+    exchange_root.mkdir(parents=True)
+    exchange = exchange_root / "task.md"
+    exchange.write_text("EXCHANGE_TASK", encoding="utf-8")
+    request = make_request(
+        task_path=str(exchange),
+        write_guard=ProviderWriteGuardPolicy(
+            exchange_root=exchange_root,
+            git_dir=clone / ".git",
+            git_common_dir=clone / ".git",
+            hooks_dir=clone / ".git" / "hooks",
+            tasks_dir=clone / "tasks",
+        ),
+    )
+    provider = _isolated_provider(
+        codex_config, security_config, tmp_path, fake, canary=canary, deny=_deny_for(request)
+    )
+    result = provider.run(request)
+    assert result.status is RunStatus.SUCCEEDED
+    probes = json.loads((_attempt_dir(tmp_path) / "canary.json").read_text())["probes"]
+    write_guard_probes = [p for p in probes if p["probe"].startswith("write-guard-")]
+    # Exchange root, `.git` (gitdir == common in a normal clone) and `tasks/`; `.git/hooks` is
+    # covered by the probed `.git` above it.
+    assert len(write_guard_probes) == 3
+    assert all(p["expect_denied"] and p["denied"] for p in write_guard_probes)
+    assert canary.calls == 4 + 3
+    assert not (clone / ".git" / WRITE_GUARD_SENTINEL).exists()  # nothing left behind
+
+
+def test_a_git_dir_write_that_lands_fails_closed_before_any_model_launch(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # AC1.1: a profile that does not actually carve `.git` out is a non-fallback CONFIGURATION_ERROR
+    # with zero model calls — the point of running the probe before `codex exec` rather than after.
+    fake = FakeRun(stdout=_success_stream())
+    # Private reads denied, exchange read allowed, exchange write denied — then the `.git` write
+    # LANDS, which is the profile failing to enforce its central claim.
+    canary = FakeCanary(
+        results=[(1, "denied"), (1, "denied"), (0, "task"), (1, "denied"), (1, "denied"), (0, "")]
+    )
+    clone = tmp_path / "clone"
+    (clone / ".git" / "hooks").mkdir(parents=True)
+    (clone / "tasks").mkdir(parents=True)
+    exchange_root = clone / ".worc-io"
+    exchange_root.mkdir(parents=True)
+    exchange = exchange_root / "task.md"
+    exchange.write_text("EXCHANGE_TASK", encoding="utf-8")
+    request = make_request(
+        task_path=str(exchange),
+        write_guard=ProviderWriteGuardPolicy(
+            exchange_root=exchange_root,
+            git_dir=clone / ".git",
+            git_common_dir=clone / ".git",
+            hooks_dir=clone / ".git" / "hooks",
+            tasks_dir=clone / "tasks",
+        ),
+    )
+    provider = _isolated_provider(
+        codex_config, security_config, tmp_path, fake, canary=canary, deny=_deny_for(request)
+    )
+    with pytest.raises(ProviderError) as excinfo:
+        provider.run(request)
+    assert excinfo.value.error_class is ErrorClass.CONFIGURATION_ERROR
+    assert not excinfo.value.is_fallback_eligible  # a security violation is never a fallback
+    assert fake.calls == 0  # the model was never launched
+    assert "write-guard" in str(excinfo.value)
 
 
 def test_canary_leak_fails_closed_before_any_model_launch(

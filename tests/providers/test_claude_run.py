@@ -711,3 +711,142 @@ def test_preflight_missing_binary_makes_no_credential_claim(
     fake = FakeRun(launch_error="not found")
     provider = _provider(claude_config, security_config, tmp_path, fake)
     assert provider.preflight().auth is None
+
+
+# --- paid isolation probe (Пре-1.2 / П1.2) ----------------------------------------------------
+
+
+class _WritingRun(FakeRun):
+    """A fake launch that creates the files the probe's prompt names, chosen per test.
+
+    Stands in for the model plus the OS sandbox: whichever paths this writes are the paths that
+    "landed", which is exactly what the classifier reads.
+    """
+
+    def __init__(self, *, write: Callable[[Path], bool], **kwargs: Any) -> None:
+        super().__init__(**kwargs)
+        self._write = write
+
+    def __call__(self, argv: list[str], **kwargs: Any) -> ProcessResult:
+        # Claude takes the prompt on stdin, so that is where the probe's four paths are.
+        prompt = " ".join([*argv, kwargs.get("stdin_text") or ""])
+        for token in prompt.split():
+            candidate = Path(token.strip().rstrip(".,"))
+            if candidate.name == "worc-isolation-probe.txt" and self._write(candidate):
+                candidate.parent.mkdir(parents=True, exist_ok=True)
+                candidate.write_text("x", encoding="utf-8")
+        return super().__call__(argv, **kwargs)
+
+
+def _paid_provider(
+    claude_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    fake: FakeRun,
+    *,
+    capability: SandboxCapability = SandboxCapability.MACOS,
+) -> ClaudeCodeProvider:
+    return ClaudeCodeProvider(
+        claude_config,
+        security=security_config,
+        artifacts_root=tmp_path / "art",
+        clock=lambda: FIXED_TIME,
+        run_process=fake,
+        sandbox_probe=lambda: capability,
+        deny_policy=InternalDenyPolicy(
+            control_home=tmp_path / "real" / ".worc",
+            private_home=tmp_path / "real" / ".worc",
+            env_file=None,
+            provider_homes=(),
+        ),
+    )
+
+
+def test_the_paid_probe_passes_when_only_the_allowed_path_is_written(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # The pass shape: the control landed inside the workspace, the Git dirs and the control home
+    # refused. Only this combination proves selective enforcement.
+    fake = _WritingRun(write=lambda path: "src" in path.parts, stdout=_success_stream())
+    provider = _paid_provider(claude_config, security_config, tmp_path, fake)
+    report = provider.paid_isolation_probe(home_dir=tmp_path)
+    assert report is not None
+    assert (report.ok, report.status, report.fatal) == (True, "passed", False)
+
+
+def test_the_paid_probe_reports_not_demonstrated_when_nothing_was_written(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # П1.2's load-bearing rule: a model that politely declined every write leaves the same empty
+    # filesystem as a perfectly sandboxed one. That is "not demonstrated", never a pass — the exact
+    # error this phase exists to remove from the Codex side too.
+    fake = _WritingRun(write=lambda path: False, stdout=_success_stream())
+    provider = _paid_provider(claude_config, security_config, tmp_path, fake)
+    report = provider.paid_isolation_probe(home_dir=tmp_path)
+    assert report is not None
+    assert (report.ok, report.status, report.fatal) == (False, "unsupported", False)
+    assert "NOT DEMONSTRATED" in report.detail
+
+
+def test_the_paid_probe_is_fatal_when_a_git_dir_write_lands(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # A write that landed in a Git directory is a proven leak: fatal regardless of any fallback
+    # provider, and the file the probe created is removed rather than left in the repository.
+    created: list[Path] = []
+
+    def _write(path: Path) -> bool:
+        if ".git" in path.parts or ".worc" in path.parts:
+            created.append(path)
+        return True
+
+    fake = _WritingRun(write=_write, stdout=_success_stream())
+    provider = _paid_provider(claude_config, security_config, tmp_path, fake)
+    report = provider.paid_isolation_probe(home_dir=tmp_path)
+    assert report is not None
+    assert (report.ok, report.status, report.fatal) == (False, "policy-failed", True)
+    assert "LANDED" in report.detail
+    assert "were removed" in report.detail
+    assert created and not any(path.exists() for path in created)
+
+
+def test_the_paid_probe_probes_both_git_directories_and_the_control_home(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # The prompt names four distinct paths: the per-worktree gitdir, the shared common dir (two
+    # different directories in production), the control home, and the allowed control.
+    fake = _WritingRun(write=lambda path: False, stdout=_success_stream())
+    provider = _paid_provider(claude_config, security_config, tmp_path, fake)
+    provider.paid_isolation_probe(home_dir=tmp_path)
+    prompt = fake.captured["stdin_text"] or ""
+    assert prompt.count("worc-isolation-probe.txt") == 4
+    assert "worktrees" in prompt  # the per-worktree gitdir, distinct from the common dir
+    assert ".worc/worc-isolation-probe.txt" in prompt.replace("\\", "/")
+
+
+def test_the_paid_probe_is_skipped_without_an_os_sandbox(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # Nothing to demonstrate where Claude has no OS Bash sandbox — and no model call is spent.
+    fake = _WritingRun(write=lambda path: True, stdout=_success_stream())
+    provider = _paid_provider(
+        claude_config,
+        security_config,
+        tmp_path,
+        fake,
+        capability=SandboxCapability.NATIVE_WINDOWS,
+    )
+    report = provider.paid_isolation_probe(home_dir=tmp_path)
+    assert report is not None and report.status == "unsupported"
+    assert fake.calls == 0
+
+
+def test_the_paid_probe_is_absent_without_strict_isolation(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    fake = _WritingRun(write=lambda path: True, stdout=_success_stream())
+    provider = _paid_provider(
+        claude_config, replace(security_config, strict_isolation=False), tmp_path, fake
+    )
+    assert provider.paid_isolation_probe(home_dir=tmp_path) is None
+    assert fake.calls == 0

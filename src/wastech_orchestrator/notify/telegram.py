@@ -24,9 +24,9 @@ from typing import Any, Protocol
 
 from wastech_orchestrator.config.schema import TelegramConfig
 from wastech_orchestrator.notify.interface import (
-    TRACE_READ_ONLY_GIT_DRIFT,
-    TRACE_READ_ONLY_WRITE,
+    TRACE_GIT_CONTROL_DRIFT,
     TRACE_REWORK_EXHAUSTED,
+    TRACE_UNEXPECTED_WRITE,
     AskHandle,
     AskKind,
     AskResult,
@@ -535,8 +535,8 @@ def _one_line(text: str, *, limit: int = _FINDING_REASON_LIMIT) -> str:
 # Three labels here are synthetic (not raw NodeOutcome.kinds), all rendered ⚠️ so they read as
 # "moved on, may need follow-up" rather than a clean pass: TRACE_REWORK_EXHAUSTED is a non-blocking
 # evaluator that accepted only because its max_rework_per_stage budget ran out,
-# TRACE_READ_ONLY_WRITE is a read-only node with a granted shell that changed the working tree, and
-# TRACE_READ_ONLY_GIT_DRIFT is the same node class changing git control state.
+# TRACE_UNEXPECTED_WRITE is a node with a shell but no write access that changed the working tree,
+# and TRACE_GIT_CONTROL_DRIFT is such a node changing git control state.
 _TRACE_EMOJI: dict[str, str] = {
     "done": "✅",
     "accept": "✅",
@@ -544,8 +544,8 @@ _TRACE_EMOJI: dict[str, str] = {
     "rework": "🔁",
     "fail": "❌",
     TRACE_REWORK_EXHAUSTED: "⚠️",
-    TRACE_READ_ONLY_WRITE: "⚠️",
-    TRACE_READ_ONLY_GIT_DRIFT: "⚠️",
+    TRACE_UNEXPECTED_WRITE: "⚠️",
+    TRACE_GIT_CONTROL_DRIFT: "⚠️",
 }
 
 

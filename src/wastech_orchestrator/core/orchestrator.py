@@ -191,9 +191,9 @@ from wastech_orchestrator.memory import (
     ensure_store,
 )
 from wastech_orchestrator.notify import (
-    TRACE_READ_ONLY_GIT_DRIFT,
-    TRACE_READ_ONLY_WRITE,
+    TRACE_GIT_CONTROL_DRIFT,
     TRACE_REWORK_EXHAUSTED,
+    TRACE_UNEXPECTED_WRITE,
     Notifier,
     NullNotifier,
     TerminalDetails,
@@ -3477,44 +3477,45 @@ class Orchestrator:
                         "findings": len(outcome.findings),
                     },
                 )
-            # A read-only node holding the git-evidence grant that changed the working tree: its
-            # sandbox write-denies the whole clone, so this means that enforcement did not hold.
-            # Warn and keep going — the node's own outcome stays `done` and the task is never parked
-            # over it, because the grant exists so an audit node can read history and a stray file
-            # is not worth trading that for. The change is not consumed by anything downstream.
-            if outcome.read_only_write:
+            # A node that has a shell but no write access changed the working tree: its sandbox
+            # write-denies the whole clone (an operator tool has no business writing either), so
+            # this means that enforcement did not hold. Warn and keep going — the node's own outcome
+            # stays `done` and the task is never parked over it, because such a node exists to read
+            # and a stray file is not worth trading that for. The change is not consumed by
+            # anything downstream.
+            if outcome.unexpected_write:
                 self._log(p.task.id).warning(
-                    "a read-only node with the git-evidence grant changed the working tree — "
-                    "continuing; inspect the tree, the sandbox should have denied this",
+                    "a node with no write access changed the working tree — continuing; inspect "
+                    "the tree, this should have been denied",
                     extra={"stage": node.id},
                 )
-            # The sharper half of the same never-park rule (operator decision 2): the same node
-            # class changed git control state — a hook, `.git/config`, the index. Continuing means
+            # The sharper half of the same never-park rule (operator decision 2): such a node
+            # changed git control state — a hook, `.git/config`, the index. Continuing means
             # the orchestrator's own next git command (commit / branch switch / push) runs in that
             # clone, so this warning names the drifted aspect and says to stop the run rather than
-            # merely "inspect". A workspace-write node doing the same still parks the task.
-            if outcome.read_only_git_drift is not None:
+            # merely "inspect". A workspace-write agent node doing the same still parks the task.
+            if outcome.git_control_drift is not None:
                 self._log(p.task.id).warning(
-                    "a read-only node with the git-evidence grant changed git control state — "
-                    "continuing per policy, but stop the run and discard the clone before it is "
-                    "committed or pushed",
-                    extra={"stage": node.id, "drift": outcome.read_only_git_drift},
+                    "a node with no write access changed git control state — continuing per "
+                    "policy, but stop the run and discard the clone before it is committed or "
+                    "pushed",
+                    extra={"stage": node.id, "drift": outcome.git_control_drift},
                 )
             # Best-effort live progress trace: one message per executed node finish (never on a
             # skip). Gated on the flag alone — when Telegram is off the notifier is a NullNotifier
             # and this is a no-op. Carries only node id + outcome (no secrets); never raises. A
             # budget-exhausted accept traces as the ⚠️ TRACE_REWORK_EXHAUSTED label, not a clean ✅;
-            # so does a read-only node that wrote (TRACE_READ_ONLY_WRITE) or drifted git control
-            # state (TRACE_READ_ONLY_GIT_DRIFT — checked first of the two, it is the one that
+            # so does a write-less node that wrote (TRACE_UNEXPECTED_WRITE) or drifted git control
+            # state (TRACE_GIT_CONTROL_DRIFT — checked first of the two, it is the one that
             # needs a human now).
             if self._config.telegram.trace:
                 trace_outcome = outcome.kind
                 if rework_exhausted:
                     trace_outcome = TRACE_REWORK_EXHAUSTED
-                elif outcome.read_only_git_drift is not None:
-                    trace_outcome = TRACE_READ_ONLY_GIT_DRIFT
-                elif outcome.read_only_write:
-                    trace_outcome = TRACE_READ_ONLY_WRITE
+                elif outcome.git_control_drift is not None:
+                    trace_outcome = TRACE_GIT_CONTROL_DRIFT
+                elif outcome.unexpected_write:
+                    trace_outcome = TRACE_UNEXPECTED_WRITE
                 self._notifier.send_trace(task_id=p.task.id, node_id=node.id, outcome=trace_outcome)
             # Chronological per-run index: one line per executed node run of every kind, so an
             # operator can read a re-running node's sequence without listing run-*/ dirs. Runs that

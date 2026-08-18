@@ -75,3 +75,36 @@ def test_pre_v7_incompatible_shape_is_refused_not_stamped(tmp_path: Path) -> Non
         StateStore.open_readonly(db)
     # The refusal left the file untouched (no version stamp), so it is not silently wedged.
     assert _user_version(db) == DB_SCHEMA_VERSION - 1
+
+
+def test_the_gate_reference_column_is_added_to_a_pre_versioning_database(tmp_path: Path) -> None:
+    # v22 is additive, so the one database `_migrate` may reshape — a `0`-stamped, pre-versioning
+    # one — gains `tasks.gate_reference_sha` and keeps the rows it already had. (An *older
+    # versioned* database is refused fail-closed instead, as the test above shows; greenfield means
+    # there is no production data to migrate.)
+    db = tmp_path / "prev.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute(
+        "CREATE TABLE tasks (task_id TEXT PRIMARY KEY, title TEXT NOT NULL, status TEXT NOT NULL, "
+        "created_at TEXT NOT NULL, updated_at TEXT NOT NULL)"
+    )
+    conn.execute(
+        "INSERT INTO tasks (task_id, title, status, created_at, updated_at) VALUES (?,?,?,?,?)",
+        ("task-001", "kept", "new", "t0", "t0"),
+    )
+    conn.commit()
+    conn.close()
+    assert _user_version(db) == 0
+
+    store = StateStore.open(db)
+    try:
+        columns = {str(row[1]) for row in store._conn.execute("PRAGMA table_info(tasks)")}
+        assert "gate_reference_sha" in columns
+        assert store.get_gate_reference("task-001") is None  # NULL means "the task's diff base"
+        row = store._conn.execute(
+            "SELECT title FROM tasks WHERE task_id = ?", ("task-001",)
+        ).fetchone()
+        assert row["title"] == "kept"  # the pre-existing task survived the column add
+    finally:
+        store.close()
+    assert _user_version(db) == DB_SCHEMA_VERSION

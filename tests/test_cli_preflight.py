@@ -55,13 +55,16 @@ class _FakeHealthProvider:
         healthy: bool = True,
         degraded_reasons: tuple[str, ...] = (),
         smoke: IsolationCapabilityReport | None = None,
+        paid: IsolationCapabilityReport | None = None,
         auth: AuthProbe | None = _LOGGED_IN,
     ) -> None:
         self.id = provider_id
         self._healthy = healthy
         self._degraded_reasons = degraded_reasons
         self._smoke = smoke
+        self._paid = paid
         self._auth = auth
+        self.paid_calls = 0
 
     def preflight(self) -> ProviderHealth:
         return ProviderHealth(
@@ -78,12 +81,18 @@ class _FakeHealthProvider:
     def isolation_capability_smoke(self, *, home_dir: object) -> IsolationCapabilityReport | None:
         return self._smoke
 
+    def paid_isolation_probe(self, *, home_dir: object) -> IsolationCapabilityReport | None:
+        self.paid_calls += 1
+        return self._paid
+
     def run(self, request: AgentRunRequest) -> object:  # pragma: no cover - never called
         raise NotImplementedError
 
 
-def _args() -> argparse.Namespace:
-    return argparse.Namespace(config="config.yaml", log_level="info")
+def _args(*, paid_isolation_probe: bool = False) -> argparse.Namespace:
+    return argparse.Namespace(
+        config="config.yaml", log_level="info", paid_isolation_probe=paid_isolation_probe
+    )
 
 
 def _patch_providers(
@@ -93,12 +102,14 @@ def _patch_providers(
     gh_result: tuple[bool, str] = (True, "gh: OK"),
     degraded: dict[str, tuple[str, ...]] | None = None,
     smokes: dict[str, IsolationCapabilityReport] | None = None,
+    paid: dict[str, IsolationCapabilityReport] | None = None,
     auth: dict[str, AuthProbe | None] | None = None,
     **healthy: bool,
-) -> None:
+) -> dict[ProviderId, _FakeHealthProvider]:
     monkeypatch.setattr(cli, "_load_config", lambda _path: config)
     degraded = degraded or {}
     smokes = smokes or {}
+    paid = paid or {}
     auth = auth or {}
     providers = {
         ProviderId.CLAUDE: _FakeHealthProvider(
@@ -106,6 +117,7 @@ def _patch_providers(
             healthy=healthy.get("claude", True),
             degraded_reasons=degraded.get("claude", ()),
             smoke=smokes.get("claude"),
+            paid=paid.get("claude"),
             auth=auth.get("claude", _LOGGED_IN),
         ),
         ProviderId.CODEX: _FakeHealthProvider(
@@ -113,11 +125,13 @@ def _patch_providers(
             healthy=healthy.get("codex", True),
             degraded_reasons=degraded.get("codex", ()),
             smoke=smokes.get("codex"),
+            paid=paid.get("codex"),
             auth=auth.get("codex", _LOGGED_IN),
         ),
     }
     monkeypatch.setattr(cli, "build_providers", lambda _c, *, layout: providers)
     monkeypatch.setattr(cli, "preflight_gh", lambda: gh_result)
+    return providers
 
 
 def test_preflight_ready(
@@ -591,7 +605,7 @@ def test_preflight_capability_smoke_ok(
     rc = cli.cmd_preflight(_args())
     out = capsys.readouterr().out
     assert rc == 0
-    assert "isolation smoke OK" in out
+    assert "isolation probe OK" in out
     assert "preflight: ready" in out
 
 
@@ -611,7 +625,7 @@ def test_preflight_capability_smoke_policy_leak_is_fatal(
     rc = cli.cmd_preflight(_args())
     out = capsys.readouterr().out
     assert rc == 1
-    assert "FAIL — isolation smoke" in out
+    assert "FAIL — isolation probe" in out
     assert "preflight: NOT ready" in out
 
 
@@ -631,7 +645,7 @@ def test_preflight_capability_smoke_unsupported_warns_with_fallback(
     rc = cli.cmd_preflight(_args())
     out = capsys.readouterr().out
     assert rc == 0
-    assert "WARN — isolation smoke" in out
+    assert "WARN — isolation probe" in out
     assert "preflight: ready" in out
 
 
@@ -792,3 +806,95 @@ def test_telegram_test_rejects_disabled_config(
 
     assert rc == 1
     assert "telegram.enabled is false" in capsys.readouterr().out
+
+
+# --- The paid Claude isolation probe: a second, explicit opt-in (Пре-1.2) ----------------------
+
+
+def test_the_paid_probe_is_not_run_without_its_flag(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # It spends a real model call, so nothing may imply it: neither `worc preflight` on its own
+    # nor the installer's auto-preflight.
+    providers = _patch_providers(
+        monkeypatch,
+        make_git_config(git_repo.clone),
+        paid={
+            "claude": IsolationCapabilityReport(
+                ok=True, status="passed", detail="the write was refused", fatal=False
+            )
+        },
+    )
+    rc = cli.cmd_preflight(_args())
+    assert rc == 0
+    assert all(provider.paid_calls == 0 for provider in providers.values())
+    assert "isolation probe OK" not in capsys.readouterr().out
+
+
+def test_the_paid_probe_runs_and_reports_with_its_flag(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    providers = _patch_providers(
+        monkeypatch,
+        make_git_config(git_repo.clone),
+        paid={
+            "claude": IsolationCapabilityReport(
+                ok=True,
+                status="passed",
+                detail="claude paid isolation probe: the gitdir refused the write",
+                fatal=False,
+            )
+        },
+    )
+    rc = cli.cmd_preflight(_args(paid_isolation_probe=True))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert providers[ProviderId.CLAUDE].paid_calls == 1
+    assert "claude: isolation probe OK — claude paid isolation probe" in out
+    assert "preflight: ready" in out
+
+
+def test_a_paid_probe_leak_is_fatal_despite_a_fallback_provider(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Same severity rule as the free smoke: a proven leak is a non-fallback security result.
+    _patch_providers(
+        monkeypatch,
+        make_git_config(git_repo.clone),
+        paid={
+            "claude": IsolationCapabilityReport(
+                ok=False,
+                status="policy-failed",
+                detail="a write LANDED in the Git common dir",
+                fatal=True,
+            )
+        },
+    )
+    rc = cli.cmd_preflight(_args(paid_isolation_probe=True))
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "FAIL — isolation probe" in out
+    assert "preflight: NOT ready" in out
+
+
+def test_an_undemonstrated_paid_probe_warns_with_a_fallback(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # "The agent wrote nothing at all" is undemonstrable, not a pass — and with a fallback provider
+    # available that degrades to a warning rather than blocking the run.
+    _patch_providers(
+        monkeypatch,
+        make_git_config(git_repo.clone),
+        paid={
+            "claude": IsolationCapabilityReport(
+                ok=False,
+                status="unsupported",
+                detail="NOT DEMONSTRATED — no file was created at all",
+                fatal=False,
+            )
+        },
+    )
+    rc = cli.cmd_preflight(_args(paid_isolation_probe=True))
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "WARN — isolation probe: NOT DEMONSTRATED" in out

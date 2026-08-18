@@ -133,18 +133,21 @@ class NodeOutcome:
     orchestrator's post-node hook surfaces it as an operator warning + Telegram trace so a human
     knows the stage moved on and may need follow-up.
 
-    ``read_only_write`` is the same shape of signal for a different event: a read-only node holding
-    the git-evidence grant changed the working tree, which the provider's sandbox is supposed to
-    make impossible. The outcome stays ``done`` and the run continues — the grant buys an audit node
-    real history, and parking a task over a stray file would trade that for a hypothetical — but the
-    post-node hook warns the operator through the same console + ⚠️ trace surface.
+    ``unexpected_write`` is the same shape of signal for a different event: a node that had a way to
+    run commands but no write access changed the working tree, which the provider's sandbox is
+    supposed to make impossible. Every runner that can produce it sets it — an agent node with a
+    shell and no write access, an evaluator, an operator ``tool`` node — because what makes the
+    write reachable is the shell, not the node kind. The outcome stays ``done`` and the run
+    continues — such a node exists to read, and parking a task over a stray file would trade that
+    for a hypothetical — but the post-node hook warns the operator through the same console + ⚠️
+    trace surface.
 
-    ``read_only_git_drift`` is the second, sharper event on that same never-park path (operator
-    decision 2, 2026-07-26): the same node class changed **Git control state** — a hook,
+    ``git_control_drift`` is the second, sharper event on that same never-park path (operator
+    decision 2, 2026-07-26): the same node changed **Git control state** — a hook,
     ``.git/config``, the index. It carries the redacted drift summary rather than a bool precisely
     because the warning *is* the mitigation here — an operator told only "something changed" would
     inspect the working tree, while the aspect that matters ("hooks: hook 'post-commit' added") is
-    the one that makes the next orchestrator git command execute provider-supplied code. The same
+    the one that makes the next orchestrator git command execute provider-supplied code. An agent
     node on a ``workspace-write`` profile still parks the task; see the agent runner.
     """
 
@@ -153,8 +156,8 @@ class NodeOutcome:
     structured_output: Mapping[str, object] | None = None
     final_message: str | None = None
     rework_exhausted: bool = False
-    read_only_write: bool = False
-    read_only_git_drift: str | None = None
+    unexpected_write: bool = False
+    git_control_drift: str | None = None
 
 
 def skip_outcome(node: FlowNode) -> NodeOutcome:

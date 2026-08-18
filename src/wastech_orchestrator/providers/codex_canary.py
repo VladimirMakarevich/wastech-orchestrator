@@ -28,11 +28,16 @@ import platform
 import shlex
 import shutil
 import tempfile
-from collections.abc import Callable, Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from wastech_orchestrator.providers._adapter_base import (
+    CAPABILITY_PASSED,
+    CAPABILITY_POLICY_FAILED,
+    CAPABILITY_UNSUPPORTED,
+)
 from wastech_orchestrator.providers.base import ErrorClass
 from wastech_orchestrator.providers.codex_profile import (
     PROFILE_NAME,
@@ -78,27 +83,41 @@ _CAPABILITY_MARKERS: tuple[str, ...] = (
 
 @dataclass(frozen=True)
 class CanaryProbe:
-    """One sandbox probe: run ``command`` under the profile; ``expect_denied`` is the verdict."""
+    """One sandbox probe: run ``command`` under the profile; ``expect_denied`` is the verdict.
+
+    ``cleanup_path`` is set for a probe that writes to a path that did not exist before it: if the
+    deny did not hold, the file the probe created is the orchestrator's litter, so it removes it
+    before failing the attempt closed. Probes that append to a pre-existing file leave it ``None`` —
+    there is nothing to delete and the file is evidence.
+    """
 
     label: str
     command: list[str]
     expect_denied: bool
+    cleanup_path: str | None = None
 
 
 @dataclass(frozen=True)
 class ExtraProbes:
-    """Optional probes the capability smoke adds beyond the per-attempt private/exchange set.
+    """Optional probes added beyond the per-attempt private/exchange set.
 
     Grouped into one value so :func:`run_codex_canary` stays within the argument-count ratchet: a
     workspace repo read (the mandatory positive control), a workspace symlink alias resolving to the
-    private file (must stay denied), and a repo write (allowed for ``workspace-write``, denied for
-    ``read-only``). All default off, so the per-attempt canary passes none.
+    private file (must stay denied), a repo write (allowed for ``workspace-write``, denied for
+    ``read-only``), and the write-guard roots.
+
+    ``write_guard_probes`` is ``(label, sentinel path)`` per Git-control / lifecycle root the
+    profile declares write-denied — the product's central claim ("the agent cannot change
+    ``.git``"), which until now no probe on any provider tested. Built by
+    :func:`write_guard_probe_paths`, which decides *which* roots are worth a probe launch. Both the
+    capability smoke and the per-attempt canary pass them; the other three fields are smoke-only.
     """
 
     repo_probe: str | None = None
     alias_probe: str | None = None
     repo_write_probe: str | None = None
     repo_writable: bool = False
+    write_guard_probes: tuple[tuple[str, str], ...] = ()
 
 
 _NO_EXTRA_PROBES = ExtraProbes()
@@ -186,6 +205,77 @@ def _write_cmd(path: str, system: str) -> list[str]:
     return ["/bin/sh", "-c", f"printf x >> {shlex.quote(path)}"]
 
 
+#: The file a write-guard probe tries to create inside a write-denied root. A name nothing else
+#: uses, and a *new* file rather than an append to an existing one: appending "x" to ``.git/HEAD``
+#: would corrupt the repository on the very host where the deny failed to hold.
+WRITE_GUARD_SENTINEL = "worc-write-guard-probe"
+
+
+@dataclass(frozen=True)
+class WriteGuardTargets:
+    """Which declared write-deny roots a probe can actually speak to, and why the rest cannot.
+
+    ``probes`` is ``(label, sentinel path)`` per root that gets its own probe launch. ``covered``
+    names roots skipped because a probed ancestor already proves the deny (``.git/hooks`` under
+    ``.git`` in a normal clone) — paired as ``(root, ancestor)`` so the reason is inspectable rather
+    than implied. ``missing`` names roots whose directory is absent: writing into a directory that
+    does not exist fails for want of a parent, and counting that as an enforced deny is exactly how
+    a probe suite certifies a policy nobody applied.
+    """
+
+    probes: tuple[tuple[str, str], ...]
+    covered: tuple[tuple[str, str], ...]
+    missing: tuple[str, ...]
+
+
+def write_guard_probe_paths(
+    denied_write_paths: Sequence[Path],
+    *,
+    is_dir: Callable[[Path], bool] = Path.is_dir,
+) -> WriteGuardTargets:
+    """Pick the probe target inside each declared write-deny root (pure but for ``is_dir``).
+
+    Every root either gets a probe of its own or is accounted for: collapsed into a probed ancestor,
+    or reported missing. Nothing is dropped silently, because "no probe ran" and "the deny held" are
+    the two answers a floor claim must never confuse. ``is_dir`` is injectable so the deterministic
+    suite can describe a host without touching one.
+
+    Labels are derived from the root's own name, so a linked worktree — where the per-worktree
+    gitdir and the shared common dir are different directories — yields two distinguishable probes
+    rather than one that could pass while the other root stays wide open.
+    """
+    probes: list[tuple[str, str]] = []
+    covered: list[tuple[str, str]] = []
+    missing: list[str] = []
+    kept: list[Path] = []
+    for root in denied_write_paths:
+        ancestor = next((k for k in kept if _is_within(root, k)), None)
+        if ancestor is not None:
+            covered.append((root.as_posix(), ancestor.as_posix()))
+            continue
+        if not is_dir(root):
+            missing.append(root.as_posix())
+            continue
+        kept.append(root)
+        probes.append((f"write-guard-{_root_label(root)}-denied", str(root / WRITE_GUARD_SENTINEL)))
+    return WriteGuardTargets(tuple(probes), tuple(covered), tuple(missing))
+
+
+def _is_within(path: Path, ancestor: Path) -> bool:
+    """Whether *path* sits inside *ancestor* (lexical, both already absolute and resolved)."""
+    return path != ancestor and ancestor in path.parents
+
+
+def _root_label(root: Path) -> str:
+    """A stable, human-readable probe label for a deny root — its last two path segments.
+
+    Two segments rather than one because the interesting pair is ``.git`` versus
+    ``.git/worktrees/<name>``: bare directory names would collide or read as the same root.
+    """
+    parts = [part for part in root.parts if part not in ("/", "\\")][-2:]
+    return "-".join(part.strip(":").replace(".", "").lower() or "root" for part in parts) or "root"
+
+
 def build_canary_probes(
     *,
     private_probe: str,
@@ -196,6 +286,7 @@ def build_canary_probes(
     alias_probe: str | None = None,
     repo_write_probe: str | None = None,
     repo_writable: bool = False,
+    write_guard_probes: Sequence[tuple[str, str]] = (),
 ) -> list[CanaryProbe]:
     """The probe set for the profile under test.
 
@@ -211,6 +302,11 @@ def build_canary_probes(
     set is now READABLE (the reads become positive controls) but a private WRITE must still be
     denied, so a ``private-write-denied`` probe is added to prove the profile keeps the control
     plane immutable.
+
+    ``write_guard_probes`` adds one write-deny probe per Git-control / lifecycle root the profile
+    carves out (see :func:`write_guard_probe_paths`). These are the probes behind the product's
+    central claim — the agent cannot change ``.git`` — which no probe tested before: each writes a
+    sentinel file into the root and expects to be refused.
     """
     if private_readable:
         probes = [
@@ -268,7 +364,32 @@ def build_canary_probes(
                 "exchange-write-denied", _write_cmd(exchange_probe, system), expect_denied=True
             )
         )
+    for label, sentinel in write_guard_probes:
+        probes.append(
+            CanaryProbe(
+                label, _write_cmd(sentinel, system), expect_denied=True, cleanup_path=sentinel
+            )
+        )
     return probes
+
+
+def _remove_probe_litter(probe: CanaryProbe) -> str:
+    """Delete the file a write probe created when the deny did not hold; describe what happened.
+
+    The attempt is about to fail closed, so nothing will consume the file — but it is the
+    orchestrator's litter inside the operator's repository (or its Git directory), and leaving it
+    there is both untidy and, in ``.git``, actively confusing. Best-effort by construction: a
+    failure to remove it is reported in the same message rather than raised, because the security
+    verdict must not depend on cleanup succeeding.
+    """
+    if probe.cleanup_path is None:
+        return ""
+    target = Path(probe.cleanup_path)
+    try:
+        target.unlink(missing_ok=True)
+    except OSError as exc:
+        return f"; the file the probe created could not be removed ({exc})"
+    return f"; removed the file the probe created ({target.name})"
 
 
 def build_canary_command(
@@ -351,6 +472,7 @@ def run_codex_canary(
         alias_probe=extra.alias_probe,
         repo_write_probe=extra.repo_write_probe,
         repo_writable=extra.repo_writable,
+        write_guard_probes=extra.write_guard_probes,
     )
     saw_positive_control = False
     with _sandbox_probe_env(env, system) as probe_env:
@@ -385,12 +507,14 @@ def run_codex_canary(
                     evidence=tuple(evidence),
                 )
             if probe.expect_denied and not denied:
+                removed = _remove_probe_litter(probe)
                 return CanaryOutcome(
                     ok=False,
                     error_class=ErrorClass.CONFIGURATION_ERROR,
                     message=(
                         f"permission-profile canary FAILED: {probe.label!r} was expected to be "
-                        "denied but succeeded — the profile is not enforcing (security violation)"
+                        "denied but succeeded — the profile is not enforcing (security "
+                        f"violation){removed}"
                     ),
                     evidence=tuple(evidence),
                 )
@@ -421,14 +545,10 @@ def run_codex_canary(
 
 # --- No-model capability smoke (worc preflight / host gate) -------------------------------------
 
-#: Smoke verdicts. ``passed`` = the profile is OS-enforced here; ``unsupported`` = the sandbox could
-#: not run / demonstrate the policy on this host (maps to the pre-model ``CAPABILITY_UNAVAILABLE``
-#: classification); ``policy-failed`` = a denied path was actually read/written (maps to the
-#: non-fallback ``CONFIGURATION_ERROR`` security result). Kept distinct so preflight never silently
-#: downgrades strict isolation.
-CAPABILITY_PASSED = "passed"
-CAPABILITY_UNSUPPORTED = "unsupported"
-CAPABILITY_POLICY_FAILED = "policy-failed"
+# Smoke verdicts. Re-exported from :mod:`_adapter_base`, where both adapters' probes read them, so
+# preflight cannot end up with two vocabularies for one question: ``unsupported`` maps to the
+# pre-model ``CAPABILITY_UNAVAILABLE`` classification, ``policy-failed`` to the non-fallback
+# ``CONFIGURATION_ERROR`` security result.
 
 #: A no-model tool-surface inventory probe: returns ``(clean_exit, combined_output)`` for a command
 #: such as ``codex mcp list``. Injectable so the deterministic suite records a fake inventory;
@@ -491,7 +611,8 @@ def run_codex_capability_smoke(
     best-effort) a workspace symlink resolving to the private file. It generates the real profile
     for *permission_profile* and runs the full probe battery through :func:`run_codex_canary`
     (private denied direct+shell+alias, repo-read positive control, repo write per profile, exchange
-    read/write), then records a no-model tool-surface inventory (``codex mcp list``). Returns a
+    read/write, and a write into every declared Git-control / lifecycle root), then records a
+    no-model tool-surface inventory (``codex mcp list``). Returns a
     :class:`CapabilitySmokeReport` whose ``status`` distinguishes ``passed`` / ``unsupported``
     (``CAPABILITY_UNAVAILABLE``) / ``policy-failed`` (``CONFIGURATION_ERROR``) — never silently
     downgrading. Reusable by ``worc preflight`` and the local/manual host smoke; the
@@ -508,6 +629,15 @@ def run_codex_capability_smoke(
         (control / "logs").mkdir(parents=True)
         (exchange / "t").mkdir(parents=True)
         (repo / "src").mkdir(parents=True)
+        # Real targets for the write-guard probes, created before anything runs. A probe that writes
+        # into a directory that does not exist fails for want of a parent, and that failure is
+        # indistinguishable from an enforced deny — so a fixture missing these would certify a floor
+        # nobody applied. The gitdir doubles as the common dir here (a normal clone collapses them);
+        # the linked-worktree shape, where they differ, is covered by the deterministic suite.
+        git_dir = repo / ".git"
+        (git_dir / "hooks").mkdir(parents=True)
+        (git_dir / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+        (repo / "tasks").mkdir(parents=True)
         private_file = control / "logs" / "req.json"
         private_file.write_text("PRIVATE_SECRET", encoding="utf-8")
         exchange_file = exchange / "t" / "task.md"
@@ -535,9 +665,9 @@ def run_codex_capability_smoke(
         )
         write_guard = ProviderWriteGuardPolicy(
             exchange_root=exchange,
-            git_dir=repo / ".git",
-            git_common_dir=repo / ".git",
-            hooks_dir=repo / ".git" / "hooks",
+            git_dir=git_dir,
+            git_common_dir=git_dir,
+            hooks_dir=git_dir / "hooks",
             tasks_dir=repo / "tasks",
         )
         profile = build_codex_permission_profile(
@@ -548,6 +678,17 @@ def run_codex_capability_smoke(
             denied_read_paths=(),
             read_isolation_off=read_isolation_off,
         )
+        # Assert the fixture before trusting its verdict: a root with no directory yields no probe,
+        # and a smoke that quietly probed fewer roots than the profile declares would certify a
+        # floor it never tested. Undemonstrable, therefore — never ``passed``.
+        targets = write_guard_probe_paths(write_guard.denied_write_paths)
+        if targets.missing:
+            return CapabilitySmokeReport(
+                CAPABILITY_UNSUPPORTED,
+                f"codex {permission_profile} sandbox: the smoke fixture is incomplete — no "
+                f"directory for the write-deny root(s) {', '.join(targets.missing)}, so their deny "
+                "cannot be demonstrated (a write there would fail for want of a parent)",
+            )
         outcome = run_codex_canary(
             command=command,
             profile_arg=render_permission_profile_arg(profile),
@@ -563,6 +704,7 @@ def run_codex_capability_smoke(
                 alias_probe=alias_probe,
                 repo_write_probe=str(repo_file),
                 repo_writable=writable,
+                write_guard_probes=targets.probes,
             ),
         )
         evidence = list(outcome.evidence)

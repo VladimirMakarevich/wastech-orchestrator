@@ -130,7 +130,7 @@ class AgentNodeRunner:
     # -- simple (non-HITL) agent run ------------------------------------------
 
     def _run_simple(self, node: AgentNode, ctx: NodeContext, route: ResolvedRoute) -> NodeResult:
-        before = self._granted_shell_before(node, ctx)
+        before = self._granted_shell_before(node, ctx, route)
         run_id, outcome = self._invoke_with_turn_gate(node, ctx, route, human_input_path=None)
         self._apply_post_edit_guard(node, ctx, route)
         return self._result(node, ctx, outcome, run_id, before)
@@ -138,6 +138,15 @@ class AgentNodeRunner:
     # -- embedded HITL (refinement / planning) --------------------------------
 
     def _run_with_hitl(self, node: AgentNode, ctx: NodeContext, route: ResolvedRoute) -> NodeResult:
+        """Run the node with one embedded human round-trip, then gate its edit like any other.
+
+        The post-edit guard runs on **both** returning exits — the answer-without-asking one and the
+        one after the operator's answer — for the same reason ``_run_simple`` runs it: a
+        workspace-write node's deletions and dependency edits need approval before the tests, and
+        nothing about a HITL node makes its diff less dangerous. It ran on neither before, so a flow
+        that declared ``hitl`` on a writing node published without ever asking; the guard is
+        core-owned and automatic, and a flow cannot opt out of it by asking a question.
+        """
         path = interaction_path(
             self._s.artifacts_root, ctx.task_id, node.id, subtask=ctx.subtask_order
         )
@@ -147,12 +156,13 @@ class AgentNodeRunner:
         if persisted is not None:
             human_input_path = self._resume_interaction(node, ctx, path, persisted)
 
-        before = self._granted_shell_before(node, ctx)
+        before = self._granted_shell_before(node, ctx, route)
         run_id, outcome = self._invoke_with_turn_gate(
             node, ctx, route, human_input_path=human_input_path
         )
         typed = self._typed(node, ctx, outcome)
         if typed.human_input is None:
+            self._apply_post_edit_guard(node, ctx, route)
             if had_interaction:
                 mark_consumed(path)
             return self._result(node, ctx, outcome, run_id, before)
@@ -183,6 +193,7 @@ class AgentNodeRunner:
         )
         if self._typed(node, ctx, outcome2).human_input is not None:
             raise NodeManualRequired(f"agent node {node.id!r}: second HITL request after an answer")
+        self._apply_post_edit_guard(node, ctx, route)
         mark_consumed(path)
         return self._result(node, ctx, outcome2, run_id2, before)
 
@@ -372,16 +383,36 @@ class AgentNodeRunner:
         """True iff this node asked for the read-only git verbs and the operator enabled them."""
         return resolve_git_evidence(node.git_evidence, self._s.allow_git_evidence)
 
+    def _can_run_commands(self, node: AgentNode, ctx: NodeContext, route: ResolvedRoute) -> bool:
+        """True iff this attempt actually gets a shell on a provider it may land on.
+
+        The question the detection brackets key on, because command execution — not the permission
+        profile, not a declared grant — is what makes a working-tree write or a ``.git`` mutation
+        reachable. Provider- and host-specific, so the answer comes from the adapters through the
+        Router (:meth:`~wastech_orchestrator.routing.router.AgentRouter.route_grants_shell`): a
+        Codex node runs commands on either profile, a Claude ``read-only`` node only with the
+        git-evidence grant, and neither on native Windows where the shell has no OS sandbox to sit
+        in. Fail-closed — an unclassifiable attempt counts as having one.
+        """
+        return self._s.router.route_grants_shell(
+            route,
+            permission_profile=node.permission_profile or ctx.snapshot.doc.permission_ceiling,
+            git_evidence=self._has_git_evidence(node),
+        )
+
     def _granted_shell_before(
-        self, node: AgentNode, ctx: NodeContext
+        self, node: AgentNode, ctx: NodeContext, route: ResolvedRoute
     ) -> _GrantedShellBefore | None:
-        """The fingerprints taken before a *read-only* node with a granted shell runs.
+        """The fingerprints taken before a node that has a shell but is not meant to write runs.
 
         ``None`` for every other node — that is the signal to skip both comparisons entirely, so no
         node pays for a check that cannot apply to it. This bracket, not the profile-keyed one in
-        :meth:`_invoke`, is what watches the node class the git-evidence grant just handed a shell:
-        what makes a working-tree write or ``.git`` drift possible is the shell, so keying on the
-        profile alone would leave exactly that class unwatched. Both are *reported*, never acted on
+        :meth:`_invoke`, is what watches the node class that can reach the repository without being
+        meant to: what makes a working-tree write or ``.git`` drift possible is the shell, so keying
+        on the profile alone would leave exactly that class unwatched. It keys on
+        :meth:`_can_run_commands` rather than on the git-evidence grant for the same reason — the
+        grant is one way to arrive at a shell (Claude), while a Codex ``read-only`` node has had one
+        all along and was therefore watched by nothing. Both signals are *reported*, never acted on
         (operator decision 2), which is why they live out here on the reporting path rather than at
         the compare site that parks a workspace-write attempt.
 
@@ -391,10 +422,12 @@ class AgentNodeRunner:
         re-run is covered without accumulating anything.
         """
         git = self._s.git
-        if git is None or self._is_workspace_write(node, ctx) or not self._has_git_evidence(node):
+        if git is None or self._is_workspace_write(node, ctx):
+            return None
+        if not self._can_run_commands(node, ctx, route):
             return None
         return _GrantedShellBefore(
-            control=git.capture_git_control_state(), tree=git.changed_code_entries()
+            control=git.capture_git_control_state(), tree=git.changed_code_entries(ctx.task_id)
         )
 
     def _result(
@@ -427,11 +460,11 @@ class AgentNodeRunner:
         if before is not None and git is not None:
             control_drift = git.compare_git_control_state(before.control)
             drift = control_drift.summary() if control_drift is not None else None
-            wrote = git.changed_code_entries() != before.tree
+            wrote = git.changed_code_entries(ctx.task_id) != before.tree
         return NodeResult(
             node_id=node.id,
             outcome=replace(
-                _agent_outcome(outcome), read_only_write=wrote, read_only_git_drift=drift
+                _agent_outcome(outcome), unexpected_write=wrote, git_control_drift=drift
             ),
             node_run_id=run_id,
         )
@@ -469,22 +502,30 @@ class AgentNodeRunner:
         assert_request_contained(request, self._s.exchange_root)
         # Fingerprint the Git control state before a workspace-write attempt; the compare
         # after `run_stage` (below) runs before any orchestrator git touches the possibly-poisoned
-        # clone, and drift there parks the task. A read-only attempt holding the git-evidence grant
-        # also has a shell and so can also reach `.git` — it is fingerprinted too, but from the
-        # outer reporting bracket (`_granted_shell_before`), because such a node deliberately
-        # warns instead of parking. A workspace-write attempt also gets its Write/Edit-deny
-        # roots (exchange/gitdir/common/hooks/tasks) resolved fresh here (only final after branch
-        # prep) and threaded onto the request; a read-only attempt carries no write tools, so
-        # ``write_guard`` stays ``None`` and its whole clone is instead write-denied in the
-        # provider's sandbox.
+        # clone, and drift there parks the task. An attempt that is not meant to write but has a
+        # shell can reach `.git` all the same — it is fingerprinted too, but from the outer
+        # reporting bracket (`_granted_shell_before`), because such a node deliberately warns
+        # instead of parking.
+        #
+        # The Write/Edit-deny roots (exchange/gitdir/common/hooks/tasks) are resolved fresh here —
+        # they are only final after branch prep — and threaded onto the request for every attempt
+        # that has *any* way to mutate the clone: write tools or a shell. Keyed on write access
+        # alone they went missing from exactly the two classes that need them most: a shell-bearing
+        # read-only attempt (whose deny roots the pre-launch canary probes) and, on native Windows,
+        # a workspace-write attempt whose shell was dropped but whose Write/Edit tools remain. Each
+        # adapter still decides what to do with them — a profile that grants no write at all needs
+        # no carve-out from it.
         git = self._s.git
         control_before = None
-        if git is not None and self._is_workspace_write(node, ctx):
-            control_before = git.capture_git_control_state()
-            request = replace(
-                request,
-                write_guard=git.resolve_control_paths(self._s.exchange_root),
-            )
+        if git is not None:
+            writes = self._is_workspace_write(node, ctx)
+            if writes:
+                control_before = git.capture_git_control_state()
+            if writes or self._can_run_commands(node, ctx, route):
+                request = replace(
+                    request,
+                    write_guard=git.resolve_control_paths(self._s.exchange_root),
+                )
         # Detection-in-depth: fingerprint the curated exchange before the attempt so a
         # provider mutation of the read-only surface is caught from parent-held state (below),
         # before
@@ -571,7 +612,7 @@ class AgentNodeRunner:
         if self._s.register_artifact is not None:
             self._s.register_artifact(ctx.task_id, "diff", private_diff)
         self._apply_output_containment_guard(node, ctx)
-        entries = self._s.git.changed_code_entries()
+        entries = self._s.git.changed_code_entries(ctx.task_id)
         dangerous = evaluate_diff_gate(entries, self._s.trust_level, self._s.protected_paths)
         if dangerous is None:
             return
@@ -617,7 +658,7 @@ class AgentNodeRunner:
             return
         offenders = [
             entry.path
-            for entry in self._s.git.changed_code_entries()
+            for entry in self._s.git.changed_code_entries(ctx.task_id)
             if not within_subdir(entry.path, policy.report_subdir)
         ]
         if offenders:
@@ -663,7 +704,9 @@ class AgentNodeRunner:
         # Re-evaluate under the same policy the request used, so the reconsider pass agrees on which
         # changes gate (level + protected floor) and does not spuriously flag a now-allowed change.
         still_dangerous = evaluate_diff_gate(
-            self._s.git.changed_code_entries(), self._s.trust_level, self._s.protected_paths
+            self._s.git.changed_code_entries(ctx.task_id),
+            self._s.trust_level,
+            self._s.protected_paths,
         )
         if still_dangerous is not None:
             raise NodeManualRequired(

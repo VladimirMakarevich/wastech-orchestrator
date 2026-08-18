@@ -106,6 +106,8 @@ That matters because `upgrade-config` preserves values but re-emits the file and
 - `gh` missing from `PATH` while `git.create_pull_request` is on;
 - Telegram misconfiguration.
 
+`worc preflight` never spends a model call. When you want the isolation claim proved rather than described — after a host change, a CLI upgrade, or before letting a flow write unattended — run `worc preflight --paid-isolation-probe`: it adds one billed call per provider that supports it and lets an agent try to write into the Git directories and the control home, reading the verdict off the filesystem. Treat `NOT DEMONSTRATED` as "unproven", not as "safe" (see [security.md](security.md#how-the-isolation-claim-is-actually-proved)).
+
 It does not probe or run your checks: it lists each configured command set with its `paths`, commands, and flags, which is enough to eyeball selection coverage. A malformed set never gets that far — the config validator rejects it on load, so every command exits 2 with the reason.
 
 Preflight does **not** validate flow files — run `worc validate-flow --all` for that (it is config-aware, so it also catches flows made invalid by a config edit, e.g. a node pinned to a provider you just removed from `agents.allowed`). It covers your own flows under `.worc/flows/` only — the packaged built-ins are excluded, so with no operator flows `--all` reports nothing to check and exits 0. Do not treat config editing as done until both preflight and `validate-flow --all` are green.
