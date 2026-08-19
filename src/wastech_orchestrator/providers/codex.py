@@ -97,8 +97,17 @@ _OUTPUT_SCHEMA_FILENAME = "output-schema.json"
 # Codex feature flags disabled for an autonomous orchestrator attempt: the non-shell tool
 # surfaces that could reach the local filesystem or spawn work outside the profiled shell
 # sandbox — hooks, custom subagents/multi-agent, computer use, in-app browser, apps/plugins. Each
-# maps to ``-c features.<name>=false``. The MCP inventory is neutralized by ``--ignore-user-config``
-# + the untrusted project layer (no server loads); the no-model capability smoke
+# is emitted as ``--disable <name>`` (an earlier note here said ``-c features.<name>=false``, which
+# the code stopped doing). Emission is conditional twice over: ``hooks`` is not disabled when
+# read-isolation is off — that is, on the shipped default — and NOTHING is disabled in the advanced
+# mode, where these surfaces are handed back deliberately. Leaving them off there would mean the
+# only way to have them was the full-access escape this product removed, turning a floor control
+# into a plain loss of function. Neighbouring flags in ``codex features list`` are not added here on
+# spec: that needs a live inventory and an owner decision, and widening a deny without a proven
+# surface is the functional over-restriction the security rules forbid.
+#
+# The MCP inventory is neutralized separately, by ``--ignore-user-config`` + the untrusted project
+# layer (no server loads); the no-model capability smoke
 # (:func:`codex_canary.run_codex_capability_smoke`, run by ``worc preflight`` / the host gate)
 # records the effective ``codex mcp list`` inventory as evidence. The per-attempt canary proves the
 # filesystem deny/read-only boundary only — it makes no MCP-inventory claim.
@@ -374,6 +383,12 @@ def _isolation_argv(
     granting it handed the sandboxed shell the orchestrator's own env-file. The heavier autonomous
     tool surfaces (multi-agent/computer/browser/apps/plugins) stay disabled (execution surfaces, not
     read-side discovery), and the pre-launch canary still holds.
+
+    ``strict_isolation: false`` — the advanced mode — drops the feature disables entirely, those
+    five included. It is the one setting where they are meant to be reachable, and refusing them
+    there would leave the removed full-access escape as their only route. Everything else in this
+    function is unchanged by the mode: the profile, its ``default_permissions`` selection and the
+    canary that proves them do not become optional because the tool surface widened.
     """
     profile = build_codex_permission_profile(
         permission_profile=_effective_permission_profile(config, request),
@@ -397,6 +412,11 @@ def _isolation_argv(
     else:
         argv += ["--ignore-user-config", "-c", f'projects.{trust}.trust_level="untrusted"']
         disabled = _DISABLED_FEATURES
+    if not strict_isolation:
+        # Advanced mode: every feature surface is handed back. The profile is still emitted (it is
+        # what the pre-launch canary re-runs to prove the local floor), so what is given up here is
+        # the tool inventory, not the filesystem boundary.
+        disabled = ()
     for feature in disabled:
         argv += ["--disable", feature]
     return argv

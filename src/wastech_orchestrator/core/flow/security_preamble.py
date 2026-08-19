@@ -118,7 +118,8 @@ def build_orchestrator_security_preamble(
         paragraphs.append(
             "On this host there is no operating-system sandbox available, so nothing outside your "
             f"own compliance keeps a write out of `.git/` or `{CONTROL_HOME_DIRNAME}/` — not the "
-            "shell, not a program the shell starts. Treat those paths as if they were read-only "
-            "hardware."
+            "shell you have been given, not a program that shell starts, and not a second shell "
+            "started by that program. This applies to every step of this run, including the ones "
+            "whose job is only to read. Treat those paths as if they were read-only hardware."
         )
     return "\n\n".join(paragraphs)

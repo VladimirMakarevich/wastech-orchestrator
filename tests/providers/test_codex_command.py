@@ -463,3 +463,22 @@ def test_no_session_id_has_no_resume(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
     assert "resume" not in _argv(codex_config, make_request())
+
+
+def test_advanced_mode_hands_back_every_feature_surface_but_keeps_the_profile(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # These five were disabled unconditionally, and the only other way to reach them was the
+    # full-access escape this product removed. Keeping them off in the one mode that exists to
+    # remove restrictions would turn a floor control into a plain loss of function.
+    argv = _argv(
+        codex_config,
+        make_request(working_directory="/clone"),
+        strict_isolation=False,
+        read_isolation_off=True,
+    )
+    assert "--disable" not in argv
+    # What does NOT become optional: the generated profile and its selection. It is the local floor
+    # in this mode, and it is what the pre-launch canary re-runs to prove that floor exists at all.
+    assert f'default_permissions="{PROFILE_NAME}"' in _config_values(argv)
+    assert any(v.startswith(f"permissions.{PROFILE_NAME}=") for v in _config_values(argv))

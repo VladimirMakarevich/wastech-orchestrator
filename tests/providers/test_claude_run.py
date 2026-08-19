@@ -500,6 +500,47 @@ def test_workspace_write_run_with_deny_policy_writes_sandbox_settings(
     assert (tmp_path / ".worc").as_posix() in sandbox["filesystem"]["denyRead"]
 
 
+def test_a_read_only_run_in_the_advanced_mode_gets_the_sandbox_that_holds_it_to_reading(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # A read-only node never reached this path before: with no Bash in its tool set there was
+    # nothing to sandbox, so no settings file was written at all. The mode gives it a shell, which
+    # makes the file appear for the first time — and that file is now half of what "read-only"
+    # means, the other half being the bare Write/Edit/NotebookEdit denies. Losing either one turns
+    # an audit node into a writer without anything failing.
+    deny = InternalDenyPolicy(
+        control_home=tmp_path / ".worc",
+        private_home=tmp_path / ".worc",
+        env_file=None,
+        provider_homes=(),
+    )
+    fake = FakeRun(stdout=_success_stream())
+    provider = ClaudeCodeProvider(
+        claude_config,
+        security=replace(security_config, strict_isolation=False),
+        artifacts_root=tmp_path,
+        clock=lambda: FIXED_TIME,
+        run_process=fake,
+        sandbox_probe=lambda: SandboxCapability.MACOS,
+        deny_policy=deny,
+    )
+    provider.run(replace(_make_ws_request(tmp_path), permission_profile="read-only"))
+
+    argv = fake.captured["argv"]
+    assert "--tools" not in argv
+    assert "Bash" in argv[argv.index("--allowedTools") + 1].split(",")
+    assert {"Write", "Edit", "NotebookEdit"} <= set(
+        argv[argv.index("--disallowedTools") + 1].split(",")
+    )
+    sandbox = json.loads(Path(argv[argv.index("--settings") + 1]).read_text(encoding="utf-8"))[
+        "sandbox"
+    ]
+    # The whole clone, not just the control paths: what holds this node to reading is the OS, and
+    # a command the auto-approve list let through still cannot change the repository.
+    assert (tmp_path / "clone").as_posix() in sandbox["filesystem"]["denyWrite"]
+    assert sandbox["autoAllowBashIfSandboxed"] is True
+
+
 def _make_ws_request(tmp_path: Path) -> AgentRunRequest:
     return AgentRunRequest(
         task_id="task-001",
@@ -543,6 +584,7 @@ _FULL_CLAUDE_HELP = (
     "  --strict-mcp-config            Only use MCP servers from --mcp-config\n"
     "  --tools <tools...>             Specify the list of available tools\n"
     "  --allowedTools <tools...>      Tools allowed without prompting\n"
+    "  --disallowedTools <tools...>   Tools denied without prompting\n"
     "  -r, --resume [value]           Resume a conversation by session ID\n"
 )
 
@@ -620,6 +662,51 @@ def test_preflight_fails_when_isolation_flag_missing(
     health = _probing_provider(claude_config, security_config, tmp_path, fake).preflight()
     assert health.supports_required_features is False
     assert "--setting-sources" in health.message
+
+
+def test_preflight_fails_when_the_flag_carrying_the_floor_was_renamed(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # --disallowedTools carries every path-scoped write deny, and in the advanced mode it carries
+    # the floor ALONE — there is no existence gate left behind it. A CLI that renamed it would
+    # otherwise run the whole task with not one deny in force and fail nowhere, so this has to be
+    # caught here: offline, before a single paid model call. Checked at BOTH isolation settings,
+    # because the flag is emitted at both and the mode-conditional filtering above it must not
+    # accidentally drop this one too.
+    help_text = _FULL_CLAUDE_HELP.replace(
+        "  --disallowedTools <tools...>   Tools denied without prompting\n", ""
+    )
+    for strict in (True, False):
+        fake = _ProbingClaudeRun(help_text=help_text)
+        provider = _probing_provider(
+            claude_config, replace(security_config, strict_isolation=strict), tmp_path, fake
+        )
+        health = provider.preflight()
+        assert health.supports_required_features is False, strict
+        assert "--disallowedTools" in health.message
+
+
+def test_preflight_stops_requiring_the_existence_gate_in_the_advanced_mode(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # The advanced mode emits no --tools at all, so a CLI that dropped it runs this configuration
+    # perfectly well. Demanding a flag the adapter never passes would refuse a healthy host.
+    help_text = _FULL_CLAUDE_HELP.replace(
+        "  --tools <tools...>             Specify the list of available tools\n", ""
+    )
+    advanced = replace(security_config, strict_isolation=False)
+    fake = _ProbingClaudeRun(help_text=help_text)
+    assert (
+        _probing_provider(claude_config, advanced, tmp_path, fake)
+        .preflight()
+        .supports_required_features
+        is True
+    )
+    # ...while the shipped default still depends on it and still blocks.
+    strict = _ProbingClaudeRun(help_text=help_text)
+    health = _probing_provider(claude_config, security_config, tmp_path, strict).preflight()
+    assert health.supports_required_features is False
+    assert "--tools" in health.message
 
 
 def test_preflight_degrades_when_resume_flag_missing(

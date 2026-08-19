@@ -2951,6 +2951,30 @@ def test_agent_cli_config_is_fingerprinted_by_digest_not_by_value(
     assert drift is not None and secret not in drift.summary()
 
 
+def test_the_clone_codex_tree_is_fingerprinted_file_by_file(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # `.codex/` is a tree, not a single file, and it matters more than the two flat ones: the
+    # advanced mode stops disabling Codex's `hooks` surface, so a hook planted here during the
+    # attempt runs on the next one. Every file under it is digested, so adding one is drift by
+    # itself — a fingerprint that only covered `config.toml` would miss the hook script beside it.
+    _task(store)
+    codex = git_repo.clone / ".codex" / "hooks"
+    codex.mkdir(parents=True, exist_ok=True)
+    (codex / "pre.sh").write_text("echo one\n", encoding="utf-8")
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+
+    before = gm.capture_git_control_state()
+    assert ".codex/hooks/pre.sh" in before.tool_config
+    assert gm.compare_git_control_state(before) is None
+
+    (codex / "pre.sh").write_text("echo two\n", encoding="utf-8")
+    drift = gm.compare_git_control_state(before)
+    assert drift is not None
+    assert any(item.aspect == "tool_config" for item in drift.items)
+
+
 def test_push_refuses_when_the_push_destination_was_rewritten(
     git_repo,
     store: StateStore,

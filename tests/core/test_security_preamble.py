@@ -104,3 +104,18 @@ def test_preamble_has_no_secret_or_unrendered_variable() -> None:
 def test_preamble_field_is_not_a_prompt_variable() -> None:
     # It cannot be reached/overridden from a task or flow role via the prompt renderer.
     assert "security_preamble" not in ALLOWED_PROMPT_VARS
+
+
+def test_the_no_sandbox_paragraph_covers_the_nodes_that_only_read() -> None:
+    """ТA.9.3: the honest statement got wider when every node gained a shell.
+
+    Before this phase a read-only node had no shell on any host, so "nothing keeps a write out"
+    was a statement about writers. It now applies to every node in the run, and a paragraph that
+    still read as if it were about writers would leave the reader of an audit node believing the
+    warning was not addressed to them.
+    """
+    text = build_orchestrator_security_preamble(
+        read_isolation_off=True, advanced_mode=True, no_write_floor=True
+    )
+    assert "every step of this run, including the ones whose job is only to read" in text
+    assert "not a second shell" in text

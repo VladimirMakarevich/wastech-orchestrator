@@ -955,6 +955,10 @@ def test_advanced_mode_is_announced_with_all_four_floor_levels(
     assert "held MECHANICALLY" in out  # level 1 — the only one that is a mechanism
     assert "WILL NOT BE HELD BY ANYTHING" in out and "no network yet" in out  # level 3, in future
     assert "forwarded WHOLE" in out  # what the mode actually changed today
+    # The tool axis, which this phase made true: the gate is gone, every node has a shell, and the
+    # three friction denies must not be announced as a boundary they are not.
+    assert "no longer gated by an allowlist" in out and "EVERY node gets a shell" in out
+    assert "Persistence is NOT held" in out
     assert "preflight: ready" in out
 
 

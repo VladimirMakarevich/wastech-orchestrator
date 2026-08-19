@@ -88,6 +88,35 @@ def test_claude_read_only_with_the_grant_has_a_shell(claude_config: ProviderConf
     )
 
 
+def test_claude_read_only_has_a_shell_in_the_advanced_mode(claude_config: ProviderConfig) -> None:
+    # The link the whole phase turns on, and it is easy to break without noticing: once the mode
+    # gives a read-only node a shell, THIS answer is what makes the core resolve the write-deny
+    # roots for an attempt that was never meant to write and bracket it for drift. Without it a
+    # read-only node would reach `.git` with no explicit deny naming it anywhere.
+    for capability in (
+        SandboxCapability.MACOS,
+        SandboxCapability.NATIVE_WINDOWS,
+        SandboxCapability.LINUX_MISSING_DEPS,
+    ):
+        assert (
+            claude_mod.attempt_has_shell(
+                claude_config,
+                _query("read-only", strict_isolation=False),
+                capability=capability,
+            )
+            is True
+        ), capability
+    # And the grant is irrelevant to that answer now — declared or not, the shell is there.
+    assert (
+        claude_mod.attempt_has_shell(
+            claude_config,
+            _query("read-only", git_evidence=False, strict_isolation=False),
+            capability=SandboxCapability.MACOS,
+        )
+        is True
+    )
+
+
 def test_claude_workspace_write_has_a_shell(claude_config: ProviderConfig) -> None:
     assert (
         claude_mod.attempt_has_shell(
@@ -217,3 +246,28 @@ def test_an_unwired_router_reports_a_shell(base_config: OrchestratorConfig) -> N
     assert (
         router.route_grants_shell(route, permission_profile="read-only", git_evidence=False) is True
     )
+
+
+def test_the_route_query_gives_a_read_only_node_a_shell_in_the_advanced_mode(
+    base_config: OrchestratorConfig,
+) -> None:
+    # End to end, with Claude the ONLY allowed provider so no fallback can supply the answer: the
+    # same route that reports no shell on the shipped default reports one in the mode. This is the
+    # question the core keys the write-guard resolution and the drift bracket on, so if this ever
+    # regresses a read-only node reaches `.git` unwatched and with nothing naming it in a deny.
+    claude_only = replace(
+        base_config, agents=replace(base_config.agents, allowed=(ProviderId.CLAUDE,))
+    )
+    strict = AgentRouter(claude_only, _providers(), shell_checks=SHELL_CHECKS)
+    advanced = AgentRouter(
+        replace(claude_only, security=replace(claude_only.security, strict_isolation=False)),
+        _providers(),
+        shell_checks=SHELL_CHECKS,
+    )
+    for router, expected in ((strict, False), (advanced, True)):
+        route = router.resolve_route("review")
+        assert route.fallback is None
+        answer = router.route_grants_shell(
+            route, permission_profile="read-only", git_evidence=False
+        )
+        assert answer is expected

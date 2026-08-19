@@ -540,14 +540,16 @@ def test_linux_missing_deps_read_only_is_unaffected(
 def test_non_strict_isolation_keeps_bash_on_unsandboxed_host(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # strict_isolation:false → the operator accepts unsandboxed Bash; no raise, no drop.
+    # strict_isolation:false → the operator accepts unsandboxed Bash; no raise, no drop. The shell
+    # is now read off --allowedTools: the advanced mode emits no existence gate at all.
     argv = _argv(
         claude_config,
         make_request(permission_profile="workspace-write"),
         capability=SandboxCapability.LINUX_MISSING_DEPS,
         strict_isolation=False,
     )
-    assert "Bash" in argv[argv.index("--tools") + 1]
+    assert "--tools" not in argv
+    assert "Bash" in argv[argv.index("--allowedTools") + 1].split(",")
 
 
 def test_internal_read_denies_seal_read_write_edit(
@@ -848,9 +850,11 @@ def test_granted_read_only_shell_drops_on_native_windows_under_strict() -> None:
     assert plan.needs_sandbox is False
 
 
-def test_granted_read_only_shell_kept_on_native_windows_when_isolation_is_off() -> None:
+def test_read_only_shell_kept_on_native_windows_when_isolation_is_off() -> None:
     # strict_isolation: false is the operator saying they own the risk — the same arm the adapter
-    # already takes for workspace-write on this host.
+    # already takes for workspace-write on this host. The shell no longer depends on the grant, and
+    # is no longer scoped by it: in the advanced mode the verb list is not applied at all, so the
+    # names go out bare even for a node that did declare git_evidence.
     plan = resolve_claude_tools(
         "read-only",
         SandboxCapability.NATIVE_WINDOWS,
@@ -859,7 +863,7 @@ def test_granted_read_only_shell_kept_on_native_windows_when_isolation_is_off() 
         git_evidence=True,
     )
     assert "Bash" in plan.tools
-    assert "Bash(git log:*)" in plan.allow_patterns
+    assert plan.allow_patterns == ()
     assert plan.needs_sandbox is False
 
 
@@ -953,3 +957,144 @@ def test_sandbox_settings_unchanged_when_no_deny_write_root_is_passed() -> None:
     assert build_sandbox_settings(
         policy, _write_guard(), network_access=False
     ) == build_sandbox_settings(policy, _write_guard(), network_access=False, deny_write_root=None)
+
+
+# --- Advanced mode: the tool-existence gate is gone (Ам-3) ---------------------------------------
+
+
+def test_advanced_mode_emits_no_existence_gate_and_gives_every_node_a_shell(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # The whole point of the inversion: --tools stops being emitted, so a tool this codebase has
+    # never heard of exists for the session. read-only is the case that changes most — it had no
+    # shell at all, and now carries both of them, bare (every invocation auto-approves; a headless
+    # run has nobody to answer a prompt).
+    for profile in ("read-only", "workspace-write"):
+        argv = _argv(
+            claude_config, make_request(permission_profile=profile), strict_isolation=False
+        )
+        assert "--tools" not in argv, profile
+        allowed = argv[argv.index("--allowedTools") + 1].split(",")
+        assert "Bash" in allowed and "PowerShell" in allowed, profile
+        # Bare names only — the git-evidence verb scoping is not applied in this mode.
+        assert not any("(" in name for name in allowed), profile
+        # ...and each name once: workspace-write already carries Bash, and a duplicate is noise in
+        # the one artifact somebody reads during an incident.
+        assert len(allowed) == len(set(allowed)), profile
+        # dontAsk would auto-deny everything not on that list, which would leave a read-only node
+        # exactly as tool-bound as before the gate was removed.
+        assert argv[argv.index("--permission-mode") + 1] == "acceptEdits", profile
+
+
+def test_advanced_mode_floor_survives_every_other_relaxation(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # The floor is the path-scoped write denies on gitdir/common-dir/hooks/tasks — the one part of
+    # the deny list a shell cannot walk around, because the CLI's own editing tools never pass
+    # through the OS sandbox. It has to hold at EVERY combination of the other relaxations, since
+    # each of them is an independent switch an operator can flip.
+    for read_isolation_off in (False, True):
+        for native_memory in (False, True):
+            for profile in ("read-only", "workspace-write"):
+                config = replace(claude_config, allow_native_memory=native_memory)
+                req = make_request(permission_profile=profile, write_guard=_write_guard())
+                argv = _argv(
+                    config,
+                    req,
+                    internal_deny=_INTERNAL_DENY,
+                    strict_isolation=False,
+                    read_isolation_off=read_isolation_off,
+                )
+                case = (read_isolation_off, native_memory, profile)
+                disallowed = argv[argv.index("--disallowedTools") + 1]
+                for path in ("//repo/.git", "//repo/.git/hooks", "//repo/tasks", "//repo/.worc"):
+                    for kind in ("Write", "Edit", "NotebookEdit"):
+                        assert f"{kind}({path}/**)" in disallowed, (case, path, kind)
+                assert "EnterWorktree" in disallowed.split(","), case
+
+
+def test_advanced_mode_keeps_a_read_only_node_from_writing(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # A shell is not a licence to write. With the existence gate gone, the write tools exist unless
+    # they are named, so read-only now denies them by bare name; workspace-write must not, or the
+    # profile would stop meaning anything.
+    read_only = _argv(
+        claude_config, make_request(permission_profile="read-only"), strict_isolation=False
+    )
+    denied = read_only[read_only.index("--disallowedTools") + 1].split(",")
+    assert {"Write", "Edit", "NotebookEdit"} <= set(denied)
+    writer = _argv(
+        claude_config, make_request(permission_profile="workspace-write"), strict_isolation=False
+    )
+    assert "Write" not in writer[writer.index("--disallowedTools") + 1].split(",")
+
+
+def test_advanced_mode_does_not_hand_the_network_to_a_node_that_was_granted_none(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # The web tools used to be withheld by simply not appearing in --tools. Dropping that gate would
+    # have handed them to every node as a side effect, opening an axis that belongs to a later phase
+    # — so the mode names them itself when the flow granted no network, and stops when it did.
+    offline = _argv(claude_config, make_request(network_access=False), strict_isolation=False)
+    denied = offline[offline.index("--disallowedTools") + 1].split(",")
+    assert "WebFetch" in denied and "WebSearch" in denied
+    online = _argv(claude_config, make_request(network_access=True), strict_isolation=False)
+    allowed = online[online.index("--allowedTools") + 1].split(",")
+    assert "WebFetch" in allowed and "WebSearch" in allowed
+    assert "WebFetch" not in online[online.index("--disallowedTools") + 1].split(",")
+
+
+def test_advanced_mode_keeps_the_shell_on_a_host_that_cannot_sandbox_it(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # Owner decision: a host with no OS sandbox is a loud line, not a refusal. Both classes are
+    # injected rather than probed, so this holds on any CI host. What must NOT happen is a
+    # CAPABILITY_UNAVAILABLE — that would stop a configuration which runs today.
+    for capability in (SandboxCapability.NATIVE_WINDOWS, SandboxCapability.LINUX_MISSING_DEPS):
+        plan = resolve_claude_tools(
+            "read-only", capability, False, strict_isolation=False, git_evidence=False
+        )
+        assert "Bash" in plan.tools, capability
+        # No sandbox file is written for such an attempt — there is nothing to write it against.
+        assert plan.needs_sandbox is False, capability
+        argv = _argv(
+            claude_config,
+            make_request(permission_profile="read-only"),
+            capability=capability,
+            strict_isolation=False,
+        )
+        assert "--settings" not in argv, capability
+
+
+def test_sandbox_file_states_the_headless_auto_approval_instead_of_inheriting_it(
+    claude_config: ProviderConfig,
+) -> None:
+    # Relying on the vendor default is a bet: were it ever false, every sandboxed command would ask
+    # permission and a headless node would burn its turns on prompts nobody can answer.
+    for read_isolation_off in (False, True):
+        settings = build_sandbox_settings(
+            _deny_policy(),
+            _write_guard(),
+            network_access=False,
+            read_isolation_off=read_isolation_off,
+        )["sandbox"]
+        assert settings["autoAllowBashIfSandboxed"] is True
+        assert settings["allowUnsandboxedCommands"] is False
+
+
+def test_the_shipped_default_builds_the_argv_it_always_did(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # The inversion is reachable only through strict_isolation: false. With the mode off the argv is
+    # what it was before this phase existed — including the tool flags carrying identical joined
+    # strings and NotebookEdit staying out of the path denies (the tool does not exist there, so
+    # naming it would be noise).
+    for profile in ("read-only", "workspace-write"):
+        req = make_request(permission_profile=profile, write_guard=_write_guard())
+        argv = _argv(claude_config, req, internal_deny=_INTERNAL_DENY, denied=DENIED)
+        assert argv[argv.index("--tools") + 1] == argv[argv.index("--allowedTools") + 1]
+        disallowed = argv[argv.index("--disallowedTools") + 1]
+        assert "NotebookEdit" not in disallowed, profile
+        for name in ("EnterWorktree", "AskUserQuestion", "CronCreate", "RemoteTrigger"):
+            assert name not in disallowed.split(","), profile

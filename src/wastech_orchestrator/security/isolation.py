@@ -64,9 +64,10 @@ _FLOOR_LOSS = (
 # The two tails are adjacent on purpose: both describe the same missing floor, and keeping them one
 # line apart is what stops one of them from drifting into a claim the other contradicts.
 _FLOOR_LOSS_SHELL_UNSANDBOXED = (
-    "; with strict_isolation=false the shell runs unsandboxed, so anything it starts — which no "
-    "tool policy sees at all — reaches both paths directly, and only the prompt's advisory "
-    "contract and after-the-fact drift detection remain"
+    "; with strict_isolation=false EVERY node here keeps an unsandboxed shell, read-only ones "
+    "included, so anything any of them starts — which no tool policy sees at all — reaches both "
+    "paths directly, and only the prompt's advisory contract and after-the-fact drift detection "
+    "remain"
 )
 _FLOOR_LOSS_SHELL_WITHHELD = (
     "; with strict_isolation=true the shell is withheld rather than unsandboxed (dropped from the "
@@ -97,6 +98,14 @@ _MODE_REDACTION = (
     "redaction: secret-named values are scrubbed from logs and artifacts by NAME alone now, "
     "without the allowlist excusing any — so a secret-named variable holding something harmless "
     "may appear as [REDACTED] in output"
+)
+_MODE_TOOLS = (
+    "tools: the agent CLI's built-in tool set is no longer gated by an allowlist, so EVERY node "
+    "gets a shell — read-only ones included — and a tool shipped by a future CLI release is "
+    "available the day it ships, without anyone here having read its name. What is still denied: "
+    "the file-editing tools on .git, .worc and the task tree, which is the floor; and four names "
+    "that are friction rather than a boundary, since a shell walks around all four. Persistence is "
+    "NOT held — a task can leave behind a launch agent, a systemd unit or a shell rc line"
 )
 
 # The four levels, in the words of ТA.1. The third is deliberately in the future tense: the agent
@@ -141,7 +150,7 @@ def describe_advanced_mode(config: OrchestratorConfig) -> tuple[str, ...]:
     """
     if config.security.strict_isolation:
         return ()
-    return (_MODE_SUBJECT, _MODE_ENVIRONMENT, _MODE_REDACTION, *_FLOOR_LEVELS)
+    return (_MODE_SUBJECT, _MODE_ENVIRONMENT, _MODE_REDACTION, _MODE_TOOLS, *_FLOOR_LEVELS)
 
 
 def check_isolation(

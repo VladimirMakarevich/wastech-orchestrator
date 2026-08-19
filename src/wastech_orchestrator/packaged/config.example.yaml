@@ -148,6 +148,21 @@ security:
                                       #   Redaction widens to compensate: secret-named values are
                                       #   scrubbed by NAME alone, so a secret-named variable with a
                                       #   harmless value may print as [REDACTED].
+                                      #
+                                      #   Tools: no allowlist is passed to the agent CLI, so EVERY
+                                      #   built-in tool exists and EVERY node gets a shell —
+                                      #   read-only ones too, and a tool shipped by a future CLI
+                                      #   release is available the day it ships. Still denied: the
+                                      #   file-editing tools on .git, .worc and tasks/ (that is
+                                      #   level 1 above), plus AskUserQuestion, CronCreate,
+                                      #   RemoteTrigger and EnterWorktree. Read those four as
+                                      #   friction, not as a boundary: a shell walks around all of
+                                      #   them, so PERSISTENCE IS NOT HELD — a task can leave
+                                      #   behind a launch agent, a systemd unit or a shell rc line
+                                      #   with no tool at all. Codex likewise stops disabling its
+                                      #   multi-agent / computer-use / browser / apps / plugins
+                                      #   surfaces; its permission profile and the canary that
+                                      #   proves it are still emitted on every attempt.
   disable_read_isolation: true        # DEFAULT true — read-isolation is OFF out of the box (set
                                       #   false to KEEP it on). true disables READ-isolation for
                                       #   provider runs: Claude reloads native
@@ -175,10 +190,14 @@ security:
                                       #   instead of grepping a changelog for delivery history.
                                       #   While this is false a declaring flow still loads and
                                       #   validates — it just runs exactly as it does today, with no
-                                      #   shell. Turning it on does NOT make the node writable: the
-                                      #   sandbox write-denies the whole clone (Claude) / forbids
-                                      #   every mutation outright (Codex), denied_commands stays the
-                                      #   floor, and commit/push/PR remain the orchestrator's alone.
+                                      #   shell. Under strict_isolation: false this key does nothing
+                                      #   at all — every node already has an unscoped shell, so
+                                      #   there is no capability left to grant and the verb list is
+                                      #   not applied. Turning it on does NOT make the node
+                                      #   writable: the sandbox write-denies the whole clone
+                                      #   (Claude) / forbids every mutation outright (Codex),
+                                      #   denied_commands stays the floor, and commit/push/PR
+                                      #   remain the orchestrator's alone.
                                       #   Operator-config ONLY (never a task/flow/extra_args key).
   allowed_environment:                  # REPLACES (does not extend) the default — keep the OS-launch
                                         # essentials for YOUR OS or the spawned CLI may fail to start.

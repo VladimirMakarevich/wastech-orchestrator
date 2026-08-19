@@ -3250,11 +3250,15 @@ def test_a_host_without_a_floor_is_announced_and_the_run_continues(
     make_git_config,
     git_run,
     tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     # The advisory twin of the gate above, and the difference that matters: the same preamble that
     # fails the run for an illegal config only speaks up here. The branch IS created, so the loss is
     # on the record while the operator keeps their host.
+    #
+    # `_collected_warnings` rather than `caplog`: once any run configures runtime logging it sets
+    # `propagate = False` on the package logger, so a root-attached caplog silently sees nothing —
+    # and a loud-line assertion that can pass because it captured everything and fail because it
+    # captured nothing is worse than no assertion at all.
     orch, store, _, _ = _build(
         git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
     )
@@ -3262,21 +3266,20 @@ def test_a_host_without_a_floor_is_announced_and_the_run_continues(
         "wastech_orchestrator.core.orchestrator.describe_host_floor",
         lambda _config, _checks: ("claude: no OS sandbox on this host — .git and .worc writable",),
     )
-    with caplog.at_level(logging.WARNING):
+    with _collected_warnings() as messages:
         result = orch.run_task(_complete_task(tmp_path, "task-floor"))
 
     assert result.final_status is not Status.FAILED
     row = store.get_task("task-floor")
     assert row is not None and row.status is not Status.FAILED
     assert git_run(["branch", "--list", "worc/*"], git_repo.clone) != ""  # the run went ahead
-    assert any("isolation floor NONE — claude: no OS sandbox" in r.message for r in caplog.records)
+    assert any("isolation floor NONE — claude: no OS sandbox" in m for m in messages)
 
 
 def test_advanced_mode_is_announced_in_the_run_log_and_recorded_durably(
     git_repo,
     make_git_config,
     tmp_path: Path,
-    caplog: pytest.LogCaptureFixture,
 ) -> None:
     """ТA.6.2/ТA.6.3: the mode reaches the run log, the ledger record and the frozen bundle.
 
@@ -3296,13 +3299,16 @@ def test_advanced_mode_is_announced_in_the_run_log_and_recorded_durably(
         check_verdicts=[0],
         config_kwargs={"strict_isolation": False, "clean_runs_on_success": False},
     )
-    with caplog.at_level(logging.WARNING):
+    # See the sibling test above for why this is not `caplog`: the package logger stops propagating
+    # as soon as any run configures logging, so under a serial run the capture came up empty.
+    with _collected_warnings() as messages:
         result = orch.run_task(_complete_task(tmp_path, "task-mode"))
 
     assert result.final_status is not Status.FAILED  # announced, never refused
-    messages = [r.message for r in caplog.records]
     assert any("advanced-mode: ON (security.strict_isolation=false)" in m for m in messages)
     assert any("floor 3 of 4" in m and "no network yet" in m for m in messages)
+    # The tool axis this phase added, in the same line and from the same formatter as preflight's.
+    assert any("EVERY node gets a shell" in m and "Persistence is NOT held" in m for m in messages)
     assert ledger.records()[0]["advanced_mode"] is True
     manifests = list(art.rglob("control-bundles/*/manifest.json"))
     assert manifests, "the frozen control bundle should exist with clean_runs_on_success off"
