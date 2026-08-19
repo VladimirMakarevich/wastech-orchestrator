@@ -8,6 +8,7 @@ from wastech_orchestrator.config.schema import SecurityConfig
 from wastech_orchestrator.security import env as env_mod
 from wastech_orchestrator.security.env import (
     build_child_env,
+    build_orchestrator_env,
     default_allowed_environment,
     describe_expansions,
     env_name_is_covered,
@@ -17,10 +18,14 @@ from wastech_orchestrator.security.env import (
 )
 
 
-def _security(*forwarded: str, assigned: dict[str, str] | None = None) -> SecurityConfig:
-    """A policy carrying only the two fields the env builder reads."""
+def _security(
+    *forwarded: str,
+    assigned: dict[str, str] | None = None,
+    strict_isolation: bool = True,
+) -> SecurityConfig:
+    """A policy carrying only the fields the env builders read."""
     return SecurityConfig(
-        strict_isolation=True,
+        strict_isolation=strict_isolation,
         allowed_environment=forwarded,
         denied_read_paths=(),
         denied_commands=(),
@@ -344,3 +349,119 @@ def test_systemroot_via_a_pattern_is_not_a_launch_failure(entry: str) -> None:
 def test_a_pattern_that_cannot_yield_systemroot_still_fails() -> None:
     # The reconciliation must not turn the gate off: an unrelated pattern is not coverage.
     assert launch_critical_env_issue(("PATH", "DOTNET_*"), "Windows") is not None
+
+
+# --- advanced mode: the parent environment forwarded whole (ТA.2.1) ------------------------------
+
+
+_MODE_PARENT = {
+    "PATH": "/usr/bin",
+    "HOME": "/home/u",
+    "NPM_TOKEN": "npm-secret-value",
+    "DOTNET_ROOT": "/opt/dotnet",
+    "RANDOM_THING": "kept",
+}
+
+
+def test_mode_off_reproduces_the_allowlisted_environment_byte_for_byte() -> None:
+    """Т0.5/ТA.2.1: with strict isolation on, the child environment is exactly what it always was.
+
+    The regression this guards is the whole reason the mode is a branch and not a rewrite: an
+    implementation that "simplified" the strict path while adding the wide one would change every
+    run that never asked for the mode. Compared as a list of items, so key ORDER is pinned too —
+    the builder's documented contract, and what makes a run's environment reproducible.
+    """
+    security = _security("PATH", "HOME", "DOTNET_*", assigned={"CI": "1"})
+    child = build_child_env(security, _MODE_PARENT)
+    assert list(child.items()) == [
+        ("PATH", "/usr/bin"),
+        ("HOME", "/home/u"),
+        ("DOTNET_ROOT", "/opt/dotnet"),
+        ("CI", "1"),
+    ]
+    # And the same policy object through the orchestrator's own builder agrees, because under strict
+    # isolation the two policies ARE the same one.
+    assert build_orchestrator_env(security, _MODE_PARENT) == child
+
+
+def test_mode_on_forwards_every_parent_name_including_secret_named_ones() -> None:
+    """ТA.2.1: `strict_isolation: false` drops the name gate entirely — no allowlist consulted.
+
+    `NPM_TOKEN` is in the parent and in no allowlist, and it is forwarded: a toolchain the agent has
+    to drive needs it. That is the trade the mode makes, and ТA.7.1 is what pays for it — the same
+    value becomes a redaction literal instead of being withheld.
+    """
+    child = build_child_env(_security(strict_isolation=False), _MODE_PARENT)
+    assert child == _MODE_PARENT
+
+
+def test_mode_on_ignores_the_allowlist_rather_than_intersecting_it() -> None:
+    # A narrow allowlist does not narrow the mode, and an allowlist naming absent variables does not
+    # add empty keys: in the mode the list is inert, not an input.
+    assert build_child_env(_security("PATH", strict_isolation=False), _MODE_PARENT) == _MODE_PARENT
+    assert build_child_env(_security("NOPE", strict_isolation=False), _MODE_PARENT) == _MODE_PARENT
+
+
+def test_mode_on_sorts_the_forwarded_names_and_assigns_extras_last() -> None:
+    # Sorted, because `os.environ` iteration order is not reproducible while this result is compared
+    # in tests and rendered into a run's artifacts. An assigned name still wins on value and keeps
+    # its forwarded position, exactly as under strict isolation.
+    child = build_child_env(
+        _security(assigned={"HOME": "/assigned", "ZZ_NEW": "z"}, strict_isolation=False),
+        _MODE_PARENT,
+    )
+    assert list(child) == ["DOTNET_ROOT", "HOME", "NPM_TOKEN", "PATH", "RANDOM_THING", "ZZ_NEW"]
+    assert child["HOME"] == "/assigned"
+
+
+def test_env_file_names_are_withheld_from_the_wide_forward(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ТA.2.3: the orchestrator's own `.worc/.env` names never ride the mode's pass-through.
+
+    The agent is denied reading that file (the private deny set covers it at every read-isolation
+    setting); forwarding its contents in the environment would hand over exactly what the deny
+    protects. Withheld by NAME, so an operator who wants one back assigns it explicitly.
+    """
+    monkeypatch.setattr(env_mod, "env_file_names", lambda: frozenset({"NPM_TOKEN"}))
+    child = build_child_env(_security(strict_isolation=False), _MODE_PARENT)
+    assert "NPM_TOKEN" not in child
+    assert child == {k: v for k, v in _MODE_PARENT.items() if k != "NPM_TOKEN"}
+
+
+def test_an_env_file_name_comes_back_only_by_explicit_assignment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The documented way back: `extra_environment` is assignment, i.e. a decision in the operator's
+    # config rather than an inherited default. It must win over the withholding, or the escape hatch
+    # ТA.2.3 points at would not exist.
+    monkeypatch.setattr(env_mod, "env_file_names", lambda: frozenset({"NPM_TOKEN"}))
+    child = build_child_env(
+        _security(assigned={"NPM_TOKEN": "chosen"}, strict_isolation=False), _MODE_PARENT
+    )
+    assert child["NPM_TOKEN"] == "chosen"
+
+
+def test_env_file_names_are_still_forwarded_under_strict_isolation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The withholding belongs to the wide forward, not to the allowlist.
+
+    Under strict isolation a name reaches a child only because the operator listed it, which is
+    already the deliberate act ТA.2.3 asks for — so subtracting the env-file there would silently
+    break a configuration that works today.
+    """
+    monkeypatch.setattr(env_mod, "env_file_names", lambda: frozenset({"NPM_TOKEN"}))
+    child = build_child_env(_security("NPM_TOKEN"), _MODE_PARENT)
+    assert child == {"NPM_TOKEN": "npm-secret-value"}
+
+
+def test_the_orchestrators_own_processes_keep_the_allowlist_in_the_mode() -> None:
+    """ТA.2.1/ТA.1.6: the mode widens what the agent may do; git/gh are not the agent.
+
+    Byte-for-byte the strict result, with the mode on — the property that keeps a shell `GH_REPO` or
+    `GIT_DIR` from reaching the one code path that publishes.
+    """
+    parent = {**_MODE_PARENT, "GH_REPO": "someone/else", "GIT_DIR": "/tmp/evil/.git"}
+    security = _security("PATH", "HOME", strict_isolation=False)
+    assert build_orchestrator_env(security, parent) == {"PATH": "/usr/bin", "HOME": "/home/u"}

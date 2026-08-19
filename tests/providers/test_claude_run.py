@@ -667,7 +667,9 @@ def test_preflight_auth_reports_logged_in_without_copying_any_identity(
     rendered = repr(health)
     assert not any(secret in rendered for secret in (email, org_id, org_name))
     # ``--json`` is passed explicitly rather than relying on it staying the CLI's default.
-    assert ["claude", "auth", "status", "--json"] in fake.argvs
+    # The subcommand, not argv[0]: the adapter pins the configured command to its resolved
+    # absolute path at launch, so argv[0] depends on where this host installed the CLI.
+    assert ["auth", "status", "--json"] in [argv[1:] for argv in fake.argvs]
 
 
 def test_preflight_auth_reports_logged_out(
@@ -841,12 +843,21 @@ def test_the_paid_probe_is_skipped_without_an_os_sandbox(
     assert fake.calls == 0
 
 
-def test_the_paid_probe_is_absent_without_strict_isolation(
+def test_the_paid_probe_runs_in_advanced_mode_too(
     claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
 ) -> None:
+    """ТA.9.2 applied to the paid probe: `strict_isolation: false` is not an exemption from proof.
+
+    It used to return `None` there on the grounds that no claim was being made. The claim is made:
+    the sandbox settings file is written whenever the resolved tool set keeps a shell and the host
+    can sandbox it, at either setting — so in advanced mode the write-deny on `.git` and `.worc` is
+    still asserted, and it is the only part of the floor that does not need the agent's cooperation.
+    Declining to prove it exactly where the rest of the enforcement is relaxed had it backwards.
+    """
     fake = _WritingRun(write=lambda path: True, stdout=_success_stream())
     provider = _paid_provider(
         claude_config, replace(security_config, strict_isolation=False), tmp_path, fake
     )
-    assert provider.paid_isolation_probe(home_dir=tmp_path) is None
-    assert fake.calls == 0
+    report = provider.paid_isolation_probe(home_dir=tmp_path)
+    assert report is not None
+    assert fake.calls == 1

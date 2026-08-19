@@ -694,23 +694,32 @@ def test_read_isolation_off_uses_project_setting_sources_and_drops_strict_mcp(
     assert "--append-system-prompt-file" not in argv
 
 
-def test_read_isolation_off_lifts_internal_reads_keeps_writes_and_blacklist(
-    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+@pytest.mark.parametrize("read_isolation_off", [False, True])
+def test_the_private_set_is_read_denied_at_either_read_isolation_setting(
+    claude_config: ProviderConfig,
+    make_request: Callable[..., AgentRunRequest],
+    read_isolation_off: bool,
 ) -> None:
-    # The private set becomes READABLE (no Read deny) but stays Write/Edit-denied; the public
-    # denied_read_paths blacklist (.env/secrets) keeps its Read deny; command + write-guard denies
-    # stay (write side).
+    """The private set keeps its Read deny even with read-isolation OFF (ТA.2.3's precondition).
+
+    It used to lose it, and since the resolved env-file is in that set, the plain ``Read`` tool
+    could open the orchestrator's own ``.worc/.env`` on the shipped default — while ТA.2.3 relies on
+    exactly that read being denied to justify withholding those names from the child environment.
+    Parameterized over both settings because the point is that the verdict no longer depends on the
+    hatch: read-isolation restores native *discovery*, never the orchestrator's own secrets.
+    """
     argv = _argv(
         claude_config,
         make_request(permission_profile="workspace-write", write_guard=_write_guard()),
         internal_deny=_INTERNAL_DENY,
         denied=DENIED,
         denied_read=(".env", "secrets/**"),
-        read_isolation_off=True,
+        read_isolation_off=read_isolation_off,
     )
     disallowed = argv[argv.index("--disallowedTools") + 1]
+    assert "Read(//repo/.worc)" in disallowed and "Read(//repo/.worc/**)" in disallowed
+    assert "Read(//repo/.worc/.env)" in disallowed
     assert "Write(//repo/.worc/**)" in disallowed and "Edit(//repo/.worc/**)" in disallowed
-    assert "Read(//repo/.worc)" not in disallowed and "Read(//repo/.worc/**)" not in disallowed
     # Public blacklist read-deny stays (decision: keep the target-repo secret blacklist enforced).
     assert "Read(.env)" in disallowed and "Read(secrets/**)" in disallowed
     # Write side stays: command denies + write-guard Write/Edit.

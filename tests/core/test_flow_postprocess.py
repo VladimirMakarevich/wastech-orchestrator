@@ -289,6 +289,64 @@ def test_summary_slot_falls_back_to_final_message(tmp_path: Path) -> None:
     assert calls == [("task-1", "summary_md", path)]
 
 
+def test_summary_slot_is_redacted_because_it_becomes_the_pr_body(tmp_path: Path) -> None:
+    """ТA.7.4: a secret in the agent's final_message does not reach `summary.md`.
+
+    This slot is the one agent-written artifact that leaves the machine — the orchestrator reads it
+    verbatim into the pull-request body and commits it as an audit artifact, deliberately without a
+    digest check, since it is treated as orchestrator-authored. It was written raw, so the agent
+    could publish arbitrary text (a leaked token included) with no sandbox to go around. Both
+    harvest sources are exercised: a recognizable token shape and an `extra_secrets` literal,
+    because the whole point of the env harvest is the secret that has no recognizable shape.
+    """
+    node = _agent("summary", output_artifact="summary")
+    token = "ghp_" + "b" * 36
+    opaque = "opaque-internal-value-1234"
+    outcome = NodeOutcome(
+        "done", structured_output=None, final_message=f"shipped it\ntoken {token}\nkey {opaque}\n"
+    )
+    inputs = NodeInputs(flow_dir=tmp_path)
+    calls, register = _recorder()
+
+    path = apply_output_artifact(
+        node,
+        outcome,
+        artifacts_root=tmp_path,
+        task_id="task-1",
+        inputs=inputs,
+        register=register,
+        extra_secrets=(opaque,),
+    )
+
+    assert path is not None and path.endswith("summary.md")
+    body = Path(path).read_text("utf-8")
+    assert token not in body and opaque not in body
+    assert "shipped it" in body  # scrubbed, not emptied — the body still has to read as a summary
+    assert calls == [("task-1", "summary_md", path)]
+
+
+def test_a_slot_that_stays_private_is_not_rewritten(tmp_path: Path) -> None:
+    # The counterweight to the test above: redaction is per slot, not a blanket. `plan` publishes
+    # its own redacted exchange copy and its private file is the audit record, so scrubbing that
+    # file too would mangle the record for no gain — and `enriched_spec` never leaves at all.
+    token = "ghp_" + "c" * 36
+    for slot, filename in (("plan", "plan.md"), ("enriched_spec", "task.enriched.md")):
+        node = _agent("n", output_artifact=slot)
+        outcome = NodeOutcome("done", structured_output={"content": f"body {token}"})
+        _, register = _recorder()
+        path = apply_output_artifact(
+            node,
+            outcome,
+            artifacts_root=tmp_path,
+            task_id="task-1",
+            inputs=NodeInputs(flow_dir=tmp_path),
+            register=register,
+            exchange_root=str(tmp_path / "io"),
+        )
+        assert path is not None and path.endswith(filename)
+        assert token in Path(path).read_text("utf-8")
+
+
 def test_enriched_slot_is_audit_only_no_inputs_field(tmp_path: Path) -> None:
     node = _agent("refinement", output_artifact="enriched_spec")
     outcome = NodeOutcome("done", structured_output={"content": "ENRICHED"})

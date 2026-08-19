@@ -7,24 +7,32 @@ on ``PATH``; and a sensible default ``checks`` list inferred from the repo's eco
 Everything here is **read-only** and operator-side. Git is launched through the shared safe process
 runner (:func:`~wastech_orchestrator.providers.process.run_process`) — an **argv list, never a shell
 string**, with a mandatory timeout — so the no-shell-interpolation invariant holds at every call
-site. Unlike sandboxed *agent* runs, these trusted, network-free probes run with the
-operator's own environment.
+site. These probes are trusted and network-free, but they are not exempt from the git environment
+policy: they used to run on the operator's full environment, which meant a shell ``GIT_DIR`` pointed
+them at another repository and a shell ``GH_REPO`` at another remote — on **every** CLI command, via
+``resolve_config_path``. They now use the same allowlist-plus-scrub environment as every other
+orchestrator-owned git process (:func:`~wastech_orchestrator.git_manager.build_helper_git_env`),
+with ``gh auth status`` alone widened by the two token names it exists to account for.
 """
 
 from __future__ import annotations
 
-import os
 import re
 import shutil
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from wastech_orchestrator.git_manager import build_helper_git_env
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.providers.process import run_process
 
 # Read-only git probes are quick; bound them so a hung git can never wedge the installer.
 _GIT_TIMEOUT_SECONDS = 30
+
+#: ``gh auth status`` reports an environment token as authenticated, which is the whole reason it is
+#: the right probe — so these two names are forwarded on purpose. Nothing else is.
+_GH_TOKEN_NAMES = ("GH_TOKEN", "GITHUB_TOKEN")
 
 
 @dataclass(frozen=True)
@@ -50,7 +58,7 @@ def _run_git(args: list[str], cwd: Path) -> tuple[int, str]:
         result = run_process(
             ["git", *args],
             cwd=cwd,
-            env=dict(os.environ),
+            env=build_helper_git_env(),
             timeout_seconds=_GIT_TIMEOUT_SECONDS,
             stdout_path=stdout_path,
         )
@@ -149,7 +157,10 @@ def gh_auth_ok() -> bool | None:
         result = run_process(
             ["gh", "auth", "status"],
             cwd=tmp,
-            env=dict(os.environ),
+            # Built per call, not once at import: the CLI loads `<repo>/.worc/.env` into the
+            # environment AFTER this module is imported, and a `GH_TOKEN` kept there (the
+            # shipped `.env.example` offers exactly that line) has to reach this probe.
+            env=build_helper_git_env(*_GH_TOKEN_NAMES),
             timeout_seconds=_GIT_TIMEOUT_SECONDS,
             stdout_path=Path(tmp) / "stdout",
         )

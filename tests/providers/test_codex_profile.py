@@ -109,9 +109,15 @@ def test_deny_applied_last_wins_over_read_guard(tmp_path: Path) -> None:
     assert profile["filesystem"][str(root / ".worc-io")] == "deny"
 
 
-def test_read_isolation_off_downgrades_deny_to_read_keeps_blacklist(tmp_path: Path) -> None:
-    # The private set is downgraded deny→read (readable, still write-denied) while the public
-    # denied_read_paths blacklist stays fully denied and the write-guard stays read-only.
+def test_the_private_set_stays_denied_whatever_read_isolation_says(tmp_path: Path) -> None:
+    """The private/control set is ``deny`` unconditionally — the profile has no read-isolation knob.
+
+    It used to be downgraded to ``read`` when read-isolation was off, i.e. on the shipped default,
+    which handed the sandboxed shell the private home and the resolved env-file. ТA.2.3 withholds
+    those names from the child environment *because* the agent cannot read the file; that reasoning
+    only holds while this stays ``deny``. Native discovery loses nothing: the CLI reads its own user
+    config and auth outside this profile, and ``--ignore-user-config`` is what gates them.
+    """
     root = tmp_path / "clone"
     profile = build_codex_permission_profile(
         permission_profile="workspace-write",
@@ -119,29 +125,16 @@ def test_read_isolation_off_downgrades_deny_to_read_keeps_blacklist(tmp_path: Pa
         deny_policy=_deny(root),
         write_guard=_write_guard(root),
         denied_read_paths=(".env", "secrets/**"),
-        read_isolation_off=True,
     )
     fs = profile["filesystem"]
-    assert fs[str(root / ".worc")] == "read"  # private set now readable, still not writable
-    assert fs[PROVIDER_HOME_KEY] == "read"  # provider home readable for native discovery
+    assert fs[str(root / ".worc")] == "deny"  # private set unreadable and unwritable
+    assert fs[str(root / ".worc" / ".env")] == "deny"  # the env-file ТA.2.3 depends on
+    assert fs[str(root / ".worc" / "runs")] == "deny"  # frozen bundles / seals / quarantine
+    assert fs[PROVIDER_HOME_KEY] == "deny"  # provider home too — auth needs no profile grant
     assert fs[str(root / ".env")] == "deny"  # public blacklist unchanged
     assert fs[str(root / "secrets")] == "deny"
     assert fs[str(root)] == "write"  # workspace still writable
     assert fs[str(root / ".worc-io")] == "read"  # write-guard still read-only
-
-
-def test_read_isolation_default_denies_private_set(tmp_path: Path) -> None:
-    # Regression: default (read_isolation_off=False) keeps the private set fully denied.
-    root = tmp_path / "clone"
-    profile = build_codex_permission_profile(
-        permission_profile="workspace-write",
-        working_directory=str(root),
-        deny_policy=_deny(root),
-        write_guard=_write_guard(root),
-        denied_read_paths=(),
-    )
-    assert profile["filesystem"][str(root / ".worc")] == "deny"
-    assert profile["filesystem"][PROVIDER_HOME_KEY] == "deny"
 
 
 def test_denied_read_dir_glob_reduced_to_subtree_no_scan(tmp_path: Path) -> None:

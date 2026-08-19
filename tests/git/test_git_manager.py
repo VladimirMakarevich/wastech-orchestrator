@@ -31,6 +31,7 @@ from wastech_orchestrator.git_manager import (
     _bound_pr_body,
     _compact_pr_section,
     append_runtime_excludes,
+    build_helper_git_env,
     ensure_path_excluded,
 )
 from wastech_orchestrator.providers.artifacts import sha256_file
@@ -114,12 +115,16 @@ def test_git_calls_use_trusted_containment_but_gh_does_not(
 ) -> None:
     """Hardened ``git`` runs under the trusted (no-``ps``-sweep) containment, while ``gh`` —
     less constrained — keeps the full quiescence barrier. Asserts the ``trusted`` flag the runner
-    receives per binary, so the fast path is scoped to git alone."""
+    receives per binary, so the fast path is scoped to git alone.
+
+    ``argv[0]`` is recorded by basename: it reaches the runner as the absolute path pinned when the
+    manager was built, so the literal spelling depends on where this host installed the binary. The
+    decision under test is which binary got the fast path, and that is what the basename answers."""
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
     seen: list[tuple[str, bool]] = []
 
     def spy_run_process(argv, **kwargs) -> ProcessResult:
-        seen.append((argv[0], bool(kwargs.get("trusted", False))))
+        seen.append((Path(argv[0]).name, bool(kwargs.get("trusted", False))))
         Path(kwargs["stdout_path"]).write_text("", encoding="utf-8")
         return ProcessResult(
             exit_code=0,
@@ -3022,3 +3027,163 @@ def test_the_repo_pin_falls_back_to_the_clone_origin_when_the_config_names_none(
     gm.create_pr("task-001", "feature/x", title="t", body_path="x")
 
     assert calls and all("--repo" not in call for call in calls)
+
+
+# --- the publish path is exempt from advanced mode (ТA.2.1 / ТA.2.4 / ТA.1.6) --------------------
+
+
+def _mode_manager(
+    git_repo,
+    store: StateStore,
+    artifacts_root: Path,
+    make_git_config: ConfigFactory,
+    *,
+    extra_environment: dict[str, str] | None = None,
+) -> GitManager:
+    """A manager whose config has `strict_isolation: false` — i.e. advanced mode on."""
+    config = make_git_config(git_repo.clone, extra_environment=extra_environment)
+    return GitManager(
+        replace(config, security=replace(config.security, strict_isolation=False)),
+        store=store,
+        artifacts_root=str(artifacts_root),
+        gh_runner=_offline_gh,
+    )
+
+
+def test_advanced_mode_does_not_widen_the_git_environment(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    """ТA.2.1: `strict_isolation: false` forwards the parent environment whole to the AGENT only.
+
+    Byte-for-byte equality with the strict manager, key order included. This is the phase's headline
+    risk written as a test: the mode reaches five call sites through one shared builder, and the
+    sixth — the one that pushes and opens pull requests — must not move with them. Compared against
+    the strict manager rather than against a literal, so the two can never drift apart silently.
+    """
+    strict = _manager(git_repo, store, tmp_path / "a1", make_git_config)
+    mode = _mode_manager(git_repo, store, tmp_path / "a2", make_git_config)
+    assert list(mode._env.items()) == list(strict._env.items())
+
+
+@pytest.mark.parametrize(
+    "name, value",
+    [
+        ("GH_REPO", "someone/else"),
+        ("GH_HOST", "evil.example.com"),
+        ("GIT_DIR", "/tmp/elsewhere/.git"),
+        ("GIT_WORK_TREE", "/tmp/elsewhere"),
+        ("GIT_INDEX_FILE", "/tmp/elsewhere/index"),
+        ("GIT_SSH_COMMAND", "sh -c 'exfiltrate'"),
+        ("GIT_ASKPASS", "/tmp/fake-askpass"),
+        ("GIT_COMMITTER_EMAIL", "someone@else.example"),
+    ],
+)
+def test_a_shell_variable_cannot_retarget_the_publish_path(
+    git_repo,
+    store: StateStore,
+    tmp_path: Path,
+    make_git_config: ConfigFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+) -> None:
+    """ТA.2.4: the names that would move publication are absent from every orchestrator git process.
+
+    Exported in the operator's own shell, with the mode on — the configuration in which every other
+    child gets the parent environment whole. `GH_REPO` alone would send the pull request to another
+    repository, and nothing downstream would notice.
+    """
+    monkeypatch.setenv(name, value)
+    mode = _mode_manager(git_repo, store, tmp_path / "art", make_git_config)
+    assert name not in mode._env
+
+
+def test_an_assigned_variable_cannot_smuggle_a_retargeting_name(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    """The scrub outranks `security.extra_environment`, which is the only way one could get here.
+
+    The allowlist alone does not close this: assignment is deliberate and reaches the git path by
+    design (that is how an operator supplies a proxy). So the scrub runs after the build, and the
+    same config's harmless assignment is still delivered — the rule is narrow, not a veto on the
+    key.
+    """
+    gm = _manager(
+        git_repo,
+        store,
+        tmp_path / "art",
+        make_git_config,
+        extra_environment={"GH_REPO": "someone/else", "NUGET_PACKAGES": "/repo/.toolcache/nuget"},
+    )
+    assert "GH_REPO" not in gm._env
+    assert gm._env["NUGET_PACKAGES"] == "/repo/.toolcache/nuget"
+
+
+def test_the_global_gitconfig_pointer_is_deliberately_not_scrubbed(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    """ТA.1.7: `GIT_CONFIG_GLOBAL` stays, because unsetting it is what restores `~/.gitconfig`.
+
+    That file is trusted on purpose — it holds the credentials push/fetch need — so the answer to a
+    swapped one is the control-state fingerprint, not a scrub that would hand git the real file
+    back. Pinned because the requirement's own scrub list names the variable and a later owner
+    decision
+    took it out; without this test the list is the more obvious of the two to follow.
+    """
+    gm = _manager(
+        git_repo,
+        store,
+        tmp_path / "art",
+        make_git_config,
+        extra_environment={"GIT_CONFIG_GLOBAL": "/tmp/operator-chosen-gitconfig"},
+    )
+    assert gm._env["GIT_CONFIG_GLOBAL"] == "/tmp/operator-chosen-gitconfig"
+
+
+def test_the_module_level_git_helpers_run_on_the_allowlist_too(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """ТA.2.1: `check-ignore` and the stdout twin are inside "allowlist everywhere in Git Manager".
+
+    They used to be the one git call site on the full `os.environ`, and they are the pair Phase
+    0.4's `.git/info/exclude` decision rests on: a shell `GIT_DIR` pointed them at another
+    repository, so they answered about the wrong clone. They hold no `SecurityConfig` (the installer
+    and preflight call them), hence the built-in allowlist — which still has to carry what a
+    read-only git needs.
+    """
+    env = build_helper_git_env()
+    assert "PATH" in env and "HOME" in env  # git must be findable and read its global config
+    assert env["LC_ALL"] == "C"  # hardened like every other orchestrator git process
+    assert not {"GIT_DIR", "GIT_WORK_TREE", "GH_REPO"} & set(env)
+
+
+def test_the_gh_probe_keeps_the_env_token_it_exists_to_account_for(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`gh auth status` is the right authentication probe BECAUSE it honors an environment token.
+
+    So the installer widens the allowlist by exactly those two names — and by nothing that could
+    move the probe to another host or repository, which the scrub enforces even when named here.
+    """
+    monkeypatch.setenv("GH_TOKEN", "gh-token-from-the-operator")
+    monkeypatch.setenv("GH_HOST", "evil.example.com")
+    env = build_helper_git_env("GH_TOKEN", "GITHUB_TOKEN", "GH_HOST")
+    assert env["GH_TOKEN"] == "gh-token-from-the-operator"
+    assert "GH_HOST" not in env
+
+
+def test_the_helper_env_is_built_per_call_not_once_at_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A regression with a narrow window: the CLI fills the environment AFTER this module imports.
+
+    `<repo>/.worc/.env` is loaded at startup, after every import has run, and the shipped
+    `.env.example` offers a `GH_TOKEN` line for exactly this purpose. Resolving these environments
+    into module constants — the obvious way to avoid rebuilding a small dict on every probe — would
+    snapshot the environment before that load and silently stop honoring an env-file token, turning
+    an authenticated `gh` into "logged out" with no diagnostic.
+    """
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    assert "GH_TOKEN" not in build_helper_git_env("GH_TOKEN")
+    monkeypatch.setenv("GH_TOKEN", "arrived-later")  # as the env-file load would
+    assert build_helper_git_env("GH_TOKEN")["GH_TOKEN"] == "arrived-later"

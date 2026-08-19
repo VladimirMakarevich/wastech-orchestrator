@@ -96,7 +96,12 @@ from wastech_orchestrator.security.env_paths import (
     internal_protected_paths,
     is_inside,
 )
-from wastech_orchestrator.security.isolation import check_isolation, describe_host_floor
+from wastech_orchestrator.security.isolation import (
+    check_isolation,
+    describe_advanced_mode,
+    describe_host_floor,
+)
+from wastech_orchestrator.security.launchers import pin_launchers
 from wastech_orchestrator.state_store import IncompatibleStateError, StateStore, TaskRow
 from wastech_orchestrator.task.model import DEFAULT_QUEUE, priority_rank
 from wastech_orchestrator.task.parser import read_task_source, split_frontmatter
@@ -3085,11 +3090,12 @@ def run_preflight(
                 ok = False
                 lines.append(f"{pid.value}: FAIL — {reason} (no fallback provider)")
 
-        # Live no-model isolation capability smoke (Codex ``codex sandbox``), opt-in via
-        # ``worc preflight`` and only for a healthy provider under strict isolation. A proven leak
-        # is unconditionally fatal (non-fallback security result); an undemonstrable sandbox
-        # degrades like a capability gap (fatal only with no fallback provider).
-        if capability_smoke and healthy and config.security.strict_isolation:
+        # Live no-model isolation capability smoke (Codex ``codex sandbox``), opt-in via ``worc
+        # preflight`` for any healthy provider — including one under `strict_isolation: false`,
+        # where the generated profile is what the local floor rests on. A proven leak is
+        # unconditionally fatal (non-fallback security result); an undemonstrable sandbox degrades
+        # like a capability gap (fatal only with no fallback provider).
+        if capability_smoke and healthy:
             smoke = getattr(provider, "isolation_capability_smoke", None)
             report = smoke(home_dir=Path.home()) if callable(smoke) else None
             ok = _append_isolation_probe_lines(lines, pid, report, ok, has_fallback=has_fallback)
@@ -3097,8 +3103,8 @@ def run_preflight(
         # The paid probe (Claude): a separate opt-in because it spends a real model call. Same
         # verdict handling as the free smoke — a proven leak is fatal, an undemonstrable probe is
         # advisory — and, crucially, "the agent wrote nothing at all" reports as undemonstrable
-        # rather than as a pass.
-        if paid_isolation_probe and healthy and config.security.strict_isolation:
+        # rather than as a pass. Ungated on `strict_isolation` for the same reason as the smoke.
+        if paid_isolation_probe and healthy:
             paid = getattr(provider, "paid_isolation_probe", None)
             report = paid(home_dir=Path.home()) if callable(paid) else None
             ok = _append_isolation_probe_lines(lines, pid, report, ok, has_fallback=has_fallback)
@@ -3122,8 +3128,9 @@ def run_preflight(
         lines.append(
             f"read-isolation: OFF ({why}) — providers use native project-instruction/config "
             "discovery (Claude CLAUDE.md + project settings/hooks/MCP/skills; Codex user + .codex "
-            "config/hooks/rules) and the private read-deny projection is lifted; the write-guard, "
-            "commit/staging gates, PR control, and denied_read_paths blacklist stay in force"
+            "config/hooks/rules). The private set is NOT opened: .worc, the env-file, provider "
+            "homes and frozen bundles stay read- and write-denied, as do the write-guard, "
+            "commit/staging gates, PR control, and denied_read_paths blacklist"
         )
 
     # What this host cannot enforce, whatever the config says. Deliberately not a FAIL: the floor
@@ -3132,6 +3139,25 @@ def run_preflight(
     lines.extend(
         f"isolation-floor: NONE — {gap}" for gap in describe_host_floor(config, HOST_FLOOR_CHECKS)
     )
+
+    # The mode itself: the loudest line in the report, from the shared formatter so the run log says
+    # the same thing. Placed after the host-floor lines because level 1 refers to them, and never a
+    # FAIL — the operator chose this, and refusing to report on a configuration the run accepts is
+    # what produced the `isolation:` disagreement this phase also fixed.
+    mode_lines = describe_advanced_mode(config)
+    if mode_lines:
+        subject, *rest = mode_lines
+        lines.append(subject)
+        lines.extend(f"  - {line}" for line in rest)
+
+    # Where each executable the orchestrator launches as itself actually resolved on this host. Only
+    # in the mode: elsewhere it is noise, while here it is the evidence behind floor 4 — the
+    # operator can see WHICH `git` will do the pushing, and a `<not found>` explains a later launch
+    # failure before it happens.
+    if mode_lines:
+        pins = pin_launchers(config)
+        lines.append("pinned-executables: resolved once, used as-is for this process")
+        lines.extend(f"  - {line}" for line in pins.describe())
 
     # Same principle for the git-evidence grant: an operator reading preflight should see which
     # optional capabilities are live, not have to infer them from the config file.
@@ -3146,7 +3172,17 @@ def run_preflight(
     # (``PATH`` is mandatory) is a validator error, because one config file must get the same
     # verdict on every machine. FAIL rather than WARN: the CLI would not start at all, and this is
     # the one place where learning that costs nothing.
-    env_issue = launch_critical_env_issue(config.security.allowed_environment)
+    #
+    # Not asked in advanced mode: the gate's whole premise is that the allowlist decides what the
+    # child receives, and there it does not — the child gets the parent environment whole, so a
+    # ``SystemRoot`` missing from the list still reaches the CLI. Asking anyway would FAIL a Windows
+    # configuration that works, which is the same false verdict this phase removed from
+    # `isolation:`.
+    env_issue = (
+        launch_critical_env_issue(config.security.allowed_environment)
+        if config.security.strict_isolation
+        else None
+    )
     if env_issue is not None:
         ok = False
         lines.append(f"allowed-environment: FAIL — {env_issue}")

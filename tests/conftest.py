@@ -229,6 +229,7 @@ def build_git_config(
     skills_dynamic: bool | None = None,
     extra_environment: Mapping[str, str] | None = None,
     allowed_environment_patterns: Sequence[str] = (),
+    strict_isolation: bool = True,
 ) -> OrchestratorConfig:
     """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks.
 
@@ -314,6 +315,7 @@ repo:
     codex:
       command: "codex"
 security:
+  strict_isolation: {str(strict_isolation).lower()}
   allow_git_evidence: {str(allow_git_evidence).lower()}
 {trust_level_line}{extra_env_block}  allowed_environment:
 {env_lines}

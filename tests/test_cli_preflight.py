@@ -921,3 +921,99 @@ def test_an_undemonstrated_paid_probe_warns_with_a_fallback(
     out = capsys.readouterr().out
     assert rc == 0
     assert "WARN — isolation probe: NOT DEMONSTRATED" in out
+
+
+# --- the advanced mode's loud line and the pinned executables (ТA.6.1 / ТA.1.7) ------------------
+
+
+def _mode(config):
+    """The same config with `strict_isolation: false` — i.e. advanced mode on."""
+    return replace(config, security=replace(config.security, strict_isolation=False))
+
+
+def test_advanced_mode_is_announced_with_all_four_floor_levels(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repo,
+    make_git_config,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ТA.6.1: the mode is never silent, and the line names every level of the floor.
+
+    Neither of the two relaxation lines that already existed (`read-isolation: OFF`, `git-evidence:
+    ON`) had a test, which is how their wording drifted from the run log's. The mode's own line is
+    the one that must not: it is what an operator reads before deciding to keep the key. Level 3 is
+    asserted in its FUTURE tense on purpose — the agent has no network yet, and a line that
+    overstated by two phases would be discounted exactly like one that understated.
+    """
+    _patch_providers(monkeypatch, _mode(make_git_config(git_repo.clone)))
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 0  # the operator chose this; reporting it is not refusing it
+    assert "advanced-mode: ON (security.strict_isolation=false)" in out
+    for level in ("floor 1 of 4", "floor 2 of 4", "floor 3 of 4", "floor 4 of 4"):
+        assert level in out
+    assert "held MECHANICALLY" in out  # level 1 — the only one that is a mechanism
+    assert "WILL NOT BE HELD BY ANYTHING" in out and "no network yet" in out  # level 3, in future
+    assert "forwarded WHOLE" in out  # what the mode actually changed today
+    assert "preflight: ready" in out
+
+
+def test_the_mode_line_is_absent_under_strict_isolation(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repo,
+    make_git_config,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # The counterweight: a default config's report gains nothing. A floor recital on every run would
+    # be noise, and noise is how a loud line stops being read.
+    _patch_providers(monkeypatch, make_git_config(git_repo.clone))
+    cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert "advanced-mode" not in out
+    assert "floor 1 of 4" not in out
+    assert "pinned-executables" not in out
+
+
+def test_the_mode_prints_where_each_launched_executable_resolved(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repo,
+    make_git_config,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """ТA.1.7 item 3: the pins are shown, because a pin nobody can read is not a control.
+
+    They are the evidence behind floor 4 — the operator can see WHICH `git` will do the pushing — so
+    the report has to name the path, not merely claim that one was resolved.
+    """
+    _patch_providers(monkeypatch, _mode(make_git_config(git_repo.clone)))
+    cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert "pinned-executables: resolved once, used as-is for this process" in out
+    assert "git -> " in out and "the orchestrator's own commits and pushes" in out
+    assert "gh -> " in out
+
+
+def test_the_windows_launch_gate_is_not_asked_in_advanced_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repo,
+    make_git_config,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The `SystemRoot` gate's premise is that the allowlist decides — in the mode it does not.
+
+    On Windows a list without `SystemRoot` normally fails preflight, because the CLI would abort
+    before printing anything. In advanced mode the child receives the parent environment whole, so
+    the variable arrives regardless and the FAIL would be about a configuration that works — the
+    same false verdict this phase removed from the `isolation:` line.
+    """
+    config = _without_systemroot(_mode(make_git_config(git_repo.clone)))
+    _patch_providers(monkeypatch, config)
+    monkeypatch.setattr(env_mod.platform, "system", lambda: "Windows")
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert "allowed-environment: FAIL" not in out
+    assert rc == 0
+    # And the gate is still there for the configuration it was written for.
+    _patch_providers(monkeypatch, _without_systemroot(make_git_config(git_repo.clone)))
+    assert cli.cmd_preflight(_args()) == 1
+    assert "allowed-environment: FAIL" in capsys.readouterr().out

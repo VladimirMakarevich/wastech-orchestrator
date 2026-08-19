@@ -30,6 +30,7 @@ from wastech_orchestrator.providers.base import (
 from wastech_orchestrator.providers.codex import CodexProvider
 from wastech_orchestrator.providers.process import ProcessResult
 from wastech_orchestrator.runtime_layout import InternalDenyPolicy, ProviderWriteGuardPolicy
+from wastech_orchestrator.security.env import build_child_env
 
 FIXED_TIME = datetime(2026, 6, 11, 12, 0, 0, tzinfo=UTC)
 FAKE_GH_TOKEN = "ghp_" + "abcdef0123456789abcdef0123"
@@ -975,7 +976,9 @@ def test_preflight_auth_reports_logged_in_from_the_status_sentence(
     assert health.auth.state is AuthState.LOGGED_IN
     # The answer is prose, so no mechanism is pattern-matched out of it.
     assert health.auth.method is None
-    assert ["codex", "login", "status"] in fake.argvs
+    # The subcommand, not argv[0]: the adapter pins the configured command to its resolved
+    # absolute path at launch, so argv[0] depends on where this host installed the CLI.
+    assert ["login", "status"] in [argv[1:] for argv in fake.argvs]
 
 
 def test_preflight_auth_reports_logged_out_from_stderr_and_a_nonzero_exit(
@@ -1048,6 +1051,55 @@ def test_assigned_environment_reaches_preflight(
     )
     provider.preflight()
     assert fake.captured["env"]["NUGET_PACKAGES"] == "/repo/.toolcache/nuget"
+
+
+def test_the_capability_smoke_runs_in_advanced_mode(
+    codex_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    """ТA.9.2: the smoke used to return `None` in the one mode that needs it most.
+
+    It is the only check that proves the generated profile is applied by the operating system rather
+    than swallowed by the CLI, which accepts an unknown profile key without complaint: a typo there
+    produces no policy and no diagnostic. In the mode that profile is the whole local floor, which
+    makes it the last configuration to excuse from demonstrating it.
+    """
+    canary = FakeCanary(results=[(1, "denied")])
+    provider = CodexProvider(
+        codex_config,
+        security=replace(security_config, strict_isolation=False),
+        artifacts_root=tmp_path,
+        clock=lambda: FIXED_TIME,
+        run_process=FakeRun(stdout="", exit_code=0),
+        canary_runner=canary,
+    )
+    assert provider.isolation_capability_smoke(home_dir=tmp_path) is not None
+    assert canary.calls > 0
+
+
+def test_the_agent_and_the_checks_get_the_same_environment_in_the_mode(
+    codex_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    """Т0.5/ТA.2.2: the mode widens both sides of the quality gate or neither.
+
+    Partial delivery is the expensive failure here, not a missing variable: the agent builds the
+    project with a toolchain root it can see, then the check set fails on "SDK not found" after the
+    work already succeeded. One builder serves both call sites, which is what makes them equal; this
+    pins the property at the two real call sites, because the shared builder is the thing a later
+    refactor would split.
+    """
+    security = replace(security_config, strict_isolation=False)
+    fake = FakeRun(stdout="codex-cli 1.2.3\n", exit_code=0)
+    provider = _provider(codex_config, security, tmp_path, fake)
+    provider.preflight()
+    agent_env = dict(fake.captured["env"])
+
+    checks_env = build_child_env(security)
+    # The adapter prepends its resources dir onto PATH on Windows; compare everything else exactly,
+    # and PATH by containment, so the assertion holds on all three platforms.
+    assert {k: v for k, v in agent_env.items() if k != "PATH"} == {
+        k: v for k, v in checks_env.items() if k != "PATH"
+    }
+    assert checks_env["PATH"] in agent_env["PATH"]
 
 
 def test_assigned_environment_reaches_the_capability_smoke(

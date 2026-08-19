@@ -801,11 +801,14 @@ def build_claude_argv(
         )
     claude_home = claude_config_home()
     read_deny_paths = [p for p in internal_deny_read_paths if p != claude_home]
-    # With read-isolation OFF the private set stays WRITE-denied (the control plane must stay
-    # immutable) but becomes READABLE so the agent can natively discover it; under isolation it is
-    # Read+Write+Edit-denied. The public ``denied_read_paths`` blacklist (above) is unchanged.
-    internal_deny_kinds = ("Write", "Edit") if read_isolation_off else ("Read", "Write", "Edit")
-    denied_tools += _internal_deny_tools(read_deny_paths, internal_deny_kinds)
+    # The private set is Read+Write+Edit-denied at EVERY read-isolation setting. It used to become
+    # merely WRITE-denied when read-isolation was off — that is, on the shipped default — and since
+    # the resolved env-file is part of this set, the plain ``Read`` tool could open the
+    # orchestrator's own ``.env``. Read-isolation relaxes native *discovery*, and discovery needs
+    # nothing from here: the provider's own config home is carved out just above (only
+    # ``allow_native_memory`` decides that one), and a project's instructions/settings are ordinary
+    # repository paths outside this set. The public ``denied_read_paths`` blacklist is unchanged.
+    denied_tools += _internal_deny_tools(read_deny_paths, ("Read", "Write", "Edit"))
     if request.write_guard is not None:
         denied_tools += _internal_deny_tools(
             request.write_guard.denied_write_paths, ("Write", "Edit")
@@ -1327,12 +1330,17 @@ class ClaudeCodeProvider(BaseCliProvider):
         Runs through the ordinary launch path so the probe tests the real posture: the same tool
         plan, the same generated sandbox settings, the same env. The one substitution is the deny
         policy — scoped to the throwaway fixture instead of the operator's real control home, since
-        the probe must write into a control plane it is allowed to destroy. ``None`` when strict
-        isolation is off (there is no claim to prove) or the host has no Bash sandbox for the shell
-        the probe needs.
+        the probe must write into a control plane it is allowed to destroy. ``None`` only when the
+        host has no Bash sandbox for the shell the probe needs.
+
+        It used to return ``None`` under ``strict_isolation: false`` as well, on the grounds that
+        there was no claim to prove. That is not true: the sandbox settings file is written whenever
+        the resolved tool set keeps a shell and the host can sandbox it, at either setting — so in
+        advanced mode the write-deny on ``.git`` and ``.worc`` is still asserted, and it is the only
+        part of the floor that does not depend on the agent cooperating. The same reasoning as the
+        Codex smoke above: the configuration that leans hardest on the profile is the last one to
+        excuse from proving it.
         """
-        if not self._security.strict_isolation:
-            return None
         probe = self._sandbox_probe if self._sandbox_probe is not None else default_sandbox_probe
         if not _bash_sandbox_available(probe()):
             return IsolationCapabilityReport(

@@ -1,10 +1,16 @@
 """Environment allowlist.
 
-A child process started by the orchestrator receives **only** the environment variables named in
-``security.allowed_environment`` that are present in the parent environment — never the parent's
-full environment — plus the ones the operator **assigns** outright in
-``security.extra_environment``. Both halves are name-gated policy: no secret or token is ever
+Under ``security.strict_isolation`` a child process started by the orchestrator receives **only**
+the environment variables named in ``security.allowed_environment`` that are present in the parent
+environment — never the parent's full environment — plus the ones the operator **assigns** outright
+in ``security.extra_environment``. Both halves are name-gated policy: no secret or token is ever
 forwarded implicitly, and git/agent credentials are configured outside the orchestrator.
+
+``strict_isolation: false`` is the operator's advanced mode, and there the gate is not the policy:
+a child run on the agent's behalf gets the parent environment whole (:func:`build_child_env`), while
+the orchestrator's own ``git``/``gh`` processes keep the allowlist (:func:`build_orchestrator_env`).
+Everything below still describes the allowlist itself, which both the strict policy and the
+orchestrator's own processes use, and which stays the operator's declared intent either way.
 
 An ``allowed_environment`` entry may also be a **prefix pattern** (``DOTNET_*``): still an
 allow-list by name, just one that does not require the operator to know every name a toolchain
@@ -30,6 +36,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from wastech_orchestrator.config.schema import SecurityConfig
+from wastech_orchestrator.env_file import env_file_names
 from wastech_orchestrator.providers.redaction import is_sensitive_key
 
 # Cross-platform base: the few names every OS needs for the agent CLIs to find their binaries
@@ -295,36 +302,100 @@ def launch_critical_env_issue(
     )
 
 
+def _allowlisted_names(security: SecurityConfig, source: Mapping[str, str]) -> tuple[str, ...]:
+    """The names ``allowed_environment`` forwards out of *source*, patterns already expanded."""
+    forwarded, _ = expand_allowed_environment(security.allowed_environment, source)
+    return forwarded
+
+
+def _assemble(
+    security: SecurityConfig, source: Mapping[str, str], forwarded: Sequence[str]
+) -> dict[str, str]:
+    """Forward *forwarded* out of *source*, then assign ``extra_environment`` on top.
+
+    The half both policies share, so neither can drift on the two properties tests pin: a name
+    missing from the parent is skipped rather than added empty, and an assigned name keeps its
+    forwarded position while taking the assigned value.
+    """
+    child = {key: source[key] for key in forwarded if key in source}
+    child.update(security.extra_environment)
+    return child
+
+
 def build_child_env(
     security: SecurityConfig,
     parent_env: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Build the child environment: forwarded allowlisted names, then assigned extras.
+    """Build the environment for a child the orchestrator runs **on the agent's behalf**.
 
-    Takes the whole :class:`SecurityConfig` rather than the two fields it reads, and that is a
-    deliberate contract: the failure mode this key introduces is *partial* delivery — the agent sees
-    a toolchain variable and the Check Runner does not, so a task dies on the quality gate after the
-    agent already succeeded. A call site that must pass a policy object cannot build an environment
-    that silently omits half the policy, which makes a new call site a type error rather than a code
-    review someone has to catch.
+    Two policies, chosen by ``security.strict_isolation``:
+
+    * **strict isolation on** — the allowlist gate described in this module's docstring: only the
+      names ``allowed_environment`` covers, then the assigned extras.
+    * **advanced mode** (``strict_isolation: false``) — the parent environment is forwarded
+      **whole**, with no name gate at all, because that switch now means "full freedom under the
+      operator's responsibility, except the floor", and a toolchain the agent has to drive needs the
+      variables the operator's own shell has. Two things are still not the parent's to give: the
+      names the orchestrator's own env-file defines
+      (:func:`~wastech_orchestrator.env_file.env_file_names` — the agent is denied reading that
+      file, so forwarding its contents would route around the deny), and whatever
+      ``extra_environment`` assigns on top, which wins here exactly as it does above. The redaction
+      net compensates: with the gate gone the harvest stops exempting allowlisted names (see
+      :func:`~wastech_orchestrator.providers.redaction.secret_env_values`), so a secret-named value
+      that is now forwarded gets scrubbed out of logs and artifacts instead of left in them.
+
+    Takes the whole :class:`SecurityConfig` rather than the fields it reads, and that is a
+    deliberate contract: the failure mode here is *partial* delivery — the agent sees a toolchain
+    variable and the Check Runner does not, so a task dies on the quality gate after the agent
+    already succeeded. A call site that must pass a policy object cannot build an environment that
+    silently omits half the policy, which makes a new call site a type error rather than a code
+    review someone has to catch. It is also why the mode is decided inside this function rather than
+    at the five call sites: they cannot drift apart. The orchestrator's own git/gh processes are the
+    one exemption, and they say so by calling a different function —
+    :func:`build_orchestrator_env`.
 
     Prefix patterns in ``allowed_environment`` are resolved here through
     :func:`expand_allowed_environment`, silently — the diagnostics belong to the callers that print
     once per run, not to a builder invoked for every child process.
 
     :param security: the operator's security policy; ``allowed_environment`` names what is forwarded
-        from *parent_env*, ``extra_environment`` names what is assigned outright.
+        from *parent_env* under strict isolation, ``extra_environment`` names what is assigned
+        outright under either policy.
     :param parent_env: the environment to draw from; defaults to the live ``os.environ``.
-    :returns: a fresh dict holding the allowlisted keys that exist in *parent_env* in allowlist
-        order (a pattern's matches sorted, in the pattern's place), then the assigned names in
-        config
-        order. A forwarded key absent from the parent is skipped (never added as empty); an assigned
-        name in both wins, keeping its forwarded position. The order is part of the contract — the
-        result is compared in tests, and an unordered result would make a run's environment
-        irreproducible.
+    :returns: a fresh dict. Under strict isolation: the allowlisted keys present in *parent_env*, in
+        allowlist order (a pattern's matches sorted, in the pattern's place), then the assigned
+        names in config order — byte for byte what it always was. In advanced mode: every parent
+        name except the env-file's, sorted, then the assigned names. A forwarded key absent from the
+        parent is skipped (never added as empty); an assigned name in both wins, keeping its
+        forwarded position. The order is part of the contract — the result is compared in tests, and
+        an unordered result would make a run's environment irreproducible, which is why the mode
+        sorts instead of inheriting ``os.environ``'s unreproducible iteration order.
     """
     source: Mapping[str, str] = os.environ if parent_env is None else parent_env
-    forwarded, _ = expand_allowed_environment(security.allowed_environment, source)
-    child = {key: source[key] for key in forwarded if key in source}
-    child.update(security.extra_environment)
-    return child
+    if security.strict_isolation:
+        return _assemble(security, source, _allowlisted_names(security, source))
+    withheld = env_file_names()
+    return _assemble(security, source, tuple(sorted(k for k in source if k not in withheld)))
+
+
+def build_orchestrator_env(
+    security: SecurityConfig,
+    parent_env: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Build the environment for a child the orchestrator runs **as itself** — its ``git``/``gh``.
+
+    The allowlist gate, at every value of ``strict_isolation``: advanced mode widens what the
+    *agent* may do, and these processes are not the agent. They need no toolchain variable, and the
+    cost of a mistake here is somebody else's repository — a shell ``GH_REPO`` would retarget a pull
+    request, and ``GIT_DIR`` / ``GIT_WORK_TREE`` would move both the commands and the resolved
+    control paths, so the write-guard would be protecting the wrong ``.git``. An operator who
+    genuinely needs a proxy or a token on this path assigns it through ``extra_environment``, which
+    reaches here. The names that would do the damage are additionally scrubbed by the caller (see
+    ``_GIT_ENV_SCRUB`` in :mod:`wastech_orchestrator.git_manager`), because ``extra_environment``
+    can assign one and an allowlist entry can forward one.
+
+    A separate function rather than a flag on :func:`build_child_env`: the exemption is legible at
+    the call site, and a new agent-side call site cannot accidentally opt into it.
+    """
+    source: Mapping[str, str] = os.environ if parent_env is None else parent_env
+    return _assemble(security, source, _allowlisted_names(security, source))

@@ -75,6 +75,75 @@ _FLOOR_LOSS_SHELL_WITHHELD = (
 )
 
 
+# The mode's own announcement, in one formatter for the reason `describe_host_floor` is: preflight
+# and the run log must not be able to describe the same configuration differently, and the two
+# existing relaxation lines (`read-isolation: OFF`, `git-evidence: ON`) are hand-written twice each
+# and have already drifted in wording. Subject + ON/OFF + the key that caused it, matching the shape
+# those two established, then one indented line per floor level.
+_MODE_SUBJECT = (
+    "advanced-mode: ON (security.strict_isolation=false) — full freedom for the agent under the "
+    "operator's responsibility, except the floor below"
+)
+
+# What the mode changes TODAY. Written per axis so each line becomes true as its phase lands, rather
+# than one sentence that is part-false for three phases.
+_MODE_ENVIRONMENT = (
+    "environment: the parent environment is forwarded WHOLE to agent processes, the check "
+    "commands, the scanners and the tool nodes — security.allowed_environment is not consulted "
+    "for them. Withheld: the names the orchestrator's own env-file defines (return one with "
+    "security.extra_environment). The orchestrator's own git/gh keep the allowlist"
+)
+_MODE_REDACTION = (
+    "redaction: secret-named values are scrubbed from logs and artifacts by NAME alone now, "
+    "without the allowlist excusing any — so a secret-named variable holding something harmless "
+    "may appear as [REDACTED] in output"
+)
+
+# The four levels, in the words of ТA.1. The third is deliberately in the future tense: the agent
+# has no network yet, so saying "not held by anything" today would overstate by two phases — and a
+# line that overstates is discounted exactly like one that understates. It changes tense in Ам-4,
+# when the network lands and the statement becomes present-tense true.
+_FLOOR_LEVELS: tuple[str, ...] = (
+    (
+        "floor 1 of 4 — the integrity of the task's own state is held MECHANICALLY: the clone's "
+        ".git and the private .worc stay unwritable, wherever this host can enforce a sandbox at "
+        "all (an isolation-floor line above says where it cannot)"
+    ),
+    (
+        "floor 2 of 4 — publication to this repository's origin is held by DETECTION, not by "
+        "prohibition: a branch or a pull request that appears without the orchestrator's own "
+        "record parks the task for a human"
+    ),
+    (
+        "floor 3 of 4 — publication anywhere else WILL NOT BE HELD BY ANYTHING once the agent has "
+        "the network: credentials are picked up automatically and are not withheld, so a "
+        "repository assembled outside the clone and pushed to any address is neither prevented nor "
+        "seen. The agent has no network yet, so this is not reachable today, and nothing will be "
+        "added to hold it when it becomes reachable"
+    ),
+    (
+        "floor 4 of 4 — publication AS THE ORCHESTRATOR is held by DETECTION: the user git config "
+        "and the clone's own agent-CLI config are fingerprinted around the attempt, every gh call "
+        "names its repository outright, and the executables the orchestrator launches are pinned "
+        "to the paths resolved at startup. Not covered, and not coverable this way: a substitution "
+        "made between runs, and an edit to the installed package's own code"
+    ),
+)
+
+
+def describe_advanced_mode(config: OrchestratorConfig) -> tuple[str, ...]:
+    """The mode's loud announcement: a subject, then what it relaxes, then all four floor levels.
+
+    Empty when the mode is off, so a caller can extend its report unconditionally. The floor lines
+    are stated whether or not this host can enforce level 1 — what that host cannot do is
+    :func:`describe_host_floor`'s answer, printed beside this one, and merging the two would let a
+    host-specific gap read as a property of the mode.
+    """
+    if config.security.strict_isolation:
+        return ()
+    return (_MODE_SUBJECT, _MODE_ENVIRONMENT, _MODE_REDACTION, *_FLOOR_LEVELS)
+
+
 def check_isolation(
     config: OrchestratorConfig, checks: Mapping[ProviderId, IsolationCheck]
 ) -> list[str]:

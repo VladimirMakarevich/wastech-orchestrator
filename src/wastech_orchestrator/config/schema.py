@@ -404,6 +404,42 @@ TRUST_LEVELS: frozenset[str] = frozenset({"strict", "auto"})
 
 @dataclass(frozen=True)
 class SecurityConfig:
+    # The master posture switch, and the only one. ``true`` (the default, and what a fresh install
+    # writes) is fail-closed: a provider whose configured isolation cannot be enabled fails
+    # preflight.
+    #
+    # ``false`` is the operator's **advanced mode** — deliberately not a second key, so there is one
+    # door rather than a matrix. It means "full freedom for the agent under the operator's
+    # responsibility, except the floor": read-isolation is forced off (see
+    # :attr:`read_isolation_off`), and the parent environment is forwarded WHOLE to every process
+    # run on the agent's behalf — agent CLIs, the check commands, the scanners, the tool nodes — so
+    # ``allowed_environment`` is not consulted for them at all. Two things it does not relax:
+    # ``extra_environment`` still assigns on top, and the names the orchestrator's own env-file
+    # defines are still withheld (the agent is denied reading that file, so forwarding its contents
+    # would route around the deny). The orchestrator's own ``git``/``gh`` keep the allowlist —
+    # advanced mode widens what the agent may do, and those processes are not the agent.
+    #
+    # What it does NOT unlock: the provider full-access modes (Codex ``--sandbox danger-full-
+    # access``, Claude ``--permission-mode bypassPermissions``) are refused at every value of this
+    # key, as are the absolutely-forbidden flags. It is also not a way to skip a proof: the config-
+    # legality check and the provider capability probes run at either setting, because the generated
+    # permission profile is what the local floor rests on and that matters most here.
+    #
+    # The floor that survives, in four honest levels — announced in full by ``worc preflight`` and
+    # in the run log, never silently: (1) the integrity of the task's own state is held MECHANICALLY
+    # — the clone's ``.git`` and the private ``.worc`` stay unwritable wherever the host can sandbox
+    # at all; (2) publication to this repository's origin is held by DETECTION — a branch or PR
+    # appearing without the orchestrator's record parks the task; (3) publication anywhere else will
+    # not be held by anything once the agent has the network, and nothing is planned to hold it; (4)
+    # publication AS the orchestrator is held by DETECTION — user git config and the clone's agent-
+    # CLI config are fingerprinted, every ``gh`` call names its repository, and the launched
+    # executables are pinned to the paths resolved at startup (a substitution between runs, and an
+    # edit to the installed package's code, are not covered).
+    #
+    # Operator-config ONLY — never a task, a flow node, or ``extra_args``. The redaction net widens
+    # to compensate: with the name gate gone, secret-named values are scrubbed from logs and
+    # artifacts by name alone, so a secret-named variable holding something harmless may print as
+    # ``[REDACTED]``.
     strict_isolation: bool
     #: Names forwarded from the parent environment. An entry is an exact name or a prefix
     #: pattern (``DOTNET_*``), resolved by

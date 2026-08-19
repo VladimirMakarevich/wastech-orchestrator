@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 from wastech_orchestrator.ledger import (
+    COMPLETED_FILENAME,
     INFRA_LOOP,
     DecomposedFailureInfo,
     Ledger,
@@ -103,6 +104,34 @@ def test_records_tolerate_missing_rerun_keys(tmp_path: Path) -> None:
     rec = ledger.records()[0]
     assert rec["attempt"] == 1
     assert rec["rerun_of"] is None
+
+
+def test_the_advanced_mode_marker_round_trips_and_defaults_for_older_records(
+    tmp_path: Path,
+) -> None:
+    """ТA.6.3: the durable record of the run's security posture, readable next to older lines.
+
+    The ledger is append-only and never rewritten, which is exactly why the field needs a default: a
+    record written before it existed has to keep reading, and it has to read as "not in the mode" —
+    which is what it was. "The key is absent" and "the run was ordinary" must not be the same answer
+    for a reader treating this file as evidence, so both forms are pinned here in one file.
+    """
+    ledger = Ledger(tmp_path)
+    ledger.append(LedgerRecord(id="old", title="Old", final_status="done", finished_at="t"))
+    ledger.append(
+        LedgerRecord(
+            id="new", title="New", final_status="done", finished_at="t", advanced_mode=True
+        )
+    )
+    # A line hand-written by an older version, i.e. one that has no such key at all.
+    with (tmp_path / COMPLETED_FILENAME).open("a", encoding="utf-8") as fh:
+        fh.write('{"id": "ancient", "title": "Ancient", "final_status": "done"}\n')
+
+    old, fresh, ancient = ledger.records()
+    assert old["advanced_mode"] is False
+    assert fresh["advanced_mode"] is True
+    assert ancient.get("advanced_mode", False) is False  # readable, and reads as it was
+    assert ledger.has_task_id("ancient")  # the older line is still a record, not a parse casualty
 
 
 def test_finalize_marker_round_trips(tmp_path: Path) -> None:

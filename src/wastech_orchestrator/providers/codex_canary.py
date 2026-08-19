@@ -281,7 +281,6 @@ def build_canary_probes(
     private_probe: str,
     exchange_probe: str | None,
     system: str,
-    private_readable: bool = False,
     repo_probe: str | None = None,
     alias_probe: str | None = None,
     repo_write_probe: str | None = None,
@@ -298,47 +297,26 @@ def build_canary_probes(
     ``read-only``). The exchange, when a file is available, must be readable but not writable — and
     also serves as a positive control on the per-attempt path where no *repo_probe* is supplied.
 
-    ``private_readable`` (read-isolation OFF) flips the private-read expectation: the private
-    set is now READABLE (the reads become positive controls) but a private WRITE must still be
-    denied, so a ``private-write-denied`` probe is added to prove the profile keeps the control
-    plane immutable.
+    The private-read expectation does not depend on read-isolation: the profile denies that set at
+    every setting, so the probes assert a denial unconditionally.
 
     ``write_guard_probes`` adds one write-deny probe per Git-control / lifecycle root the profile
     carves out (see :func:`write_guard_probe_paths`). These are the probes behind the product's
     central claim — the agent cannot change ``.git`` — which no probe tested before: each writes a
     sentinel file into the root and expects to be refused.
     """
-    if private_readable:
-        probes = [
-            CanaryProbe(
-                "private-read-allowed", _read_cmd(private_probe, system), expect_denied=False
-            ),
-            CanaryProbe(
-                "private-shell-read-allowed",
-                _shell_read_cmd(private_probe, system),
-                expect_denied=False,
-            ),
-            CanaryProbe(
-                "private-write-denied", _write_cmd(private_probe, system), expect_denied=True
-            ),
-        ]
-    else:
-        probes = [
-            CanaryProbe(
-                "private-read-denied", _read_cmd(private_probe, system), expect_denied=True
-            ),
-            CanaryProbe(
-                "private-shell-read-denied",
-                _shell_read_cmd(private_probe, system),
-                expect_denied=True,
-            ),
-        ]
+    probes = [
+        CanaryProbe("private-read-denied", _read_cmd(private_probe, system), expect_denied=True),
+        CanaryProbe(
+            "private-shell-read-denied",
+            _shell_read_cmd(private_probe, system),
+            expect_denied=True,
+        ),
+    ]
     if alias_probe is not None:
         probes.append(
             CanaryProbe(
-                "private-alias-read-allowed" if private_readable else "private-alias-read-denied",
-                _read_cmd(alias_probe, system),
-                expect_denied=not private_readable,
+                "private-alias-read-denied", _read_cmd(alias_probe, system), expect_denied=True
             )
         )
     if repo_probe is not None:
@@ -445,7 +423,6 @@ def run_codex_canary(
     system: str,
     runner: CanaryRunner = default_canary_runner,
     extra: ExtraProbes = _NO_EXTRA_PROBES,
-    private_readable: bool = False,
 ) -> CanaryOutcome:
     """Prove the profile's deny/read-only boundary via ``codex sandbox`` before ``codex exec``.
 
@@ -467,7 +444,6 @@ def run_codex_canary(
         private_probe=private_probe,
         exchange_probe=exchange_probe,
         system=system,
-        private_readable=private_readable,
         repo_probe=extra.repo_probe,
         alias_probe=extra.alias_probe,
         repo_write_probe=extra.repo_write_probe,
@@ -601,7 +577,6 @@ def run_codex_capability_smoke(
     system: str | None = None,
     runner: CanaryRunner = default_canary_runner,
     inventory_probe: InventoryProbe | None = None,
-    read_isolation_off: bool = False,
 ) -> CapabilitySmokeReport:
     """No-model, real-``codex sandbox`` capability smoke for the generated ``worc`` profile.
 
@@ -676,7 +651,6 @@ def run_codex_capability_smoke(
             deny_policy=deny,
             write_guard=write_guard if writable else None,
             denied_read_paths=(),
-            read_isolation_off=read_isolation_off,
         )
         # Assert the fixture before trusting its verdict: a root with no directory yields no probe,
         # and a smoke that quietly probed fewer roots than the profile declares would certify a
@@ -698,7 +672,6 @@ def run_codex_capability_smoke(
             env=env,
             system=sys_name,
             runner=runner,
-            private_readable=read_isolation_off,
             extra=ExtraProbes(
                 repo_probe=str(repo_file),
                 alias_probe=alias_probe,

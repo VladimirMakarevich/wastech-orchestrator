@@ -239,6 +239,7 @@ from wastech_orchestrator.security.isolation import (
     HostFloorCheck,
     IsolationCheck,
     check_isolation,
+    describe_advanced_mode,
     describe_host_floor,
 )
 from wastech_orchestrator.state_store import (
@@ -1642,6 +1643,7 @@ class Orchestrator:
                 manual=True,
                 note=note,
                 outcome=outcome,
+                advanced_mode=self._advanced_mode,
             )
         )
         self._log(task_id).info(
@@ -1860,6 +1862,7 @@ class Orchestrator:
                         finished_at=self._clock(),
                         branch=row.branch,
                         fix_iterations=row.fix_iterations,
+                        advanced_mode=self._advanced_mode,
                     )
                 )
                 self._notify_terminal(
@@ -1909,6 +1912,7 @@ class Orchestrator:
                     fix_iterations=row.fix_iterations,
                     terminal_cleanup="completed" if cleanup.safe else "blocked",
                     finished_at=self._clock(),
+                    advanced_mode=self._advanced_mode,
                 )
             )
             self._notify_terminal(
@@ -2187,7 +2191,16 @@ class Orchestrator:
             live,
             live_flow_dir,
             self._tool_registry,
-            metadata={"orchestrator_version": __version__},
+            # ``advanced_mode`` records the posture the task STARTED in, which is the half the
+            # ledger cannot cover: the bundle is written before the first node runs, so it is there
+            # for a task that never reached a terminal transition. The two do not back each other up
+            # — they divide the timeline. A successful run sweeps its own ``runs/`` subtree
+            # (``clean_runs_on_success``, the shipped default), so this copy is gone exactly when
+            # the ledger record exists, and present exactly when it does not.
+            metadata={
+                "orchestrator_version": __version__,
+                "advanced_mode": "true" if self._advanced_mode else "false",
+            },
         )
         self._store.update_task(p.task.id, control_bundle_digest=bundle.bundle_digest)
         return live, bundle, live_flow_dir
@@ -2562,9 +2575,9 @@ class Orchestrator:
             # ``strict_isolation: false`` (the strict check below is skipped in the latter case).
             self._log(p.task.id).warning(
                 "read-isolation OFF — providers run native project-instruction/config discovery "
-                "and the private read-deny projection is lifted (operator-sanctioned; the "
-                "write-guard, commit/staging gates, PR control, and denied_read_paths blacklist "
-                "stay in force)",
+                "(operator-sanctioned). The private set is NOT opened: .worc, the env-file, "
+                "provider homes and frozen bundles stay read- and write-denied, as do the "
+                "write-guard, commit/staging gates, PR control, and denied_read_paths blacklist",
                 extra={
                     "disable_read_isolation": self._config.security.disable_read_isolation,
                     "strict_isolation": self._config.security.strict_isolation,
@@ -2593,19 +2606,28 @@ class Orchestrator:
                 "to inspect delivery history; the repository stays unwritable (the sandbox denies "
                 "writes) and commit/push/PR stay the orchestrator's alone"
             )
+        for mode_line in describe_advanced_mode(self._config):
+            # The same text preflight prints, from the same formatter — a run whose log said less
+            # than the report would let the two disagree about what the run was allowed to do, and
+            # the log is the half that survives on the machine that ran it.
+            self._log(p.task.id).warning(mode_line)
         for floor_gap in describe_host_floor(self._config, self._host_floor_checks):
             # The write floor is the one guarantee that does not need the agent's cooperation, so a
             # host that cannot enforce it is stated outright rather than inferred later from a
             # surprising diff. Never a stop: the operator still has to work on the host they have.
             self._log(p.task.id).warning(f"isolation floor NONE — {floor_gap}")
-        if self._config.security.strict_isolation:
-            reasons = check_isolation(self._config, self._isolation_checks)
-            if reasons:
-                joined = "; ".join(reasons)
-                self._log(p.task.id).warning(
-                    "isolation preflight failed", extra={"reasons": joined}
-                )
-                raise PipelineFailed(f"strict_isolation: {joined}")
+        # Ungated on `strict_isolation`, and it has to be: since the host half moved out to
+        # `describe_host_floor`, what is left is "is this provider configuration legal?" — a pure,
+        # host-independent verdict about extra_args and permission profiles that no configuration
+        # value earns an exemption from. Skipping it under `strict_isolation: false` skipped it in
+        # exactly the mode where the generated profile carries the whole local floor, and it also
+        # disagreed with `worc preflight`, which has always run this check unconditionally: the same
+        # config file reported `isolation: FAIL` there and started anyway here.
+        reasons = check_isolation(self._config, self._isolation_checks)
+        if reasons:
+            joined = "; ".join(reasons)
+            self._log(p.task.id).warning("isolation preflight failed", extra={"reasons": joined})
+            raise PipelineFailed(f"isolation: {joined}")
         self._check_preflight(p)
         self._transition(p, Status.PREPARING)
         self._prepare_branch(p)
@@ -3270,19 +3292,29 @@ class Orchestrator:
             extra_secrets=self._memory_extra_secrets(),
         )
 
+    @property
+    def _advanced_mode(self) -> bool:
+        """Whether this run is in the operator's advanced mode (``strict_isolation: false``).
+
+        Named rather than spelled out at each use, because it is asked in five places that must all
+        agree: the loud run-log line, the frozen bundle's metadata, and three of the ledger paths.
+        """
+        return not self._config.security.strict_isolation
+
     def _memory_extra_secrets(self) -> tuple[str, ...]:
         """Known secret literals to scrub from every memory write, beyond the structural
         patterns — a structural-only scrub let a known literal through.
 
-        The same sources the provider adapters scrub from artifacts: the values of non-allowlisted,
-        secret-named parent env vars + the contents of the repo's denied-read files (`.env` /
-        `secrets/**`). Best-effort and read-only (missing files are skipped); the values are only
-        ever used as redaction literals and are never themselves written anywhere.
+        The same sources the provider adapters scrub from artifacts, by the same rule: the values of
+        secret-named parent env vars (the allowlist excuses one only while it is also the gate on
+        what a child receives — in advanced mode it is not) + the contents of the repo's denied-read
+        files (`.env` / `secrets/**`). Best-effort and read-only (missing files are skipped); the
+        values are only ever used as redaction literals and are never themselves written anywhere.
         """
         security = self._config.security
-        return secret_env_values(security.allowed_environment) + read_denied_secrets(
-            self._config.repo.local_path, security.denied_read_paths
-        )
+        return secret_env_values(
+            security.allowed_environment, exempt_allowlisted=security.strict_isolation
+        ) + read_denied_secrets(self._config.repo.local_path, security.denied_read_paths)
 
     def _packet_builder(self) -> PacketBuilder | None:
         """Build the read-path ``PacketBuilder`` for this run, or ``None`` when memory is disabled.
@@ -4576,6 +4608,7 @@ class Orchestrator:
                 finished_at=self._clock(),
                 validation_reason=reason,
                 branch=None,
+                advanced_mode=self._advanced_mode,
             )
         )
         self._notify_terminal(
@@ -4627,11 +4660,17 @@ class Orchestrator:
 
         Defense-in-depth / advisory only — never enforcement (the sandbox + deny projection are the
         enforcement). Resolved once here (config-derived, not per-node) and threaded to the agent/
-        evaluator via ``NodeServices`` and to the supervisor directly: an always-on baseline plus a
-        read-restraint reinforcement when effective read-isolation is off.
+        evaluator via ``NodeServices`` and to the supervisor directly: an always-on baseline, a
+        read-restraint reinforcement when effective read-isolation is off, a paragraph naming the
+        advanced mode, and — only where this host truly has no OS sandbox — a paragraph saying that
+        the write floor is not enforced by anything but the agent's own compliance. The last one
+        asks the same host question the loud floor line does, through the same injected table, so
+        the prompt and the operator's report can never disagree about the machine.
         """
         return build_orchestrator_security_preamble(
-            read_isolation_off=self._config.security.read_isolation_off
+            read_isolation_off=self._config.security.read_isolation_off,
+            advanced_mode=self._advanced_mode,
+            no_write_floor=bool(describe_host_floor(self._config, self._host_floor_checks)),
         )
 
     def _log(self, task_id: str) -> logging.LoggerAdapter[logging.Logger]:
@@ -4963,5 +5002,6 @@ class Orchestrator:
                 attempt=attempt,
                 rerun_of=p.task.id if attempt > 1 else None,
                 governance_changed=p.governance_changed,
+                advanced_mode=self._advanced_mode,
             )
         )

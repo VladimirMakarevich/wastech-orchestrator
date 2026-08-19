@@ -112,15 +112,54 @@ security:
                                       #   all (native Windows; Linux/WSL2 without bubblewrap+socat)
                                       #   does not fail: preflight and the run log print a loud line
                                       #   saying .git and .worc are writable there.
+                                      #
+                                      #   false IS THE ADVANCED MODE — there is no second key. It
+                                      #   means "full freedom for the agent under your
+                                      #   responsibility, except the floor": read-isolation is
+                                      #   forced off, and the parent environment is forwarded WHOLE
+                                      #   to the agent CLIs, the check commands, the scanners and
+                                      #   the tool nodes, so allowed_environment is not consulted
+                                      #   for them at all. Still withheld: the names your
+                                      #   .worc/.env defines (return one with extra_environment).
+                                      #   The orchestrator's own git/gh keep the allowlist. It
+                                      #   unlocks no full-access provider mode and skips no proof —
+                                      #   the config-legality check and the capability probes run
+                                      #   at either value.
+                                      #
+                                      #   The floor that survives, in four levels, printed in full
+                                      #   by `worc preflight` and in the run log:
+                                      #     1. the task's own state is held MECHANICALLY — the
+                                      #        clone's .git and .worc stay unwritable wherever this
+                                      #        host can sandbox at all;
+                                      #     2. publication to your origin is held by DETECTION — a
+                                      #        branch or PR appearing without the orchestrator's
+                                      #        record parks the task;
+                                      #     3. publication ANYWHERE ELSE will not be held by
+                                      #        anything once the agent has network, and nothing is
+                                      #        planned to hold it. The agent has no network yet;
+                                      #     4. publication AS THE ORCHESTRATOR is held by DETECTION
+                                      #        — your git config and the clone's agent-CLI config
+                                      #        are fingerprinted, every gh call names its
+                                      #        repository, and the launched executables are pinned
+                                      #        to the paths resolved at startup. NOT covered: a
+                                      #        substitution made between runs, and an edit to the
+                                      #        installed package's own code.
+                                      #
+                                      #   Redaction widens to compensate: secret-named values are
+                                      #   scrubbed by NAME alone, so a secret-named variable with a
+                                      #   harmless value may print as [REDACTED].
   disable_read_isolation: true        # DEFAULT true — read-isolation is OFF out of the box (set
                                       #   false to KEEP it on). true disables READ-isolation for
                                       #   provider runs: Claude reloads native
                                       #   CLAUDE.md + project settings/hooks/MCP/skills (via
                                       #   --setting-sources project) and Codex reloads the user +
-                                      #   project .codex config/hooks/rules; the PRIVATE read-deny
-                                      #   projection (.worc/env-file/provider homes/frozen bundles)
-                                      #   is lifted. The WRITE side stays (exchange/.git/tasks write-
-                                      #   deny, commit/staging gates, PR control) and the
+                                      #   project .codex config/hooks/rules. It does NOT open the
+                                      #   PRIVATE set (.worc, the env-file, provider homes, frozen
+                                      #   bundles): that stays read+write-denied at either value —
+                                      #   native discovery never needed it, and opening it handed
+                                      #   the agent .worc/.env through the plain Read tool. The
+                                      #   WRITE side stays too (exchange/.git/tasks write-deny,
+                                      #   commit/staging gates, PR control) and the
                                       #   denied_read_paths blacklist stays enforced. strict_isolation
                                       #   is the master switch: strict_isolation: false forces this on
                                       #   regardless. Operator-config ONLY (never a task/flow/extra_args

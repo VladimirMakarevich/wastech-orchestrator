@@ -245,24 +245,24 @@ def test_windows_write_probe_redirects_with_a_bare_operator() -> None:
     assert write.command == ["cmd", "/c", "echo", "x", ">>", "C:\\clone\\src\\main.py"]
 
 
-def test_private_readable_flips_reads_and_adds_write_deny() -> None:
-    # Read-isolation OFF → private reads become positive controls (allowed) and a private
-    # WRITE-denied probe is added to prove the control plane stays immutable.
-    default = {
-        p.label: p.expect_denied
-        for p in build_canary_probes(private_probe="/p", exchange_probe=None, system="Linux")
-    }
-    assert default["private-read-denied"] is True
-    readable = {
+def test_private_reads_are_expected_denied_with_no_read_isolation_knob() -> None:
+    """The canary asserts the private deny unconditionally — direct, shell-mediated and via alias.
+
+    It used to flip these three to *allowed* whenever read-isolation was off, mirroring a profile
+    that downgraded the private set to ``read``. Both halves are gone, so the probe set no longer
+    has a configuration in which the orchestrator's own private home is expected to be readable, and
+    the canary now proves that deny on every run rather than on the non-default half of them.
+    """
+    probes = {
         p.label: p.expect_denied
         for p in build_canary_probes(
-            private_probe="/p", exchange_probe=None, system="Linux", private_readable=True
+            private_probe="/p", exchange_probe=None, system="Linux", alias_probe="/repo/alias"
         )
     }
-    assert readable["private-read-allowed"] is False
-    assert readable["private-shell-read-allowed"] is False
-    assert readable["private-write-denied"] is True
-    assert "private-read-denied" not in readable
+    assert probes["private-read-denied"] is True
+    assert probes["private-shell-read-denied"] is True
+    assert probes["private-alias-read-denied"] is True
+    assert not [label for label in probes if label.endswith("-read-allowed")]
 
 
 # --- the no-model capability smoke (deterministic; scripted sandbox + inventory) -----------------

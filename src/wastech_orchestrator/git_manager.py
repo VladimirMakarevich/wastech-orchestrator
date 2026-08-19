@@ -27,7 +27,7 @@ import re
 import stat
 import tempfile
 import time
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,6 +36,7 @@ from wastech_orchestrator.config.schema import (
     BranchMode,
     MergeStrategy,
     OrchestratorConfig,
+    SecurityConfig,
 )
 from wastech_orchestrator.observability.logging import bind
 from wastech_orchestrator.observability.progress import run_with_heartbeat
@@ -48,8 +49,9 @@ from wastech_orchestrator.runtime_layout import (
     EXCHANGE_HOME_DIRNAME,
     ProviderWriteGuardPolicy,
 )
-from wastech_orchestrator.security.env import build_child_env
+from wastech_orchestrator.security.env import build_orchestrator_env, default_allowed_environment
 from wastech_orchestrator.security.env_paths import assigned_path_elements, is_inside
+from wastech_orchestrator.security.launchers import pin_launchers, resolve_launcher
 from wastech_orchestrator.state_store import PublishOpRow, StateStore
 from wastech_orchestrator.task.model import BRANCH_NAME_MAX_LEN
 from wastech_orchestrator.task.parser import slugify_bounded
@@ -159,10 +161,68 @@ _GIT_HARDENING_ENV: dict[str, str] = {
     # left behind, whether a PR was already merged (`_ALREADY_MERGED_MARKERS`). Git is localized, so
     # an operator setting `LANG` (a legitimate `security.extra_environment` value, and the very
     # example the design used) would turn a retryable network blip into a final task failure with no
-    # trace of why. Pinned here because this mapping is applied ON TOP of `build_child_env`, so no
-    # config value can override it, and it already covers both `git` and `gh`.
+    # trace of why. Pinned here because this mapping is applied ON TOP of the built environment, so
+    # no config value can override it, and it already covers both `git` and `gh`.
     "LC_ALL": "C",
 }
+
+# Environment names REMOVED from every orchestrator git/gh process, applied after the build and
+# before `_GIT_HARDENING_ENV`. The allowlist alone does not cover this: `security.extra_environment`
+# *assigns* outright and reaches this path by design (it is how an operator supplies a proxy), and
+# an `allowed_environment` entry — a plain name or a prefix pattern — can forward one of these from
+# the operator's shell. Either way the name would retarget the orchestrator's own publication —
+# the one thing no configuration is allowed to move: `GH_REPO`/`GH_HOST` send the pull request
+# somewhere else, the `GIT_DIR`/`GIT_WORK_TREE`/index/object names move both the commands and
+# `resolve_control_paths` (so the write-guard would protect a different `.git`), the `GIT_CONFIG_*`
+# counters inject config a `-c` cannot outrank, the ssh/askpass names substitute the transport or
+# the credential prompt, and the author/committer names rewrite who a commit says it is from.
+#
+# `GIT_CONFIG_GLOBAL` is deliberately NOT here: unsetting it is what sends git back to the real
+# `~/.gitconfig`, which is trusted on purpose (it holds the credentials push/fetch need — see
+# `_GIT_HARDENING_ENV` above). That file is covered by the control-state fingerprint instead, so a
+# swap during a run is detected rather than silently honored.
+_GIT_ENV_SCRUB: frozenset[str] = frozenset(
+    {
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_COUNT",
+        "GIT_SSH",
+        "GIT_SSH_COMMAND",
+        "GIT_ASKPASS",
+        "SSH_ASKPASS",
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_AUTHOR_DATE",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+        "GIT_COMMITTER_DATE",
+        "GH_REPO",
+        "GH_HOST",
+    }
+)
+
+
+def build_git_env(
+    security: SecurityConfig, parent_env: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """The environment for every orchestrator-owned ``git`` / ``gh`` process.
+
+    The allowlist (never the agent's full pass-through — :func:`build_orchestrator_env` explains
+    why), minus :data:`_GIT_ENV_SCRUB`, plus the unconditional :data:`_GIT_HARDENING_ENV`. One
+    function so the three orders — forward, scrub, pin — cannot differ between call sites, and so a
+    scrubbed name cannot be reintroduced by the pin or by a config value.
+    """
+    env = build_orchestrator_env(security, parent_env)
+    for name in _GIT_ENV_SCRUB:
+        env.pop(name, None)
+    env.update(_GIT_HARDENING_ENV)
+    return env
+
 
 # Repo-local/worktree config keys whose *value is a program* git would execute during a
 # filter (clean/smudge/process), an external/textconv diff, or a fetch/push. A command-line `-c`
@@ -195,14 +255,49 @@ def _append_missing_lines(target: Path, lines: Sequence[str]) -> list[str]:
     return additions
 
 
+# The environment for a git/gh call site that holds a repo path but no `SecurityConfig` — the two
+# module-level helpers below, plus the installer's own probes, which run before any policy object
+# exists. Still an allowlist, just the built-in one: the cross-platform base plus this host's
+# OS-launch essentials, which is what a read-only `git` needs (`PATH` so it is found, `HOME` for the
+# global config that decides `core.excludesFile`), scrubbed and hardened like every other
+# orchestrator git process. Those helpers used to take the full `os.environ` — alone among the git
+# call sites, and with no comment saying why — so a shell `GIT_DIR` moved them off the clone, and
+# Phase 0.4's `.git/info/exclude` decision rests on their answer.
+def build_helper_git_env(*extra_allowed: str) -> dict[str, str]:
+    """:func:`build_git_env` for a call site that has no :class:`SecurityConfig` to pass it.
+
+    ``extra_allowed`` widens the built-in allowlist by exact name, for the one probe that needs it:
+    ``gh auth status`` is the right way to ask whether ``gh`` is authenticated *because* it accounts
+    for an environment token, so the installer forwards ``GH_TOKEN``/``GITHUB_TOKEN`` deliberately.
+    Widening cannot reach a scrubbed name — :func:`build_git_env` removes those after forwarding —
+    so naming ``GH_HOST`` here would still not retarget anything.
+    """
+    return build_git_env(
+        SecurityConfig(
+            strict_isolation=True,
+            allowed_environment=(*default_allowed_environment(), *extra_allowed),
+            denied_read_paths=(),
+            denied_commands=(),
+        )
+    )
+
+
+#: ``git`` for the two helpers below, pinned once at import for the reason the per-manager pin
+#: exists: a bare name lets a directory earlier on ``PATH`` decide what answers. At import rather
+#: than per call because these are stateless module functions with nothing to hold a pin on, and
+#: ``PATH`` itself is set before this module loads — unlike the *environment*, which the CLI is
+#: still filling from ``.worc/.env`` at that point, and which is therefore built per call above.
+_HELPER_GIT_PATH: str = resolve_launcher("git") or "git"
+
+
 def _git_path_ignored(repo_root: str | Path, probe: str) -> bool:
     """Whether ``git check-ignore`` reports ``probe`` as ignored in ``repo_root`` (exit code 0)."""
     with tempfile.TemporaryDirectory() as scratch:
         stdout_path = Path(scratch) / "stdout"
         result = run_process(
-            ["git", "check-ignore", "-q", probe],
+            [_HELPER_GIT_PATH, "check-ignore", "-q", probe],
             cwd=repo_root,
-            env=dict(os.environ),
+            env=build_helper_git_env(),
             timeout_seconds=30,
             stdout_path=str(stdout_path),
         )
@@ -219,9 +314,9 @@ def _git_stdout(repo_root: str | Path, *args: str) -> str:
     with tempfile.TemporaryDirectory() as scratch:
         stdout_path = Path(scratch) / "stdout"
         result = run_process(
-            ["git", *args],
+            [_HELPER_GIT_PATH, *args],
             cwd=repo_root,
-            env=dict(os.environ),
+            env=build_helper_git_env(),
             timeout_seconds=30,
             stdout_path=str(stdout_path),
         )
@@ -632,7 +727,7 @@ class GitControlState:
 class GitControlDriftItem:
     """One redacted control-state change (path/key/name level only — never a value or content)."""
 
-    aspect: str  # index | head | task_ref | config | hooks | markers
+    aspect: str  # index | head | task_ref | config | hooks | markers | executables
     detail: str
 
 
@@ -762,12 +857,16 @@ class GitManager:
         # from the code commit alongside the gitignored `.worc/` runtime home.
         self._tasks_dir = config.paths.tasks_dir
         self._excluded_dirs = (*RUNTIME_EXCLUDED_DIRS, self._tasks_dir)
-        # Orchestrator-injected no-prompt/no-editor git env on top of the security
-        # allowlist; applies to both `git` (`_run`) and `gh` (`_gh`), which shells out to git.
-        self._env = {
-            **build_child_env(config.security),
-            **_GIT_HARDENING_ENV,
-        }
+        # The allowlist, scrubbed of the publication-retargeting names and hardened; applies to both
+        # `git` (`_run`) and `gh` (`_gh`), which shells out to git. See `build_git_env`.
+        self._env = build_git_env(config.security)
+        # `git` and `gh` resolved ONCE, here, and used for every later call (see `_pinned_argv`).
+        # Both are launched by bare name throughout this module, which means a directory earlier on
+        # PATH decides what actually commits and pushes; resolving per call would re-decide that at
+        # every invocation, including the ones after the agent has been running. The logical name
+        # stays in the argv the callers build — `_harden_git_argv` keys on it — and the path is
+        # substituted at the point of launch.
+        self._launchers = pin_launchers(config)
         # An empty hooks dir every git command points at (see `_harden_git_argv`), so no
         # target-repo hook runs in an orchestrator git process. Absolute, real, empty.
         self._null_hooks_dir = Path(self._artifacts_root) / GIT_NULL_HOOKS_DIRNAME
@@ -802,7 +901,7 @@ class GitManager:
         signing helpers). ``gh`` is less constrained, so it keeps the full quiescence barrier.
         """
         argv = list(argv)
-        hardened = self._harden_git_argv(argv)
+        hardened = self._pinned_argv(self._harden_git_argv(argv))
         trusted = bool(argv) and argv[0] == "git"
         with tempfile.TemporaryDirectory() as scratch:
             stdout_path = Path(scratch) / "stdout"
@@ -833,6 +932,18 @@ class GitManager:
             timed_out=result.timed_out,
             launch_error=result.launch_error,
         )
+
+    def _pinned_argv(self, argv: list[str]) -> list[str]:
+        """Replace ``argv[0]`` with the path pinned when this manager was built.
+
+        Last thing before launch, after hardening, so everything upstream — the callers, the ``-c``
+        prefix insertion, the ``trusted`` decision — keeps reading the logical name it was written
+        against. A name this host never resolved passes through unchanged, and the process runner
+        reports the launch failure it already reports.
+        """
+        if not argv:
+            return argv
+        return [self._launchers.launch(argv[0]), *argv[1:]]
 
     def _harden_git_argv(self, argv: list[str]) -> list[str]:
         """Insert the hardening prefix into a ``git`` argv (leaves ``gh``/other argv as-is).
@@ -1453,6 +1564,15 @@ class GitManager:
         if before.markers != after.markers:
             changed = ", ".join(sorted(before.markers ^ after.markers))
             items.append(GitControlDriftItem("markers", f"operation markers changed: {changed}"))
+        # The same question as everything above, asked of the binaries instead of the repository:
+        # would a bare-name launch still reach the file it reached when this run started? Asked here
+        # because this comparison already runs in the one window that matters — after the agent has
+        # finished, before the orchestrator commits and pushes — and its verdict is already
+        # `manual_action_required`. The orchestrator has been using the pinned paths throughout, so
+        # an item here reports an attempt to redirect it, not a redirection that succeeded.
+        items.extend(
+            GitControlDriftItem("executables", detail) for detail in self._launchers.drift()
+        )
         return GitControlDrift(tuple(items)) if items else None
 
     def _capture_local_config(self) -> dict[str, tuple[str, ...]]:

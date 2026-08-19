@@ -3272,6 +3272,87 @@ def test_a_host_without_a_floor_is_announced_and_the_run_continues(
     assert any("isolation floor NONE — claude: no OS sandbox" in r.message for r in caplog.records)
 
 
+def test_advanced_mode_is_announced_in_the_run_log_and_recorded_durably(
+    git_repo,
+    make_git_config,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """ТA.6.2/ТA.6.3: the mode reaches the run log, the ledger record and the frozen bundle.
+
+    Three carriers, one question, and they do not overlap by accident. The log line is the same text
+    preflight prints, from the same formatter, so a run cannot describe itself differently from the
+    report. The bundle's manifest records the posture the task STARTED in — written before the first
+    node, so it exists for a task that never reached a terminal transition. The ledger record
+    answers for a task that finished. Together they are the only durable answer to "what was this
+    run allowed to do": the attempt's `request.json`, which carries the permission profile and the
+    full argv, is deleted at the end of every attempt under the shipped artifact levels.
+    """
+    orch, store, ledger, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        config_kwargs={"strict_isolation": False, "clean_runs_on_success": False},
+    )
+    with caplog.at_level(logging.WARNING):
+        result = orch.run_task(_complete_task(tmp_path, "task-mode"))
+
+    assert result.final_status is not Status.FAILED  # announced, never refused
+    messages = [r.message for r in caplog.records]
+    assert any("advanced-mode: ON (security.strict_isolation=false)" in m for m in messages)
+    assert any("floor 3 of 4" in m and "no network yet" in m for m in messages)
+    assert ledger.records()[0]["advanced_mode"] is True
+    manifests = list(art.rglob("control-bundles/*/manifest.json"))
+    assert manifests, "the frozen control bundle should exist with clean_runs_on_success off"
+    assert json.loads(manifests[0].read_text("utf-8"))["metadata"]["advanced_mode"] == "true"
+
+
+def test_a_default_run_carries_the_mode_marker_as_false(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The marker is written on every run, not only in the mode: "this key is absent" and "this run
+    # was ordinary" have to be different answers, or the ledger cannot be read as evidence at all.
+    orch, _, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    orch.run_task(_complete_task(tmp_path, "task-plain"))
+    assert ledger.records()[0]["advanced_mode"] is False
+
+
+def test_config_legality_is_checked_even_with_strict_isolation_off(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    """ТA.9.1: `check_isolation` no longer skips when `strict_isolation` is false.
+
+    What is left of that check after the host half moved out is "is this provider configuration
+    legal?" — pure, host-independent, and nothing a configuration value earns an exemption from.
+    Skipping it under `strict_isolation: false` skipped it in exactly the mode where the generated
+    profile carries the whole local floor, and it disagreed with `worc preflight`, which has always
+    run the check unconditionally: the same file reported `isolation: FAIL` there and started here.
+    """
+    orch, store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        config_kwargs={"strict_isolation": False},
+    )
+    monkeypatch.setattr(
+        "wastech_orchestrator.core.orchestrator.check_isolation",
+        lambda _config, _checks: ["claude: extra_args carries a forbidden flag"],
+    )
+    result = orch.run_task(_complete_task(tmp_path, "task-illegal"))
+
+    assert result.final_status is Status.FAILED
+    row = store.get_task("task-illegal")
+    assert row is not None and row.status is Status.FAILED
+    # Stopped before the branch: the gate is part of the preamble, ahead of any side effect.
+    assert git_run(["branch", "--list", "worc/*"], git_repo.clone) == ""
+
+
 def test_failed_with_branch_commits_and_pushes_task_and_summary(
     git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:

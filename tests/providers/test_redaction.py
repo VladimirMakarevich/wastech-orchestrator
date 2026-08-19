@@ -17,6 +17,7 @@ from wastech_orchestrator.providers.redaction import (
     redact_text,
     secret_env_values,
 )
+from wastech_orchestrator.security.env import build_child_env
 
 # Fake credential-shaped strings (assembled so they are obviously not real secrets).
 FAKE_GH = "ghp_" + "0123456789abcdef0123456789"
@@ -326,3 +327,112 @@ def test_prefix_patterns_never_shrink_the_harvest(
     )
     assert set(baseline._secret_env_values()) <= set(widened._secret_env_values())
     assert "supersecretvalue123" in widened._secret_env_values()
+
+
+# --- И-4 across the mode, plus the exemption that keeps it holdable (ТA.7.1–ТA.7.3) --------------
+
+
+def test_advanced_mode_never_shrinks_the_harvest(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """И-4 as a property over the mode itself: the mode's literal set is a superset, never smaller.
+
+    The rule inverts because the strict one collapses: with the parent environment forwarded whole,
+    "secret-named AND not allowlisted" matches nothing, so the layer that exists for secrets with no
+    recognizable shape would collect an empty set exactly when the environment holds the most of
+    them. Driven through the adapter's real call site, because wiring the mode is the part that can
+    be forgotten and a direct call to the harvester would not notice.
+
+    `ALLOWLISTED_TOKEN` carries the property: strict isolation excuses it (exported on purpose), and
+    the mode does not, so it can only appear on the wider side.
+    """
+    monkeypatch.setenv("MY_API_KEY", "supersecretvalue123")
+    monkeypatch.setenv("ALLOWLISTED_TOKEN", "forwarded-on-purpose-1")
+    security = replace(
+        security_config,
+        allowed_environment=(*security_config.allowed_environment, "ALLOWLISTED_TOKEN"),
+    )
+    strict = CodexProvider(codex_config, security=security, artifacts_root=tmp_path)
+    mode = CodexProvider(
+        codex_config,
+        security=replace(security, strict_isolation=False),
+        artifacts_root=tmp_path,
+    )
+    assert set(strict._secret_env_values()) <= set(mode._secret_env_values())
+    assert "forwarded-on-purpose-1" not in strict._secret_env_values()
+    assert "forwarded-on-purpose-1" in mode._secret_env_values()
+    assert "supersecretvalue123" in mode._secret_env_values()
+
+
+def test_env_file_values_stay_in_the_harvest_in_the_mode(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ТA.7.3: withholding an env-file name from the CHILD must not drop it from the scrub.
+
+    The two rules pull in opposite directions and meet here. ТA.2.3 keeps `.worc/.env` names out of
+    the child environment; the harvest still has to scrub their values, because the orchestrator's
+    own process holds them and they can reach a log line or an artifact through it. The natural
+    implementation — harvest from the environment the child was given — would silently drop them,
+    and the superset property above would not catch it: both sides would shrink together. So this is
+    pinned separately, as the requirement demands.
+    """
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "env-file-loaded-secret-1")
+    monkeypatch.setattr(
+        "wastech_orchestrator.security.env.env_file_names",
+        lambda: frozenset({"TELEGRAM_BOT_TOKEN"}),
+    )
+    mode = CodexProvider(
+        codex_config,
+        security=replace(security_config, strict_isolation=False),
+        artifacts_root=tmp_path,
+    )
+    child = build_child_env(mode._security)
+    assert "TELEGRAM_BOT_TOKEN" not in child  # withheld from the child …
+    assert "env-file-loaded-secret-1" in mode._secret_env_values()  # … and still scrubbed
+
+
+@pytest.mark.parametrize("strict_isolation", [True, False])
+def test_the_working_directory_is_not_harvested_as_a_secret(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    strict_isolation: bool,
+) -> None:
+    """ТA.7.2: `PWD` matches the `pwd` segment and holds a path, so it was scrubbing every citation.
+
+    A live defect before the mode existed: `PWD` is absent from the default allowlist, so the run's
+    own absolute path became a redaction literal and `<repo>/src/foo.py:42` printed as
+    `[REDACTED]/src/foo.py:42` in reports and pull-request bodies. Parameterized over both settings
+    because the exemption has to hold in both: strict isolation had a workaround (allowlist the
+    name) and the mode takes it away, so an exemption on one side only would fix the mode and leave
+    the shipped default broken — and И-4 is compared after the exemption, so applying it on both
+    sides is also what keeps that property true.
+    """
+    monkeypatch.setenv("PWD", "/Users/someone/work/orchestrator")
+    monkeypatch.setenv("OLDPWD", "/Users/someone/elsewhere")
+    monkeypatch.setenv("DB_PWD", "a-real-database-password")
+    provider = CodexProvider(
+        codex_config,
+        security=replace(security_config, strict_isolation=strict_isolation),
+        artifacts_root=tmp_path,
+    )
+    harvested = provider._secret_env_values()
+    assert "/Users/someone/work/orchestrator" not in harvested
+    assert "/Users/someone/elsewhere" not in harvested
+    # Narrow: the exemption is by exact name, so the segment stays useful for what it is there for.
+    assert "a-real-database-password" in harvested
+
+
+def test_a_citation_survives_redaction_end_to_end(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The defect as an operator saw it, through the real text path rather than the harvester alone.
+    monkeypatch.setenv("PWD", "/Users/someone/work/orchestrator")
+    literals = secret_env_values(allowed_environment=(), exempt_allowlisted=False)
+    quoted = "failing test at /Users/someone/work/orchestrator/src/foo.py:42"
+    assert redact_text(quoted, extra_secrets=literals) == quoted

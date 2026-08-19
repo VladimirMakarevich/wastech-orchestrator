@@ -110,7 +110,6 @@ def build_codex_permission_profile(
     write_guard: ProviderWriteGuardPolicy | None,
     denied_read_paths: Sequence[str],
     strict_isolation: bool = True,
-    read_isolation_off: bool = False,
     to_native: NativePath = str,
 ) -> dict[str, Any]:
     """Build the Codex ``[permissions.<name>]`` profile mapping for one attempt.
@@ -119,10 +118,10 @@ def build_codex_permission_profile(
     ``:workspace`` and grants it write, then Write/Edit-denies (as more-specific ``read`` rules) the
     exchange, resolved Git dirs, and ``tasks/`` tree from *write_guard* so they stay readable
     but immutable. Both profiles ``deny`` the *deny_policy* set (private/control homes, resolved
-    env-file, provider auth homes incl. ``CODEX_HOME``, frozen bundles) and the public
-    *denied_read_paths* blacklist. Network is disabled in both (a validator rule keeps a Codex
-    workspace-write node offline). Deny rules are applied last so a deny always wins on any path
-    collision.
+    env-file, provider auth homes incl. ``CODEX_HOME``, frozen bundles) — unconditionally, at every
+    read-isolation setting — and the public *denied_read_paths* blacklist. Network is disabled in
+    both (a validator rule keeps a Codex workspace-write node offline). Deny rules are applied last
+    so a deny always wins on any path collision.
     """
     if permission_profile not in _EXTENDS:
         raise ProviderError(
@@ -142,14 +141,16 @@ def build_codex_permission_profile(
     # Deny last: private/control/secret roots always win over any read/write grant above.
     needs_glob_scan = False
     if deny_policy is not None:
-        # With read-isolation OFF the private set is downgraded from ``deny`` (read+write
-        # blocked) to ``read`` — it stays WRITE-denied (a ``read`` grant more specific than the
-        # workspace ``write`` keeps the control plane immutable) but becomes READABLE so the agent
-        # can run native ``.codex``/config discovery. Under isolation it stays fully ``deny``. The
-        # public ``denied_read_paths`` blacklist below is ``deny`` regardless.
-        internal_grant = "read" if read_isolation_off else "deny"
+        # ``deny`` at EVERY read-isolation setting. This set used to be downgraded to ``read``
+        # when read-isolation was off — that is, on the shipped default — which made the private
+        # home and the resolved env-file readable to the sandboxed shell. Native discovery never
+        # needed that grant: the CLI loads its own user ``config.toml`` and auth from ``CODEX_HOME``
+        # in its own process, outside this profile (which is why auth works today with that home
+        # denied), and a project's ``.codex`` tree is an ordinary workspace path. What restores
+        # discovery is dropping ``--ignore-user-config`` and trusting the project, both in the argv
+        # builder. The public ``denied_read_paths`` blacklist below is ``deny`` regardless.
         for path in deny_policy.denied_paths:
-            filesystem[to_native(path)] = internal_grant
+            filesystem[to_native(path)] = "deny"
     for pattern in denied_read_paths:
         if not pattern.strip():
             continue

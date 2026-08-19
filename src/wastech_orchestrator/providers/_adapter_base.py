@@ -65,6 +65,7 @@ from wastech_orchestrator.providers.redaction import (
 )
 from wastech_orchestrator.runtime_layout import InternalDenyPolicy
 from wastech_orchestrator.security.env import build_child_env
+from wastech_orchestrator.security.launchers import resolve_launcher
 
 _PREFLIGHT_TIMEOUT_SECONDS = 10
 _LOG = logging.getLogger(__name__)
@@ -241,6 +242,13 @@ class BaseCliProvider:
     ) -> None:
         self._config = config
         self._security = security
+        # The configured ``command`` resolved to an absolute path ONCE, and used for every launch
+        # (see `_pinned_argv`). A CLI launched by bare name is whatever a ``PATH`` directory offers
+        # at that instant, and the agent CLI is the process the whole run is built around. Falls
+        # back to the configured spelling when this host resolves nothing, so the "executable not
+        # found" preflight verdict stays the diagnostic it is instead of turning into a launch
+        # mystery.
+        self._command_path = resolve_launcher(config.command) or config.command
         self._artifacts_root = Path(artifacts_root)
         # The internal read-deny set (private/control homes, secrets, provider auth
         # homes, frozen bundles) the adapter projects into its tool/OS-sandbox deny policy. On the
@@ -363,7 +371,7 @@ class BaseCliProvider:
         with tempfile.TemporaryDirectory() as scratch:
             stdout_path = str(Path(scratch) / "version.out")
             proc = self._run_process(
-                [self._config.command, "--version"],
+                [self._command_path, "--version"],
                 cwd=scratch,
                 env=env,
                 timeout_seconds=self._preflight_timeout_seconds,
@@ -452,6 +460,19 @@ class BaseCliProvider:
         """
         return ""
 
+    def _pinned_argv(self, argv: Sequence[str]) -> list[str]:
+        """``argv`` with the configured command replaced by the path pinned at construction.
+
+        Substituted at the point of launch, not where the argv is built, so every builder and every
+        test that inspects an argv keeps seeing the configured spelling. Only ``argv[0]``, and only
+        when it IS the configured command: an argv naming some other program is not this adapter's
+        to redirect.
+        """
+        items = list(argv)
+        if items and items[0] == self._config.command:
+            items[0] = self._command_path
+        return items
+
     def _probe(self, argv: list[str], env: Mapping[str, str]) -> tuple[bool, str]:
         """Run a short, read-only probe command (e.g. ``<cli> … --help``) for a capability check.
 
@@ -462,7 +483,7 @@ class BaseCliProvider:
         with tempfile.TemporaryDirectory() as scratch:
             out = str(Path(scratch) / "probe.out")
             proc = self._run_process(
-                argv,
+                self._pinned_argv(argv),
                 cwd=scratch,
                 env=env,
                 timeout_seconds=self._preflight_timeout_seconds,
@@ -507,7 +528,7 @@ class BaseCliProvider:
         )
         proc = run_with_heartbeat(
             lambda: self._run_process(
-                argv,
+                self._pinned_argv(argv),
                 cwd=request.working_directory,
                 env=env,
                 timeout_seconds=request.timeout_seconds,
@@ -776,8 +797,16 @@ class BaseCliProvider:
         )
 
     def _secret_env_values(self) -> tuple[str, ...]:
-        """Values of non-allowlisted, secret-named parent env vars, for defensive redaction."""
-        return secret_env_values(self._security.allowed_environment)
+        """Values of secret-named parent env vars, for defensive redaction.
+
+        The allowlist excuses a name only while it is also the gate on what a child receives. In
+        advanced mode it is not (``strict_isolation: false`` forwards the parent environment whole),
+        so nothing is excused and the name policy decides alone — see :func:`secret_env_values`.
+        """
+        return secret_env_values(
+            self._security.allowed_environment,
+            exempt_allowlisted=self._security.strict_isolation,
+        )
 
 
 def _parse_version(text: str) -> str | None:

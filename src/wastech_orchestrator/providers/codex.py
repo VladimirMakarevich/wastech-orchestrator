@@ -365,13 +365,15 @@ def _isolation_argv(
     deny/read-only carve-outs and disables network. There is no opt-out: a profile is emitted for
     every attempt, because it is also what the pre-launch canary re-runs to prove enforcement.
 
-    ``read_isolation_off`` restores Codex's NATIVE config discovery — the private profile
-    carve-outs are downgraded to read-only (:func:`build_codex_permission_profile`), the operator's
-    user ``config.toml`` is loaded (no ``--ignore-user-config``), the project is TRUSTED (so its
+    ``read_isolation_off`` restores Codex's NATIVE config discovery: the operator's user
+    ``config.toml`` is loaded (no ``--ignore-user-config``), the project is TRUSTED (so its
     ``.codex`` config/rules/hooks apply), and the ``hooks`` feature is re-enabled — symmetric with
-    Claude's ``--setting-sources project``. The heavier autonomous tool surfaces
-    (multi-agent/computer/browser/apps/plugins) stay disabled (execution surfaces, not read-side
-    discovery), and the profile's write-only carve-outs (and the pre-launch canary) still hold.
+    Claude's ``--setting-sources project``. It does **not** reach the profile: the private/control
+    set stays ``deny`` at every setting (:func:`build_codex_permission_profile`), because the CLI
+    reads its own config and auth outside the profile, so discovery never needed that grant — while
+    granting it handed the sandboxed shell the orchestrator's own env-file. The heavier autonomous
+    tool surfaces (multi-agent/computer/browser/apps/plugins) stay disabled (execution surfaces, not
+    read-side discovery), and the pre-launch canary still holds.
     """
     profile = build_codex_permission_profile(
         permission_profile=_effective_permission_profile(config, request),
@@ -380,7 +382,6 @@ def _isolation_argv(
         write_guard=request.write_guard,
         denied_read_paths=tuple(denied_read_paths),
         strict_isolation=strict_isolation,
-        read_isolation_off=read_isolation_off,
     )
     argv = [
         "-c",
@@ -689,7 +690,7 @@ class CodexProvider(BaseCliProvider):
         task_path = request.task_path
         exchange_probe = task_path if task_path and Path(task_path).exists() else None
         outcome = run_codex_canary(
-            command=self._config.command,
+            command=self._command_path,
             profile_arg=profile_arg,
             working_directory=request.working_directory,
             private_probe=paths.request_path,
@@ -697,7 +698,6 @@ class CodexProvider(BaseCliProvider):
             env=env,
             system=platform.system(),
             runner=self._canary_runner,
-            private_readable=self._security.read_isolation_off,
             extra=ExtraProbes(write_guard_probes=self._write_guard_probes(request)),
         )
         Path(paths.attempt_dir, "canary.json").write_text(
@@ -744,19 +744,21 @@ class CodexProvider(BaseCliProvider):
         mid-run ``CAPABILITY_UNAVAILABLE`` / ``CONFIGURATION_ERROR`` that reads like a bug. Runs the
         no-model :func:`codex_canary.run_codex_capability_smoke` on the configured profile under a
         throwaway fixture. A proven leak is fatal (a non-fallback result); an undemonstrable
-        sandbox is advisory (degrades like a capability gap). Returns ``None`` when strict isolation
-        is off.
+        sandbox is advisory (degrades like a capability gap).
+
+        Runs at every value of ``strict_isolation``. It used to return ``None`` when that was off —
+        i.e. it declined to prove the profile in the one configuration where the profile is the
+        whole local floor. It is also the only check that proves the generated profile is applied by
+        the operating system rather than swallowed by the CLI, which accepts an unknown profile key
+        without complaint: a typo there yields no policy and no diagnostic.
         """
-        if not self._security.strict_isolation:
-            return None
         env = self._augment_child_env(build_child_env(self._security))
         report = run_codex_capability_smoke(
-            command=self._config.command,
+            command=self._command_path,
             home_dir=home_dir,
             env=env,
             permission_profile=self._config.permission_profile or _DEFAULT_PROFILE,
             runner=self._canary_runner,
-            read_isolation_off=self._security.read_isolation_off,
         )
         return IsolationCapabilityReport(
             ok=report.ok,
