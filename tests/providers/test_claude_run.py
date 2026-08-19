@@ -541,6 +541,48 @@ def test_a_read_only_run_in_the_advanced_mode_gets_the_sandbox_that_holds_it_to_
     assert sandbox["autoAllowBashIfSandboxed"] is True
 
 
+def test_the_advanced_mode_writes_the_volume_root_and_the_open_network_into_the_sandbox_file(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    """The wiring, end to end: mode on → ``allowWrite`` on the volume root and ``allowedDomains``.
+
+    The unit tests prove the file's shape; this proves the adapter actually asks for that shape from
+    a real request, which is the half that breaks silently. The node here was granted NO network by
+    its flow, on purpose: the mode is a config-level grant of the whole network, and a flow cannot
+    take it back — the shell would reach the network regardless of any tool list.
+    """
+    deny = InternalDenyPolicy(
+        control_home=tmp_path / ".worc",
+        private_home=tmp_path / ".worc",
+        env_file=None,
+        provider_homes=(),
+    )
+    fake = FakeRun(stdout=_success_stream())
+    provider = ClaudeCodeProvider(
+        claude_config,
+        security=replace(security_config, strict_isolation=False),
+        artifacts_root=tmp_path,
+        clock=lambda: FIXED_TIME,
+        run_process=fake,
+        sandbox_probe=lambda: SandboxCapability.MACOS,
+        deny_policy=deny,
+    )
+    provider.run(replace(_make_ws_request(tmp_path), network_access=False))
+
+    argv = fake.captured["argv"]
+    sandbox = json.loads(Path(argv[argv.index("--settings") + 1]).read_text(encoding="utf-8"))[
+        "sandbox"
+    ]
+    # The volume root, taken from the workspace path's own anchor rather than a hardcoded "/".
+    assert sandbox["filesystem"]["allowWrite"] == [Path((tmp_path / "clone").anchor).as_posix()]
+    assert sandbox["network"]["allowedDomains"] == ["*"]
+    # The floor is still spelled out inside that grant, and so is the whole clone for a writer's
+    # control paths — this attempt is workspace-write, so the guard roots are what to look for.
+    deny_write = set(sandbox["filesystem"]["denyWrite"])
+    assert (tmp_path / ".worc").as_posix() in deny_write
+    assert {"WebFetch", "WebSearch"} <= set(argv[argv.index("--allowedTools") + 1].split(","))
+
+
 def _make_ws_request(tmp_path: Path) -> AgentRunRequest:
     return AgentRunRequest(
         task_id="task-001",
@@ -809,14 +851,20 @@ class _WritingRun(FakeRun):
     """A fake launch that creates the files the probe's prompt names, chosen per test.
 
     Stands in for the model plus the OS sandbox: whichever paths this writes are the paths that
-    "landed", which is exactly what the classifier reads.
+    "landed", which is exactly what the classifier reads. It also keeps the sandbox settings file's
+    CONTENT, read at launch: the probe builds its fixture under a throwaway root and removes it on
+    the way out, so a test that wants the policy the probe launched under has to read it here.
     """
 
     def __init__(self, *, write: Callable[[Path], bool], **kwargs: Any) -> None:
         super().__init__(**kwargs)
         self._write = write
+        self.sandbox_settings: dict[str, Any] | None = None
 
     def __call__(self, argv: list[str], **kwargs: Any) -> ProcessResult:
+        if "--settings" in argv:
+            path = Path(argv[argv.index("--settings") + 1])
+            self.sandbox_settings = json.loads(path.read_text(encoding="utf-8"))
         # Claude takes the prompt on stdin, so that is where the probe's four paths are.
         prompt = " ".join([*argv, kwargs.get("stdin_text") or ""])
         for token in prompt.split():
@@ -948,3 +996,11 @@ def test_the_paid_probe_runs_in_advanced_mode_too(
     report = provider.paid_isolation_probe(home_dir=tmp_path)
     assert report is not None
     assert fake.calls == 1
+    # And it asks the one question Ам-4 opened and no free probe can: the settings file it launches
+    # under carries the mode's volume-wide `allowWrite` WITH the carve-outs nested inside it, so an
+    # operator running this opt-in is testing that precedence for real rather than taking the
+    # adapter's word for it. That is why the "not proven" row names this command.
+    assert fake.sandbox_settings is not None
+    filesystem = fake.sandbox_settings["sandbox"]["filesystem"]
+    assert filesystem["allowWrite"], filesystem
+    assert any(path.endswith(".git") for path in filesystem["denyWrite"]), filesystem

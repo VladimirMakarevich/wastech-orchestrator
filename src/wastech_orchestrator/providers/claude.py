@@ -7,8 +7,12 @@ redaction, artifacts, error normalization) introduced in Phase 2 — exactly as 
 the two adapters are interchangeable behind the contract.
 
 Invariants: the adapter performs **no fallback** and **never**
-touches the state machine; it never commits/pushes/PRs (the denied-commands blacklist is enforced as
-``--disallowedTools`` so the agent process cannot publish). It raises
+touches the state machine; it never commits/pushes/PRs itself, and it renders the denied-commands
+blacklist as ``--disallowedTools`` patterns. Read that list as friction and telemetry rather than a
+boundary: it never bound a shell (path denies are not rendered into ``Bash(...)`` patterns at all),
+and under ``security.strict_isolation: false`` the agent has a shell, the network and credentials it
+picks up by itself, so what keeps publication the orchestrator's is the product mandate plus
+after-the-fact detection — not this process being unable to. It raises
 :class:`~wastech_orchestrator.providers.base.ProviderError` (with the right
 :class:`~wastech_orchestrator.providers.base.ErrorClass`) for infrastructure failures, and returns
 ``AgentRunResult(status=failed, error=task_failure)`` for a clean run that did not satisfy the task.
@@ -192,6 +196,30 @@ _ADVANCED_MODE_FRICTION_DENIES: tuple[str, ...] = (
 )
 
 
+def _write_anywhere_root(working_directory: str) -> Path | None:
+    """The workspace volume's root — how "write outside the clone" is expressed to the sandbox.
+
+    The anchor of the workspace path, so one expression covers every platform this settings file is
+    ever written on: ``/`` on macOS and Linux/WSL2, a drive root on native Windows (where no Bash
+    sandbox exists, so no such file is written at all today). ``None`` for a relative path — a unit
+    harness rather than a real attempt — because a relative anchor names no volume, and a grant on
+    ``.`` would be a rule about the process's cwd.
+    """
+    anchor = Path(working_directory).anchor
+    return Path(anchor) if anchor else None
+
+
+def _effective_network_access(granted: bool, *, strict_isolation: bool) -> bool:
+    """Whether this attempt reaches the network — the ONE place the formula lives.
+
+    The flow's grant, OR the advanced mode, which hands every node the whole network whatever its
+    flow said (ТA.8.1). Both surfaces read it: the OS sandbox's ``allowedDomains`` and the built-in
+    web tools, which do NOT pass through that sandbox — so a single formula is what keeps them from
+    disagreeing about whether this run is online.
+    """
+    return granted or not strict_isolation
+
+
 def _write_deny_kinds(*, advanced_mode: bool) -> tuple[str, ...]:
     """The built-in write tools a path deny has to name — THE FLOOR, and the only part of the
     disallowed list a shell cannot walk around, because these tools do not pass through the OS
@@ -304,9 +332,10 @@ def resolve_claude_tools(
     node can read delivery history instead of substituting a changelog grep for it.
 
     ``strict_isolation: false`` is the advanced mode, and it changes what this function returns in
-    three ways. Every profile gains :data:`_ADVANCED_MODE_TOOLS`, so a ``read-only`` node gets the
-    shell it has never had. The git-evidence construction is not applied at all — its whole purpose
-    was to hand a shell-less profile a shell narrowed to twelve verbs, and both halves of that are
+    four ways. Every profile gains :data:`_ADVANCED_MODE_TOOLS`, so a ``read-only`` node gets the
+    shell it has never had, and :data:`_NETWORK_TOOLS` join it whatever the flow granted
+    (:func:`_effective_network_access`). The git-evidence construction is not applied at all — its
+    whole purpose was to hand a shell-less profile a shell narrowed to twelve verbs, and both are
     moot once every node has an unscoped one; the names go out bare. And the mode becomes
     ``acceptEdits`` for both profiles, because ``dontAsk`` auto-denies every tool not on the
     allow-list: with the existence gate gone that would leave a ``read-only`` node exactly as
@@ -363,7 +392,9 @@ def resolve_claude_tools(
             needs_sandbox = True
         # else: LINUX_MISSING_DEPS/NATIVE_WINDOWS under strict_isolation:false → keep Bash
         # unsandboxed.
-    if network_access:
+    if _effective_network_access(network_access, strict_isolation=strict_isolation):
+        # The advanced mode is online whatever the flow granted, so the web tools join every node's
+        # auto-approve list there. Outside it nothing changes: no grant, no web tools.
         tools = (*tools, *_NETWORK_TOOLS)
     return ClaudeToolPlan(
         mode=mode, tools=tools, needs_sandbox=needs_sandbox, allow_patterns=allow_patterns
@@ -682,6 +713,7 @@ def build_sandbox_settings(
     network_access: bool,
     read_isolation_off: bool = False,
     deny_write_root: Path | None = None,
+    allow_write_root: Path | None = None,
 ) -> dict[str, Any]:
     """Build the adapter-owned Claude OS Bash-sandbox settings.
 
@@ -703,6 +735,16 @@ def build_sandbox_settings(
     the workspace root for a read-only attempt that was granted a shell: what keeps such a node
     read-only is then the OS sandbox — the same mechanism Codex relies on — and not the goodwill of
     a verb allowlist.
+
+    ``allow_write_root`` write-ALLOWS one whole subtree, and the adapter passes the workspace
+    volume's root in the advanced mode: without it the sandbox permits writes only inside the
+    workspace and the session temp, which is what makes ``dotnet build`` fail on ``~/.nuget`` rather
+    than on anything to do with ``dotnet``. It is emitted as ``filesystem.allowWrite`` and only when
+    given, so the file this function builds outside the mode is unchanged byte for byte. Two things
+    to know before reading this as a boundary: the deny sets above are *more specific* paths inside
+    it, and how the CLI ranks the two is documented nowhere and is not proven here (the loud
+    preflight line says so on floor 1) — on Claude what actually holds ``.git``/``.worc`` is the
+    tool-level Write/Edit/NotebookEdit denies, which never pass through this sandbox at all.
     """
     internal = [_sandbox_path(p) for p in deny_policy.denied_paths]
     # With read-isolation OFF the private set stays WRITE-denied (control plane immutable) but
@@ -715,6 +757,12 @@ def build_sandbox_settings(
     if deny_write_root is not None:
         deny_write.append(_sandbox_path(deny_write_root))
     deny_write = list(dict.fromkeys(deny_write))  # order-preserving de-dup
+    filesystem: dict[str, Any] = {}
+    if allow_write_root is not None:
+        # Grant first, carve out second — the order this dict is read in, not a precedence claim.
+        filesystem["allowWrite"] = [_sandbox_path(allow_write_root)]
+    filesystem["denyRead"] = deny_read
+    filesystem["denyWrite"] = deny_write
     sandbox: dict[str, Any] = {
         "enabled": True,
         "failIfUnavailable": True,
@@ -725,7 +773,7 @@ def build_sandbox_settings(
         # and a headless run has nobody to ask, so the node would burn its turns on prompts nobody
         # answers. The key rides in the settings file, so today's argv is unchanged either way.
         "autoAllowBashIfSandboxed": True,
-        "filesystem": {"denyRead": deny_read, "denyWrite": deny_write},
+        "filesystem": filesystem,
         "network": {"allowedDomains": ["*"] if network_access else []},
     }
     if deny_policy.env_file is not None:
@@ -780,7 +828,6 @@ def _disallowed_tools(
     *,
     profile: str,
     advanced_mode: bool,
-    network_access: bool,
     allow_native_memory: bool,
     read_isolation_off: bool,
     denied_commands: Sequence[str],
@@ -804,14 +851,13 @@ def _disallowed_tools(
     if advanced_mode:
         # Everything below is named because the existence gate no longer names it. The write tools
         # are the floor for a node that is not meant to write; the friction set is not a floor and
-        # is documented as such; the web tools are here because dropping the gate would otherwise
-        # hand the network to a node whose flow granted it none — the network axis belongs to a
-        # later phase, and it must not arrive early as a side effect of this one.
+        # is documented as such. The web tools used to be denied here for a node whose flow granted
+        # no network — that was this list holding the network axis shut for one phase, until the
+        # phase that opens it deliberately. The mode is online for every node now, so nothing about
+        # the network is said here at all.
         if profile == "read-only":
             denied_tools += list(_write_deny_kinds(advanced_mode=True))
         denied_tools += list(_ADVANCED_MODE_FRICTION_DENIES)
-        if not network_access:
-            denied_tools += list(_NETWORK_TOOLS)
     # Confine native project memory out of the spawn unless the operator opted in
     # (agents.providers.claude.allow_native_memory) — a deliberate, operator-owned restoration of
     # Claude's own native memory (that store is unaudited and outside the redaction net). The claude
@@ -898,9 +944,9 @@ def build_claude_argv(
     ``strict_isolation: false`` (the advanced mode) inverts the first half of that: **no**
     ``--tools`` is emitted, so every built-in tool exists and ``--disallowedTools`` becomes the sole
     carrier of the floor. What it then has to name itself, because nothing else does any more: the
-    write tools for a ``read-only`` node, the web tools for a node whose flow granted no network,
-    and :data:`_ADVANCED_MODE_FRICTION_DENIES`. With the mode off the argv is byte for byte what it
-    was before the inversion existed.
+    write tools for a ``read-only`` node and :data:`_ADVANCED_MODE_FRICTION_DENIES`. The mode is
+    also online for every node, so the web tools are auto-approved rather than denied there. With
+    the mode off the argv is byte for byte what it was before the inversion existed.
     """
     combined_extra = tuple(config.extra_args) + tuple(request.extra_args)
     reasons = find_forbidden_args(combined_extra) + _find_reserved_claude_args(combined_extra)
@@ -964,7 +1010,6 @@ def build_claude_argv(
     denied_tools = _disallowed_tools(
         profile=profile,
         advanced_mode=advanced_mode,
-        network_access=request.network_access,
         allow_native_memory=config.allow_native_memory,
         read_isolation_off=read_isolation_off,
         denied_commands=denied_commands,
@@ -1506,6 +1551,12 @@ class ClaudeCodeProvider(BaseCliProvider):
         part of the floor that does not depend on the agent cooperating. The same reasoning as the
         Codex smoke above: the configuration that leans hardest on the profile is the last one to
         excuse from proving it.
+
+        In the mode it is also the ONLY instrument that can answer the open precedence question: the
+        settings file it launches under carries the volume-wide ``allowWrite`` with the carve-outs
+        nested inside it, so a passing verdict here is a real answer to "does a ``denyWrite`` inside
+        an ``allowWrite`` still hold" — the thing the loud floor-1 line reports as unproven, and the
+        reason that line points an operator at this opt-in rather than at nothing.
         """
         probe = self._sandbox_probe if self._sandbox_probe is not None else default_sandbox_probe
         if not _bash_sandbox_available(probe()):
@@ -1579,16 +1630,26 @@ class ClaudeCodeProvider(BaseCliProvider):
         )
         settings_path: str | None = None
         if plan.needs_sandbox and self._deny_policy is not None:
+            advanced_mode = not self._security.strict_isolation
             settings = build_sandbox_settings(
                 self._deny_policy,
                 request.write_guard,
-                network_access=request.network_access,
+                network_access=_effective_network_access(
+                    request.network_access, strict_isolation=self._security.strict_isolation
+                ),
                 read_isolation_off=self._security.read_isolation_off,
                 # A read-only attempt only reaches a sandbox when it was granted a shell, and then
                 # the whole clone is write-denied: the sandbox is what holds it to reading, so a
                 # command outside the allowlist still cannot change the repository.
                 deny_write_root=(
                     Path(request.working_directory) if profile == "read-only" else None
+                ),
+                # The advanced mode writes outside the clone (:func:`_write_anywhere_root`). It
+                # applies to a read-only attempt too — the ADR settled that writable reach outside
+                # the clone follows the shell, not the profile — and the clone itself stays denied
+                # for one by ``deny_write_root`` above.
+                allow_write_root=(
+                    _write_anywhere_root(request.working_directory) if advanced_mode else None
                 ),
             )
             settings_path = self._write_sandbox_settings(paths, settings)

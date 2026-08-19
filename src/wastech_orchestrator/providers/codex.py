@@ -361,6 +361,7 @@ def _isolation_argv(
     request: AgentRunRequest,
     *,
     strict_isolation: bool,
+    network_access: bool,
     deny_policy: InternalDenyPolicy | None,
     denied_read_paths: Sequence[str],
     read_isolation_off: bool,
@@ -386,9 +387,12 @@ def _isolation_argv(
 
     ``strict_isolation: false`` — the advanced mode — drops the feature disables entirely, those
     five included. It is the one setting where they are meant to be reachable, and refusing them
-    there would leave the removed full-access escape as their only route. Everything else in this
-    function is unchanged by the mode: the profile, its ``default_permissions`` selection and the
-    canary that proves them do not become optional because the tool surface widened.
+    there would leave the removed full-access escape as their only route. The profile it generates
+    also changes there, in the two ways that mode is about: ``write`` on the workspace volume's root
+    and ``network.enabled`` from *network_access*, which the caller resolved once for the whole
+    attempt. What does NOT become optional: the profile itself, its ``default_permissions``
+    selection, and the canary that re-proves it before every launch — the wider the grant, the more
+    the carve-outs need demonstrating rather than asserting.
     """
     profile = build_codex_permission_profile(
         permission_profile=_effective_permission_profile(config, request),
@@ -396,6 +400,7 @@ def _isolation_argv(
         deny_policy=deny_policy,
         write_guard=request.write_guard,
         denied_read_paths=tuple(denied_read_paths),
+        network_access=network_access,
         strict_isolation=strict_isolation,
     )
     argv = [
@@ -473,10 +478,16 @@ def build_codex_argv(
         "--output-last-message",
         last_message_path,
     ]
+    # The attempt's effective network, resolved ONCE: the flow's grant, or the advanced mode, which
+    # is online for every node whatever its flow said. Both surfaces below read this one value —
+    # the profile's sandbox network and the backend-side ``web_search`` — because they are separate
+    # boundaries, and a run that opened only one would be online in half the ways that matter.
+    network_access = request.network_access or not strict_isolation
     argv += _isolation_argv(
         config,
         request,
         strict_isolation=strict_isolation,
+        network_access=network_access,
         deny_policy=deny_policy,
         denied_read_paths=denied_read_paths,
         read_isolation_off=read_isolation_off,
@@ -486,12 +497,13 @@ def build_codex_argv(
     # editable repository content: a run that changes them is reported to the operator as a
     # notice, not blocked. (The ``.codex`` project trust control in ``_isolation_argv`` is separate
     # and stays: the project is marked untrusted.)
-    if not request.network_access:
-        # No network grant → also deny the host-side ``web_search`` tool. It runs on the OpenAI
+    if not network_access:
+        # Offline attempt → also deny the host-side ``web_search`` tool. It runs on the OpenAI
         # backend, OUTSIDE the profile's sandbox network policy, so without this an "offline" node
         # could still reach the web (a network_access=false writer performed 9 web searches). An
-        # online node keeps web_search as its resolved grant; the profile keeps the shell sandbox
-        # offline regardless (a workspace-write node is never online — a validator rule).
+        # online attempt keeps web_search, and its profile is online too: one flag, both surfaces.
+        # In the advanced mode every attempt is online, which is also why the validator rule
+        # forbidding a Codex workspace-write node with network does not apply there.
         argv += ["-c", 'web_search="disabled"']
     if output_schema_path is not None:
         argv += ["--output-schema", output_schema_path]
@@ -778,6 +790,10 @@ class CodexProvider(BaseCliProvider):
             home_dir=home_dir,
             env=env,
             permission_profile=self._config.permission_profile or _DEFAULT_PROFILE,
+            # The operator's own setting, so the smoke proves the profile that will launch — in the
+            # advanced mode that is the one with the volume-wide write grant, whose carve-outs are
+            # the whole reason this check is not skippable there.
+            strict_isolation=self._security.strict_isolation,
             runner=self._canary_runner,
         )
         return IsolationCapabilityReport(

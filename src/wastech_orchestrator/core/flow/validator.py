@@ -524,8 +524,16 @@ def _check_config_consistency(
                         f"{sorted(reasoning_levels_for(resolved_provider))}"
                     )
                 )
+        # The class ban on "Codex workspace-write + network", and why it is conditional. It exists
+        # because that combination is the one Codex profile that both writes the clone and reaches
+        # the network, i.e. the shape a publishing attempt needs. Under
+        # ``security.strict_isolation: false`` the operator has already granted every node both, by
+        # the mode's own definition, so refusing the flow would refuse a configuration the run
+        # itself accepts — the same false verdict this campaign removed from ``isolation:`` — while
+        # protecting nothing. Outside the mode it is unchanged.
         if (
-            isinstance(node, AgentNode)
+            config.security.strict_isolation
+            and isinstance(node, AgentNode)
             and resolved_provider is ProviderId.CODEX
             and (node.permission_profile or doc.permission_ceiling)
             is PermissionProfile.WORKSPACE_WRITE

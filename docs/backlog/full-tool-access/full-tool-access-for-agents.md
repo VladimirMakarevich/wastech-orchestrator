@@ -631,16 +631,16 @@ flowchart LR
 | Место | Что там |
 | --- | --- |
 | [`providers/claude.py:104`](../../../src/wastech_orchestrator/providers/claude.py) | `_PROFILE_MAP` — тот самый allow-list и режимы `dontAsk`/`acceptEdits` |
-| [`providers/claude.py:111`](../../../src/wastech_orchestrator/providers/claude.py) | `WebFetch`/`WebSearch` включаются только при гранте сети |
+| [`providers/claude.py:111`](../../../src/wastech_orchestrator/providers/claude.py) | `WebFetch`/`WebSearch` включаются только при гранте сети (после Ам-4 — либо при гранте, либо в режиме: один effective-флаг) |
 | [`providers/claude.py:199`](../../../src/wastech_orchestrator/providers/claude.py) | `allowed_tools`: голое имя инструмента автоаппрувит **каждый** его вызов (196 — это `allow_patterns`, поле строкой выше) |
 | [`providers/claude.py:246`](../../../src/wastech_orchestrator/providers/claude.py) | нативная Windows: `Bash` выкидывается **из любого профиля**; Linux без `bwrap` → `CAPABILITY_UNAVAILABLE`. Держится на `--tools` |
 | [`providers/claude.py:479`](../../../src/wastech_orchestrator/providers/claude.py) | `_REQUIRED_CLAUDE_FLAGS` — сюда добавляется `--disallowedTools`, отсюда уходит `--tools` |
-| [`providers/claude.py:537`](../../../src/wastech_orchestrator/providers/claude.py) | `build_sandbox_settings` — `excludedCommands: []`, `allowWrite` не эмитится |
+| [`providers/claude.py:537`](../../../src/wastech_orchestrator/providers/claude.py) | `build_sandbox_settings` — `excludedCommands: []`, `allowWrite` не эмитится (после Ам-4 эмитится в режиме: якорь тома клона) |
 | [`providers/claude.py:734`](../../../src/wastech_orchestrator/providers/claude.py) | сборка `--tools` / `--allowedTools` / `--disallowedTools` |
 | [`providers/claude.py:749`](../../../src/wastech_orchestrator/providers/claude.py) | «the CLI's own Write/Edit tools never go through that sandbox» — почему песочница не является границей для встроенных инструментов |
 | [`providers/claude.py:1038`](../../../src/wastech_orchestrator/providers/claude.py) | песочница создаётся только при наличии `Bash`; `deny_write_root` на клон для `read-only` |
 | [`providers/codex_profile.py:105`](../../../src/wastech_orchestrator/providers/codex_profile.py) | профиль Codex: `extends` + direct absolute rules; текущий комментарий «deny last» нельзя трактовать как приоритет над более специфичным дочерним `write` |
-| [`providers/codex_profile.py:166`](../../../src/wastech_orchestrator/providers/codex_profile.py) | текущий адаптер всегда эмитит `network = { enabled = false }`; CLI при этом поддерживает `network.domains`, а их enforcement требует включённого `network_proxy` |
+| [`providers/codex_profile.py:166`](../../../src/wastech_orchestrator/providers/codex_profile.py) | адаптер всегда эмитил `network = { enabled = false }` (после Ам-4 — значение effective-гранта попытки); CLI при этом поддерживает `network.domains`, а их enforcement требует включённого `network_proxy` |
 | [`providers/codex.py:371`](../../../src/wastech_orchestrator/providers/codex.py) | `danger-full-access` выбрасывает profile и всю собранную в той же ветке config/tool-surface изоляцию |
 | [`providers/codex.py:466`](../../../src/wastech_orchestrator/providers/codex.py) | Codex `web_search` — backend-side поверхность вне profile network policy, отдельно отключаемая только для offline node |
 | [`providers/codex_canary.py:189`](../../../src/wastech_orchestrator/providers/codex_canary.py) | текущие per-attempt probes не знают про external writable paths и network; новые capabilities требуют собственных paired controls |

@@ -419,6 +419,15 @@ class SecurityConfig:
     # would route around the deny). The orchestrator's own ``git``/``gh`` keep the allowlist —
     # advanced mode widens what the agent may do, and those processes are not the agent.
     #
+    # The other three axes, all of them present-tense: no tool allowlist reaches the agent CLI, so
+    # every built-in tool exists and EVERY node has a shell, read-only ones included; the agent may
+    # WRITE anywhere the sandbox reaches rather than only inside the clone, which includes a
+    # toolchain cache under ``$HOME``, the system temp, and equally a directory on ``PATH`` — that
+    # last one being the right to replace an executable which later runs OUTSIDE the sandbox; and
+    # every node is ONLINE whatever its flow granted, across all three network surfaces (the
+    # sandboxed shell, the built-in web tools that do not pass through it, and Codex's backend-side
+    # ``web_search``), with no domain filtering.
+    #
     # What it does NOT unlock: the provider full-access modes (Codex ``--sandbox danger-full-
     # access``, Claude ``--permission-mode bypassPermissions``) are refused at every value of this
     # key, as are the absolutely-forbidden flags. It is also not a way to skip a proof: the config-
@@ -426,15 +435,21 @@ class SecurityConfig:
     # permission profile is what the local floor rests on and that matters most here.
     #
     # The floor that survives, in four honest levels — announced in full by ``worc preflight`` and
-    # in the run log, never silently: (1) the integrity of the task's own state is held MECHANICALLY
-    # — the clone's ``.git`` and the private ``.worc`` stay unwritable wherever the host can sandbox
-    # at all; (2) publication to this repository's origin is held by DETECTION — a branch or PR
-    # appearing without the orchestrator's record parks the task; (3) publication anywhere else will
-    # not be held by anything once the agent has the network, and nothing is planned to hold it; (4)
-    # publication AS the orchestrator is held by DETECTION — user git config and the clone's agent-
-    # CLI config are fingerprinted, every ``gh`` call names its repository, and the launched
-    # executables are pinned to the paths resolved at startup (a substitution between runs, and an
-    # edit to the installed package's code, are not covered).
+    # in the run log, never silently. (1) The integrity of the task's own state is held
+    # MECHANICALLY: the clone's ``.git`` and private ``.worc`` stay unwritable wherever it can
+    # sandbox
+    # at all. One qualifier, since the write grant above is volume-wide — what keeps those paths
+    # out of it is the carve-out being the more specific rule, which Codex re-proves under its own
+    # sandbox
+    # before every attempt and Claude does not, so there this level rests on the tool-level write
+    # denies. (2) Publication to this repository's origin is held by DETECTION: a branch or PR
+    # appearing without the orchestrator's record parks the task. (3) Publication anywhere else IS
+    # HELD BY NOTHING, and is reachable today: the agent has the network, credentials are picked up
+    # automatically, and nothing is planned to hold it. (4) Publication AS the orchestrator is held
+    # by DETECTION: user git config and the clone's agent-CLI config are fingerprinted, every ``gh``
+    # call names its repository, and the launched executables are pinned to the paths resolved at
+    # startup (a substitution between runs, and an edit to the installed package's own code, are not
+    # covered).
     #
     # Operator-config ONLY — never a task, a flow node, or ``extra_args``. The redaction net widens
     # to compensate: with the name gate gone, secret-named values are scrubbed from logs and

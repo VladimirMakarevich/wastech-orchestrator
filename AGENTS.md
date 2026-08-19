@@ -23,7 +23,7 @@ Practical consequence: a `main`-only document is linked by absolute URL, so if y
 ## Hard invariants (must not be violated)
 
 - **The core does not know the CLI syntax.** All provider-specific logic lives only in `src/wastech_orchestrator/providers/`. The core only ever calls the `AgentProvider` interface — it never builds provider-specific commands.
-- **Only the orchestrator does commit / push / PR**, not the agent provider. Providers do not perform fallback and do not change the state machine.
+- **The orchestrator never delegates publication to the agent:** no node is given a mandate to commit, push, or open a PR, and no product mechanism expects the agent to. Mechanical impossibility is guaranteed only where a sandbox exists, and only for the local half (`.git` and `.worc` are immutable); the remote half is held by detection on our `origin` and is not held outside it. Providers do not perform fallback and do not change the state machine.
 - **Fallback is only for infrastructure error classes** of the provider. Failed tests/linters, review findings, incomplete fulfillment, Git errors, an invalid task/config, or a security violation are never fallback — they route to `fixing` / `failed` / `manual_action_required`.
 - **The security envelope cannot be weakened** through a task, `extra_args`, or a flow node. Flags that disable approvals/sandbox/hook-trust wholesale (`--dangerously*`, `--yolo`, Claude `--dangerously-skip-permissions`) are absolutely forbidden by the config validator.
 - **No secrets** in logs, in SQLite, or in artifacts. Pass only allowlisted env variables to processes.

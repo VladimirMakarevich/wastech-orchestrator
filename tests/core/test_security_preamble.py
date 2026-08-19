@@ -76,6 +76,11 @@ def test_the_mode_paragraph_appears_only_in_the_mode_and_still_forbids_publishin
     tail = on[len(off) :]
     assert "Do not publish anything" in tail
     assert f"`{CONTROL_HOME_DIRNAME}/`" in tail and "`.git/`" in tail
+    # Ам-4: with the network and credentials the CLI picks up by itself, "that is the orchestrator's
+    # job" no longer implies WHERE — so the ban names any address and any route outright, and the
+    # paragraph says what the run actually got rather than only what it must not do with it.
+    assert "not to any other address" in tail and "by any route" in tail
+    assert "you have the network" in tail and "write outside this clone" in tail
 
 
 def test_the_no_sandbox_paragraph_is_withheld_where_a_sandbox_exists() -> None:

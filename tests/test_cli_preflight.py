@@ -942,8 +942,10 @@ def test_advanced_mode_is_announced_with_all_four_floor_levels(
     Neither of the two relaxation lines that already existed (`read-isolation: OFF`, `git-evidence:
     ON`) had a test, which is how their wording drifted from the run log's. The mode's own line is
     the one that must not: it is what an operator reads before deciding to keep the key. Level 3 is
-    asserted in its FUTURE tense on purpose — the agent has no network yet, and a line that
-    overstated by two phases would be discounted exactly like one that understated.
+    asserted in its PRESENT tense, and the absence of the old future-tense wording is asserted too:
+    it was deliberately written as "once the agent has the network" while the network was still two
+    phases away, and the phase that hands it over is the one that owes the correction — a line that
+    understates is discounted exactly like one that overstates.
     """
     _patch_providers(monkeypatch, _mode(make_git_config(git_repo.clone)))
     rc = cli.cmd_preflight(_args())
@@ -953,12 +955,23 @@ def test_advanced_mode_is_announced_with_all_four_floor_levels(
     for level in ("floor 1 of 4", "floor 2 of 4", "floor 3 of 4", "floor 4 of 4"):
         assert level in out
     assert "held MECHANICALLY" in out  # level 1 — the only one that is a mechanism
-    assert "WILL NOT BE HELD BY ANYTHING" in out and "no network yet" in out  # level 3, in future
+    # Level 3, present tense now, and the old future-tense hedge gone with it.
+    assert "IS HELD BY NOTHING" in out and "reachable today" in out
+    assert "no network yet" not in out
     assert "forwarded WHOLE" in out  # what the mode actually changed today
-    # The tool axis, which this phase made true: the gate is gone, every node has a shell, and the
-    # three friction denies must not be announced as a boundary they are not.
+    # The tool axis: the gate is gone, every node has a shell, and the friction denies must not be
+    # announced as a boundary they are not.
     assert "no longer gated by an allowlist" in out and "EVERY node gets a shell" in out
     assert "Persistence is NOT held" in out
+    # The write and network axes, which this phase made true. Both name what an operator has to
+    # decide about: a directory on PATH is an executable that later runs outside the sandbox, and
+    # "the network" is three surfaces rather than one boundary.
+    assert "write anywhere" in out.lower() and "directory on PATH" in out
+    assert "EVERY node reaches the whole network" in out
+    assert "three surfaces" in out
+    # Level 1 keeps its qualifier: under a volume-wide write grant, what holds the carve-outs is
+    # specificity — re-proven on Codex before every attempt, unproven on Claude.
+    assert "more specific rule" in out and "unproven here" in out
     assert "preflight: ready" in out
 
 

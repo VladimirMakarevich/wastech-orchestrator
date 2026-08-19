@@ -314,6 +314,21 @@ def test_codex_workspace_write_with_network_is_fatal(tmp_path: Path) -> None:
     assert _has(vs, "config", "network_access=true")
 
 
+def test_codex_workspace_write_with_network_is_valid_in_the_advanced_mode(tmp_path: Path) -> None:
+    """The class ban is conditional on the mode, and this is the pair of tests that says which way.
+
+    The ban exists because "writes the clone AND reaches the network" is the shape a publishing
+    attempt needs. Under ``strict_isolation: false`` the operator has granted every node both by the
+    mode's own definition, so refusing the flow would refuse a configuration the run itself accepts
+    — protecting nothing while making a legal flow unloadable. Outside the mode it is unchanged
+    (the test above).
+    """
+    config = _config(tmp_path, strict_isolation=False)
+    snap = _snap(_flow(network_policy="research", extra="provider: codex"), tmp_path)
+    validate_flow(snap)
+    validate_flow_against_config(snap, config)
+
+
 def test_codex_read_only_with_network_is_valid(tmp_path: Path) -> None:
     config = _config(tmp_path)
     snap = _snap(

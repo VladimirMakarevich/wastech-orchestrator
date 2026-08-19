@@ -166,11 +166,13 @@ def test_no_prompt_text_is_interpolated_into_argv(
 def test_no_legacy_sandbox_network_override(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # The old workspace-write network override is gone; network lives in the profile.
+    # The old workspace-write network override is gone; network lives in the profile, and it follows
+    # the attempt's effective grant rather than being pinned off.
     for networked in (True, False):
         argv = _argv(codex_config, make_request(network_access=networked))
         assert "sandbox_workspace_write.network_access=true" not in _config_values(argv)
-        assert '"network" = { "enabled" = false }' in _profile_arg(argv)
+        enabled = "true" if networked else "false"
+        assert f'"network" = {{ "enabled" = {enabled} }}' in _profile_arg(argv)
 
 
 def test_web_search_disabled_when_offline(
@@ -185,9 +187,42 @@ def test_web_search_disabled_when_offline(
 def test_web_search_not_disabled_when_network_granted(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # An online node keeps its web_search grant; the profile still keeps the shell sandbox offline.
+    """An online node keeps web_search — and its profile is online too, on the same flag.
+
+    Before this the two halves disagreed: ``web_search`` followed the grant while the profile pinned
+    ``network.enabled = false``, so a node the flow put online had a web tool and an offline shell.
+    The pair is one decision now (ТA.8.1). The combination is legal for a ``read-only`` node;
+    ``workspace-write`` + network is refused by the flow validator outside the advanced mode, which
+    is why that pairing is only ever built in the mode's own tests.
+    """
     argv = _argv(codex_config, make_request(network_access=True))
     assert 'web_search="disabled"' not in _config_values(argv)
+    assert '"network" = { "enabled" = true }' in _profile_arg(argv)
+
+
+def test_the_advanced_mode_is_online_for_a_node_that_was_granted_no_network(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    """ТA.8.1/ТA.8.4: in the mode BOTH surfaces open, whatever the flow granted.
+
+    Half a network is the failure mode worth its own test, because the two are enforced in different
+    places: the profile's sandbox network is what a shell (``restore``, ``npm ci``) needs, while
+    ``web_search`` runs on the backend, outside that profile entirely. One effective flag drives
+    both, so neither can open without the other.
+    """
+    argv = _argv(codex_config, make_request(network_access=False), strict_isolation=False)
+    assert '"network" = { "enabled" = true }' in _profile_arg(argv)
+    assert 'web_search="disabled"' not in _config_values(argv)
+
+
+def test_outside_the_mode_an_offline_node_is_offline_on_both_surfaces(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # The counterweight, and the shipped default: nothing about the network moved for a node with no
+    # grant. Both halves in one place, so a later edit cannot open one of them quietly.
+    argv = _argv(codex_config, make_request(network_access=False))
+    assert '"network" = { "enabled" = false }' in _profile_arg(argv)
+    assert 'web_search="disabled"' in _config_values(argv)
 
 
 def test_output_schema_flag_only_when_requested(

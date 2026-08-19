@@ -3306,9 +3306,13 @@ def test_advanced_mode_is_announced_in_the_run_log_and_recorded_durably(
 
     assert result.final_status is not Status.FAILED  # announced, never refused
     assert any("advanced-mode: ON (security.strict_isolation=false)" in m for m in messages)
-    assert any("floor 3 of 4" in m and "no network yet" in m for m in messages)
-    # The tool axis this phase added, in the same line and from the same formatter as preflight's.
+    # Level 3 in the present tense: the network landed, so the line that hedged it away is gone.
+    assert any("floor 3 of 4" in m and "IS HELD BY NOTHING" in m for m in messages)
+    assert not any("no network yet" in m for m in messages)
+    # The axes, in the same lines and from the same formatter as preflight's.
     assert any("EVERY node gets a shell" in m and "Persistence is NOT held" in m for m in messages)
+    assert any("EVERY node reaches the whole network" in m for m in messages)
+    assert any("directory on PATH" in m for m in messages)
     assert ledger.records()[0]["advanced_mode"] is True
     manifests = list(art.rglob("control-bundles/*/manifest.json"))
     assert manifests, "the frozen control bundle should exist with clean_runs_on_success off"

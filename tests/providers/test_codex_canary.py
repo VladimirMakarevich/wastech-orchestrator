@@ -359,6 +359,41 @@ def test_capability_smoke_workspace_write_passes(tmp_path: Path) -> None:
     assert {"private-read-denied", "repo-read-allowed", "mcp-inventory"} <= labels
 
 
+def test_capability_smoke_proves_the_profile_the_advanced_mode_will_actually_launch(
+    tmp_path: Path,
+) -> None:
+    """ТA.9.2: the smoke must not quietly prove a stricter profile than the one that runs.
+
+    It generates its own profile rather than receiving one, so the operator's ``strict_isolation``
+    has to reach it — otherwise in the advanced mode this check certifies a floor nobody runs under,
+    which is the exact failure the requirement exists to prevent. Asserted on the argv the runner
+    receives (the profile is rendered into it), because the report carries probe verdicts and not
+    the profile. The real-CLI counterpart lives in ``test_codex_canary_smoke.py``.
+    """
+    seen: list[list[str]] = []
+    sandbox_runner = _smoke_runner(writable=True)
+
+    def _recording(argv: list[str], cwd: str, env: Mapping[str, str]) -> tuple[int, str]:
+        seen.append(argv)
+        return sandbox_runner(argv, cwd, env)
+
+    report = run_codex_capability_smoke(
+        command="codex",
+        home_dir=tmp_path,
+        env={},
+        permission_profile="workspace-write",
+        strict_isolation=False,
+        system="Linux",
+        runner=_recording,
+        inventory_probe=_empty_inventory,
+    )
+    assert report.status == CAPABILITY_PASSED  # the carve-outs still hold under the wide grant
+    profiles = {token for argv in seen for token in argv if token.startswith("permissions.worc=")}
+    assert profiles, seen
+    assert all('"/" = "write"' in profile for profile in profiles)
+    assert all('"network" = { "enabled" = true }' in profile for profile in profiles)
+
+
 def test_capability_smoke_probes_the_git_control_roots_it_created(tmp_path: Path) -> None:
     # Пре-1.2: the fixture stands up real `.git`, hooks and `tasks/` targets, so the smoke actually
     # demonstrates the floor instead of inferring it from writes that failed for want of a parent.

@@ -60,6 +60,7 @@ The source of truth is the code (`src/wastech_orchestrator/`). These invariants 
 ## State machine and idempotency
 
 - Transitions are transactional; a re-run **does not** create a second commit/push/PR.
+- **The orchestrator never delegates publication to the agent:** no node is given a mandate to commit, push, or open a PR, and no product mechanism expects the agent to. Mechanical impossibility is guaranteed only where a sandbox exists, and only for the local half (`.git` and `.worc` are immutable); the remote half is held by detection on our `origin` and is not held outside it.
 - **Publishing recovers, it never adopts.** What `origin` holds for the task branch decides the push: matching us (nothing sent), behind us (an ordinary push), diverged from the commit we recorded pushing (a lease-guarded force-push over our own stale push, and only that), or diverged from something we never pushed (merge it in, re-run the checks over the combination, declare the adopted commits in the PR; a conflict parks with the tree restored). A pull request is only ever written into when this orchestrator opened it. An existing remote branch or an open PR is never taken as proof of our own earlier publication.
 - After a restart, the unfinished step is resumed or its result is safely reconciled.
 - Human waiting does not add a task status; the registered HITL artifact is the recovery source of truth, and a timeout, transport error, or ambiguous approval fails closed to `manual_action_required`.
@@ -75,7 +76,7 @@ The source of truth is the code (`src/wastech_orchestrator/`). These invariants 
 ## What must not be done
 
 - Couple core to a specific CLI, or let it build provider-specific commands.
-- Grant a provider the right to commit/push/PR.
+- Grant a provider a mandate to commit/push/PR, or build a mechanism that expects the agent to publish (see the publication invariant above — it is de jure, and the mechanical half of it holds only where a sandbox does).
 - Perform fallback on a quality error.
 - Change the provider route for a node that has already begun.
 - Hardcode or special-case a specific flow node **id**, or make any packaged id mandatory — behavior attaches to a node kind or a declared fact.

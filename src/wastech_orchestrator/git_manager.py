@@ -148,8 +148,13 @@ _GIT_HARDENING_CONFIG: tuple[tuple[str, str], ...] = (
 # Orchestrator-injected git environment (unconditional — not agent-influenced, so not gated by the
 # `security.allowed_environment` allowlist). No credential/host prompt, no editor, no GUI credential
 # dialog, no opportunistic index.lock. `GIT_CONFIG_NOSYSTEM` is deliberately NOT set: operator
-# system/global config is trusted and holds the credentials push/fetch/gh need; the agent-writable
-# surface is repo-local config + `.gitattributes`, handled by the fingerprint and the filter gate.
+# system/global config holds the credentials push/fetch/gh need, and clearing it would take those
+# with it. Trusted, then, but not unreachable: under `security.strict_isolation: false` the agent
+# may write outside the clone, `~/.gitconfig` included, so `pushInsteadOf`, `credential.helper` and
+# `core.sshCommand` are agent-writable there too. What answers that is detection, by owner decision,
+# not a wider ban: the user git config is fingerprinted by digest around every attempt, every `gh`
+# call names its repository outright, and a push re-reads its own destination immediately before
+# sending. The repo-local half stays the filter gate's business below.
 _GIT_HARDENING_ENV: dict[str, str] = {
     "GIT_TERMINAL_PROMPT": "0",
     "GIT_OPTIONAL_LOCKS": "0",
@@ -226,10 +231,13 @@ def build_git_env(
 
 # Repo-local/worktree config keys whose *value is a program* git would execute during a
 # filter (clean/smudge/process), an external/textconv diff, or a fetch/push. A command-line `-c`
-# cannot blanket a filter/diff driver — its name comes from `.gitattributes` — so the agent-writable
+# cannot blanket a filter/diff driver — its name comes from `.gitattributes` — so the repo-local
 # config surface is inventoried and any such key is refused. `git config --list` lowercases the
 # section/name (subsection preserved), so keys are matched lowercased. Operator global/system config
-# is trusted and is not inventoried, so a global `git lfs install` keeps working with zero config.
+# is trusted and is not inventoried, so a global `git lfs install` keeps working with zero config —
+# a deliberate line, not an oversight: in the advanced mode that file is agent-writable as well, and
+# inventorying it would break every legitimate global driver to answer a case detection already
+# covers (see the digest in the per-attempt fingerprint).
 _FILTER_DRIVER_KEY_RE = re.compile(
     r"^(filter|diff)\.[^.]+\.(clean|smudge|process|command|textconv)$"
 )
@@ -1884,14 +1892,17 @@ class GitManager:
         return keys
 
     def _assert_no_untrusted_filters(self) -> None:
-        """Refuse (manual action) before staging/checkout if the agent-writable config defines a
+        """Refuse (manual action) before staging/checkout if the repo-local config defines a
         program-launching driver.
 
         An operator-authorized-filter allowlist is a deferred follow-up; under the current
         contract any untrusted repo-local driver stops the run in manual action rather than letting
         an orchestrator git command execute agent-selected code. An agent ``.gitattributes`` edit
         cannot authorize a new process because a *repo-local* driver program is refused outright
-        (binding a trusted operator-global driver is not a new process and is unaffected).
+        (binding a trusted operator-global driver is not a new process and is unaffected). What this
+        gate does not reach is a driver planted in the operator's OWN global config, which the
+        advanced mode's write reach makes possible: that path is watched by the user-git-config
+        digest in the per-attempt fingerprint, not closed here.
         """
         programs = self._untrusted_config_programs()
         if programs:

@@ -83,7 +83,7 @@ def _version() -> str:
     return (out.stdout or out.stderr).strip()
 
 
-def _profile_arg(repo: Path, profile: str) -> str:
+def _profile_arg(repo: Path, profile: str, *, strict_isolation: bool = True) -> str:
     deny = InternalDenyPolicy(
         control_home=repo / ".worc",
         private_home=repo / ".worc",
@@ -103,6 +103,8 @@ def _profile_arg(repo: Path, profile: str) -> str:
         deny_policy=deny,
         write_guard=wg if profile == "workspace-write" else None,
         denied_read_paths=(".env", "secrets/**"),
+        network_access=not strict_isolation,
+        strict_isolation=strict_isolation,
     )
     return render_permission_profile_arg(generated)
 
@@ -222,6 +224,43 @@ def test_capability_smoke_passes_on_real_host(profile: str) -> None:
     )
     labels = {e["probe"] for e in report.evidence}
     assert {"private-read-denied", "repo-read-allowed", "mcp-inventory"} <= labels
+
+
+@pytest.mark.parametrize("profile", ["read-only", "workspace-write"])
+def test_the_advanced_mode_profile_is_enforced_with_the_volume_wide_write_grant(
+    profile: str,
+) -> None:
+    """Ам-4, the half of its live probe that costs nothing: real sandbox, no model, mode profile.
+
+    The mode's profile grants ``write`` on the volume ROOT, and the question the phase opens is
+    whether the carve-outs survive being nested inside that grant. The capability smoke is the
+    right instrument because it stands up real ``.git`` / hooks / ``tasks`` targets and probes each
+    one — a write that failed for want of a parent would otherwise read as an enforced deny (Пре-1).
+    Codex can be asked directly, without a model, so on a host with the CLI this is evidence rather
+    than an assumption.
+
+    What it still does not answer, and is recorded as "not proven" in the campaign README: the same
+    question on Linux and native Windows, a clone under the global ``/private/tmp`` (where an
+    inherited ``extends`` grant beats an explicit deny), and Claude's ranking of a ``denyWrite``
+    inside an ``allowWrite``, which no free probe can ask at all.
+    """
+    report = run_codex_capability_smoke(
+        command=_codex(),
+        home_dir=Path.home(),
+        env=_env(),
+        permission_profile=profile,
+        strict_isolation=False,
+        system=platform.system(),
+    )
+    assert report.status == CAPABILITY_PASSED, (
+        f"advanced-mode capability smoke {report.status} on {platform.system()} / codex "
+        f"{_version()} for {profile}: {report.detail} :: {report.evidence}"
+    )
+    verdicts = {e["probe"]: e["denied"] for e in report.evidence if "denied" in e}
+    assert verdicts["private-read-denied"] is True
+    assert verdicts["repo-read-allowed"] is False  # the positive control still passed
+    guarded = [e for e in report.evidence if str(e["probe"]).startswith("write-guard-")]
+    assert guarded and all(e["denied"] for e in guarded), guarded
 
 
 def test_canary_detects_a_non_enforcing_profile(clone: Path) -> None:

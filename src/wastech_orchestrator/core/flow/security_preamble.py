@@ -43,6 +43,10 @@ def build_orchestrator_security_preamble(
 
     ``advanced_mode`` (``security.strict_isolation: false``) appends a paragraph saying outright
     that most of the enforcement is off and the rules above therefore have to be honored by choice.
+    It names the network and the write reach outside the clone, and it extends the publication ban
+    to any address by any route: with both of those and credentials the CLI picks up by itself, the
+    remote half of the floor is detection after the fact, so the request has to be stated rather
+    than left implied by "the orchestrator's job".
     This layer is worth the most exactly there — where it is closest to being all there is — and it
     costs one paragraph at a single insertion point, so it cannot drift from what is actually
     enforced the way fifty-odd role prompts would.
@@ -106,10 +110,12 @@ def build_orchestrator_security_preamble(
         paragraphs.append(
             "This run is configured for maximum freedom: you have the operator's own environment, "
             "and most of the restrictions an orchestrated run usually applies are switched off. "
-            "That is deliberate — use the machine's tools as you need them. It also means the "
-            "rules above are now asked of you rather than imposed on you. Two of them stay "
-            "non-negotiable however capable you turn out to be. Do not publish anything: no "
-            "commit, push, merge, tag or pull request — that is the orchestrator's job. And do "
+            "That is deliberate — use the machine's tools as you need them: you have the network, "
+            "and you may write outside this clone. It also means the rules above are now asked of "
+            "you rather than imposed on you. Two of them stay non-negotiable however capable you "
+            "turn out to be. Do not publish anything: no commit, push, merge, tag or pull request "
+            "— not to this repository's remote and not to any other address, by any route, "
+            "including a second clone assembled elsewhere. That is the orchestrator's job. And do "
             f"not read or write `{CONTROL_HOME_DIRNAME}/`, `{EXCHANGE_HOME_DIRNAME}/`, `.git/` "
             "or `tasks/`. Both are checked after you finish, and either one parks the task for a "
             "human instead of being fixed up."

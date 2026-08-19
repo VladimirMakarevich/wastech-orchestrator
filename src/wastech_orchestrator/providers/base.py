@@ -234,9 +234,13 @@ class AgentRunRequest:
     resume_baseline_output_tokens: int | None = None
     # Whether the agent process may reach the network (``network_policy`` enforcement). Default
     # ``False`` — the flow grants network only by declaring ``network_policy``; absent, no network.
-    # The adapter maps it onto its sandbox: Codex enables the workspace-write sandbox's network
-    # access; Claude allows the WebFetch/WebSearch tools. It only toggles the network — never the
-    # filesystem sandbox/approvals (the ceiling stays in force).
+    # The adapter maps it onto its sandbox: Codex's profile network plus the backend-side
+    # ``web_search``; Claude's sandbox ``allowedDomains`` plus the WebFetch/WebSearch tools. It only
+    # toggles the network — never the filesystem sandbox/approvals (the ceiling stays in force).
+    # Under ``security.strict_isolation: false`` each adapter resolves its own effective value and
+    # every node is online whatever this says: the mode is a config-level grant of the whole
+    # network, and a flow cannot take it back (nor could it, since the shell would reach the network
+    # regardless of any tool list).
     network_access: bool = False
     # Whether this attempt may execute the read-only git verbs to inspect delivery history. Set by
     # the node runner from the node's declaration AND the operator's master switch, so a flow alone
@@ -245,6 +249,10 @@ class AgentRunRequest:
     # repository unchangeable, nothing published) by different means: Claude adds a shell scoped to
     # those verbs and write-denies the clone in its OS sandbox, while Codex's ``read-only`` sandbox
     # already permits commands and already forbids every mutation, so it needs nothing from this.
+    # That contract is the shipped default's. Under ``security.strict_isolation: false`` this field
+    # is not consulted at all — every node already has an unscoped shell — and its third clause
+    # holds as a mandate rather than a mechanism, since such a node has the network and picks up
+    # credentials by itself.
     git_evidence: bool = False
     # The absolute Git-control + lifecycle roots a *workspace-write* attempt must
     # Write/Edit-deny (exchange root, resolved gitdir/common-dir/hooks-dir, ``tasks/`` tree). Set by

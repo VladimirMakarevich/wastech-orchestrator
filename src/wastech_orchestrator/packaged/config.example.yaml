@@ -130,13 +130,19 @@ security:
                                       #   by `worc preflight` and in the run log:
                                       #     1. the task's own state is held MECHANICALLY — the
                                       #        clone's .git and .worc stay unwritable wherever this
-                                      #        host can sandbox at all;
+                                      #        host can sandbox at all. Since the write below is
+                                      #        volume-wide, what keeps them out of it is the
+                                      #        carve-out being the more specific rule: Codex
+                                      #        re-proves that under its own sandbox before every
+                                      #        attempt, Claude does not, so there this level rests
+                                      #        on the tool-level write denies;
                                       #     2. publication to your origin is held by DETECTION — a
                                       #        branch or PR appearing without the orchestrator's
                                       #        record parks the task;
-                                      #     3. publication ANYWHERE ELSE will not be held by
-                                      #        anything once the agent has network, and nothing is
-                                      #        planned to hold it. The agent has no network yet;
+                                      #     3. publication ANYWHERE ELSE is held by NOTHING and is
+                                      #        reachable today: the agent has the network, and
+                                      #        credentials are picked up automatically. Nothing is
+                                      #        planned to hold it;
                                       #     4. publication AS THE ORCHESTRATOR is held by DETECTION
                                       #        — your git config and the clone's agent-CLI config
                                       #        are fingerprinted, every gh call names its
@@ -163,6 +169,25 @@ security:
                                       #   multi-agent / computer-use / browser / apps / plugins
                                       #   surfaces; its permission profile and the canary that
                                       #   proves it are still emitted on every attempt.
+                                      #
+                                      #   Write: the agent writes ANYWHERE the sandbox reaches, not
+                                      #   only inside the clone — so `dotnet build` finds ~/.nuget
+                                      #   and `npm ci` finds ~/.npm without you redirecting a cache.
+                                      #   Read that plainly: it includes a directory on PATH, which
+                                      #   is the right to replace an executable that later runs
+                                      #   OUTSIDE the sandbox, this orchestrator's own git/gh
+                                      #   included. Still write-denied: level 1 above plus the agent
+                                      #   CLIs' own config homes (~/.claude, $CODEX_HOME) — one of
+                                      #   those files is loaded as configuration by default.
+                                      #
+                                      #   Network: EVERY node is online whatever its flow granted,
+                                      #   and that is three surfaces, not one — the sandboxed shell,
+                                      #   the CLI's built-in web tools (which do not pass through
+                                      #   the sandbox), and Codex's backend-side web_search. There
+                                      #   is no domain filtering and none is planned: an allowlist
+                                      #   that has to pass github.com for ordinary dependencies
+                                      #   holds nothing, and on Codex a domain list is not enforced
+                                      #   without an experimental feature that ships disabled.
   disable_read_isolation: true        # DEFAULT true — read-isolation is OFF out of the box (set
                                       #   false to KEEP it on). true disables READ-isolation for
                                       #   provider runs: Claude reloads native
@@ -196,8 +221,9 @@ security:
                                       #   not applied. Turning it on does NOT make the node
                                       #   writable: the sandbox write-denies the whole clone
                                       #   (Claude) / forbids every mutation outright (Codex),
-                                      #   denied_commands stays the floor, and commit/push/PR
-                                      #   remain the orchestrator's alone.
+                                      #   denied_commands is rendered as friction (it binds tool
+                                      #   calls, not the shell), and publication stays the
+                                      #   orchestrator's by mandate.
                                       #   Operator-config ONLY (never a task/flow/extra_args key).
   allowed_environment:                  # REPLACES (does not extend) the default — keep the OS-launch
                                         # essentials for YOUR OS or the spawned CLI may fail to start.

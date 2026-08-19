@@ -659,6 +659,55 @@ def test_build_sandbox_settings_shape_is_hardened() -> None:
     assert settings["network"]["allowedDomains"] == []
 
 
+def test_the_advanced_mode_grants_write_outside_the_clone_and_keeps_every_carve_out() -> None:
+    """ТA.4.1: ``allowWrite`` on the volume root, with the floor listed one entry at a time.
+
+    The carve-outs are asserted by NAME rather than by "the write guard is in there", because the
+    short form of the floor ("`.git` and `.worc`") does not show all of them: both provider auth
+    homes are write-denied today and are exactly what an implementer reading that short form drops.
+    On the shipped default Codex loads ``$CODEX_HOME/config.toml``, so a writable one is code
+    execution on the next attempt — that is the cost of losing an entry nobody can see.
+
+    What this does NOT prove, and cannot: that the CLI ranks a ``denyWrite`` inside an
+    ``allowWrite`` the way this file assumes. That is a live probe, recorded as "not proven" in the
+    campaign README and in the loud preflight line on floor 1.
+    """
+    deny = InternalDenyPolicy(
+        control_home=Path("/repo/.worc"),
+        private_home=Path("/repo/.worc"),
+        env_file=Path("/etc/worc/.env"),  # resolved outside the private home on purpose
+        provider_homes=(Path("/home/me/.claude"), Path("/home/me/.codex")),
+        runs_home=Path("/repo/.worc/runs"),
+    )
+    settings = build_sandbox_settings(
+        deny,
+        _write_guard(),
+        network_access=True,
+        allow_write_root=Path("/"),
+    )["sandbox"]
+    assert settings["filesystem"]["allowWrite"] == ["/"]
+    deny_write = set(settings["filesystem"]["denyWrite"])
+    assert {
+        "/repo/.worc",  # the control plane
+        "/etc/worc/.env",  # the orchestrator's own secrets, wherever they resolved
+        "/repo/.worc/runs",  # the frozen bundles, denied by name rather than by location
+        "/home/me/.claude",  # provider auth/config home — invisible in the short form of the floor
+        "/home/me/.codex",  # and the one that is LOADED as config on the shipped default
+        "/repo/.worc-io",  # the curated exchange
+        "/repo/.git",  # gitdir and, for a linked worktree, the shared common dir
+        "/repo/.git/hooks",
+        "/repo/tasks",  # the committed lifecycle tree
+    } <= deny_write
+
+
+def test_no_allow_write_key_appears_outside_the_advanced_mode() -> None:
+    # The shipped default's file, key for key. A grant leaking in unconditionally is the one mistake
+    # in this phase that would remove the floor everywhere at once, so this pins the exact key set
+    # rather than the absence of one name.
+    settings = build_sandbox_settings(_deny_policy(), _write_guard(), network_access=False)
+    assert set(settings["sandbox"]["filesystem"]) == {"denyRead", "denyWrite"}
+
+
 def test_build_sandbox_settings_network_grant_allows_domains() -> None:
     deny = InternalDenyPolicy(
         control_home=Path("/repo/.worc"),
@@ -810,7 +859,7 @@ def test_read_only_grant_adds_a_shell_scoped_to_the_git_verbs() -> None:
         assert "Bash(git log:*)" in plan.allow_patterns
         assert "Bash(git show:*)" in plan.allow_patterns
         # No mutating verb is reachable through the allowlist, so the grant cannot become a second
-        # path to publishing — that stays the orchestrator's alone.
+        # path to publishing — that stays the orchestrator's.
         assert not any(
             f"Bash(git {verb}:*)" in plan.allow_patterns
             for verb in ("commit", "push", "add", "checkout", "reset", "clean")
@@ -1030,19 +1079,36 @@ def test_advanced_mode_keeps_a_read_only_node_from_writing(
     assert "Write" not in writer[writer.index("--disallowedTools") + 1].split(",")
 
 
-def test_advanced_mode_does_not_hand_the_network_to_a_node_that_was_granted_none(
+def test_the_advanced_mode_is_online_for_every_node_whatever_the_flow_granted(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # The web tools used to be withheld by simply not appearing in --tools. Dropping that gate would
-    # have handed them to every node as a side effect, opening an axis that belongs to a later phase
-    # — so the mode names them itself when the flow granted no network, and stops when it did.
-    offline = _argv(claude_config, make_request(network_access=False), strict_isolation=False)
-    denied = offline[offline.index("--disallowedTools") + 1].split(",")
-    assert "WebFetch" in denied and "WebSearch" in denied
-    online = _argv(claude_config, make_request(network_access=True), strict_isolation=False)
-    allowed = online[online.index("--allowedTools") + 1].split(",")
-    assert "WebFetch" in allowed and "WebSearch" in allowed
-    assert "WebFetch" not in online[online.index("--disallowedTools") + 1].split(",")
+    """ТA.8.1/ТA.8.4: the mode opens the network for every node, and that is three surfaces.
+
+    For one phase these two names were DENIED here for a node whose flow granted none — the tool
+    list holding the network axis shut while the phase that opens it deliberately was still ahead.
+    That deny is gone: the mode is online, so they are auto-approved instead. Worth keeping next to
+    the sandbox file's own assertion (see the write/network settings test) because these are
+    different boundaries: ``WebFetch``/``WebSearch`` never pass through the OS sandbox at all, so
+    ``allowedDomains`` says nothing about them and this list is all there is.
+    """
+    for granted in (False, True):
+        request = make_request(network_access=granted)
+        argv = _argv(claude_config, request, strict_isolation=False)
+        allowed = argv[argv.index("--allowedTools") + 1].split(",")
+        denied = argv[argv.index("--disallowedTools") + 1].split(",")
+        assert {"WebFetch", "WebSearch"} <= set(allowed), granted
+        assert "WebFetch" not in denied and "WebSearch" not in denied, granted
+
+
+def test_outside_the_mode_the_web_tools_still_follow_the_flow_grant(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # The counterweight: on the shipped default the existence gate is what withholds them, and a
+    # node with no grant has neither the tools nor a reason to name them in the denies.
+    offline = _argv(claude_config, make_request(network_access=False))
+    assert "WebFetch" not in offline[offline.index("--tools") + 1].split(",")
+    online = _argv(claude_config, make_request(network_access=True))
+    assert "WebFetch" in online[online.index("--tools") + 1].split(",")
 
 
 def test_advanced_mode_keeps_the_shell_on_a_host_that_cannot_sandbox_it(

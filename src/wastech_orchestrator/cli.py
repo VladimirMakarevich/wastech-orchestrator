@@ -3165,7 +3165,9 @@ def run_preflight(
         lines.append(
             "git-evidence: ON (security.allow_git_evidence=true) — a flow node declaring "
             "git_evidence may run the read-only git verbs to inspect delivery history; the "
-            "repository stays unwritable (sandbox) and commit/push/PR stay the orchestrator's"
+            "repository stays unwritable (sandbox) and publication stays the orchestrator's. "
+            "Not applied at all under strict_isolation=false: every node has an unscoped shell "
+            "there, so read the advanced-mode lines above for what holds instead"
         )
 
     # The host-dependent half of the ``allowed_environment`` gate — its host-independent half

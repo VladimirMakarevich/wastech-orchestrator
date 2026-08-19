@@ -574,6 +574,7 @@ def run_codex_capability_smoke(
     home_dir: Path,
     env: Mapping[str, str],
     permission_profile: str = "workspace-write",
+    strict_isolation: bool = True,
     system: str | None = None,
     runner: CanaryRunner = default_canary_runner,
     inventory_probe: InventoryProbe | None = None,
@@ -592,6 +593,12 @@ def run_codex_capability_smoke(
     (``CAPABILITY_UNAVAILABLE``) / ``policy-failed`` (``CONFIGURATION_ERROR``) — never silently
     downgrading. Reusable by ``worc preflight`` and the local/manual host smoke; the
     deterministic suite injects a scripted *runner* + *inventory_probe* so no real sandbox spawns.
+
+    ``strict_isolation`` is the operator's own setting and is passed to the profile generator, so
+    what gets proven here is the profile that will actually launch. With it ``false`` (the advanced
+    mode) that profile grants ``write`` on the whole volume, which is exactly the configuration
+    whose carve-outs are worth demonstrating: a smoke that quietly proved the stricter profile
+    instead would report a floor nobody runs under.
     """
     sys_name = system if system is not None else platform.system()
     root = Path(tempfile.mkdtemp(prefix="worc-cap-smoke-", dir=str(home_dir)))
@@ -651,6 +658,11 @@ def run_codex_capability_smoke(
             deny_policy=deny,
             write_guard=write_guard if writable else None,
             denied_read_paths=(),
+            # Same profile the attempt would launch under, network included: the advanced mode is
+            # online, and proving a profile that differs from the real one in any key is what this
+            # check exists to stop. The probes are local commands either way.
+            network_access=not strict_isolation,
+            strict_isolation=strict_isolation,
         )
         # Assert the fixture before trusting its verdict: a root with no directory yields no probe,
         # and a smoke that quietly probed fewer roots than the profile declares would certify a

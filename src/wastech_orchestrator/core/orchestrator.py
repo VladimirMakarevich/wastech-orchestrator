@@ -2604,7 +2604,9 @@ class Orchestrator:
             self._log(p.task.id).info(
                 "git-evidence ON — a node declaring git_evidence may run the read-only git verbs "
                 "to inspect delivery history; the repository stays unwritable (the sandbox denies "
-                "writes) and commit/push/PR stay the orchestrator's alone"
+                "writes) and publication stays the orchestrator's. Not applied at all under "
+                "strict_isolation=false: every node has an unscoped shell there, so the "
+                "advanced-mode lines below say what holds instead"
             )
         for mode_line in describe_advanced_mode(self._config):
             # The same text preflight prints, from the same formatter — a run whose log said less
