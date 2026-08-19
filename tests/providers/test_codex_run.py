@@ -311,30 +311,6 @@ def test_canary_capability_failure_is_pre_model(
     assert fake.calls == 0
 
 
-def test_full_access_escape_skips_canary(
-    codex_config: ProviderConfig,
-    security_config: SecurityConfig,
-    tmp_path: Path,
-    make_request: Callable[..., AgentRunRequest],
-) -> None:
-    # danger-full-access emits no permission profile, so there is nothing (and no claim) to prove.
-    fake = FakeRun(stdout=_success_stream(), last_message='{"summary":"ok"}')
-    canary = FakeCanary(results=[(0, "should never be called")])
-    request = make_request()
-    provider = _isolated_provider(
-        replace(codex_config, sandbox="danger-full-access"),
-        security_config,
-        tmp_path,
-        fake,
-        canary=canary,
-        deny=_deny_for(request),
-    )
-    result = provider.run(request)
-    assert result.status is RunStatus.SUCCEEDED
-    assert canary.calls == 0  # skipped
-    assert fake.calls == 1
-
-
 def test_canary_skipped_without_deny_policy(
     codex_config: ProviderConfig,
     security_config: SecurityConfig,

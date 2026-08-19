@@ -21,6 +21,7 @@ from wastech_orchestrator.core.flow.exchange_seal import (
     exchange_seal_root,
 )
 from wastech_orchestrator.core.flow.instruction_bundle import instruction_bundle_dir
+from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.runtime_layout import RuntimeLayout
 
 
@@ -75,17 +76,26 @@ def test_providers_receive_read_isolation_off_flag(
 
 
 def test_router_receives_isolation_checks(git_repo, make_git_config, tmp_path: Path) -> None:
-    # Wiring guard: the router's CAPABILITY_UNAVAILABLE host-verified fallback gate needs
-    # the
-    # offline isolation-check table; build_orchestrator must inject it (else _can_isolate fails
-    # closed
-    # for every provider and a legitimate cross-provider recovery would be wrongly refused).
+    # Wiring guard: the router's CAPABILITY_UNAVAILABLE fallback-eligibility gate needs the offline
+    # isolation-check table; build_orchestrator must inject it (else _can_isolate fails closed for
+    # every provider and a legitimate cross-provider recovery would be wrongly refused).
     config = make_git_config(git_repo.clone, checks=["pytest"])
     layout = _distinct_layout(git_repo.clone, tmp_path)
     orch = build_orchestrator(config, layout=layout)
     assert orch._router._isolation_checks  # non-empty
     for pid in config.agents.providers:
         assert pid in orch._router._isolation_checks
+
+
+def test_orchestrator_receives_host_floor_checks(git_repo, make_git_config, tmp_path: Path) -> None:
+    # Wiring guard for the advisory twin: without the injected table the run says nothing at all
+    # about a host that cannot enforce the write floor, which is the exact silence this verdict
+    # exists to end. Claude is the only entry — Codex answers the same question per attempt, from
+    # inside the attempt.
+    config = make_git_config(git_repo.clone, checks=["pytest"])
+    layout = _distinct_layout(git_repo.clone, tmp_path)
+    orch = build_orchestrator(config, layout=layout)
+    assert list(orch._host_floor_checks) == [ProviderId.CLAUDE]
 
 
 def test_orchestrator_consumers_receive_the_right_field(

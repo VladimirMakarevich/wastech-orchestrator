@@ -51,14 +51,14 @@ Decide which CLIs are actually available and keep the set small:
 - `allowed` — only the providers the operator can really run (`codex`, `claude`).
 - Exactly one provider must be `primary: true`.
 - Leave the shipped `model`, `reasoning`, `timeout_seconds`, `permission_profile`, and `max_turns` defaults unless the operator has a concrete reason to change them.
-- Do not write `sandbox` at all. `install` never emits it, the access level lives in `permission_profile`, and its only surviving value is the Codex full-access escape.
+- There is no `sandbox` key. The access level lives in `permission_profile`; a config that still carries `sandbox:` is rejected on load as an unknown key, and `upgrade-config` does not strip it — delete the line by hand. It is not tolerated on purpose: its one remaining value selected a provider full-access mode, which is now forbidden outright, so keeping the key loadable would only suggest that some value of it still works.
 - Leave `decomposition.enabled: false` until the team is ready for one-task-many-subtasks planning.
 
 ### 3. `security`
 
 Treat this block as a guardrail, not a convenience area:
 
-- Keep `strict_isolation: true` unless the operator consciously accepts full-access runs.
+- Keep `strict_isolation: true` unless the operator consciously accepts unsandboxed runs. It unlocks no provider full-access mode — those are forbidden outright.
 - Know that `disable_read_isolation` defaults to `true` — read-isolation is **off** out of the box, and `install` does not write the key. Set it `false` to turn read-isolation on; the write side (commit/staging gates, PR control, `denied_read_paths`) is in force either way.
 - Pass only names in `allowed_environment`; secret **values** never belong in the file. The list replaces the default wholesale, so keep `PATH` (a config without it is rejected at load) and, on Windows, `SystemRoot` (`worc preflight` fails without it — the CLI would abort at startup printing nothing). What `install` generated is the host OS default; the longer list in `config.example.yaml` is the cross-platform union. An entry may be a prefix pattern (`DOTNET_*`, `npm_config_*`) instead of an exact name — resolved against your environment, with the same secret-name filter applied to every name it produces, so `NUGET_*` forwards `NUGET_PACKAGES` and refuses `NUGET_API_KEY`.
 - Use `extra_environment` when a child process needs a variable **set**, not forwarded — a toolchain root or a cache path (`NUGET_PACKAGES`, `npm_config_cache`). Forwarding only passes on what your shell exported, so it is unset on the next machine and a forgotten `export` is skipped in silence. Every child gets these: the agent CLI, the checks, the scanners, `git`/`gh`. Values must be quoted strings, and **no credentials** — the value is plaintext in this file, and only secret-looking *names* are refused at load.
@@ -132,7 +132,7 @@ If the repo already answers the question (`origin`, current branch, `pyproject.t
 
 After editing the config:
 
-1. If the package was upgraded, run `worc upgrade-config` first so the file has the current schema shape.
+1. If the package was upgraded, run `worc upgrade-config` first so the file has the current schema shape. It adds new keys from the template and strips the ones that were retired with a migration; a key that was removed **without** one — `agents.providers.<provider>.sandbox` — it leaves in place, so that line has to be deleted by hand before the config will load at all.
 2. Run `worc preflight`. Fix every reported provider, credential, isolation, `gh`, or Telegram issue.
 3. Run `worc validate-flow --all` — preflight does not look at flows, and a config edit can invalidate one (a node pinned to a provider you just removed from `agents.allowed`). It checks the operator flows under `.worc/flows/` only.
 

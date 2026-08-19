@@ -57,10 +57,11 @@ _LOG = logging.getLogger(__name__)
 # Error classes whose fallback is CONDITIONAL, decided here (not in providers.base):
 # * authorization_failed / permission_denied — only when the fallback provider runs in the same or a
 #   stricter permission profile (never relaxing the policy);
-# * capability_unavailable — only when the fallback is same-or-stricter AND can itself
-#   enforce the required isolation for the node on this host (``fallback_can_isolate``), so the
-#   Router never recovers a missing-sandbox refusal by falling over to an equally-unisolable
-# provider.
+# * capability_unavailable — only when the fallback is same-or-stricter AND is itself configured to
+#   isolate (``fallback_can_isolate``), so a capability refusal is never recovered by falling over
+#   to a provider whose own config forbids isolating. Whether the *host* can enforce a floor is
+#   deliberately not part of this: that answer is advisory everywhere else, and the fallback
+#   provider decides it per attempt, with the node's declaration in hand, before any CLI launches.
 CONDITIONAL_FALLBACK: frozenset[ErrorClass] = frozenset(
     {
         ErrorClass.AUTHORIZATION_FAILED,
@@ -83,7 +84,7 @@ def fallback_allowed(
     :data:`~wastech_orchestrator.providers.base.FALLBACK_ELIGIBLE`; conditional for
     ``authorization_failed`` / ``permission_denied`` (only when the fallback profile is the same or
     stricter — never relaxing the policy) and for ``capability_unavailable`` (same-or-stricter AND
-    ``fallback_can_isolate`` — the fallback must itself be able to isolate the node on this host);
+    ``fallback_can_isolate`` — the fallback's own configuration must permit isolating);
     never for quality (``task_failure``) or configuration errors. Pure and directly unit-tested as a
     decision table.
     """
@@ -200,10 +201,9 @@ class AgentRouter:
         # Set only by the watch daemon: True once an operator stop was requested. Checked before any
         # fallback/retry so a stop-killed agent is never respawned on another provider.
         self._is_cancelled = is_cancelled
-        # The offline ProviderId→isolation-check table (the same one composition binds), so
-        # a ``CAPABILITY_UNAVAILABLE`` fallback is allowed only to a provider that can itself
-        # isolate
-        # the node on this host. The router imports no concrete adapter — the table is injected.
+        # The offline ProviderId→isolation-check table (the same one composition binds), so a
+        # ``CAPABILITY_UNAVAILABLE`` fallback is allowed only to a provider whose own configuration
+        # is legal. The router imports no concrete adapter — the table is injected.
         self._isolation_checks = isolation_checks or {}
         # The offline ProviderId→"does this attempt get a shell?" table (also injected, same
         # reason). Empty means every answer is fail-closed ``True``: a caller that cannot classify
@@ -212,13 +212,15 @@ class AgentRouter:
         self._global_primary = _resolve_global_primary(config)
 
     def _can_isolate(self, pid: ProviderId) -> bool:
-        """Whether ``pid`` can enforce its required isolation on this host (offline; fail-closed).
+        """Whether ``pid``'s config permits isolating (offline, host-independent, fail-closed).
 
         Reuses the injected offline isolation check (``isolation_reasons``): an empty reason list
-        means the provider can isolate here. A missing check/config is treated as *cannot* isolate
-        (fail-closed), so a ``CAPABILITY_UNAVAILABLE`` fallback never silently reaches an
-        unverifiable
-        provider.
+        means nothing in that provider's config stands in the way. A missing check/config is treated
+        as *cannot* isolate (fail-closed), so a ``CAPABILITY_UNAVAILABLE`` fallback never silently
+        reaches an unverifiable provider. It asks nothing about the host: a host that cannot enforce
+        a floor is announced, not refused, and turning that into a denied fallback would resurrect
+        the refusal here — costing a legitimate hop (a read-only node needs no sandbox at all) while
+        the target provider already refuses the genuinely unsafe attempt itself.
         """
         check = self._isolation_checks.get(pid)
         cfg = self._config.agents.providers.get(pid)

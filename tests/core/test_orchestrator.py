@@ -3233,9 +3233,7 @@ def test_strict_isolation_preflight_fails_without_branch(
     )
     monkeypatch.setattr(
         "wastech_orchestrator.core.orchestrator.check_isolation",
-        lambda _config, _checks: [
-            "codex: sandbox 'danger-full-access' grants full filesystem access"
-        ],
+        lambda _config, _checks: ["claude: extra_args flag '--add-dir' is reserved"],
     )
     result = orch.run_task(_complete_task(tmp_path, "task-iso"))
 
@@ -3244,6 +3242,34 @@ def test_strict_isolation_preflight_fails_without_branch(
     assert row is not None and row.status is Status.FAILED
     assert git_run(["branch", "--list", "worc/*"], git_repo.clone) == ""  # no branch created
     assert ledger.records()[0]["final_status"] == "failed"
+
+
+def test_a_host_without_a_floor_is_announced_and_the_run_continues(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repo,
+    make_git_config,
+    git_run,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # The advisory twin of the gate above, and the difference that matters: the same preamble that
+    # fails the run for an illegal config only speaks up here. The branch IS created, so the loss is
+    # on the record while the operator keeps their host.
+    orch, store, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    monkeypatch.setattr(
+        "wastech_orchestrator.core.orchestrator.describe_host_floor",
+        lambda _config, _checks: ("claude: no OS sandbox on this host — .git and .worc writable",),
+    )
+    with caplog.at_level(logging.WARNING):
+        result = orch.run_task(_complete_task(tmp_path, "task-floor"))
+
+    assert result.final_status is not Status.FAILED
+    row = store.get_task("task-floor")
+    assert row is not None and row.status is not Status.FAILED
+    assert git_run(["branch", "--list", "worc/*"], git_repo.clone) != ""  # the run went ahead
+    assert any("isolation floor NONE — claude: no OS sandbox" in r.message for r in caplog.records)
 
 
 def test_failed_with_branch_commits_and_pushes_task_and_summary(

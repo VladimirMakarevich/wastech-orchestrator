@@ -28,6 +28,7 @@ from typing import NamedTuple, TextIO
 
 from wastech_orchestrator import __version__, preflight, process_control, runs_retention
 from wastech_orchestrator.composition import (
+    HOST_FLOOR_CHECKS,
     ISOLATION_CHECKS,
     build_internal_deny_policy,
     build_orchestrator,
@@ -95,7 +96,7 @@ from wastech_orchestrator.security.env_paths import (
     internal_protected_paths,
     is_inside,
 )
-from wastech_orchestrator.security.isolation import check_isolation
+from wastech_orchestrator.security.isolation import check_isolation, describe_host_floor
 from wastech_orchestrator.state_store import IncompatibleStateError, StateStore, TaskRow
 from wastech_orchestrator.task.model import DEFAULT_QUEUE, priority_rank
 from wastech_orchestrator.task.parser import read_task_source, split_frontmatter
@@ -3124,6 +3125,13 @@ def run_preflight(
             "config/hooks/rules) and the private read-deny projection is lifted; the write-guard, "
             "commit/staging gates, PR control, and denied_read_paths blacklist stay in force"
         )
+
+    # What this host cannot enforce, whatever the config says. Deliberately not a FAIL: the floor
+    # is missing either way, and refusing to run would leave the operator without the guarantee AND
+    # without the work. The same text lands in the run log, from the same formatter.
+    lines.extend(
+        f"isolation-floor: NONE — {gap}" for gap in describe_host_floor(config, HOST_FLOOR_CHECKS)
+    )
 
     # Same principle for the git-evidence grant: an operator reading preflight should see which
     # optional capabilities are live, not have to infer them from the config file.

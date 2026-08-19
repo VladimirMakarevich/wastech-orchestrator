@@ -166,7 +166,7 @@ from wastech_orchestrator.providers.base import ProviderId
 # v31: a Codex node's isolation is a generated permission profile driven by
 # `permission_profile`; the legacy `agents.providers.codex.sandbox: read-only|workspace-write` is
 # rejected by the validator and folded into `permission_profile` by `upgrade-config`. `sandbox`
-# survives only as the `danger-full-access` escape (gated by `strict_isolation: false`).
+# survives only as the `danger-full-access` escape (removed again in v38).
 # v32: adds the optional `logging.clean_runs_on_success` (bool, default true) — a successful task
 # evicts its own per-task `runs/` subtree (frozen bundles + sealed exchanges). Old (absent) configs
 # take the default, so cleanup is on out of the box; set false to retain every run for analysis.
@@ -210,7 +210,14 @@ from wastech_orchestrator.providers.base import ProviderId
 # the symptom being a build that behaves differently than in a terminal, with no error anywhere. A
 # config
 # using only exact names is unaffected in either direction.
-CONFIG_SCHEMA_VERSION = 37
+# v38 (2026-08-19, full-tool-access advanced mode): removes `agents.providers.<provider>.sandbox`.
+# Its one remaining value selected a provider full-access mode, which discarded the generated
+# permission profile wholesale — the clone's `.git` became writable and the enforcement canary had
+# no profile left to prove — and that mode is now absolutely forbidden, so the field has no legal
+# value at all. Removal, not deprecation: a config still carrying the key is rejected on load as an
+# unknown key, and `upgrade-config` does not strip it, because there is no deployed installation to
+# migrate and a tolerated key would only keep the impression that some value of it still works.
+CONFIG_SCHEMA_VERSION = 38
 
 
 class AuditBranch(StrEnum):
@@ -357,12 +364,6 @@ class ProviderConfig:
     timeout_seconds: int
     permission_profile: str
     extra_args: tuple[str, ...] = ()
-    # Codex escape: the sole remaining value is ``danger-full-access`` — the operator's explicit,
-    # loudly-unisolated opt-out, gated by ``strict_isolation: false``. The access level
-    # (``read-only`` | ``workspace-write``) now lives in the provider-neutral ``permission_profile``
-    # above; a legacy ``sandbox: read-only|workspace-write`` is rejected (migrate via
-    # ``upgrade-config``). Inert on Claude.
-    sandbox: str | None = None
     # Claude turn cap: positive int, or ``None`` = no cap. The loader maps ``"none"``/``"max"``/
     # ``null`` to ``None`` (adapter omits ``--max-turns``); config default 400.
     max_turns: int | None = None

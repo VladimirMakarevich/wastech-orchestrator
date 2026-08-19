@@ -27,10 +27,7 @@ from wastech_orchestrator.providers.capabilities import is_reasoning_supported, 
 from wastech_orchestrator.providers.redaction import is_sensitive_key
 from wastech_orchestrator.security.env import env_name_is_covered, env_pattern_prefix
 from wastech_orchestrator.security.env_paths import internal_protected_paths, lexical_collision
-from wastech_orchestrator.security.forbidden_args import (
-    FORBIDDEN_SANDBOX_VALUE,
-    find_forbidden_args,
-)
+from wastech_orchestrator.security.forbidden_args import find_forbidden_args
 
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -44,24 +41,6 @@ def _check_extra_args(pid: ProviderId, args: tuple[str, ...], issues: list[str])
     """
     where = f"agents.providers.{pid.value}.extra_args"
     issues.extend(f"{where}: {reason}" for reason in find_forbidden_args(args))
-
-
-def _check_sandbox_field(pid: ProviderId, sandbox: str | None, issues: list[str]) -> None:
-    """Reject a legacy ``sandbox: read-only|workspace-write``.
-
-    A Codex node's isolation is now the generated permission profile selected by
-    ``permission_profile``; the ``sandbox`` field survives only as the ``danger-full-access`` escape
-    (still gated by ``strict_isolation`` at preflight). A safe legacy value is rejected rather
-    than silently ignored — ``upgrade-config`` folds it into ``permission_profile``.
-    """
-    if sandbox is None or sandbox == FORBIDDEN_SANDBOX_VALUE:
-        return
-    where = f"agents.providers.{pid.value}.sandbox"
-    issues.append(
-        f"{where}: {sandbox!r} is a legacy setting; set permission_profile: {sandbox!r} instead "
-        f"(only {FORBIDDEN_SANDBOX_VALUE!r} remains valid here, and only under "
-        "strict_isolation: false). Run `wastech-orchestrator upgrade-config` to migrate."
-    )
 
 
 def _check_global_primary(
@@ -191,7 +170,6 @@ def validate_config(config: OrchestratorConfig) -> list[str]:
             issues=issues,
         )
         _check_extra_args(pid, provider.extra_args, issues)
-        _check_sandbox_field(pid, provider.sandbox, issues)
 
     _validate_checks(config, issues, warnings)
     _validate_telegram(config, issues)

@@ -11,11 +11,12 @@ two places so the security invariant is enforced in depth:
 Covers Codex ``--dangerously-bypass-approvals-and-sandbox`` / ``--yolo`` /
 ``--dangerously-bypass-hook-trust`` / ``--ignore-rules`` and Claude
 ``--dangerously-skip-permissions`` / ``--allow-dangerously-skip-permissions`` — plus any future
-``--dangerously*`` flag, defensively. The
-**structured** full-access selectors
-(Codex ``--sandbox danger-full-access``, Claude ``--permission-mode bypassPermissions``) are *not*
-absolutely forbidden — an operator may opt in under ``security.strict_isolation: false`` — so they
-are detected separately by :func:`find_full_access_args`, which the ``strict_isolation`` gate uses.
+``--dangerously*`` flag, defensively. The **structured** full-access selectors (Codex
+``--sandbox danger-full-access``, Claude ``--permission-mode bypassPermissions``) are covered here
+too, and just as absolutely: each removes the write floor the whole product rests on — the first
+discards the generated permission profile wholesale, so the clone's ``.git`` becomes writable and
+the enforcement canary has no profile left to prove; the second drops the permission prompts. No
+configuration selects either, at any value of any other key.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ FORBIDDEN_SANDBOX_VALUE = "danger-full-access"
 # prefix rule). ``--allow-dangerously-skip-permissions`` (Claude) enables the bypass as an option
 # without the ``--dangerously`` prefix, so it must be listed explicitly — it is the same bypass
 # class
-# as ``--dangerously-skip-permissions`` and stays absolutely forbidden (never operator-selectable).
+# as ``--dangerously-skip-permissions``.
 _FORBIDDEN_FLAGS: frozenset[str] = frozenset(
     {
         "--yolo",
@@ -41,8 +42,8 @@ _FORBIDDEN_FLAGS: frozenset[str] = frozenset(
 # Flags that select the sandbox mode (long and short form).
 _SANDBOX_FLAGS: frozenset[str] = frozenset({"--sandbox", "-s"})
 
-# Claude's permission-mode flag and its full-bypass value. Used only by ``find_full_access_args``;
-# the flag itself is legitimate (the orchestrator sets it) — only the bypass *value* is full access.
+# Claude's permission-mode flag and its full-bypass value: the flag itself is legitimate (the
+# orchestrator sets it), only the bypass *value* is full access.
 _PERMISSION_MODE_FLAG = "--permission-mode"
 _BYPASS_PERMISSION_MODE = "bypassPermissions"
 
@@ -53,45 +54,25 @@ def find_forbidden_args(args: Sequence[str]) -> list[str]:
     """Return a reason per offending token; an empty list means the args are safe.
 
     Reasons are unqualified (no config path / provider prefix) so each caller can frame them in its
-    own terms (a config issue vs. a :class:`ProviderError` message).
+    own terms (a config issue vs. a :class:`ProviderError` message). Both spellings of a valued
+    flag are recognized (``--flag value`` and ``--flag=value``), so neither form slips through.
     """
     reasons: list[str] = []
     for index, token in enumerate(args):
-        flag = token.split("=", 1)[0]
+        flag, separator, inline = token.partition("=")
+        value = inline if separator else _peek(args, index + 1)
         if flag.startswith("--dangerously") or flag in _FORBIDDEN_FLAGS:
             reasons.append(f"flag {token!r} {_BYPASS_REASON}")
-            continue
-        if flag in _SANDBOX_FLAGS:
-            has_value = "=" in token or index + 1 < len(args)
-            value = token.split("=", 1)[1] if "=" in token else _peek(args, index + 1)
-            if not has_value or value == "":
+        elif flag in _SANDBOX_FLAGS:
+            if value == FORBIDDEN_SANDBOX_VALUE:
+                reasons.append(
+                    f"--sandbox {FORBIDDEN_SANDBOX_VALUE!r} grants full access (no isolation)"
+                )
+            elif value == "":
                 # A sandbox flag with no value (last token, or a trailing ``=``) is malformed: the
                 # CLI would consume the next real flag as its value or error out. Reject it rather
                 # than treat it as safe — defense in depth, it can never weaken isolation.
-                # (``danger-full-access`` is no longer rejected here — it is a gated full-access
-                # selector handled by ``find_full_access_args``.)
                 reasons.append(f"{flag} requires a sandbox value (none given)")
-    return reasons
-
-
-def find_full_access_args(args: Sequence[str]) -> list[str]:
-    """Return a reason per token that selects a provider full-access / no-isolation mode.
-
-    Covers the **structured** full-access selectors — Codex ``--sandbox danger-full-access`` and
-    Claude ``--permission-mode bypassPermissions`` (either ``flag value`` or ``flag=value`` form).
-    Unlike :func:`find_forbidden_args` these are *not* absolutely forbidden: an operator may opt in
-    under ``security.strict_isolation: false`` and owns the risk. The ``strict_isolation`` gate
-    (provider preflight and the flow validator) uses this to reject them while the default
-    ``strict_isolation: true`` holds — preserving the fail-closed posture.
-    """
-    reasons: list[str] = []
-    for index, token in enumerate(args):
-        flag, sep, inline = token.partition("=")
-        value = inline if sep else _peek(args, index + 1)
-        if flag in _SANDBOX_FLAGS and value == FORBIDDEN_SANDBOX_VALUE:
-            reasons.append(
-                f"--sandbox {FORBIDDEN_SANDBOX_VALUE!r} grants full access (no isolation)"
-            )
         elif flag == _PERMISSION_MODE_FLAG and value == _BYPASS_PERMISSION_MODE:
             reasons.append(
                 f"--permission-mode {_BYPASS_PERMISSION_MODE!r} disables permission prompts "

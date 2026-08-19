@@ -113,9 +113,6 @@ def test_safe_security_defaults_are_written(tmp_path: Path) -> None:
     assert "gh pr create" in cfg.security.denied_commands
     assert "gh pr merge" in cfg.security.denied_commands
     assert cfg.agents.providers[ProviderId.CODEX].permission_profile == "workspace-write"
-    # The installer no longer writes the legacy `sandbox` field — codex isolation is the
-    # generated permission profile driven by `permission_profile` above.
-    assert cfg.agents.providers[ProviderId.CODEX].sandbox is None
     assert cfg.agents.providers[ProviderId.CODEX].extra_args == ()
 
 

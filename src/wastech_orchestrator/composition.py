@@ -26,7 +26,7 @@ from wastech_orchestrator.providers.base import AgentProvider, ProviderId
 from wastech_orchestrator.providers.process import AgentHandleRecorder
 from wastech_orchestrator.routing.router import AgentRouter
 from wastech_orchestrator.runtime_layout import InternalDenyPolicy, RuntimeLayout
-from wastech_orchestrator.security.isolation import IsolationCheck
+from wastech_orchestrator.security.isolation import HostFloorCheck, IsolationCheck
 from wastech_orchestrator.security.shell_reach import ShellCheck
 from wastech_orchestrator.state_store import StateStore
 from wastech_orchestrator.task.validation_gate import ValidationGate
@@ -36,6 +36,15 @@ from wastech_orchestrator.task.validation_gate import ValidationGate
 ISOLATION_CHECKS: dict[ProviderId, IsolationCheck] = {
     ProviderId.CLAUDE: claude.isolation_reasons,
     ProviderId.CODEX: codex.isolation_reasons,
+}
+
+# ProviderId → offline "what can this host not enforce?" answer, bound here for the same reason.
+# Only Claude is listed: its floor rides an OS sandbox that can be classified offline, while Codex
+# runs its own backend and answers the same question per attempt, from inside it, with a canary.
+# An absent entry is the honest "no answer here" — binding a hardcoded "the floor exists" would be a
+# claim about a host nothing verified.
+HOST_FLOOR_CHECKS: dict[ProviderId, HostFloorCheck] = {
+    ProviderId.CLAUDE: claude.host_floor_gap,
 }
 
 # ProviderId → offline "does this attempt get a shell?" check, bound here for the same reason: the
@@ -167,7 +176,7 @@ def build_orchestrator(
     # it
     # into the providers (read/write-deny projection), the Orchestrator (audit), and — as the
     # offline
-    # isolation-check table — the Router's ``CAPABILITY_UNAVAILABLE`` host-verified fallback gate.
+    # isolation-check table — the Router's ``CAPABILITY_UNAVAILABLE`` fallback-eligibility gate.
     deny_policy = build_internal_deny_policy(config, layout, env_file=env_file)
     providers = build_providers(
         config,
@@ -218,5 +227,6 @@ def build_orchestrator(
         resolver=resolver,
         heartbeat_seconds=heartbeat_seconds,
         isolation_checks=ISOLATION_CHECKS,
+        host_floor_checks=HOST_FLOOR_CHECKS,
         is_cancelled=is_cancelled,
     )

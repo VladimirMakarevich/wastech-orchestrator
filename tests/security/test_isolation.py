@@ -1,8 +1,9 @@
-"""strict_isolation preflight — security/isolation.py + adapter isolation_reasons.
+"""The fatal isolation gate — security/isolation.py + adapter isolation_reasons.
 
-Proves the deterministic, offline check: a provider that may run must be able to enable its required
-isolation; ``extra_args`` or a profile/sandbox that would weaken it is flagged. None of these launch
-a CLI.
+Proves the deterministic, offline, host-independent check: a provider that may run must have a legal
+configuration, so a profile or an ``extra_args`` flag that would weaken, replace or escalate the
+owned authority is flagged. None of these launch a CLI. What a *host* cannot enforce is the adjacent
+advisory question and lives in ``test_host_floor.py``.
 """
 
 from __future__ import annotations
@@ -80,14 +81,7 @@ def test_claude_bypass_permission_mode_extra_arg_is_flagged(claude_config: Provi
     assert reasons
 
 
-def test_codex_danger_full_access_sandbox_is_flagged(codex_config: ProviderConfig) -> None:
-    reasons = codex_mod.isolation_reasons(replace(codex_config, sandbox="danger-full-access"))
-    assert reasons and "danger-full-access" in reasons[0]
-
-
 def test_codex_full_access_sandbox_in_extra_args_is_flagged(codex_config: ProviderConfig) -> None:
-    # Full access selected via extra_args (not the sandbox field) is also reported as "no isolation"
-    # — the structured selector is gated, not absolutely banned (provider-config-cleanup #1).
     reasons = codex_mod.isolation_reasons(
         replace(codex_config, extra_args=("--sandbox", "danger-full-access"))
     )
@@ -118,39 +112,33 @@ def test_codex_reserved_approval_extra_arg_is_flagged(
     assert reasons and any("reserved" in r for r in reasons)
 
 
-# --- host-aware sandbox availability + reserved Claude extra_args
-# -------------------------
+# --- reserved and escalating Claude extra_args ----------------------------------------------------
 
 
-def test_claude_workspace_write_missing_sandbox_deps_is_flagged(
-    claude_config: ProviderConfig,
-) -> None:
-    # A configured workspace-write Claude on a Linux/WSL2 host missing bubblewrap+socat cannot get
-    # its required Bash sandbox → strict_isolation preflight must flag it (offline, no CLI
-    # launched).
+def test_claude_weaker_permission_override_is_flagged(claude_config: ProviderConfig) -> None:
+    # An escalation short of the outright bypass value: no list of forbidden tokens can recognize
+    # it, because whether `acceptEdits` is weaker depends on the profile it is compared against.
+    # This is the signal the full-access removal must not have taken with it.
     reasons = claude_mod.isolation_reasons(
-        replace(claude_config, permission_profile="workspace-write"),
-        capability=claude_mod.SandboxCapability.LINUX_MISSING_DEPS,
+        replace(
+            claude_config,
+            permission_profile="read-only",
+            extra_args=("--permission-mode", "acceptEdits"),
+        )
     )
-    assert reasons and any("bubblewrap" in r for r in reasons)
+    assert reasons and any("weaker" in r for r in reasons)
 
 
-def test_claude_read_only_missing_sandbox_deps_is_clean(claude_config: ProviderConfig) -> None:
-    # A read-only node needs no Bash sandbox, so a sandbox-less host is not flagged.
+def test_claude_bypass_mode_is_flagged_by_both_closers(claude_config: ProviderConfig) -> None:
+    # Two independent detectors reach the bypass value — the absolute forbidden-args scan (its
+    # reason is prefixed "extra_args") and the profile-aware escalation check (appended bare).
+    # Keeping both is defence in depth, and the prefix is the only way to tell them apart, since
+    # both describe the same token.
     reasons = claude_mod.isolation_reasons(
-        replace(claude_config, permission_profile="read-only"),
-        capability=claude_mod.SandboxCapability.LINUX_MISSING_DEPS,
+        replace(claude_config, extra_args=("--permission-mode", "bypassPermissions"))
     )
-    assert reasons == []
-
-
-def test_claude_native_windows_workspace_write_not_flagged(claude_config: ProviderConfig) -> None:
-    # Native Windows degrades to a Bash-less restricted mode — not a preflight failure.
-    reasons = claude_mod.isolation_reasons(
-        replace(claude_config, permission_profile="workspace-write"),
-        capability=claude_mod.SandboxCapability.NATIVE_WINDOWS,
-    )
-    assert reasons == []
+    assert any(r.startswith("extra_args ") for r in reasons)
+    assert any(not r.startswith("extra_args ") for r in reasons)
 
 
 def test_claude_reserved_extra_arg_is_flagged(claude_config: ProviderConfig) -> None:
@@ -177,7 +165,9 @@ def test_disable_read_isolation_not_flagged_under_strict(base_config: Orchestrat
 
 
 def test_codex_full_access_fails_with_provider_prefix(base_config: OrchestratorConfig) -> None:
-    cfg = _with_provider(base_config, ProviderId.CODEX, sandbox="danger-full-access")
+    cfg = _with_provider(
+        base_config, ProviderId.CODEX, extra_args=("--sandbox", "danger-full-access")
+    )
     reasons = check_isolation(cfg, ISOLATION_CHECKS)
     assert reasons and reasons[0].startswith("codex:")
 
@@ -189,19 +179,19 @@ def test_claude_full_access_fails_with_provider_prefix(base_config: Orchestrator
 
 
 def test_unallowed_provider_is_not_checked(base_config: OrchestratorConfig) -> None:
-    # codex has a forbidden sandbox, but it is not in agents.allowed → must NOT brick the run (PRE.1
-    # makes the allowlist the exact set of providers that may run).
+    # codex carries an illegal flag, but it is not in agents.allowed → must NOT brick the run: the
+    # allowlist is the exact set of providers that may run.
     agents = replace(base_config.agents, allowed=(ProviderId.CLAUDE,))
     cfg = _with_provider(
-        replace(base_config, agents=agents), ProviderId.CODEX, sandbox="danger-full-access"
+        replace(base_config, agents=agents), ProviderId.CODEX, extra_args=("--yolo",)
     )
     assert check_isolation(cfg, ISOLATION_CHECKS) == []
 
 
 def test_allowed_provider_is_checked(base_config: OrchestratorConfig) -> None:
-    # codex is in agents.allowed (default), so its bad sandbox must still be flagged.
+    # codex is in agents.allowed (default), so its illegal flag must still be flagged.
     assert ProviderId.CODEX in base_config.agents.allowed
-    cfg = _with_provider(base_config, ProviderId.CODEX, sandbox="danger-full-access")
+    cfg = _with_provider(base_config, ProviderId.CODEX, extra_args=("--yolo",))
     assert any(r.startswith("codex:") for r in check_isolation(cfg, ISOLATION_CHECKS))
 
 

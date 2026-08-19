@@ -73,11 +73,7 @@ from wastech_orchestrator.providers.errors import (
 from wastech_orchestrator.providers.redaction import redact_text
 from wastech_orchestrator.runtime_layout import InternalDenyPolicy
 from wastech_orchestrator.security.env import build_child_env
-from wastech_orchestrator.security.forbidden_args import (
-    FORBIDDEN_SANDBOX_VALUE,
-    find_forbidden_args,
-    find_full_access_args,
-)
+from wastech_orchestrator.security.forbidden_args import find_forbidden_args
 from wastech_orchestrator.security.shell_reach import ShellQuery
 
 __all__ = [
@@ -118,9 +114,9 @@ _DISABLED_FEATURES: tuple[str, ...] = (
 # Authority-bearing Codex flags an operator may NOT supply through config/flow ``extra_args``: they
 # would select, replace, or weaken the permission profile, config-isolation, workspace, tool, or
 # network policy the adapter owns. Distinct from the cross-provider absolute bans in
-# ``security.forbidden_args`` (``--dangerously*`` / ``--yolo`` / ``--ignore-rules`` / ``--sandbox``
-# with no value) — these are rejected regardless of ``strict_isolation``. The full-access escape
-# is reached only through the ``sandbox: danger-full-access`` config field, never argv.
+# ``security.forbidden_args`` (``--dangerously*`` / ``--yolo`` / ``--ignore-rules``, and any
+# ``--sandbox`` that is valueless or selects full access) — both clusters are rejected regardless of
+# ``strict_isolation``.
 _RESERVED_CODEX_FLAGS: frozenset[str] = frozenset(
     {
         "-c",
@@ -337,10 +333,11 @@ def _effective_permission_profile(config: ProviderConfig, request: AgentRunReque
 
 
 def _extract_profile_arg(argv: Sequence[str]) -> str | None:
-    """The generated permission-profile inline ``-c`` value in *argv*, or ``None`` (escape path).
+    """The generated permission-profile inline ``-c`` value in *argv*, or ``None``.
 
-    The canary re-runs this exact profile under ``codex sandbox -P`` to prove it enforces; the
-    full-access escape emits no profile, so there is nothing (and no isolation claim) to prove.
+    The canary re-runs this exact profile under ``codex sandbox -P`` to prove it enforces. Every
+    attempt emits a profile, so ``None`` means the argv is not one this adapter built — a structural
+    guard, not a policy: there is no configuration that asks for a profile-free launch.
     """
     for index, token in enumerate(argv[:-1]):
         if token in ("-c", "--config") and argv[index + 1].startswith(
@@ -365,10 +362,8 @@ def _isolation_argv(
     active ``default_permissions``, the operator's user ``config.toml`` ignored (auth still uses
     ``CODEX_HOME``), the project marked ``untrusted`` (so ``.codex/config.toml``/hooks/rules are not
     trusted), and the non-shell tool surfaces disabled. The profile itself carries the filesystem
-    deny/read-only carve-outs and disables network. The operator escape
-    (``sandbox: danger-full-access``, reachable only under ``strict_isolation: false`` and never via
-    task/flow/``extra_args``) instead emits the legacy ``--sandbox danger-full-access`` and makes no
-    read-isolation claim.
+    deny/read-only carve-outs and disables network. There is no opt-out: a profile is emitted for
+    every attempt, because it is also what the pre-launch canary re-runs to prove enforcement.
 
     ``read_isolation_off`` restores Codex's NATIVE config discovery — the private profile
     carve-outs are downgraded to read-only (:func:`build_codex_permission_profile`), the operator's
@@ -378,8 +373,6 @@ def _isolation_argv(
     (multi-agent/computer/browser/apps/plugins) stay disabled (execution surfaces, not read-side
     discovery), and the profile's write-only carve-outs (and the pre-launch canary) still hold.
     """
-    if config.sandbox == FORBIDDEN_SANDBOX_VALUE:
-        return ["--sandbox", FORBIDDEN_SANDBOX_VALUE]
     profile = build_codex_permission_profile(
         permission_profile=_effective_permission_profile(config, request),
         working_directory=request.working_directory,
@@ -423,14 +416,13 @@ def build_codex_argv(
 
     Raises :class:`ProviderError` (``CONFIGURATION_ERROR``) when ``extra_args`` would weaken or
     replace the owned authority: the absolutely-forbidden ``--dangerously*`` / ``--yolo`` /
-    ``--ignore-rules`` / bare ``--sandbox`` flags, and the reserved authority-bearing flags
-    (``-c``/``--config``, ``-p``/``--profile``, ``-P``, ``-s``/``--sandbox``, the approval/sandbox
-    selectors ``--full-auto`` / ``-a``/``--ask-for-approval``, ``--add-dir``,
-    ``--ignore-user-config``, ``--enable``/``--disable``, ...). Isolation is a generated permission
-    profile via ``default_permissions`` (:func:`_isolation_argv`); the full-access escape is
-    reached only through the ``sandbox: danger-full-access`` config field, gated by
-    ``strict_isolation`` at preflight. The prompt is delivered on stdin (the
-    trailing ``-``), never on the command line.
+    ``--ignore-rules`` flags and any ``--sandbox`` that is valueless or selects full access, plus
+    the reserved authority-bearing flags (``-c``/``--config``, ``-p``/``--profile``, ``-P``,
+    ``-s``/``--sandbox``, the approval/sandbox selectors ``--full-auto`` /
+    ``-a``/``--ask-for-approval``, ``--add-dir``, ``--ignore-user-config``,
+    ``--enable``/``--disable``, ...). Isolation is a generated permission profile via
+    ``default_permissions`` (:func:`_isolation_argv`), emitted for every attempt with no opt-out.
+    The prompt is delivered on stdin (the trailing ``-``), never on the command line.
     """
     combined_extra = tuple(config.extra_args) + tuple(request.extra_args)
     reasons = find_forbidden_args(combined_extra) + _find_reserved_codex_args(combined_extra)
@@ -506,21 +498,18 @@ def build_codex_argv(
 
 
 def isolation_reasons(config: ProviderConfig) -> list[str]:
-    """Reasons the configured Codex isolation cannot be enabled — an empty list means OK.
+    """Reasons this Codex *configuration* is not legal — an empty list means OK.
 
-    Pure and offline (no CLI launched), so it can drive the ``strict_isolation`` preflight
-    (:mod:`wastech_orchestrator.security.isolation`) and the Router's ``CAPABILITY_UNAVAILABLE``
-    fallback gate. A ``read-only``/``workspace-write`` node runs a generated permission profile, so
-    it is isolated. The only "no isolation" configurations are the full-access escape
-    (``sandbox: danger-full-access``, or selected in ``extra_args`` — the gate, not an absolute ban)
-    and any forbidden/reserved authority-bearing ``extra_args`` (which would weaken or replace the
-    owned profile/config surface). The real OS-enforced proof is the pre-launch canary
-    (:mod:`wastech_orchestrator.providers.codex_canary`); this offline check mirrors argv.
+    Pure, offline and host-independent (no CLI launched), so it drives the fatal
+    ``strict_isolation`` gate (:mod:`wastech_orchestrator.security.isolation`) and the Router's
+    fallback eligibility question. Every ``read-only``/``workspace-write`` node runs a generated
+    permission profile, so what is left to reject is ``extra_args``: an absolutely-forbidden flag
+    (including the full-access sandbox selector) or a reserved authority-bearing one, either of
+    which would weaken or replace the profile/config surface the adapter owns. The real OS-enforced
+    proof is the pre-launch canary (:mod:`wastech_orchestrator.providers.codex_canary`); this
+    offline check mirrors argv.
     """
     reasons: list[str] = []
-    if config.sandbox == FORBIDDEN_SANDBOX_VALUE:
-        reasons.append(f"sandbox {config.sandbox!r} grants full filesystem access (no isolation)")
-    reasons.extend(f"extra_args {r}" for r in find_full_access_args(config.extra_args))
     reasons.extend(f"extra_args {r}" for r in find_forbidden_args(config.extra_args))
     reasons.extend(f"extra_args {r}" for r in _find_reserved_codex_args(config.extra_args))
     return reasons
@@ -532,8 +521,8 @@ def attempt_has_shell(config: ProviderConfig, query: ShellQuery) -> bool:
     Pure and offline (no CLI launched), so it can drive the core's per-attempt detection bracket
     (:mod:`wastech_orchestrator.security.shell_reach`). Codex has no shell-less mode: the generated
     ``read-only`` profile forbids every mutation but still permits command execution (a
-    ``read-only`` node can run ``git log`` today), ``workspace-write`` adds the write grant, and the
-    full-access escape removes the sandbox entirely. So neither the node's ceiling nor the
+    ``read-only`` node can run ``git log`` today) and ``workspace-write`` adds the write grant. So
+    neither the node's ceiling nor the
     git-evidence grant changes the answer — the grant exists for the provider whose read-only
     profile carries no shell, and Codex needs nothing from it.
     """
@@ -755,10 +744,10 @@ class CodexProvider(BaseCliProvider):
         mid-run ``CAPABILITY_UNAVAILABLE`` / ``CONFIGURATION_ERROR`` that reads like a bug. Runs the
         no-model :func:`codex_canary.run_codex_capability_smoke` on the configured profile under a
         throwaway fixture. A proven leak is fatal (a non-fallback result); an undemonstrable
-        sandbox is advisory (degrades like a capability gap). Returns ``None`` for the operator
-        full-access escape (no profile, no isolation claim) or when strict isolation is off.
+        sandbox is advisory (degrades like a capability gap). Returns ``None`` when strict isolation
+        is off.
         """
-        if not self._security.strict_isolation or self._config.sandbox == FORBIDDEN_SANDBOX_VALUE:
+        if not self._security.strict_isolation:
             return None
         env = self._augment_child_env(build_child_env(self._security))
         report = run_codex_capability_smoke(
@@ -779,14 +768,11 @@ class CodexProvider(BaseCliProvider):
     def _sandbox_needs_windows_helper(self) -> bool:
         """Whether the configured permission profile engages the Windows sandbox helper.
 
-        The helper backs the native-Windows OS sandbox a ``workspace-write`` profile uses;
-        ``read-only`` and the full-access escape (``sandbox: danger-full-access``) do not launch it.
-        Conservative — it reads the configured provider default (there is no per-node request here),
-        so a provider defaulted to ``workspace-write`` that only ever runs read-only nodes still
-        requires the helper discoverable at preflight.
+        The helper backs the native-Windows OS sandbox a ``workspace-write`` profile uses; a
+        ``read-only`` profile does not launch it. Conservative — it reads the configured provider
+        default (there is no per-node request here), so a provider defaulted to ``workspace-write``
+        that only ever runs read-only nodes still requires the helper discoverable at preflight.
         """
-        if self._config.sandbox == FORBIDDEN_SANDBOX_VALUE:
-            return False
         return (self._config.permission_profile or _DEFAULT_PROFILE) != "read-only"
 
     def _augment_child_env(self, env: dict[str, str]) -> dict[str, str]:

@@ -16,10 +16,7 @@ one pass:
 :func:`validate_flow_against_config` is the **config-aware** third layer: it needs the
 ``OrchestratorConfig`` (node providers ∈ ``agents.allowed``; node reasoning is valid for the
 resolved provider; Codex never receives a write-enabled node with network access;
-``permission_ceiling`` ≤ a configured provider's capability; and — under
-``security.strict_isolation`` — no node selects a provider full-access mode in ``extra_args`` via
-:func:`~wastech_orchestrator.security.forbidden_args.find_full_access_args`, the flow-side half of
-the global isolation gate). It is kept separate so
+``permission_ceiling`` ≤ a configured provider's capability). It is kept separate so
 :func:`validate_flow` stays unit-testable without a config, and so the layers (graph / ceiling /
 config) never mix in one signature. The :class:`~.registry.FlowRegistry` calls it after
 :func:`validate_flow`; both raise :class:`FlowValidationError`.
@@ -70,10 +67,7 @@ from wastech_orchestrator.providers.capabilities import (
     is_reasoning_supported,
     reasoning_levels_for,
 )
-from wastech_orchestrator.security.forbidden_args import (
-    find_forbidden_args,
-    find_full_access_args,
-)
+from wastech_orchestrator.security.forbidden_args import find_forbidden_args
 from wastech_orchestrator.security.profiles import is_same_or_stricter
 
 
@@ -583,26 +577,7 @@ def _check_config_consistency(
                 )
             )
 
-    # 3. strict_isolation gate (provider-config-cleanup Risk #2): under security.strict_isolation a
-    #    flow node must not select a provider full-access mode in extra_args (Codex
-    #    ``--sandbox danger-full-access`` / Claude ``--permission-mode bypassPermissions``). This
-    #    mirrors the provider-config isolation preflight so the gate is global — the operator opts
-    #    in by setting strict_isolation: false (and owns the risk). The absolutely-forbidden
-    #    ``--dangerously*`` / ``--yolo`` / ``--ignore-rules`` flags are already rejected (config-
-    #    free) by _check_ceiling regardless of strict_isolation.
-    if config.security.strict_isolation:
-        for node in doc.nodes:
-            if not isinstance(node, AgentNode):
-                continue
-            errs.extend(
-                cfg(
-                    f"node {node.id!r}: extra_args {reason} — not permitted under "
-                    "security.strict_isolation (set strict_isolation: false to opt in)"
-                )
-                for reason in find_full_access_args(node.extra_args)
-            )
-
-    # 4. Every ``tool`` node names a registered, contained, executable operator tool. The name
+    # 3. Every ``tool`` node names a registered, contained, executable operator tool. The name
     #    is a free operator string (like a flow name), so — like the provider check — it is resolved
     #    here, fail-closed, before any launch. Skipped when no registry is wired (config-free unit
     #    path); the fatal install/preflight gate always supplies one.

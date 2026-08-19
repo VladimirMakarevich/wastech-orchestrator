@@ -46,4 +46,4 @@ A brand-new task always picks up the edited flow. To apply your edit to a **spec
 - Don't name a `provider` that is not in `agents.allowed`, or a `reasoning` value invalid for that provider — validation fails.
 - Don't give a Codex `workspace-write` node `network_access: true` — it is rejected; split external fetches into a `read-only` node.
 - Don't invent a `model` id; it is passed through unverified and will only fail at run time. Keep to models the provider actually serves.
-- Don't add full-access `extra_args` under `strict_isolation` — the forbidden-args scan rejects them.
+- Don't add full-access `extra_args` — the forbidden-args scan rejects them at any value of `strict_isolation`.

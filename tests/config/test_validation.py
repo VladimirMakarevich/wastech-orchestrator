@@ -32,33 +32,8 @@ def _with_security(config: OrchestratorConfig, **changes: object) -> Orchestrato
     return replace(config, security=replace(config.security, **changes))
 
 
-def _with_codex(config: OrchestratorConfig, **changes: object) -> OrchestratorConfig:
-    providers = dict(config.agents.providers)
-    providers[ProviderId.CODEX] = replace(providers[ProviderId.CODEX], **changes)
-    return _with_agents(config, providers=providers)
-
-
 def test_packaged_config_validates_clean(base_config: OrchestratorConfig) -> None:
     assert validate_config(base_config) == []
-
-
-@pytest.mark.parametrize("value", ["read-only", "workspace-write"])
-def test_legacy_codex_sandbox_value_is_rejected(
-    base_config: OrchestratorConfig, value: str
-) -> None:
-    # The access level lives in permission_profile; a safe legacy `sandbox` is rejected.
-    cfg = _with_codex(base_config, sandbox=value)
-    with pytest.raises(ConfigError) as exc:
-        validate_config(cfg)
-    assert any(".sandbox" in issue and "permission_profile" in issue for issue in exc.value.issues)
-
-
-def test_danger_full_access_sandbox_passes_config_validation(
-    base_config: OrchestratorConfig,
-) -> None:
-    # The full-access escape still loads at config time — strict_isolation gates it at preflight.
-    cfg = _with_codex(base_config, sandbox="danger-full-access")
-    assert validate_config(cfg) == []
 
 
 def test_protected_paths_globs_validate_clean(base_config: OrchestratorConfig) -> None:
@@ -564,22 +539,31 @@ def test_sandbox_bypass_extra_arg_is_rejected(base_config: OrchestratorConfig, f
     assert any("extra_args" in issue for issue in exc.value.issues)
 
 
+@pytest.mark.parametrize("strict_isolation", [True, False])
 @pytest.mark.parametrize(
     "extra_args",
     [
         ("--sandbox=danger-full-access",),
         ("--sandbox", "danger-full-access"),
+        ("-s", "danger-full-access"),
+        ("--permission-mode", "bypassPermissions"),
+        ("--permission-mode=bypassPermissions",),
     ],
 )
-def test_full_access_sandbox_extra_arg_is_not_a_config_error(
-    base_config: OrchestratorConfig, extra_args: tuple[str, ...]
+def test_full_access_selector_extra_arg_is_a_config_error(
+    base_config: OrchestratorConfig, extra_args: tuple[str, ...], strict_isolation: bool
 ) -> None:
-    # provider-config-cleanup #1: a full-access sandbox is no longer an absolute config-validation
-    # error — it is operator-selectable and gated by the strict_isolation preflight (the absolute
-    # ban is reserved for --dangerously*/--yolo/--ignore-rules). See test_isolation.py for the gate.
+    # There is no configuration in which a full-access selector loads: it is absolutely forbidden,
+    # so `strict_isolation` is not a way in either. Both values are exercised because the key used
+    # to be exactly that way in.
     codex = replace(base_config.agents.providers[ProviderId.CODEX], extra_args=extra_args)
     providers = {**base_config.agents.providers, ProviderId.CODEX: codex}
-    assert validate_config(_with_agents(base_config, providers=providers)) == []
+    cfg = _with_security(
+        _with_agents(base_config, providers=providers), strict_isolation=strict_isolation
+    )
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("extra_args" in issue for issue in exc.value.issues)
 
 
 def test_claude_skip_permissions_extra_arg_is_rejected(base_config: OrchestratorConfig) -> None:

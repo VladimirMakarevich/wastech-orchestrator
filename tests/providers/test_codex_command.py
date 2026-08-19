@@ -281,17 +281,25 @@ def test_benign_extra_args_are_appended(
     assert "--image" in argv and "/tmp/diagram.png" in argv
 
 
-def test_danger_full_access_escape_builds_legacy_sandbox_argv(
-    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        ("--sandbox", "danger-full-access"),
+        ("--sandbox=danger-full-access",),
+        ("-s", "danger-full-access"),
+    ],
+)
+def test_full_access_selector_never_builds_argv(
+    codex_config: ProviderConfig,
+    make_request: Callable[..., AgentRunRequest],
+    extra_args: tuple[str, ...],
 ) -> None:
-    # The full-access escape (danger-full-access, non-strict) makes NO isolation claim:
-    # it emits the legacy --sandbox flag and no permission profile. strict_isolation gates it at
-    # preflight (tests/security/test_isolation.py), not the argv builder.
-    full = replace(codex_config, sandbox="danger-full-access")
-    argv = _argv(full, make_request())
-    assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
-    assert not any(v.startswith(f"permissions.{PROFILE_NAME}=") for v in _config_values(argv))
-    assert "--ignore-user-config" not in argv
+    # Selecting full access discarded the generated profile wholesale — writable `.git`, and a
+    # canary with no profile left to prove. Nothing may select it, so the argv is never built.
+    cfg = replace(codex_config, extra_args=extra_args)
+    with pytest.raises(ProviderError) as exc:
+        _argv(cfg, make_request())
+    assert exc.value.error_class is ErrorClass.CONFIGURATION_ERROR
 
 
 def test_default_isolation_argv_unchanged(

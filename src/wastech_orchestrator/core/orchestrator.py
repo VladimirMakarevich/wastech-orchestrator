@@ -235,7 +235,12 @@ from wastech_orchestrator.security.env import (
     describe_expansions,
     expand_allowed_environment,
 )
-from wastech_orchestrator.security.isolation import IsolationCheck, check_isolation
+from wastech_orchestrator.security.isolation import (
+    HostFloorCheck,
+    IsolationCheck,
+    check_isolation,
+    describe_host_floor,
+)
 from wastech_orchestrator.state_store import (
     ArtifactRow,
     EvaluationRow,
@@ -623,6 +628,7 @@ class Orchestrator:
         skill_scanner: SkillInventoryScanner | None = None,
         heartbeat_seconds: float = 30.0,
         isolation_checks: Mapping[ProviderId, IsolationCheck] | None = None,
+        host_floor_checks: Mapping[ProviderId, HostFloorCheck] | None = None,
         is_cancelled: Callable[[], bool] = lambda: False,
     ) -> None:
         self._config = config
@@ -657,6 +663,9 @@ class Orchestrator:
         # Composition-root-injected ProviderId→isolation-check table for the strict_isolation
         # preflight; empty for a directly-constructed Orchestrator (binds no concrete adapter).
         self._isolation_checks: Mapping[ProviderId, IsolationCheck] = isolation_checks or {}
+        # Its advisory twin: what the host cannot enforce. Injected the same way and for the same
+        # reason; empty means the run says nothing about the floor rather than claiming one exists.
+        self._host_floor_checks: Mapping[ProviderId, HostFloorCheck] = host_floor_checks or {}
         # The watch daemon's cross-platform stop predicate. The same callable is also wired into
         # the Router, so a stop either interrupts at a clean node boundary or suppresses fallback
         # when a hard-killed provider exits abnormally mid-node.
@@ -2584,6 +2593,11 @@ class Orchestrator:
                 "to inspect delivery history; the repository stays unwritable (the sandbox denies "
                 "writes) and commit/push/PR stay the orchestrator's alone"
             )
+        for floor_gap in describe_host_floor(self._config, self._host_floor_checks):
+            # The write floor is the one guarantee that does not need the agent's cooperation, so a
+            # host that cannot enforce it is stated outright rather than inferred later from a
+            # surprising diff. Never a stop: the operator still has to work on the host they have.
+            self._log(p.task.id).warning(f"isolation floor NONE — {floor_gap}")
         if self._config.security.strict_isolation:
             reasons = check_isolation(self._config, self._isolation_checks)
             if reasons:

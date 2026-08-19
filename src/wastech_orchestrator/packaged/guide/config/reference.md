@@ -23,7 +23,7 @@ The reference is split by concern, so a page you open to answer one question is 
 
 | Field | Type | Default | Constraint | Meaning |
 | --- | --- | --- | --- | --- |
-| `schema_version` | int | current is `37` | A value **greater** than the orchestrator's supported version fails closed ("upgrade wastech-orchestrator"); equal or lower is accepted, absent is accepted. | The config format version. `worc upgrade-config` re-emits the file at the current version. |
+| `schema_version` | int | current is `38` | A value **greater** than the orchestrator's supported version fails closed ("upgrade wastech-orchestrator"); equal or lower is accepted, absent is accepted. | The config format version. `worc upgrade-config` re-emits the file at the current version. |
 
 ## `orchestrator` — the watch loop and task queue
 
@@ -82,7 +82,7 @@ A push is also refused outright if the destination of `origin` changed during th
 - **Telegram-gated fields.** `orchestrator.auto_mode.confirm_next_task` and any provider `max_turns_gate` require `telegram.enabled: true`.
 - **Ordering constraints.** `max_total_fix_iterations >= max_fix_cycles`; `retry.max_delay_s >= retry.base_delay_s`; `decomposition.max_subtasks >= 2`.
 - **Replace-not-extend.** `allowed_environment`, `denied_read_paths`, `denied_commands` replace their defaults wholesale. `extra_environment` is **not** one of them — it has no default to replace, so writing it only ever adds the names you list. For `allowed_environment` that also means the generated `config.yaml` (host OS default) and the shipped `config.example.yaml` (cross-platform union) differ by design; `PATH` is mandatory in either, and on Windows `SystemRoot` is a preflight FAIL.
-- **Full access needs `strict_isolation: false`.** Codex `danger-full-access` / Claude `bypassPermissions` load but are rejected at preflight unless you turn `strict_isolation` off (owning the risk).
+- **Full access is not available at all.** Codex `--sandbox danger-full-access` and Claude `--permission-mode bypassPermissions` are rejected wherever they can appear — a provider's `extra_args`, a flow node's `extra_args`, and the argv build — at every value of `strict_isolation`. The `agents.providers.<provider>.sandbox` key that used to carry the Codex half is gone as of config v38, and a config that still has it fails to load as an unknown key: `upgrade-config` does not remove it, so delete the line by hand.
 - **Install vs dataclass defaults differ** for a few fields: `memory.enabled` (`true`), `skills.dynamic` (`false`), provider `model`/`reasoning`, and `supervisor` (provider and every phase model pinned to the primary; `observe.reasoning` delivered as `low`, the other phases as `high`). The table shows both.
 - **Comments are stripped on upgrade.** `worc upgrade-config` preserves values but re-emits the file without inline comments — keep the _reason_ for an unusual value recoverable elsewhere.
 

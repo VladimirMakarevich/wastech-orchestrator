@@ -323,6 +323,17 @@ def test_legacy_deletion_exempt_paths_key_is_rejected() -> None:
     assert any("deletion_approval_exempt_paths" in issue for issue in exc.value.issues)
 
 
+@pytest.mark.parametrize("value", ["danger-full-access", "read-only"])
+def test_removed_provider_sandbox_key_is_rejected(value: str) -> None:
+    # Removed in v38 with no toleration and no migration: its one remaining value selected a
+    # provider full-access mode, which is now forbidden outright, so every value of the key is dead.
+    # Failing on load is the point — a tolerated key would suggest some value of it still works.
+    text = _LEGACY + f"      sandbox: {value!r}\n"
+    with pytest.raises(ConfigError) as exc:
+        loads_config(text)
+    assert any("sandbox" in issue for issue in exc.value.issues)
+
+
 def test_legacy_routing_block_is_tolerated() -> None:
     # ``agents.routing`` was removed in v11 (routing is node-based now — a node declares its own
     # ``provider``, else the global ``providers.<id>.primary``). An old config still carrying it

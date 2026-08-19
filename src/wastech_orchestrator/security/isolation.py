@@ -1,19 +1,25 @@
-"""``strict_isolation`` preflight check.
+"""The two isolation questions the core asks without knowing any CLI.
 
-When ``security.strict_isolation`` is true, "an inability to enable the required isolation fails
-preflight with an error (no silent downgrade)". This module is the deterministic, **offline** check
-that drives that gate: it asks each provider that may run whether its configured isolation can be
-enabled, **without launching any CLI**, so the gate is unit-testable and runs before a branch is
-ever created (see :meth:`Orchestrator._drive_via_engine`).
+Both are deterministic and **offline** (no CLI is launched), both are answered by provider-owned
+functions the composition root injects — so this module imports no concrete adapter — and both are
+asked only of the providers that may actually run (``agents.allowed``; every flow node either
+declares an allowed ``provider`` or defaults to the global primary, also allowed, so a
+configured-but-unused provider block never bricks an otherwise-valid run). What differs is what the
+answer does:
 
-The provider-specific meaning of "required isolation" stays in the adapters (``providers/*.py``
-``isolation_reasons``) — Codex's sandbox, Claude's permission mode — so this module holds no CLI
-syntax; it only dispatches by :class:`~wastech_orchestrator.providers.base.ProviderId` and frames
-the reasons. Only providers that *may* run are checked (those in ``agents.allowed`` — every flow
-node either declares an allowed ``provider`` or defaults to the global primary, also allowed), so a
-configured-but-unused provider block never bricks an otherwise-valid run.
+* :func:`check_isolation` — "is this provider's configuration legal?" The verdict is fatal: under
+  ``security.strict_isolation`` the run stops before a branch is ever created (see
+  :meth:`Orchestrator._drive_via_engine`) and ``worc preflight`` reports a failure.
+* :func:`describe_host_floor` — "can an OS-enforced write floor exist on this host at all?" The
+  verdict is a loud line and nothing more. A host without a sandbox is still a host an operator has
+  to work on, so refusing the run there would leave them with neither the guarantee nor the work;
+  instead the loss is stated in full, in preflight and in the run log, and the run continues.
 
-Read-isolation is orthogonal to this gate. The operator escape hatch
+The provider-specific meaning of both stays in the adapters (``providers/*.py``) — Codex's sandbox,
+Claude's permission mode and Bash-sandbox host classes — so this module holds no CLI syntax; it only
+dispatches by :class:`~wastech_orchestrator.providers.base.ProviderId` and frames the answers.
+
+Read-isolation is orthogonal to the fatal gate. The operator escape hatch
 ``security.disable_read_isolation`` — like the master ``strict_isolation: false`` — relaxes
 only the READ side (native discovery + the private read-deny projection); this preflight validates
 the WRITE/permission/sandbox ceiling, which stays in force regardless. So ``disable_read_isolation``
@@ -35,20 +41,49 @@ from collections.abc import Callable, Mapping
 from wastech_orchestrator.config.schema import OrchestratorConfig, ProviderConfig
 from wastech_orchestrator.providers.base import ProviderId
 
-# A provider's offline "can your required isolation be enabled?" check, keyed by provider id. The
-# concrete implementations live in the adapters (Codex's sandbox / Claude's permission mode); the
-# composition root binds them and injects the table so this module imports no concrete adapter.
+# A provider's offline "is this configuration legal?" check, keyed by provider id. The concrete
+# implementations live in the adapters (Codex's profile/authority flags, Claude's permission mode);
+# the composition root binds them and injects the table so this module imports no concrete adapter.
 IsolationCheck = Callable[[ProviderConfig], list[str]]
+
+# A provider's offline "what can this host not enforce?" answer: prose naming the missing floor (and
+# its remedy where one exists), or ``None`` when the floor can exist here. It takes no argument on
+# purpose — the answer describes the machine, not the configuration, so it cannot drift into a
+# per-config verdict and back into a refusal.
+HostFloorCheck = Callable[[], str | None]
+
+# What is lost wherever no OS-enforced write floor exists, stated rather than softened. ``.worc`` is
+# the more expensive half of the two: with it writable a frozen control plane can be swapped without
+# detection, the exchange cannot be quarantined, and ``state.db`` can be rewritten.
+_FLOOR_LOSS = (
+    "No OS-enforced write floor exists here, so nothing outside the agent CLI's own tool policy "
+    "keeps a write out of the clone's .git or out of .worc — and with .worc writable, "
+    "control-plane tamper detection, exchange quarantine and state.db integrity are unenforced"
+)
+
+# The two tails are adjacent on purpose: both describe the same missing floor, and keeping them one
+# line apart is what stops one of them from drifting into a claim the other contradicts.
+_FLOOR_LOSS_SHELL_UNSANDBOXED = (
+    "; with strict_isolation=false the shell runs unsandboxed, so anything it starts — which no "
+    "tool policy sees at all — reaches both paths directly, and only the prompt's advisory "
+    "contract and after-the-fact drift detection remain"
+)
+_FLOOR_LOSS_SHELL_WITHHELD = (
+    "; with strict_isolation=true the shell is withheld rather than unsandboxed (dropped from the "
+    "tool set, or the attempt refused), which closes the command-execution path and leaves the "
+    "CLI's own file-editing denies as the only boundary"
+)
 
 
 def check_isolation(
     config: OrchestratorConfig, checks: Mapping[ProviderId, IsolationCheck]
 ) -> list[str]:
-    """Return a reason per provider whose required isolation cannot be enabled; ``[]`` means all OK.
+    """Return a reason per provider whose configuration is illegal; ``[]`` means all OK.
 
-    Pure and deterministic (no CLI launched). ``checks`` is the ProviderId→isolation-check table
-    injected by the composition root (so this module imports no concrete adapter). Each reason is
-    prefixed with the provider id so the caller can surface a single combined message.
+    Pure and deterministic (no CLI launched, and no host probing — the same config file gets the
+    same verdict on every machine). ``checks`` is the ProviderId→isolation-check table injected by
+    the composition root (so this module imports no concrete adapter). Each reason is prefixed with
+    the provider id so the caller can surface a single combined message.
     """
     reasons: list[str] = []
     for provider_id in _providers_in_use(config):
@@ -58,6 +93,32 @@ def check_isolation(
             continue
         reasons.extend(f"{provider_id.value}: {reason}" for reason in check(provider_cfg))
     return reasons
+
+
+def describe_host_floor(
+    config: OrchestratorConfig, checks: Mapping[ProviderId, HostFloorCheck]
+) -> tuple[str, ...]:
+    """One line per provider whose host cannot enforce the write floor; ``()`` when every host can.
+
+    Each line names the gap and then what it costs. The cost half depends on
+    ``security.strict_isolation`` because the truth does: with it off the shell runs unsandboxed
+    and anything it starts reaches the denied paths, with it on the attempt loses its shell instead.
+    Both halves live in one formatter, so preflight and the run log can never describe the same
+    host differently; the caller supplies its own framing (a verdict line, a log record).
+    """
+    tail = (
+        _FLOOR_LOSS_SHELL_WITHHELD
+        if config.security.strict_isolation
+        else _FLOOR_LOSS_SHELL_UNSANDBOXED
+    )
+    lines: list[str] = []
+    for provider_id in _providers_in_use(config):
+        check = checks.get(provider_id)
+        gap = check() if check is not None else None
+        if gap is None:
+            continue
+        lines.append(f"{provider_id.value}: {gap}. {_FLOOR_LOSS}{tail}")
+    return tuple(lines)
 
 
 def _providers_in_use(config: OrchestratorConfig) -> list[ProviderId]:

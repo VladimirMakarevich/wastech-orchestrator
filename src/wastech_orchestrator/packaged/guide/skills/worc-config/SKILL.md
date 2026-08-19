@@ -56,7 +56,7 @@ Before drafting or changing any field, consult `reference.md` in the packaged co
 ## What not to do
 
 - Do not put token values, chat ids, or passwords into the file.
-- Do not enable full-access runs casually.
+- Never write a `sandbox` key or a full-access `extra_args` selector: the first is an unknown key, the second is forbidden outright, so either one stops the config before it runs.
 - Do not turn on `auto_merge` just to save time.
 - Do not add providers that are not actually installed or intended for use.
 - Do not replace a working operator value unless the user asked for that exact change.

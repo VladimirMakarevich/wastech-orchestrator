@@ -84,6 +84,7 @@ __all__ = [
     "build_sandbox_settings",
     "classify_paid_probe",
     "default_sandbox_probe",
+    "host_floor_gap",
     "isolation_reasons",
     "map_permission",
     "parse_stream_json",
@@ -104,8 +105,10 @@ _MODE_ORDER: tuple[str, ...] = (
     "auto",
     "bypassPermissions",
 )
+# The flag the adapter emits. The bypass *value* is not named here: it is absolutely forbidden and
+# owned by the shared detector, while ``_MODE_ORDER`` above still ranks it as the most permissive
+# mode, which is what the escalation check compares against.
 _PERMISSION_MODE_FLAG = "--permission-mode"
-_BYPASS_MODE = "bypassPermissions"
 
 # Profile → (permission mode, baseline allowed tools). ``read-only`` executes nothing because Edit,
 # Write, and Bash are simply absent from its allowlist (a hard tool-level gate). ``dontAsk`` is the
@@ -268,6 +271,11 @@ def resolve_claude_tools(
                 allow_patterns = ()
             # Under strict_isolation: false the operator keeps unsandboxed Bash (owns the risk).
         elif capability is SandboxCapability.LINUX_MISSING_DEPS and strict_isolation:
+            # The only place a floor-less host still stops anything. Preflight and the run log name
+            # such a host in a loud line but never refuse, so this refusal is both narrower and more
+            # useful than a preamble stop would be: it fires for the attempt that actually keeps a
+            # shell, with the node's profile in hand, and leaves the rest of the run — and a
+            # fallback provider that can isolate here — free to proceed.
             raise ProviderError(
                 ErrorClass.CAPABILITY_UNAVAILABLE,
                 f"Claude's Bash sandbox for a {profile} node that keeps a shell requires "
@@ -465,10 +473,9 @@ def _native_memory_deny_tools(
 # extend the authority the adapter owns (tools, settings/config sources, MCP, plugins, agents,
 # additional directories/files, Chrome/IDE/remote-control/background/worktree, system prompt, and
 # session selection). Distinct from ``forbidden_args`` (the cross-provider absolute sandbox/approval
-# bypass) and from the ``strict_isolation``-gated ``--permission-mode bypassPermissions``: these are
-# hard-rejected regardless of ``strict_isolation`` (an operator who wants full access already has
-# the
-# gated ``bypassPermissions`` path; re-opening a closed surface is never the sanctioned opt-out).
+# bypass, which also owns ``--permission-mode bypassPermissions``): both clusters are rejected
+# regardless of ``strict_isolation``, because no configuration grants an operator full access and
+# re-opening a closed surface is never a sanctioned opt-out.
 _RESERVED_CLAUDE_FLAGS: frozenset[str] = frozenset(
     {
         "--tools",
@@ -655,12 +662,10 @@ def map_permission(profile: str) -> tuple[str, tuple[str, ...]]:
 def _reject_weaker_permission_override(extra_args: Sequence[str], required_mode: str) -> None:
     """Report an ``extra_args`` ``--permission-mode`` that is weaker than the required mode.
 
-    Used **only** by :func:`isolation_reasons` to drive the ``strict_isolation`` preflight — it is
-    no longer a runtime hard-raise in :func:`build_claude_argv` (a permission-mode escalation, incl.
-    ``bypassPermissions``, is operator-selectable and gated by ``strict_isolation``, not absolutely
-    forbidden). ``--dangerously-skip-permissions`` stays absolutely forbidden via
-    :func:`find_forbidden_args`; this flags the ``--permission-mode bypassPermissions`` vector and
-    any mode more permissive than ``required_mode``.
+    Used by :func:`isolation_reasons` to surface an escalation before any run. The outright bypass
+    value is caught earlier and absolutely by :func:`find_forbidden_args`; what is left here is the
+    quieter vector — a mode that is merely *more permissive* than the one the requested profile maps
+    to, which no list of forbidden tokens can recognize without knowing that profile.
     """
     required_rank = _MODE_ORDER.index(required_mode)
     for index, token in enumerate(extra_args):
@@ -671,11 +676,6 @@ def _reject_weaker_permission_override(extra_args: Sequence[str], required_mode:
             value = inline
         else:
             value = extra_args[index + 1] if index + 1 < len(extra_args) else ""
-        if value == _BYPASS_MODE:
-            raise ProviderError(
-                ErrorClass.CONFIGURATION_ERROR,
-                f"{_PERMISSION_MODE_FLAG} {_BYPASS_MODE!r} may not disable the sandbox/approvals",
-            )
         if value in _MODE_ORDER and _MODE_ORDER.index(value) > required_rank:
             raise ProviderError(
                 ErrorClass.CONFIGURATION_ERROR,
@@ -710,12 +710,12 @@ def build_claude_argv(
     authority-bearing Claude flag (:data:`_RESERVED_CLAUDE_FLAGS` —
     tools/settings/MCP/plugins/agents/
     add-dir/file/Chrome/IDE/remote/worktree/system-prompt/session), or the requested profile is the
-    forbidden full-access mode — defence in depth over the config validator. Raises
-    ``CAPABILITY_UNAVAILABLE`` (a pre-model infra error) when a strict workspace-write attempt needs
-    the Bash sandbox on a supported host whose sandbox dependencies are missing (:func:
-    `resolve_claude_tools`). A ``--permission-mode`` override in ``extra_args`` (incl.
-    ``bypassPermissions``) is **not** rejected here: it is operator-selectable, gated by
-    ``strict_isolation`` at preflight, and appended last so the CLI's last-wins resolution applies.
+    forbidden full-access mode — defence in depth over the config validator. The absolute set
+    includes ``--permission-mode bypassPermissions``: operator ``extra_args`` are appended last, so
+    the CLI's last-wins resolution would otherwise let that token replace the mode the profile maps
+    to. Raises ``CAPABILITY_UNAVAILABLE`` (a pre-model infra error) when a strict workspace-write
+    attempt needs the Bash sandbox on a supported host whose sandbox dependencies are missing
+    (:func:`resolve_claude_tools`).
 
     The prompt is delivered on stdin, never on the command line; context reaches Claude only as file
     paths. Isolation is one adapter-owned effective policy: ``--tools`` is the hard built-in tool
@@ -839,24 +839,16 @@ def build_claude_argv(
     return argv
 
 
-def isolation_reasons(
-    config: ProviderConfig, *, capability: SandboxCapability | None = None
-) -> list[str]:
-    """Reasons the configured Claude isolation cannot be enabled — an empty list means OK.
+def isolation_reasons(config: ProviderConfig) -> list[str]:
+    """Reasons this Claude *configuration* is not legal — an empty list means OK.
 
-    Pure and offline (no CLI launched — ``shutil.which`` is only a ``PATH`` lookup), so it drives
-    the
-    ``strict_isolation`` preflight (:mod:`wastech_orchestrator.security.isolation`) and the Router's
-    ``CAPABILITY_UNAVAILABLE`` host-verified fallback gate. Mirrors what :func:`build_claude_argv`
-    would enforce: a concrete non-``bypassPermissions`` mode, no forbidden/reserved/weakening
-    ``extra_args``, and — host-aware — that a *configured* workspace-write profile can actually get
-    its Bash OS sandbox on this host. The last check is conservative: it reads the configured
-    provider profile, so a flow that only ever runs Claude read-only but leaves the provider default
-    at ``workspace-write`` over-flags on a broken-sandbox host. Native Windows is **not** flagged
-    (it
-    degrades to a Bash-less restricted mode, not a preflight failure). ``capability`` defaults to
-    the
-    real host; tests inject it.
+    Pure, offline and host-independent, so one config file gets the same verdict on every machine:
+    it drives the fatal ``strict_isolation`` gate (:mod:`wastech_orchestrator.security.isolation`)
+    and the Router's fallback eligibility question. Mirrors what :func:`build_claude_argv` would
+    enforce: a supported permission profile, and ``extra_args`` that carry no absolutely-forbidden
+    flag, no reserved authority-bearing flag and no permission-mode escalation. Whether the *host*
+    can enforce a write floor at all is a separate question with a separate answer — see
+    :func:`host_floor_gap` — because that one is advisory and this one refuses a run.
     """
     profile = config.permission_profile or _DEFAULT_PROFILE
     try:
@@ -869,13 +861,34 @@ def isolation_reasons(
         _reject_weaker_permission_override(tuple(config.extra_args), mode)
     except ProviderError as exc:
         reasons.append(str(exc))
-    cap = capability if capability is not None else default_sandbox_probe()
-    if profile == "workspace-write" and cap is SandboxCapability.LINUX_MISSING_DEPS:
-        reasons.append(
-            "Bash sandbox unavailable for a workspace-write node (bubblewrap+socat missing on "
-            "PATH); install them, or set this provider read-only"
-        )
     return reasons
+
+
+def host_floor_gap(*, capability: SandboxCapability | None = None) -> str | None:
+    """What this host cannot enforce, or ``None`` when an OS-enforced write floor can exist here.
+
+    The write floor — the clone's ``.git`` and the private ``.worc`` home unwritable by anything the
+    agent starts — is the one guarantee that does not depend on the agent cooperating, and on two
+    host classes it cannot exist: native Windows has no supported OS sandbox for the shell, and
+    Linux/WSL2 needs ``bubblewrap`` + ``socat`` on ``PATH``. Deliberately **profile-blind**: the
+    question is what the machine can do, not what this config happens to ask for, so the answer is
+    the same whichever node runs next.
+
+    The verdict is a loud line, never a refusal (a host that cannot sandbox is still a host an
+    operator may work on), so it must carry the remedy where one exists. The refusal that does
+    remain is per-attempt and lives in :func:`resolve_claude_tools`, where the node's profile is
+    known: under strict isolation an attempt that would keep a shell here is refused or loses it,
+    which a fallback provider can cover. ``capability`` defaults to the real host; tests inject it.
+    """
+    cap = capability if capability is not None else default_sandbox_probe()
+    if cap is SandboxCapability.NATIVE_WINDOWS:
+        return "native Windows has no supported OS sandbox for the agent shell"
+    if cap is SandboxCapability.LINUX_MISSING_DEPS:
+        return (
+            "the Bash OS sandbox needs bubblewrap+socat on PATH (Linux/WSL2) and they are missing; "
+            "install them to get the floor back"
+        )
+    return None
 
 
 #: The file each paid-probe write attempt targets inside a root that must refuse it, and the one

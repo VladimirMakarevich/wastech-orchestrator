@@ -20,6 +20,7 @@ import pytest
 from wastech_orchestrator import cli
 from wastech_orchestrator.notify import AskResult
 from wastech_orchestrator.observability import logging as obslog
+from wastech_orchestrator.providers import claude as claude_mod
 from wastech_orchestrator.providers._adapter_base import IsolationCapabilityReport
 from wastech_orchestrator.providers.base import (
     AgentRunRequest,
@@ -326,6 +327,28 @@ def test_preflight_fails_on_isolation(
     assert rc == 1
     assert "isolation: FAIL" in out
     assert "codex: sandbox is forbidden" in out
+
+
+def test_preflight_warns_but_stays_ready_on_a_host_without_a_floor(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repo,
+    make_git_config,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # A host that cannot enforce the write floor is announced, never refused: refusing would leave
+    # the operator without the guarantee AND without the work. The real formatter runs here — only
+    # the host classification is substituted — so the line an operator actually reads is the one
+    # under test, and the exit code stays 0.
+    _patch_providers(monkeypatch, make_git_config(git_repo.clone))
+    monkeypatch.setattr(
+        claude_mod, "default_sandbox_probe", lambda: claude_mod.SandboxCapability.NATIVE_WINDOWS
+    )
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "isolation-floor: NONE — claude: " in out
+    assert ".git" in out and ".worc" in out
+    assert "preflight: ready" in out
 
 
 # --- The host-dependent half of the allowed_environment gate ------------------------------------
