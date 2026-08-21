@@ -18,7 +18,29 @@ from wastech_orchestrator.providers import codex as codex_mod
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.providers.claude import SandboxCapability
 from wastech_orchestrator.routing.router import AgentRouter
-from wastech_orchestrator.security.shell_reach import ShellQuery, any_provider_grants_shell
+from wastech_orchestrator.security.shell_reach import (
+    ShellCheck,
+    ShellQuery,
+    any_provider_grants_shell,
+)
+
+
+def _checks(
+    capability: SandboxCapability = SandboxCapability.MACOS,
+) -> dict[ProviderId, ShellCheck]:
+    """The bound table with Claude's host capability INJECTED rather than probed.
+
+    The composition table asks the real host, which makes any assertion about Claude's answer a
+    statement about the machine running the suite: substituting ``NATIVE_WINDOWS`` turns "a granted
+    read-only node has a shell" red. This file holds the cross-host logic, so the host is a
+    parameter here exactly as it is in the adapter-level cases below.
+    """
+    return {
+        ProviderId.CLAUDE: lambda cfg, q: claude_mod.attempt_has_shell(
+            cfg, q, capability=capability
+        ),
+        ProviderId.CODEX: SHELL_CHECKS[ProviderId.CODEX],
+    }
 
 
 @pytest.fixture
@@ -195,10 +217,10 @@ def test_the_dispatcher_answers_from_the_bound_table(base_config: OrchestratorCo
     # is exactly what a route with a fallback has to do.
     configs = base_config.agents.providers
     claude_only = any_provider_grants_shell(
-        [ProviderId.CLAUDE], configs, SHELL_CHECKS, _query("read-only")
+        [ProviderId.CLAUDE], configs, _checks(), _query("read-only")
     )
     with_codex = any_provider_grants_shell(
-        [ProviderId.CLAUDE, ProviderId.CODEX], configs, SHELL_CHECKS, _query("read-only")
+        [ProviderId.CLAUDE, ProviderId.CODEX], configs, _checks(), _query("read-only")
     )
     assert (claude_only, with_codex) == (False, True)
 
@@ -211,7 +233,7 @@ def test_the_route_query_asks_both_ends(base_config: OrchestratorConfig) -> None
     # fallback — a different CLI with its own answer. Claude primary + Codex fallback therefore
     # reports a shell even for a read-only node.
     providers = _providers()
-    router = AgentRouter(base_config, providers, shell_checks=SHELL_CHECKS)
+    router = AgentRouter(base_config, providers, shell_checks=_checks())
     route = router.resolve_route("review", ProviderId.CLAUDE)
     assert (route.primary, route.fallback) == (ProviderId.CLAUDE, ProviderId.CODEX)
     assert (
@@ -226,7 +248,7 @@ def test_the_route_query_reports_no_shell_when_neither_end_has_one(
     # grant has no shell anywhere on the route and is not bracketed.
     cfg = replace(base_config, agents=replace(base_config.agents, allowed=(ProviderId.CLAUDE,)))
     providers = _providers()
-    router = AgentRouter(cfg, providers, shell_checks=SHELL_CHECKS)
+    router = AgentRouter(cfg, providers, shell_checks=_checks())
     route = router.resolve_route("review")
     assert route.fallback is None
     assert (
@@ -258,11 +280,11 @@ def test_the_route_query_gives_a_read_only_node_a_shell_in_the_advanced_mode(
     claude_only = replace(
         base_config, agents=replace(base_config.agents, allowed=(ProviderId.CLAUDE,))
     )
-    strict = AgentRouter(claude_only, _providers(), shell_checks=SHELL_CHECKS)
+    strict = AgentRouter(claude_only, _providers(), shell_checks=_checks())
     advanced = AgentRouter(
         replace(claude_only, security=replace(claude_only.security, strict_isolation=False)),
         _providers(),
-        shell_checks=SHELL_CHECKS,
+        shell_checks=_checks(),
     )
     for router, expected in ((strict, False), (advanced, True)):
         route = router.resolve_route("review")

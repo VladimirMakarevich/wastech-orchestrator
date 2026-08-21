@@ -6,6 +6,10 @@ Status: **implemented 2026-08-18** (AC0.2.1–AC0.2.6, AC0.5.1, AC0.6.1–AC0.6.
 
 Несущая фаза Шага 0. Форвардинг (`allowed_environment`) даёт только **имя**: значение приходит из окружения оператора, нигде не зафиксировано и на другой машине другое, а забытый `export` молча пропускается — `build_child_env` отбрасывает имя, отсутствующее у родителя ([`env.py:101`](../../../src/wastech_orchestrator/security/env.py)). Для корней тулчейнов и путей кэша нужен второй механизм: не «пробросить», а «присвоить».
 
+## Поправка follow-ups 2026-08-20
+
+Agent/check/scanner/tool call-site'ы используют `build_child_env(SecurityConfig)`; orchestrator-owned `git`/`gh` использует отдельный `build_orchestrator_env(SecurityConfig)` и затем scrub имён, способных перенаправить публикацию. Config-aware helper-git пути теперь получают ту же `SecurityConfig`, поэтому ignore-verdict и основной Git Manager читают один `HOME` / `GIT_CONFIG_GLOBAL`; built-in policy осталась только у install-проб до появления конфига. На Windows forwarding/dedup/assignment объединяются регистронезависимо. Loader отвергает нестроковые YAML-ключи и значения, не повторяя в подсказке уже преобразованный `1.10 → 1.1` текст. Комментарии call-site'ов называют окружение policy-built, а не allowlisted. Паритет реального adapter call-site и Check Runner покрыт под strict и advanced policy.
+
 ```yaml
 security:
   extra_environment: # значения задаются явно, а не наследуются из окружения

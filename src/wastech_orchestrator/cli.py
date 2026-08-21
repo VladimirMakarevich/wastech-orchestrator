@@ -63,6 +63,7 @@ from wastech_orchestrator.git_manager import (
     ManualActionRequired,
     append_runtime_excludes,
     ensure_path_excluded,
+    gh_repo_pin,
 )
 from wastech_orchestrator.install import config_writer, detect, wizard
 from wastech_orchestrator.ledger import Ledger
@@ -90,10 +91,10 @@ from wastech_orchestrator.security.env import (
     launch_critical_env_issue,
 )
 from wastech_orchestrator.security.env_paths import (
-    ProtectedPath,
     assigned_path_elements,
     canonical_collision,
-    internal_protected_paths,
+    denied_read_path_collision,
+    host_protected_paths,
     is_inside,
 )
 from wastech_orchestrator.security.isolation import (
@@ -168,8 +169,11 @@ _ENV_EXAMPLE_TEMPLATE = """\
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 
-# Add any other variables the orchestrator process needs. A variable reaches a child process
-# (codex / claude / git / gh / checks) only if its name is also in security.allowed_environment.
+# Add any other variables the orchestrator process needs. In strict mode, an exact
+# security.allowed_environment entry may forward one to an agent child; a prefix match alone does
+# not. In advanced mode agent children withhold every name loaded here. Use non-secret
+# security.extra_environment assignments for an intentional agent-side value. Orchestrator git/gh
+# keeps the allowlist in both modes and also scrubs names that could retarget publication.
 # GH_TOKEN=
 """
 
@@ -1822,10 +1826,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     config = load_config_for(args)
     if config is None:
         return 2
+    require_launch_environment(config, env_file=resolve_env_file_path(args)[0])
     preflight.require_git_control()  # git must honor `core.hooksPath` (>= 2.9)
     if config.git.create_pull_request:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
-        preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
+        # Non-blocking advisory if gh is present but logged out. The policy travels with it so
+        # the probe sees the same environment (a proxy, a token) every other gh call gets.
+        preflight.warn_if_gh_logged_out(security=config.security)
     # A node may route to ANY allowed provider, so one that cannot start is refused up front
     # rather than discovered at the first fallback with a stage's work already spent.
     require_provider_auth(config)
@@ -2025,10 +2032,13 @@ def cmd_rerun(args: argparse.Namespace) -> int:
         _report_rerun_plan(plan)
         return 0
 
+    require_launch_environment(config, env_file=resolve_env_file_path(args)[0])
     preflight.require_git_control()  # git must honor `core.hooksPath` (>= 2.9)
     if config.git.create_pull_request:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
-        preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
+        # Non-blocking advisory if gh is present but logged out. The policy travels with it so
+        # the probe sees the same environment (a proxy, a token) every other gh call gets.
+        preflight.warn_if_gh_logged_out(security=config.security)
     # A node may route to ANY allowed provider, so one that cannot start is refused up front
     # rather than discovered at the first fallback with a stage's work already spent.
     require_provider_auth(config)
@@ -2891,6 +2901,51 @@ def require_provider_auth(config: OrchestratorConfig) -> None:
             raise preflight.ProviderNotLoggedInError(_logged_out_refusal(pid, auth))
 
 
+def require_launch_environment(
+    config: OrchestratorConfig,
+    *,
+    env_file: Path | None,
+    system: str | None = None,
+) -> None:
+    """Refuse a task launch when host-specific environment safety checks fail.
+
+    ``worc preflight`` remains the full diagnostic surface, but a daemon or explicit run must not
+    depend on the operator remembering to invoke it after every config edit. This repeats only the
+    launch-critical checks whose damage occurs during a run: the Windows ``SystemRoot`` floor and
+    canonical assigned-path collisions (symlinks, case aliases, provider homes, and the env-file).
+    Values are never included in the error.
+
+    :raises ConfigError: the current host cannot safely use the configured environment.
+    """
+    issues: list[str] = []
+    launch_issue = launch_critical_env_issue(config.security.allowed_environment, system=system)
+    if launch_issue is not None:
+        issues.append(launch_issue)
+
+    clone = Path(config.repo.local_path)
+    protected = host_protected_paths(
+        config,
+        build_internal_deny_policy(config, layout_for(config), env_file=env_file),
+    )
+    for name, value in config.security.extra_environment.items():
+        entry = canonical_collision(value, protected, system=system)
+        if entry is None:
+            entry = denied_read_path_collision(
+                value,
+                clone,
+                config.security.denied_read_paths,
+                canonical=True,
+                system=system,
+            )
+        if entry is not None:
+            issues.append(
+                f"security.extra_environment.{name}: the assigned path resolves onto "
+                f"{entry.label} ({entry.path.as_posix()}); choose a separate toolchain directory"
+            )
+    if issues:
+        raise ConfigError(issues)
+
+
 def _allowed_environment_pattern_lines(config: OrchestratorConfig) -> list[str]:
     """Preflight report lines for the ``allowed_environment`` prefix patterns (empty when none).
 
@@ -2909,6 +2964,16 @@ def _allowed_environment_pattern_lines(config: OrchestratorConfig) -> list[str]:
     )
     if dropped:
         header += f", {dropped} dropped as secret-named"
+    if config.security.strict_isolation:
+        header += (
+            "; applies to orchestrator git/gh and strict-mode agent children (agent children also "
+            "withhold env-file names matched only by a prefix pattern)"
+        )
+    else:
+        header += (
+            "; gates orchestrator git/gh only — advanced-mode agent/check/tool children receive "
+            "the parent environment whole except variables loaded from the env-file"
+        )
     return [header, *(f"  - {line}" for line in described)]
 
 
@@ -2938,14 +3003,9 @@ def _assigned_path_lines(
     a CI log to leak from. A line does name the protected path it collided with, which is
     orchestrator-owned and is the one thing the operator cannot infer.
     """
-    protected: tuple[ProtectedPath, ...] = (
-        *internal_protected_paths(config),
-        *(
-            ProtectedPath("a provider's own config or credential home", path)
-            for path in build_internal_deny_policy(
-                config, layout_for(config), env_file=env_file
-            ).denied_paths
-        ),
+    protected = host_protected_paths(
+        config,
+        build_internal_deny_policy(config, layout_for(config), env_file=env_file),
     )
     clone = Path(config.repo.local_path)
     clone_present = clone.is_dir()
@@ -2953,6 +3013,13 @@ def _assigned_path_lines(
     lines: list[str] = []
     for name, value in config.security.extra_environment.items():
         entry = canonical_collision(value, protected)
+        if entry is None:
+            entry = denied_read_path_collision(
+                value,
+                clone,
+                config.security.denied_read_paths,
+                canonical=True,
+            )
         if entry is not None:
             ok = False
             lines.append(
@@ -2961,9 +3028,10 @@ def _assigned_path_lines(
                 "there and a toolchain writing into it corrupts the run or the repository"
             )
             continue
-        inside = [element for element in assigned_path_elements(value) if is_inside(element, clone)]
-        outside = len(assigned_path_elements(value)) - len(inside)
-        if outside:
+        elements = assigned_path_elements(value, include_unsplit=False)
+        inside = [element for element in elements if is_inside(element, clone)]
+        outside = len(elements) - len(inside)
+        if outside and config.security.strict_isolation:
             lines.append(
                 f"assigned-paths: WARN — {name} points outside the clone; a node running under the "
                 "sandbox can only write inside the clone, so a build using that path fails with a "
@@ -2981,7 +3049,7 @@ def _assigned_path_lines(
         excluded = [
             element
             for element in inside
-            if not ensure_path_excluded(clone, Path(element).expanduser())
+            if not ensure_path_excluded(clone, Path(element).expanduser(), security=config.security)
         ]
         if excluded:
             ok = False
@@ -3006,27 +3074,79 @@ def _append_isolation_probe_lines(
     ok: bool,
     *,
     has_fallback: bool,
+    advanced_mode: bool,
 ) -> bool:
     """Render one isolation-probe verdict (free smoke or paid probe) and return the new ``ok``.
 
     Shared by both so the two probes cannot drift into different severities for the same answer: a
     proven policy leak is unconditionally fatal (a non-fallback security result), while a probe that
-    could not demonstrate the policy degrades like a capability gap — fatal only when this provider
-    has no fallback to cover it. ``None`` means the provider offers no such probe — not a verdict,
-    so nothing is printed.
+    could not demonstrate the policy degrades like a capability gap. ``None`` means the provider
+    offers no such probe — not a verdict, so nothing is printed.
+
+    In the advanced mode an undemonstrable probe is a warning even with no fallback provider (owner
+    decision 2026-08-20, applied identically in the per-attempt canary): the host class that answers
+    "cannot demonstrate" — native Windows without the elevated Codex backend — is exactly the one
+    the mode exists to keep working, and a preflight stop there made the mode unavailable on that
+    host while proving nothing. Under strict isolation the old rule stands: with no fallback to
+    cover the gap, an unprovable sandbox fails preflight.
     """
     if report is None:
         return ok
     if report.ok:
         lines.append(f"{pid.value}: isolation probe OK — {report.detail}")
         return ok
-    if report.fatal or not has_fallback:
+    if report.fatal:
         lines.append(f"{pid.value}: FAIL — isolation probe: {report.detail}")
         return False
-    lines.append(
-        f"{pid.value}: WARN — isolation probe: {report.detail} (a fallback provider will cover)"
+    if not has_fallback and not advanced_mode:
+        lines.append(f"{pid.value}: FAIL — isolation probe: {report.detail}")
+        return False
+    cover = (
+        "a fallback provider will cover"
+        if has_fallback
+        else "strict_isolation is off, so the run continues with the floor unproven"
     )
+    lines.append(f"{pid.value}: WARN — isolation probe: {report.detail} ({cover})")
     return ok
+
+
+#: The Claude CLI environment variable that changes what a generated settings file MEANS: in its
+#: env-scrub branch a volume-wide ``allowWrite`` entry is filtered out by name, so the advanced
+#: mode's write grant quietly does not apply. Named here because ``worc preflight`` is the one place
+#: that announces that grant, and in the mode the parent environment reaches the agent whole.
+_CLAUDE_ENV_SCRUB_VAR = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"
+
+
+def _gh_repo_pin_line(config: OrchestratorConfig) -> tuple[bool, str]:
+    """``(ok, line)`` for the ``gh --repo`` pin verdict.
+
+    Fatal only where the configuration actually needs GitHub: with ``create_pull_request`` on, an
+    unpinnable repository means the run would open its pull request against whatever ``gh`` infers,
+    so learning that here costs nothing and learning it at publish time costs a PR. Otherwise it is
+    a warning that says plainly which promise is off, rather than a refusal over a capability this
+    configuration never uses.
+    """
+    slug, source = gh_repo_pin(config.repo.url, config.repo.local_path, security=config.security)
+    if slug is not None:
+        return True, (
+            f"gh-repo-pin: OK ({source}) — every gh call names {slug} outright, so a planted "
+            "gh config or an insteadOf rewrite cannot retarget it"
+        )
+    detail = (
+        "repo.url names no hosted OWNER/REPO (an ssh alias, a file:// URL or a local path), so no "
+        "gh call can be pinned with --repo: gh would infer the repository from the clone, which is "
+        "the surface the control-state fingerprint exists to watch, and the open-PR probe behind "
+        "floor 2 is not asked at all"
+    )
+    if config.git.create_pull_request:
+        return False, (
+            f"gh-repo-pin: FAIL — {detail}. This configuration opens pull requests "
+            "(git.create_pull_request: true), so set repo.url to the https://host/owner/name form"
+        )
+    return True, (
+        f"gh-repo-pin: WARN — {detail}. This configuration opens no pull requests, so nothing is "
+        "blocked; floor 4's 'every gh call names its repository outright' does not hold here"
+    )
 
 
 def run_preflight(
@@ -3098,7 +3218,14 @@ def run_preflight(
         if capability_smoke and healthy:
             smoke = getattr(provider, "isolation_capability_smoke", None)
             report = smoke(home_dir=Path.home()) if callable(smoke) else None
-            ok = _append_isolation_probe_lines(lines, pid, report, ok, has_fallback=has_fallback)
+            ok = _append_isolation_probe_lines(
+                lines,
+                pid,
+                report,
+                ok,
+                has_fallback=has_fallback,
+                advanced_mode=not config.security.strict_isolation,
+            )
 
         # The paid probe (Claude): a separate opt-in because it spends a real model call. Same
         # verdict handling as the free smoke — a proven leak is fatal, an undemonstrable probe is
@@ -3107,7 +3234,14 @@ def run_preflight(
         if paid_isolation_probe and healthy:
             paid = getattr(provider, "paid_isolation_probe", None)
             report = paid(home_dir=Path.home()) if callable(paid) else None
-            ok = _append_isolation_probe_lines(lines, pid, report, ok, has_fallback=has_fallback)
+            ok = _append_isolation_probe_lines(
+                lines,
+                pid,
+                report,
+                ok,
+                has_fallback=has_fallback,
+                advanced_mode=not config.security.strict_isolation,
+            )
 
     reasons = check_isolation(config, ISOLATION_CHECKS)
     if reasons:
@@ -3128,17 +3262,33 @@ def run_preflight(
         lines.append(
             f"read-isolation: OFF ({why}) — providers use native project-instruction/config "
             "discovery (Claude CLAUDE.md + project settings/hooks/MCP/skills; Codex user + .codex "
-            "config/hooks/rules). The private set is NOT opened: .worc, the env-file, provider "
-            "homes and frozen bundles stay read- and write-denied, as do the write-guard, "
-            "commit/staging gates, PR control, and denied_read_paths blacklist"
+            "config/hooks/rules). The private set is NOT opened: .worc, the env-file and the "
+            "frozen bundles stay read- and write-denied, as do the write-guard, commit/staging, PR "
+            "control, and the denied_read_paths blacklist. One exception, provider-specific: "
+            "Claude's own config home is governed by "
+            "agents.providers.claude.allow_native_memory alone, so with read-isolation off its "
+            "per-project memory store is READABLE by the Read tool (it stays write-denied). "
+            "Codex's home is not: it keeps the read-deny"
         )
 
     # What this host cannot enforce, whatever the config says. Deliberately not a FAIL: the floor
     # is missing either way, and refusing to run would leave the operator without the guarantee AND
     # without the work. The same text lands in the run log, from the same formatter.
-    lines.extend(
-        f"isolation-floor: NONE — {gap}" for gap in describe_host_floor(config, HOST_FLOOR_CHECKS)
-    )
+    floor_gaps = describe_host_floor(config, HOST_FLOOR_CHECKS)
+    lines.extend(f"isolation-floor: NONE — {gap}" for gap in floor_gaps)
+    # Ам1-6: the price of making that verdict advisory instead of fatal. Dropping the preflight stop
+    # was justified by "a node can still fall back to the other provider" — a compensation that does
+    # not exist when only one provider is allowed. Under strict isolation the attempt that needs a
+    # sandboxed shell is then refused mid-run with nothing to cover it, and preflight said `ready`.
+    # Still not a FAIL (the host verdict is advisory by decision), but said out loud here.
+    if floor_gaps and len(config.agents.allowed) == 1 and config.security.strict_isolation:
+        lines.append(
+            "isolation-floor: WARN — this host cannot enforce the write floor and "
+            f"{config.agents.allowed[0].value} is the only allowed provider, so a node needing a "
+            "sandboxed shell will be refused mid-run (CAPABILITY_UNAVAILABLE) with no fallback to "
+            "cover it. Allow a second provider, install the missing sandbox dependencies, or set "
+            "security.strict_isolation: false and read the advanced-mode lines below"
+        )
 
     # The mode itself: the loudest line in the report, from the shared formatter so the run log says
     # the same thing. Placed after the host-floor lines because level 1 refers to them, and never a
@@ -3159,6 +3309,20 @@ def run_preflight(
         lines.append("pinned-executables: resolved once, used as-is for this process")
         lines.extend(f"  - {line}" for line in pins.describe())
 
+    # The one environment variable that silently changes what the mode's write grant means. In the
+    # CLI's env-scrub branch the settings compiler filters a volume-wide `allowWrite` entry by name,
+    # so with this set the grant this report just announced is not the grant the agent gets — and in
+    # the mode the parent environment is forwarded whole, so it takes no config change to arrive.
+    # A warning, not a failure: a narrower write grant is not a security problem, it is a
+    # correctness surprise (a toolchain cache stops being writable and the build looks broken).
+    if mode_lines and os.environ.get(_CLAUDE_ENV_SCRUB_VAR):
+        lines.append(
+            f"write-grant: WARN — {_CLAUDE_ENV_SCRUB_VAR} is set in this environment, and the "
+            "Claude CLI filters the volume-wide write grant out of its settings in that branch. "
+            "The write axis above then overstates what the agent gets: expect writes outside the "
+            "clone to be refused, and unset the variable if you meant the grant to apply"
+        )
+
     # Same principle for the git-evidence grant: an operator reading preflight should see which
     # optional capabilities are live, not have to infer them from the config file.
     if config.security.allow_git_evidence:
@@ -3175,16 +3339,9 @@ def run_preflight(
     # verdict on every machine. FAIL rather than WARN: the CLI would not start at all, and this is
     # the one place where learning that costs nothing.
     #
-    # Not asked in advanced mode: the gate's whole premise is that the allowlist decides what the
-    # child receives, and there it does not — the child gets the parent environment whole, so a
-    # ``SystemRoot`` missing from the list still reaches the CLI. Asking anyway would FAIL a Windows
-    # configuration that works, which is the same false verdict this phase removed from
-    # `isolation:`.
-    env_issue = (
-        launch_critical_env_issue(config.security.allowed_environment)
-        if config.security.strict_isolation
-        else None
-    )
+    # Advanced mode widens agent-side children only. Orchestrator-owned git/gh keeps this allowlist,
+    # so the Windows launch floor is checked at both strict-isolation values.
+    env_issue = launch_critical_env_issue(config.security.allowed_environment)
     if env_issue is not None:
         ok = False
         lines.append(f"allowed-environment: FAIL — {env_issue}")
@@ -3201,8 +3358,8 @@ def run_preflight(
         names = ", ".join(config.security.extra_environment)
         lines.append(
             f"extra-environment: {len(config.security.extra_environment)} assigned "
-            f"({names}) — every child process (agent CLI, checks, scanners, git) receives these; "
-            "values are not printed"
+            f"({names}) — agent/check/tool children receive these; orchestrator git/gh receives "
+            "only names not removed by its publication-retargeting scrub. Values are not printed"
         )
         paths_ok, path_lines = _assigned_path_lines(config, env_file=env_file)
         ok = ok and paths_ok
@@ -3216,10 +3373,19 @@ def run_preflight(
     # ``FlowRegistry.resolve`` regardless (a broken flow fails that task, not the whole gate).
 
     if config.git.create_pull_request:
-        gh_ok, gh_line = preflight_gh()
+        gh_ok, gh_line = preflight_gh(config.security)
         if not gh_ok:
             ok = False
         lines.append(gh_line)
+
+    # Whether every `gh` call can actually name its repository — the second half of floor 4, which
+    # switches off silently when the configured URL names no hosted repository (an ssh alias, a
+    # `file://` URL, a local path). Without the pin `gh` infers the repository from the clone, i.e.
+    # from the very surface the fingerprint exists to watch, and the open-PR probe is not asked at
+    # all. Printed at every isolation setting: the pin is not a mode feature.
+    pin_ok, pin_line = _gh_repo_pin_line(config)
+    ok = ok and pin_ok
+    lines.append(pin_line)
 
     tg_ok, tg_line = check_telegram_preflight(config.telegram)
     if not tg_ok:
@@ -3231,7 +3397,7 @@ def run_preflight(
 
 
 def cmd_preflight(args: argparse.Namespace) -> int:
-    """Report each CLI's health and the strict_isolation verdict (read-only diagnostics)."""
+    """Report readiness without running a task (may repair clone-local ignore rules)."""
     _configure_runtime_logging(args)
     config = load_config_for(args)
     if config is None:
@@ -3366,10 +3532,13 @@ def cmd_watch(args: argparse.Namespace) -> int:
     config = load_config_for(args)
     if config is None:
         return 2
+    require_launch_environment(config, env_file=resolve_env_file_path(args)[0])
     preflight.require_git_control()  # git must honor `core.hooksPath` (>= 2.9)
     if config.git.create_pull_request:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
-        preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
+        # Non-blocking advisory if gh is present but logged out. The policy travels with it so
+        # the probe sees the same environment (a proxy, a token) every other gh call gets.
+        preflight.warn_if_gh_logged_out(security=config.security)
     # A node may route to ANY allowed provider, so one that cannot start is refused up front
     # rather than discovered at the first fallback with a stage's work already spent.
     require_provider_auth(config)

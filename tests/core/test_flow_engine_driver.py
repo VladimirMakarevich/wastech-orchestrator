@@ -130,6 +130,12 @@ class _FakeGit:
             tasks_dir=Path("/x/tasks"),
         )
 
+    def adopted_commit_count(self, task_id: str) -> int:
+        return 0
+
+    def adopt_foreign_commits(self, task_id: str, branch: str, **_: object) -> tuple[str, ...]:
+        return ()  # nothing of anyone else's on the branch: the ordinary case
+
     def push(self, task_id: str, branch: str, **_: object) -> PushOutcome:
         return PushOutcome(pushed=True, adopted_commits=())
 

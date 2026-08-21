@@ -232,6 +232,91 @@ def test_the_canary_probes_the_write_guard_roots_from_the_request(
     assert not (clone / ".git" / WRITE_GUARD_SENTINEL).exists()  # nothing left behind
 
 
+def test_an_argv_without_a_generated_profile_refuses_the_attempt(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # Ам1-8: returning quietly here was legal while the full-access escape existed and emitted no
+    # profile. It no longer does — every attempt emits one — so `None` means the argv is not one
+    # this adapter built, and skipping the canary on it is fail-open on the run's central proof.
+    from wastech_orchestrator.providers.artifacts import ArtifactPaths
+
+    request = make_request()
+    provider = _isolated_provider(
+        codex_config,
+        security_config,
+        tmp_path,
+        FakeRun(stdout=_success_stream()),
+        canary=FakeCanary(results=[]),
+        deny=_deny_for(request),
+    )
+    attempt_dir = tmp_path / "attempt"
+    attempt_dir.mkdir()
+    paths = ArtifactPaths(
+        attempt_dir=str(attempt_dir),
+        request_path=str(attempt_dir / "request.json"),
+        stdout_path=str(attempt_dir / "stdout"),
+        stderr_path=str(attempt_dir / "stderr"),
+        events_path=str(attempt_dir / "events.jsonl"),
+        result_path=str(attempt_dir / "result.json"),
+    )
+
+    with pytest.raises(ProviderError) as excinfo:
+        provider._pre_launch_check(request, ["codex", "exec"], {}, paths)
+
+    assert excinfo.value.error_class is ErrorClass.CONFIGURATION_ERROR
+    assert "cannot prove the sandbox" in str(excinfo.value)
+
+
+def test_a_declared_root_with_no_directory_warns_and_the_attempt_still_runs(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+    package_log_text: Callable[[], str],
+) -> None:
+    # П1.3: "the probe could not be run" is a loud line, and the attempt continues. The asymmetry
+    # with the preflight smoke (which answers `unsupported` for the same input) is deliberate and
+    # documented in the shipped guide — an attempt must not be refused because a directory it never
+    # needed is absent — so the warning is the only carrier of "this root was not proved". Both
+    # accounting lines are asserted: the missing root at warning level and the collapsed one at
+    # debug, because a root that quietly leaves the probe set is how a floor claim stops being
+    # tested.
+    fake = FakeRun(stdout=_success_stream(), last_message='{"summary":"ok"}')
+    canary = FakeCanary(results=[(1, "denied"), (1, "denied"), (0, "task"), (1, "denied")])
+    clone = tmp_path / "clone"
+    (clone / ".git" / "hooks").mkdir(parents=True)  # hooks collapses into the probed `.git`
+    exchange_root = clone / ".worc-io"
+    exchange_root.mkdir(parents=True)
+    exchange = exchange_root / "task.md"
+    exchange.write_text("EXCHANGE_TASK", encoding="utf-8")
+    request = make_request(
+        task_path=str(exchange),
+        write_guard=ProviderWriteGuardPolicy(
+            exchange_root=exchange_root,
+            git_dir=clone / ".git",
+            git_common_dir=clone / ".git",
+            hooks_dir=clone / ".git" / "hooks",
+            tasks_dir=clone / "tasks",  # deliberately never created
+        ),
+    )
+    provider = _isolated_provider(
+        codex_config, security_config, tmp_path, fake, canary=canary, deny=_deny_for(request)
+    )
+    result = provider.run(request)
+    # The run continues: this is a warning, not a refusal.
+    assert result.status is RunStatus.SUCCEEDED
+    log = package_log_text()
+    assert "has no directory on disk" in log
+    assert (clone / "tasks").as_posix() in log
+    assert "covered by its probed parent" in log
+    probes = json.loads((_attempt_dir(tmp_path) / "canary.json").read_text())["probes"]
+    labels = [p["probe"] for p in probes if p["probe"].startswith("write-guard-")]
+    assert len(labels) == 2  # the exchange root and `.git`; `tasks/` is missing, hooks is covered
+
+
 def test_a_git_dir_write_that_lands_fails_closed_before_any_model_launch(
     codex_config: ProviderConfig,
     security_config: SecurityConfig,
@@ -309,6 +394,65 @@ def test_canary_capability_failure_is_pre_model(
     with pytest.raises(ProviderError) as exc:
         provider.run(request)
     assert exc.value.error_class is ErrorClass.CAPABILITY_UNAVAILABLE
+    assert fake.calls == 0
+
+
+def test_an_undemonstrable_sandbox_warns_and_runs_in_the_advanced_mode(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+    package_log_text: Callable[[], str],
+) -> None:
+    # Owner decision 2026-08-20, the same one `worc preflight` applies: under `strict_isolation:
+    # false` a probe that could not demonstrate the sandbox is a warning and the attempt proceeds —
+    # that host class is the one the mode exists to keep working. The warning says the floor is
+    # unproven, because continuing quietly is what the campaign exists to prevent.
+    fake = FakeRun(stdout=_success_stream(), last_message='{"summary":"ok"}')
+    canary = FakeCanary(results=[(1, "windows: refusing to run unsandboxed")])
+    request = make_request()
+    provider = _isolated_provider(
+        codex_config,
+        replace(security_config, strict_isolation=False),
+        tmp_path,
+        fake,
+        canary=canary,
+        deny=_deny_for(request),
+    )
+
+    result = provider.run(request)
+
+    assert result.status is RunStatus.SUCCEEDED
+    assert fake.calls == 1  # the model call happened
+    log = package_log_text()
+    assert "the sandbox could not be demonstrated on this host and the run continues" in log
+    assert "treat .git and .worc as writable here" in log
+
+
+def test_a_proven_leak_is_still_fatal_in_the_advanced_mode(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # The other half: an unclassifiable host is a warning, an enforcement FAILURE is not. The
+    # private home is readable here — a proven leak, and a `CONFIGURATION_ERROR` at either setting.
+    fake = FakeRun(stdout=_success_stream())
+    canary = FakeCanary(results=[(0, "PRIVATE_SECRET")])
+    request = make_request()
+    provider = _isolated_provider(
+        codex_config,
+        replace(security_config, strict_isolation=False),
+        tmp_path,
+        fake,
+        canary=canary,
+        deny=_deny_for(request),
+    )
+
+    with pytest.raises(ProviderError) as exc:
+        provider.run(request)
+
+    assert exc.value.error_class is ErrorClass.CONFIGURATION_ERROR
     assert fake.calls == 0
 
 
@@ -1076,10 +1220,14 @@ def test_the_capability_smoke_runs_in_advanced_mode(
     assert canary.calls > 0
 
 
-def test_the_agent_and_the_checks_get_the_same_environment_in_the_mode(
-    codex_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+@pytest.mark.parametrize("strict_isolation", [True, False], ids=["strict", "advanced"])
+def test_the_agent_and_the_checks_get_the_same_environment_under_both_policies(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    strict_isolation: bool,
 ) -> None:
-    """Т0.5/ТA.2.2: the mode widens both sides of the quality gate or neither.
+    """Т0.5/ТA.2.2: each policy reaches both sides of the quality gate identically.
 
     Partial delivery is the expensive failure here, not a missing variable: the agent builds the
     project with a toolchain root it can see, then the check set fails on "SDK not found" after the
@@ -1087,7 +1235,7 @@ def test_the_agent_and_the_checks_get_the_same_environment_in_the_mode(
     pins the property at the two real call sites, because the shared builder is the thing a later
     refactor would split.
     """
-    security = replace(security_config, strict_isolation=False)
+    security = replace(security_config, strict_isolation=strict_isolation)
     fake = FakeRun(stdout="codex-cli 1.2.3\n", exit_code=0)
     provider = _provider(codex_config, security, tmp_path, fake)
     provider.preflight()

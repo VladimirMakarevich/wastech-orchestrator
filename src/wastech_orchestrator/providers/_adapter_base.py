@@ -135,7 +135,10 @@ CAPABILITY_POLICY_FAILED = "policy-failed"
 
 @dataclass(frozen=True)
 class IsolationCapabilityReport:
-    """A provider's live, no-model isolation capability-probe verdict for ``worc preflight``.
+    """A provider's live isolation capability-probe verdict for ``worc preflight``.
+
+    Shared by both probes — the no-model Codex sandbox smoke and the paid Claude one — so a single
+    vocabulary describes both; see the status constants above.
 
     ``ok`` is pass/fail; ``status`` a short machine label (e.g. ``passed``/``unsupported``/
     ``policy-failed``); ``detail`` a secret-free operator line. ``fatal`` marks a result that must
@@ -313,12 +316,13 @@ class BaseCliProvider:
         return build_effective_prompt(request)
 
     def _augment_child_env(self, env: dict[str, str]) -> dict[str, str]:
-        """Subclass hook: adjust the allowlisted child env just before preflight/probe/run.
+        """Subclass hook: adjust the policy-built child env just before preflight/probe/run.
 
-        The base builds the env purely from the security allowlist (:func:`build_child_env`) and
+        The base builds the env through :func:`build_child_env`: allowlist plus assignments under
+        strict isolation, or the parent environment plus assignments in advanced mode. The base
         knows no CLI syntax; a subclass may need to make its own runtime discoverable — e.g. prepend
         a package directory onto ``PATH`` so the CLI can find a sibling helper binary. It only ever
-        adjusts the *value* of an already-allowlisted key; it never adds a key the allowlist omits.
+        adjusts the *value* of an existing key; it never introduces another environment capability.
         Default: return ``env`` unchanged.
         """
         return env
@@ -416,7 +420,8 @@ class BaseCliProvider:
             version=version,
             supports_required_features=version is not None,
             message=f"{label} {version or 'unknown version'} available"
-            f"{self._preflight_healthy_detail(env)}",
+            f"{self._preflight_healthy_detail(env)}"
+            f"{self._preflight_version_note(version)}",
             degraded_reasons=self._preflight_degraded_reasons(env),
             auth=self._preflight_auth_state(env),
         )
@@ -457,6 +462,15 @@ class BaseCliProvider:
     def _preflight_healthy_detail(self, env: Mapping[str, str]) -> str:
         """Subclass hook: extra detail appended to the healthy preflight message (e.g. a resolved
         runtime path a subclass wants an operator to see). Secret-free; default: empty string.
+        """
+        return ""
+
+    def _preflight_version_note(self, version: str | None) -> str:
+        """Subclass hook: a note about the reported version itself (e.g. offline-inventory drift).
+
+        Separate from :meth:`_preflight_degraded_reasons` on purpose: that one is fatal for a sole
+        allowed provider, and "this CLI is newer than the build we inventoried" must never refuse a
+        run — it is a note for whoever maintains the inventory. Secret-free; default: empty.
         """
         return ""
 

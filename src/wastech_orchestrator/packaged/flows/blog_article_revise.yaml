@@ -20,7 +20,8 @@
 # `git.create_pull_request: false` (install `--no-create-pr`) to land the revision as a local commit
 # with no PR. network_policy: research grants the external-research node (read-only) web access;
 # every writing node stays offline and workspace-write, so a Codex writer with network is never
-# constructed. The deterministic gate `check_length` here is a sanity floor against the edit
+# constructed — on the shipped default. Under `security.strict_isolation: false` (advanced mode)
+# every node is online whatever this flow declares, and the validator stops refusing that shape. The deterministic gate `check_length` here is a sanity floor against the edit
 # accidentally gutting the piece, not a growth mandate — its defaults are intentionally low (see the
 # node below); there is no structural gate like `check_chapter` here — a free-form blog post has no
 # fixed structure, so all remaining quality is evaluator-driven.

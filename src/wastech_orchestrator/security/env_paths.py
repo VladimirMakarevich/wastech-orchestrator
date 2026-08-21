@@ -1,11 +1,11 @@
 """Where a variable assigned through ``security.extra_environment`` may point.
 
 The key exists to redirect a toolchain's root or cache — ``NUGET_PACKAGES``, ``CARGO_HOME``,
-``npm_config_cache`` — and the useful destination is *inside the clone*, the one place a
-workspace-write node is allowed to write. That makes one class of value dangerous in a way no name
-check catches: a path landing on the orchestrator's own control surface. A build writing into
-``.worc/`` corrupts the run that launched it; one writing into ``.git/`` corrupts the repository;
-one pointed at the exchange rewrites what the next node is told.
+``npm_config_cache``. Inside the clone is the useful destination under strict isolation; advanced
+mode may also use writable paths outside it. In either mode one class of value is dangerous in a
+way no name check catches: a path landing on the orchestrator's own control surface. A build
+writing into ``.worc/`` corrupts the run that launched it; one writing into ``.git/`` corrupts the
+repository; one pointed at the exchange rewrites what the next node is told.
 
 The check is split in two halves that answer to different rules:
 
@@ -23,15 +23,19 @@ protected directory's parent nor something inside it.
 from __future__ import annotations
 
 import contextlib
-import os
 import platform
 import posixpath
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import TYPE_CHECKING
 
-from wastech_orchestrator.config.schema import OrchestratorConfig
+from wastech_orchestrator.globmatch import path_matches_any
 from wastech_orchestrator.runtime_layout import RuntimeLayout
+
+if TYPE_CHECKING:
+    from wastech_orchestrator.config.schema import OrchestratorConfig
+    from wastech_orchestrator.runtime_layout import InternalDenyPolicy
 
 
 @dataclass(frozen=True)
@@ -47,23 +51,24 @@ class ProtectedPath:
     path: Path
 
 
-def assigned_path_elements(value: str) -> tuple[str, ...]:
+def assigned_path_elements(value: str, *, include_unsplit: bool = True) -> tuple[str, ...]:
     """The path-looking parts of an assigned value, in order (empty when it holds no path).
 
-    Two candidates are considered: the value **as a whole**, and each element of it split on
-    ``os.pathsep``. The split is what catches the list-shaped variables most likely to be pointed
-    somewhere dangerous by accident (``PYTHONPATH``, ``LD_LIBRARY_PATH``, ``CLASSPATH``) — unsplit,
-    ``"/repo/.worc:/x"`` matches no protected root as one string and would sail through. Keeping
-    the whole value too is what makes the answer host-independent: ``os.pathsep`` is ``:`` on POSIX,
-    so a Windows value like ``C:\\repo\\cache`` is torn at its drive letter there and every
-    fragment stops looking like a path — checked whole, it is caught on either OS.
+    List-shaped values are split on both ``:`` and ``;`` on every host, while a Windows drive colon
+    (``C:\\`` / ``C:/``) stays part of its element. This keeps the lexical verdict host-independent:
+    a Windows list is still understood on POSIX and a POSIX list on Windows. The unsplit value is
+    retained by default as a conservative collision candidate for a single foreign-platform path;
+    callers that create one ignore rule per real list element set ``include_unsplit=False`` so a
+    whole list can never become a synthetic `.git/info/exclude` entry.
 
     A candidate counts as a path when it is absolute under *either* platform's rules or starts
     with ``~``. Anything else — ``"1"``, ``"C.UTF-8"``, a bare name — is not a path and is neither
     checked nor resolved: guessing what the operator meant would turn ordinary values into spurious
     errors.
     """
-    candidates = [*value.split(os.pathsep), value]
+    candidates = _split_path_list(value)
+    if include_unsplit:
+        candidates.append(value)
     seen: set[str] = set()
     elements: list[str] = []
     for candidate in candidates:
@@ -75,6 +80,27 @@ def assigned_path_elements(value: str) -> tuple[str, ...]:
     return tuple(elements)
 
 
+def _split_path_list(value: str) -> list[str]:
+    """Split a path-list using both platform separators without tearing Windows drive prefixes."""
+    parts: list[str] = []
+    current: list[str] = []
+    for index, char in enumerate(value):
+        drive_colon = (
+            char == ":"
+            and len(current) == 1
+            and current[0].isalpha()
+            and index + 1 < len(value)
+            and value[index + 1] in ("/", "\\")
+        )
+        if char in (":", ";") and not drive_colon:
+            parts.append("".join(current))
+            current = []
+        else:
+            current.append(char)
+    parts.append("".join(current))
+    return parts
+
+
 def internal_protected_paths(config: OrchestratorConfig) -> tuple[ProtectedPath, ...]:
     """The protected paths derivable from the config alone — the set the lexical half compares to.
 
@@ -84,8 +110,8 @@ def internal_protected_paths(config: OrchestratorConfig) -> tuple[ProtectedPath,
     the environment and the command line — they are host state, so they join the deny set only in
     ``worc preflight``, which is allowed to be host-specific.
 
-    ``denied_read_paths`` entries are globs; each contributes the fixed part before its first
-    wildcard, which is the strongest containment a lexical check can honestly assert about a glob.
+    ``denied_read_paths`` entries are handled separately by :func:`denied_read_path_collision` so
+    their real glob semantics are preserved instead of broadening a pattern to its fixed prefix.
 
     A **relative** ``repo.local_path`` yields relative protected paths, which then match no assigned
     value at all — an assigned value only counts as a path when it is absolute. That is deliberate,
@@ -104,13 +130,54 @@ def internal_protected_paths(config: OrchestratorConfig) -> tuple[ProtectedPath,
         ProtectedPath("the per-task runtime roots", layout.runs_home),
         ProtectedPath("the committed task lifecycle tree", root / config.paths.tasks_dir),
     ]
-    for pattern in config.security.denied_read_paths:
-        fixed = _glob_prefix(pattern)
-        if fixed:
-            candidates.append(
-                ProtectedPath(f"a denied_read_paths target ({pattern})", root / fixed)
-            )
     return _dedupe_by_path(candidates)
+
+
+def host_protected_paths(
+    config: OrchestratorConfig, deny_policy: InternalDenyPolicy
+) -> tuple[ProtectedPath, ...]:
+    """The fixed protected paths for host-aware preflight/run checks, with accurate labels."""
+    entries = list(internal_protected_paths(config))
+    if deny_policy.env_file is not None:
+        entries.append(ProtectedPath("the orchestrator environment file", deny_policy.env_file))
+    entries.extend(
+        ProtectedPath("a provider's own config or credential home", path)
+        for path in deny_policy.provider_homes
+    )
+    return _dedupe_by_path(entries)
+
+
+def denied_read_path_collision(
+    value: str,
+    repo_root: Path,
+    patterns: Sequence[str],
+    *,
+    canonical: bool,
+    system: str | None = None,
+) -> ProtectedPath | None:
+    """The first assigned element that actually matches a repo-relative deny glob.
+
+    Matching the concrete assigned directory avoids both errors caused by reducing a glob to its
+    wildcard-free prefix: leading-``**`` patterns remain effective, while ``conf/*.yaml`` no longer
+    rejects an unrelated cache directory under ``conf/``. This deliberately does not speculate
+    about files a toolchain might create below a directory; it evaluates the configured value.
+    """
+    fold = _folds_case(system)
+    normalize = (lambda raw: _canonical(raw, fold=fold)) if canonical else _lexical
+    root = normalize(str(repo_root))
+    effective_patterns = tuple(pattern.casefold() for pattern in patterns) if fold else patterns
+    for element in assigned_path_elements(value):
+        candidate = normalize(element)
+        if not _is_within(candidate, root):
+            continue
+        relative = candidate.relative_to(root).as_posix()
+        probe = relative.casefold() if fold else relative
+        for original, pattern in zip(patterns, effective_patterns, strict=True):
+            if path_matches_any(probe, (pattern,)):
+                return ProtectedPath(
+                    f"a denied_read_paths target ({original})", repo_root / original
+                )
+    return None
 
 
 def lexical_collision(value: str, protected: Sequence[ProtectedPath]) -> ProtectedPath | None:
@@ -144,7 +211,7 @@ def is_inside(value_element: str, root: Path, *, system: str | None = None) -> b
 
     Used to decide the two halves of the cache recipe that only ``worc preflight`` can decide: a
     path inside the clone has to be excluded from git before a build fills it with thousands of
-    files, and a path outside it cannot be written to at all by a sandboxed node.
+    files, and a path outside it merits the unwritable-path warning only under strict isolation.
     """
     fold = _folds_case(system)
     return _is_within(_canonical(value_element, fold=fold), _canonical(str(root), fold=fold))
@@ -236,16 +303,6 @@ def _is_absolute_anywhere(element: str) -> bool:
         or PurePosixPath(element).is_absolute()
         or PureWindowsPath(element).is_absolute()
     )
-
-
-def _glob_prefix(pattern: str) -> str:
-    """The leading wildcard-free portion of a repo-relative glob (``secrets/**`` → ``secrets``)."""
-    parts: list[str] = []
-    for part in PurePosixPath(pattern.replace("\\", "/")).parts:
-        if any(char in part for char in "*?["):
-            break
-        parts.append(part)
-    return PurePosixPath(*parts).as_posix() if parts else ""
 
 
 def _dedupe_by_path(entries: list[ProtectedPath]) -> tuple[ProtectedPath, ...]:

@@ -130,7 +130,9 @@ def build_codex_permission_profile(
     volume's ROOT, which is what stops ``dotnet build`` failing on ``~/.nuget``. The floor's
     carve-outs survive it by being more specific paths (Codex resolves ``deny > write > read`` by
     specificity first, verified live), and unlike Claude's file this profile is re-proven under
-    ``codex sandbox`` before every attempt, so the survival is demonstrated rather than assumed. Two
+    ``codex sandbox`` before every provider attempt that gets a shell — which on Codex is all of
+    them, an evaluator and the supervisor's own read-only turn included — so the survival is
+    demonstrated rather than assumed. Two
     honest limits: an inherited ``extends`` grant can still beat an explicit deny (a clone under the
     global ``/private/tmp`` removes the carve-outs entirely), and the base ``:minimal`` read set may
     keep some system paths read-only inside the root grant — its exact composition is

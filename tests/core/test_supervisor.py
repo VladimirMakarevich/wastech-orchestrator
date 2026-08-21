@@ -35,6 +35,7 @@ from wastech_orchestrator.core.supervisor import (
     _SUMMARY_MIN_CHARS,
     Supervisor,
 )
+from wastech_orchestrator.git_manager import GitControlDrift, GitControlDriftItem
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
 from wastech_orchestrator.providers.base import (
     AgentRunResult,
@@ -49,6 +50,7 @@ from wastech_orchestrator.routing.router import (
     RouteSource,
     StageOutcome,
 )
+from wastech_orchestrator.runtime_layout import ProviderWriteGuardPolicy
 from wastech_orchestrator.state_store import (
     CheckRunRow,
     EditingLineageRow,
@@ -156,6 +158,7 @@ def _supervisor(
     security_preamble: str | None = None,
     repo_dir: str = "/repo",
     exchange_root: str = "",
+    git: Any = None,
 ) -> Supervisor:
     (tmp_path / "roles").mkdir(exist_ok=True)
     (tmp_path / "roles" / "supervisor.md").write_text("Observe {task_id} in {repo}.", "utf-8")
@@ -173,6 +176,7 @@ def _supervisor(
         router=router,
         store=store,
         repo_dir=repo_dir,
+        git=git,
         artifacts_root=str(tmp_path / "art"),
         exchange_root=exchange_root,
         flow_dir=tmp_path,
@@ -2053,3 +2057,85 @@ def test_summary_md_carries_no_spend_telemetry(tmp_path: Path) -> None:
     body = result.summary_path.read_text("utf-8")
     for token in ("supervisor_usage", "cost", "duration_seconds", "0.30"):
         assert token not in body
+
+
+# --- The layer's own attempt is bracketed like a graph node's (Пре1-2 / Пре3-9) ------------------
+
+
+class _FakeSupervisorGit:
+    """The three GitPort methods the layer's bracket uses; records what it was asked."""
+
+    def __init__(self, *, drift: object | None = None) -> None:
+        self.captures = 0
+        self.resolved: list[str | None] = []
+        self._drift = drift
+
+    def resolve_control_paths(self, exchange_root: str | None = None) -> object:
+        self.resolved.append(exchange_root)
+        return ProviderWriteGuardPolicy(
+            exchange_root=None,
+            git_dir=Path("/repo/.git"),
+            git_common_dir=Path("/repo/.git"),
+            hooks_dir=Path("/repo/.git/hooks"),
+            tasks_dir=Path("/repo/tasks"),
+        )
+
+    def capture_git_control_state(self) -> object:
+        self.captures += 1
+        return object()
+
+    def compare_git_control_state(self, before: object) -> object | None:
+        return self._drift
+
+
+def test_a_shell_bearing_supervisor_turn_carries_the_write_deny_roots(tmp_path: Path) -> None:
+    # П4.2 / Пре1-2: the layer is read-only by mandate, but the mandate is not a mechanism — Codex
+    # runs commands on `read-only`, and in the advanced mode so does Claude. With the write guard on
+    # the request the provider's pre-launch canary re-proves the `.git`/`.worc` denies around this
+    # attempt too, which is what makes floor 1's "before every provider attempt" literally true.
+    store = _store(tmp_path)
+    router = FakeRouter([_ok("s", "note")])
+    router.grants_shell = True
+    git = _FakeSupervisorGit()
+    sup = _supervisor(tmp_path, router, store, git=git, exchange_root=str(tmp_path / "io"))
+
+    sup.observe(task_id=_TASK, node_id="n", node_run_id=1, outcome_kind="done")
+
+    assert router.requests[0].write_guard is not None
+    assert git.resolved == [str(tmp_path / "io")]
+    assert git.captures == 1
+
+
+def test_a_supervisor_turn_without_a_shell_is_not_bracketed(tmp_path: Path) -> None:
+    # No attempt pays for a check that cannot apply to it: a Claude turn with no shell can neither
+    # write nor run commands, so neither the guard nor the fingerprint is resolved.
+    store = _store(tmp_path)
+    router = FakeRouter([_ok("s", "note")])
+    router.grants_shell = False
+    git = _FakeSupervisorGit()
+    sup = _supervisor(tmp_path, router, store, git=git)
+
+    sup.observe(task_id=_TASK, node_id="n", node_run_id=1, outcome_kind="done")
+
+    assert router.requests[0].write_guard is None
+    assert git.captures == 0
+    assert git.resolved == []
+
+
+def test_git_control_drift_across_a_supervisor_turn_warns_and_the_run_continues(
+    tmp_path: Path, package_log_text: Callable[[], str]
+) -> None:
+    # The advisory contract decides the verdict: the layer can flag but cannot rework, so drift here
+    # is the same loud line every non-writing node class gets — never a park, which would let an
+    # advisory layer stop a reviewed, passing change.
+    store = _store(tmp_path)
+    router = FakeRouter([_ok("s", "note")])
+    router.grants_shell = True
+    drift = GitControlDrift((GitControlDriftItem("hooks", "hook 'pre-push' added"),))
+    sup = _supervisor(tmp_path, router, store, git=_FakeSupervisorGit(drift=drift))
+
+    sup.observe(task_id=_TASK, node_id="n", node_run_id=1, outcome_kind="done")
+
+    log = package_log_text()
+    assert "git control state changed during a supervisor turn" in log
+    assert "hook 'pre-push' added" in log

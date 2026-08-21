@@ -23,12 +23,12 @@ Before editing, read the packaged flow reference `.worc/guide/flows/reference.md
    - `reasoning` — overrides effort; **must be valid for the resolved provider** (Claude and Codex effort sets differ) — this one _is_ validated.
    - `timeout_seconds` — per-attempt CLI wall-clock ceiling.
    - `network_access` — tri-state per-node override of the flow's `network_policy` (`true`/`false`/omit).
-   - `git_evidence` — tri-state; `true` asks for the read-only git verbs so the node can inspect delivery history. Honored only while the operator's `security.allow_git_evidence` is on (default off, so the declaration is otherwise inert), and **rejected on a `workspace-write` node** — it already has an unrestricted shell.
+   - `git_evidence` — tri-state; `true` asks for the read-only git verbs so the node can inspect delivery history. Honored only while the operator's `security.allow_git_evidence` is on (default off, so the declaration is otherwise inert), and **rejected on a `workspace-write` node** — it already has an unrestricted shell. Inert as well under `security.strict_isolation: false` (advanced mode), where every node has an unscoped shell already: declaring it there buys nothing, so do not reach for it instead of `workspace-write` on that configuration.
    - `extra_args` — raw CLI flags for this node (subject to the forbidden-args scan).
    - `best_effort` — tolerate an infrastructure failure and continue (e.g. a summary node).
 3. For loop iteration caps, edit the flow-level `budgets:` mapping (each named `fail`/`rework` loop; the engine clamps to `min(flow, config cap)`), not a node field.
 4. Confirm the model/reasoning you chose is actually configured for that provider in `.worc/config.yaml agents.providers.<id>` — if the provider or its reasoning set needs adjusting, that is a config change (use **worc-config**), not a flow edit.
-5. Validate: run `worc validate-flow <name>`. The config-aware layer checks that every `provider` is in `agents.allowed`, that `reasoning` is valid for the resolved provider, and that no Codex `workspace-write` node also has network. `worc preflight` does **not** validate flows.
+5. Validate: run `worc validate-flow <name>`. The config-aware layer checks that every `provider` is in `agents.allowed`, that `reasoning` is valid for the resolved provider, and — on the shipped default — that no Codex `workspace-write` node also has network (that last check is skipped under `security.strict_isolation: false`, where the mode grants both anyway). `worc preflight` does **not** validate flows.
 
 ## Applying the change to a task already in flight
 
@@ -44,6 +44,6 @@ A brand-new task always picks up the edited flow. To apply your edit to a **spec
 
 - Don't put `provider`/`model`/`reasoning` at a **task file's top level** — that is rejected outright (`unknown_top_level_field`). A per-node overlay under `nodes.<node-id>` _is_ accepted, but it is one run only and best-effort (an unsupported value is warned and silently skipped), so it is for a one-off experiment — never the place to record a durable decision. Tune the flow node for that.
 - Don't name a `provider` that is not in `agents.allowed`, or a `reasoning` value invalid for that provider — validation fails.
-- Don't give a Codex `workspace-write` node `network_access: true` — it is rejected; split external fetches into a `read-only` node.
+- Don't give a Codex `workspace-write` node `network_access: true` — it is rejected; split external fetches into a `read-only` node. That refusal belongs to the shipped default: under `security.strict_isolation: false` (advanced mode) the validator no longer rejects the combination, because the mode has already granted every node both the write and the network.
 - Don't invent a `model` id; it is passed through unverified and will only fail at run time. Keep to models the provider actually serves.
 - Don't add full-access `extra_args` — the forbidden-args scan rejects them at any value of `strict_isolation`.

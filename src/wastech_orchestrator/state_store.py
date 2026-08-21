@@ -128,9 +128,10 @@ def _utc_now_iso() -> str:
 # change from. The gate used to diff against ``HEAD``, which measures "what is not committed yet"
 # rather than "what this task did", so any commit inside the task (an agent's own, on a node the
 # profile bracket does not park) emptied the one question a human is asked before publishing. NULL
-# means "the task's diff base", which is what a run has until the orchestrator commits —
-# deliberately not a frozen base SHA, because the base branch legitimately moves and a frozen SHA
-# would start asking about other people's deletions. Each orchestrator commit that carries code
+# means "the task's diff base", which is what a run has until the orchestrator commits — the point
+# the task started from, and deliberately not a remote-tracking ref: measured against a base that
+# moved on the remote, the gate prints other people's additions as this task's deletions. Each
+# orchestrator commit that carries code
 # (code / subtask / merge) stamps its SHA here, which is what keeps a decomposed run from re-asking
 # about the deletions its first subtask already got approved. Additive, ``_migrate`` adds it on a
 # brand-new (``0``) database; an older versioned DB is still refused fail-closed and recreated
@@ -145,7 +146,17 @@ def _utc_now_iso() -> str:
 # deliberately left alone: it keys push idempotency, and reusing it would change the very
 # short-circuit this column exists to fix. Additive, ``_migrate`` adds it on a brand-new (``0``)
 # database; an older versioned DB is still refused fail-closed and recreated (greenfield).
-DB_SCHEMA_VERSION = 23
+# v24 (push-destination baseline): added the **additive** nullable ``tasks.push_url_digest`` column
+# — the sha256 of where a push would go, read once when the task's branch was prepared and before
+# any provider ran. The baseline used to live only in the Git Manager's in-memory active-task
+# record, so the unconditional pre-push re-read had nothing to compare against on the one path
+# that pushes *after* the agent is gone without preparing a branch first (``merge-task``), and a
+# rewritten ``pushurl`` sent the branch — with this orchestrator's credentials — wherever it
+# pointed. NULL is its real meaning ("no baseline was taken", e.g. a task whose branch prep could
+# not read the URL), and a missing answer is never read as a rewrite. Additive, ``_migrate`` adds
+# it on a brand-new
+# (``0``) database; an older versioned DB is still refused fail-closed and recreated (greenfield).
+DB_SCHEMA_VERSION = 24
 
 
 class IncompatibleStateError(Exception):
@@ -205,6 +216,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # ("the task's diff base"), not a placeholder, so no default.
     if "gate_reference_sha" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN gate_reference_sha TEXT")
+    if "push_url_digest" not in task_cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN push_url_digest TEXT")
     # v23: the commit a push left on the remote. Nullable — NULL is its real meaning ("not pushed
     # by us"), not a placeholder, so no default.
     publish_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(publish_operations)")}
@@ -325,7 +338,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     instruction_manifest_digest TEXT,
     exchange_contaminated INTEGER NOT NULL DEFAULT 0,
     exchange_active_unsafe INTEGER NOT NULL DEFAULT 0,
-    gate_reference_sha TEXT
+    gate_reference_sha TEXT,
+    push_url_digest TEXT
 );
 
 CREATE TABLE IF NOT EXISTS node_runs (
@@ -1318,6 +1332,35 @@ class StateStore:
             c.execute(
                 "UPDATE tasks SET gate_reference_sha = ?, updated_at = ? WHERE task_id = ?",
                 (sha, self._clock(), task_id),
+            )
+
+    def get_push_url_digest(self, task_id: str) -> str | None:
+        """The push destination recorded when this task's branch was prepared, or ``None``.
+
+        ``None`` means no baseline was taken — a task row that does not exist, or a branch prep that
+        could not read the URL at all. The pre-push gate reads it as "nothing to compare", never as
+        a rewrite: a missing answer is not evidence.
+        """
+        cur = self._conn.execute("SELECT push_url_digest FROM tasks WHERE task_id = ?", (task_id,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        value = row["push_url_digest"]
+        return str(value) if value else None
+
+    def set_push_url_digest(
+        self, task_id: str, digest: str, conn: sqlite3.Connection | None = None
+    ) -> None:
+        """Stamp where a push would go, as read at branch prep — before any provider ran.
+
+        Persisted rather than kept in memory because the push that needs it most happens in a later
+        process: ``merge-task`` pushes the base-merge commit after the agent is gone and without
+        preparing a branch, so an in-memory baseline is always absent exactly there.
+        """
+        with self._writer(conn) as c:
+            c.execute(
+                "UPDATE tasks SET push_url_digest = ?, updated_at = ? WHERE task_id = ?",
+                (digest, self._clock(), task_id),
             )
 
     def record_provider_attempt(

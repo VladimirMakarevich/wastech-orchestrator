@@ -14,7 +14,8 @@
 # `git.create_pull_request: false` (install `--no-create-pr`) to land the article as a local commit
 # with no PR. network_policy: research grants the external-research node (read-only) web access;
 # every writing node stays offline and workspace-write, so a Codex writer with network is never
-# constructed. The one deterministic gate is `check_length` (a minimum chars/paragraphs floor for the
+# constructed — on the shipped default. Under `security.strict_isolation: false` (advanced mode)
+# every node is online whatever this flow declares, and the validator stops refusing that shape. The one deterministic gate is `check_length` (a minimum chars/paragraphs floor for the
 # drafted article, delivered to `.worc/tools/` by `worc install`); there is no structural gate like
 # `check_chapter` here — a free-form blog post has no fixed structure, so all remaining quality is
 # evaluator-driven.

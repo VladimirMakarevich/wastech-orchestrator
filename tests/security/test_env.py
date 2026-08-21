@@ -98,6 +98,15 @@ def test_assigned_value_wins_over_the_forwarded_one() -> None:
     assert list(child) == ["PATH", "LANG"]
 
 
+def test_windows_assignment_replaces_a_forwarded_name_case_insensitively() -> None:
+    child = build_child_env(
+        _security("npm_config_*", assigned={"npm_config_cache": "assigned"}),
+        {"NPM_CONFIG_CACHE": "inherited"},
+        system="Windows",
+    )
+    assert child == {"NPM_CONFIG_CACHE": "assigned"}
+
+
 def test_key_order_is_forwarded_then_assigned() -> None:
     # Compared as a list, not a set: a run's environment has to be reproducible between runs, and
     # `os.environ` iteration order is not.
@@ -276,6 +285,19 @@ def test_windows_matches_a_pattern_case_insensitively() -> None:
     assert names == ("DOTNET_ROOT",)
 
 
+def test_windows_deduplicates_plain_and_pattern_names_case_insensitively() -> None:
+    names, _ = expand_allowed_environment(
+        ("Path", "PATH*"), {"PATH": "/bin", "PATHEXT": ".EXE"}, system="Windows"
+    )
+    assert names == ("PATH", "PATHEXT")
+
+
+def test_lone_star_is_fail_closed_even_without_the_validator() -> None:
+    names, expansions = expand_allowed_environment(("*",), _TOOLCHAIN_PARENT, system="Linux")
+    assert names == ("*",)
+    assert expansions == ()
+
+
 def test_posix_matches_a_pattern_case_sensitively() -> None:
     # AC0.3.4, POSIX half: the same config on Linux/macOS matches nothing, because there
     # `dotnet_root` and `DOTNET_ROOT` are two different variables.
@@ -442,18 +464,36 @@ def test_an_env_file_name_comes_back_only_by_explicit_assignment(
     assert child["NPM_TOKEN"] == "chosen"
 
 
-def test_env_file_names_are_still_forwarded_under_strict_isolation(
+def test_env_file_names_matched_only_by_a_pattern_are_withheld_under_strict_isolation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The withholding belongs to the wide forward, not to the allowlist.
+    """An implicit pattern match must not route around the read-deny on ``.worc/.env``.
 
-    Under strict isolation a name reaches a child only because the operator listed it, which is
-    already the deliberate act ТA.2.3 asks for — so subtracting the env-file there would silently
-    break a configuration that works today.
+    An exact allowlist name remains an explicit strict-mode grant, while a pattern no longer turns
+    every non-secret-looking env-file name into an accidental grant.
     """
-    monkeypatch.setattr(env_mod, "env_file_names", lambda: frozenset({"NPM_TOKEN"}))
-    child = build_child_env(_security("NPM_TOKEN"), _MODE_PARENT)
-    assert child == {"NPM_TOKEN": "npm-secret-value"}
+    parent = {**_MODE_PARENT, "TOOL_CACHE_ROOT": "/cache"}
+    monkeypatch.setattr(env_mod, "env_file_names", lambda: frozenset({"TOOL_CACHE_ROOT"}))
+    child = build_child_env(_security("TOOL_*"), parent)
+    assert child == {}
+
+
+def test_an_exact_name_still_grants_an_env_file_value_under_strict_isolation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = {**_MODE_PARENT, "TOOL_CACHE_ROOT": "/cache"}
+    monkeypatch.setattr(env_mod, "env_file_names", lambda: frozenset({"TOOL_CACHE_ROOT"}))
+    child = build_child_env(_security("TOOL_CACHE_ROOT"), parent)
+    assert child == {"TOOL_CACHE_ROOT": "/cache"}
+
+
+def test_extra_environment_restores_a_pattern_withheld_name_under_strict_isolation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = {**_MODE_PARENT, "TOOL_CACHE_ROOT": "/inherited"}
+    monkeypatch.setattr(env_mod, "env_file_names", lambda: frozenset({"TOOL_CACHE_ROOT"}))
+    child = build_child_env(_security("TOOL_*", assigned={"TOOL_CACHE_ROOT": "/chosen"}), parent)
+    assert child == {"TOOL_CACHE_ROOT": "/chosen"}
 
 
 def test_the_orchestrators_own_processes_keep_the_allowlist_in_the_mode() -> None:

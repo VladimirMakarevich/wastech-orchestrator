@@ -1,7 +1,8 @@
 """Argv dependency scanners — evidence, not a gate.
 
 Runs the core-owned set of dependency / advisory scanners as argv child processes (never a shell
-string) through the safe process runner — mandatory timeout, allowlisted environment — and
+string) through the safe process runner — mandatory timeout, and the policy-built child environment
+(the allowlist under strict isolation, the parent environment whole in the advanced mode) — and
 structures each scanner's run as evidence. The scan **never gates**: it always reports
 ``passed=True`` (the scan ran) so the ``checks`` node stays uniformly pass/fail and the engine needs
 no "this checker doesn't gate" special case. Whether the findings gate the flow

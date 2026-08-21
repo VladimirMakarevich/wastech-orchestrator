@@ -215,13 +215,19 @@ def _str_mapping(m: Mapping[str, Any], key: str, where: str, issues: list[str]) 
         return {}
     out: dict[str, str] = {}
     for name, value in raw.items():
+        if not isinstance(name, str):
+            issues.append(
+                f"{where}.{key}: expected string keys, got {type(name).__name__} — quote the "
+                "environment variable name in YAML"
+            )
+            continue
         if not isinstance(value, str):
             issues.append(
                 f"{where}.{key}.{name}: expected a string, got {type(value).__name__} — "
-                f'quote the value (e.g. {name}: "{value}")'
+                "quote the value as written in YAML"
             )
             continue
-        out[str(name)] = value
+        out[name] = value
     return out
 
 
@@ -450,8 +456,20 @@ def _build_provider(raw: Any, pid: ProviderId, issues: list[str]) -> ProviderCon
         where,
         issues,
         # ``max_budget_usd`` (removed v14) is tolerated, not accepted — a stale config still loads.
-        tolerated={"max_budget_usd"},
+        # ``sandbox`` (removed v38) gets a named message below instead of the generic unknown-key
+        # one: it is the key whose removal has no migration, so this message is the entire cost of
+        # that decision, and "unknown key" sends the operator to `upgrade-config`, which cannot
+        # strip it either.
+        tolerated={"max_budget_usd", "sandbox"},
     )
+    if "sandbox" in m:
+        issues.append(
+            f"{where}.sandbox: this key no longer exists (config v38) — delete the line. There is "
+            "no value it could take: the provider full-access modes are refused at every value of "
+            "security.strict_isolation, and everything else it used to select is now decided by "
+            "permission_profile plus security.strict_isolation. `worc upgrade-config` will not "
+            "remove it for you"
+        )
     reasoning_raw = _opt_str(m, "reasoning", where, issues)
     if reasoning_raw is not None and reasoning_raw not in _REASONING_LEVELS:
         issues.append(

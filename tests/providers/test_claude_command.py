@@ -138,6 +138,57 @@ def test_denied_commands_become_disallowed_tools(
     assert "Bash(git commit:*)" in disallowed
     assert "Bash(git push:*)" in disallowed
     assert "Bash(gh pr create:*)" in disallowed
+    # Ам3-2: both shells. Keeping this list at all was justified by "otherwise there is no trace in
+    # the log of an attempt" — and on Windows, where PowerShell is the shell, there was none.
+    assert "PowerShell(git commit:*)" in disallowed
+    assert "PowerShell(git push:*)" in disallowed
+    assert "PowerShell(gh pr create:*)" in disallowed
+
+
+def test_the_full_editor_set_is_denied_by_path_in_the_advanced_mode(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest], tmp_path: Path
+) -> None:
+    # Ам3-1: the floor on the tool side is a list of names — and it was written from memory,
+    # missing the fourth editor the pinned binary's own registry carries. `MultiEdit` in a path deny
+    # is what keeps a `read-only` node in the mode from editing the working tree with a tool that
+    # appeared in no list at all.
+    guard = ProviderWriteGuardPolicy(
+        exchange_root=tmp_path / ".worc-io",
+        git_dir=tmp_path / ".git",
+        git_common_dir=tmp_path / ".git",
+        hooks_dir=tmp_path / ".git" / "hooks",
+        tasks_dir=tmp_path / "tasks",
+    )
+    argv = _argv(
+        claude_config,
+        make_request(permission_profile="read-only", write_guard=guard),
+        strict_isolation=False,
+    )
+    disallowed = argv[argv.index("--disallowedTools") + 1]
+    gitdir = "//" + (tmp_path / ".git").resolve().as_posix().lstrip("/") + "/**"
+    for kind in ("Write", "Edit", "MultiEdit", "NotebookEdit"):
+        assert f"{kind}({gitdir})" in disallowed  # the path-scoped floor names every editor
+        assert kind in disallowed.split(",")  # and the bare deny for a read-only node too
+
+
+def test_the_shipped_default_keeps_the_historical_editor_pair(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest], tmp_path: Path
+) -> None:
+    # The asymmetry is deliberate: with `--tools` still emitted a tool outside the allowlist does
+    # not exist for the session, so naming it in a deny is noise in every argv the default builds.
+    guard = ProviderWriteGuardPolicy(
+        exchange_root=tmp_path / ".worc-io",
+        git_dir=tmp_path / ".git",
+        git_common_dir=tmp_path / ".git",
+        hooks_dir=tmp_path / ".git" / "hooks",
+        tasks_dir=tmp_path / "tasks",
+    )
+    argv = _argv(claude_config, make_request(write_guard=guard))
+    disallowed = argv[argv.index("--disallowedTools") + 1]
+    gitdir = "//" + (tmp_path / ".git").resolve().as_posix().lstrip("/") + "/**"
+    assert f"Write({gitdir})" in disallowed and f"Edit({gitdir})" in disallowed
+    assert f"MultiEdit({gitdir})" not in disallowed
+    assert f"NotebookEdit({gitdir})" not in disallowed
 
 
 def _native_memory_glob(config_dir: Path) -> str:
@@ -177,36 +228,93 @@ def test_native_memory_deny_defaults_to_home_claude(
     assert f"Write({_native_memory_glob(Path.home() / '.claude')})" in disallowed
 
 
-def test_allow_native_memory_drops_the_deny_but_keeps_command_denies(
+def test_allow_native_memory_opens_the_store_and_nothing_above_it(
     claude_config: ProviderConfig,
     make_request: Callable[..., AgentRunRequest],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    # With the Claude-only opt-in on, the native-memory deny is
-    # dropped so the agent may use its own auto-memory — but the command/read denies are untouched.
+    # Ам4-1 (owner decision 2026-08-20): the opt-in opens the per-project MEMORY STORE, not the
+    # config home it lives in. It used to drop the deny for the whole home — and since the internal
+    # projection carves that home out as well, `~/.claude` (credentials, settings, every project's
+    # session transcripts) was left with no tool-level deny at all, in the one mode where the agent
+    # also has an unscoped shell.
     config_dir = tmp_path / "isolated-claude"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
     opted_in = replace(claude_config, allow_native_memory=True)
     argv = _argv(opted_in, make_request(), denied=DENIED)
     disallowed = argv[argv.index("--disallowedTools") + 1]
-    glob = _native_memory_glob(config_dir)
-    assert f"Write({glob})" not in disallowed
-    assert f"Edit({glob})" not in disallowed
-    assert f"Read({glob})" not in disallowed
+    home = config_dir.resolve().as_posix().lstrip("/")
+    # The whole home is no longer denied wholesale — that is what the opt-in buys...
+    assert f"Write({_native_memory_glob(config_dir)})" not in disallowed
+    # ...but the credential/settings layer and each project's own files still are.
+    assert f"Write(//{home}/*)" in disallowed
+    assert f"Edit(//{home}/*)" in disallowed
+    assert f"Write(//{home}/*/*)" in disallowed
+    # The read axis belongs to `disable_read_isolation`, and the opt-in was never a read grant.
+    assert f"Read(//{home}/*)" not in disallowed
     # The publish blacklist is unaffected by the memory opt-in.
     assert "Bash(git commit:*)" in disallowed
 
 
-def test_allow_native_memory_with_no_other_denies_omits_disallowed_flag(
+def test_the_memory_store_itself_is_left_writable_under_the_opt_in(
     claude_config: ProviderConfig,
     make_request: Callable[..., AgentRunRequest],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
-    # With the opt-in on and no command/read denies passed, there is nothing left to deny, so the
-    # flag is omitted entirely (rather than emitted empty).
+    # The other side: no emitted pattern may match the store, or the opt-in would buy nothing. The
+    # store sits three segments below the home, and the denies stop at two.
+    config_dir = tmp_path / "isolated-claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
     opted_in = replace(claude_config, allow_native_memory=True)
-    argv = build_claude_argv(opted_in, make_request())
-    assert "--disallowedTools" not in argv
+    argv = _argv(opted_in, make_request())
+    disallowed = argv[argv.index("--disallowedTools") + 1]
+    home = config_dir.resolve().as_posix().lstrip("/")
+    store = f"//{home}/projects/some-slug/memory"
+    assert f"Write({store}/**)" not in disallowed
+    assert f"Write({store}/*)" not in disallowed
+    # And nothing was emitted at the depth the store lives at.
+    assert f"Write(//{home}/*/*/*)" not in disallowed
+
+
+def test_a_flow_node_cannot_escalate_the_permission_mode(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # Ам1-1: `--permission-mode` is last-wins in this CLI and `extra_args` are appended verbatim,
+    # so a flow node — the one surface an operator does not review — could hand itself the rank
+    # directly under the forbidden bypass value. On a read-only node that turns "the tool exists
+    # but asks" into "auto-approved" for everything not named in a deny.
+    with pytest.raises(ProviderError) as excinfo:
+        _argv(claude_config, make_request(extra_args=["--permission-mode", "auto"]))
+    assert excinfo.value.error_class is ErrorClass.CONFIGURATION_ERROR
+    assert "weaker than the requested profile" in str(excinfo.value)
+
+
+def test_the_escalation_check_covers_the_inline_form_and_the_provider_config(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # Both spellings and both sources: the check runs over the COMBINED set, so it cannot be reached
+    # around by moving the token from the node to the provider block or by using `--flag=value`.
+    with pytest.raises(ProviderError):
+        _argv(claude_config, make_request(extra_args=["--permission-mode=auto"]))
+    with pytest.raises(ProviderError):
+        _argv(
+            replace(claude_config, extra_args=("--permission-mode", "auto")),
+            make_request(),
+        )
+
+
+def test_a_permission_mode_that_is_not_weaker_is_still_allowed(
+    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # The operator keeps the legal override (decision Ам1-В2 (а), not (б)): only a WEAKER rank than
+    # the profile's own mode is refused, so restating the mode a workspace-write node already has is
+    # fine — and so is picking a stricter one.
+    argv = _argv(claude_config, make_request(extra_args=["--permission-mode", "acceptEdits"]))
+    assert argv[-2:] == ["--permission-mode", "acceptEdits"]
+    argv = _argv(claude_config, make_request(extra_args=["--permission-mode", "dontAsk"]))
+    assert argv[-2:] == ["--permission-mode", "dontAsk"]
 
 
 def test_no_prompt_text_is_interpolated_into_argv(
@@ -1149,13 +1257,14 @@ def test_sandbox_file_states_the_headless_auto_approval_instead_of_inheriting_it
         assert settings["allowUnsandboxedCommands"] is False
 
 
-def test_the_shipped_default_builds_the_argv_it_always_did(
+def test_the_shipped_default_keeps_the_tool_flags_and_deny_membership_it_always_had(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # The inversion is reachable only through strict_isolation: false. With the mode off the argv is
-    # what it was before this phase existed — including the tool flags carrying identical joined
-    # strings and NotebookEdit staying out of the path denies (the tool does not exist there, so
-    # naming it would be noise).
+    # The inversion is reachable only through strict_isolation: false. This pins the three things
+    # the shipped default is allowed to rely on, and nothing wider: both tool flags carry the same
+    # joined string, no editor beyond the historical pair enters the path denies (a tool outside
+    # --tools does not exist there, so naming it would be noise), and no friction name is emitted.
+    # It is deliberately NOT a golden argv — no assertion here says the whole list is unchanged.
     for profile in ("read-only", "workspace-write"):
         req = make_request(permission_profile=profile, write_guard=_write_guard())
         argv = _argv(claude_config, req, internal_deny=_INTERNAL_DENY, denied=DENIED)

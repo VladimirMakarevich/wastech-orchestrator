@@ -30,6 +30,22 @@ def test_git_and_gh_are_pinned_on_every_host(make_git_config, tmp_path) -> None:
         assert pins.launch("gh") == "/h"
 
 
+def test_the_daemon_launcher_is_pinned_and_printed(make_git_config, tmp_path) -> None:
+    # Ам2-7: ТA.1.7 names the daemon launcher among the classes to pin, and the shipped guide says
+    # the report prints it. It was resolved in `cli_shell` for the spawn, printed nowhere, and never
+    # re-checked for drift — while being the one path that hands the NEXT WHOLE RUN to whatever
+    # answers to the name.
+    config: OrchestratorConfig = make_git_config(tmp_path / "clone")
+    for system in ("Windows", "Linux", "Darwin"):
+        pins = pin_launchers(
+            config,
+            which=_which({"git": "/g", "gh": "/h", "worc": "/usr/local/bin/worc"}),
+            system=system,
+        )
+        assert pins.launch("worc") == "/usr/local/bin/worc"
+        assert any("worc -> /usr/local/bin/worc" in line for line in pins.describe())
+
+
 def test_the_host_specific_names_follow_the_host_not_the_config(make_git_config, tmp_path) -> None:
     """``ps`` is POSIX-only and ``bwrap``/``socat`` are Linux-only, so the pinned set differs.
 

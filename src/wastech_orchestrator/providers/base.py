@@ -254,14 +254,16 @@ class AgentRunRequest:
     # holds as a mandate rather than a mechanism, since such a node has the network and picks up
     # credentials by itself.
     git_evidence: bool = False
-    # The absolute Git-control + lifecycle roots a *workspace-write* attempt must
-    # Write/Edit-deny (exchange root, resolved gitdir/common-dir/hooks-dir, ``tasks/`` tree). Set by
-    # the node runner from ``GitManager.resolve_control_paths`` only for a workspace-write attempt
-    # (the gitdir/common-dir are per-worktree and only final after branch prep); ``None`` for
-    # read-only attempts, which carry no write tools. Provider-neutral — each adapter renders it
-    # into its own tool-deny / OS-sandbox ``denyWrite`` syntax; preserved verbatim across a
-    # fallback. Repository governance/instruction files are intentionally not in this set — editing
-    # them is ordinary work, reported to the operator rather than blocked.
+    # The absolute Git-control + lifecycle roots an attempt must Write/Edit-deny (exchange root,
+    # resolved gitdir/common-dir/hooks-dir, ``tasks/`` tree). Set from
+    # ``GitManager.resolve_control_paths`` for every attempt that has *any* way to mutate the clone
+    # — write tools or a shell — which is every provider attempt with a shell (agent, evaluator,
+    # supervisor) plus a workspace-write one whose shell the host dropped (the gitdir/common-dir are
+    # per-worktree and only final after branch prep). ``None`` only for an attempt that has neither.
+    # Provider-neutral — each adapter renders it into its own tool-deny / OS-sandbox ``denyWrite``
+    # syntax and re-proves it with the pre-launch canary; preserved verbatim across a fallback.
+    # Repository governance/instruction files are intentionally not in this set — editing them is
+    # ordinary work, reported to the operator rather than blocked.
     write_guard: ProviderWriteGuardPolicy | None = None
     # The Core-owned orchestrator security contract prepended to the effective prompt as
     # defense-in-depth (advisory, NOT enforcement — the sandbox + deny projection enforce). Neutral

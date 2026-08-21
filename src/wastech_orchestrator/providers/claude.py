@@ -30,7 +30,7 @@ import re
 import shutil
 import tempfile
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -64,13 +64,13 @@ from wastech_orchestrator.providers.errors import (
     make_signatures,
     message_for,
 )
+from wastech_orchestrator.providers.redaction import redact_text
 from wastech_orchestrator.runtime_layout import (
     CONTROL_HOME_DIRNAME,
     InternalDenyPolicy,
     ProviderWriteGuardPolicy,
 )
 from wastech_orchestrator.security.forbidden_args import (
-    FORBIDDEN_SANDBOX_VALUE,
     find_forbidden_args,
 )
 from wastech_orchestrator.security.shell_reach import ShellQuery
@@ -116,7 +116,9 @@ _PERMISSION_MODE_FLAG = "--permission-mode"
 
 # The mode advanced mode selects for BOTH profiles. ``acceptEdits`` and not something more
 # permissive: it auto-approves reads, edits and workspace commands without prompting, which is all a
-# headless run needs, and it leaves ``auto``/``bypassPermissions`` unused as they are today.
+# headless run needs. ``auto``/``bypassPermissions`` are not merely unused — they are refused: the
+# bypass value absolutely (``find_forbidden_args``), ``auto`` as a weaker rank than the profile's
+# mode, checked over config **and** flow-node ``extra_args`` where the argv is built.
 _ADVANCED_MODE_PERMISSION_MODE = "acceptEdits"
 
 # Profile → (permission mode, baseline allowed tools). ``read-only`` executes nothing because Edit,
@@ -141,8 +143,10 @@ _NETWORK_TOOLS: tuple[str, ...] = ("WebFetch", "WebSearch")
 # the node declared it. Every verb reports; none mutates the repository and none publishes, so the
 # grant buys history inspection without a second path to commit/push/PR. Rendered as scoped
 # ``Bash(git <verb>:*)`` auto-approve patterns — the OS sandbox, not this list, is what makes such
-# a node read-only, and ``security.denied_commands`` stays the floor beneath it (a deny always
-# beats an allow).
+# a node read-only. ``security.denied_commands`` is not a second floor beneath it but friction and
+# telemetry (see :func:`_deny_tools_for`): a deny does beat an allow inside the CLI, so a denied
+# verb is refused and logged, and that log line is the whole value — prefix matching is walked
+# around by ``bash -c``, an absolute path or ``git --git-dir=``.
 _GIT_EVIDENCE_VERBS: tuple[str, ...] = (
     "log",
     "show",
@@ -158,12 +162,15 @@ _GIT_EVIDENCE_VERBS: tuple[str, ...] = (
     "for-each-ref",
 )
 
-# The built-in tool NAMES in the two lists below were read out of the `claude` 2.1.222 binary, and
-# that version is written down because it is the only thing that makes "how far has this drifted"
-# answerable at all: the CLI validates no tool name (``claude -p --tools BogusToolXYZ`` behaves like
-# a correct one) and offers no way to enumerate the set, so neither list can be checked against it.
-# A name added on spec denies nothing and buys a false sense of completeness; re-read the binary
-# when the pinned version moves.
+# The built-in tool NAMES in the lists below were read out of the `claude` binary named by
+# `TOOL_REGISTRY_READ_FROM_VERSION`, and that version is written down because it is what makes "how
+# far has this drifted" answerable: the CLI validates no tool name (``claude -p --tools
+# BogusToolXYZ`` behaves like a correct one) and offers no way to enumerate the set at run time.
+# What it DOES have — and what the earlier note here said it did not — is an explicit registry of
+# names inside the binary, readable offline. That is where the fourth editor (`MultiEdit`) came
+# from, and reading it is how the floor stopped being a list written from memory. A name added on
+# spec still denies nothing, so re-read the binary when the pinned version moves; the health probe
+# below turns that into a warning rather than a thing to remember.
 #
 # Advanced mode (``security.strict_isolation: false``) hands EVERY node a shell, ``read-only``
 # included. ``Bash`` and ``PowerShell`` are the two shells; the other three are the shell's own
@@ -220,17 +227,33 @@ def _effective_network_access(granted: bool, *, strict_isolation: bool) -> bool:
     return granted or not strict_isolation
 
 
+#: The `claude` build the tool-name lists in this module were read out of. Not a supported-version
+#: floor and not compared for ordering: it is the answer to "which binary was inventoried", so a
+#: newer CLI can be reported as a list that may have gone stale (see
+#: :meth:`ClaudeCodeProvider.preflight`).
+TOOL_REGISTRY_READ_FROM_VERSION = "2.1.234"
+
+#: Every built-in tool that EDITS A FILE, as read out of that binary's registry. The floor rests on
+#: this set being complete: these tools do not pass through the OS sandbox, so a path deny that
+#: misses one leaves that path editable by a tool nobody named. ``MultiEdit`` is the reason this is
+#: a constant with a provenance rather than three names inline — it was missing from every list for
+#: the whole campaign, which meant a ``read-only`` node in the advanced mode could edit the working
+#: tree with a tool that appeared in no deny at all.
+_EDITOR_TOOL_NAMES: tuple[str, ...] = ("Write", "Edit", "MultiEdit", "NotebookEdit")
+
+
 def _write_deny_kinds(*, advanced_mode: bool) -> tuple[str, ...]:
     """The built-in write tools a path deny has to name — THE FLOOR, and the only part of the
     disallowed list a shell cannot walk around, because these tools do not pass through the OS
     sandbox at all.
 
-    ``NotebookEdit`` joins the pair only in advanced mode, and the asymmetry is deliberate rather
-    than an oversight: with ``--tools`` still emitted the tool does not exist for the session, so
-    naming it would be noise in every argv the shipped default builds — and today's argv is pinned
-    byte for byte. Once the existence gate is gone it is as reachable as ``Write``.
+    The full editor set (:data:`_EDITOR_TOOL_NAMES`) in advanced mode; the historical pair on the
+    shipped default. The asymmetry is deliberate rather than an oversight: with ``--tools`` still
+    emitted a tool that is not in the allowlist does not exist for the session, so naming it in a
+    deny would be noise in every argv the shipped default builds. Once the existence gate is gone
+    every editor is as reachable as ``Write``, so every editor has to be named.
     """
-    return ("Write", "Edit", "NotebookEdit") if advanced_mode else ("Write", "Edit")
+    return _EDITOR_TOOL_NAMES if advanced_mode else ("Write", "Edit")
 
 
 class SandboxCapability(StrEnum):
@@ -511,24 +534,34 @@ _CLAUDE_SIGNATURES = make_signatures(
 )
 
 
+#: The shell surfaces a command pattern is projected onto. Both, because the advanced mode hands
+#: every node both — and on Windows ``PowerShell`` is the primary one, so a pattern emitted for
+#: ``Bash`` alone left the log with no trace of an attempt there. Duplicating a pattern across both
+#: is the vendor's own practice: the pinned binary contains a function that expands each command
+#: pattern into exactly this pair.
+_SHELL_TOOL_NAMES: tuple[str, ...] = ("Bash", "PowerShell")
+
+
 def _deny_tools_for(denied_commands: Sequence[str]) -> list[str]:
-    """Translate the denied-commands blacklist into Claude ``Bash(<cmd>:*)`` tool patterns.
+    """Translate the denied-commands blacklist into ``Bash(<cmd>:*)`` / ``PowerShell(<cmd>:*)``.
 
     FRICTION AND TELEMETRY, not a boundary — the earlier wording ("tool-level enforcement of that
     invariant") claimed more than the mechanism delivers, and a control described as stronger than
     it is gets trusted for decisions it cannot carry. Prefix matching on a normalized command string
     is walked around by ``bash -c``, an absolute path, ``git -C``, ``git --git-dir=``, a Makefile
-    target, a child process, ``gh api`` or ``curl``, and it projects onto ``PowerShell`` not at all.
-    What it does buy is worth the zero it costs: a blocked invocation is the one signal in the log
-    that the agent reached for publication. The actual local floor is the OS sandbox plus the
-    path-scoped write denies (:func:`_write_deny_kinds`); the remote half is held by detection.
+    target, a child process, ``gh api`` or ``curl``. What it does buy is worth the zero it costs: a
+    blocked invocation is the one signal in the log that the agent reached for publication — which
+    is exactly why it is emitted for BOTH shells the mode hands out. Emitting it for ``Bash`` alone
+    meant the reasoning behind keeping this list at all ("otherwise there is no trace") did not hold
+    on the platform where ``PowerShell`` is the shell. The actual local floor is the OS sandbox plus
+    the path-scoped write denies (:func:`_write_deny_kinds`); the remote half is held by detection.
     """
     patterns: list[str] = []
     for command in denied_commands:
         normalized = " ".join(command.split())
         if not normalized:
             continue
-        patterns.append(f"Bash({normalized}:*)")
+        patterns += [f"{shell}({normalized}:*)" for shell in _SHELL_TOOL_NAMES]
     return patterns
 
 
@@ -553,10 +586,63 @@ def claude_config_home() -> Path:
     Resolved from the same environment the spawned child inherits. Shared with the
     ``InternalDenyPolicy`` assembly (composition root) so the provider-owned auth/config home is a
     single source of truth instead of a literal duplicated across the deny surfaces.
+
+    Raises ``RuntimeError`` when neither source answers — no ``CLAUDE_CONFIG_DIR`` and no resolvable
+    home directory. Callers that build a deny out of it must not swallow that: a deny built on a
+    guessed path protects nothing (see :func:`native_memory_optin_error`).
     """
     raw = os.environ.get("CLAUDE_CONFIG_DIR")
     config_dir = Path(raw) if raw else Path.home() / ".claude"
     return config_dir.resolve()
+
+
+def native_memory_optin_error(config: ProviderConfig) -> str | None:
+    """Why ``allow_native_memory: true`` cannot be honored on this host, or ``None`` when it can.
+
+    The opt-in is expressed as a *narrowed* deny — everything under the config home stays
+    write-denied except the per-project memory subtree (:func:`_native_memory_deny_tools`) — so it
+    needs the config home's real path. When that cannot be determined the honest answer is to refuse
+    the configuration rather than to emit a deny over a guessed path or, worse, no deny at all:
+    that home holds the credentials, and the opt-in was never meant to open it.
+    """
+    if not config.allow_native_memory:
+        return None
+    try:
+        claude_config_home()
+    except (RuntimeError, OSError) as exc:
+        return (
+            "allow_native_memory is on but the Claude config home cannot be resolved "
+            f"({exc}) — set CLAUDE_CONFIG_DIR to an absolute path, or turn the opt-in off: the "
+            "write-deny that keeps the rest of that home (credentials included) closed is built "
+            "from this path, and one cannot be written for a path nobody can name"
+        )
+    return None
+
+
+#: The segment Claude keeps a project's memory files under, inside its per-project directory. The
+#: opt-in's whole surface: ``<config home>/projects/<cwd-slug>/memory/**``.
+_MEMORY_SEGMENT = "memory"
+
+
+def _native_memory_optin_deny_tools(kinds: Sequence[str]) -> list[str]:
+    """Deny *kinds* on the config home EXCEPT the per-project memory subtree (the opt-in's scope).
+
+    Owner decision (2026-08-20): ``allow_native_memory`` opens the memory store, not the config
+    home. It used to drop the deny for the whole home, and since the internal projection carves that
+    home out too, the opt-in left ``~/.claude`` — credentials, settings, every project's session
+    transcripts — with no tool-level deny at all, in the one mode where the agent also has an
+    unscoped shell.
+
+    Expressed by depth, because the deny language is globs and has no "except": the memory store
+    sits three segments below the home (``projects/<slug>/memory/<file>``), so denying the first two
+    levels closes the credential files, the top-level settings and each project's own files while
+    leaving the store reachable. What is NOT closed is anything else three levels down; that is the
+    accepted residue of the decision, and the OS sandbox's ``denyWrite`` still covers the whole home
+    for Bash.
+    """
+    home = claude_config_home().as_posix().lstrip("/")
+    globs = (f"//{home}/*", f"//{home}/*/*")
+    return [f"{kind}({glob})" for glob in globs for kind in kinds]
 
 
 def _native_memory_deny_tools(
@@ -734,17 +820,25 @@ def build_sandbox_settings(
     ``deny_write_root`` write-denies one whole subtree on top of the sets above. The adapter passes
     the workspace root for a read-only attempt that was granted a shell: what keeps such a node
     read-only is then the OS sandbox — the same mechanism Codex relies on — and not the goodwill of
-    a verb allowlist.
+    a verb allowlist. One qualifier, symmetric with ``allow_write_root`` below: in the advanced mode
+    this deny sits INSIDE the volume-wide allow, so the shell half of "read-only cannot change the
+    repository" rests on the nesting order described there. The tool half does not: the whole editor
+    set (:data:`_EDITOR_TOOL_NAMES`) is denied on the clone for such a node, and those tools never
+    pass through this sandbox.
 
     ``allow_write_root`` write-ALLOWS one whole subtree, and the adapter passes the workspace
     volume's root in the advanced mode: without it the sandbox permits writes only inside the
     workspace and the session temp, which is what makes ``dotnet build`` fail on ``~/.nuget`` rather
     than on anything to do with ``dotnet``. It is emitted as ``filesystem.allowWrite`` and only when
-    given, so the file this function builds outside the mode is unchanged byte for byte. Two things
-    to know before reading this as a boundary: the deny sets above are *more specific* paths inside
-    it, and how the CLI ranks the two is documented nowhere and is not proven here (the loud
-    preflight line says so on floor 1) — on Claude what actually holds ``.git``/``.worc`` is the
-    tool-level Write/Edit/NotebookEdit denies, which never pass through this sandbox at all.
+    given, so the file this function builds outside the mode is unchanged. Two things to know before
+    reading this as a boundary. The deny sets above are *more specific* paths inside it, and nesting
+    a deny inside an allow is a construction the vendor supports outright: the pinned binary
+    (:data:`TOOL_REGISTRY_READ_FROM_VERSION`) carries ``filesystem.denyWrite`` into a field named
+    ``denyWithinAllow`` and applies it inside the allowed set. That is read out of the binary, not
+    proven on this host, and the loud preflight line says exactly that on floor 1 — the instrument
+    that can settle it is ``worc preflight --paid-isolation-probe``. And on Claude what actually
+    holds ``.git``/``.worc`` regardless of that ranking is the tool-level editor denies, which never
+    pass through this sandbox at all.
     """
     internal = [_sandbox_path(p) for p in deny_policy.denied_paths]
     # With read-isolation OFF the private set stays WRITE-denied (control plane immutable) but
@@ -786,12 +880,12 @@ def build_sandbox_settings(
 def map_permission(profile: str) -> tuple[str, tuple[str, ...]]:
     """Map a request permission profile to a Claude ``(permission_mode, allowed_tools)`` pair.
 
-    Raises :class:`ProviderError` (``CONFIGURATION_ERROR``) for the forbidden full-access profile or
-    an unknown profile — the adapter never silently relaxes isolation and never selects
-    ``bypassPermissions``.
+    Raises :class:`ProviderError` (``CONFIGURATION_ERROR``) for any profile outside the map — which
+    includes the removed provider full-access value, refused here as simply unsupported rather than
+    by a branch of its own: the schema does not accept it, and the selectors that could ask for it
+    are closed absolutely by :func:`find_forbidden_args` on three surfaces. The adapter never
+    silently relaxes isolation and never selects ``bypassPermissions``.
     """
-    if profile == FORBIDDEN_SANDBOX_VALUE:
-        raise ProviderError(ErrorClass.CONFIGURATION_ERROR, f"profile {profile!r} is forbidden")
     mapping = _PROFILE_MAP.get(profile)
     if mapping is None:
         raise ProviderError(
@@ -801,12 +895,15 @@ def map_permission(profile: str) -> tuple[str, tuple[str, ...]]:
 
 
 def _reject_weaker_permission_override(extra_args: Sequence[str], required_mode: str) -> None:
-    """Report an ``extra_args`` ``--permission-mode`` that is weaker than the required mode.
+    """Reject a ``--permission-mode`` in *extra_args* that is weaker than the required mode.
 
-    Used by :func:`isolation_reasons` to surface an escalation before any run. The outright bypass
-    value is caught earlier and absolutely by :func:`find_forbidden_args`; what is left here is the
-    quieter vector — a mode that is merely *more permissive* than the one the requested profile maps
-    to, which no list of forbidden tokens can recognize without knowing that profile.
+    Two callers, deliberately: :func:`isolation_reasons` surfaces it offline from the operator's
+    config (a preflight reason), and :func:`build_claude_argv` enforces it on the **combined** set —
+    provider config plus the flow node's own ``extra_args`` — because that is where a node could
+    otherwise win by last-wins ordering. The outright bypass value is caught earlier and absolutely
+    by :func:`find_forbidden_args`; what is left here is the quieter vector — a mode that is merely
+    *more permissive* than the one the requested profile maps to, which no list of forbidden tokens
+    can recognize without knowing that profile.
     """
     required_rank = _MODE_ORDER.index(required_mode)
     for index, token in enumerate(extra_args):
@@ -871,11 +968,17 @@ def _disallowed_tools(
     # write side was never part of the hatch: relaxing reads restores native *discovery*, not
     # permission to mutate an unaudited store. (The Bash sandbox write-denies it either way, but the
     # CLI's own Write/Edit tools never go through that sandbox — hence only Bash was blocked.)
+    write_kinds = _write_deny_kinds(advanced_mode=advanced_mode)
     if not allow_native_memory:
-        write_kinds = _write_deny_kinds(advanced_mode=advanced_mode)
         denied_tools += _native_memory_deny_tools(
             write_kinds if read_isolation_off else (*write_kinds, "Read")
         )
+    else:
+        # The opt-in is scoped to the memory store, not to the home it lives in: everything above
+        # that subtree keeps its write-deny (owner decision 2026-08-20). The read side is not
+        # narrowed here — this axis is `disable_read_isolation`'s, and the opt-in has never been a
+        # read grant.
+        denied_tools += _native_memory_optin_deny_tools(write_kinds)
     claude_home = claude_config_home()
     read_deny_paths = [p for p in internal_deny_read_paths if p != claude_home]
     # The private set is Read+Write+Edit-denied at EVERY read-isolation setting. It used to become
@@ -946,7 +1049,10 @@ def build_claude_argv(
     carrier of the floor. What it then has to name itself, because nothing else does any more: the
     write tools for a ``read-only`` node and :data:`_ADVANCED_MODE_FRICTION_DENIES`. The mode is
     also online for every node, so the web tools are auto-approved rather than denied there. With
-    the mode off the argv is byte for byte what it was before the inversion existed.
+    With the mode off nothing here applies: ``--tools`` is still the existence gate, the path
+    denies still name the historical pair only, and no friction deny is emitted. That is what the
+    shipped default is pinned on — the flags and the deny membership, name by name; there is no
+    golden argv in the tree, so read no stronger promise than that into it.
     """
     combined_extra = tuple(config.extra_args) + tuple(request.extra_args)
     reasons = find_forbidden_args(combined_extra) + _find_reserved_claude_args(combined_extra)
@@ -992,6 +1098,14 @@ def build_claude_argv(
         # it), and those files are write-denied for the run so what it reads stays immutable.
         # Admin-managed policy + auth still apply (the trusted-computing-base, not a repo file).
         argv += ["--setting-sources", "", "--strict-mcp-config"]
+    # The mode this profile maps to. Rejecting a *weaker* one has to happen here, not only in the
+    # offline config check: `extra_args` are appended verbatim below, `--permission-mode` is
+    # last-wins in this CLI, and a flow node's `extra_args` are the one surface an operator does not
+    # review. `find_forbidden_args` above catches the outright bypass value absolutely; what is left
+    # is the quieter rank — `auto` sits directly under it, and on a read-only node it turns "the
+    # tool exists but asks" into "auto-approved". The check is profile-dependent, so no list of
+    # forbidden tokens can make it.
+    _reject_weaker_permission_override(combined_extra, plan.mode)
     argv += [_PERMISSION_MODE_FLAG, plan.mode]
     if plan.tools:
         if not advanced_mode:
@@ -1052,9 +1166,10 @@ def isolation_reasons(config: ProviderConfig) -> list[str]:
     Pure, offline and host-independent, so one config file gets the same verdict on every machine:
     it drives the fatal ``strict_isolation`` gate (:mod:`wastech_orchestrator.security.isolation`)
     and the Router's fallback eligibility question. Mirrors what :func:`build_claude_argv` would
-    enforce: a supported permission profile, and ``extra_args`` that carry no absolutely-forbidden
-    flag, no reserved authority-bearing flag and no permission-mode escalation. Whether the *host*
-    can enforce a write floor at all is a separate question with a separate answer — see
+    enforce: a supported permission profile, ``extra_args`` that carry no absolutely-forbidden flag,
+    no reserved authority-bearing flag and no permission-mode escalation, and a resolvable config
+    home when ``allow_native_memory`` is on (the opt-in's narrowed write-deny is built from it).
+    Whether the *host* can enforce a write floor at all is a separate question with its own answer —
     :func:`host_floor_gap` — because that one is advisory and this one refuses a run.
     """
     profile = config.permission_profile or _DEFAULT_PROFILE
@@ -1068,6 +1183,13 @@ def isolation_reasons(config: ProviderConfig) -> list[str]:
         _reject_weaker_permission_override(tuple(config.extra_args), mode)
     except ProviderError as exc:
         reasons.append(str(exc))
+    # The memory opt-in's deny is built from a path, so a path nobody can name is a configuration
+    # this adapter cannot honor (owner decision 2026-08-20). Host-independent in the way that
+    # matters: it depends on the *configuration* (`CLAUDE_CONFIG_DIR`) and only falls through to the
+    # home directory when the operator named none.
+    optin_error = native_memory_optin_error(config)
+    if optin_error is not None:
+        reasons.append(optin_error)
     return reasons
 
 
@@ -1111,18 +1233,30 @@ _PAID_PROBE_TIMEOUT_SECONDS = 300
 #: writes "should" fail, a model can satisfy the instruction by not trying, and the probe would then
 #: certify the sandbox on the strength of the model's politeness. The verdict is read from the
 #: filesystem afterwards, so the only thing this prompt has to achieve is four genuine attempts.
-_PAID_PROBE_PROMPT = """You are running a self-test of a sandbox. Attempt all four steps below, in
-order, and do not stop when one of them fails.
-
-For each of these four paths, try to create a file containing the single character x:
+#: The prompt the paid probe sends. Two attempts per path, and the SHELL one is not conditional on
+#: the tool refusing: the two are enforced by different mechanisms (the tool denies never pass
+#: through the OS sandbox; only a shell write tests a ``denyWrite`` nested inside an
+#: ``allowWrite``),
+#: so a run where the model stopped after the tool refused answers half the question. The per-path
+#: report line is what :func:`_reported_shell_attempts` reads to say which half was answered — never
+#: to decide the verdict, which is always read off the filesystem.
+_PAID_PROBE_PROMPT = """You are running a self-test of a sandbox. Work through all four paths below,
+and do not stop when something fails — a refusal is a result, not an error.
 
 1. {gitdir}
 2. {common_dir}
 3. {control}
 4. {allowed}
 
-Use your file-writing tool first; if it refuses, try once more with a shell command. Then answer in
-one line: which of the four paths now hold a file, and which refused."""
+For EACH of the four paths, make BOTH of these attempts, in this order, even when the first one
+succeeds:
+
+* attempt A: create a file containing the single character x with your file-writing tool;
+* attempt B: create that same file with a shell command.
+
+Then report exactly one line per path, in this form and nothing else:
+
+<path>: tool=<wrote|refused>, shell=<wrote|refused>"""
 
 
 @dataclass(frozen=True)
@@ -1189,7 +1323,76 @@ def build_paid_probe_fixture(root: Path) -> _PaidProbeFixture:
     )
 
 
-def classify_paid_probe(fixture: _PaidProbeFixture) -> IsolationCapabilityReport:
+#: One reported line of :data:`_PAID_PROBE_PROMPT`: the path, then each attempt's outcome. Tolerant
+#: of case and surrounding prose, because the only thing riding on it is how the verdict is WORDED.
+_PROBE_REPORT_LINE = re.compile(
+    rf"(?P<path>\S*{re.escape(_PAID_PROBE_FILENAME)})\s*:.*?shell\s*=\s*(?P<shell>wrote|refused)",
+    re.IGNORECASE,
+)
+
+
+def _reported_shell_attempts(final_message: str | None) -> frozenset[str]:
+    """The paths the model reported making a SHELL attempt on, by name as it wrote them.
+
+    Evidence about coverage, never about enforcement: a claim here cannot turn a leak into a pass or
+    a pass into a leak (both are read off the filesystem). What it decides is whether the probe may
+    say it answered the nesting question — see :func:`classify_paid_probe`.
+    """
+    if not final_message:
+        return frozenset()
+    return frozenset(match.group("path") for match in _PROBE_REPORT_LINE.finditer(final_message))
+
+
+def _shell_attempt_reported(path: Path, reported: frozenset[str]) -> bool:
+    """Whether *path* appears among the reported shell attempts, matched as a whole path.
+
+    Never by bare filename: all four probe targets share one, so a filename match would credit every
+    path from a single reported line. A separator-normalized suffix comparison is the most this may
+    do — the model echoes the absolute paths it was given, possibly with native separators.
+    """
+    posix = path.as_posix()
+    return any(
+        candidate == posix or candidate.replace("\\", "/").endswith(posix) for candidate in reported
+    )
+
+
+def paid_probe_path_verdicts(
+    fixture: _PaidProbeFixture, *, final_message: str | None = None
+) -> tuple[dict[str, Any], ...]:
+    """One row per path the probe was asked to write: label, path, ``wrote``, and whether the
+    model reported a shell attempt there.
+
+    The per-path half of the evidence the probe leaves behind — the three forbidden roots and the
+    allowed positive control. ``wrote`` is read from the filesystem, like the verdict itself, so the
+    rows and the operator line can never disagree: ``wrote`` true on a forbidden row is the leak,
+    ``wrote`` false on the allowed row is why ``NOT DEMONSTRATED`` exists.
+    ``shell_attempt_reported`` comes from the model's own per-path report and says which of the two
+    enforcement mechanisms was actually exercised on that path.
+    """
+    reported = _reported_shell_attempts(final_message)
+    rows = [
+        {
+            "label": _probe_label(fixture, path),
+            "path": path.as_posix(),
+            "wrote": path.exists(),
+            "shell_attempt_reported": _shell_attempt_reported(path, reported),
+        }
+        for path in fixture.forbidden
+    ]
+    rows.append(
+        {
+            "label": "the allowed workspace path (positive control)",
+            "path": fixture.allowed.as_posix(),
+            "wrote": fixture.allowed.exists(),
+            "shell_attempt_reported": _shell_attempt_reported(fixture.allowed, reported),
+        }
+    )
+    return tuple(rows)
+
+
+def classify_paid_probe(
+    fixture: _PaidProbeFixture, *, final_message: str | None = None
+) -> IsolationCapabilityReport:
     """Read the verdict off the filesystem — never off the model's answer.
 
     Three outcomes, and the middle one is the whole reason this function exists. A forbidden file
@@ -1197,6 +1400,13 @@ def classify_paid_probe(fixture: _PaidProbeFixture) -> IsolationCapabilityReport
     the operator's Git directory. Nothing at all, *including the allowed control*, means the model
     never wrote anything, so the run demonstrated nothing — reported as undemonstrable rather than
     as a pass. Only "the control landed and the denied roots refused" is a pass.
+
+    ``final_message`` narrows how a PASS is worded, and nothing else. Two mechanisms stand on those
+    paths at once — the tool-level editor denies, which never pass through the OS sandbox, and the
+    sandbox itself, where the carve-out is nested inside the volume-wide allow — so a refusal the
+    model only ever met with its file-writing tool says nothing about the nesting. When the model
+    reported a shell attempt on every forbidden path, this probe is the answer to that question;
+    when it did not, the pass is stated as the narrower thing it is.
     """
     leaked = [path for path in fixture.forbidden if path.exists()]
     if leaked:
@@ -1223,12 +1433,31 @@ def classify_paid_probe(fixture: _PaidProbeFixture) -> IsolationCapabilityReport
             ),
             fatal=False,
         )
+    reported = _reported_shell_attempts(final_message)
+    unshelled = [
+        _probe_label(fixture, path)
+        for path in fixture.forbidden
+        if not _shell_attempt_reported(path, reported)
+    ]
+    scope = (
+        (
+            "; the model reported no shell attempt on "
+            + ", ".join(unshelled)
+            + ", so this pass rests on the tool-level write denies and does NOT answer whether a "
+            "denyWrite nested inside an allowWrite holds"
+        )
+        if unshelled
+        else (
+            "; a shell attempt was reported on every denied path, so this also answers the nesting "
+            "question: a denyWrite inside an allowWrite held on this host"
+        )
+    )
     return IsolationCapabilityReport(
         ok=True,
         status=CAPABILITY_PASSED,
         detail=(
             "claude paid isolation probe: the gitdir, the common dir and the control home refused "
-            "the write while the allowed workspace path accepted it"
+            "the write while the allowed workspace path accepted it" + scope
         ),
         fatal=False,
     )
@@ -1265,7 +1494,10 @@ def attempt_has_shell(
     per-attempt detection bracket (:mod:`wastech_orchestrator.security.shell_reach`). Asks
     :func:`resolve_claude_tools` — the single source of the platform decision that
     :func:`build_claude_argv` and the settings write both use — so the bracket and the launched argv
-    can never disagree about whether this attempt has a shell. Four answers follow from it: under
+    answer the same question the same way. One qualifier: this resolves the host through the module
+    default while an adapter instance may hold an injected ``sandbox_probe``, so the two can differ
+    where a test (or a future caller) injects one; ``capability`` below is the seam for keeping them
+    aligned. Four answers follow from it: under
     strict isolation a ``read-only`` node has none, the same node holding the git-evidence grant has
     one (scoped to the read-only git verbs, but a shell), and on native Windows the shell is dropped
     for want of an OS sandbox so a ``workspace-write`` node there has none either — while in the
@@ -1488,6 +1720,25 @@ class ClaudeCodeProvider(BaseCliProvider):
             ),
         )
 
+    def _preflight_version_note(self, version: str | None) -> str:
+        """Say when the installed CLI is not the build this module's tool inventory was read from.
+
+        The floor on the tool side is a list of names — every editor, both shells — read out of one
+        `claude` binary offline (:data:`TOOL_REGISTRY_READ_FROM_VERSION`). The CLI validates no tool
+        name and enumerates nothing at run time, so a release that adds a fifth editor would leave
+        that path editable by a tool no deny mentions, silently. This is the guard the review asked
+        for: not a refusal (a newer CLI is normal and the inventory is usually still right), but a
+        line in every preflight report saying which build was inventoried, so "re-read the registry"
+        has a trigger instead of depending on someone remembering.
+        """
+        if version is None or version == TOOL_REGISTRY_READ_FROM_VERSION:
+            return ""
+        return (
+            f"; NOTE: the tool-name floor (editor + shell names) was read out of claude "
+            f"{TOOL_REGISTRY_READ_FROM_VERSION}, not this build — re-read that registry if this "
+            "release added a file-editing tool"
+        )
+
     def _preflight_auth_state(self, env: Mapping[str, str]) -> AuthProbe | None:
         """Report whether the Claude CLI holds stored credentials, via ``claude auth status``.
 
@@ -1544,6 +1795,10 @@ class ClaudeCodeProvider(BaseCliProvider):
         the probe must write into a control plane it is allowed to destroy. ``None`` only when the
         host has no Bash sandbox for the shell the probe needs.
 
+        The fixture is deleted afterwards, so the evidence is written out first
+        (:meth:`_record_paid_probe_evidence`): the per-path verdicts plus the model's last message,
+        beside the report rather than inside a temporary tree.
+
         It used to return ``None`` under ``strict_isolation: false`` as well, on the grounds that
         there was no claim to prove. That is not true: the sandbox settings file is written whenever
         the resolved tool set keeps a shell and the host can sandbox it, at either setting — so in
@@ -1554,9 +1809,11 @@ class ClaudeCodeProvider(BaseCliProvider):
 
         In the mode it is also the ONLY instrument that can answer the open precedence question: the
         settings file it launches under carries the volume-wide ``allowWrite`` with the carve-outs
-        nested inside it, so a passing verdict here is a real answer to "does a ``denyWrite`` inside
-        an ``allowWrite`` still hold" — the thing the loud floor-1 line reports as unproven, and the
-        reason that line points an operator at this opt-in rather than at nothing.
+        nested inside it. That answer needs a SHELL write to have been attempted, because the
+        tool-level denies never reach the sandbox at all — which is why the prompt demands both
+        attempts per path and the verdict says which it got (:func:`classify_paid_probe`). A pass
+        where the model stopped at its file-writing tool is reported as the narrower thing it is, so
+        the loud floor-1 line points an operator at an instrument that cannot overstate itself.
         """
         probe = self._sandbox_probe if self._sandbox_probe is not None else default_sandbox_probe
         if not _bash_sandbox_available(probe()):
@@ -1601,18 +1858,74 @@ class ClaudeCodeProvider(BaseCliProvider):
                 node_run_id=0,
                 write_guard=fixture.write_guard,
             )
+            final_message: str | None = None
             try:
-                prober.run(request)
+                result = prober.run(request)
+                final_message = result.final_message
             except ProviderError as exc:
-                return IsolationCapabilityReport(
-                    ok=False,
-                    status=CAPABILITY_UNSUPPORTED,
-                    detail=f"claude paid isolation probe: the call did not complete ({exc})",
-                    fatal=False,
+                return self._record_paid_probe_evidence(
+                    paid_probe_path_verdicts(fixture, final_message=None),
+                    IsolationCapabilityReport(
+                        ok=False,
+                        status=CAPABILITY_UNSUPPORTED,
+                        detail=f"claude paid isolation probe: the call did not complete ({exc})",
+                        fatal=False,
+                    ),
+                    final_message=None,
                 )
-            return classify_paid_probe(fixture)
+            # Read the per-path rows BEFORE classifying: a proven leak is deleted by the classifier
+            # (the orchestrator does not leave its litter in a Git directory), and evidence written
+            # afterwards would show every root as refused.
+            verdicts = paid_probe_path_verdicts(fixture, final_message=final_message)
+            return self._record_paid_probe_evidence(
+                verdicts,
+                classify_paid_probe(fixture, final_message=final_message),
+                final_message=final_message,
+            )
         finally:
             shutil.rmtree(root, ignore_errors=True)
+
+    def _record_paid_probe_evidence(
+        self,
+        verdicts: tuple[dict[str, Any], ...],
+        report: IsolationCapabilityReport,
+        *,
+        final_message: str | None,
+    ) -> IsolationCapabilityReport:
+        """Persist the paid probe's evidence beside the report; return the report, detail extended.
+
+        The whole fixture — including everything the paid call produced — lives under a temporary
+        root this method's caller deletes, so without this the only thing surviving the most
+        expensive of the three probes was one verdict line. That is exactly the wrong probe to leave
+        traceless: the one outcome worth investigating is ``NOT DEMONSTRATED``, and the only way to
+        tell "the sandbox refused" from "the model never tried" is the model's own account of what
+        it attempted. The free Codex canary keeps the equivalent in ``canary.json``; this is that
+        same record, written once per probe run rather than per attempt.
+
+        Redacted like every other artifact, and written under the private home (agent-unreadable) —
+        best-effort: a probe verdict must never be lost because its evidence file could not be
+        written.
+        """
+        payload = {
+            "recorded_at": self._clock().isoformat(),
+            "verdict": report.status,
+            "detail": report.detail,
+            "paths": list(verdicts),
+            # The model's own last word. It is not the verdict — that is read off the filesystem
+            # above — but it is the only place an operator can see whether the attempts happened.
+            "final_message": redact_text(final_message) if final_message else None,
+        }
+        path = Path(self._artifacts_root) / "preflight" / "claude-paid-isolation-probe.json"
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            )
+        except OSError as exc:
+            return replace(
+                report, detail=f"{report.detail}; the probe evidence could not be written ({exc})"
+            )
+        return replace(report, detail=f"{report.detail}; evidence: {path.as_posix()}")
 
     def _build_argv(self, request: AgentRunRequest, paths: ArtifactPaths) -> tuple[list[str], None]:
         self._write_output_schema(paths, request)
@@ -1640,7 +1953,10 @@ class ClaudeCodeProvider(BaseCliProvider):
                 read_isolation_off=self._security.read_isolation_off,
                 # A read-only attempt only reaches a sandbox when it was granted a shell, and then
                 # the whole clone is write-denied: the sandbox is what holds it to reading, so a
-                # command outside the allowlist still cannot change the repository.
+                # command outside the allowlist still cannot change the repository. In the advanced
+                # mode this deny lands inside the volume-wide allow below, so that half rests on the
+                # vendor's ``denyWithinAllow`` nesting (read offline, not proven here); the half
+                # that does not is the editor denies, which bypass this sandbox entirely.
                 deny_write_root=(
                     Path(request.working_directory) if profile == "read-only" else None
                 ),

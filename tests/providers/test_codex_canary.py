@@ -612,14 +612,22 @@ def test_a_deny_that_covers_only_the_gitdir_fails_on_the_common_dir_probe(tmp_pa
     # would have passed while the common dir stayed writable.
     guard = _write_guard(tmp_path, linked_worktree=True)
     targets = write_guard_probe_paths(guard.denied_write_paths)
+    common_sentinel = str(guard.git_common_dir / WRITE_GUARD_SENTINEL)
     gitdir_sentinel = str(guard.git_dir / WRITE_GUARD_SENTINEL)
+    # The labels are derived from the roots, so name the two from the fixture rather than by hand:
+    # what this test is about is that they are DIFFERENT probes.
+    common_label = next(label for label, path in targets.probes if path == common_sentinel)
+    gitdir_label = next(label for label, path in targets.probes if path == gitdir_sentinel)
+    assert common_label != gitdir_label
 
-    def _only_gitdir_is_denied(
+    def _every_root_denied_except_the_common_dir(
         argv: list[str], cwd: str, env: Mapping[str, str]
     ) -> tuple[int, str]:
         joined = " ".join(argv)
         if WRITE_GUARD_SENTINEL in joined:
-            return (1, "operation not permitted") if gitdir_sentinel in joined else (0, "")
+            # Only the shared common dir accepts the write — including the per-worktree gitdir,
+            # which is what a profile that closed "the .git" and nothing else would look like.
+            return (0, "") if common_sentinel in joined else (1, "operation not permitted")
         if "main.py" in joined:
             return 0, "print(1)"
         return 1, "operation not permitted"
@@ -633,11 +641,12 @@ def test_a_deny_that_covers_only_the_gitdir_fails_on_the_common_dir_probe(tmp_pa
         extra=ExtraProbes(repo_probe="/clone/src/main.py", write_guard_probes=targets.probes),
         env={},
         system="Linux",
-        runner=_only_gitdir_is_denied,
+        runner=_every_root_denied_except_the_common_dir,
     )
     assert not outcome.ok
     assert outcome.error_class is ErrorClass.CONFIGURATION_ERROR
-    # The failing probe is one of the roots the gitdir does NOT cover — never the gitdir itself.
+    # The named probe is the common dir's own — not the gitdir's, and not the first root in the set:
+    # every other probe was refused, so execution reached this one and it is the one that failed.
     failed = outcome.message.split("'")[1]
-    assert failed in {label for label, _ in targets.probes}
-    assert gitdir_sentinel not in failed
+    assert failed == common_label
+    assert failed != gitdir_label

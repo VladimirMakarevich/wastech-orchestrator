@@ -23,8 +23,10 @@ TRACE_REWORK_EXHAUSTED = "accept (rework budget exhausted)"
 
 #: Synthetic ``send_trace`` outcome label for a node that changed the working tree without being
 #: meant to write — something its sandbox (or, for a tool node, its own job description) is supposed
-#: to make impossible. Applies to every node class that gets a shell without write access: a granted
-#: read-only agent node, a Codex read-only node, an evaluator, an operator tool. The node still
+#: to make impossible. Applies to every FLOW NODE class that gets a shell without write access: a
+#: granted read-only agent node, a Codex read-only node, an evaluator, an operator tool. (The
+#: supervisor's own read-only turn is bracketed the same way, but it is not a graph node, so its
+#: verdict is a log warning with no trace label.) The node still
 #: finished (``done``) and the run continues; the ⚠️ says the guarantee did not hold and the tree
 #: needs a look. Same producer/transport split as :data:`TRACE_REWORK_EXHAUSTED`.
 TRACE_UNEXPECTED_WRITE = "done (node wrote to the workspace unexpectedly)"
@@ -36,6 +38,13 @@ TRACE_UNEXPECTED_WRITE = "done (node wrote to the workspace unexpectedly)"
 #: planted. Distinct from :data:`TRACE_UNEXPECTED_WRITE` because the two need different reactions: a
 #: stray file can be ignored, a poisoned hook cannot.
 TRACE_GIT_CONTROL_DRIFT = "done (node changed git control state)"
+
+#: Synthetic ``send_trace`` outcome label for a publish that had to merge in commits this
+#: orchestrator did not make (the fourth publish case). The run succeeded — the combination was
+#: re-checked before anything went out — but the task's reported diff is measured from the base and
+#: therefore now covers someone else's work too. A pull request says this in its body; with
+#: ``publish: push``/``commit`` there is no body, and then this ⚠️ is the only place it is said.
+TRACE_ADOPTED_COMMITS = "done (publish adopted commits it did not make)"
 
 #: Maps an internal terminal reason / loop ``limit_name`` (:mod:`core.flow.engine`) to one human
 #: sentence for the operator-facing terminal notification. These tokens are code-path

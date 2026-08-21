@@ -51,11 +51,19 @@ _ROLES: Mapping[str, str] = {
     "ps": "the process-quiescence barrier's descendant sweep",
     "bwrap": "the Claude host sandbox probe (probed, never launched by us)",
     "socat": "the Claude host sandbox probe (probed, never launched by us)",
+    "worc": "the watch daemon this process re-invokes as itself",
 }
 
 #: Names to pin on every host. ``ps`` is POSIX-only; the Windows quiescence proof uses a Job Object
 #: and launches nothing. ``bwrap``/``socat`` are Linux-only and probe-only.
-_ALWAYS: tuple[str, ...] = ("git", "gh")
+#:
+#: ``worc`` is here because ТA.1.7 names the daemon launcher among the four classes to pin and the
+#: report claims to print it: it is the one path that hands the *next whole run* to whatever
+#: answers, so a report listing five binaries and not this one describes a narrower pin than exists.
+#: :func:`~wastech_orchestrator.cli_shell.daemon_argv` resolves it for the actual spawn (it also
+#: tries ``wastech-orchestrator`` and falls back to ``-m``, which no pin can express); this entry is
+#: what puts it in the printed set and under the drift check.
+_ALWAYS: tuple[str, ...] = ("git", "gh", "worc")
 
 
 def _host_names(system: str) -> tuple[str, ...]:

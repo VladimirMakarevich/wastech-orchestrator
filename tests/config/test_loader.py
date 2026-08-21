@@ -331,7 +331,12 @@ def test_removed_provider_sandbox_key_is_rejected(value: str) -> None:
     text = _LEGACY + f"      sandbox: {value!r}\n"
     with pytest.raises(ConfigError) as exc:
         loads_config(text)
-    assert any("sandbox" in issue for issue in exc.value.issues)
+    # Ам1-5: named, not the generic unknown-key line. The whole cost of "no migration" lands in this
+    # message, and "unknown key" sends the operator to `upgrade-config`, which cannot strip it
+    # either — so the message has to say both "delete the line" and "that command will not help".
+    issue = next(i for i in exc.value.issues if "sandbox" in i)
+    assert "no longer exists" in issue and "delete the line" in issue
+    assert "upgrade-config" in issue
 
 
 def test_legacy_routing_block_is_tolerated() -> None:

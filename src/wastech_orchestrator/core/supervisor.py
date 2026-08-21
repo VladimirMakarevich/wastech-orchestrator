@@ -40,7 +40,7 @@ from typing import Any, Protocol
 
 from wastech_orchestrator.config.schema import SupervisorConfig
 from wastech_orchestrator.core.flow.engine import Finding
-from wastech_orchestrator.core.flow.nodes.base import RegisterArtifact, RouterPort
+from wastech_orchestrator.core.flow.nodes.base import GitPort, RegisterArtifact, RouterPort
 from wastech_orchestrator.core.flow.nodes.exchange_publish import publish_artifact
 from wastech_orchestrator.core.flow.observability import (
     record_provider_attempts,
@@ -70,6 +70,7 @@ from wastech_orchestrator.core.supervisor_packet import (
     render_packet,
 )
 from wastech_orchestrator.core.supervisor_usage import SupervisorFunction, summarize_spend
+from wastech_orchestrator.git_manager import GitControlState
 from wastech_orchestrator.memory.delta import DELTA_OUTPUT_SCHEMA, CandidateDelta, parse_delta
 from wastech_orchestrator.providers.artifacts import (
     node_run_dir,
@@ -84,6 +85,7 @@ from wastech_orchestrator.providers.base import (
 )
 from wastech_orchestrator.providers.exchange import assert_orchestration_paths_contained
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
+from wastech_orchestrator.runtime_layout import ProviderWriteGuardPolicy
 from wastech_orchestrator.state_store import (
     CheckRunRow,
     EvaluationRow,
@@ -103,6 +105,11 @@ def _utc_now_iso() -> str:
 # The supervisor's read-only requests carry a dedicated ``supervisor`` node identity (audit dir /
 # route label); it is not a graph node, so it records ``evaluations`` rows, never ``node_runs``.
 _SUPERVISOR_IDENTITY = "supervisor"
+
+# The layer's forced permission profile. Named once because two places need the same value: the
+# request it launches with, and the per-attempt "does this turn get a shell" question its detection
+# bracket asks — a bracket keyed on a different profile than the launch would watch the wrong thing.
+_SUPERVISOR_PROFILE = "read-only"
 
 # The reserved ``node_lineage`` key under which the supervisor's own durable session lives. It is a
 # double-underscore sentinel, distinct from the routing identity above, so it can never collide with
@@ -486,6 +493,7 @@ class Supervisor:
         router: RouterPort,
         store: SupervisorStorePort,
         repo_dir: str,
+        git: GitPort | None = None,
         artifacts_root: str | Path,
         flow_dir: Path,
         exchange_root: str | Path = "",
@@ -506,6 +514,11 @@ class Supervisor:
         # threads its own so a run's audit timestamps share one source.
         self._clock = clock
         self._repo_dir = repo_dir
+        # The Git Manager slice the layer's own provider attempt is bracketed with. The supervisor
+        # turn is read-only by mandate, but on Codex — and on every provider in the advanced mode —
+        # it still gets a shell, and a shell is what makes a ``.git`` mutation reachable. ``None``
+        # (a harness without a clone) skips both the write guard and the comparison.
+        self._git = git
         self._artifacts_root = artifacts_root
         # The provider-readable exchange root ``<repo>/.worc-io``; the supervisor's own
         # provider call passes the same pre-launch containment gate as agent/evaluator (Part C).
@@ -1004,6 +1017,7 @@ class Supervisor:
         readable per job. It cannot be inferred from ``turn``: two different jobs deliberately share
         the observe phase's cheap model + effort, so the settings object does not identify either.
         """
+        control_before: GitControlState | None = None
         try:
             route = self._router.resolve_route(_SUPERVISOR_IDENTITY, self._settings.provider)
             # Cap to `high` for a schema turn (fragile at max) OR an advisory observe turn
@@ -1018,12 +1032,20 @@ class Supervisor:
             resume_id, usage_baseline, baseline_session_id = (
                 self._resume_context(task_id, route) if resume_session else (None, None, None)
             )
+            # The same per-attempt bracket the graph nodes take, keyed on the same question: does
+            # this attempt get a shell? The layer is read-only by mandate, but the mandate is not a
+            # mechanism — Codex runs commands on ``read-only``, and in the advanced mode so does
+            # Claude. With the write guard on the request the provider's pre-launch canary re-proves
+            # the ``.git``/``.worc`` denies here too, which is what makes floor 1's "before every
+            # provider attempt" literally true; drift after the turn is reported, never parked,
+            # because an advisory layer must not be able to stop a reviewed, passing change.
+            write_guard, control_before = self._control_bracket(route)
             request = AgentRunRequest(
                 task_id=task_id,
                 node_id=_SUPERVISOR_IDENTITY,
                 working_directory=self._repo_dir,
                 prompt=prompt,
-                permission_profile="read-only",  # forced — the supervisor never writes
+                permission_profile=_SUPERVISOR_PROFILE,  # forced — the supervisor never writes
                 timeout_seconds=self._default_timeout_seconds,
                 attempt=1,
                 node_run_id=node_run_id,  # not a graph node; audit lives in ``evaluations``
@@ -1040,6 +1062,10 @@ class Supervisor:
                 supervisor_packet_path=supervisor_packet_path,
                 # Defense-in-depth: the Core-owned orchestrator security contract (advisory).
                 security_preamble=self._security_preamble,
+                # The Git-control / lifecycle roots this attempt must not be able to write. Resolved
+                # only when the attempt has a shell — a profile that can run nothing needs no
+                # carve-out from it.
+                write_guard=write_guard,
             )
             # Same pre-launch containment invariant as agent/evaluator: the supervisor
             # carries the frozen exchange ``task_path``, so this asserts it resolves under the
@@ -1060,6 +1086,7 @@ class Supervisor:
         self._record_provider_attempts(
             task_id, outcome, function, usage_baseline, baseline_session_id
         )
+        self._report_control_drift(task_id, control_before)
         result = outcome.result
         if result is None:
             return None
@@ -1078,6 +1105,48 @@ class Supervisor:
             reasoning=reasoning,
         )
         return result
+
+    def _control_bracket(
+        self, route: ResolvedRoute
+    ) -> tuple[ProviderWriteGuardPolicy | None, GitControlState | None]:
+        """``(write guard, control fingerprint)`` for a supervisor turn that gets a shell.
+
+        ``(None, None)`` when there is no Git Manager or when neither end of the route would give
+        this turn a shell — the signal to skip both, so a turn that can run nothing pays for
+        neither. The shell answer comes from the adapters through the Router (the layer's profile is
+        forced ``read-only``, and it declares no git-evidence grant), fail-closed like everywhere
+        else: an unclassifiable attempt is bracketed rather than left unwatched.
+        """
+        if self._git is None:
+            return None, None
+        if not self._router.route_grants_shell(
+            route, permission_profile=_SUPERVISOR_PROFILE, git_evidence=False
+        ):
+            return None, None
+        exchange_root = str(self._exchange_root) if self._exchange_root else None
+        return (
+            self._git.resolve_control_paths(exchange_root),
+            self._git.capture_git_control_state(),
+        )
+
+    def _report_control_drift(self, task_id: str, before: GitControlState | None) -> None:
+        """Warn when the Git control state moved across a supervisor turn; never park.
+
+        The layer is advisory by contract — it can flag but cannot rework, and a reviewed, passing
+        change is never blocked by it — so this is the same verdict every non-writing node class
+        gets: a loud line carrying the drift's aspect-level summary, and the run continues. The
+        summary comes from the redacted formatter, so no configuration value reaches the log.
+        """
+        if before is None or self._git is None:
+            return
+        drift = self._git.compare_git_control_state(before)
+        if drift is None:
+            return
+        _LOG.warning(
+            "git control state changed during a supervisor turn (advisory, run continues): %s",
+            drift.summary(),
+            extra={"task_id": task_id},
+        )
 
     def _record_turn_observability(
         self,

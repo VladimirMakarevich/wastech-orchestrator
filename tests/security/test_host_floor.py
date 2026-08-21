@@ -16,8 +16,13 @@ from wastech_orchestrator.composition import HOST_FLOOR_CHECKS
 from wastech_orchestrator.config.loader import loads_config
 from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.providers import claude as claude_mod
+from wastech_orchestrator.providers import codex as codex_mod
 from wastech_orchestrator.providers.base import ProviderId
-from wastech_orchestrator.security.isolation import check_isolation, describe_host_floor
+from wastech_orchestrator.security.isolation import (
+    HostFloorCheck,
+    check_isolation,
+    describe_host_floor,
+)
 
 _INCAPABLE = (
     claude_mod.SandboxCapability.NATIVE_WINDOWS,
@@ -32,6 +37,23 @@ def base_config(packaged_config_text: str) -> OrchestratorConfig:
 
 def _with_strict(config: OrchestratorConfig, strict: bool) -> OrchestratorConfig:
     return replace(config, security=replace(config.security, strict_isolation=strict))
+
+
+def _table(
+    *,
+    claude: claude_mod.SandboxCapability = claude_mod.SandboxCapability.MACOS,
+    codex_system: str = "Darwin",
+) -> dict[ProviderId, HostFloorCheck]:
+    """The bound table with BOTH hosts injected, so no assertion depends on the running machine.
+
+    The two providers answer differently shaped questions — Claude's sandbox availability is a
+    platform plus two executables, Codex's is decided by its own CLI and, on native Windows, by an
+    elevated backend — so each takes its own seam.
+    """
+    return {
+        ProviderId.CLAUDE: lambda: claude_mod.host_floor_gap(capability=claude),
+        ProviderId.CODEX: lambda: codex_mod.host_floor_gap(system=codex_system),
+    }
 
 
 # --- the provider answer --------------------------------------------------------------------------
@@ -64,12 +86,23 @@ def test_a_capable_host_reports_nothing(capability: claude_mod.SandboxCapability
 @pytest.mark.parametrize("capability", _INCAPABLE)
 @pytest.mark.parametrize("profile", ["read-only", "workspace-write"])
 def test_the_verdict_ignores_the_configured_profile(
-    capability: claude_mod.SandboxCapability, profile: str
+    base_config: OrchestratorConfig, capability: claude_mod.SandboxCapability, profile: str
 ) -> None:
     # The old check asked "does this config need a sandbox it cannot get", so it answered
     # differently for a read-only provider default. The floor question is about the machine, and the
     # machine does not change when a profile does.
-    assert claude_mod.host_floor_gap(capability=capability) is not None
+    #
+    # Ам1-11: the parametrization has to reach something that CAN see the profile, or it measures
+    # nothing — the provider function does not take one. So the assertion runs through
+    # `describe_host_floor` over a config whose Claude block carries each profile in turn: the line
+    # must be identical either way, which is the property the review correction asked for.
+    providers = dict(base_config.agents.providers)
+    claude_cfg = providers[ProviderId.CLAUDE]
+    providers[ProviderId.CLAUDE] = replace(claude_cfg, permission_profile=profile)
+    config = replace(base_config, agents=replace(base_config.agents, providers=providers))
+    lines = describe_host_floor(config, _table(claude=capability))
+    assert any(line.startswith("claude: ") for line in lines)
+    assert lines == describe_host_floor(base_config, _table(claude=capability))
 
 
 @pytest.mark.parametrize("capability", _INCAPABLE)
@@ -107,22 +140,47 @@ def test_the_line_states_the_loss_and_matches_the_strict_state(
     assert "strict_isolation=true" in strict and "withheld" in strict
 
 
-def test_a_capable_host_says_nothing_at_all(
-    base_config: OrchestratorConfig, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(
-        claude_mod, "default_sandbox_probe", lambda: claude_mod.SandboxCapability.MACOS
-    )
-    assert describe_host_floor(base_config, HOST_FLOOR_CHECKS) == ()
+def test_a_capable_host_says_nothing_at_all(base_config: OrchestratorConfig) -> None:
+    assert describe_host_floor(base_config, _table()) == ()
 
 
-def test_a_provider_outside_the_allowlist_is_not_asked(
-    base_config: OrchestratorConfig, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_a_provider_outside_the_allowlist_is_not_asked(base_config: OrchestratorConfig) -> None:
     # Same rule as the fatal gate: only the providers that may actually run get to produce a line,
     # so a configured-but-unused Claude block never annoys a Codex-only fleet.
-    monkeypatch.setattr(
-        claude_mod, "default_sandbox_probe", lambda: claude_mod.SandboxCapability.NATIVE_WINDOWS
-    )
     agents = replace(base_config.agents, allowed=(ProviderId.CODEX,))
-    assert describe_host_floor(replace(base_config, agents=agents), HOST_FLOOR_CHECKS) == ()
+    table = _table(claude=claude_mod.SandboxCapability.NATIVE_WINDOWS)
+    assert describe_host_floor(replace(base_config, agents=agents), table) == ()
+
+
+# --- Codex: a host whose answer only its own CLI has (Ам1-4 / Ам2-8) ------------------------------
+
+
+def test_codex_says_a_windows_host_is_not_classifiable_offline() -> None:
+    # The requirement is about the HOST, and the table had no Codex entry at all — so a Codex-only
+    # park on native Windows printed no floor line, got no preamble paragraph, and met the answer
+    # inside its first attempt as a canary refusal.
+    gap = codex_mod.host_floor_gap(system="Windows")
+    assert gap is not None
+    assert "cannot be classified offline" in gap
+    assert "worc preflight --capability-smoke" in gap
+    # And it states the verdict the owner chose, in both directions.
+    assert "warning under strict_isolation: false" in gap
+    assert "refuses the attempt under strict_isolation: true" in gap
+
+
+@pytest.mark.parametrize("system", ["Darwin", "Linux"])
+def test_codex_says_nothing_on_a_posix_host(system: str) -> None:
+    assert codex_mod.host_floor_gap(system=system) is None
+
+
+def test_a_codex_only_fleet_on_windows_gets_a_floor_line(base_config: OrchestratorConfig) -> None:
+    # The end the finding was about: `allowed: [codex]` used to produce an empty report on the one
+    # host class where the floor is least certain.
+    agents = replace(base_config.agents, allowed=(ProviderId.CODEX,))
+    lines = describe_host_floor(replace(base_config, agents=agents), _table(codex_system="Windows"))
+    assert len(lines) == 1 and lines[0].startswith("codex: native Windows")
+
+
+def test_the_bound_table_carries_both_providers() -> None:
+    # The composition table is what production uses; a missing entry is silence, not a default.
+    assert set(HOST_FLOOR_CHECKS) == {ProviderId.CLAUDE, ProviderId.CODEX}

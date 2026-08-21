@@ -15,6 +15,10 @@ security:
 
 Это по-прежнему allow-list по именам: элемент списка стал шаблоном, инвариант «в процессы передаются только allowlisted переменные» не двигается.
 
+## Поправка follow-ups 2026-08-20
+
+Последняя фраза выше относится к strict agent-side процессам и orchestrator-owned `git`/`gh`; advanced-mode agent/check/tool получает parent env целиком за вычетом имён `.worc/.env`. Поэтому preflight и run-log теперь печатают effective scope раскрытия, а не выдают secret-name drop за agent-side гарантию в advanced mode. В strict mode имя из `.worc/.env`, попавшее только через шаблон, удерживается; точное имя остаётся явным грантом, `extra_environment` — явным назначением. Windows case-fold применяется не только к match, но и к dedupe/override; lone `*` fail-closed даже при обходе валидатора. INFO-ветка, отсутствие строки без шаблонов и повтор posture при resume покрыты тестами. Цикл `config ↔ security` разорван type-only импортами; чистая функция обоснована отсутствием logging/global state, а не отсутствием импортов модуля.
+
 ## Что делаем
 
 **1. Грамматика и её валидация.** Элемент — точное имя либо префикс с **одной замыкающей** `*`. Одинокая `*`, `*` в середине (`A*B`), несколько `*` — ошибки валидации в `_validate_security` ([`validation.py:326`](../../../src/wastech_orchestrator/config/validation.py)). Одинокая `*` запрещена намеренно: она и есть та самая инверсия окружения, которую Шаг 0 не делает.

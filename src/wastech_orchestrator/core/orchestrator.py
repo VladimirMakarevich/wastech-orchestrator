@@ -191,6 +191,7 @@ from wastech_orchestrator.memory import (
     ensure_store,
 )
 from wastech_orchestrator.notify import (
+    TRACE_ADOPTED_COMMITS,
     TRACE_GIT_CONTROL_DRIFT,
     TRACE_REWORK_EXHAUSTED,
     TRACE_UNEXPECTED_WRITE,
@@ -1753,7 +1754,7 @@ class Orchestrator:
             self._git.commit_merge_resolution(
                 task_id, f"merge({task_id}): integrate base '{self._config.repo.base_branch}'"
             )
-            self._git.push_branch_update(branch)
+            self._git.push_branch_update(task_id, branch)
             outcome = self._git.merge_pr(
                 task_id, pr_url, strategy=strategy, wait_for_checks=wait_for_checks
             )
@@ -2049,12 +2050,19 @@ class Orchestrator:
                 self._store.set_status(p.task.id, Status.VALIDATED)  # reset to re-enter the driver
                 p.status = Status.VALIDATED
             return self._drive_via_engine(p, self._gate.phase_b(p.task))
+        self._announce_security_posture(p)
         self._check_preflight(p)  # re-resolve the launchable check profile (idempotent)
         p.branch = self._git.prepare_branch(
             p.task.id,
             p.slug,
             epoch=int(time.time()),  # shadowed by the persisted branch override on a normal resume
             branch_name=p.branch or p.task.branch_name,
+            # The mode has to travel with the resume: without it an `existing`/`current` task
+            # re-entered through the `new` path, which never restores the task's own start commit —
+            # and the dangerous-diff gate then measured from `base_branch`, i.e. from the whole
+            # unmerged chain, so `rerun --continue` asked about previous tasks' deletions.
+            mode=self._branch_mode(p.task),
+            branch_ref=p.task.branch_ref,
         )  # re-attach the existing branch (reused)
         self._store.update_task(p.task.id, branch=p.branch, slug=p.slug)
         return self._engine_run(p, self._gate.phase_b(p.task), resume=True, run_state=run_state)
@@ -2337,7 +2345,7 @@ class Orchestrator:
             # staged lifecycle ``<id>.md`` against (``None`` for the not-frozen merge flow).
             task_packet_digest=self._task_packet_digest(p),
             # The dependency_scan checker launches its argv scanners through the same safe runner
-            # and allowlisted env the Check Runner uses (a test's fake runner drives both).
+            # and policy-built env the Check Runner uses (a test's fake runner drives both).
             run_process=self._checks.run_process,
             process_env=build_child_env(self._config.security),
             scan_timeout_s=self._config.checks.timeout_seconds,
@@ -2529,13 +2537,10 @@ class Orchestrator:
     def _announce_environment_patterns(self, p: _Pipeline) -> None:
         """Announce what each ``allowed_environment`` prefix pattern resolved to — once, up front.
 
-        Once per run and before any child process, not once per process: the same expansion feeds
-        every agent turn, every check command and every git invocation, so repeating it would be
-        noise while omitting it would leave a pattern that quietly matched nothing (or quietly
-        matched more than the operator expected) invisible in the run's own record. ``worc
-        preflight``
-        prints the same lines from the same formatter; this is the copy that lands in the run log,
-        where a task is diagnosed after the fact.
+        Once per fresh/resumed engine entry, before that entry launches git or a provider. The
+        allowlist feeds every child under strict isolation, but only orchestrator git/gh in advanced
+        mode; the scope is stated explicitly so a secret-name drop is never misread as an agent-side
+        guarantee. ``worc preflight`` prints the same expansion in its report.
 
         A dropped name is a warning — the operator wrote a pattern that reaches a credential and the
         filter refused it — while a clean expansion is informational. A config with no pattern says
@@ -2546,12 +2551,61 @@ class Orchestrator:
         if not described:
             return
         log = self._log(p.task.id)
-        message = "allowed_environment prefix patterns resolved: " + "; ".join(described)
+        scope = (
+            "applies to orchestrator git/gh and strict-mode agent children; agent children also "
+            "withhold env-file names matched only by a prefix pattern"
+            if self._config.security.strict_isolation
+            else "gates orchestrator git/gh only; advanced-mode agent/check/tool children receive "
+            "the parent environment whole except variables loaded from the env-file"
+        )
+        message = (
+            "allowed_environment prefix patterns resolved (" + scope + "): " + "; ".join(described)
+        )
         extra = {"patterns": [item.pattern for item in expansions]}
         if any(item.dropped for item in expansions):
             log.warning(message, extra=extra)
         else:
             log.info(message, extra=extra)
+
+    def _announce_security_posture(self, p: _Pipeline) -> None:
+        """Record the effective environment/isolation posture for a fresh or resumed entry."""
+        self._announce_environment_patterns(p)
+        if self._config.security.read_isolation_off:
+            self._log(p.task.id).warning(
+                "read-isolation OFF — providers run native project-instruction/config discovery "
+                "(operator-sanctioned). The private set is NOT opened: .worc, the env-file and "
+                "the frozen bundles stay read- and write-denied, as do the write-guard, "
+                "commit/staging gates, PR control, and denied_read_paths blacklist. One "
+                "provider-specific exception: Claude's config home is governed by "
+                "allow_native_memory alone, so its per-project memory store is READABLE here "
+                "(still write-denied); Codex's home keeps the read-deny",
+                extra={
+                    "disable_read_isolation": self._config.security.disable_read_isolation,
+                    "strict_isolation": self._config.security.strict_isolation,
+                },
+            )
+        claude_cfg = self._config.agents.providers.get(ProviderId.CLAUDE)
+        if claude_cfg is not None and claude_cfg.allow_native_memory:
+            self._log(p.task.id).warning(
+                "native Claude memory ON — the agent may read and write its own per-project memory "
+                "store under the Claude config home (operator-sanctioned via "
+                "agents.providers.claude.allow_native_memory); that store is outside this run's "
+                "audit trail, artifact manifest, and redaction net, and it carries state across "
+                "tasks",
+                extra={"allow_native_memory": True},
+            )
+        if self._config.security.allow_git_evidence:
+            self._log(p.task.id).info(
+                "git-evidence ON — a node declaring git_evidence may run the read-only git verbs "
+                "to inspect delivery history; the repository stays unwritable (the sandbox denies "
+                "writes) and publication stays the orchestrator's. Not applied at all under "
+                "strict_isolation=false: every node has an unscoped shell there, so the "
+                "advanced-mode lines below say what holds instead"
+            )
+        for mode_line in describe_advanced_mode(self._config):
+            self._log(p.task.id).warning(mode_line)
+        for floor_gap in describe_host_floor(self._config, self._host_floor_checks):
+            self._log(p.task.id).warning(f"isolation floor NONE — {floor_gap}")
 
     def _drive_via_engine(self, p: _Pipeline, completeness: Completeness) -> PipelineResult:
         """Drive the task through the :class:`FlowEngine`.
@@ -2568,56 +2622,7 @@ class Orchestrator:
             # branch, so it is in place whether or not the planning ``proposed_by`` node runs (a
             # disabled planning node never fires the post-hook). Validated already at preflight.
             self._persist_decomposition(p, p.operator_decomposition, gate_on=True)
-        self._announce_environment_patterns(p)
-        if self._config.security.read_isolation_off:
-            # Never a silent weakening — announce that the operator's escape hatch is in
-            # effect. Fires whether it came from ``disable_read_isolation: true`` or the master
-            # ``strict_isolation: false`` (the strict check below is skipped in the latter case).
-            self._log(p.task.id).warning(
-                "read-isolation OFF — providers run native project-instruction/config discovery "
-                "(operator-sanctioned). The private set is NOT opened: .worc, the env-file, "
-                "provider homes and frozen bundles stay read- and write-denied, as do the "
-                "write-guard, commit/staging gates, PR control, and denied_read_paths blacklist",
-                extra={
-                    "disable_read_isolation": self._config.security.disable_read_isolation,
-                    "strict_isolation": self._config.security.strict_isolation,
-                },
-            )
-        claude_cfg = self._config.agents.providers.get(ProviderId.CLAUDE)
-        if claude_cfg is not None and claude_cfg.allow_native_memory:
-            # Same reasoning as the read-isolation announce above, and the one relaxation that
-            # reaches OUTSIDE the run's audit: with the opt-in on, Claude's own per-project memory
-            # store in the operator's HOME is readable and writable, so what a task learns there
-            # escapes the frozen instruction bundle, ``current.diff``, and the redaction net — and a
-            # later task on the same repo reads it, which a replay elsewhere cannot reproduce.
-            self._log(p.task.id).warning(
-                "native Claude memory ON — the agent may read and write its own per-project memory "
-                "store under the Claude config home (operator-sanctioned via "
-                "agents.providers.claude.allow_native_memory); that store is outside this run's "
-                "audit trail, artifact manifest, and redaction net, and it carries state across "
-                "tasks",
-                extra={"allow_native_memory": True},
-            )
-        if self._config.security.allow_git_evidence:
-            # Same reasoning as the read-isolation announce above: an optional capability that
-            # widens what a node may execute is stated in the run log rather than left implicit.
-            self._log(p.task.id).info(
-                "git-evidence ON — a node declaring git_evidence may run the read-only git verbs "
-                "to inspect delivery history; the repository stays unwritable (the sandbox denies "
-                "writes) and publication stays the orchestrator's. Not applied at all under "
-                "strict_isolation=false: every node has an unscoped shell there, so the "
-                "advanced-mode lines below say what holds instead"
-            )
-        for mode_line in describe_advanced_mode(self._config):
-            # The same text preflight prints, from the same formatter — a run whose log said less
-            # than the report would let the two disagree about what the run was allowed to do, and
-            # the log is the half that survives on the machine that ran it.
-            self._log(p.task.id).warning(mode_line)
-        for floor_gap in describe_host_floor(self._config, self._host_floor_checks):
-            # The write floor is the one guarantee that does not need the agent's cooperation, so a
-            # host that cannot enforce it is stated outright rather than inferred later from a
-            # surprising diff. Never a stop: the operator still has to work on the host they have.
-            self._log(p.task.id).warning(f"isolation floor NONE — {floor_gap}")
+        self._announce_security_posture(p)
         # Ungated on `strict_isolation`, and it has to be: since the host half moved out to
         # `describe_host_floor`, what is left is "is this provider configuration legal?" — a pure,
         # host-independent verdict about extra_args and permission profiles that no configuration
@@ -3196,6 +3201,10 @@ class Orchestrator:
             router=self._router,
             store=self._store,
             repo_dir=self._config.repo.local_path,
+            # The layer's own provider turn is bracketed like a graph node's: it is read-only by
+            # mandate, but on Codex — and on every provider in the advanced mode — it still gets a
+            # shell, so it carries the write guard and its Git-control drift is reported.
+            git=self._git,
             artifacts_root=str(self._artifacts_root),
             exchange_root=str(self._exchange_root),
             flow_dir=flow_dir,
@@ -3558,6 +3567,19 @@ class Orchestrator:
                     "pushed",
                     extra={"stage": node.id, "drift": outcome.git_control_drift},
                 )
+            # Publishing had to merge in commits this orchestrator did not make. The run is a
+            # success — the combination was re-checked BEFORE anything went out — but the task's
+            # reported diff is measured from the base, so it now covers someone else's work too. A
+            # pull request carries the same sentence in its body; with `publish: push`/`commit`
+            # there is no body, and this warning plus the ⚠️ trace below is where it is said.
+            if outcome.adopted_commits:
+                self._log(p.task.id).warning(
+                    "publishing merged in %d commit(s) this run did not record pushing (%s) — the "
+                    "task's reported diff is measured from the base and now covers them too",
+                    len(outcome.adopted_commits),
+                    ", ".join(outcome.adopted_commits[:5]),
+                    extra={"stage": node.id},
+                )
             # Best-effort live progress trace: one message per executed node finish (never on a
             # skip). Gated on the flag alone — when Telegram is off the notifier is a NullNotifier
             # and this is a no-op. Carries only node id + outcome (no secrets); never raises. A
@@ -3573,6 +3595,8 @@ class Orchestrator:
                     trace_outcome = TRACE_GIT_CONTROL_DRIFT
                 elif outcome.unexpected_write:
                     trace_outcome = TRACE_UNEXPECTED_WRITE
+                elif outcome.adopted_commits:
+                    trace_outcome = TRACE_ADOPTED_COMMITS
                 self._notifier.send_trace(task_id=p.task.id, node_id=node.id, outcome=trace_outcome)
             # Chronological per-run index: one line per executed node run of every kind, so an
             # operator can read a re-running node's sequence without listing run-*/ dirs. Runs that

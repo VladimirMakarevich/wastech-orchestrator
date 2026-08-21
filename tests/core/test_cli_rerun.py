@@ -235,13 +235,32 @@ def _seed(
     return config
 
 
-def _seed_manifest(clone: Path, task_id: str, *, task_type: str | None = None) -> None:
-    """Write the persisted normalized manifest a ``--from`` rerun reads to resolve the flow."""
+def _seed_manifest(
+    clone: Path,
+    task_id: str,
+    *,
+    task_type: str | None = None,
+    branch_mode: str | None = None,
+    branch_ref: str | None = None,
+) -> None:
+    """Write the persisted normalized manifest a ``--from`` rerun reads to resolve the flow.
+
+    ``branch_mode``/``branch_ref`` are what a chain task carries: the resume has to read them from
+    here, because the live ``NormalizedTask`` is not in hand on that path.
+    """
+    from wastech_orchestrator.config.schema import BranchMode
     from wastech_orchestrator.task.model import NormalizedTask
     from wastech_orchestrator.task.parser import write_normalized
 
     write_normalized(
-        NormalizedTask(id=task_id, title="T", description="x", task_type=task_type),
+        NormalizedTask(
+            id=task_id,
+            title="T",
+            description="x",
+            task_type=task_type,
+            branch_mode=BranchMode(branch_mode) if branch_mode else None,
+            branch_ref=branch_ref,
+        ),
         clone / ".worc",
     )
 
@@ -780,6 +799,60 @@ def test_rerun_continue_at_review_survives_real_resume_with_dirty_tree(
     assert (git_repo.clone / "README.md").read_text(
         encoding="utf-8"
     ) == "# project\n\nimplemented and reviewed.\n"
+
+
+def test_a_resume_carries_the_branch_mode_so_the_gate_measures_from_the_task(
+    git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git_run
+) -> None:
+    """Пре3-8: the resume called ``prepare_branch`` without a mode, so an ``existing``/``current``
+    task re-entered through the ``new`` path — which never restores the task's own start commit.
+    The dangerous-diff gate then measured from ``base_branch``, i.e. from the whole unmerged chain,
+    and ``rerun --continue`` on a chain task asked the operator about previous tasks' deletions.
+    """
+    from wastech_orchestrator.config.schema import BranchMode
+    from wastech_orchestrator.git_manager import GitManager
+
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "failed" / "task-1.md"
+    _complete_task_file(source, "task-1")
+    branch = "chain/feature"
+    git_run(["checkout", "-b", branch], git_repo.clone)
+    (git_repo.clone / "README.md").write_text("# project\n\nprior task\n", encoding="utf-8")
+    git_run(["commit", "-am", "feat: an earlier task in the chain"], git_repo.clone)
+    config = _seed(
+        project,
+        git_repo.clone,
+        TaskRow("task-1", "T", Status.FAILED, source_path=str(source), branch=branch),
+        checkpoint_node="review",
+        node_run=("review", "evaluator"),
+    )
+    _seed_manifest(git_repo.clone, "task-1", branch_mode="existing", branch_ref=branch)
+
+    seen: list[tuple[object, object]] = []
+    original = GitManager.prepare_branch
+
+    def spy(self: GitManager, task_id: str, slug: str, **kwargs: object) -> str:
+        seen.append((kwargs.get("mode"), kwargs.get("branch_ref")))
+        return original(self, task_id, slug, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(GitManager, "prepare_branch", spy)
+
+    def fake_engine_run(
+        self: Orchestrator,
+        p: object,
+        completeness: object,
+        *,
+        resume: bool,
+        run_state: object = None,
+    ) -> PipelineResult:
+        return PipelineResult(task_id="task-1", final_status=Status.DONE)
+
+    monkeypatch.setattr(Orchestrator, "_engine_run", fake_engine_run)
+    code = cli.main(["--config", str(config), "rerun", "task-1", "--continue", "--yes"])
+
+    assert code == 0
+    assert seen == [(BranchMode.EXISTING, branch)]
 
 
 def test_rerun_continue_confirm_names_the_branch_not_base(

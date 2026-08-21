@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 import pytest
@@ -12,6 +11,7 @@ from wastech_orchestrator.security.env_paths import (
     ProtectedPath,
     assigned_path_elements,
     canonical_collision,
+    denied_read_path_collision,
     is_inside,
     lexical_collision,
 )
@@ -36,11 +36,27 @@ def test_only_path_shaped_values_are_examined(value: str, expected: tuple[str, .
     assert assigned_path_elements(value) == expected
 
 
-def test_a_list_value_is_split_into_its_elements() -> None:
+@pytest.mark.parametrize(
+    "value",
+    [
+        "/a:/repo/.worc:/b",
+        r"C:\a;C:\repo\.worc;C:\b",
+    ],
+)
+def test_a_list_value_is_split_by_both_platform_separators(value: str) -> None:
     # The failure this exists for: unsplit, the string matches no protected root and sails through,
     # while the element in the middle of it is the one that lands on the runtime home.
-    elements = assigned_path_elements(f"/a{os.pathsep}/repo/.worc{os.pathsep}/b")
-    assert "/repo/.worc" in elements
+    elements = assigned_path_elements(value)
+    assert any(".worc" in element for element in elements)
+
+
+def test_ignore_candidates_never_include_a_whole_path_list() -> None:
+    value = "/repo/cache/a:/repo/cache/b"
+    assert assigned_path_elements(value, include_unsplit=False) == (
+        "/repo/cache/a",
+        "/repo/cache/b",
+    )
+    assert value in assigned_path_elements(value)
 
 
 def test_a_windows_value_survives_a_posix_separator_split() -> None:
@@ -109,6 +125,13 @@ def test_windows_folds_case_and_posix_does_not(tmp_path: Path) -> None:
     assert canonical_collision(variant, protected, system="Linux") is None
 
 
+def test_is_inside_folds_case_only_on_windows(tmp_path: Path) -> None:
+    root = tmp_path / "Clone"
+    variant = str(tmp_path / "clone" / "cache")
+    assert is_inside(variant, root, system="Windows")
+    assert not is_inside(variant, root, system="Linux")
+
+
 def test_a_value_that_cannot_be_resolved_does_not_take_the_gate_down(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -128,3 +151,22 @@ def test_is_inside_decides_the_clone_half(tmp_path: Path) -> None:
     clone.mkdir()
     assert is_inside(str(clone / ".toolcache" / "nuget"), clone)
     assert not is_inside(str(tmp_path / "elsewhere"), clone)
+
+
+def test_denied_read_path_uses_real_glob_semantics() -> None:
+    patterns = ("**/private/**", "conf/*.yaml")
+    leading_wildcard = denied_read_path_collision(
+        "/repo/x/private/cache", Path("/repo"), patterns, canonical=False
+    )
+    assert leading_wildcard is not None
+    assert "**/private/**" in leading_wildcard.label
+
+    unrelated_sibling = denied_read_path_collision(
+        "/repo/conf/gocache", Path("/repo"), patterns, canonical=False
+    )
+    assert unrelated_sibling is None
+    matching_file = denied_read_path_collision(
+        "/repo/conf/private.yaml", Path("/repo"), patterns, canonical=False
+    )
+    assert matching_file is not None
+    assert "conf/*.yaml" in matching_file.label

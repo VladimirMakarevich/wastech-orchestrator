@@ -23,9 +23,20 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+from wastech_orchestrator.config.schema import SecurityConfig
 from wastech_orchestrator.git_manager import build_helper_git_env
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.providers.process import run_process
+from wastech_orchestrator.security.launchers import resolve_launcher
+
+#: ``git``/``gh`` resolved once at import, the same rule the Git Manager and the adapters follow: a
+#: bare name lets a directory earlier on ``PATH`` decide what answers. It matters here more than the
+#: name suggests — ``git_info`` resolves the repository root on **every** CLI command, so a shim
+#: chooses which ``config.yaml`` the orchestrator reads, and the ``gh`` probe decides the
+#: install-time default for opening pull requests. Falls back to the bare name when the executable
+#: is not on ``PATH`` at all, so a launch failure stays the caller's ordinary "not found" answer.
+_GIT = resolve_launcher("git") or "git"
+_GH = resolve_launcher("gh") or "gh"
 
 # Read-only git probes are quick; bound them so a hung git can never wedge the installer.
 _GIT_TIMEOUT_SECONDS = 30
@@ -46,7 +57,7 @@ class GitInfo:
     is_clean: bool
 
 
-def _run_git(args: list[str], cwd: Path) -> tuple[int, str]:
+def _run_git(args: list[str], cwd: Path, security: SecurityConfig | None = None) -> tuple[int, str]:
     """Run a read-only git command through the safe runner; return ``(returncode, stdout)``.
 
     A launch failure (``git`` missing or an invalid ``cwd``) maps to returncode 127 and a timeout to
@@ -56,9 +67,9 @@ def _run_git(args: list[str], cwd: Path) -> tuple[int, str]:
     with tempfile.TemporaryDirectory() as tmp:
         stdout_path = Path(tmp) / "stdout"
         result = run_process(
-            ["git", *args],
+            [_GIT, *args],
             cwd=cwd,
-            env=build_helper_git_env(),
+            env=build_helper_git_env(security=security),
             timeout_seconds=_GIT_TIMEOUT_SECONDS,
             stdout_path=stdout_path,
         )
@@ -141,26 +152,34 @@ def git_version() -> tuple[int, int] | None:
     return int(match.group(1)), int(match.group(2))
 
 
-def gh_auth_ok() -> bool | None:
+def gh_auth_ok(security: SecurityConfig | None = None) -> bool | None:
     """Whether ``gh`` is authenticated, via a read-only ``gh auth status`` probe.
 
     Returns ``True`` on exit 0 (authenticated), ``False`` on a non-zero exit (logged out), and
     ``None`` on a launch failure / timeout (unknown — a missing ``gh`` binary is
     :func:`has_gh`/``require_gh``'s concern, not this one). Mirrors :func:`_run_git`: the probe runs
-    through the safe runner with the operator's own environment, so an env
+    through the safe runner with the policy-built git/gh environment, so an env
     ``GH_TOKEN``/``GITHUB_TOKEN`` is honored (``gh auth status`` already accounts for env tokens,
-    which is why it is the right probe). Its stdout (streamed to a throwaway temp file) and stderr
-    are discarded, never surfaced — ``gh auth status`` prints the account login and token scopes,
-    which must stay out of logs/artifacts per the no-secrets invariant.
+    which is why it is the right probe).
+
+    ``security`` is the operator's policy when the caller has one — ``worc preflight`` and the run
+    entry points do, the installer does not. Passing it matters for more than tidiness: this probe
+    decides the reported auth verdict, and without the operator's ``allowed_environment`` an
+    ``HTTPS_PROXY`` that every other ``gh`` call gets never reached it, so a proxied host reported
+    "not logged in" while publishing worked.
+
+    Its stdout (streamed to a throwaway temp file) and stderr are discarded, never surfaced —
+    ``gh auth status`` prints the account login and token scopes, which must stay out of
+    logs/artifacts per the no-secrets invariant.
     """
     with tempfile.TemporaryDirectory() as tmp:
         result = run_process(
-            ["gh", "auth", "status"],
+            [_GH, "auth", "status"],
             cwd=tmp,
             # Built per call, not once at import: the CLI loads `<repo>/.worc/.env` into the
             # environment AFTER this module is imported, and a `GH_TOKEN` kept there (the
             # shipped `.env.example` offers exactly that line) has to reach this probe.
-            env=build_helper_git_env(*_GH_TOKEN_NAMES),
+            env=build_helper_git_env(*_GH_TOKEN_NAMES, security=security),
             timeout_seconds=_GIT_TIMEOUT_SECONDS,
             stdout_path=Path(tmp) / "stdout",
         )

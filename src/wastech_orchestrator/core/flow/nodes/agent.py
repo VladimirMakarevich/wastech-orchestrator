@@ -46,6 +46,11 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeManualRequired,
     NodeServices,
 )
+from wastech_orchestrator.core.flow.nodes.diff_gate import (
+    already_approved_in_task,
+    dangerous_diff_signal,
+    guardrail_request_matches,
+)
 from wastech_orchestrator.core.flow.nodes.exchange_publish import (
     assert_exchange_unchanged,
     assert_request_contained,
@@ -71,7 +76,6 @@ from wastech_orchestrator.core.hitl import (
     TypedStageOutput,
     guardrail_interaction_path,
     interaction_path,
-    iter_task_interactions,
     load_interaction,
     mark_consumed,
     mark_interaction_status,
@@ -626,14 +630,14 @@ class AgentNodeRunner:
         persisted = load_interaction(path)
         if persisted is not None:
             approved = self._resume_guardrail(node, path, persisted, dangerous)
-        elif self._already_approved_in_task(ctx, dangerous):
+        elif already_approved_in_task(self._s.artifacts_root, ctx.task_id, dangerous):
             return  # this exact dangerous diff was already approved earlier in the task
         else:
             result = self._gate().request(
                 task_id=ctx.task_id,
                 node_id=node.id,
                 subtask=ctx.subtask_order,
-                signal=_dangerous_diff_signal(node.id, dangerous),
+                signal=dangerous_diff_signal(node.id, dangerous),
                 path=path,
             )
             self._require_human(node, "approval", result)
@@ -670,7 +674,7 @@ class AgentNodeRunner:
     def _resume_guardrail(
         self, node: AgentNode, path: Any, persisted: Mapping[str, Any], dangerous: DangerousDiff
     ) -> bool:
-        if not _guardrail_request_matches(persisted, dangerous):
+        if not guardrail_request_matches(persisted, dangerous):
             raise NodeManualRequired(
                 f"agent node {node.id!r}: dangerous diff expanded after its approval request"
             )
@@ -713,22 +717,6 @@ class AgentNodeRunner:
                 f"agent node {node.id!r}: retained dangerous changes after approval was denied"
             )
         mark_interaction_status(path, "reconsidered")
-
-    def _already_approved_in_task(self, ctx: NodeContext, dangerous: DangerousDiff) -> bool:
-        """True if the operator already approved this exact dangerous diff earlier in the task.
-
-        The dangerous-diff classifier runs over the whole *uncommitted* working-tree diff, so a
-        second workspace-write node (``documentation`` after ``implementation``, or ``fixing`` in a
-        re-test loop) re-sees a deletion/dependency change an upstream node already got cleared.
-        Honoring any prior in-task approval of the identical change (same risk + exact path set) —
-        the planning pre-approval, or an earlier node's guardrail approval — keeps the guard from
-        re-prompting for it. A new or expanded dangerous set does not match, so it still prompts:
-        the guard never weakens, it only avoids asking twice for the same approved change.
-        """
-        return any(
-            persisted.get("approved") is True and _guardrail_request_matches(persisted, dangerous)
-            for persisted in iter_task_interactions(self._s.artifacts_root, ctx.task_id)
-        )
 
     def _build_request(
         self,
@@ -1047,38 +1035,6 @@ def _wants_hitl(node: AgentNode) -> bool:
     (see :meth:`AgentNodeRunner._contract`), also never the stage name.
     """
     return node.hitl is not None and (node.hitl.allow_question or node.hitl.allow_approval)
-
-
-def _dangerous_diff_signal(node_id: str, dangerous: DangerousDiff) -> HumanInputSignal:
-    detail: list[str] = []
-    if dangerous.protected_paths:
-        detail.append(
-            "Protected paths (always require approval): " + ", ".join(dangerous.protected_paths)
-        )
-    if dangerous.deleted_paths:
-        detail.append("Deleted paths: " + ", ".join(dangerous.deleted_paths))
-    if dangerous.dependency_paths:
-        detail.append("Dependency manifests/locks: " + ", ".join(dangerous.dependency_paths))
-    return HumanInputSignal(
-        kind="approval",
-        question=f"Approve changes requiring approval produced by the {node_id!r} node?",
-        context="\n".join(detail),
-        risk=dangerous.risk,
-        paths=dangerous.paths,
-    )
-
-
-def _guardrail_request_matches(persisted: Mapping[str, Any], dangerous: DangerousDiff) -> bool:
-    request = persisted.get("request")
-    if not isinstance(request, Mapping):
-        return False
-    paths = request.get("paths")
-    return (
-        request.get("kind") == "approval"
-        and request.get("risk") == dangerous.risk
-        and isinstance(paths, list)
-        and tuple(sorted(str(path) for path in paths)) == dangerous.paths
-    )
 
 
 def _persisted_kind(persisted: Mapping[str, Any]) -> AskKind | None:

@@ -234,8 +234,10 @@ def test_git_evidence_does_not_change_the_codex_profile(tmp_path: Path) -> None:
     Codex's profile has three keys — ``extends`` / ``filesystem`` / ``network`` — and no command or
     verb dimension at all. Under ``read-only`` it already permits command execution, so ``git log``
     works there today; what forbids mutation is not a list of verbs but the sandbox: the workspace
-    is mounted ``read`` and, on the shipped default, the network is off — so ``git commit`` fails
-    for want of a writable ``.git`` and ``git push`` for want of a network. That is a stronger
+    is mounted ``read`` and, for a node its flow granted no network, the network is off — so
+    ``git commit`` fails for want of a writable ``.git`` and ``git push`` for want of a network.
+    The condition there is the GRANT, not ``strict_isolation``: a node granted network gets
+    ``network.enabled = true`` in this profile at either value of the key. That is a stronger
     guarantee than an allowlist and nothing in a prompt, task or flow can argue with it, which is
     why the two providers are made to agree on the observable contract (history readable, repository
     unchangeable, nothing published) rather than on a symmetric list of verbs.

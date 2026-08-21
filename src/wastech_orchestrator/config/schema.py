@@ -152,8 +152,9 @@ from wastech_orchestrator.providers.base import ProviderId
 # v29 (2026-07-11, agent-native-memory-opt-in): adds the optional Claude-only
 # `agents.providers.claude.allow_native_memory` bool (default false) — an operator opt-in that, when
 # true, drops the native-memory deny so Claude Code's own auto-memory (`~/.claude/projects/
-# <repo>/memory/`) persists across tasks. Off (default/absent) => the deny stays in place (today's
-# behavior exactly). It relaxes a security control (that store is unaudited, no redaction
+# <repo>/memory/`) persists across tasks — that subtree only, the config home above it stays
+# write-denied. Off (default/absent) => the deny stays in place (today's behavior exactly). It
+# relaxes a security control (that store is unaudited, no redaction
 # guarantee), so it is a conscious opt-in: `config_writer` does NOT write it on a fresh install and
 # `upgrade-config` does not add it — documented in `config.example.yaml` only. Old configs load
 # fail-open with the safe default. Inert on Codex (no deny to gate there).
@@ -303,6 +304,15 @@ class OrchestratorRuntimeConfig:
 
 @dataclass(frozen=True)
 class RepoConfig:
+    # The repository this instance publishes to. Beyond cloning it, this is what every ``gh`` call
+    # is pinned to with ``--repo``: parsed once into ``[HOST/]OWNER/REPO``, so a planted gh config
+    # or an ``insteadOf`` rewrite cannot retarget a pull request. A URL that names no hosted
+    # repository (an ssh alias like ``git@ghwork:o/n.git``, a ``file://`` URL, a local path) yields
+    # no pin —
+    # ``gh`` then infers the repository from the clone and the open-PR probe is not asked at all.
+    # ``worc preflight`` prints that verdict as its own ``gh-repo-pin`` line: fatal when this
+    # configuration opens pull requests, a warning otherwise. Prefer the
+    # ``https://host/owner/name`` form when the ssh transport is not required.
     url: str
     local_path: str
     base_branch: str
@@ -376,11 +386,15 @@ class ProviderConfig:
     # resumes the same agent session with a fresh turn grant. Requires ``telegram.enabled``
     # (preflight). With this on, a low ``max_turns`` (~50–100) is safe — extendable on demand.
     max_turns_gate: bool = False
-    # Claude-only opt-in: when true, the adapter DROPS the
+    # Claude-only opt-in: when true, the adapter drops the
     # native-memory deny so Claude Code's own auto-memory (``<config_dir>/projects/<repo>/memory/``)
-    # persists across tasks on this repo. Default false keeps the deny in place. RISK: that store is
-    # outside the orchestrator's redaction net and audit (an unredacted ``originSessionId`` was once
-    # observed leaking there) — a deliberate, operator-owned risk acceptance. Inert on Codex.
+    # persists across tasks on this repo. Default false keeps the deny in place. It opens THAT
+    # SUBTREE ONLY: the config home around it (credentials, settings, other projects) keeps its
+    # tool-level write deny at every value of ``strict_isolation``, and if the home cannot be
+    # resolved the run is refused rather than left unprotected (owner decision 2026-08-20). RISK:
+    # that store is outside the orchestrator's redaction net and audit (an unredacted
+    # ``originSessionId`` was once observed leaking there) — a deliberate, operator-owned risk
+    # acceptance. Inert on Codex.
     allow_native_memory: bool = False
 
 
@@ -440,9 +454,12 @@ class SecurityConfig:
     # sandbox
     # at all. One qualifier, since the write grant above is volume-wide — what keeps those paths
     # out of it is the carve-out being the more specific rule, which Codex re-proves under its own
-    # sandbox
-    # before every attempt and Claude does not, so there this level rests on the tool-level write
-    # denies. (2) Publication to this repository's origin is held by DETECTION: a branch or PR
+    # sandbox before every provider attempt that gets a shell (agent node, evaluator, supervisor
+    # turn) and Claude does not, so there this level rests on the tool-level write denies. Nesting a
+    # deny inside an allow is a construction Claude's own settings compiler supports (it carries the
+    # carve-outs as ``denyWithinAllow``) — read out of the pinned binary, not proven on this host,
+    # and ``worc preflight --paid-isolation-probe`` is the one instrument that can answer it here.
+    # (2) Publication to this repository's origin is held by DETECTION: a branch or PR
     # appearing without the orchestrator's record parks the task. (3) Publication anywhere else IS
     # HELD BY NOTHING, and is reachable today: the agent has the network, credentials are picked up
     # automatically, and nothing is planned to hold it. (4) Publication AS the orchestrator is held
@@ -458,7 +475,9 @@ class SecurityConfig:
     strict_isolation: bool
     #: Names forwarded from the parent environment. An entry is an exact name or a prefix
     #: pattern (``DOTNET_*``), resolved by
-    #: :func:`~wastech_orchestrator.security.env.expand_allowed_environment`.
+    #: :func:`~wastech_orchestrator.security.env.expand_allowed_environment`. The list must cover
+    #: ``PATH``; on Windows it must also cover ``SystemRoot`` or the launch-critical preflight/run
+    #: checks fail on that host.
     allowed_environment: tuple[str, ...]
     denied_read_paths: tuple[str, ...]
     denied_commands: tuple[str, ...]
@@ -468,22 +487,35 @@ class SecurityConfig:
     # loader's absent-key default, and what a fresh install writes (config_writer) — so "the
     # default" has one answer no matter how a config arrives. ``protected_paths`` stays the
     # always-ask floor under either level.
+    #
+    # What the gate measures, at either level, is the change since the last commit the
+    # **orchestrator** made for this task (the task's own start point until it makes one) — never
+    # since ``HEAD``, which a commit made inside the run would empty. So a self-commit by an agent
+    # or by a node whose class only warns is still asked about, and a decomposed run is not asked
+    # twice about the same approved deletion. It is asked at the writing node, at that node's
+    # ``hitl`` round-trip, and once more immediately before the publishing commit — the last of
+    # which is the only ask a flow with no writing node ever reaches.
     trust_level: str = "auto"
     # Operator allowlist (repo-relative globs) of paths that ALWAYS require approval on any change,
     # regardless of ``trust_level`` — the always-ask floor no level can lower. Empty = no floor.
     protected_paths: tuple[str, ...] = ()
-    # Operator escape hatch: fully disable READ-isolation for provider runs. When on it
-    # restores the provider's native project-instruction/config discovery (Claude re-loads
-    # ``CLAUDE.md`` + project settings/hooks/MCP/skills via ``--setting-sources project``; Codex
-    # re-reads the user ``config.toml`` and the project ``.codex`` config/hooks/rules) and lifts the
-    # private :class:`~wastech_orchestrator.runtime_layout.InternalDenyPolicy` read-deny projection
-    # (``.worc``/env-file/provider homes/frozen bundles), at the cost of that isolation. The WRITE
-    # side stays: exchange/Git/``tasks/``/instruction write-deny, the commit/staging gates, and the
-    # PR control layer. The public ``denied_read_paths`` blacklist also stays enforced. Operator-
-    # config ONLY (never a task / ``extra_args`` / flow-node key). Defaults to ``True`` — read-
-    # isolation is OFF out of the box: a deliberate deployment-posture choice that departs from the
-    # project's own default-safe rule for isolation. Set it ``False`` to keep
-    # read-isolation on. ``strict_isolation`` is still the master switch and always wins toward
+    # Operator escape hatch: fully disable READ-isolation for provider runs. When on it restores the
+    # provider's native project-instruction/config discovery (Claude re-loads ``CLAUDE.md`` +
+    # project settings/hooks/MCP/skills via ``--setting-sources project``; Codex re-reads the user
+    # ``config.toml`` and the project ``.codex`` config/hooks/rules). It does NOT lift the private
+    # :class:`~wastech_orchestrator.runtime_layout.InternalDenyPolicy` read-deny projection:
+    # ``.worc``, the resolved env-file and the frozen bundles stay ``Read``-denied either way, since
+    # native discovery needs nothing from them while opening them handed the agent the
+    # orchestrator's own ``.env``. One exception, and it is provider-specific: Claude's own config
+    # home is carved out of that projection entirely and governed by
+    # ``agents.providers.claude.allow_native_memory`` alone — with read-isolation off and the opt-in
+    # off, its per-project memory store is ``Read``-able (it stays write-denied). The WRITE side
+    # stays throughout: exchange/Git/``tasks/``/instruction write-deny, the commit/staging gates,
+    # and the PR control layer. The public ``denied_read_paths`` blacklist also stays enforced.
+    # Operator- config ONLY (never a task / ``extra_args`` / flow-node key). Defaults to ``True`` —
+    # read- isolation is OFF out of the box: a deliberate deployment-posture choice that departs
+    # from the project's own default-safe rule for isolation. Set it ``False`` to keep read-
+    # isolation on. ``strict_isolation`` is still the master switch and always wins toward
     # relaxation (see :attr:`read_isolation_off`).
     disable_read_isolation: bool = True
     # Operator master switch for the read-only git-evidence grant. A flow node may declare
@@ -494,11 +526,17 @@ class SecurityConfig:
     # today. That split is what keeps the envelope un-weakenable through a flow: the capability is
     # reachable declaratively, but only the operator can turn it on. Operator-config ONLY (never a
     # task / ``extra_args`` / flow-node key). Enabling it does not make the node writable: Claude
-    # confines the shell to those verbs and write-denies the whole clone in its OS sandbox, Codex's
-    # read-only sandbox already forbids every mutation, and ``denied_commands`` stays the floor.
+    # confines the shell to those verbs and write-denies the whole clone in its OS sandbox, and
+    # Codex's read-only sandbox already forbids every mutation. ``denied_commands`` adds no floor
+    # under either: it is friction and telemetry (a refusal that shows up in the log), because
+    # prefix matching on a command string is walked around by ``bash -c`` or an absolute path.
     allow_git_evidence: bool = False
-    # Environment variables the orchestrator **assigns** to every child process it starts, as
-    # ``name -> value``. The complement of ``allowed_environment``, which only *forwards* a name and
+    # Environment variables the orchestrator **assigns** to agent/check/tool children and to its
+    # own git/gh before the publication-retargeting scrub, as ``name -> value``. That scrub is a
+    # whitelist over the ``GIT_*``/``GH_*``/``GITHUB_*`` namespace, so an assignment in it reaches
+    # git/gh only for ``GIT_CONFIG_GLOBAL`` and the two token names; assignments outside those
+    # prefixes reach it as written. The complement of
+    # ``allowed_environment``, which only *forwards* a name and
     # therefore inherits whatever the operator's shell happened to export — unset on another
     # machine, different on the next, and a forgotten ``export`` is silently skipped. Toolchain
     # roots and cache paths (``DOTNET_ROOT``, ``NUGET_PACKAGES``, ``npm_config_cache``) need a
@@ -507,6 +545,9 @@ class SecurityConfig:
     # key order is deterministic (allowlist order, then this mapping's config order). Validated
     # fail-closed: ``PATH`` (any case) is refused — reassigning it is how you substitute every
     # binary — as is a secret-looking name and a name outside ``[A-Za-z_][A-Za-z0-9_]*``. The
+    # assigned path may not overlap the orchestrator control/private roots, Git metadata, the
+    # exchange, task lifecycle files, provider homes, the env-file, or a ``denied_read_paths``
+    # target; config validation handles lexical paths and preflight/run resolve host aliases. The
     # **value** cannot be checked for secrecy and sits in plaintext in ``config.yaml``, so
     # credentials never go here; that is a documented contract, not an enforced one.
     extra_environment: dict[str, str] = field(default_factory=dict)

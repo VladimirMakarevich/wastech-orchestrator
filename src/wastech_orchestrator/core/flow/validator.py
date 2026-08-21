@@ -115,10 +115,9 @@ def validate_flow_against_config(
     configured provider can reach, a flow-local ``supervisor.observe.mode`` broader than the
     operator's global cadence (unless ``supervisor.enabled`` is false — there is then no cadence to
     widen), a ``tool`` node naming an unregistered executable (when a
-    :class:`~.tools_registry.ToolRegistry` is supplied), or — under
-    ``security.strict_isolation`` — a node whose ``extra_args`` select a provider full-access mode
-    (the flow-side half of the isolation gate; the operator opts in via ``strict_isolation:
-    false``). Security can only ever *narrow* here.
+    :class:`~.tools_registry.ToolRegistry` is supplied), or a node whose ``extra_args`` select a
+    provider full-access mode — refused at **every** value of ``security.strict_isolation``, since
+    there is no opt-in to it and never was one at this layer. Security can only ever *narrow* here.
     (Flow ``budgets`` and ``publishing`` are handled by graceful runtime degradation, not here — see
     the module docstring.)
 

@@ -2,9 +2,10 @@
 
 Runs the operator's selected ``checks.command_sets`` — normalized to ``checks.model.ResolvedCheck``
 argv lists, never shell strings — through the shared safe process runner, each in its set's ``cwd``
-with
-an allowlisted environment and the set's (or global) timeout. Each run is written to
-``checks/<run-id>.log``.
+with the environment built by the operator's security policy (the allowlist plus assignments under
+strict isolation; the parent environment whole, minus ``.worc/.env`` names, under
+``security.strict_isolation: false``) and the set's (or global) timeout.
+Each run is written to ``checks/<run-id>.log``.
 
 Every selected check runs (no fail-fast): the runner aggregates the results so the human sees the
 full picture and ``fixing`` can address all quality failures in one cycle. A check failure is a

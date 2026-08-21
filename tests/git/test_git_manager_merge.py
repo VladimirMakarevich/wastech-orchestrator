@@ -19,6 +19,7 @@ from wastech_orchestrator.git_manager import (
     GitCommandError,
     GitManager,
     GitResult,
+    ManualActionRequired,
 )
 from wastech_orchestrator.state_store import StateStore, TaskRow
 
@@ -183,12 +184,62 @@ def test_push_branch_update_fast_forwards_remote(
     assert gm.update_branch_with_base("worc/t1", "main") is False
     local_head = git_run(["rev-parse", "refs/heads/worc/t1"], git_repo.clone)
 
-    gm.push_branch_update("worc/t1")
+    gm.push_branch_update("task-001", "worc/t1")
 
     # Query the remote from the clone (the bare repo refuses in-repo git under safe.bareRepository).
     remote_line = git_run(["ls-remote", "origin", "refs/heads/worc/t1"], git_repo.clone)
     assert remote_line.split()[0] == local_head
-    gm.push_branch_update("worc/t1")  # idempotent: re-push of the same commit is a git no-op
+    # Idempotent: a re-push of the same commit is a git no-op.
+    gm.push_branch_update("task-001", "worc/t1")
+
+
+def test_push_branch_update_refuses_a_destination_changed_since_branch_prep(
+    git_repo,
+    store: StateStore,
+    tmp_path: Path,
+    make_git_config: ConfigFactory,
+    git_run: GitRunner,
+) -> None:
+    # Пре2-2: П2.4 asks for the destination to be re-read before EVERY push, and this is the push
+    # that happens after the agent has had its run at the clone — in a later process that prepares
+    # no branch. With the baseline held only in memory the gate found nothing to compare and let the
+    # branch go to a rewritten `pushurl`, carrying this orchestrator's credentials with it.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    _task(store)
+    gm.prepare_branch("task-001", "slug", epoch=1)  # stamps the baseline, pre-provider
+    _branch_with_change(git_run, git_repo.clone, "worc/t1", "feature.txt", "feature\n")
+    elsewhere = tmp_path / "elsewhere.git"
+    git_run(["init", "--bare", str(elsewhere)], git_repo.clone)
+    git_run(["remote", "set-url", "--push", "origin", str(elsewhere)], git_repo.clone)
+
+    with pytest.raises(ManualActionRequired, match="push destination"):
+        gm.push_branch_update("task-001", "worc/t1")
+
+    # Nothing was sent: the refusal happens before the push, not after it.
+    assert git_run(["ls-remote", str(elsewhere), "refs/heads/worc/t1"], git_repo.clone) == ""
+
+
+def test_push_branch_update_uses_the_persisted_baseline_in_a_later_process(
+    git_repo,
+    store: StateStore,
+    tmp_path: Path,
+    make_git_config: ConfigFactory,
+    git_run: GitRunner,
+) -> None:
+    # The half that makes the refusal above reachable at all: `merge-task` runs with a fresh Git
+    # Manager, so the comparison has to come from the task's own record rather than from memory.
+    prep = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    _task(store)
+    prep.prepare_branch("task-001", "slug", epoch=1)
+    assert store.get_push_url_digest("task-001") is not None
+    _branch_with_change(git_run, git_repo.clone, "worc/t1", "feature.txt", "feature\n")
+    elsewhere = tmp_path / "elsewhere2.git"
+    git_run(["init", "--bare", str(elsewhere)], git_repo.clone)
+    git_run(["remote", "set-url", "--push", "origin", str(elsewhere)], git_repo.clone)
+
+    later = _manager(git_repo, store, tmp_path / "art", make_git_config)  # no branch prep here
+    with pytest.raises(ManualActionRequired, match="push destination"):
+        later.push_branch_update("task-001", "worc/t1")
 
 
 def test_record_external_merge_writes_op_and_is_idempotent(

@@ -121,6 +121,39 @@ def test_tool_surfaces_disabled(
     assert {"hooks", "multi_agent", "computer_use", "plugins"} <= disabled
 
 
+def test_the_extra_browser_surfaces_and_the_memory_store_are_disabled_too(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # Ам4-11, owner decision of 2026-08-20 on a live `codex features list` inventory: the deny is
+    # extended only where an ENABLED flag is a distinct surface that executes something or reaches
+    # data. An external browser and full CDP access reach the operator's own browser session, the
+    # in-app browser is a third name for the same class, and `memories` persists task content
+    # outside this orchestrator's redaction net — none of the four passes through the profiled
+    # shell, which is what the sandbox covers.
+    argv = _argv(codex_config, make_request())
+    disabled = {argv[i + 1] for i, tok in enumerate(argv[:-1]) if tok == "--disable"}
+    assert {
+        "browser_use",
+        "browser_use_external",
+        "browser_use_full_cdp_access",
+        "in_app_browser",
+        "memories",
+    } <= disabled
+    # And the names deliberately left enabled: disabling the profiled shell itself would remove the
+    # agent's ability to work, and the rest are either sub-surfaces of an already-denied flag or
+    # ship disabled anyway.
+    assert (
+        not {
+            "unified_exec",
+            "plugin_sharing",
+            "remote_plugin",
+            "enable_mcp_apps",
+            "standalone_web_search",
+        }
+        & disabled
+    )
+
+
 def test_deny_policy_and_write_guard_projected_into_profile(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
@@ -503,9 +536,11 @@ def test_no_session_id_has_no_resume(
 def test_advanced_mode_hands_back_every_feature_surface_but_keeps_the_profile(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # These five were disabled unconditionally, and the only other way to reach them was the
-    # full-access escape this product removed. Keeping them off in the one mode that exists to
-    # remove restrictions would turn a floor control into a plain loss of function.
+    # Every name in the set was disabled unconditionally (all but `hooks`, which follows
+    # read-isolation), and the only other way to reach them was the full-access escape this product
+    # removed. Keeping them off in the one mode that exists to remove restrictions would turn a
+    # floor control into a plain loss of function — including the browser surfaces and the memory
+    # store the deny grew by in Ам4-11.
     argv = _argv(
         codex_config,
         make_request(working_directory="/clone"),

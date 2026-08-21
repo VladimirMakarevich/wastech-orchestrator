@@ -90,12 +90,13 @@ def test_router_receives_isolation_checks(git_repo, make_git_config, tmp_path: P
 def test_orchestrator_receives_host_floor_checks(git_repo, make_git_config, tmp_path: Path) -> None:
     # Wiring guard for the advisory twin: without the injected table the run says nothing at all
     # about a host that cannot enforce the write floor, which is the exact silence this verdict
-    # exists to end. Claude is the only entry — Codex answers the same question per attempt, from
-    # inside the attempt.
+    # exists to end. BOTH providers answer (Ам1-4): Claude classifies its host offline, Codex says
+    # that on native Windows its own CLI is the only thing that can — a Codex-only park on that host
+    # used to get no line and no preamble paragraph at all.
     config = make_git_config(git_repo.clone, checks=["pytest"])
     layout = _distinct_layout(git_repo.clone, tmp_path)
     orch = build_orchestrator(config, layout=layout)
-    assert list(orch._host_floor_checks) == [ProviderId.CLAUDE]
+    assert set(orch._host_floor_checks) == {ProviderId.CLAUDE, ProviderId.CODEX}
 
 
 def test_orchestrator_consumers_receive_the_right_field(

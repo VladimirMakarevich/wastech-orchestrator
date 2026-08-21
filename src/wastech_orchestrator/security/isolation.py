@@ -20,8 +20,10 @@ Claude's permission mode and Bash-sandbox host classes — so this module holds 
 dispatches by :class:`~wastech_orchestrator.providers.base.ProviderId` and frames the answers.
 
 Read-isolation is orthogonal to the fatal gate. The operator escape hatch
-``security.disable_read_isolation`` — like the master ``strict_isolation: false`` — relaxes
-only the READ side (native discovery + the private read-deny projection); this preflight validates
+``security.disable_read_isolation`` — like the master ``strict_isolation: false`` — relaxes only the
+READ side, and only the *native discovery* half of it: the private read-deny projection (``.worc``,
+the env-file, the frozen bundles) stays ``Read``-denied at either value, with Claude's own config
+home the one carve-out (``allow_native_memory`` governs that path alone). This preflight validates
 the WRITE/permission/sandbox ceiling, which stays in force regardless. So ``disable_read_isolation``
 is a sanctioned opt-out, never itself a preflight reason (the per-provider ``isolation_reasons`` do
 not examine it), and the ``strict_isolation`` preflight is unaffected.
@@ -110,13 +112,19 @@ _MODE_TOOLS = (
 )
 
 _MODE_WRITE = (
-    "write: the agent may write ANYWHERE this host lets the sandbox reach, not only inside the "
-    "clone — a toolchain cache under $HOME, a scratch tree in the system temp, and just as much a "
-    "directory on PATH or a shell rc file. Say that one out loud: the right to write a directory "
-    "on PATH is the right to replace an executable that later runs OUTSIDE the sandbox, including "
-    "one this orchestrator launches as itself. What is still write-denied is floor 1 below, plus "
-    "the agent CLIs' own config homes (~/.claude / $CLAUDE_CONFIG_DIR, $CODEX_HOME), because one "
-    "of those files is loaded as configuration on the shipped default"
+    "write: the agent may write ANYWHERE ON THIS VOLUME that the host lets the sandbox reach, "
+    "not only inside the clone — a toolchain cache under $HOME, a scratch tree in the system "
+    "temp, and just as much a directory on PATH or a shell rc file. Say that one out loud: the "
+    "right to write a directory on PATH is the right to replace an executable that later runs "
+    "OUTSIDE the sandbox, including one this orchestrator launches as itself. One volume, not "
+    "every volume: the grant is expressed as the workspace path's anchor, so on Windows a "
+    "second drive (D:) stays unwritable — a toolchain cache kept there will still fail, and it "
+    "will look like a broken toolchain. What is still write-denied is floor 1 below, plus the "
+    "agent CLIs' own config homes (~/.claude / $CLAUDE_CONFIG_DIR, $CODEX_HOME), because one of "
+    "those files is loaded as configuration on the shipped default. "
+    "agents.providers.claude.allow_native_memory narrows that last one and only that one: it "
+    "opens the per-project memory store under the Claude home (projects/<slug>/memory) while "
+    "the credential and settings layers above it stay write-denied"
 )
 _MODE_NETWORK = (
     "network: EVERY node reaches the whole network whatever its flow granted, and so do the CLIs' "
@@ -138,14 +146,25 @@ _FLOOR_LEVELS: tuple[str, ...] = (
         ".git and the private .worc stay unwritable, wherever this host can enforce a sandbox at "
         "all (an isolation-floor line above says where it cannot). One qualifier, since the write "
         "granted above is filesystem-wide: what keeps these paths out of it is the carve-out being "
-        "the more specific rule, which Codex re-proves under its own sandbox before every attempt "
-        "and Claude does not — there, this level rests on the tool-level write denies, because how "
-        "that CLI ranks a denyWrite inside an allowWrite is documented nowhere and unproven here"
+        "the more specific rule, which Codex re-proves under its own sandbox before every provider "
+        "attempt that gets a shell — an agent node, an evaluator and the supervisor's own "
+        "read-only turn alike — and Claude does not. There this level rests on the tool-level "
+        "write denies. How that CLI ranks a denyWrite inside an allowWrite is a first-class "
+        "construction of the vendor's own (its settings compiler carries the carve-outs as "
+        "denyWithinAllow and applies them inside the allowed set) — but it is not proven on THIS "
+        "host, and the instrument that can prove it is the opt-in "
+        "`worc preflight --paid-isolation-probe`"
     ),
     (
         "floor 2 of 4 — publication to this repository's origin is held by DETECTION, not by "
         "prohibition: a branch or a pull request that appears without the orchestrator's own "
-        "record parks the task for a human"
+        "record is seen, and what happens then depends on where. During a WRITING agent node it "
+        "parks the task; during any other node with a shell (a read-only agent attempt, an "
+        "evaluator, a tool, the supervisor's own turn) it is a loud warning and the run continues "
+        "— the operator decision of 2026-07-26, not an oversight. At publish time nothing parks "
+        "for a moved branch at all: it is recovered from in four cases, and only a merge "
+        "conflict, a pull request this orchestrator did not open, or failing checks over the "
+        "adopted combination stop the run"
     ),
     (
         "floor 3 of 4 — publication anywhere else IS HELD BY NOTHING, and is reachable today: the "
@@ -156,9 +175,11 @@ _FLOOR_LEVELS: tuple[str, ...] = (
     (
         "floor 4 of 4 — publication AS THE ORCHESTRATOR is held by DETECTION: the user git config "
         "and the clone's own agent-CLI config are fingerprinted around the attempt, every gh call "
-        "names its repository outright, and the executables the orchestrator launches are pinned "
-        "to the paths resolved at startup. Not covered, and not coverable this way: a substitution "
-        "made between runs, and an edit to the installed package's own code"
+        "names its repository outright WHEN that repository can be named at all (an ssh alias, a "
+        "file:// URL or a local path in repo.url yields no pin and no open-PR probe — worc "
+        "preflight prints that as its own gh-repo-pin line), and the executables the orchestrator "
+        "launches are pinned to the paths resolved at startup. Not covered, and not coverable this "
+        "way: a substitution made between runs, and an edit to the installed package's own code"
     ),
 )
 

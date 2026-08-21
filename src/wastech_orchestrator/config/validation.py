@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 
 from wastech_orchestrator.checks.model import (
     CheckCommandError,
@@ -26,7 +27,11 @@ from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.providers.capabilities import is_reasoning_supported, reasoning_levels_for
 from wastech_orchestrator.providers.redaction import is_sensitive_key
 from wastech_orchestrator.security.env import env_name_is_covered, env_pattern_prefix
-from wastech_orchestrator.security.env_paths import internal_protected_paths, lexical_collision
+from wastech_orchestrator.security.env_paths import (
+    denied_read_path_collision,
+    internal_protected_paths,
+    lexical_collision,
+)
 from wastech_orchestrator.security.forbidden_args import find_forbidden_args
 
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
@@ -311,10 +316,9 @@ def _validate_security(config: OrchestratorConfig, issues: list[str]) -> None:
     applied to a check command's ``cwd``.
 
     ``allowed_environment`` must cover ``PATH``: the list replaces the OS-aware default wholesale,
-    so
-    an operator who edits it can silently drop the one name every child process needs. Only the
-    host-independent half of that rule lives here (the same config must get the same verdict on
-    every machine); the Windows-only ``SystemRoot`` half is a ``worc preflight`` FAIL
+    so an operator who edits it can silently drop the name strict-mode agent children and
+    always-allowlisted orchestrator git/gh need. Only the host-independent half lives here; the
+    Windows-only ``SystemRoot`` half is a preflight and task-start FAIL
     (:func:`~wastech_orchestrator.security.env.launch_critical_env_issue`). Matching is
     case-sensitive for the same reason: ``Path`` would be forwarded on Windows and dropped on POSIX.
     A prefix pattern counts as covering it — see :func:`_validate_allowed_environment` for the
@@ -352,6 +356,14 @@ def _validate_allowed_environment(names: Sequence[str], issues: list[str]) -> No
     """
     for index, entry in enumerate(names):
         where = f"security.allowed_environment[{index}]"
+        if entry == "*":
+            issues.append(
+                f"{where}: a lone '*' is not supported — the environment gate is an allow-list by "
+                "name, never 'everything except a deny-list' (a value leaks by being present in a "
+                "child's environment at all). Name the variables, or use a prefix pattern like "
+                "'DOTNET_*'"
+            )
+            continue
         prefix = env_pattern_prefix(entry)
         if prefix is None:
             if "*" in entry:
@@ -359,13 +371,6 @@ def _validate_allowed_environment(names: Sequence[str], issues: list[str]) -> No
                     f"{where} {entry!r}: '*' is only allowed as the single trailing character of a "
                     "prefix pattern (e.g. 'DOTNET_*')"
                 )
-        elif not prefix:
-            issues.append(
-                f"{where}: a lone '*' is not supported — the environment gate is an allow-list by "
-                "name, never 'everything except a deny-list' (a value leaks by being present in a "
-                "child's environment at all). Name the variables, or use a prefix pattern like "
-                "'DOTNET_*'"
-            )
         elif not _ENV_NAME_RE.fullmatch(prefix):
             issues.append(
                 f"{where} {entry!r}: the pattern prefix {prefix!r} is not a valid environment "
@@ -382,7 +387,8 @@ def _validate_allowed_environment(names: Sequence[str], issues: list[str]) -> No
         issues.append(
             "security.allowed_environment must cover 'PATH' (spelled exactly, or via a prefix "
             "pattern such as 'PATH*') — the list replaces the default wholesale, and without it a "
-            "child process finds neither the agent CLI nor git"
+            "strict-mode agent process cannot find its CLI, and orchestrator-owned git/gh cannot "
+            "find their executables in either mode"
         )
 
 
@@ -449,12 +455,19 @@ def _validate_assigned_paths(config: OrchestratorConfig, issues: list[str]) -> N
     for name, value in config.security.extra_environment.items():
         entry = lexical_collision(value, protected)
         if entry is None:
+            entry = denied_read_path_collision(
+                value,
+                Path(config.repo.local_path),
+                config.security.denied_read_paths,
+                canonical=False,
+            )
+        if entry is None:
             continue
         issues.append(
             f"security.extra_environment.{name}: the path it assigns overlaps {entry.label} "
-            f"({entry.path.as_posix()}) — the orchestrator's own state lives there, and a "
-            "toolchain writing into it corrupts the run or the repository. Point it at a directory "
-            "of its own inside the clone"
+            f"({entry.path.as_posix()}) — that target is protected from agent reads or writes, "
+            "and a toolchain cache must not be redirected onto it. Point the variable at a "
+            "directory of its own"
         )
 
 

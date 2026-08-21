@@ -20,7 +20,7 @@ The agents do the editing. The orchestrator owns the process and the Git lifecyc
 
 - **Tasks in, PRs out.** Author a task in Markdown; get a branch, the change, your checks run, and a PR with a written summary — no babysitting.
 - **Two agents, one interface.** Codex and Claude Code are interchangeable. If one fails for an infrastructure reason (missing binary, timeout, rate limit), the orchestrator automatically falls back to the other.
-- **The orchestrator owns Git.** Agents never commit or push. Branch naming, staging, commit, push, PR, and the safe return to your base branch are all handled for you.
+- **The orchestrator owns Git.** Agents are never asked to commit or push — the mandate is the orchestrator's, and it is backed by an immutable `.git` wherever the host can sandbox plus detection on your `origin`, not by a wall around the whole network. Branch naming, staging, commit, push, PR, and the safe return to your base branch are all handled for you.
 - **Your work stays in your repo.** The task file and its summary are committed alongside your code as an audit trail; everything else lives in a single gitignored home and never touches Git history.
 - **Debt does not scatter.** What a task noticed but did not fix — the supervisor's technical-debt notes and the review findings below your gate — is appended to one growing `.worc/follow-ups.md`. "What has this orchestrator not fixed here?" is one file, not thirty pull-request bodies. Nothing rewrites it: you close an item by deleting its entry.
 - **Runs unattended.** A watch loop periodically syncs your base branch, so a teammate can hand off a task just by committing it and pushing.
@@ -59,7 +59,7 @@ One task at a time, end to end. A read-only supervisor watches the steps that de
 
 **Officially supported CLI versions:** `claude` **≥ 2.1.210** and `codex` **≥ 0.144.4**. Older versions may work but are not guaranteed — the orchestrator is developed and tested against these.
 
-You authorize the tools yourself, once, in the environment the orchestrator runs in (`git push` for your remote, `gh auth login`, and signing in to `codex` / `claude`). The orchestrator never installs the CLIs or stores credentials, and passes only allowlisted environment variables to the agents.
+You authorize the tools yourself, once, in the environment the orchestrator runs in (`git push` for your remote, `gh auth login`, and signing in to `codex` / `claude`). The orchestrator never installs the CLIs or stores credentials. Under strict isolation, agent-side processes receive the allowlisted environment plus explicit non-secret assignments; advanced mode forwards the parent environment except names loaded from `.worc/.env`. Orchestrator-owned `git`/`gh` keep the allowlist in both modes.
 
 ## Quick start
 
@@ -71,7 +71,8 @@ pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git
 cd /path/to/my-repo
 worc install .
 
-# 3. Confirm the agents and isolation policy are ready (read-only)
+# 3. Confirm the agents, environment and isolation policy are ready (runs no task;
+#    may repair clone-local .git/info/exclude rules for assigned cache paths)
 worc preflight
 ```
 
@@ -122,6 +123,7 @@ The orchestrator creates a branch, runs the pipeline and your checks, commits th
 | `agents.allowed` / providers | Which agents are enabled and which is the default. |
 | `checks.command_sets` | Your test/lint commands, run as the testing stage. `install` leaves this empty — you author it. |
 | `orchestrator.auto_mode.enabled` | Whether the next pending task starts automatically (default off). |
+| `security.allowed_environment` / `security.extra_environment` | Which parent names are forwarded and which non-secret toolchain/cache values are assigned. `PATH` is mandatory; Windows also requires `SystemRoot`. |
 | `git.create_pull_request` | Open a PR after push (needs `gh`). |
 | `telegram.*` | Optional notifications and human-in-the-loop approvals. |
 
@@ -131,7 +133,8 @@ Secrets are read from the environment (keep them in a gitignored `.env` or `expo
 
 ```text
 worc install [repo]     set up the orchestrator in a repository
-worc preflight          check the agent CLIs and isolation policy (runs no task)
+worc preflight          check CLIs, environment and isolation (runs no task;
+                        may repair clone-local cache-ignore rules)
 worc preflight --paid-isolation-probe
                         the same, plus one billed model call per provider that
                         supports it, letting an agent try to write into .git

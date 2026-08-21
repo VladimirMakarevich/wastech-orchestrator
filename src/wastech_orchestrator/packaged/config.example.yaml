@@ -17,6 +17,11 @@ orchestrator:
 
 repo:
   url: "git@github.com:OWNER/REPO.git"
+                                    #   Also the source of the `gh --repo` pin every GitHub call
+                                    #   carries. An ssh ALIAS (git@myhost:o/n.git), a file:// URL or
+                                    #   a local path names no OWNER/REPO, so nothing can be pinned:
+                                    #   `worc preflight` then prints `gh-repo-pin: FAIL` when
+                                    #   create_pull_request is on, `WARN` otherwise.
   local_path: "./workspace/repo"
   base_branch: "main"               # branch tasks fork from and PRs target by default
   branch_prefix: "worc"             # task branches: worc/<task-id>-<slug>
@@ -86,7 +91,11 @@ agents:
                                # redaction net and audit; leave off unless you accept that. This is
                                # the ONLY switch that makes it writable (disable_read_isolation
                                # below lifts only reads), and each run then logs
-                               # "native Claude memory ON". Claude-only.
+                               # "native Claude memory ON". It opens THAT SUBTREE ONLY: the Claude
+                               # config home around it — credentials, settings, other projects —
+                               # keeps its write deny at either value of strict_isolation, and if
+                               # that home cannot be resolved on this host `worc preflight` refuses
+                               # the run instead of leaving it unprotected. Claude-only.
       permission_profile: "workspace-write"   # read-only | workspace-write (a flow node's ceiling may lower it)
       extra_args: []           # raw CLI flags appended verbatim; forbidden ones fail preflight
       primary: true            # the global primary (exactly one provider; must be in `allowed`)
@@ -134,8 +143,11 @@ security:
                                       #        volume-wide, what keeps them out of it is the
                                       #        carve-out being the more specific rule: Codex
                                       #        re-proves that under its own sandbox before every
-                                      #        attempt, Claude does not, so there this level rests
-                                      #        on the tool-level write denies;
+                                      #        provider attempt that gets a shell (agent node,
+                                      #        evaluator, supervisor turn), Claude does not, so
+                                      #        there this level rests on the tool-level write denies
+                                      #        — `worc preflight --paid-isolation-probe` is the one
+                                      #        instrument that can answer it on your host;
                                       #     2. publication to your origin is held by DETECTION — a
                                       #        branch or PR appearing without the orchestrator's
                                       #        record parks the task;
@@ -235,8 +247,8 @@ security:
                                         # `worc upgrade-config` merges from this template. Two names
                                         # are checked for you: `PATH` is mandatory (a config without
                                         # it is a load error) and on Windows `SystemRoot` is a
-                                        # `worc preflight` FAIL (without it claude.exe aborts at
-                                        # startup with exit 0xC0000409, printing nothing).
+                                        # preflight AND run/watch/rerun launch gate. The full host
+                                        # failure explanation lives in guide/config/security.md.
                                         # An entry may also be a PREFIX PATTERN — a name plus one
                                         # trailing `*` — so a toolchain whose variable names you do
                                         # not know in advance needs one line, not ten:
@@ -255,6 +267,11 @@ security:
                                         # drops. `worc preflight` prints what each pattern resolved
                                         # to on this host, including a pattern that matched nothing
                                         # (usually a typo, or a toolchain that is not installed).
+                                        # In strict mode a pattern does not implicitly forward a
+                                        # name loaded from .worc/.env; name it exactly to grant it.
+                                        # In advanced mode this list gates only orchestrator git/gh;
+                                        # agent/check/tool children get the parent environment minus
+                                        # every name loaded from .worc/.env.
     # Cross-platform base
     - "PATH"
     - "HOME"
@@ -262,8 +279,8 @@ security:
     - "USERPROFILE"
     - "CODEX_HOME"
     - "CLAUDE_CONFIG_DIR"
-    # Windows OS-launch essentials. SystemRoot is load-bearing: without it the Node-based claude.exe
-    # aborts at startup (exit 0xC0000409) before printing anything, and preflight reports it "did not succeed".
+    # Windows OS-launch essentials. SystemRoot is load-bearing for orchestrator-owned git/gh in
+    # both modes and for strict-mode agent children; preflight and task-start gates require it.
     - "SystemRoot"
     - "SystemDrive"
     - "windir"
@@ -281,9 +298,10 @@ security:
     - "TMPDIR"
     - "LD_LIBRARY_PATH"
     - "DYLD_LIBRARY_PATH"
-  extra_environment: {}               # Variables the orchestrator ASSIGNS to every child process it
-                                      #   starts — the agent CLI, the Check Runner, the dependency
-                                      #   scanners, git/gh. The complement of allowed_environment,
+  extra_environment: {}               # Variables the orchestrator ASSIGNS to agent/check/tool
+                                      #   children and to orchestrator git/gh before its final
+                                      #   publication-retargeting scrub. The complement of
+                                      #   allowed_environment,
                                       #   which only forwards a name and inherits whatever your shell
                                       #   exported (unset on the next machine, and a forgotten
                                       #   `export` is skipped in silence). Use it to pin a toolchain
@@ -311,8 +329,10 @@ security:
                                       #       either direction is refused at load, and `worc preflight`
                                       #       also refuses a symlink or a Windows case/UNC alias that
                                       #       reaches one.
-                                      #     - a `read-only` node cannot use it and is not meant to:
-                                      #       today such nodes have no shell at all.
+                                      #     - under strict isolation a `read-only` node cannot write
+                                      #       the clone, even if that provider gives it a shell. In
+                                      #       advanced mode it may write outside the clone, so the
+                                      #       outside-path warning is intentionally suppressed.
                                       #     - the cache grows without bound. Nothing prunes it — not the
                                       #       .worc/runs retention, not task cleanup — because deleting a
                                       #       toolchain's cache is more dangerous than occupying disk.
@@ -320,8 +340,9 @@ security:
                                       #   You do NOT have to gitignore it: for a path inside the clone
                                       #   `worc preflight` adds the rule to .git/info/exclude itself
                                       #   (untracked, so no diff and no PR noise) and reports FAIL if the
-                                      #   path is still not ignored afterwards. A path OUTSIDE the clone
-                                      #   gets a WARN instead — a sandboxed node cannot write there.
+                                      #   path is still not ignored afterwards. Every task start repairs
+                                      #   the same rule too. A path OUTSIDE the clone gets a WARN only
+                                      #   under strict isolation; advanced mode permits that recipe.
                                       #   Values MUST be quoted strings (`1` is a YAML int and is
                                       #   refused, with a hint). An empty string is a valid value.
                                       #   Applied after forwarding, so a name in both wins here.
@@ -329,7 +350,8 @@ security:
                                       #   binary the child runs — forward it instead), a
                                       #   secret-looking name, a name outside [A-Za-z_][A-Za-z0-9_]*,
                                       #   and two names differing only in case (Windows environment
-                                      #   names are case-insensitive).
+                                      #   names are case-insensitive). YAML keys and values must both
+                                      #   be quoted strings when YAML would coerce them (`on`, `1`, etc.).
                                       #   NEVER put credentials here: the value sits in this file in
                                       #   plaintext, and nothing can check a value for secrecy. The
                                       #   agent CLIs read their own credentials from their own stores.
@@ -349,6 +371,13 @@ security:
                                       #            manifest/lock edit (ask before continuing)
                                       #   auto   = (default) routine in-repo deletions/renames/edits do
                                       #            NOT gate; only a protected_paths match asks
+                                      # The diff it looks at is measured from the last commit the
+                                      # ORCHESTRATOR made for this task (the task's start point until
+                                      # it makes one), not from HEAD — so a commit made inside the run
+                                      # by an agent cannot empty the question. You are asked at the
+                                      # writing node, at that node's `hitl` round-trip, and once more
+                                      # just before the publishing commit (the only ask a flow with no
+                                      # writing node reaches).
                                       # Never lowers the hard ceiling (env-allowlist, bypass ban, cwd
                                       # containment). A task may override with front-matter `trust_level`.
   protected_paths: []                 # repo-relative globs that ALWAYS require approval on ANY change,

@@ -50,7 +50,8 @@ from wastech_orchestrator.state_store import (
 RegisterArtifact = Callable[[str, str, str], None]
 
 #: The safe argv process runner (``providers.process.run_process``) the ``dependency_scan`` checker
-#: launches its scanners through (argv-without-shell, mandatory timeout, allowlisted env).
+#: launches its scanners through (argv-without-shell, mandatory timeout, and the policy-built child
+#: env — the allowlist under strict isolation, the parent environment whole in the advanced mode).
 RunProcess = Callable[..., ProcessResult]
 
 
@@ -297,8 +298,22 @@ class GitPort(Protocol):
         self, exchange_root: str | None = None
     ) -> ProviderWriteGuardPolicy: ...
 
-    #: Publishes the task branch and reports what it had to do to get there — including any
-    #: commits it merged in because the remote branch had moved on without us.
+    #: How many commits this run adopted rather than made — an agent's or an operator's own
+    #: ``git commit`` that ``commit_code``/``commit_subtask`` found on a clean tree. Declared in the
+    #: PR body beside the remote-side adoptions: a locally adopted commit is the more suspicious of
+    #: the two (the agent made it inside this run), and a reviewer had no way to know.
+    def adopted_commit_count(self, task_id: str) -> int: ...
+
+    #: Merges in commits someone else put on the task branch, before anything is published, and
+    #: reports them. The publish node runs the checks over that combination BEFORE pushing: the
+    #: invariant is "publishing happens only when checks succeed", and a merge is local while a push
+    #: is not. Empty (and a no-op) in the ordinary case where the remote holds nothing of anyone
+    #: else's.
+    def adopt_foreign_commits(
+        self, task_id: str, branch: str, *, mode: BranchMode = BranchMode.NEW
+    ) -> tuple[str, ...]: ...
+
+    #: Publishes the task branch and reports what it had to do to get there.
     def push(
         self, task_id: str, branch: str, *, mode: BranchMode = BranchMode.NEW
     ) -> PushOutcome: ...
@@ -373,9 +388,10 @@ class NodeServices:
     #: so it verifies the lifecycle ``<id>.md`` was not rewritten under the run. ``None`` in a
     #: flow with no frozen packet (a unit harness / the ephemeral merge flow).
     task_packet_digest: str | None = None
-    #: the ``dependency_scan`` checker's process runner + its allowlisted child env + per-scanner
-    #: timeout. ``process_env`` is the same allowlisted env the Check Runner uses
-    #: (``build_child_env(config.security)``); empty in unit harnesses.
+    #: the ``dependency_scan`` checker's process runner + its policy-built child env + per-scanner
+    #: timeout. ``process_env`` is the same env the Check Runner uses
+    #: (``build_child_env(config.security)``) — which under ``strict_isolation: false`` is the
+    #: parent environment whole, secrets included; empty in unit harnesses.
     run_process: RunProcess = run_process
     process_env: Mapping[str, str] = field(default_factory=dict)
     scan_timeout_s: int = 600

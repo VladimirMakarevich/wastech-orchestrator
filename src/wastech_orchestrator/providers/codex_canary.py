@@ -228,17 +228,14 @@ class WriteGuardTargets:
     missing: tuple[str, ...]
 
 
-def write_guard_probe_paths(
-    denied_write_paths: Sequence[Path],
-    *,
-    is_dir: Callable[[Path], bool] = Path.is_dir,
-) -> WriteGuardTargets:
-    """Pick the probe target inside each declared write-deny root (pure but for ``is_dir``).
+def write_guard_probe_paths(denied_write_paths: Sequence[Path]) -> WriteGuardTargets:
+    """Pick the probe target inside each declared write-deny root.
 
     Every root either gets a probe of its own or is accounted for: collapsed into a probed ancestor,
     or reported missing. Nothing is dropped silently, because "no probe ran" and "the deny held" are
-    the two answers a floor claim must never confuse. ``is_dir`` is injectable so the deterministic
-    suite can describe a host without touching one.
+    the two answers a floor claim must never confuse. The one host question — does this root exist
+    as a directory — is asked directly; the deterministic suite creates real directories, so an
+    injection seam for it would have no caller.
 
     Labels are derived from the root's own name, so a linked worktree — where the per-worktree
     gitdir and the shared common dir are different directories — yields two distinguishable probes
@@ -253,7 +250,7 @@ def write_guard_probe_paths(
         if ancestor is not None:
             covered.append((root.as_posix(), ancestor.as_posix()))
             continue
-        if not is_dir(root):
+        if not root.is_dir():
             missing.append(root.as_posix())
             continue
         kept.append(root)

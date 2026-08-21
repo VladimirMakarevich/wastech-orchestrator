@@ -156,7 +156,7 @@ git cherry-pick --continue
 
 This is a product invariant (see [architecture.md](architecture.md)).
 
-- **Only the orchestrator (Git Manager) commits, pushes, and opens PRs** — never the agent provider.
+- **Only the orchestrator (Git Manager) commits, pushes, and opens PRs** — never the agent provider. That is a de-jure mandate: no node is given one and no mechanism expects the agent to publish. Mechanical impossibility holds only where a sandbox exists, and only for the local half (`.git` and `.worc` are immutable); the remote half is held by detection on our `origin` and is not held outside it (see [architecture.md](architecture.md)).
 - Default task branch: `repo.branch_prefix/<task-id>-<slug>` (`worc/…` by default); a validated task `branch_name` may override it.
 - Branch setup: `git fetch` → checkout `base_branch` → `pull` → create the task branch.
 - A direct push to `base_branch` is forbidden; the result always goes through a PR, whose body is the task summary.

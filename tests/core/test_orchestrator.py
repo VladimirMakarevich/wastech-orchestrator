@@ -1959,15 +1959,21 @@ def test_boundary_cancellation_parks_then_resumes_from_untouched_node(
 
 
 def test_parked_task_resumes_when_provider_recovers(
-    git_repo, make_git_config, tmp_path: Path
+    git_repo, make_git_config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # After parking, the outage clears: resume() continues from the checkpoint to DONE, clearing
     # blocked_since. The implementation is committed exactly once (the parked run never committed).
     providers = _both(
         infra_fail={"implementation"}, infra_error_class=ErrorClass.PROVIDER_UNAVAILABLE
     )
+    monkeypatch.setenv("DOTNET_ROOT", "/opt/dotnet")
     orch, store, ledger, art = _build(
-        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"allowed_environment_patterns": ["DOTNET_*"]},
     )
     _patch_impl_edit(providers, git_repo)
 
@@ -1976,9 +1982,12 @@ def test_parked_task_resumes_when_provider_recovers(
 
     for provider in providers.values():
         provider.heal()
-    result = orch.resume()
+    with _collected_warnings(logging.INFO) as messages:
+        result = orch.resume()
 
     assert result is not None and result.final_status is Status.DONE
+    announced = [m for m in messages if "allowed_environment prefix patterns resolved" in m]
+    assert len(announced) == 1  # resume has its own posture preamble before more work launches
     task = store.get_task("task-resume")
     assert task is not None and task.blocked_since is None  # cleared at terminal
     assert ledger.records()[0]["final_status"] == "done"
@@ -2475,8 +2484,8 @@ def test_summary_fallback_when_provider_fails(git_repo, make_git_config, tmp_pat
 
 
 @contextmanager
-def _collected_warnings() -> Iterator[list[str]]:
-    """Collect ``wastech_orchestrator`` WARNING messages emitted inside the block.
+def _collected_warnings(level: int = logging.WARNING) -> Iterator[list[str]]:
+    """Collect package messages at ``level`` or above emitted inside the block.
 
     A handler on the package logger rather than ``caplog``: the per-task logger is a bound adapter
     whose records do not reach pytest's capture handler.
@@ -2488,10 +2497,10 @@ def _collected_warnings() -> Iterator[list[str]]:
             messages.append(record.getMessage())
 
     logger = logging.getLogger("wastech_orchestrator")
-    handler = _Collect(level=logging.WARNING)
+    handler = _Collect(level=level)
     logger.addHandler(handler)
     prior_level = logger.level
-    logger.setLevel(logging.WARNING)
+    logger.setLevel(level)
     try:
         yield messages
     finally:
@@ -2533,6 +2542,29 @@ def test_environment_patterns_are_announced_once_per_run(
     assert "oy2-secret" not in announced[0]  # names, never values
 
 
+def test_clean_environment_pattern_expansion_is_announced_at_info(
+    git_repo, make_git_config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AC0.3.2: the ordinary, no-secret pattern branch is observable in the run log."""
+    monkeypatch.setenv("DOTNET_ROOT", "/opt/dotnet")
+    orch, _store, _ledger, _art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        config_kwargs={"allowed_environment_patterns": ["DOTNET_*"]},
+    )
+
+    with _collected_warnings(logging.INFO) as messages:
+        result = orch.run_task(_complete_task(tmp_path, "task-envpat-info"))
+
+    assert result.final_status is Status.DONE
+    announced = [m for m in messages if "allowed_environment prefix patterns resolved" in m]
+    assert len(announced) == 1
+    assert "DOTNET_* → 1 name(s) (DOTNET_ROOT)" in announced[0]
+
+
 def test_a_run_excludes_an_assigned_in_clone_cache_without_preflight(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
@@ -2569,6 +2601,33 @@ def test_a_run_excludes_an_assigned_in_clone_cache_without_preflight(
     assert ".toolcache" not in status.stdout
 
 
+def test_a_failed_assigned_cache_exclude_warns_without_stopping_the_task(
+    git_repo,
+    make_git_config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    package_log_text,
+) -> None:
+    """0.4-12: ignore repair failure is loud but remains non-terminal by contract."""
+    cache = git_repo.clone / ".toolcache" / "nuget"
+    monkeypatch.setattr(
+        "wastech_orchestrator.git_manager.ensure_path_excluded", lambda *_a, **_kw: False
+    )
+    orch, _store, _ledger, _art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        config_kwargs={"extra_environment": {"NUGET_PACKAGES": str(cache)}},
+    )
+
+    result = orch.run_task(_complete_task(tmp_path, "task-cacheign-warning"))
+
+    assert result.final_status is Status.DONE
+    assert "assigned path for NUGET_PACKAGES points into the clone" in package_log_text()
+
+
 def test_a_config_without_patterns_announces_nothing(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
@@ -2577,7 +2636,7 @@ def test_a_config_without_patterns_announces_nothing(
     orch, _store, _ledger, _art = _build(
         git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
     )
-    with _collected_warnings() as messages:
+    with _collected_warnings(logging.INFO) as messages:
         assert orch.run_task(_complete_task(tmp_path, "task-nopat")).final_status is Status.DONE
     assert not [m for m in messages if "prefix patterns" in m]
 

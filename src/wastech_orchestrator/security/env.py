@@ -34,10 +34,13 @@ import os
 import platform
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-from wastech_orchestrator.config.schema import SecurityConfig
 from wastech_orchestrator.env_file import env_file_names
 from wastech_orchestrator.providers.redaction import is_sensitive_key
+
+if TYPE_CHECKING:
+    from wastech_orchestrator.config.schema import SecurityConfig
 
 # Cross-platform base: the few names every OS needs for the agent CLIs to find their binaries
 # (PATH), their home/config dirs, and their credentials. ``USER`` is the macOS Keychain login
@@ -116,9 +119,12 @@ def env_pattern_prefix(entry: str) -> str | None:
     ``"DOTNET_*"`` → ``"DOTNET_"``; ``"DOTNET_ROOT"`` → ``None``. The single source of truth for the
     grammar's shape, shared by the config validator — which is what rejects every *other* use of
     ``*`` (a lone ``*``, ``A*B``, ``**``, ``*SUFFIX``) — and by :func:`expand_allowed_environment`.
-    A malformed entry therefore never reaches run time; if one somehow did, it would behave as an
-    exact name that matches nothing, never as a wider pattern.
+    The lone ``*`` is deliberately returned as ``None`` too. The validator reports its specific
+    grammar error, while this lower-level helper remains fail-closed if a caller bypasses that gate:
+    a malformed inversion can never expand to the whole process environment.
     """
+    if entry == _PATTERN_SUFFIX:
+        return None
     return entry[: -len(_PATTERN_SUFFIX)] if entry.endswith(_PATTERN_SUFFIX) else None
 
 
@@ -184,12 +190,15 @@ def expand_allowed_environment(
     effective: list[str] = []
     seen: set[str] = set()
     expansions: list[PatternExpansion] = []
+    source_by_fold = {key.upper(): key for key in source} if fold else {}
     for entry in names:
         prefix = env_pattern_prefix(entry)
         if prefix is None:
-            if entry not in seen:
-                seen.add(entry)
-                effective.append(entry)
+            actual = source_by_fold.get(entry.upper(), entry) if fold else entry
+            identity = actual.upper() if fold else actual
+            if identity not in seen:
+                seen.add(identity)
+                effective.append(actual)
             continue
         probe = prefix.upper() if fold else prefix
         matched = sorted(key for key in source if (key.upper() if fold else key).startswith(probe))
@@ -202,8 +211,9 @@ def expand_allowed_environment(
             )
         )
         for key in kept:
-            if key not in seen:
-                seen.add(key)
+            identity = key.upper() if fold else key
+            if identity not in seen:
+                seen.add(identity)
                 effective.append(key)
     return tuple(effective), tuple(expansions)
 
@@ -269,12 +279,13 @@ def env_name_is_covered(allowed_environment: Sequence[str], name: str) -> bool:
 def launch_critical_env_issue(
     allowed_environment: Sequence[str], system: str | None = None
 ) -> str | None:
-    """The host-specific reason ``allowed_environment`` cannot launch a child CLI, or ``None``.
+    """The host-specific reason the allowlist cannot launch required Windows children, or ``None``.
 
-    Only one name qualifies, and only on one OS: without ``SystemRoot`` the Windows CLI aborts
-    before printing anything (see :data:`_WINDOWS_ESSENTIAL_ENV`), so the operator sees "CLI did not
-    succeed" and nothing else. The remaining OS-launch essentials only degrade a child (no temp dir,
-    no extension resolution), so they are not asserted here.
+    Only one name qualifies, and only on one OS. Orchestrator-owned git/gh uses this allowlist in
+    every mode, so the verdict is unconditional. Under strict isolation the same omission also
+    reaches Node-based agent CLIs; a real ``claude.exe`` launch demonstrated an abort before output
+    with ``0xC0000409``. The remaining OS-launch essentials only degrade a child, so they are not
+    asserted here.
 
     The verdict depends on the host, which is why it belongs to ``worc preflight`` and never to
     ``validate_config``: the same config file must get the same verdict on every machine. The
@@ -296,20 +307,56 @@ def launch_critical_env_issue(
         return None
     return (
         "security.allowed_environment omits 'SystemRoot' (the list replaces the default wholesale) "
-        "— on Windows the Node-based claude.exe aborts at startup with exit 0xC0000409 before "
-        "printing anything, so a run would only report that the CLI did not succeed. "
+        "— orchestrator-owned git/gh cannot be launched reliably on Windows in either mode; under "
+        "strict isolation a Node-based agent CLI may also abort before printing anything "
+        "(observed with claude.exe as exit 0xC0000409). "
         "Add 'SystemRoot' to the list."
     )
 
 
-def _allowlisted_names(security: SecurityConfig, source: Mapping[str, str]) -> tuple[str, ...]:
-    """The names ``allowed_environment`` forwards out of *source*, patterns already expanded."""
-    forwarded, _ = expand_allowed_environment(security.allowed_environment, source)
-    return forwarded
+def _name_identity(name: str, *, system: str) -> str:
+    """The environment-name identity for *system* (Windows names are case-insensitive)."""
+    return name.upper() if system == "Windows" else name
+
+
+def _allowlisted_names(
+    security: SecurityConfig,
+    source: Mapping[str, str],
+    *,
+    system: str,
+    withhold_env_file: bool,
+) -> tuple[str, ...]:
+    """Resolve allowlisted names, optionally excluding implicit env-file pattern matches.
+
+    The orchestrator loads ``.worc/.env`` into its own process before building children. Agent-side
+    environments must not receive a value merely because a prefix pattern happened to match its
+    non-secret-looking name: that would route around the provider read-deny on the file. An exact
+    ``allowed_environment`` entry remains an explicit strict-mode grant, and
+    ``extra_environment`` remains the explicit restoration in either mode. Orchestrator-owned
+    git/gh is not an agent and keeps the ordinary allowlist behavior.
+    """
+    forwarded, _ = expand_allowed_environment(security.allowed_environment, source, system=system)
+    if not withhold_env_file:
+        return forwarded
+    explicit = {
+        _name_identity(name, system=system)
+        for name in security.allowed_environment
+        if env_pattern_prefix(name) is None
+    }
+    withheld = {
+        _name_identity(name, system=system)
+        for name in env_file_names()
+        if _name_identity(name, system=system) not in explicit
+    }
+    return tuple(name for name in forwarded if _name_identity(name, system=system) not in withheld)
 
 
 def _assemble(
-    security: SecurityConfig, source: Mapping[str, str], forwarded: Sequence[str]
+    security: SecurityConfig,
+    source: Mapping[str, str],
+    forwarded: Sequence[str],
+    *,
+    system: str,
 ) -> dict[str, str]:
     """Forward *forwarded* out of *source*, then assign ``extra_environment`` on top.
 
@@ -318,20 +365,37 @@ def _assemble(
     forwarded position while taking the assigned value.
     """
     child = {key: source[key] for key in forwarded if key in source}
-    child.update(security.extra_environment)
+    if system != "Windows":
+        child.update(security.extra_environment)
+        return child
+
+    # A plain dict is case-sensitive even when it models a Windows environment. Preserve the
+    # forwarded key's position/spelling, but replace its value case-insensitively so an assignment
+    # cannot leave two spellings whose winner is deferred to CreateProcess.
+    by_identity = {key.upper(): key for key in child}
+    for name, value in security.extra_environment.items():
+        existing = by_identity.get(name.upper())
+        if existing is not None:
+            child[existing] = value
+        else:
+            child[name] = value
+            by_identity[name.upper()] = name
     return child
 
 
 def build_child_env(
     security: SecurityConfig,
     parent_env: Mapping[str, str] | None = None,
+    *,
+    system: str | None = None,
 ) -> dict[str, str]:
     """Build the environment for a child the orchestrator runs **on the agent's behalf**.
 
     Two policies, chosen by ``security.strict_isolation``:
 
     * **strict isolation on** — the allowlist gate described in this module's docstring: only the
-      names ``allowed_environment`` covers, then the assigned extras.
+      names ``allowed_environment`` covers, then the assigned extras. A prefix pattern cannot
+      implicitly forward a name loaded from the orchestrator env-file; an exact entry can.
     * **advanced mode** (``strict_isolation: false``) — the parent environment is forwarded
       **whole**, with no name gate at all, because that switch now means "full freedom under the
       operator's responsibility, except the floor", and a toolchain the agent has to drive needs the
@@ -363,24 +427,35 @@ def build_child_env(
         outright under either policy.
     :param parent_env: the environment to draw from; defaults to the live ``os.environ``.
     :returns: a fresh dict. Under strict isolation: the allowlisted keys present in *parent_env*, in
-        allowlist order (a pattern's matches sorted, in the pattern's place), then the assigned
-        names in config order — byte for byte what it always was. In advanced mode: every parent
-        name except the env-file's, sorted, then the assigned names. A forwarded key absent from the
-        parent is skipped (never added as empty); an assigned name in both wins, keeping its
-        forwarded position. The order is part of the contract — the result is compared in tests, and
-        an unordered result would make a run's environment irreproducible, which is why the mode
-        sorts instead of inheriting ``os.environ``'s unreproducible iteration order.
+        allowlist order (a pattern's matches sorted, in the pattern's place), minus implicit
+        env-file pattern matches, then the assigned names in config order. In advanced mode: every
+        parent name except the env-file's, sorted, then the assigned names. A forwarded key absent
+        from the parent is skipped (never added as empty); an assigned name in both wins, keeping
+        its forwarded position. The order is part of the contract — the result is compared in
+        tests, and an unordered result would make a run's environment irreproducible, which is why
+        the mode sorts instead of inheriting ``os.environ``'s unreproducible iteration order.
     """
     source: Mapping[str, str] = os.environ if parent_env is None else parent_env
+    host = system if system is not None else platform.system()
     if security.strict_isolation:
-        return _assemble(security, source, _allowlisted_names(security, source))
-    withheld = env_file_names()
-    return _assemble(security, source, tuple(sorted(k for k in source if k not in withheld)))
+        return _assemble(
+            security,
+            source,
+            _allowlisted_names(security, source, system=host, withhold_env_file=True),
+            system=host,
+        )
+    withheld = {_name_identity(name, system=host) for name in env_file_names()}
+    forwarded = tuple(
+        sorted(key for key in source if _name_identity(key, system=host) not in withheld)
+    )
+    return _assemble(security, source, forwarded, system=host)
 
 
 def build_orchestrator_env(
     security: SecurityConfig,
     parent_env: Mapping[str, str] | None = None,
+    *,
+    system: str | None = None,
 ) -> dict[str, str]:
     """Build the environment for a child the orchestrator runs **as itself** — its ``git``/``gh``.
 
@@ -389,13 +464,19 @@ def build_orchestrator_env(
     cost of a mistake here is somebody else's repository — a shell ``GH_REPO`` would retarget a pull
     request, and ``GIT_DIR`` / ``GIT_WORK_TREE`` would move both the commands and the resolved
     control paths, so the write-guard would be protecting the wrong ``.git``. An operator who
-    genuinely needs a proxy or a token on this path assigns it through ``extra_environment``, which
-    reaches here. The names that would do the damage are additionally scrubbed by the caller (see
-    ``_GIT_ENV_SCRUB`` in :mod:`wastech_orchestrator.git_manager`), because ``extra_environment``
-    can assign one and an allowlist entry can forward one.
+    genuinely needs a proxy on this path assigns it through ``extra_environment``, which reaches
+    here. Names that retarget publication or substitute Git's transport are additionally scrubbed
+    by the caller (see ``_GIT_ENV_SCRUB`` in :mod:`wastech_orchestrator.git_manager`), because
+    ``extra_environment`` can assign one and an allowlist entry can forward one.
 
     A separate function rather than a flag on :func:`build_child_env`: the exemption is legible at
     the call site, and a new agent-side call site cannot accidentally opt into it.
     """
     source: Mapping[str, str] = os.environ if parent_env is None else parent_env
-    return _assemble(security, source, _allowlisted_names(security, source))
+    host = system if system is not None else platform.system()
+    return _assemble(
+        security,
+        source,
+        _allowlisted_names(security, source, system=host, withhold_env_file=False),
+        system=host,
+    )

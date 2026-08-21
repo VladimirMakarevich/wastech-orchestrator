@@ -45,6 +45,11 @@ ISOLATION_CHECKS: dict[ProviderId, IsolationCheck] = {
 # claim about a host nothing verified.
 HOST_FLOOR_CHECKS: dict[ProviderId, HostFloorCheck] = {
     ProviderId.CLAUDE: claude.host_floor_gap,
+    # Codex answers a different shape of the same question — its sandbox availability is decided by
+    # its own CLI, not by a platform plus two executables — but the requirement is about the HOST,
+    # so an entry that says "not classifiable offline here" beats no entry at all: without one a
+    # Codex-only park on native Windows printed no floor line and got no preamble paragraph.
+    ProviderId.CODEX: codex.host_floor_gap,
 }
 
 # ProviderId → offline "does this attempt get a shell?" check, bound here for the same reason: the

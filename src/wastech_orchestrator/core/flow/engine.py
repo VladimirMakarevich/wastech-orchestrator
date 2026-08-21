@@ -142,6 +142,13 @@ class NodeOutcome:
     for a hypothetical — but the post-node hook warns the operator through the same console + ⚠️
     trace surface.
 
+    ``adopted_commits`` is the publish node's own report of the fourth publish case: the task
+    branch carried commits this orchestrator did not make, so publishing merged them in and re-ran
+    the checks over the combination before sending anything. The run is a success; what the operator
+    has to be told is that the task's reported diff — measured from the base — now covers that work
+    too. A pull request carries the same fact in its body, so this exists for the scopes that open
+    none (``publish: push`` / ``commit``), where the run's own trace is the only carrier.
+
     ``git_control_drift`` is the second, sharper event on that same never-park path (operator
     decision 2, 2026-07-26): the same node changed **Git control state** — a hook,
     ``.git/config``, the index. It carries the redacted drift summary rather than a bool precisely
@@ -158,6 +165,7 @@ class NodeOutcome:
     rework_exhausted: bool = False
     unexpected_write: bool = False
     git_control_drift: str | None = None
+    adopted_commits: tuple[str, ...] = ()
 
 
 def skip_outcome(node: FlowNode) -> NodeOutcome:

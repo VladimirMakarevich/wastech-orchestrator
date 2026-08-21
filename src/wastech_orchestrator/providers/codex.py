@@ -96,15 +96,29 @@ _OUTPUT_SCHEMA_FILENAME = "output-schema.json"
 
 # Codex feature flags disabled for an autonomous orchestrator attempt: the non-shell tool
 # surfaces that could reach the local filesystem or spawn work outside the profiled shell
-# sandbox — hooks, custom subagents/multi-agent, computer use, in-app browser, apps/plugins. Each
-# is emitted as ``--disable <name>`` (an earlier note here said ``-c features.<name>=false``, which
-# the code stopped doing). Emission is conditional twice over: ``hooks`` is not disabled when
-# read-isolation is off — that is, on the shipped default — and NOTHING is disabled in the advanced
-# mode, where these surfaces are handed back deliberately. Leaving them off there would mean the
-# only way to have them was the full-access escape this product removed, turning a floor control
-# into a plain loss of function. Neighbouring flags in ``codex features list`` are not added here on
-# spec: that needs a live inventory and an owner decision, and widening a deny without a proven
-# surface is the functional over-restriction the security rules forbid.
+# sandbox — hooks, custom subagents/multi-agent, computer use, the browser surfaces, apps/plugins,
+# and the persistent memory store. Each is emitted as ``--disable <name>`` (an earlier note here
+# said ``-c features.<name>=false``, which the code stopped doing). Emission is conditional twice
+# over: ``hooks`` is not disabled when read-isolation is off — that is, on the shipped default —
+# and NOTHING is disabled in the advanced mode, where these surfaces are handed back deliberately.
+# Leaving them off there would mean the only way to have them was the full-access escape this
+# product removed, turning a floor control into a plain loss of function.
+#
+# The set is grounded in a live no-model inventory, not in guesswork: ``codex features list`` on
+# codex-cli 0.144.4 (2026-08-20) reports 92 flags, 29 of them enabled, and ``codex sandbox
+# --disable <name>`` validates every name here while rejecting an invented one ("Unknown feature
+# flag"). Owner decision of that date, on that inventory: extend only where an enabled flag is a
+# distinct surface that really executes something or reaches data. That added the two extra browser
+# surfaces (an EXTERNAL browser and full CDP access reach the operator's own browser session, and
+# neither passes through the profiled shell) and ``memories`` (a persistent store outside this
+# orchestrator's redaction net and audit — the same risk the Claude-side native-memory deny exists
+# for). Deliberately NOT added, so the next reader does not have to re-derive it: ``unified_exec``
+# is the profiled shell itself; ``plugin_sharing``/``remote_plugin`` are sub-surfaces of the
+# already-denied ``plugins``; ``enable_mcp_apps`` and ``standalone_web_search`` ship disabled;
+# MCP elicitation is neutralized by ``--ignore-user-config`` plus the untrusted project layer;
+# ``code_mode_host`` is enabled but its semantics are not established here, so it stays a watch
+# item rather than a blind deny. Widening a deny without a proven surface is the functional
+# over-restriction the security rules forbid.
 #
 # The MCP inventory is neutralized separately, by ``--ignore-user-config`` + the untrusted project
 # layer (no server loads); the no-model capability smoke
@@ -116,6 +130,10 @@ _DISABLED_FEATURES: tuple[str, ...] = (
     "multi_agent",
     "computer_use",
     "browser_use",
+    "browser_use_external",
+    "browser_use_full_cdp_access",
+    "in_app_browser",
+    "memories",
     "apps",
     "plugins",
 )
@@ -548,6 +566,30 @@ def isolation_reasons(config: ProviderConfig) -> list[str]:
     return reasons
 
 
+def host_floor_gap(*, system: str | None = None) -> str | None:
+    """What this host cannot be shown to enforce for Codex, or ``None`` when it can be.
+
+    The counterpart of :func:`claude.host_floor_gap`, and deliberately shaped differently, because
+    the two questions differ: Claude's sandbox availability is classifiable offline (a platform plus
+    two executables on ``PATH``), while Codex's is decided by its own CLI and, on native Windows, by
+    whether the elevated sandbox backend is installed — something only the CLI can answer. So the
+    honest offline verdict there is "not classifiable here", which is still worth printing: the
+    alternative was silence, and a Codex-only park on such a host learned nothing from
+    ``worc preflight`` and then met the answer inside its first attempt.
+
+    ``system`` is injectable for the deterministic suite; it defaults to the real host.
+    """
+    if (system if system is not None else platform.system()) != "Windows":
+        return None
+    return (
+        "native Windows: whether the Codex sandbox can enforce here is decided by the CLI's "
+        "elevated sandbox backend, which cannot be classified offline — run "
+        "`worc preflight --capability-smoke` to get the answer before a task does. An "
+        "undemonstrable sandbox is a warning under strict_isolation: false (the run continues, "
+        "unproven) and refuses the attempt under strict_isolation: true"
+    )
+
+
 def attempt_has_shell(config: ProviderConfig, query: ShellQuery) -> bool:
     """Whether a Codex attempt can execute commands — always true, on every profile.
 
@@ -708,17 +750,25 @@ class CodexProvider(BaseCliProvider):
         Runs the *same* profile under ``codex sandbox -P`` (no model, no network) and checks the
         private home is denied (direct and shell-mediated), the exchange is read-only, and every
         Git-control / lifecycle root the profile write-denies actually refuses a write — the
-        product's central claim, which no probe tested before. On real launch env. Skipped when
-        there is no
-        internal deny set to prove (a unit harness with no ``deny_policy``) or on the full-access
-        escape (no profile emitted). A leak fails closed as a non-fallback security error; an
-        undemonstrable sandbox as ``CAPABILITY_UNAVAILABLE``.
+        product's central claim, which no probe tested before. On real launch env. Skipped only
+        when there is no internal deny set to prove (a unit harness with no ``deny_policy``). A leak
+        fails closed as a non-fallback security error; an undemonstrable sandbox as
+        ``CAPABILITY_UNAVAILABLE``.
+
+        A missing profile in the argv used to return quietly, which was legal while the full-access
+        escape existed and emitted none. It no longer does: every attempt emits a profile, so
+        ``None`` means the argv is not one this adapter built — and skipping the canary on it would
+        be fail-open on the run's central proof. It is a configuration error instead.
         """
         if self._deny_policy is None:
             return
         profile_arg = _extract_profile_arg(argv)
         if profile_arg is None:
-            return
+            raise ProviderError(
+                ErrorClass.CONFIGURATION_ERROR,
+                "no generated permission profile in the launch argv, so the pre-launch canary "
+                "cannot prove the sandbox — refusing the attempt rather than running unproven",
+            )
         task_path = request.task_path
         exchange_probe = task_path if task_path and Path(task_path).exists() else None
         outcome = run_codex_canary(
@@ -742,6 +792,23 @@ class CodexProvider(BaseCliProvider):
         )
         if not outcome.ok:
             assert outcome.error_class is not None  # set whenever ok is False
+            # Owner decision (2026-08-20), applied identically in `worc preflight`, in the router's
+            # fallback rule and here: in the ADVANCED mode a probe that could not demonstrate the
+            # sandbox is a warning and the attempt proceeds — that host class (native Windows
+            # without the elevated backend) is exactly the one the mode exists to keep working, and
+            # refusing it would make the mode unavailable there while proving nothing. A *proven*
+            # leak (`CONFIGURATION_ERROR`) stays fatal at either setting: that is not an
+            # unclassifiable host, it is an enforcement failure. Under strict isolation nothing
+            # changes — an undemonstrable sandbox still refuses the attempt, fallback-eligible.
+            undemonstrable = outcome.error_class is ErrorClass.CAPABILITY_UNAVAILABLE
+            if undemonstrable and not self._security.strict_isolation:
+                bind(_LOG, task_id=request.task_id, component="canary").warning(
+                    "the sandbox could not be demonstrated on this host and the run continues "
+                    "(strict_isolation is off): %s. The write floor is not proven for this "
+                    "attempt — treat .git and .worc as writable here",
+                    outcome.message,
+                )
+                return
             raise ProviderError(outcome.error_class, outcome.message)
 
     def _write_guard_probes(self, request: AgentRunRequest) -> tuple[tuple[str, str], ...]:

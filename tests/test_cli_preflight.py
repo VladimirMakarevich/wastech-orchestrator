@@ -1,4 +1,4 @@
-"""The read-only `preflight` CLI command.
+"""The no-task `preflight` CLI command.
 
 Drives ``cmd_preflight`` with in-memory providers so the test is deterministic and free of real
 subprocess/CLI concerns (each adapter's real ``preflight()`` is covered by the provider tests). The
@@ -13,11 +13,14 @@ import logging
 import os
 from collections.abc import Iterator
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from wastech_orchestrator import cli
+from wastech_orchestrator.config.loader import ConfigError
+from wastech_orchestrator.install.config_writer import InstallSpec, build_and_validate
 from wastech_orchestrator.notify import AskResult
 from wastech_orchestrator.observability import logging as obslog
 from wastech_orchestrator.providers import claude as claude_mod
@@ -34,6 +37,40 @@ from wastech_orchestrator.security import env as env_mod
 # The default credential answer for a healthy fake, so the ~15 tests that predate the auth probe
 # keep printing an OK auth field instead of tripping the logged-out refusal.
 _LOGGED_IN = AuthProbe(state=AuthState.LOGGED_IN, method="fake-method", detail="stored credentials")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ("run", "task.md"),
+        ("watch", "--poll-seconds", "0"),
+        ("rerun", "task-1", "--yes", "--non-interactive"),
+    ],
+    ids=["run", "watch", "rerun"],
+)
+def test_task_entry_points_reject_a_config_without_path(
+    command: tuple[str, ...], tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """AC0.1.1: every work-starting CLI path goes through validated config loading."""
+    clone = tmp_path / "clone"
+    clone.mkdir()
+    text = build_and_validate(
+        InstallSpec(
+            repo_url="git@example.invalid:owner/repo.git",
+            repo_local_path=clone,
+            base_branch="main",
+            providers=(ProviderId.CODEX,),
+            create_pull_request=False,
+            auto_mode=False,
+        )
+    )
+    config = tmp_path / "config.yaml"
+    config.write_text(text.replace("  - PATH\n", "", 1), encoding="utf-8")
+
+    assert cli.main(["--config", str(config), *command]) == 2
+    output = capsys.readouterr().out
+    assert "security.allowed_environment" in output
+    assert "PATH" in output
 
 
 @pytest.fixture(autouse=True)
@@ -131,7 +168,7 @@ def _patch_providers(
         ),
     }
     monkeypatch.setattr(cli, "build_providers", lambda _c, *, layout: providers)
-    monkeypatch.setattr(cli, "preflight_gh", lambda: gh_result)
+    monkeypatch.setattr(cli, "preflight_gh", lambda _security=None: gh_result)
     return providers
 
 
@@ -427,6 +464,7 @@ def test_preflight_reports_what_each_prefix_pattern_matched_here(
     out = capsys.readouterr().out
     assert rc == 0  # a pattern report is never a FAIL on its own
     assert "allowed-environment: 3 prefix pattern(s) — 3 name(s) forwarded" in out
+    assert "applies to orchestrator git/gh and strict-mode agent children" in out
     assert "1 dropped as secret-named" in out
     assert "DOTNET_* \u2192 2 name(s) (DOTNET_NOLOGO, DOTNET_ROOT)" in out
     assert "NUGET_* \u2192 1 name(s) (NUGET_PACKAGES)" in out
@@ -434,6 +472,22 @@ def test_preflight_reports_what_each_prefix_pattern_matched_here(
     assert "WASTECH_NO_SUCH_* \u2192 0 name(s)" in out
     for value in ("/usr/share/dotnet", "oy2-secret", "/repo/.toolcache/nuget"):
         assert value not in out  # names only, exactly as for the assigned half
+
+
+def test_advanced_mode_pattern_report_names_its_git_only_scope(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repo,
+    make_git_config,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv("DOTNET_ROOT", "/usr/share/dotnet")
+    config = _mode(_with_allowed(make_git_config(git_repo.clone), "PATH", "DOTNET_*"))
+    _patch_providers(monkeypatch, config)
+
+    assert cli.cmd_preflight(_args()) == 0
+    out = capsys.readouterr().out
+    assert "gates orchestrator git/gh only" in out
+    assert "advanced-mode agent/check/tool children receive the parent environment whole" in out
 
 
 def test_preflight_is_silent_when_no_entry_is_a_pattern(
@@ -552,6 +606,23 @@ def test_preflight_warns_but_does_not_fail_on_a_cache_outside_the_clone(
     assert "preflight: ready" in out
 
 
+def test_preflight_accepts_an_outside_cache_in_advanced_mode_without_false_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repo,
+    make_git_config,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    outside = tmp_path / "shared-cache"
+    config = _mode(_with_assigned(make_git_config(git_repo.clone), NUGET_PACKAGES=str(outside)))
+    _patch_providers(monkeypatch, config)
+
+    assert cli.cmd_preflight(_args()) == 0
+    out = capsys.readouterr().out
+    assert "assigned-paths: WARN — NUGET_PACKAGES" not in out
+    assert "preflight: ready" in out
+
+
 def test_preflight_fails_on_a_cache_that_reaches_a_protected_path_through_a_link(
     monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -568,6 +639,60 @@ def test_preflight_fails_on_a_cache_that_reaches_a_protected_path_through_a_link
     out = capsys.readouterr().out
     assert "assigned-paths: FAIL — CARGO_HOME resolves onto" in out
     assert "preflight: NOT ready" in out
+
+
+def test_task_launch_repeats_the_canonical_assigned_path_gate(git_repo, make_git_config) -> None:
+    worc = git_repo.clone / ".worc"
+    worc.mkdir(exist_ok=True)
+    link = git_repo.clone / "innocent-launch-path"
+    link.symlink_to(worc)
+    config = _with_assigned(make_git_config(git_repo.clone), CARGO_HOME=str(link / "cargo"))
+
+    with pytest.raises(ConfigError) as exc:
+        cli.require_launch_environment(config, env_file=None, system="Linux")
+    assert "security.extra_environment.CARGO_HOME" in str(exc.value)
+    assert "control home" in str(exc.value)
+
+
+def test_task_launch_repeats_the_windows_systemroot_gate(git_repo, make_git_config) -> None:
+    config = _without_systemroot(_mode(make_git_config(git_repo.clone)))
+    with pytest.raises(ConfigError) as exc:
+        cli.require_launch_environment(config, env_file=None, system="Windows")
+    assert "SystemRoot" in str(exc.value)
+    assert "git/gh" in str(exc.value)
+
+
+def test_preflight_labels_an_explicit_env_file_accurately(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repo,
+    make_git_config,
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / "operator.env"
+    env_file.write_text("A=1\n", encoding="utf-8")
+    config = _with_assigned(make_git_config(git_repo.clone), CARGO_HOME=str(env_file))
+    _patch_providers(monkeypatch, config)
+
+    ok, lines = cli.run_preflight(config, env_file=env_file)
+    assert not ok
+    assert any("orchestrator environment file" in line for line in lines)
+
+
+def test_preflight_labels_a_provider_home_accurately(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repo,
+    make_git_config,
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    config = _with_assigned(make_git_config(git_repo.clone), CARGO_HOME=str(codex_home / "cache"))
+    _patch_providers(monkeypatch, config)
+
+    ok, lines = cli.run_preflight(config, env_file=None)
+    assert not ok
+    assert any("provider's own config or credential home" in line for line in lines)
 
 
 def test_the_assigned_path_report_never_prints_a_value(
@@ -670,6 +795,95 @@ def test_preflight_capability_smoke_unsupported_warns_with_fallback(
     assert rc == 0
     assert "WARN — isolation probe" in out
     assert "preflight: ready" in out
+
+
+def test_a_sole_provider_on_a_floorless_host_is_warned_about_by_name(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Ам1-6: making the host verdict advisory was justified by "a node can fall back to the other
+    # provider" — a compensation that does not exist with one allowed provider. Under strict
+    # isolation the attempt is then refused mid-run and preflight used to say only `ready`.
+    from wastech_orchestrator.providers import claude as claude_mod
+
+    monkeypatch.setattr(
+        claude_mod, "default_sandbox_probe", lambda: claude_mod.SandboxCapability.NATIVE_WINDOWS
+    )
+    config = make_git_config(git_repo.clone)
+    config = replace(config, agents=replace(config.agents, allowed=(ProviderId.CLAUDE,)))
+    _patch_providers(monkeypatch, config)
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 0  # advisory by decision, not a stop
+    assert "isolation-floor: WARN" in out
+    assert "is the only allowed provider" in out
+
+
+def test_an_undemonstrable_sandbox_with_no_fallback_fails_under_strict_isolation(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The unchanged half of the owner decision: under strict isolation the floor is the promise, so
+    # a sole provider that cannot demonstrate its sandbox stops the run before it starts.
+    config = make_git_config(git_repo.clone)
+    config = replace(config, agents=replace(config.agents, allowed=(ProviderId.CODEX,)))
+    _patch_providers(
+        monkeypatch,
+        config,
+        smokes={
+            "codex": IsolationCapabilityReport(
+                ok=False, status="unsupported", detail="sandbox could not run here", fatal=False
+            )
+        },
+    )
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "FAIL — isolation probe" in out
+
+
+def test_an_undemonstrable_sandbox_with_no_fallback_only_warns_in_the_advanced_mode(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Owner decision 2026-08-20: that host class (native Windows without the elevated Codex backend)
+    # is exactly the one the mode exists to keep working, and stopping there proved nothing while
+    # making the mode unavailable. The line still says the floor is unproven.
+    config = make_git_config(git_repo.clone, strict_isolation=False)
+    config = replace(config, agents=replace(config.agents, allowed=(ProviderId.CODEX,)))
+    _patch_providers(
+        monkeypatch,
+        config,
+        smokes={
+            "codex": IsolationCapabilityReport(
+                ok=False, status="unsupported", detail="sandbox could not run here", fatal=False
+            )
+        },
+    )
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "WARN — isolation probe" in out
+    assert "the run continues with the floor unproven" in out
+    assert "preflight: ready" in out
+
+
+def test_a_proven_leak_stays_fatal_in_the_advanced_mode(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The other half of the same decision: an unclassifiable host is a warning, an enforcement
+    # FAILURE is not — the mode relaxes what is asked for, never what was proven to break.
+    config = make_git_config(git_repo.clone, strict_isolation=False)
+    config = replace(config, agents=replace(config.agents, allowed=(ProviderId.CODEX,)))
+    _patch_providers(
+        monkeypatch,
+        config,
+        smokes={
+            "codex": IsolationCapabilityReport(
+                ok=False, status="policy-failed", detail="a denied path was writable", fatal=True
+            )
+        },
+    )
+    rc = cli.cmd_preflight(_args())
+    assert rc == 1
+    assert "FAIL — isolation probe" in capsys.readouterr().out
 
 
 def test_preflight_telegram_skip(
@@ -831,6 +1045,53 @@ def test_telegram_test_rejects_disabled_config(
     assert "telegram.enabled is false" in capsys.readouterr().out
 
 
+# --- the gh --repo pin verdict (Пре2-3 / floor 4) -----------------------------------------------
+
+
+def test_preflight_reports_the_gh_repo_pin_it_will_use(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Floor 4 promises that every gh call names its repository outright. Which repository that is
+    # was never printed, so an operator could not tell the promise was even in force.
+    _patch_providers(monkeypatch, make_git_config(git_repo.clone))
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "gh-repo-pin: OK (repo.url) — every gh call names example.com/o/r outright" in out
+
+
+def test_an_unpinnable_repository_fails_preflight_when_prs_are_enabled(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # An ssh alias names no OWNER/REPO, so no call can be pinned and the open-PR probe is not asked
+    # at all — two floor guarantees off, silently. This configuration opens pull requests, so it is
+    # fatal here rather than at publish time, where the cost is a PR against whatever gh inferred.
+    config = make_git_config(git_repo.clone)
+    config = replace(config, repo=replace(config.repo, url="git@ghwork:o/n.git"))
+    _patch_providers(monkeypatch, config)
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "gh-repo-pin: FAIL" in out
+    assert "preflight: NOT ready" in out
+
+
+def test_an_unpinnable_repository_only_warns_when_no_pr_is_ever_opened(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Nothing is blocked over a capability this configuration never uses — but the report says
+    # plainly which promise does not hold, instead of leaving floor 4 reading as unconditional.
+    config = make_git_config(git_repo.clone, create_pr=False)
+    config = replace(config, repo=replace(config.repo, url="/srv/repos/local.git"))
+    _patch_providers(monkeypatch, config)
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "gh-repo-pin: WARN" in out
+    assert "floor 4's 'every gh call names its repository outright' does not hold here" in out
+    assert "preflight: ready" in out
+
+
 # --- The paid Claude isolation probe: a second, explicit opt-in (Пре-1.2) ----------------------
 
 
@@ -844,14 +1105,20 @@ def test_the_paid_probe_is_not_run_without_its_flag(
         make_git_config(git_repo.clone),
         paid={
             "claude": IsolationCapabilityReport(
-                ok=True, status="passed", detail="the write was refused", fatal=False
+                ok=True,
+                status="passed",
+                detail="claude paid isolation probe: the write was refused",
+                fatal=False,
             )
         },
     )
     rc = cli.cmd_preflight(_args())
     assert rc == 0
     assert all(provider.paid_calls == 0 for provider in providers.values())
-    assert "isolation probe OK" not in capsys.readouterr().out
+    # Assert on the paid probe's OWN wording, not on the "isolation probe OK" prefix: that prefix is
+    # shared with the free smoke, so with a smoke configured it would be present for another reason
+    # and this negative assert would pass by accident.
+    assert "paid isolation probe" not in capsys.readouterr().out
 
 
 def test_the_paid_probe_runs_and_reports_with_its_flag(
@@ -970,8 +1237,13 @@ def test_advanced_mode_is_announced_with_all_four_floor_levels(
     assert "EVERY node reaches the whole network" in out
     assert "three surfaces" in out
     # Level 1 keeps its qualifier: under a volume-wide write grant, what holds the carve-outs is
-    # specificity — re-proven on Codex before every attempt, unproven on Claude.
-    assert "more specific rule" in out and "unproven here" in out
+    # specificity — re-proven on Codex before every provider attempt with a shell, and on Claude a
+    # vendor-supported construction that is still unproven on THIS host, with the instrument that
+    # could prove it named (Ам4-5: it used to say "documented nowhere", which the binary's own
+    # settings compiler contradicts).
+    assert "more specific rule" in out
+    assert "denyWithinAllow" in out and "not proven on THIS host" in out
+    assert "worc preflight --paid-isolation-probe" in out
     assert "preflight: ready" in out
 
 
@@ -1010,27 +1282,66 @@ def test_the_mode_prints_where_each_launched_executable_resolved(
     assert "gh -> " in out
 
 
-def test_the_windows_launch_gate_is_not_asked_in_advanced_mode(
+def test_the_mode_warns_when_the_claude_env_scrub_variable_would_shrink_the_write_grant(
     monkeypatch: pytest.MonkeyPatch,
     git_repo,
     make_git_config,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """The `SystemRoot` gate's premise is that the allowlist decides — in the mode it does not.
+    """Ам4-5: one variable in the operator's shell silently narrows the grant this report announces.
 
-    On Windows a list without `SystemRoot` normally fails preflight, because the CLI would abort
-    before printing anything. In advanced mode the child receives the parent environment whole, so
-    the variable arrives regardless and the FAIL would be about a configuration that works — the
-    same false verdict this phase removed from the `isolation:` line.
+    In the CLI's env-scrub branch the settings compiler filters a volume-wide ``allowWrite`` out by
+    name, and in this mode the parent environment reaches the agent whole — so it takes no config
+    change to arrive. A warning rather than a failure: a narrower write grant is a correctness
+    surprise (the toolchain cache stops being writable and the build looks broken), not a hole.
+    """
+    monkeypatch.setenv("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "1")
+    _patch_providers(monkeypatch, _mode(make_git_config(git_repo.clone)))
+    assert cli.cmd_preflight(_args()) == 0
+    out = capsys.readouterr().out
+    assert "write-grant: WARN — CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set" in out
+    assert "preflight: ready" in out
+
+
+def test_no_write_grant_warning_without_that_variable_or_without_the_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repo,
+    make_git_config,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Both halves of the condition, so neither can rot: unset in the mode says nothing, and set
+    # outside the mode says nothing either (there is no volume-wide grant to shrink).
+    monkeypatch.delenv("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", raising=False)
+    _patch_providers(monkeypatch, _mode(make_git_config(git_repo.clone)))
+    cli.cmd_preflight(_args())
+    assert "write-grant: WARN" not in capsys.readouterr().out
+
+    monkeypatch.setenv("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "1")
+    _patch_providers(monkeypatch, make_git_config(git_repo.clone))
+    cli.cmd_preflight(_args())
+    assert "write-grant: WARN" not in capsys.readouterr().out
+
+
+def test_the_windows_launch_gate_also_protects_git_in_advanced_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repo,
+    make_git_config,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Agent children are wide in the mode, but orchestrator-owned git/gh keep the allowlist.
+
+    The launch-critical gate therefore remains a FAIL at both strict-isolation values, with a
+    provider-neutral message that names git/gh and retains the observed Node CLI detail as evidence.
     """
     config = _without_systemroot(_mode(make_git_config(git_repo.clone)))
     _patch_providers(monkeypatch, config)
     monkeypatch.setattr(env_mod.platform, "system", lambda: "Windows")
     rc = cli.cmd_preflight(_args())
     out = capsys.readouterr().out
-    assert "allowed-environment: FAIL" not in out
-    assert rc == 0
-    # And the gate is still there for the configuration it was written for.
+    assert "allowed-environment: FAIL" in out
+    assert "orchestrator-owned git/gh" in out
+    assert rc == 1
+    # The strict branch is governed by the same check.
     _patch_providers(monkeypatch, _without_systemroot(make_git_config(git_repo.clone)))
     assert cli.cmd_preflight(_args()) == 1
     assert "allowed-environment: FAIL" in capsys.readouterr().out

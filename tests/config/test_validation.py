@@ -294,6 +294,25 @@ def test_a_cache_beside_the_protected_paths_validates_clean(
     )
 
 
+def test_assigned_paths_match_denied_read_globs_without_prefix_broadening(
+    base_config: OrchestratorConfig,
+) -> None:
+    security = replace(base_config.security, denied_read_paths=("**/private/**", "conf/*.yaml"))
+    hidden = _assigning(
+        replace(base_config, security=security),
+        PIP_CACHE_DIR=f"{_CLONE}/x/private/cache",
+    )
+    with pytest.raises(ConfigError) as exc:
+        validate_config(hidden)
+    assert any("**/private/**" in issue for issue in exc.value.issues)
+
+    sibling = _assigning(
+        replace(base_config, security=security),
+        GOMODCACHE=f"{_CLONE}/conf/gocache",
+    )
+    assert validate_config(sibling) == []
+
+
 @pytest.mark.parametrize("name", ["PATH", "path", "Path"])
 def test_extra_environment_cannot_assign_path(base_config: OrchestratorConfig, name: str) -> None:
     # И-3: reassigning PATH substitutes every binary the child resolves. Case-insensitive because a
@@ -372,6 +391,17 @@ def test_extra_environment_non_string_value_is_a_loader_error(value: str) -> Non
         loads_config(_config_text(f"  extra_environment:\n    DOTNET_NOLOGO: {value}"))
     assert any(
         "expected a string" in issue and "quote the value" in issue for issue in exc.value.issues
+    )
+    assert all("e.g." not in issue for issue in exc.value.issues)
+
+
+@pytest.mark.parametrize("name", ["on", "NO", "1"])
+def test_extra_environment_non_string_yaml_key_is_rejected(name: str) -> None:
+    with pytest.raises(ConfigError) as exc:
+        loads_config(_config_text(f'  extra_environment:\n    {name}: "value"'))
+    assert any(
+        "expected string keys" in issue and "quote the environment variable name" in issue
+        for issue in exc.value.issues
     )
 
 

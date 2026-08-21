@@ -2,10 +2,13 @@
 
 A ``tool`` node runs an operator's own program (any language) from ``<repo>/.worc/tools/`` through
 the same :func:`~wastech_orchestrator.providers.process.run_process` ceiling an ``agent`` node uses:
-an **argv list** (never a shell string), a **mandatory timeout**, and exactly the allowlisted child
-``env`` (the parent environment is never inherited). The program receives only the allowlisted path
-context + the flow's ``args`` on **stdin** — never secrets, the full environment, or a raw session
-id — and reports back through its **exit code** and an optional JSON object on stdout.
+an **argv list** (never a shell string), a **mandatory timeout**, and the policy-built child
+``env`` — under strict isolation the allowlist plus assignments, and under
+``security.strict_isolation: false`` the **parent environment whole** (minus the names loaded from
+``.worc/.env``), which is the mode's deliberate widening and reaches this call site like the other
+four. The program receives only the allowlisted path context + the flow's ``args`` on **stdin** —
+never a raw session id — and reports back through its **exit code** and an optional JSON object on
+stdout.
 
 Outcome contract (see :func:`parse_tool_output`), in priority order:
 
@@ -24,9 +27,13 @@ before another fix edge can be charged. This bounds a degenerate gate/fixer loop
 the same non-actionable thing after the fixer changed real content.
 
 The core **records** ``findings`` (→ ``NodeOutcome.findings``) and ``data`` (→
-``NodeOutcome.structured_output``) but never *applies* them: the orchestrator hands a tool no git
-credentials (env-allowlist) and has no code path where a returned value triggers a git / state write
-(the "git only the orchestrator" invariant). stdout / stderr are redacted before they are written
+``NodeOutcome.structured_output``) but never *applies* them: there is no code path where a returned
+value triggers a git / state write (the "git only the orchestrator" invariant). Note what that does
+and does not say about credentials: under strict isolation the env allowlist keeps them out of a
+tool's environment, but in the advanced mode the tool inherits the operator's environment whole, so
+what holds publication there is the mandate plus detection, not the absence of a token.
+
+stdout / stderr are redacted before they are written
 under the tool run's per-run dir (``stages/<node_id>/run-<id>/``), and the redacted stdout is
 exposed downstream as ``{<node_id>_path}``
 (symmetric with an agent node's output), so a tool → agent hand-off is pure flow wiring.
@@ -144,7 +151,7 @@ class ToolNodeRunner:
         result = self._s.run_process(
             _launch_argv(tool_path),
             cwd=self._s.repo_dir,
-            env=dict(self._s.process_env),  # exactly the allowlisted child env — no secrets
+            env=dict(self._s.process_env),  # exactly the policy-built child environment
             timeout_seconds=node.timeout_seconds or self._s.tools_default_timeout_seconds,
             stdout_path=str(stdout_path),
             stdin_text=self._build_stdin(node, ctx),
@@ -334,9 +341,10 @@ def _launch_argv(tool_path: Path) -> list[str]:
 
     A Windows ``.bat``/``.cmd`` cannot be started directly by CreateProcess under ``shell=False``,
     so such a tool is launched through the command interpreter as ``[COMSPEC, "/c", <path>]``
-    (``COMSPEC`` is read only to locate the interpreter binary, never passed as child env — the
-    child still gets exactly the allowlisted env). Everything else — a POSIX ``+x`` script, a
-    Windows ``.exe`` — launches directly. Keeping it a list means no user string is shell-parsed.
+    (``COMSPEC`` is read only to locate the interpreter binary; the child's environment is the
+    policy-built one either way — see the module docstring on what that is per mode). Everything
+    else — a POSIX ``+x`` script, a Windows ``.exe`` — launches directly. Keeping it a list means
+    no user string is shell-parsed.
     """
     if os.name == "nt" and tool_path.suffix.lower() in _BATCH_SUFFIXES:
         return [os.environ.get("COMSPEC", "cmd.exe"), "/c", str(tool_path)]
