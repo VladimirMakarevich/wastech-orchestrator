@@ -6,7 +6,7 @@ checks / git / notifier / store) and the per-run ``_Pipeline`` into the data bun
 runners read. Keeping it here (not in ``orchestrator.py``) keeps the node layer free of any
 orchestrator import and makes the mapping unit-testable with fakes.
 
-Routing is node-based (a node's ``provider`` field, else the global primary — PRE.1); each node
+Routing is node-based (a node's ``provider`` field, else the global primary); each node
 runner uses the node's own id as its identity (the request ``node_id`` and the audit / interaction
 paths) and derives its typed-output contract from the node's declared fields. There is no
 ``Stage`` map: nothing here translates a node into a pipeline stage.

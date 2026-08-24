@@ -68,7 +68,7 @@ class AgentNode:
     #: verbs cannot mutate, the sandbox write-denies the clone, and publishing stays the
     #: orchestrator's.
     git_evidence: bool | None = None
-    #: which provider runs this node; None → the config's global primary (PRE.1). Validated against
+    #: which provider runs this node; None → the config's global primary. Validated against
     #: ``agents.allowed`` at preflight; never relaxes the security ceiling.
     provider: ProviderId | None = None
     model: str | None = None
@@ -125,7 +125,7 @@ class EvaluatorNode:
     #: make a content critic block on any finding. Orthogonal to ``blocking`` (which decides whether
     #: the evaluator gates at all): this decides *which* severities count.
     gate_severity: str = DEFAULT_GATE_SEVERITY
-    #: which provider runs this evaluator; None → the config's global primary (PRE.1).
+    #: which provider runs this evaluator; None → the config's global primary.
     provider: ProviderId | None = None
     model: str | None = None
     reasoning: str | None = None
@@ -133,8 +133,9 @@ class EvaluatorNode:
 
 
 #: Filename the ``citation`` checker looks for in the flow's report dir when the node does not name
-#: one. A flow whose writing node names its manifest anything else used to get a silent
-#: ``uncheckable: missing`` and a gate that did nothing, because the name was a literal in the node.
+#: one. It is a named default rather than a literal inside the checker so that a flow whose writing
+#: node uses another name can say so — otherwise the gate reports ``uncheckable: missing`` and
+#: silently does nothing.
 DEFAULT_CITATION_MANIFEST = "sources.json"
 
 

@@ -105,7 +105,6 @@ def test_runs_home_is_a_named_deny_entry(tmp_path: Path) -> None:
         control_home=layout.control_home,
         private_home=layout.private_home,
         env_file=None,
-        provider_homes=(),
         runs_home=layout.runs_home,
     )
     assert layout.runs_home in policy.denied_paths
@@ -120,19 +119,16 @@ def test_layout_is_immutable(tmp_path: Path) -> None:
 def test_deny_policy_collects_all_sources(tmp_path: Path) -> None:
     layout = RuntimeLayout.default(tmp_path)
     env_file = Path("/etc/secrets/prod.env")  # deliberately outside the private home
-    claude_home = Path("/home/op/.claude")
-    codex_home = Path("/home/op/.codex")
     policy = InternalDenyPolicy(
         control_home=layout.control_home,
         private_home=layout.private_home,
         env_file=env_file,
-        provider_homes=(claude_home, codex_home),
+        runs_home=layout.runs_home,
     )
     denied = policy.denied_paths
     assert layout.control_home in denied
     assert env_file in denied  # out-of-tree explicit env-file is a deny target
-    assert claude_home in denied
-    assert codex_home in denied
+    assert layout.runs_home in denied
 
 
 def test_deny_policy_dedupes_and_orders(tmp_path: Path) -> None:
@@ -140,11 +136,11 @@ def test_deny_policy_dedupes_and_orders(tmp_path: Path) -> None:
     policy = InternalDenyPolicy(
         control_home=layout.control_home,
         private_home=layout.private_home,
-        env_file=None,
-        provider_homes=(layout.control_home,),  # duplicate on purpose
+        env_file=layout.private_home,  # duplicate on purpose
+        runs_home=layout.control_home,  # duplicate on purpose
     )
     denied = policy.denied_paths
-    # control_home and private_home coincide and the provider dup repeats it — collapsed to one.
+    # control_home and private_home coincide and both dups repeat it — collapsed to one.
     assert denied == (layout.control_home,)
 
 
@@ -154,7 +150,6 @@ def test_deny_policy_env_file_optional(tmp_path: Path) -> None:
         control_home=layout.control_home,
         private_home=layout.private_home,
         env_file=None,
-        provider_homes=(),
     )
     assert all(isinstance(p, Path) for p in policy.denied_paths)
     assert layout.private_home in policy.denied_paths

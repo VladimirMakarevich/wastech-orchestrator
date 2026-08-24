@@ -102,9 +102,9 @@ def test_newer_schema_version_is_refused(
 def test_upgrade_migrates_a_config_whose_removed_key_the_loader_now_rejects(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # The command's whole purpose. v33 removed the flat `supervisor.model`/`reasoning`, and the
-    # loader rejects them fail-closed — so the fail-closed read-back of the operator's own file has
-    # to look past exactly the keys being stripped, or `upgrade-config` would refuse every config it
+    # The command's whole purpose. The flat `supervisor.model`/`reasoning` are dead keys the loader
+    # rejects fail-closed — so the fail-closed read-back of the operator's own file has to look past
+    # exactly the keys being stripped, or `upgrade-config` would refuse every config it
     # exists to migrate and the operator would have no automated path off the old schema.
     m = packaged_template_mapping()
     m["schema_version"] = 32

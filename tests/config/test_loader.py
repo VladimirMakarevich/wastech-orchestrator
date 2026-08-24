@@ -94,27 +94,26 @@ def test_unknown_logging_subkey_is_rejected() -> None:
 
 
 def test_legacy_skip_stages_tolerated_not_error() -> None:
-    # ``agents.skip_stages`` was removed in config v10 (global stage-skip dropped for flexible
-    # flows — drop the node from the flow instead). An old config still carrying it loads fail-open
-    # (the key is ignored, not rejected); ``upgrade-config`` strips it.
+    # ``agents.skip_stages`` is a dead key — a global stage-skip has no meaning with configurable
+    # flows, where the way to skip a stage is to drop the node. A config still carrying it loads
+    # fail-open (the key is ignored, not rejected); ``upgrade-config`` strips it.
     result = loads_config(_agents("  skip_stages: [testing, review]\n"))
     assert not hasattr(result.config.agents, "skip_stages")
     assert result.config.agents.allowed  # loaded cleanly, dead key ignored
 
 
 def test_legacy_allow_review_skip_tolerated_not_error() -> None:
-    # ``agents.allow_review_skip`` was removed in config v13 (per-task skip is by flow node id, and
-    # the operator owns which nodes are safe to disable — no ``review``-special-case). An old config
-    # still carrying it loads fail-open (key ignored, not rejected); ``upgrade-config`` strips it.
+    # ``agents.allow_review_skip`` is a dead key — per-task skip is by flow node id, and the
+    # operator owns which nodes are safe to disable, so there is no ``review`` special case. A
+    # config carrying it loads fail-open (ignored, not rejected); ``upgrade-config`` strips it.
     result = loads_config(_agents("  allow_review_skip: true\n"))
     assert not hasattr(result.config.agents, "allow_review_skip")
     assert result.config.agents.allowed  # loaded cleanly, dead key ignored
 
 
 def test_legacy_max_budget_usd_tolerated_not_error() -> None:
-    # ``agents.providers.<p>.max_budget_usd`` was removed in config v14 (declared/parsed but read
-    # nowhere). An old config still carrying it loads fail-open (the key is ignored, not rejected);
-    # ``upgrade-config`` strips it.
+    # ``agents.providers.<p>.max_budget_usd`` is a dead key — nothing reads it. A config still
+    # carrying it loads fail-open (the key is ignored, not rejected); ``upgrade-config`` strips it.
     text = (
         'repo:\n  url: "git@example.com:o/r.git"\n'
         "agents:\n  allowed: [codex]\n  providers:\n"
@@ -316,11 +315,27 @@ def test_protected_paths_non_string_item_is_rejected() -> None:
 
 
 def test_legacy_deletion_exempt_paths_key_is_rejected() -> None:
-    # Removed in v25 (no toleration): a config still carrying it fails as an unknown key.
+    # Not tolerated: a config carrying this dead key fails as an unknown key.
     text = _LEGACY + 'security:\n  deletion_approval_exempt_paths: ["**/*.md"]\n'
     with pytest.raises(ConfigError) as exc:
         loads_config(text)
     assert any("deletion_approval_exempt_paths" in issue for issue in exc.value.issues)
+
+
+@pytest.mark.parametrize("value", ["danger-full-access", "read-only"])
+def test_removed_provider_sandbox_key_is_rejected(value: str) -> None:
+    # Not tolerated: the only thing this key could select is a provider full-access mode, which is
+    # forbidden outright, so every value of it is dead. Failing on load is the point — a tolerated
+    # key would suggest some value of it still works.
+    text = _LEGACY + f"      sandbox: {value!r}\n"
+    with pytest.raises(ConfigError) as exc:
+        loads_config(text)
+    # Named, not the generic unknown-key line. The whole cost of "no migration" lands in this
+    # message, and "unknown key" sends the operator to `upgrade-config`, which cannot strip it
+    # either — so the message has to say both "delete the line" and "that command will not help".
+    issue = next(i for i in exc.value.issues if "sandbox" in i)
+    assert "does not exist" in issue and "delete the line" in issue
+    assert "upgrade-config" in issue
 
 
 def test_legacy_routing_block_is_tolerated() -> None:
@@ -411,22 +426,21 @@ def test_reasoning_null_parses_to_none() -> None:
     assert result.config.agents.providers[ProviderId.CLAUDE].reasoning is None
 
 
-def test_allow_native_memory_absent_defaults_to_false() -> None:
-    from wastech_orchestrator.providers.base import ProviderId
-
-    cfg = loads_config(_PROVIDER_BASE).config
-    assert cfg.agents.providers[ProviderId.CLAUDE].allow_native_memory is False
-
-
-def test_allow_native_memory_true_parses() -> None:
+def test_allow_native_memory_is_rejected_as_unknown() -> None:
+    # There is no deny for this key to gate — the provider config homes carry none — so it would
+    # decide nothing, and a key that reads as a security opt-in but does nothing is worse than an
+    # absent one. Rejected outright rather than tolerated: install/upgrade-config never write it,
+    # so any config carrying it was typed by the operator.
     text = _PROVIDER_BASE.replace(
         '    claude:\n      command: "claude"',
         '    claude:\n      command: "claude"\n      allow_native_memory: true',
     )
-    from wastech_orchestrator.providers.base import ProviderId
-
-    cfg = loads_config(text).config
-    assert cfg.agents.providers[ProviderId.CLAUDE].allow_native_memory is True
+    with pytest.raises(ConfigError) as exc:
+        loads_config(text)
+    assert any(
+        "allow_native_memory" in issue and "agents.providers.claude" in issue
+        for issue in exc.value.issues
+    )
 
 
 # --- auto-merge bypass (git.auto_merge*) ---
@@ -453,8 +467,8 @@ def test_auto_merge_keys_parse() -> None:
 
 
 def test_legacy_auto_merge_allow_per_task_is_tolerated() -> None:
-    # Removed in v11 (a per-task ``auto_merge`` now wins outright). An old config still carrying it
-    # loads fail-open (ignored, not rejected); ``upgrade-config`` strips it.
+    # A dead key: a per-task ``auto_merge`` wins outright, so there is no gate for it to open. A
+    # config carrying it loads fail-open (ignored, not rejected); ``upgrade-config`` strips it.
     cfg = loads_config(_LEGACY + "git:\n  auto_merge_allow_per_task: true\n").config
     assert not hasattr(cfg.git, "auto_merge_allow_per_task")
 
@@ -496,26 +510,26 @@ def test_denied_commands_default_blocks_gh_pr_merge() -> None:
     assert "gh pr merge" in cfg.security.denied_commands
 
 
-# --- legacy prompts block (removed in config v9) ---
+# --- the dead prompts block ---
 
 
 def test_legacy_prompts_block_is_tolerated() -> None:
-    # config v9 removed the `prompts` block (a flow node's prompt is its role_file). An old config
-    # carrying one — including any sub-keys — still loads fail-open: the whole block is ignored and
-    # never stored on the schema (`upgrade-config` strips it).
+    # `prompts` is a dead block — a flow node's prompt is its `role_file`. A config carrying one,
+    # including any sub-keys, still loads fail-open: the whole block is ignored and never stored on
+    # the schema (`upgrade-config` strips it).
     text = _LEGACY + "prompts:\n  templates_dir: './tpl'\n  mode: append\n  preamble: 'hi'\n"
     cfg = loads_config(text).config
     assert not hasattr(cfg, "prompts")
 
 
-# --- legacy validation knobs (removed in config v35) ---
+# --- the dead validation knobs ---
 
 
 def test_legacy_validation_knobs_are_tolerated() -> None:
-    # config v35 removed `validation.required_fields` / `reject_unknown_fields`: both were parsed
-    # and written by `install`, yet read by nothing (the task gate hard-codes the required front
-    # matter and denies an unknown key unconditionally). Every config `install` wrote carries them,
-    # so they must load fail-open — ignored, never stored — and `upgrade-config` strips them.
+    # `validation.required_fields` / `reject_unknown_fields` are dead keys: nothing reads them (the
+    # task gate hard-codes the required front matter and denies an unknown key unconditionally).
+    # Configs written by earlier installs carry them, so they must load fail-open — ignored, never
+    # stored — and `upgrade-config` strips them.
     text = _LEGACY + (
         "validation:\n"
         "  required_fields: ['id', 'title', 'owner']\n"
@@ -528,11 +542,11 @@ def test_legacy_validation_knobs_are_tolerated() -> None:
     assert cfg.validation.max_task_lines == 4000  # the live sibling key still applies
 
 
-# --- agents.retry (transient provider-failure recovery, config v20) ---
+# --- agents.retry (transient provider-failure recovery) ---
 
 
 def test_retry_defaults_when_block_absent() -> None:
-    # The whole `agents.retry` block is optional → safe defaults (back-compat for old configs).
+    # The whole `agents.retry` block is optional → safe defaults.
     cfg = loads_config(_agents("")).config
     retry = cfg.agents.retry
     assert (retry.max_attempts, retry.base_delay_s, retry.max_delay_s, retry.max_blocked_s) == (

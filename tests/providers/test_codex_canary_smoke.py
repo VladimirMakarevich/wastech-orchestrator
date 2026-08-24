@@ -83,12 +83,11 @@ def _version() -> str:
     return (out.stdout or out.stderr).strip()
 
 
-def _profile_arg(repo: Path, profile: str) -> str:
+def _profile_arg(repo: Path, profile: str, *, strict_isolation: bool = True) -> str:
     deny = InternalDenyPolicy(
         control_home=repo / ".worc",
         private_home=repo / ".worc",
         env_file=None,
-        provider_homes=(),
     )
     wg = ProviderWriteGuardPolicy(
         exchange_root=repo / ".worc-io",
@@ -103,6 +102,8 @@ def _profile_arg(repo: Path, profile: str) -> str:
         deny_policy=deny,
         write_guard=wg if profile == "workspace-write" else None,
         denied_read_paths=(".env", "secrets/**"),
+        network_access=not strict_isolation,
+        strict_isolation=strict_isolation,
     )
     return render_permission_profile_arg(generated)
 
@@ -195,12 +196,14 @@ def test_generated_profile_is_os_enforced(clone: Path, profile: str) -> None:
         f"canary failed on {platform.system()} / codex {_version()} for {profile}: "
         f"{outcome.message} :: {outcome.evidence}"
     )
-    # the private read (direct + shell) must be denied; the exchange readable but not writable
+    # the private read (direct + shell) must be denied; the exchange readable but not writable;
+    # and the CLI binary itself executes under the shipped profile.
     verdicts = {e["probe"]: e["denied"] for e in outcome.evidence}
     assert verdicts["private-read-denied"] is True
     assert verdicts["private-shell-read-denied"] is True
     assert verdicts["exchange-read-allowed"] is False
     assert verdicts["exchange-write-denied"] is True
+    assert verdicts["cli-exec-allowed"] is False
 
 
 @pytest.mark.parametrize("profile", ["read-only", "workspace-write"])
@@ -224,6 +227,43 @@ def test_capability_smoke_passes_on_real_host(profile: str) -> None:
     assert {"private-read-denied", "repo-read-allowed", "mcp-inventory"} <= labels
 
 
+@pytest.mark.parametrize("profile", ["read-only", "workspace-write"])
+def test_the_advanced_mode_profile_is_enforced_with_the_volume_wide_write_grant(
+    profile: str,
+) -> None:
+    """The half of the live probe that costs nothing: real sandbox, no model, mode profile.
+
+    The mode's profile grants ``write`` on the volume ROOT, and the open question is whether the
+    carve-outs survive being nested inside that grant. The capability smoke is the
+    right instrument because it stands up real ``.git`` / hooks / ``tasks`` targets and probes each
+    one — a write that failed for want of a parent would otherwise read as an enforced deny.
+    Codex can be asked directly, without a model, so on a host with the CLI this is evidence rather
+    than an assumption.
+
+    What it still does not answer, and is recorded as "not proven" in the campaign README: the same
+    question on Linux and native Windows, a clone under the global ``/private/tmp`` (where an
+    inherited ``extends`` grant beats an explicit deny), and Claude's ranking of a ``denyWrite``
+    inside an ``allowWrite``, which no free probe can ask at all.
+    """
+    report = run_codex_capability_smoke(
+        command=_codex(),
+        home_dir=Path.home(),
+        env=_env(),
+        permission_profile=profile,
+        strict_isolation=False,
+        system=platform.system(),
+    )
+    assert report.status == CAPABILITY_PASSED, (
+        f"advanced-mode capability smoke {report.status} on {platform.system()} / codex "
+        f"{_version()} for {profile}: {report.detail} :: {report.evidence}"
+    )
+    verdicts = {e["probe"]: e["denied"] for e in report.evidence if "denied" in e}
+    assert verdicts["private-read-denied"] is True
+    assert verdicts["repo-read-allowed"] is False  # the positive control still passed
+    guarded = [e for e in report.evidence if str(e["probe"]).startswith("write-guard-")]
+    assert guarded and all(e["denied"] for e in guarded), guarded
+
+
 def test_canary_detects_a_non_enforcing_profile(clone: Path) -> None:
     # A profile that (wrongly) grants the private home read must be caught as a security leak —
     # proving the canary observes enforcement rather than rubber-stamping.
@@ -245,3 +285,43 @@ def test_canary_detects_a_non_enforcing_profile(clone: Path) -> None:
     )
     assert not outcome.ok
     assert outcome.error_class is ErrorClass.CONFIGURATION_ERROR
+
+
+def test_exec_probe_detects_a_profile_that_denies_the_binary(clone: Path) -> None:
+    # The CLI is launched through a symlink whose target lives inside a denied tree — the
+    # standalone package layout, rebuilt from symlinks next to the clone so the test bites whether
+    # or not the real codex lives under `$CODEX_HOME` on this host. The exec probe must classify
+    # the refusal as OUR configuration error, on the sandbox's real refusal output — on macOS that
+    # output carries seatbelt prose, which is the wording most likely to be misread as a host gap
+    # and rerouted into a fallback. The enforcement is literal-path-based, so
+    # the fixture must NOT sit under the system temp root (codex always grants it) — the `clone`
+    # fixture already lives under HOME for the same reason.
+    fixture_root = clone.parent
+    binhome = fixture_root / "binhome"
+    (binhome / "inner").mkdir(parents=True)
+    launcher_dir = fixture_root / "launcher"
+    launcher_dir.mkdir()
+    try:
+        (binhome / "inner" / "codex").symlink_to(Path(_codex()).resolve())
+        (launcher_dir / "codex").symlink_to(binhome / "inner" / "codex")
+    except (OSError, NotImplementedError):  # pragma: no cover - host cannot create symlinks
+        pytest.skip("host cannot create a symlink fixture")
+    bad = (
+        'permissions.worc={ "extends" = ":workspace", "filesystem" = '
+        f'{{ ":minimal" = "read", {toml_basic_string(str(clone))} = "write", '
+        f'{toml_basic_string(str(clone / ".worc"))} = "deny", '
+        f'{toml_basic_string(str(clone / ".worc-io"))} = "read", '
+        f'{toml_basic_string(str(binhome))} = "deny" }} }}'
+    )
+    outcome = run_codex_canary(
+        command=str(launcher_dir / "codex"),
+        profile_arg=bad,
+        working_directory=str(clone),
+        private_probe=str(clone / ".worc" / "logs" / "req.json"),
+        exchange_probe=str(clone / ".worc-io" / "t" / "task.md"),
+        env=_env(),
+        system=platform.system(),
+    )
+    assert not outcome.ok, "a profile denying the binary's own tree must not pass"
+    assert outcome.error_class is ErrorClass.CONFIGURATION_ERROR, outcome.message
+    assert "cli-exec-allowed" in outcome.message

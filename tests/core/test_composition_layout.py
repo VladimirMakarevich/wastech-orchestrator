@@ -21,6 +21,7 @@ from wastech_orchestrator.core.flow.exchange_seal import (
     exchange_seal_root,
 )
 from wastech_orchestrator.core.flow.instruction_bundle import instruction_bundle_dir
+from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.runtime_layout import RuntimeLayout
 
 
@@ -75,17 +76,27 @@ def test_providers_receive_read_isolation_off_flag(
 
 
 def test_router_receives_isolation_checks(git_repo, make_git_config, tmp_path: Path) -> None:
-    # Wiring guard: the router's CAPABILITY_UNAVAILABLE host-verified fallback gate needs
-    # the
-    # offline isolation-check table; build_orchestrator must inject it (else _can_isolate fails
-    # closed
-    # for every provider and a legitimate cross-provider recovery would be wrongly refused).
+    # Wiring guard: the router's CAPABILITY_UNAVAILABLE fallback-eligibility gate needs the offline
+    # isolation-check table; build_orchestrator must inject it (else _can_isolate fails closed for
+    # every provider and a legitimate cross-provider recovery would be wrongly refused).
     config = make_git_config(git_repo.clone, checks=["pytest"])
     layout = _distinct_layout(git_repo.clone, tmp_path)
     orch = build_orchestrator(config, layout=layout)
     assert orch._router._isolation_checks  # non-empty
     for pid in config.agents.providers:
         assert pid in orch._router._isolation_checks
+
+
+def test_orchestrator_receives_host_floor_checks(git_repo, make_git_config, tmp_path: Path) -> None:
+    # Wiring guard for the advisory twin: without the injected table the run says nothing at all
+    # about a host that cannot enforce the write floor, which is the exact silence this verdict
+    # exists to end. BOTH providers answer: Claude classifies its host offline, Codex says
+    # that on native Windows its own CLI is the only thing that can — without both answers a
+    # Codex-only fleet on that host gets no line and no preamble paragraph at all.
+    config = make_git_config(git_repo.clone, checks=["pytest"])
+    layout = _distinct_layout(git_repo.clone, tmp_path)
+    orch = build_orchestrator(config, layout=layout)
+    assert set(orch._host_floor_checks) == {ProviderId.CLAUDE, ProviderId.CODEX}
 
 
 def test_orchestrator_consumers_receive_the_right_field(
@@ -111,33 +122,30 @@ def test_orchestrator_consumers_receive_the_right_field(
     assert env_file in orch._deny_policy.denied_paths
 
 
-def test_deny_policy_includes_configured_provider_homes(
-    git_repo, make_git_config, tmp_path: Path
-) -> None:
-    config = make_git_config(git_repo.clone, checks=["pytest"])
+def test_deny_policy_carries_no_provider_home(git_repo, tmp_path: Path, monkeypatch) -> None:
+    # The assembly never feeds provider config homes into the deny set — while the orchestrator's
+    # own private four stay in it.
+    claude_home = tmp_path / "homes" / ".claude"
+    codex_home = tmp_path / "homes" / ".codex"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
     layout = _distinct_layout(git_repo.clone, tmp_path)
-    policy = build_internal_deny_policy(config, layout, env_file=None)
-    # Every configured provider contributes its auth/config home to the deny set (defense in depth,
-    # kept out of the public security.denied_read_paths list).
-    assert len(policy.provider_homes) == len(config.agents.providers)
-    for home in policy.provider_homes:
-        assert home in policy.denied_paths
-    # Provider homes are not silently folded into the public redaction/skill-scan config.
-    assert set(config.security.denied_read_paths).isdisjoint(
-        {h.as_posix() for h in policy.provider_homes}
-    )
+    env_file = tmp_path / "envs" / "prod.env"
+    policy = build_internal_deny_policy(layout, env_file=env_file)
+    denied = policy.denied_paths
+    assert claude_home.resolve() not in denied
+    assert codex_home.resolve() not in denied
+    for private in (layout.control_home, layout.private_home, layout.runs_home, env_file):
+        assert private in denied, private
 
 
-def test_deny_policy_names_the_per_task_runs_root(
-    git_repo, make_git_config, tmp_path: Path
-) -> None:
+def test_deny_policy_names_the_per_task_runs_root(git_repo, tmp_path: Path) -> None:
     # The per-task runtime root under private_home is a *named* deny target so the provider
     # projection denies it by name, not by coincidence of location — and it survives a later
     # relocation of private_home. Asserting the entry itself (not merely that it sits under
     # private_home) is what makes this fail if the entry is ever dropped.
-    config = make_git_config(git_repo.clone, checks=["pytest"])
     layout = _distinct_layout(git_repo.clone, tmp_path)
-    policy = build_internal_deny_policy(config, layout, env_file=None)
+    policy = build_internal_deny_policy(layout, env_file=None)
     runs_home = layout.private_home / "runs"
     assert policy.runs_home == runs_home
     assert runs_home in policy.denied_paths

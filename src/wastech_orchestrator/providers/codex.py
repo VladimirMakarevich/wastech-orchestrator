@@ -17,6 +17,7 @@ only as file paths.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import platform
 import re
@@ -26,7 +27,9 @@ from pathlib import Path
 from typing import Any
 
 from wastech_orchestrator.config.schema import ProviderConfig
+from wastech_orchestrator.observability.logging import bind
 from wastech_orchestrator.providers._adapter_base import (
+    CAPABILITY_POLICY_FAILED,
     BaseCliProvider,
     IsolationCapabilityReport,
     ParsedEvents,
@@ -49,11 +52,12 @@ from wastech_orchestrator.providers.base import (
 )
 from wastech_orchestrator.providers.capabilities import normalize_codex_reasoning
 from wastech_orchestrator.providers.codex_canary import (
-    CAPABILITY_POLICY_FAILED,
     CanaryRunner,
+    ExtraProbes,
     default_canary_runner,
     run_codex_canary,
     run_codex_capability_smoke,
+    write_guard_probe_paths,
 )
 from wastech_orchestrator.providers.codex_profile import (
     PROFILE_NAME,
@@ -69,15 +73,13 @@ from wastech_orchestrator.providers.errors import (
 from wastech_orchestrator.providers.redaction import redact_text
 from wastech_orchestrator.runtime_layout import InternalDenyPolicy
 from wastech_orchestrator.security.env import build_child_env
-from wastech_orchestrator.security.forbidden_args import (
-    FORBIDDEN_SANDBOX_VALUE,
-    find_forbidden_args,
-    find_full_access_args,
-)
+from wastech_orchestrator.security.forbidden_args import find_forbidden_args
+from wastech_orchestrator.security.shell_reach import ShellQuery
 
 __all__ = [
     "CodexProvider",
     "ParsedEvents",
+    "attempt_has_shell",
     "build_codex_argv",
     "build_context_footer",
     "build_effective_prompt",
@@ -86,15 +88,38 @@ __all__ = [
     "resolve_codex_resources_dir",
 ]
 
+_LOG = logging.getLogger(__name__)
+
 _DEFAULT_PROFILE = "workspace-write"
 _LAST_MESSAGE_FILENAME = "last-message.txt"
 _OUTPUT_SCHEMA_FILENAME = "output-schema.json"
 
 # Codex feature flags disabled for an autonomous orchestrator attempt: the non-shell tool
 # surfaces that could reach the local filesystem or spawn work outside the profiled shell
-# sandbox — hooks, custom subagents/multi-agent, computer use, in-app browser, apps/plugins. Each
-# maps to ``-c features.<name>=false``. The MCP inventory is neutralized by ``--ignore-user-config``
-# + the untrusted project layer (no server loads); the no-model capability smoke
+# sandbox — hooks, custom subagents/multi-agent, computer use, the browser surfaces, apps/plugins,
+# and the persistent memory store. Each is emitted as ``--disable <name>``. Emission is conditional
+# twice over: ``hooks`` is not disabled when read-isolation is off — that is, on the shipped
+# default — and NOTHING is disabled in the advanced mode, where these surfaces are handed back
+# deliberately: in a mode whose whole point is full freedom under the operator's responsibility,
+# withholding them would be a floor control that buys nothing and a plain loss of function.
+#
+# The set is grounded in a live no-model inventory, not in guesswork: ``codex features list``
+# enumerates the flags and their enabled state, and ``codex sandbox --disable <name>`` validates
+# every name here while rejecting an invented one ("Unknown feature flag"). The rule for extending
+# it: only where an enabled flag is a distinct surface that really executes something or reaches
+# data. That is what puts the two extra browser surfaces here (an EXTERNAL browser and full CDP
+# access reach the operator's own browser session, and neither passes through the profiled shell)
+# and ``memories`` (a persistent store outside this orchestrator's redaction net and audit).
+# Deliberately NOT added, so the next reader does not have to re-derive it: ``unified_exec``
+# is the profiled shell itself; ``plugin_sharing``/``remote_plugin`` are sub-surfaces of the
+# already-denied ``plugins``; ``enable_mcp_apps`` and ``standalone_web_search`` ship disabled;
+# MCP elicitation is neutralized by ``--ignore-user-config`` plus the untrusted project layer;
+# ``code_mode_host`` is enabled but its semantics are not established here, so it stays a watch
+# item rather than a blind deny. Widening a deny without a proven surface is the functional
+# over-restriction the security rules forbid.
+#
+# The MCP inventory is neutralized separately, by ``--ignore-user-config`` + the untrusted project
+# layer (no server loads); the no-model capability smoke
 # (:func:`codex_canary.run_codex_capability_smoke`, run by ``worc preflight`` / the host gate)
 # records the effective ``codex mcp list`` inventory as evidence. The per-attempt canary proves the
 # filesystem deny/read-only boundary only — it makes no MCP-inventory claim.
@@ -103,6 +128,10 @@ _DISABLED_FEATURES: tuple[str, ...] = (
     "multi_agent",
     "computer_use",
     "browser_use",
+    "browser_use_external",
+    "browser_use_full_cdp_access",
+    "in_app_browser",
+    "memories",
     "apps",
     "plugins",
 )
@@ -110,9 +139,9 @@ _DISABLED_FEATURES: tuple[str, ...] = (
 # Authority-bearing Codex flags an operator may NOT supply through config/flow ``extra_args``: they
 # would select, replace, or weaken the permission profile, config-isolation, workspace, tool, or
 # network policy the adapter owns. Distinct from the cross-provider absolute bans in
-# ``security.forbidden_args`` (``--dangerously*`` / ``--yolo`` / ``--ignore-rules`` / ``--sandbox``
-# with no value) — these are rejected regardless of ``strict_isolation``. The full-access escape
-# is reached only through the ``sandbox: danger-full-access`` config field, never argv.
+# ``security.forbidden_args`` (``--dangerously*`` / ``--yolo`` / ``--ignore-rules``, and any
+# ``--sandbox`` that is valueless or selects full access) — both clusters are rejected regardless of
+# ``strict_isolation``.
 _RESERVED_CODEX_FLAGS: frozenset[str] = frozenset(
     {
         "-c",
@@ -256,8 +285,10 @@ def codex_config_home() -> Path:
     """The Codex config/credential home: ``$CODEX_HOME`` or the ``~/.codex`` default.
 
     Codex authenticates through the operator's own home (credentials stay outside the orchestrator).
-    Shared with the ``InternalDenyPolicy`` assembly (composition root) so the provider-owned
-    auth/config home is a single source of truth rather than a duplicated literal.
+    No deny is built from it: the standalone package keeps the ``codex`` binary itself inside this
+    home, and ``apply_patch`` re-execs that binary under the sandbox as its filesystem helper, so a
+    deny here stops every patch from landing. Its consumer is the ``worc preflight`` diagnostic that
+    reports whether the provider binary lies inside this home.
     """
     raw = os.environ.get("CODEX_HOME")
     config_dir = Path(raw) if raw else Path.home() / ".codex"
@@ -329,10 +360,11 @@ def _effective_permission_profile(config: ProviderConfig, request: AgentRunReque
 
 
 def _extract_profile_arg(argv: Sequence[str]) -> str | None:
-    """The generated permission-profile inline ``-c`` value in *argv*, or ``None`` (escape path).
+    """The generated permission-profile inline ``-c`` value in *argv*, or ``None``.
 
-    The canary re-runs this exact profile under ``codex sandbox -P`` to prove it enforces; the
-    full-access escape emits no profile, so there is nothing (and no isolation claim) to prove.
+    The canary re-runs this exact profile under ``codex sandbox -P`` to prove it enforces. Every
+    attempt emits a profile, so ``None`` means the argv is not one this adapter built — a structural
+    guard, not a policy: there is no configuration that asks for a profile-free launch.
     """
     for index, token in enumerate(argv[:-1]):
         if token in ("-c", "--config") and argv[index + 1].startswith(
@@ -347,6 +379,7 @@ def _isolation_argv(
     request: AgentRunRequest,
     *,
     strict_isolation: bool,
+    network_access: bool,
     deny_policy: InternalDenyPolicy | None,
     denied_read_paths: Sequence[str],
     read_isolation_off: bool,
@@ -357,29 +390,36 @@ def _isolation_argv(
     active ``default_permissions``, the operator's user ``config.toml`` ignored (auth still uses
     ``CODEX_HOME``), the project marked ``untrusted`` (so ``.codex/config.toml``/hooks/rules are not
     trusted), and the non-shell tool surfaces disabled. The profile itself carries the filesystem
-    deny/read-only carve-outs and disables network. The operator escape
-    (``sandbox: danger-full-access``, reachable only under ``strict_isolation: false`` and never via
-    task/flow/``extra_args``) instead emits the legacy ``--sandbox danger-full-access`` and makes no
-    read-isolation claim.
+    deny/read-only carve-outs and disables network. There is no opt-out: a profile is emitted for
+    every attempt, because it is also what the pre-launch canary re-runs to prove enforcement.
 
-    ``read_isolation_off`` restores Codex's NATIVE config discovery — the private profile
-    carve-outs are downgraded to read-only (:func:`build_codex_permission_profile`), the operator's
-    user ``config.toml`` is loaded (no ``--ignore-user-config``), the project is TRUSTED (so its
+    ``read_isolation_off`` restores Codex's NATIVE config discovery: the operator's user
+    ``config.toml`` is loaded (no ``--ignore-user-config``), the project is TRUSTED (so its
     ``.codex`` config/rules/hooks apply), and the ``hooks`` feature is re-enabled — symmetric with
-    Claude's ``--setting-sources project``. The heavier autonomous tool surfaces
-    (multi-agent/computer/browser/apps/plugins) stay disabled (execution surfaces, not read-side
-    discovery), and the profile's write-only carve-outs (and the pre-launch canary) still hold.
+    Claude's ``--setting-sources project``. It does **not** reach the profile: the private/control
+    set stays ``deny`` at every setting (:func:`build_codex_permission_profile`), because the CLI
+    reads its own config and auth outside the profile, so discovery never needed that grant — while
+    granting it handed the sandboxed shell the orchestrator's own env-file. The heavier autonomous
+    tool surfaces (multi-agent/computer/browser/apps/plugins) stay disabled (execution surfaces, not
+    read-side discovery), and the pre-launch canary still holds.
+
+    ``strict_isolation: false`` — the advanced mode — drops the feature disables entirely, those
+    five included. It is the one setting where they are meant to be reachable, and refusing them
+    there would leave the removed full-access escape as their only route. The profile it generates
+    also changes there, in the two ways that mode is about: ``write`` on the workspace volume's root
+    and ``network.enabled`` from *network_access*, which the caller resolved once for the whole
+    attempt. What does NOT become optional: the profile itself, its ``default_permissions``
+    selection, and the canary that re-proves it before every launch — the wider the grant, the more
+    the carve-outs need demonstrating rather than asserting.
     """
-    if config.sandbox == FORBIDDEN_SANDBOX_VALUE:
-        return ["--sandbox", FORBIDDEN_SANDBOX_VALUE]
     profile = build_codex_permission_profile(
         permission_profile=_effective_permission_profile(config, request),
         working_directory=request.working_directory,
         deny_policy=deny_policy,
         write_guard=request.write_guard,
         denied_read_paths=tuple(denied_read_paths),
+        network_access=network_access,
         strict_isolation=strict_isolation,
-        read_isolation_off=read_isolation_off,
     )
     argv = [
         "-c",
@@ -395,6 +435,11 @@ def _isolation_argv(
     else:
         argv += ["--ignore-user-config", "-c", f'projects.{trust}.trust_level="untrusted"']
         disabled = _DISABLED_FEATURES
+    if not strict_isolation:
+        # Advanced mode: every feature surface is handed back. The profile is still emitted (it is
+        # what the pre-launch canary re-runs to prove the local floor), so what is given up here is
+        # the tool inventory, not the filesystem boundary.
+        disabled = ()
     for feature in disabled:
         argv += ["--disable", feature]
     return argv
@@ -415,14 +460,13 @@ def build_codex_argv(
 
     Raises :class:`ProviderError` (``CONFIGURATION_ERROR``) when ``extra_args`` would weaken or
     replace the owned authority: the absolutely-forbidden ``--dangerously*`` / ``--yolo`` /
-    ``--ignore-rules`` / bare ``--sandbox`` flags, and the reserved authority-bearing flags
-    (``-c``/``--config``, ``-p``/``--profile``, ``-P``, ``-s``/``--sandbox``, the approval/sandbox
-    selectors ``--full-auto`` / ``-a``/``--ask-for-approval``, ``--add-dir``,
-    ``--ignore-user-config``, ``--enable``/``--disable``, ...). Isolation is a generated permission
-    profile via ``default_permissions`` (:func:`_isolation_argv`); the full-access escape is
-    reached only through the ``sandbox: danger-full-access`` config field, gated by
-    ``strict_isolation`` at preflight. The prompt is delivered on stdin (the
-    trailing ``-``), never on the command line.
+    ``--ignore-rules`` flags and any ``--sandbox`` that is valueless or selects full access, plus
+    the reserved authority-bearing flags (``-c``/``--config``, ``-p``/``--profile``, ``-P``,
+    ``-s``/``--sandbox``, the approval/sandbox selectors ``--full-auto`` /
+    ``-a``/``--ask-for-approval``, ``--add-dir``, ``--ignore-user-config``,
+    ``--enable``/``--disable``, ...). Isolation is a generated permission profile via
+    ``default_permissions`` (:func:`_isolation_argv`), emitted for every attempt with no opt-out.
+    The prompt is delivered on stdin (the trailing ``-``), never on the command line.
     """
     combined_extra = tuple(config.extra_args) + tuple(request.extra_args)
     reasons = find_forbidden_args(combined_extra) + _find_reserved_codex_args(combined_extra)
@@ -452,10 +496,16 @@ def build_codex_argv(
         "--output-last-message",
         last_message_path,
     ]
+    # The attempt's effective network, resolved ONCE: the flow's grant, or the advanced mode, which
+    # is online for every node whatever its flow said. Both surfaces below read this one value —
+    # the profile's sandbox network and the backend-side ``web_search`` — because they are separate
+    # boundaries, and a run that opened only one would be online in half the ways that matter.
+    network_access = request.network_access or not strict_isolation
     argv += _isolation_argv(
         config,
         request,
         strict_isolation=strict_isolation,
+        network_access=network_access,
         deny_policy=deny_policy,
         denied_read_paths=denied_read_paths,
         read_isolation_off=read_isolation_off,
@@ -465,12 +515,13 @@ def build_codex_argv(
     # editable repository content: a run that changes them is reported to the operator as a
     # notice, not blocked. (The ``.codex`` project trust control in ``_isolation_argv`` is separate
     # and stays: the project is marked untrusted.)
-    if not request.network_access:
-        # No network grant → also deny the host-side ``web_search`` tool. It runs on the OpenAI
+    if not network_access:
+        # Offline attempt → also deny the host-side ``web_search`` tool. It runs on the OpenAI
         # backend, OUTSIDE the profile's sandbox network policy, so without this an "offline" node
         # could still reach the web (a network_access=false writer performed 9 web searches). An
-        # online node keeps web_search as its resolved grant; the profile keeps the shell sandbox
-        # offline regardless (a workspace-write node is never online — a validator rule).
+        # online attempt keeps web_search, and its profile is online too: one flag, both surfaces.
+        # In the advanced mode every attempt is online, which is also why the validator rule
+        # forbidding a Codex workspace-write node with network does not apply there.
         argv += ["-c", 'web_search="disabled"']
     if output_schema_path is not None:
         argv += ["--output-schema", output_schema_path]
@@ -498,24 +549,59 @@ def build_codex_argv(
 
 
 def isolation_reasons(config: ProviderConfig) -> list[str]:
-    """Reasons the configured Codex isolation cannot be enabled — an empty list means OK.
+    """Reasons this Codex *configuration* is not legal — an empty list means OK.
 
-    Pure and offline (no CLI launched), so it can drive the ``strict_isolation`` preflight
-    (:mod:`wastech_orchestrator.security.isolation`) and the Router's ``CAPABILITY_UNAVAILABLE``
-    fallback gate. A ``read-only``/``workspace-write`` node runs a generated permission profile, so
-    it is isolated. The only "no isolation" configurations are the full-access escape
-    (``sandbox: danger-full-access``, or selected in ``extra_args`` — the gate, not an absolute ban)
-    and any forbidden/reserved authority-bearing ``extra_args`` (which would weaken or replace the
-    owned profile/config surface). The real OS-enforced proof is the pre-launch canary
-    (:mod:`wastech_orchestrator.providers.codex_canary`); this offline check mirrors argv.
+    Pure, offline and host-independent (no CLI launched), so it drives the fatal
+    ``strict_isolation`` gate (:mod:`wastech_orchestrator.security.isolation`) and the Router's
+    fallback eligibility question. Every ``read-only``/``workspace-write`` node runs a generated
+    permission profile, so what is left to reject is ``extra_args``: an absolutely-forbidden flag
+    (including the full-access sandbox selector) or a reserved authority-bearing one, either of
+    which would weaken or replace the profile/config surface the adapter owns. The real OS-enforced
+    proof is the pre-launch canary (:mod:`wastech_orchestrator.providers.codex_canary`); this
+    offline check mirrors argv.
     """
     reasons: list[str] = []
-    if config.sandbox == FORBIDDEN_SANDBOX_VALUE:
-        reasons.append(f"sandbox {config.sandbox!r} grants full filesystem access (no isolation)")
-    reasons.extend(f"extra_args {r}" for r in find_full_access_args(config.extra_args))
     reasons.extend(f"extra_args {r}" for r in find_forbidden_args(config.extra_args))
     reasons.extend(f"extra_args {r}" for r in _find_reserved_codex_args(config.extra_args))
     return reasons
+
+
+def host_floor_gap(*, system: str | None = None) -> str | None:
+    """What this host cannot be shown to enforce for Codex, or ``None`` when it can be.
+
+    The counterpart of :func:`claude.host_floor_gap`, and deliberately shaped differently, because
+    the two questions differ: Claude's sandbox availability is classifiable offline (a platform plus
+    two executables on ``PATH``), while Codex's is decided by its own CLI and, on native Windows, by
+    whether the elevated sandbox backend is installed — something only the CLI can answer. So the
+    honest offline verdict there is "not classifiable here", which is still worth printing: the
+    alternative was silence, and a Codex-only park on such a host learned nothing from
+    ``worc preflight`` and then met the answer inside its first attempt.
+
+    ``system`` is injectable for the deterministic suite; it defaults to the real host.
+    """
+    if (system if system is not None else platform.system()) != "Windows":
+        return None
+    return (
+        "native Windows: whether the Codex sandbox can enforce here is decided by the CLI's "
+        "elevated sandbox backend, which cannot be classified offline — run "
+        "`worc preflight` (it runs the capability smoke) to get the answer before a task does. An "
+        "undemonstrable sandbox is a warning under strict_isolation: false (the run continues, "
+        "unproven) and refuses the attempt under strict_isolation: true"
+    )
+
+
+def attempt_has_shell(config: ProviderConfig, query: ShellQuery) -> bool:
+    """Whether a Codex attempt can execute commands — always true, on every profile.
+
+    Pure and offline (no CLI launched), so it can drive the core's per-attempt detection bracket
+    (:mod:`wastech_orchestrator.security.shell_reach`). Codex has no shell-less mode: the generated
+    ``read-only`` profile forbids every mutation but still permits command execution (a
+    ``read-only`` node can run ``git log`` today) and ``workspace-write`` adds the write grant. So
+    neither the node's ceiling nor the
+    git-evidence grant changes the answer — the grant exists for the provider whose read-only
+    profile carries no shell, and Codex needs nothing from it.
+    """
+    return True
 
 
 def _normalize_codex_usage(usage: Mapping[str, Any] | None) -> NormalizedUsage | None:
@@ -662,20 +748,34 @@ class CodexProvider(BaseCliProvider):
         """Prove the generated permission profile is OS-enforced before ``codex exec``.
 
         Runs the *same* profile under ``codex sandbox -P`` (no model, no network) and checks the
-        private home is denied (direct and shell-mediated) and the exchange is read-only, on real
-        launch env. Skipped when there is no internal deny set to prove (a unit harness with no
-        ``deny_policy``) or on the full-access escape (no profile emitted). A leak fails closed as a
-        non-fallback security error; an undemonstrable sandbox as ``CAPABILITY_UNAVAILABLE``.
+        private home is denied (direct and shell-mediated), the exchange is read-only, the CLI
+        binary itself executes under the profile (the path ``apply_patch``'s fs sandbox helper
+        takes — a deny that covers the binary broke every patch while every read probe stayed
+        green), and every
+        Git-control / lifecycle root the profile write-denies actually refuses a write — the
+        product's central claim. On real launch env. Skipped only when there is no internal deny set
+        to prove (a unit harness with no ``deny_policy``). A leak
+        — and a refused exec of the CLI binary — fails closed as a non-fallback security error; an
+        undemonstrable sandbox as
+        ``CAPABILITY_UNAVAILABLE``.
+
+        Every attempt emits a profile, so a missing one in the argv means the argv is not one this
+        adapter built. Returning quietly there would be fail-open on the run's central proof, so it
+        is a configuration error instead.
         """
         if self._deny_policy is None:
             return
         profile_arg = _extract_profile_arg(argv)
         if profile_arg is None:
-            return
+            raise ProviderError(
+                ErrorClass.CONFIGURATION_ERROR,
+                "no generated permission profile in the launch argv, so the pre-launch canary "
+                "cannot prove the sandbox — refusing the attempt rather than running unproven",
+            )
         task_path = request.task_path
         exchange_probe = task_path if task_path and Path(task_path).exists() else None
         outcome = run_codex_canary(
-            command=self._config.command,
+            command=self._command_path,
             profile_arg=profile_arg,
             working_directory=request.working_directory,
             private_probe=paths.request_path,
@@ -683,7 +783,7 @@ class CodexProvider(BaseCliProvider):
             env=env,
             system=platform.system(),
             runner=self._canary_runner,
-            private_readable=self._security.read_isolation_off,
+            extra=ExtraProbes(write_guard_probes=self._write_guard_probes(request)),
         )
         Path(paths.attempt_dir, "canary.json").write_text(
             json.dumps(
@@ -695,7 +795,48 @@ class CodexProvider(BaseCliProvider):
         )
         if not outcome.ok:
             assert outcome.error_class is not None  # set whenever ok is False
+            # The same rule `worc preflight` and the router's fallback apply: in the ADVANCED mode
+            # a probe that could not demonstrate the sandbox is a warning and the attempt proceeds —
+            # that host class (native Windows without the elevated backend) is exactly the one the
+            # mode exists to keep working, and refusing it would make the mode unavailable there
+            # while proving nothing. A *proven*
+            # leak (`CONFIGURATION_ERROR`) stays fatal at either setting: that is not an
+            # unclassifiable host, it is an enforcement failure. Under strict isolation nothing
+            # changes — an undemonstrable sandbox still refuses the attempt, fallback-eligible.
+            undemonstrable = outcome.error_class is ErrorClass.CAPABILITY_UNAVAILABLE
+            if undemonstrable and not self._security.strict_isolation:
+                bind(_LOG, task_id=request.task_id, component="canary").warning(
+                    "the sandbox could not be demonstrated on this host and the run continues "
+                    "(strict_isolation is off): %s. The write floor is not proven for this "
+                    "attempt — treat .git and .worc as writable here",
+                    outcome.message,
+                )
+                return
             raise ProviderError(outcome.error_class, outcome.message)
+
+    def _write_guard_probes(self, request: AgentRunRequest) -> tuple[tuple[str, str], ...]:
+        """The write-deny probes for this attempt's Git-control roots (empty when it has none).
+
+        The roots come from the request the Core built, so the probes test the profile that is about
+        to launch rather than a re-derived guess. Roots that cannot be probed are said out loud
+        instead of quietly reducing the probe set: a collapsed one names the ancestor that covers
+        it (debug — the coverage is intended), a missing directory names itself at warning level,
+        because a write into a directory that does not exist would fail for want of a parent and
+        read as an enforced deny.
+        """
+        if request.write_guard is None:
+            return ()
+        targets = write_guard_probe_paths(request.write_guard.denied_write_paths)
+        log = bind(_LOG, task_id=request.task_id, component="canary")
+        for root, ancestor in targets.covered:
+            log.debug("write-guard probe for %s covered by its probed parent %s", root, ancestor)
+        for root in targets.missing:
+            log.warning(
+                "write-guard root %s has no directory on disk, so no probe can demonstrate its "
+                "deny — a write there would fail for want of a parent, which is not enforcement",
+                root,
+            )
+        return targets.probes
 
     def isolation_capability_smoke(self, *, home_dir: Path) -> IsolationCapabilityReport | None:
         """Prove the generated profile is OS-enforced on this host, no model.
@@ -705,19 +846,25 @@ class CodexProvider(BaseCliProvider):
         mid-run ``CAPABILITY_UNAVAILABLE`` / ``CONFIGURATION_ERROR`` that reads like a bug. Runs the
         no-model :func:`codex_canary.run_codex_capability_smoke` on the configured profile under a
         throwaway fixture. A proven leak is fatal (a non-fallback result); an undemonstrable
-        sandbox is advisory (degrades like a capability gap). Returns ``None`` for the operator
-        full-access escape (no profile, no isolation claim) or when strict isolation is off.
+        sandbox is advisory (degrades like a capability gap).
+
+        Runs at every value of ``strict_isolation``, including off — that is the configuration
+        where the generated profile is the whole local floor, so it is the last one to excuse from
+        proving it. It is also the only check that proves the profile is applied by
+        the operating system rather than swallowed by the CLI, which accepts an unknown profile key
+        without complaint: a typo there yields no policy and no diagnostic.
         """
-        if not self._security.strict_isolation or self._config.sandbox == FORBIDDEN_SANDBOX_VALUE:
-            return None
-        env = self._augment_child_env(build_child_env(self._security.allowed_environment))
+        env = self._augment_child_env(build_child_env(self._security))
         report = run_codex_capability_smoke(
-            command=self._config.command,
+            command=self._command_path,
             home_dir=home_dir,
             env=env,
             permission_profile=self._config.permission_profile or _DEFAULT_PROFILE,
+            # The operator's own setting, so the smoke proves the profile that will launch — in the
+            # advanced mode that is the one with the volume-wide write grant, whose carve-outs are
+            # the whole reason this check is not skippable there.
+            strict_isolation=self._security.strict_isolation,
             runner=self._canary_runner,
-            read_isolation_off=self._security.read_isolation_off,
         )
         return IsolationCapabilityReport(
             ok=report.ok,
@@ -729,14 +876,11 @@ class CodexProvider(BaseCliProvider):
     def _sandbox_needs_windows_helper(self) -> bool:
         """Whether the configured permission profile engages the Windows sandbox helper.
 
-        The helper backs the native-Windows OS sandbox a ``workspace-write`` profile uses;
-        ``read-only`` and the full-access escape (``sandbox: danger-full-access``) do not launch it.
-        Conservative — it reads the configured provider default (there is no per-node request here),
-        so a provider defaulted to ``workspace-write`` that only ever runs read-only nodes still
-        requires the helper discoverable at preflight.
+        The helper backs the native-Windows OS sandbox a ``workspace-write`` profile uses; a
+        ``read-only`` profile does not launch it. Conservative — it reads the configured provider
+        default (there is no per-node request here), so a provider defaulted to ``workspace-write``
+        that only ever runs read-only nodes still requires the helper discoverable at preflight.
         """
-        if self._config.sandbox == FORBIDDEN_SANDBOX_VALUE:
-            return False
         return (self._config.permission_profile or _DEFAULT_PROFILE) != "read-only"
 
     def _augment_child_env(self, env: dict[str, str]) -> dict[str, str]:

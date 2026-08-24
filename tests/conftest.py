@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import shlex
 import shutil
 import stat
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -86,6 +87,34 @@ def seed_builtin_flows(clone: Path) -> None:
     missing = [ln for ln in (".worc/", ".worc-io/") if ln not in present]
     if missing:
         exclude.write_text("\n".join([*present, *missing]) + "\n", encoding="utf-8")
+
+
+@pytest.fixture
+def package_log_text() -> Iterator[Callable[[], str]]:
+    """Return a reader for the ``wastech_orchestrator`` log text emitted during the test.
+
+    ``caplog`` cannot be used for these records: the product's logging setup detaches the package
+    logger from the root (``propagate = False``), so a root-attached capture handler sees nothing —
+    and whether the setup has run yet depends on which test touched it first in this worker, which
+    turns any ``caplog`` assertion on orchestrator output into an order-dependent flake. Attaching
+    to the package logger directly is order-independent.
+    """
+    records: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record.getMessage())
+
+    logger = logging.getLogger("wastech_orchestrator")
+    handler = _Collect(level=logging.DEBUG)
+    logger.addHandler(handler)
+    prior_level = logger.level
+    logger.setLevel(logging.DEBUG)
+    try:
+        yield lambda: "\n".join(records)
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(prior_level)
 
 
 # A broad-but-explicit env allowlist so git runs under the orchestrator's allowlisted environment on
@@ -190,7 +219,6 @@ def build_git_config(
     telegram_trace: bool = False,
     memory_enabled: bool = False,
     allow_git_evidence: bool = False,
-    allow_native_memory: bool = False,
     trust_level: str | None = None,
     checkout_base_on_cleanup: bool | None = None,
     clean_runs_on_success: bool = True,
@@ -198,6 +226,9 @@ def build_git_config(
     supervisor_include_nodes: Sequence[str] = (),
     supervisor_enabled: bool | None = None,
     skills_dynamic: bool | None = None,
+    extra_environment: Mapping[str, str] | None = None,
+    allowed_environment_patterns: Sequence[str] = (),
+    strict_isolation: bool = True,
 ) -> OrchestratorConfig:
     """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks.
 
@@ -216,7 +247,18 @@ def build_git_config(
     returns has ``memory.enabled is False``. The warning that says so is on
     ``loads_config(...).warnings``, which this helper drops; assert it through ``loads_config``.
     """
-    env_lines = "\n".join(f"    - {e}" for e in _TEST_ALLOWED_ENV)
+    # Prefix patterns are APPENDED to the test allowlist rather than replacing it: a pattern test
+    # cares about what its own pattern resolves to, and dropping the base names would break git.
+    env_lines = "\n".join(f"    - {e}" for e in (*_TEST_ALLOWED_ENV, *allowed_environment_patterns))
+    # Variables the orchestrator ASSIGNS to every child process (security.extra_environment).
+    # Absent => the key is omitted entirely, which is what most tests want: the child environment
+    # then has to be byte-for-byte the pre-key one.
+    extra_env_block = (
+        "  extra_environment:\n"
+        + "".join(f"    {name}: {value!r}\n" for name, value in extra_environment.items())
+        if extra_environment
+        else ""
+    )
     cleanup_line = (
         f"  checkout_base_on_cleanup: {str(checkout_base_on_cleanup).lower()}\n"
         if checkout_base_on_cleanup is not None
@@ -268,12 +310,12 @@ repo:
     claude:
       command: "claude"
       primary: true
-      allow_native_memory: {str(allow_native_memory).lower()}
     codex:
       command: "codex"
 security:
+  strict_isolation: {str(strict_isolation).lower()}
   allow_git_evidence: {str(allow_git_evidence).lower()}
-{trust_level_line}  allowed_environment:
+{trust_level_line}{extra_env_block}  allowed_environment:
 {env_lines}
 {validation_block}{telegram_block}checks:
 {checks_block}  timeout_seconds: 30
@@ -284,7 +326,7 @@ git:
   auto_merge_strategy: {auto_merge_strategy}
   auto_merge_wait_for_checks: {str(auto_merge_wait_for_checks).lower()}
   footprint:
-    audit_commit_message: "chore(orchestrator): audit trail for {{task_id}}"
+    audit_commit_message: "chore(worc): audit trail for {{task_id}}"
     audit_on_branch: {audit_on_branch}
 prompt_audit: {str(prompt_audit).lower()}
 {memory_block}{logging_block}{skills_block}{supervisor_block}"""

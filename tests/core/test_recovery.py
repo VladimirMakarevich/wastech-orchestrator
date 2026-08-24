@@ -476,14 +476,24 @@ def test_resume_blocked_cleanup_returns_none_and_keeps_queue_scanning(
     assert ledger.records()[0]["terminal_cleanup"] == "blocked"
 
 
+@pytest.mark.parametrize(
+    "node_id,node_kind",
+    [
+        ("publish", "publish"),  # parked past the first critic
+        ("implementation", "agent"),  # parked ON the writing node, before any critic ran
+    ],
+)
 def test_resume_cleanup_preserves_own_wip_on_manual_park(
-    git_repo, make_git_config, git_run, tmp_path: Path
+    git_repo, make_git_config, git_run, tmp_path: Path, node_id: str, node_kind: str
 ) -> None:
     # A resumable manual_action_required park carrying the task's OWN uncommitted work
-    # (a publish node ran, so the dirty tree is the task's output — its --continue resume input) is
-    # preserved on the resume path exactly as the primary terminal path does: cleanup leaves HEAD on
-    # the branch and reports safe instead of fail-closing on "unaccounted changes". Without the fix
-    # the retry drops preserve_own_wip and stalls on the very tree _go_terminal kept.
+    # (a node that writes to the tree ran, so the dirty tree is the task's output — its --continue
+    # resume input) is preserved on the resume path exactly as the primary terminal path does:
+    # cleanup leaves HEAD on the branch and reports safe instead of fail-closing on "unaccounted
+    # changes". Without the fix the retry drops preserve_own_wip and stalls on the very tree
+    # _go_terminal kept. Both parking points count: an agent node writes the work, an evaluator /
+    # checks / publish node only proves writing already happened upstream — new-mode cleanup must
+    # not fail-close on the agent-only walk that every flow passes through before its first critic.
     notifier = RecordingNotifier()
     orch, store, ledger, *_ = _build_orchestrator(
         git_repo, make_git_config, tmp_path, _make_providers(git_repo), [0], notifier=notifier
@@ -498,7 +508,7 @@ def test_resume_cleanup_preserves_own_wip_on_manual_park(
             branch=branch,
         )
     )
-    store.record_node_run(NodeRunRow(task_id="task-wip", node_id="publish", node_kind="publish"))
+    store.record_node_run(NodeRunRow(task_id="task-wip", node_id=node_id, node_kind=node_kind))
     (git_repo.clone / "own-wip.txt").write_text("task work\n", encoding="utf-8")
 
     result = orch.resume()
@@ -583,7 +593,7 @@ def _seed_control_bundle(
         ("refinement", ProviderId.CLAUDE, "refinement"),
         ("planning", ProviderId.CLAUDE, "planning"),
         ("implementation", ProviderId.CLAUDE, "implementation"),
-        # Every node defaults to the global primary (claude) now — routing is node-based (PRE.1).
+        # Every node defaults to the global primary (claude) now — routing is node-based.
         ("testing", ProviderId.CLAUDE, "review"),  # checks node → first agent node is review
         ("review", ProviderId.CLAUDE, "review"),
         ("fixing", ProviderId.CLAUDE, "fixing"),

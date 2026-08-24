@@ -1,10 +1,10 @@
 """Frozen control bundle — a per-task immutable snapshot of the effective control plane.
 
 The operator control plane (``<repo>/.worc`` = ``control_home``: the flow YAML, role/supervisor
-prompts, and ``tools/`` executables) lives under the provider working directory. Every consumer
-historically re-read it **live** on each call, so a workspace-write agent could rewrite a later role
-prompt or a tool executable mid-run and a *later* orchestrator node would then read/execute those
-provider-chosen bytes outside the provider sandbox with the orchestrator's own authority.
+prompts, and ``tools/`` executables) lives under the provider working directory. Re-reading it
+**live** on each call would let a workspace-write agent rewrite a later role prompt or a tool
+executable mid-run, and a *later* orchestrator node would then read/execute those provider-chosen
+bytes outside the provider sandbox with the orchestrator's own authority.
 
 At task start the orchestrator freezes the exact effective control inputs referenced by the task's
 flow into a private, immutable bundle under ``<private_home>/runs/control-bundles/<task-id>/`` and
@@ -279,6 +279,32 @@ def digest_live_control_inputs(
     refs = _referenced_inputs(snapshot, flow_dir, tools)
     entries = [(ref.key, sha256_file(_checked(ref.source, inspector))) for ref in refs]
     return digest_entries(entries)
+
+
+def diverged_control_inputs(
+    snapshot: FlowSnapshot,
+    flow_dir: Path,
+    tools: ToolRegistry,
+    bundle_dir: Path,
+    *,
+    inspect: FileInspector | None = None,
+) -> tuple[str, ...]:
+    """The bundle-relative keys whose live bytes no longer match the frozen copy.
+
+    Names what :func:`digest_live_control_inputs` can only report as a single mismatched digest. It
+    is for the *message*, not for the verdict: the verdict compares against the parent-held digest,
+    which is what catches a provider that rewrote a live file and the frozen copy together, while
+    this reads the frozen copies off disk and so cannot. An empty tuple next to a mismatched digest
+    therefore means exactly that case, and the caller says so rather than naming nothing.
+    """
+    inspector = inspect or default_file_inspector()
+    diverged: list[str] = []
+    for ref in _referenced_inputs(snapshot, flow_dir, tools):
+        frozen = bundle_dir / ref.key
+        frozen_sha = sha256_file(frozen) if frozen.is_file() else None
+        if sha256_file(_checked(ref.source, inspector)) != frozen_sha:
+            diverged.append(ref.key)
+    return tuple(diverged)
 
 
 def _checked(path: Path, inspector: FileInspector) -> Path:

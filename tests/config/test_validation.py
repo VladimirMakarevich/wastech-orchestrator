@@ -1,7 +1,8 @@
-"""Validator: every reject path, including the global-primary rule (PRE.1)."""
+"""Validator: every reject path, including the global-primary rule."""
 
 from __future__ import annotations
 
+import os
 from dataclasses import replace
 
 import pytest
@@ -15,6 +16,7 @@ from wastech_orchestrator.config.schema import (
 )
 from wastech_orchestrator.config.validation import validate_config
 from wastech_orchestrator.providers.base import ProviderId
+from wastech_orchestrator.security import env_paths
 
 
 @pytest.fixture
@@ -30,33 +32,8 @@ def _with_security(config: OrchestratorConfig, **changes: object) -> Orchestrato
     return replace(config, security=replace(config.security, **changes))
 
 
-def _with_codex(config: OrchestratorConfig, **changes: object) -> OrchestratorConfig:
-    providers = dict(config.agents.providers)
-    providers[ProviderId.CODEX] = replace(providers[ProviderId.CODEX], **changes)
-    return _with_agents(config, providers=providers)
-
-
 def test_packaged_config_validates_clean(base_config: OrchestratorConfig) -> None:
     assert validate_config(base_config) == []
-
-
-@pytest.mark.parametrize("value", ["read-only", "workspace-write"])
-def test_legacy_codex_sandbox_value_is_rejected(
-    base_config: OrchestratorConfig, value: str
-) -> None:
-    # The access level lives in permission_profile; a safe legacy `sandbox` is rejected.
-    cfg = _with_codex(base_config, sandbox=value)
-    with pytest.raises(ConfigError) as exc:
-        validate_config(cfg)
-    assert any(".sandbox" in issue and "permission_profile" in issue for issue in exc.value.issues)
-
-
-def test_danger_full_access_sandbox_passes_config_validation(
-    base_config: OrchestratorConfig,
-) -> None:
-    # The full-access escape still loads at config time — strict_isolation gates it at preflight.
-    cfg = _with_codex(base_config, sandbox="danger-full-access")
-    assert validate_config(cfg) == []
 
 
 def test_protected_paths_globs_validate_clean(base_config: OrchestratorConfig) -> None:
@@ -88,11 +65,13 @@ def test_disable_read_isolation_default_and_validates(
 
 def test_loader_parses_disable_read_isolation(packaged_config_text: str) -> None:
     # Operator-config key parsed from the security block: the packaged config ships `true`
-    # (read-isolation OFF), and an explicit `false` is honored (keeps read-isolation ON).
+    # (read-isolation OFF), and an explicit `false` is honored on the key itself. The EFFECTIVE
+    # state needs `strict_isolation: true` too — the packaged config now ships the advanced mode,
+    # which forces read-isolation off whatever this key says, so flip both to see the key land.
     assert loads_config(packaged_config_text).config.security.disable_read_isolation is True
     text = packaged_config_text.replace(
         "disable_read_isolation: true", "disable_read_isolation: false"
-    )
+    ).replace("strict_isolation: false", "strict_isolation: true")
     assert "disable_read_isolation: false" in text  # guard: the packaged key still exists
     cfg = loads_config(text).config
     assert cfg.security.disable_read_isolation is False
@@ -111,6 +90,336 @@ def test_protected_paths_absolute_path_is_rejected(base_config: OrchestratorConf
     with pytest.raises(ConfigError) as exc:
         validate_config(cfg)
     assert any("protected_paths" in issue for issue in exc.value.issues)
+
+
+def test_allowed_environment_without_path_is_rejected(base_config: OrchestratorConfig) -> None:
+    # The list replaces the OS-aware default wholesale, so an operator who edits it can drop the one
+    # name every child needs. Today that surfaces as "CLI did not succeed" at run time.
+    cfg = _with_security(base_config, allowed_environment=("HOME", "TMPDIR"))
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any(
+        "security.allowed_environment" in issue and "PATH" in issue for issue in exc.value.issues
+    )
+
+
+def test_allowed_environment_with_path_validates_clean(base_config: OrchestratorConfig) -> None:
+    # `PATH` alone is enough for the validator on every host: the Windows-only `SystemRoot` half of
+    # the rule belongs to preflight, so that one config file gets the same verdict everywhere.
+    assert validate_config(_with_security(base_config, allowed_environment=("PATH",))) == []
+
+
+def test_allowed_environment_path_match_is_exact(base_config: OrchestratorConfig) -> None:
+    # A host-independent verdict has to be the strictest reading: `Path` is forwarded on Windows
+    # (its environment is case-insensitive) and silently dropped on POSIX, so it is not `PATH`.
+    cfg = _with_security(base_config, allowed_environment=("Path", "HOME"))
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("security.allowed_environment" in issue for issue in exc.value.issues)
+
+
+@pytest.mark.parametrize("entry", ["DOTNET_*", "npm_config_*", "_*", "PATH*"])
+def test_allowed_environment_accepts_a_prefix_pattern(
+    base_config: OrchestratorConfig, entry: str
+) -> None:
+    # One trailing `*` after a valid variable name. `PATH*` is in the list deliberately: it is
+    # legitimate, and a naive "PATH is mandatory" gate rejects it.
+    assert validate_config(_with_security(base_config, allowed_environment=("PATH", entry))) == []
+
+
+def test_allowed_environment_pattern_can_satisfy_the_path_requirement(
+    base_config: OrchestratorConfig,
+) -> None:
+    # The seam with phase 0.1 in its sharpest form: `PATH*` is the ONLY entry, and it covers PATH.
+    assert validate_config(_with_security(base_config, allowed_environment=("PATH*",))) == []
+
+
+def test_allowed_environment_lone_star_is_rejected(base_config: OrchestratorConfig) -> None:
+    # A lone `*` is the inversion of the mechanism (everything minus a deny-list), which
+    # the environment gate deliberately does not offer — a value leaks by being present at all. The
+    # message has to say that, not just "invalid syntax".
+    cfg = _with_security(base_config, allowed_environment=("PATH", "*"))
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("allow-list by name" in issue for issue in exc.value.issues)
+
+
+@pytest.mark.parametrize("entry", ["A*B", "**", "*SUFFIX", "DOT*NET_*", "*"])
+def test_allowed_environment_misplaced_star_is_rejected(
+    base_config: OrchestratorConfig, entry: str
+) -> None:
+    # One wildcard, one position: anything else would read like a glob and silently match
+    # nothing.
+    cfg = _with_security(base_config, allowed_environment=("PATH", entry))
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("security.allowed_environment[1]" in issue for issue in exc.value.issues)
+
+
+@pytest.mark.parametrize("entry", ["SECRET_*", "TOKEN_*", "AWS_SECRET_*"])
+def test_allowed_environment_secret_prefix_pattern_is_rejected(
+    base_config: OrchestratorConfig, entry: str
+) -> None:
+    # Such a pattern is not dangerous — the secret filter runs after expansion,
+    # so it can only ever forward the empty set. It is refused because accepting it would leave the
+    # operator certain the variables went through, and the message explains that mechanism.
+    cfg = _with_security(base_config, allowed_environment=("PATH", entry))
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any(
+        "secret-bearing" in issue and "after expansion" in issue for issue in exc.value.issues
+    )
+
+
+def test_allowed_environment_plain_name_grammar_is_left_alone(
+    base_config: OrchestratorConfig,
+) -> None:
+    # Deliberately NOT validated: a `*`-free entry that matches nothing has always been inert, and
+    # turning that into a load error would reject configs that work today.
+    cfg = _with_security(base_config, allowed_environment=("PATH", "not a name"))
+    assert validate_config(cfg) == []
+
+
+# The shipped template's `local_path` is the relative placeholder `./workspace/repo`, against which
+# no absolute value can be compared without resolving it (which would make the verdict depend on the
+# process's working directory). `worc install` writes the resolved git root, so an absolute clone
+# path is what every real config holds — and what these tests use.
+_CLONE = "/srv/clones/target"
+
+
+def _assigning(config: OrchestratorConfig, **assigned: str) -> OrchestratorConfig:
+    config = replace(config, repo=replace(config.repo, local_path=_CLONE))
+    return _with_security(config, extra_environment=dict(assigned))
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [".worc", ".worc/cache", ".git", ".git/objects", ".worc-io", "tasks", "tasks/pending"],
+)
+def test_assigned_value_inside_a_protected_path_is_rejected(
+    base_config: OrchestratorConfig, suffix: str
+) -> None:
+    # The key exists to point a toolchain cache into the clone, so a wrong path is a plausible typo
+    # rather than an exotic case — and the damage is what it lands on: a build filling `.worc/`
+    # corrupts the run that launched it, one filling `.git/` corrupts the repository.
+    clone = _CLONE
+    cfg = _assigning(base_config, NUGET_PACKAGES=f"{clone}/{suffix}")
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("security.extra_environment.NUGET_PACKAGES" in issue for issue in exc.value.issues)
+
+
+def test_assigned_value_that_is_a_protected_path_parent_is_rejected(
+    base_config: OrchestratorConfig,
+) -> None:
+    # Symmetry matters: naming the clone root redirects the cache onto every protected directory
+    # inside it just as effectively as naming one of them.
+    cfg = _assigning(base_config, CARGO_HOME=_CLONE)
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("security.extra_environment.CARGO_HOME" in issue for issue in exc.value.issues)
+
+
+def test_a_list_value_is_rejected_by_its_offending_element(
+    base_config: OrchestratorConfig,
+) -> None:
+    # A list-shaped variable is the one that slips through an unsplit comparison: as a single string
+    # it matches no protected root at all, while the element in the middle of it lands on one.
+    clone = _CLONE
+    cfg = _assigning(base_config, PYTHONPATH=f"{clone}/.worc{os.pathsep}{clone}/src")
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("security.extra_environment.PYTHONPATH" in issue for issue in exc.value.issues)
+
+
+def test_the_rejection_names_what_was_hit_and_never_the_value(
+    base_config: OrchestratorConfig,
+) -> None:
+    # The operator reads the value in their own config; repeating it here would give a secret that
+    # landed in it against the guide's advice a second surface (a terminal, a CI log) to leak from.
+    clone = _CLONE
+    cfg = _assigning(base_config, NUGET_PACKAGES=f"{clone}/.worc/secret-looking-cache")
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    issue = next(i for i in exc.value.issues if "NUGET_PACKAGES" in i)
+    assert "control home" in issue or "runtime home" in issue
+    assert "secret-looking-cache" not in issue
+
+
+@pytest.mark.parametrize("value", ["1", "C.UTF-8", "true", ""])
+def test_a_value_that_is_not_a_path_is_not_examined(
+    base_config: OrchestratorConfig, value: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Non-path values are the common case (`DOTNET_NOLOGO: "1"`), and the validator must neither
+    # guess at them nor resolve them: canonicalizing here would make the verdict host-dependent.
+    def explode(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("a non-path value was canonicalized")
+
+    monkeypatch.setattr(env_paths, "_canonical", explode)
+    assert validate_config(_assigning(base_config, DOTNET_NOLOGO=value)) == []
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "{clone}/.toolcache/../.worc/cache",
+        "{clone}/a/b/../../.git/objects",
+        "{clone}/./.worc/cache",
+    ],
+)
+def test_a_traversal_cannot_walk_into_a_protected_path(
+    base_config: OrchestratorConfig, value: str
+) -> None:
+    # `..` shares no component prefix with the protected path, so without collapsing it this level
+    # is bypassed by one token and only the canonical check in preflight is left — which is exactly
+    # the host-dependent verdict the two-level split exists to avoid.
+    cfg = _assigning(base_config, NUGET_PACKAGES=value.format(clone=_CLONE))
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("security.extra_environment.NUGET_PACKAGES" in issue for issue in exc.value.issues)
+
+
+def test_a_traversal_that_stays_clear_is_not_refused(base_config: OrchestratorConfig) -> None:
+    # Collapsing `..` must not turn every indirect path into a refusal: this one resolves to a
+    # perfectly ordinary cache directory.
+    cfg = _assigning(base_config, NUGET_PACKAGES=f"{_CLONE}/build/../.toolcache/nuget")
+    assert validate_config(cfg) == []
+
+
+def test_a_cache_beside_the_protected_paths_validates_clean(
+    base_config: OrchestratorConfig,
+) -> None:
+    # The recipe itself has to pass: a directory of its own inside the clone is exactly right.
+    clone = _CLONE
+    assert (
+        validate_config(_assigning(base_config, NUGET_PACKAGES=f"{clone}/.toolcache/nuget")) == []
+    )
+
+
+def test_assigned_paths_match_denied_read_globs_without_prefix_broadening(
+    base_config: OrchestratorConfig,
+) -> None:
+    security = replace(base_config.security, denied_read_paths=("**/private/**", "conf/*.yaml"))
+    hidden = _assigning(
+        replace(base_config, security=security),
+        PIP_CACHE_DIR=f"{_CLONE}/x/private/cache",
+    )
+    with pytest.raises(ConfigError) as exc:
+        validate_config(hidden)
+    assert any("**/private/**" in issue for issue in exc.value.issues)
+
+    sibling = _assigning(
+        replace(base_config, security=security),
+        GOMODCACHE=f"{_CLONE}/conf/gocache",
+    )
+    assert validate_config(sibling) == []
+
+
+@pytest.mark.parametrize("name", ["PATH", "path", "Path"])
+def test_extra_environment_cannot_assign_path(base_config: OrchestratorConfig, name: str) -> None:
+    # Reassigning PATH substitutes every binary the child resolves. Case-insensitive because a
+    # Windows child honors `Path` exactly as it honors `PATH`.
+    cfg = _with_security(base_config, extra_environment={name: "/tmp/evil"})
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("PATH cannot be assigned" in issue for issue in exc.value.issues)
+
+
+@pytest.mark.parametrize("name", ["GITHUB_TOKEN", "MY_API_KEY", "npm_password"])
+def test_extra_environment_rejects_secret_names(base_config: OrchestratorConfig, name: str) -> None:
+    # One definition of "secret name" (is_sensitive_key), no second list of masks.
+    cfg = _with_security(base_config, extra_environment={name: "x"})
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("secret-bearing" in issue for issue in exc.value.issues)
+
+
+@pytest.mark.parametrize("name", ["HAS SPACE", "WITH=EQUALS", "1LEADING_DIGIT", "", "with-dash"])
+def test_extra_environment_rejects_names_outside_the_grammar(
+    base_config: OrchestratorConfig, name: str
+) -> None:
+    cfg = _with_security(base_config, extra_environment={name: "x"})
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("not a valid environment variable name" in issue for issue in exc.value.issues)
+
+
+def test_extra_environment_rejects_names_differing_only_in_case(
+    base_config: OrchestratorConfig,
+) -> None:
+    # On Windows the environment is case-insensitive, so this config has no defined meaning: which
+    # value the child saw would depend on the order the mapping was read in.
+    cfg = _with_security(base_config, extra_environment={"DOTNET_ROOT": "/a", "dotnet_root": "/b"})
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("only in case" in issue for issue in exc.value.issues)
+
+
+def test_extra_environment_accepts_a_toolchain_recipe(base_config: OrchestratorConfig) -> None:
+    # The shape the guide recommends, plus an empty value — a real assignment that forwarding cannot
+    # express at all, and therefore NOT an error.
+    cfg = _with_security(
+        base_config,
+        extra_environment={
+            "DOTNET_CLI_TELEMETRY_OPTOUT": "1",
+            "NUGET_PACKAGES": "/repo/.toolcache/nuget",
+            "npm_config_cache": "/repo/.toolcache/npm",
+            "DOTNET_NOLOGO": "",
+        },
+    )
+    assert validate_config(cfg) == []
+
+
+def _config_text(security_block: str) -> str:
+    return f"""
+repo:
+  url: "git@example.com:o/r.git"
+agents:
+  allowed: [claude]
+  providers:
+    claude:
+      command: "claude"
+      primary: true
+security:
+{security_block}
+"""
+
+
+@pytest.mark.parametrize("value", ["1", "1.10", "true", "null"])
+def test_extra_environment_non_string_value_is_a_loader_error(value: str) -> None:
+    # Fail-closed with a hint instead of coercing: `1` is a YAML int, `true` a bool, `1.10` a float
+    # that would lose its trailing zero, `null` a None. Quoting is the fix and the message says so.
+    with pytest.raises(ConfigError) as exc:
+        loads_config(_config_text(f"  extra_environment:\n    DOTNET_NOLOGO: {value}"))
+    assert any(
+        "expected a string" in issue and "quote the value" in issue for issue in exc.value.issues
+    )
+    assert all("e.g." not in issue for issue in exc.value.issues)
+
+
+@pytest.mark.parametrize("name", ["on", "NO", "1"])
+def test_extra_environment_non_string_yaml_key_is_rejected(name: str) -> None:
+    with pytest.raises(ConfigError) as exc:
+        loads_config(_config_text(f'  extra_environment:\n    {name}: "value"'))
+    assert any(
+        "expected string keys" in issue and "quote the environment variable name" in issue
+        for issue in exc.value.issues
+    )
+
+
+def test_extra_environment_must_be_a_mapping() -> None:
+    # A scalar or a list where a mapping belongs is a structural error, not something to interpret.
+    with pytest.raises(ConfigError) as exc:
+        loads_config(_config_text('  extra_environment: "DOTNET_NOLOGO=1"'))
+    assert any("expected a mapping" in issue for issue in exc.value.issues)
+
+
+def test_extra_environment_absent_key_is_an_empty_mapping(packaged_config_text: str) -> None:
+    # The key is optional and its absence is not a special case — it is the empty mapping, so
+    # the child environment stays exactly what forwarding alone produces.
+    text = packaged_config_text.replace("  extra_environment: {}", "", 1)
+    assert "  extra_environment: {}" not in text  # guard: the packaged key really was removed
+    assert loads_config(text).config.security.extra_environment == {}
 
 
 def test_global_primary_not_in_allowed_is_rejected(base_config: OrchestratorConfig) -> None:
@@ -262,22 +571,31 @@ def test_sandbox_bypass_extra_arg_is_rejected(base_config: OrchestratorConfig, f
     assert any("extra_args" in issue for issue in exc.value.issues)
 
 
+@pytest.mark.parametrize("strict_isolation", [True, False])
 @pytest.mark.parametrize(
     "extra_args",
     [
         ("--sandbox=danger-full-access",),
         ("--sandbox", "danger-full-access"),
+        ("-s", "danger-full-access"),
+        ("--permission-mode", "bypassPermissions"),
+        ("--permission-mode=bypassPermissions",),
     ],
 )
-def test_full_access_sandbox_extra_arg_is_not_a_config_error(
-    base_config: OrchestratorConfig, extra_args: tuple[str, ...]
+def test_full_access_selector_extra_arg_is_a_config_error(
+    base_config: OrchestratorConfig, extra_args: tuple[str, ...], strict_isolation: bool
 ) -> None:
-    # provider-config-cleanup #1: a full-access sandbox is no longer an absolute config-validation
-    # error — it is operator-selectable and gated by the strict_isolation preflight (the absolute
-    # ban is reserved for --dangerously*/--yolo/--ignore-rules). See test_isolation.py for the gate.
+    # There is no configuration in which a full-access selector loads: it is absolutely forbidden,
+    # so `strict_isolation` is not a way in either. Both values are exercised because the key used
+    # to be exactly that way in.
     codex = replace(base_config.agents.providers[ProviderId.CODEX], extra_args=extra_args)
     providers = {**base_config.agents.providers, ProviderId.CODEX: codex}
-    assert validate_config(_with_agents(base_config, providers=providers)) == []
+    cfg = _with_security(
+        _with_agents(base_config, providers=providers), strict_isolation=strict_isolation
+    )
+    with pytest.raises(ConfigError) as exc:
+        validate_config(cfg)
+    assert any("extra_args" in issue for issue in exc.value.issues)
 
 
 def test_claude_skip_permissions_extra_arg_is_rejected(base_config: OrchestratorConfig) -> None:
@@ -461,20 +779,23 @@ def test_confirmation_gates_with_telegram_validate_clean(base_config: Orchestrat
     assert validate_config(cfg) == []
 
 
-def test_allow_git_evidence_defaults_off_and_validates(base_config: OrchestratorConfig) -> None:
-    # The git-evidence grant is opt-in: absent the key, a flow that declares git_evidence gets
-    # nothing. Both the default and an explicit True validate cleanly.
-    assert base_config.security.allow_git_evidence is False
-    assert validate_config(_with_security(base_config, allow_git_evidence=True)) == []
+def test_allow_git_evidence_ships_on_and_validates_either_way(
+    base_config: OrchestratorConfig,
+) -> None:
+    # The packaged config ships the grant ON. Beside the shipped `strict_isolation: false` it adds
+    # no capability (every node has an unscoped shell there) — it is what a declaring node gets the
+    # moment strict isolation returns. Both values validate cleanly.
+    assert base_config.security.allow_git_evidence is True
+    assert validate_config(_with_security(base_config, allow_git_evidence=False)) == []
 
 
 def test_loader_parses_allow_git_evidence(packaged_config_text: str) -> None:
     # A key the loader does not know is a key that is silently ignored, so parse it from the
-    # packaged security block explicitly: shipped `false`, and an explicit `true` honored.
-    assert loads_config(packaged_config_text).config.security.allow_git_evidence is False
-    text = packaged_config_text.replace("allow_git_evidence: false", "allow_git_evidence: true")
-    assert "allow_git_evidence: true" in text  # guard: the packaged key still exists
-    assert loads_config(text).config.security.allow_git_evidence is True
+    # packaged security block explicitly: shipped `true`, and an explicit `false` honored.
+    assert loads_config(packaged_config_text).config.security.allow_git_evidence is True
+    text = packaged_config_text.replace("allow_git_evidence: true", "allow_git_evidence: false")
+    assert "allow_git_evidence: false" in text  # guard: the packaged key still exists
+    assert loads_config(text).config.security.allow_git_evidence is False
 
 
 # --- supervisor.enabled: false (P3) ------------------------------------------

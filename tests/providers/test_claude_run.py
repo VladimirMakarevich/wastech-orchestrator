@@ -26,7 +26,12 @@ from wastech_orchestrator.providers.base import (
     RunStatus,
     build_effective_prompt,
 )
-from wastech_orchestrator.providers.claude import ClaudeCodeProvider, SandboxCapability
+from wastech_orchestrator.providers.claude import (
+    ClaudeCodeProvider,
+    SandboxCapability,
+    build_paid_probe_fixture,
+    paid_probe_path_verdicts,
+)
 from wastech_orchestrator.providers.process import ProcessResult, QuiescenceResult
 from wastech_orchestrator.runtime_layout import InternalDenyPolicy
 
@@ -34,7 +39,9 @@ FIXED_TIME = datetime(2026, 6, 11, 12, 0, 0, tzinfo=UTC)
 FAKE_GH_TOKEN = "ghp_" + "abcdef0123456789abcdef0123"
 
 
-def _success_stream(*, is_error: bool = False, subtype: str = "success") -> str:
+def _success_stream(
+    *, is_error: bool = False, subtype: str = "success", result: str = "Implemented the feature."
+) -> str:
     events = [
         {"type": "system", "subtype": "init", "session_id": "sess-99"},
         {"type": "assistant", "message": {"content": [{"type": "text", "text": "working"}]}},
@@ -42,7 +49,7 @@ def _success_stream(*, is_error: bool = False, subtype: str = "success") -> str:
             "type": "result",
             "subtype": subtype,
             "is_error": is_error,
-            "result": "Implemented the feature.",
+            "result": result,
             "session_id": "sess-99",
             "usage": {"input_tokens": 10, "output_tokens": 5},
             "structured_output": {"summary": "ok"},
@@ -478,7 +485,6 @@ def test_workspace_write_run_with_deny_policy_writes_sandbox_settings(
         control_home=tmp_path / ".worc",
         private_home=tmp_path / ".worc",
         env_file=None,
-        provider_homes=(),
     )
     fake = FakeRun(stdout=_success_stream())
     provider = ClaudeCodeProvider(
@@ -498,6 +504,87 @@ def test_workspace_write_run_with_deny_policy_writes_sandbox_settings(
     sandbox = settings["sandbox"]
     assert sandbox["enabled"] is True and sandbox["failIfUnavailable"] is True
     assert (tmp_path / ".worc").as_posix() in sandbox["filesystem"]["denyRead"]
+
+
+def test_a_read_only_run_in_the_advanced_mode_gets_the_sandbox_that_holds_it_to_reading(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # A read-only node never reached this path before: with no Bash in its tool set there was
+    # nothing to sandbox, so no settings file was written at all. The mode gives it a shell, which
+    # makes the file appear for the first time — and that file is now half of what "read-only"
+    # means, the other half being the bare Write/Edit/NotebookEdit denies. Losing either one turns
+    # an audit node into a writer without anything failing.
+    deny = InternalDenyPolicy(
+        control_home=tmp_path / ".worc",
+        private_home=tmp_path / ".worc",
+        env_file=None,
+    )
+    fake = FakeRun(stdout=_success_stream())
+    provider = ClaudeCodeProvider(
+        claude_config,
+        security=replace(security_config, strict_isolation=False),
+        artifacts_root=tmp_path,
+        clock=lambda: FIXED_TIME,
+        run_process=fake,
+        sandbox_probe=lambda: SandboxCapability.MACOS,
+        deny_policy=deny,
+    )
+    provider.run(replace(_make_ws_request(tmp_path), permission_profile="read-only"))
+
+    argv = fake.captured["argv"]
+    assert "--tools" not in argv
+    assert "Bash" in argv[argv.index("--allowedTools") + 1].split(",")
+    assert {"Write", "Edit", "NotebookEdit"} <= set(
+        argv[argv.index("--disallowedTools") + 1].split(",")
+    )
+    sandbox = json.loads(Path(argv[argv.index("--settings") + 1]).read_text(encoding="utf-8"))[
+        "sandbox"
+    ]
+    # The whole clone, not just the control paths: what holds this node to reading is the OS, and
+    # a command the auto-approve list let through still cannot change the repository.
+    assert (tmp_path / "clone").as_posix() in sandbox["filesystem"]["denyWrite"]
+    assert sandbox["autoAllowBashIfSandboxed"] is True
+
+
+def test_the_advanced_mode_writes_the_volume_root_and_the_open_network_into_the_sandbox_file(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    """The wiring, end to end: mode on → ``allowWrite`` on the volume root and ``allowedDomains``.
+
+    The unit tests prove the file's shape; this proves the adapter actually asks for that shape from
+    a real request, which is the half that breaks silently. The node here was granted NO network by
+    its flow, on purpose: the mode is a config-level grant of the whole network, and a flow cannot
+    take it back — the shell would reach the network regardless of any tool list.
+    """
+    deny = InternalDenyPolicy(
+        control_home=tmp_path / ".worc",
+        private_home=tmp_path / ".worc",
+        env_file=None,
+    )
+    fake = FakeRun(stdout=_success_stream())
+    provider = ClaudeCodeProvider(
+        claude_config,
+        security=replace(security_config, strict_isolation=False),
+        artifacts_root=tmp_path,
+        clock=lambda: FIXED_TIME,
+        run_process=fake,
+        sandbox_probe=lambda: SandboxCapability.MACOS,
+        deny_policy=deny,
+    )
+    provider.run(replace(_make_ws_request(tmp_path), network_access=False))
+
+    argv = fake.captured["argv"]
+    sandbox = json.loads(Path(argv[argv.index("--settings") + 1]).read_text(encoding="utf-8"))[
+        "sandbox"
+    ]
+    # The volume root, taken from the workspace path's own anchor rather than a hardcoded "/".
+    assert sandbox["filesystem"]["allowWrite"] == [Path((tmp_path / "clone").anchor).as_posix()]
+    assert sandbox["network"]["allowedDomains"] == ["*"]
+    # The floor is still spelled out inside that grant, and so is the whole clone for a writer's
+    # control paths — this attempt is workspace-write, so the guard roots are what to look for.
+    deny_write = set(sandbox["filesystem"]["denyWrite"])
+    assert (tmp_path / ".worc").as_posix() in deny_write
+    assert {"WebFetch", "WebSearch"} <= set(argv[argv.index("--allowedTools") + 1].split(","))
 
 
 def _make_ws_request(tmp_path: Path) -> AgentRunRequest:
@@ -543,6 +630,7 @@ _FULL_CLAUDE_HELP = (
     "  --strict-mcp-config            Only use MCP servers from --mcp-config\n"
     "  --tools <tools...>             Specify the list of available tools\n"
     "  --allowedTools <tools...>      Tools allowed without prompting\n"
+    "  --disallowedTools <tools...>   Tools denied without prompting\n"
     "  -r, --resume [value]           Resume a conversation by session ID\n"
 )
 
@@ -622,6 +710,51 @@ def test_preflight_fails_when_isolation_flag_missing(
     assert "--setting-sources" in health.message
 
 
+def test_preflight_fails_when_the_flag_carrying_the_floor_was_renamed(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # --disallowedTools carries every path-scoped write deny, and in the advanced mode it carries
+    # the floor ALONE — there is no existence gate left behind it. A CLI that renamed it would
+    # otherwise run the whole task with not one deny in force and fail nowhere, so this has to be
+    # caught here: offline, before a single paid model call. Checked at BOTH isolation settings,
+    # because the flag is emitted at both and the mode-conditional filtering above it must not
+    # accidentally drop this one too.
+    help_text = _FULL_CLAUDE_HELP.replace(
+        "  --disallowedTools <tools...>   Tools denied without prompting\n", ""
+    )
+    for strict in (True, False):
+        fake = _ProbingClaudeRun(help_text=help_text)
+        provider = _probing_provider(
+            claude_config, replace(security_config, strict_isolation=strict), tmp_path, fake
+        )
+        health = provider.preflight()
+        assert health.supports_required_features is False, strict
+        assert "--disallowedTools" in health.message
+
+
+def test_preflight_stops_requiring_the_existence_gate_in_the_advanced_mode(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # The advanced mode emits no --tools at all, so a CLI that dropped it runs this configuration
+    # perfectly well. Demanding a flag the adapter never passes would refuse a healthy host.
+    help_text = _FULL_CLAUDE_HELP.replace(
+        "  --tools <tools...>             Specify the list of available tools\n", ""
+    )
+    advanced = replace(security_config, strict_isolation=False)
+    fake = _ProbingClaudeRun(help_text=help_text)
+    assert (
+        _probing_provider(claude_config, advanced, tmp_path, fake)
+        .preflight()
+        .supports_required_features
+        is True
+    )
+    # ...while the shipped default still depends on it and still blocks.
+    strict = _ProbingClaudeRun(help_text=help_text)
+    health = _probing_provider(claude_config, security_config, tmp_path, strict).preflight()
+    assert health.supports_required_features is False
+    assert "--tools" in health.message
+
+
 def test_preflight_degrades_when_resume_flag_missing(
     claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
 ) -> None:
@@ -667,7 +800,9 @@ def test_preflight_auth_reports_logged_in_without_copying_any_identity(
     rendered = repr(health)
     assert not any(secret in rendered for secret in (email, org_id, org_name))
     # ``--json`` is passed explicitly rather than relying on it staying the CLI's default.
-    assert ["claude", "auth", "status", "--json"] in fake.argvs
+    # The subcommand, not argv[0]: the adapter pins the configured command to its resolved
+    # absolute path at launch, so argv[0] depends on where this host installed the CLI.
+    assert ["auth", "status", "--json"] in [argv[1:] for argv in fake.argvs]
 
 
 def test_preflight_auth_reports_logged_out(
@@ -711,3 +846,291 @@ def test_preflight_missing_binary_makes_no_credential_claim(
     fake = FakeRun(launch_error="not found")
     provider = _provider(claude_config, security_config, tmp_path, fake)
     assert provider.preflight().auth is None
+
+
+# --- paid isolation probe ---------------------------------------------------------------------
+
+
+class _WritingRun(FakeRun):
+    """A fake launch that creates the files the probe's prompt names, chosen per test.
+
+    Stands in for the model plus the OS sandbox: whichever paths this writes are the paths that
+    "landed", which is exactly what the classifier reads. It also keeps the sandbox settings file's
+    CONTENT, read at launch: the probe builds its fixture under a throwaway root and removes it on
+    the way out, so a test that wants the policy the probe launched under has to read it here.
+    """
+
+    def __init__(
+        self, *, write: Callable[[Path], bool], report_shell: bool = False, **kwargs: Any
+    ) -> None:
+        super().__init__(**kwargs)
+        self._write = write
+        # Whether the answer carries the per-path "tool=…, shell=…" report the prompt demands. Off
+        # by default: a model that stopped after its file-writing tool refused is the case the
+        # classifier has to word differently, so it is the default the older tests exercise.
+        self._report_shell = report_shell
+        self.sandbox_settings: dict[str, Any] | None = None
+
+    def __call__(self, argv: list[str], **kwargs: Any) -> ProcessResult:
+        if "--settings" in argv:
+            path = Path(argv[argv.index("--settings") + 1])
+            self.sandbox_settings = json.loads(path.read_text(encoding="utf-8"))
+        # Claude takes the prompt on stdin, so that is where the probe's four paths are.
+        prompt = " ".join([*argv, kwargs.get("stdin_text") or ""])
+        reported: list[str] = []
+        for token in prompt.split():
+            candidate = Path(token.strip().rstrip(".,"))
+            if candidate.name != "worc-isolation-probe.txt":
+                continue
+            wrote = self._write(candidate)
+            if wrote:
+                candidate.parent.mkdir(parents=True, exist_ok=True)
+                candidate.write_text("x", encoding="utf-8")
+            outcome = "wrote" if wrote else "refused"
+            reported.append(f"{candidate.as_posix()}: tool={outcome}, shell={outcome}")
+        if self._report_shell:
+            self.stdout = _success_stream(result="\n".join(reported))
+        return super().__call__(argv, **kwargs)
+
+
+def _paid_provider(
+    claude_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    fake: FakeRun,
+    *,
+    capability: SandboxCapability = SandboxCapability.MACOS,
+) -> ClaudeCodeProvider:
+    return ClaudeCodeProvider(
+        claude_config,
+        security=security_config,
+        artifacts_root=tmp_path / "art",
+        clock=lambda: FIXED_TIME,
+        run_process=fake,
+        sandbox_probe=lambda: capability,
+        deny_policy=InternalDenyPolicy(
+            control_home=tmp_path / "real" / ".worc",
+            private_home=tmp_path / "real" / ".worc",
+            env_file=None,
+        ),
+    )
+
+
+def test_the_paid_probe_passes_when_only_the_allowed_path_is_written(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # The pass shape: the control landed inside the workspace, the Git dirs and the control home
+    # refused. Only this combination proves selective enforcement.
+    fake = _WritingRun(write=lambda path: "src" in path.parts, stdout=_success_stream())
+    provider = _paid_provider(claude_config, security_config, tmp_path, fake)
+    report = provider.paid_isolation_probe(home_dir=tmp_path)
+    assert report is not None
+    assert (report.ok, report.status, report.fatal) == (True, "passed", False)
+
+
+def test_the_paid_probe_pass_says_it_did_not_answer_the_nesting_question_without_a_shell_attempt(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # Two mechanisms stand on those paths at once, and only a shell write tests the one the
+    # floor line reports as unproven (a denyWrite nested inside an allowWrite). A model that met the
+    # refusal with its file-writing tool alone still passes — the write did not land — but the
+    # verdict must not be read as the answer to that question.
+    fake = _WritingRun(write=lambda path: "src" in path.parts, stdout=_success_stream())
+    provider = _paid_provider(claude_config, security_config, tmp_path, fake)
+    report = provider.paid_isolation_probe(home_dir=tmp_path)
+    assert report is not None
+    assert (report.ok, report.status, report.fatal) == (True, "passed", False)
+    assert "no shell attempt" in report.detail
+    assert "does NOT answer whether a denyWrite nested inside an allowWrite holds" in report.detail
+    evidence = json.loads(
+        (tmp_path / "art" / "preflight" / "claude-paid-isolation-probe.json").read_text("utf-8")
+    )
+    assert [row["shell_attempt_reported"] for row in evidence["paths"]] == [False] * 4
+
+
+def test_the_paid_probe_pass_answers_the_nesting_question_with_a_shell_attempt_per_path(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # When the answer reports a shell attempt on every denied path, this probe IS the instrument
+    # the floor-1 line points an operator at, and says so.
+    fake = _WritingRun(
+        write=lambda path: "src" in path.parts, report_shell=True, stdout=_success_stream()
+    )
+    provider = _paid_provider(claude_config, security_config, tmp_path, fake)
+    report = provider.paid_isolation_probe(home_dir=tmp_path)
+    assert report is not None
+    assert (report.ok, report.status, report.fatal) == (True, "passed", False)
+    assert "a denyWrite inside an allowWrite held on this host" in report.detail
+    evidence = json.loads(
+        (tmp_path / "art" / "preflight" / "claude-paid-isolation-probe.json").read_text("utf-8")
+    )
+    assert [row["shell_attempt_reported"] for row in evidence["paths"]] == [True] * 4
+
+
+def test_a_reported_shell_attempt_cannot_turn_a_leak_into_a_pass(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # The report is evidence about COVERAGE, never about enforcement: the verdict is read off the
+    # filesystem, so an answer claiming every path refused loses to one file that exists.
+    fake = _WritingRun(
+        write=lambda path: True,
+        report_shell=False,
+        stdout=_success_stream(result="every path refused: tool=refused, shell=refused"),
+    )
+    provider = _paid_provider(claude_config, security_config, tmp_path, fake)
+    report = provider.paid_isolation_probe(home_dir=tmp_path)
+    assert report is not None
+    assert (report.ok, report.status, report.fatal) == (False, "policy-failed", True)
+
+
+def test_a_report_naming_one_path_does_not_credit_the_other_three(tmp_path: Path) -> None:
+    # All four probe targets share one filename, so matching by name would let a single reported
+    # line claim coverage of every path — and the pass would then say it answered the nesting
+    # question on the strength of one attempt. Whole-path matching only.
+    fixture = build_paid_probe_fixture(tmp_path / "fx")
+    named = fixture.forbidden[0]
+    report = f"{named.as_posix()}: tool=refused, shell=refused"
+    rows = paid_probe_path_verdicts(fixture, final_message=report)
+    credited = [row["path"] for row in rows if row["shell_attempt_reported"]]
+    assert credited == [named.as_posix()]
+
+
+def test_the_paid_probe_reports_not_demonstrated_when_nothing_was_written(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # The load-bearing rule: a model that politely declined every write leaves the same empty
+    # filesystem as a perfectly sandboxed one. That is "not demonstrated", never a pass.
+    fake = _WritingRun(write=lambda path: False, stdout=_success_stream())
+    provider = _paid_provider(claude_config, security_config, tmp_path, fake)
+    report = provider.paid_isolation_probe(home_dir=tmp_path)
+    assert report is not None
+    assert (report.ok, report.status, report.fatal) == (False, "unsupported", False)
+    assert "NOT DEMONSTRATED" in report.detail
+
+
+def test_the_paid_probe_is_fatal_when_a_git_dir_write_lands(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # A write that landed in a Git directory is a proven leak: fatal regardless of any fallback
+    # provider, and the file the probe created is removed rather than left in the repository.
+    created: list[Path] = []
+
+    def _write(path: Path) -> bool:
+        if ".git" in path.parts or ".worc" in path.parts:
+            created.append(path)
+        return True
+
+    fake = _WritingRun(write=_write, stdout=_success_stream())
+    provider = _paid_provider(claude_config, security_config, tmp_path, fake)
+    report = provider.paid_isolation_probe(home_dir=tmp_path)
+    assert report is not None
+    assert (report.ok, report.status, report.fatal) == (False, "policy-failed", True)
+    assert "LANDED" in report.detail
+    assert "were removed" in report.detail
+    assert created and not any(path.exists() for path in created)
+
+
+def test_the_paid_probe_probes_both_git_directories_and_the_control_home(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # The prompt names four distinct paths: the per-worktree gitdir, the shared common dir (two
+    # different directories in production), the control home, and the allowed control.
+    fake = _WritingRun(write=lambda path: False, stdout=_success_stream())
+    provider = _paid_provider(claude_config, security_config, tmp_path, fake)
+    provider.paid_isolation_probe(home_dir=tmp_path)
+    prompt = fake.captured["stdin_text"] or ""
+    assert prompt.count("worc-isolation-probe.txt") == 4
+    assert "worktrees" in prompt  # the per-worktree gitdir, distinct from the common dir
+    assert ".worc/worc-isolation-probe.txt" in prompt.replace("\\", "/")
+
+
+def test_the_paid_probe_leaves_its_evidence_beside_the_report(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # The probe's fixture — and everything the paid call produced — is deleted on the way
+    # out, so without this the most expensive of the three probes was the only one leaving no trace.
+    # The one outcome worth investigating is `NOT DEMONSTRATED`, and the only way to tell "the
+    # sandbox refused" from "the model never tried" is the model's own account.
+    fake = _WritingRun(write=lambda path: False, stdout=_success_stream())
+    provider = _paid_provider(claude_config, security_config, tmp_path, fake)
+    report = provider.paid_isolation_probe(home_dir=tmp_path)
+    assert report is not None and report.status == "unsupported"
+    evidence = tmp_path / "art" / "preflight" / "claude-paid-isolation-probe.json"
+    assert evidence.as_posix() in report.detail  # the operator line says where it is
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+    assert payload["verdict"] == "unsupported"
+    # The model's own last word — not the verdict, but the only place an operator can see whether
+    # the attempts happened at all.
+    assert payload["final_message"] == "Implemented the feature."
+    # Four rows: the three forbidden roots and the allowed positive control, each with its verdict.
+    assert len(payload["paths"]) == 4
+    assert all(row["wrote"] is False for row in payload["paths"])
+    assert {row["label"] for row in payload["paths"]} == {
+        "the per-worktree gitdir",
+        "the Git common dir",
+        "the control home",
+        "the allowed workspace path (positive control)",
+    }
+
+
+def test_the_paid_probe_evidence_records_a_leak_per_path(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # The rows are read off the filesystem like the verdict, so a leak is visible per root rather
+    # than only as a sentence: the control home wrote, the two Git directories refused.
+    fake = _WritingRun(write=lambda path: ".worc" in path.parts, stdout=_success_stream())
+    provider = _paid_provider(claude_config, security_config, tmp_path, fake)
+    report = provider.paid_isolation_probe(home_dir=tmp_path)
+    assert report is not None and report.status == "policy-failed"
+    payload = json.loads(
+        (tmp_path / "art" / "preflight" / "claude-paid-isolation-probe.json").read_text("utf-8")
+    )
+    wrote = {row["label"]: row["wrote"] for row in payload["paths"]}
+    assert wrote["the control home"] is True
+    assert wrote["the Git common dir"] is False
+    assert wrote["the per-worktree gitdir"] is False
+
+
+def test_the_paid_probe_is_skipped_without_an_os_sandbox(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    # Nothing to demonstrate where Claude has no OS Bash sandbox — and no model call is spent.
+    fake = _WritingRun(write=lambda path: True, stdout=_success_stream())
+    provider = _paid_provider(
+        claude_config,
+        security_config,
+        tmp_path,
+        fake,
+        capability=SandboxCapability.NATIVE_WINDOWS,
+    )
+    report = provider.paid_isolation_probe(home_dir=tmp_path)
+    assert report is not None and report.status == "unsupported"
+    assert fake.calls == 0
+
+
+def test_the_paid_probe_runs_in_advanced_mode_too(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    """The paid probe: `strict_isolation: false` is not an exemption from proof.
+
+    There is a claim to prove there: the sandbox settings file is written whenever the resolved tool
+    set keeps a shell and the host can sandbox it, at either setting — so in advanced mode the
+    write-deny on `.git` and `.worc` is still asserted, and it is the only part of the floor that
+    does not need the agent's cooperation. Declining to prove it exactly where the rest of the
+    enforcement is relaxed would have it backwards.
+    """
+    fake = _WritingRun(write=lambda path: True, stdout=_success_stream())
+    provider = _paid_provider(
+        claude_config, replace(security_config, strict_isolation=False), tmp_path, fake
+    )
+    report = provider.paid_isolation_probe(home_dir=tmp_path)
+    assert report is not None
+    assert fake.calls == 1
+    # And it asks the one question no free probe can: the settings file it launches under carries
+    # the mode's volume-wide `allowWrite` WITH the carve-outs nested inside it, so an
+    # operator running this opt-in is testing that precedence for real rather than taking the
+    # adapter's word for it. That is why the "not proven" row names this command.
+    assert fake.sandbox_settings is not None
+    filesystem = fake.sandbox_settings["sandbox"]["filesystem"]
+    assert filesystem["allowWrite"], filesystem
+    assert any(path.endswith(".git") for path in filesystem["denyWrite"]), filesystem

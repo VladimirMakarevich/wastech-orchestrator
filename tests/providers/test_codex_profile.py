@@ -19,19 +19,12 @@ from wastech_orchestrator.providers.codex_profile import (
 )
 from wastech_orchestrator.runtime_layout import InternalDenyPolicy, ProviderWriteGuardPolicy
 
-# The fixture provider home, plus the profile key it renders to. The generator normalizes every
-# path through the `to_native=str` seam, so a POSIX fixture literal becomes `\opt\codexhome` on
-# native Windows — assert the normalized form, not the literal, or these tests only pass on POSIX.
-PROVIDER_HOME = Path("/opt/codexhome")
-PROVIDER_HOME_KEY = str(PROVIDER_HOME)
-
 
 def _deny(root: Path) -> InternalDenyPolicy:
     return InternalDenyPolicy(
         control_home=root / ".worc",
         private_home=root / ".worc",
         env_file=root / ".worc" / ".env",
-        provider_homes=(PROVIDER_HOME,),
         runs_home=root / ".worc" / "runs",
     )
 
@@ -83,7 +76,6 @@ def test_workspace_write_grants_write_and_readonly_guard(tmp_path: Path) -> None
     assert fs[str(root / "tasks")] == "read"
     # deny set still wins
     assert fs[str(root / ".worc")] == "deny"
-    assert fs[PROVIDER_HOME_KEY] == "deny"
     # Governance/instruction files are ordinary, editable content — no per-file guard entry.
     for name in ("AGENTS.md", "AGENTS.override.md", "CLAUDE.md"):
         assert not any(name in key for key in fs)
@@ -97,7 +89,6 @@ def test_deny_applied_last_wins_over_read_guard(tmp_path: Path) -> None:
         control_home=root / ".worc",
         private_home=root / ".worc",
         env_file=root / ".worc-io",
-        provider_homes=(),
     )
     profile = build_codex_permission_profile(
         permission_profile="workspace-write",
@@ -109,9 +100,16 @@ def test_deny_applied_last_wins_over_read_guard(tmp_path: Path) -> None:
     assert profile["filesystem"][str(root / ".worc-io")] == "deny"
 
 
-def test_read_isolation_off_downgrades_deny_to_read_keeps_blacklist(tmp_path: Path) -> None:
-    # The private set is downgraded deny→read (readable, still write-denied) while the public
-    # denied_read_paths blacklist stays fully denied and the write-guard stays read-only.
+def test_the_private_set_stays_denied_whatever_read_isolation_says(tmp_path: Path) -> None:
+    """The private/control set is ``deny`` unconditionally — the profile has no read-isolation knob.
+
+    Downgrading it to ``read`` when read-isolation is off — i.e. on the shipped default — would
+    hand the sandboxed shell the private home and the resolved env-file. The env-file names are
+    withheld from the child environment *because* the agent cannot read the file, and that reasoning
+    only holds while this stays ``deny``. Native discovery loses nothing: the CLI reads its own user
+    config and auth outside this profile, and ``--ignore-user-config`` is what gates them. The
+    provider config home is not in this set at all.
+    """
     root = tmp_path / "clone"
     profile = build_codex_permission_profile(
         permission_profile="workspace-write",
@@ -119,29 +117,15 @@ def test_read_isolation_off_downgrades_deny_to_read_keeps_blacklist(tmp_path: Pa
         deny_policy=_deny(root),
         write_guard=_write_guard(root),
         denied_read_paths=(".env", "secrets/**"),
-        read_isolation_off=True,
     )
     fs = profile["filesystem"]
-    assert fs[str(root / ".worc")] == "read"  # private set now readable, still not writable
-    assert fs[PROVIDER_HOME_KEY] == "read"  # provider home readable for native discovery
+    assert fs[str(root / ".worc")] == "deny"  # private set unreadable and unwritable
+    assert fs[str(root / ".worc" / ".env")] == "deny"  # the env-file the withholding rule needs
+    assert fs[str(root / ".worc" / "runs")] == "deny"  # frozen bundles / seals / quarantine
     assert fs[str(root / ".env")] == "deny"  # public blacklist unchanged
     assert fs[str(root / "secrets")] == "deny"
     assert fs[str(root)] == "write"  # workspace still writable
     assert fs[str(root / ".worc-io")] == "read"  # write-guard still read-only
-
-
-def test_read_isolation_default_denies_private_set(tmp_path: Path) -> None:
-    # Regression: default (read_isolation_off=False) keeps the private set fully denied.
-    root = tmp_path / "clone"
-    profile = build_codex_permission_profile(
-        permission_profile="workspace-write",
-        working_directory=str(root),
-        deny_policy=_deny(root),
-        write_guard=_write_guard(root),
-        denied_read_paths=(),
-    )
-    assert profile["filesystem"][str(root / ".worc")] == "deny"
-    assert profile["filesystem"][PROVIDER_HOME_KEY] == "deny"
 
 
 def test_denied_read_dir_glob_reduced_to_subtree_no_scan(tmp_path: Path) -> None:
@@ -241,11 +225,20 @@ def test_git_evidence_does_not_change_the_codex_profile(tmp_path: Path) -> None:
     Codex's profile has three keys — ``extends`` / ``filesystem`` / ``network`` — and no command or
     verb dimension at all. Under ``read-only`` it already permits command execution, so ``git log``
     works there today; what forbids mutation is not a list of verbs but the sandbox: the workspace
-    is mounted ``read`` and the network is off, so ``git commit`` fails for want of a writable
-    ``.git`` and ``git push`` for want of a network. That is a stronger guarantee than an allowlist
-    and nothing in a prompt, task or flow can argue with it — which is why the two providers are
-    made to agree on the observable contract (history readable, repository unchangeable, nothing
-    published) rather than on a symmetric list of verbs.
+    is mounted ``read`` and, for a node its flow granted no network, the network is off — so
+    ``git commit`` fails for want of a writable ``.git`` and ``git push`` for want of a network.
+    The condition there is the GRANT, not ``strict_isolation``: a node granted network gets
+    ``network.enabled = true`` in this profile at either value of the key. That is a stronger
+    guarantee than an allowlist and nothing in a prompt, task or flow can argue with it, which is
+    why the two providers are made to agree on the observable contract (history readable, repository
+    unchangeable, nothing published) rather than on a symmetric list of verbs.
+
+    The second half of that contract is a DEFAULT, not an invariant, and this is one of the places
+    most easily misread as though it were. ``security.strict_isolation: false`` puts every node
+    online (asserted below), so ``git push`` there has somewhere to go and credentials it picks up
+    by itself; what keeps publication the orchestrator's is the product mandate plus detection on
+    our own ``origin``, not this profile. The first half — the workspace mounted ``read`` —
+    survives the mode, and that is asserted below too.
     """
     root = tmp_path / "clone"
     profile = build_codex_permission_profile(
@@ -260,3 +253,110 @@ def test_git_evidence_does_not_change_the_codex_profile(tmp_path: Path) -> None:
     # The mutation ban, stated as the sandbox states it.
     assert profile["filesystem"][str(root)] == "read"  # `git commit` has nothing to write to
     assert profile["network"] == {"enabled": False}  # `git push` has nowhere to go
+    # And the same two claims in the advanced mode, where only the first one still holds.
+    in_mode = build_codex_permission_profile(
+        permission_profile="read-only",
+        working_directory=str(root),
+        deny_policy=_deny(root),
+        write_guard=None,
+        denied_read_paths=(),
+        network_access=True,
+        strict_isolation=False,
+    )
+    assert in_mode["filesystem"][str(root)] == "read"  # still nothing to write to
+    assert in_mode["network"] == {"enabled": True}  # but `git push` now has somewhere to go
+
+
+def test_the_advanced_mode_grants_the_volume_root_and_keeps_every_carve_out(tmp_path: Path) -> None:
+    """Write extends to the whole volume, and the floor survives by being more specific.
+
+    The carve-out set is asserted by NAME, one entry at a time, because the short form of the floor
+    ("`.git` and `.worc`") does not show all of it: ``runs_home`` and the resolved env-file are the
+    entries an implementer reading that short form drops. The provider config home is deliberately
+    NOT a carve-out — a deny there stops Codex's own ``apply_patch`` sandbox helper from executing
+    on standalone installs, where the ``codex`` binary lives inside that home.
+    """
+    root = tmp_path / "clone"
+    profile = build_codex_permission_profile(
+        permission_profile="workspace-write",
+        working_directory=str(root),
+        deny_policy=_deny(root),
+        write_guard=_write_guard(root),
+        denied_read_paths=(),
+        network_access=True,
+        strict_isolation=False,
+    )
+    fs = profile["filesystem"]
+    assert fs[str(Path(root.anchor))] == "write"  # `~/.nuget`, `/tmp`, a PATH directory
+    assert fs[str(root)] == "write"
+    # The floor: write-denied (as `read`) inside the volume-wide grant.
+    for guarded in (root / ".worc-io", root / ".git", root / ".git" / "hooks", root / "tasks"):
+        assert fs[str(guarded)] == "read", guarded
+    # The private set: denied outright, including BOTH halves the short form hides.
+    for private in (root / ".worc", root / ".worc" / ".env", root / ".worc" / "runs"):
+        assert fs[str(private)] == "deny", private
+
+
+def test_outside_the_mode_no_root_grant_appears(tmp_path: Path) -> None:
+    # The counterweight: the shipped default's profile is what it always was, key for key. A root
+    # `write` slipping in unconditionally is the one mistake in this phase that would remove the
+    # floor everywhere at once, so it is pinned as an exact key set, not as an absence.
+    root = tmp_path / "clone"
+    profile = build_codex_permission_profile(
+        permission_profile="workspace-write",
+        working_directory=str(root),
+        deny_policy=_deny(root),
+        write_guard=_write_guard(root),
+        denied_read_paths=(),
+    )
+    assert set(profile["filesystem"]) == {
+        ":minimal",
+        str(root),
+        str(root / ".worc-io"),
+        str(root / ".git"),
+        str(root / ".git" / "hooks"),
+        str(root / "tasks"),
+        str(root / ".worc"),
+        str(root / ".worc" / ".env"),
+        str(root / ".worc" / "runs"),
+    }
+
+
+def test_the_root_grant_takes_the_windows_shape_through_the_native_seam(tmp_path: Path) -> None:
+    """The volume root is the workspace path's anchor, so it is a drive root on native Windows.
+
+    Codex is the provider that generates a profile on every host, native Windows included (Claude's
+    sandbox file is never written there — no Bash sandbox exists), so this is the one place the
+    Windows shape of the new grant can be proven at all from a POSIX host.
+    """
+    root = tmp_path / "clone"
+
+    def to_win(p: Path) -> str:
+        return str(PureWindowsPath("C:/") / PureWindowsPath(*p.parts[1:]))
+
+    profile = build_codex_permission_profile(
+        permission_profile="workspace-write",
+        working_directory=str(root),
+        deny_policy=_deny(root),
+        write_guard=_write_guard(root),
+        denied_read_paths=(),
+        network_access=True,
+        strict_isolation=False,
+        to_native=to_win,
+    )
+    assert profile["filesystem"]["C:\\"] == "write"
+    assert profile["filesystem"][to_win(root / ".git")] == "read"
+
+
+def test_a_relative_workspace_gets_no_root_grant(tmp_path: Path) -> None:
+    # A relative working directory is a unit harness, not an attempt, and its anchor names no
+    # volume: granting `.` would be a rule about the process's cwd, which is not what this means.
+    profile = build_codex_permission_profile(
+        permission_profile="workspace-write",
+        working_directory="clone",
+        deny_policy=None,
+        write_guard=None,
+        denied_read_paths=(),
+        strict_isolation=False,
+    )
+    assert set(profile["filesystem"]) == {":minimal", "clone"}

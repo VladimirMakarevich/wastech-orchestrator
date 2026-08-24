@@ -47,14 +47,55 @@ def test_governance_files_declared_editable_not_read_only() -> None:
         assert "ordinary repository files" in text
 
 
-def test_preamble_is_a_pure_function_of_read_isolation_only() -> None:
-    # Its only input is the effective-read-isolation bool — nothing task/flow/extra_args-derived.
+def test_preamble_is_a_pure_function_of_its_three_config_flags() -> None:
+    # Its only inputs are config-derived booleans — nothing task/flow/extra_args-derived, so a task
+    # can never soften what the agent is told.
     assert build_orchestrator_security_preamble(
         read_isolation_off=True
     ) == build_orchestrator_security_preamble(read_isolation_off=True)
     assert build_orchestrator_security_preamble(
         read_isolation_off=True
     ) != build_orchestrator_security_preamble(read_isolation_off=False)
+    for flag in ("advanced_mode", "no_write_floor"):
+        assert build_orchestrator_security_preamble(
+            read_isolation_off=True, **{flag: True}
+        ) != build_orchestrator_security_preamble(read_isolation_off=True)
+
+
+def test_the_mode_paragraph_appears_only_in_the_mode_and_still_forbids_publishing() -> None:
+    """The mode gets its own paragraph, and it does not soften the two hard rules.
+
+    Advisory by design and labelled as such — but this is the configuration where the advisory layer
+    is closest to being all there is, so the paragraph has to be explicit about which two rules
+    survive rather than leaving the reader to infer them from the baseline above.
+    """
+    off = build_orchestrator_security_preamble(read_isolation_off=True)
+    on = build_orchestrator_security_preamble(read_isolation_off=True, advanced_mode=True)
+    assert "maximum freedom" not in off
+    assert on.startswith(off)  # additive: the baseline and the read-restraint text are unchanged
+    tail = on[len(off) :]
+    assert "Do not publish anything" in tail
+    assert f"`{CONTROL_HOME_DIRNAME}/`" in tail and "`.git/`" in tail
+    # With the network and credentials the CLI picks up by itself, "that is the orchestrator's
+    # job" no longer implies WHERE — so the ban names any address and any route outright, and the
+    # paragraph says what the run actually got rather than only what it must not do with it.
+    assert "not to any other address" in tail and "by any route" in tail
+    assert "you have the network" in tail and "write outside this clone" in tail
+
+
+def test_the_no_sandbox_paragraph_is_withheld_where_a_sandbox_exists() -> None:
+    """Say "nothing enforces this" only where nothing does.
+
+    Rendered on every run it would be false on most of them, and a block that overstates once is
+    discounted from then on — which costs exactly the hosts where it is the only thing left.
+    """
+    with_floor = build_orchestrator_security_preamble(read_isolation_off=True, advanced_mode=True)
+    without = build_orchestrator_security_preamble(
+        read_isolation_off=True, advanced_mode=True, no_write_floor=True
+    )
+    assert "no operating-system sandbox available" not in with_floor
+    assert without.startswith(with_floor)
+    assert "no operating-system sandbox available" in without[len(with_floor) :]
 
 
 def test_preamble_has_no_secret_or_unrendered_variable() -> None:
@@ -68,3 +109,18 @@ def test_preamble_has_no_secret_or_unrendered_variable() -> None:
 def test_preamble_field_is_not_a_prompt_variable() -> None:
     # It cannot be reached/overridden from a task or flow role via the prompt renderer.
     assert "security_preamble" not in ALLOWED_PROMPT_VARS
+
+
+def test_the_no_sandbox_paragraph_covers_the_nodes_that_only_read() -> None:
+    """The honest statement got wider when every node gained a shell.
+
+    Before this phase a read-only node had no shell on any host, so "nothing keeps a write out"
+    was a statement about writers. It now applies to every node in the run, and a paragraph that
+    still read as if it were about writers would leave the reader of an audit node believing the
+    warning was not addressed to them.
+    """
+    text = build_orchestrator_security_preamble(
+        read_isolation_off=True, advanced_mode=True, no_write_floor=True
+    )
+    assert "every step of this run, including the ones whose job is only to read" in text
+    assert "not a second shell" in text

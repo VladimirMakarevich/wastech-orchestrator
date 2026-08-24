@@ -58,7 +58,7 @@ from wastech_orchestrator.providers.capabilities import all_reasoning_levels
 from wastech_orchestrator.security.env import default_allowed_environment
 
 # Defaults mirror / the packaged config.example.yaml so a partial config still loads safely.
-_DEFAULT_AUDIT_MESSAGE = "chore(orchestrator): audit trail for {task_id}"
+_DEFAULT_AUDIT_MESSAGE = "chore(worc): audit trail for {task_id}"
 
 _REASONING_LEVELS: frozenset[str] = all_reasoning_levels()
 
@@ -194,6 +194,41 @@ def _str_tuple(
             continue
         out.append(item)
     return tuple(out)
+
+
+def _str_mapping(m: Mapping[str, Any], key: str, where: str, issues: list[str]) -> dict[str, str]:
+    """Parse a ``name -> string value`` mapping, preserving config order.
+
+    Fail-closed on a non-string value rather than coercing it: ``DOTNET_NOLOGO: 1`` is a YAML int,
+    and silently stringifying it would teach the operator that quoting is optional right up to the
+    value where it is not (``NO: 1`` is a bool, ``VERSION: 1.10`` loses its trailing zero). The hint
+    names the fix. An empty string is a legitimate value — assigning an empty variable is something
+    forwarding cannot express at all — so only the type is checked here.
+    """
+    if key not in m:
+        return {}
+    raw = m[key]
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping):
+        issues.append(f"{where}.{key}: expected a mapping, got {type(raw).__name__}")
+        return {}
+    out: dict[str, str] = {}
+    for name, value in raw.items():
+        if not isinstance(name, str):
+            issues.append(
+                f"{where}.{key}: expected string keys, got {type(name).__name__} — quote the "
+                "environment variable name in YAML"
+            )
+            continue
+        if not isinstance(value, str):
+            issues.append(
+                f"{where}.{key}.{name}: expected a string, got {type(value).__name__} — "
+                "quote the value as written in YAML"
+            )
+            continue
+        out[name] = value
+    return out
 
 
 def _command_spec(m: Mapping[str, Any], where: str, issues: list[str]) -> CheckCommandSpec | None:
@@ -412,18 +447,26 @@ def _build_provider(raw: Any, pid: ProviderId, issues: list[str]) -> ProviderCon
             "timeout_seconds",
             "permission_profile",
             "extra_args",
-            "sandbox",
             "max_turns",
             "max_turns_gate",
-            "allow_native_memory",
             "reasoning",
             "primary",
         },
         where,
         issues,
         # ``max_budget_usd`` (removed v14) is tolerated, not accepted — a stale config still loads.
-        tolerated={"max_budget_usd"},
+        # ``sandbox`` gets a named message below instead of the generic unknown-key one: nothing
+        # strips it for the operator, and a bare "unknown key" would send them to
+        # `upgrade-config`, which does not remove it either.
+        tolerated={"max_budget_usd", "sandbox"},
     )
+    if "sandbox" in m:
+        issues.append(
+            f"{where}.sandbox: this key does not exist — delete the line. There is no value it "
+            "could take: the provider full-access modes are refused at every value of "
+            "security.strict_isolation, and the isolation level is decided by permission_profile "
+            "plus security.strict_isolation. `worc upgrade-config` will not remove it for you"
+        )
     reasoning_raw = _opt_str(m, "reasoning", where, issues)
     if reasoning_raw is not None and reasoning_raw not in _REASONING_LEVELS:
         issues.append(
@@ -437,12 +480,10 @@ def _build_provider(raw: Any, pid: ProviderId, issues: list[str]) -> ProviderCon
         timeout_seconds=_int(m, "timeout_seconds", 7200, where, issues),
         permission_profile=_str(m, "permission_profile", "workspace-write", where, issues),
         extra_args=_str_tuple(m, "extra_args", (), where, issues),
-        sandbox=_opt_str(m, "sandbox", where, issues),
         max_turns=_max_turns(m, where, issues),
         reasoning=reasoning_raw,
         primary=_bool(m, "primary", False, where, issues),
         max_turns_gate=_bool(m, "max_turns_gate", False, where, issues),
-        allow_native_memory=_bool(m, "allow_native_memory", False, where, issues),
     )
 
 
@@ -480,7 +521,7 @@ def _build_decomposition(raw: Any, issues: list[str]) -> DecompositionConfig:
 def _build_retry(raw: Any, issues: list[str]) -> RetryConfig:
     where = "agents.retry"
     if raw is None:
-        return RetryConfig()  # whole block optional → defaults (back-compat)
+        return RetryConfig()  # the whole block is optional → defaults
     m = _mapping(raw, where, issues)
     _check_keys(m, {"max_attempts", "base_delay_s", "max_delay_s", "max_blocked_s"}, where, issues)
     return RetryConfig(
@@ -549,6 +590,7 @@ def _build_security(raw: Any, issues: list[str]) -> SecurityConfig:
             "disable_read_isolation",
             "allow_git_evidence",
             "allowed_environment",
+            "extra_environment",
             "denied_read_paths",
             "denied_commands",
             "trust_level",
@@ -573,6 +615,7 @@ def _build_security(raw: Any, issues: list[str]) -> SecurityConfig:
         allowed_environment=_str_tuple(
             m, "allowed_environment", default_allowed_environment(), where, issues
         ),
+        extra_environment=_str_mapping(m, "extra_environment", where, issues),
         denied_read_paths=_str_tuple(m, "denied_read_paths", (".env", "secrets/**"), where, issues),
         denied_commands=_str_tuple(
             m,
@@ -653,9 +696,8 @@ def _build_footprint(raw: Any, issues: list[str]) -> FootprintConfig:
 def _build_git(raw: Any, issues: list[str]) -> GitConfig:
     where = "git"
     m = _mapping(raw, where, issues)
-    # ``auto_merge_allow_per_task`` (removed v11) is tolerated, not accepted: a per-task
-    # ``auto_merge`` now wins outright (PRE.2), so the gate is gone. Old configs load fail-open;
-    # ``upgrade-config`` strips the dead key.
+    # ``auto_merge_allow_per_task`` is tolerated, not accepted: a per-task ``auto_merge`` wins
+    # outright, so there is no gate for it to open. ``upgrade-config`` strips the dead key.
     _check_keys(
         m,
         {

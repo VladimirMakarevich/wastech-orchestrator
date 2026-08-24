@@ -38,19 +38,21 @@ from wastech_orchestrator.config.schema import CONFIG_SCHEMA_VERSION
 # of denylisting; the block shrinks to ``skills.dynamic``/``skills.strict`` (added from template).)
 # v25: ``security.deletion_approval_exempt_paths`` is gone — replaced by the ``trust_level`` policy
 # (added from template) plus the always-ask ``security.protected_paths`` floor; the old allowlist
-# has no equivalent under the new model, so it is stripped (not migrated).
-# v31: a Codex ``sandbox: read-only|workspace-write`` is not removed but *folded* into
-# ``permission_profile`` (a conditional value transform, see ``_migrate_codex_sandbox``);
-# ``danger-full-access`` is kept as the operator escape.
-# v33: the flat ``supervisor.model``/``supervisor.reasoning`` are gone — each phase carries its own
-# pair under ``supervisor.observe``/``.finalize``/``.handoff`` (added from template). Deliberately
-# stripped, not migrated: one old value has two new homes, and copying it into both would put the
-# expensive model back on the cheap per-step notes. The operator re-declares what they want; the
-# loss is visible in this command's report, so there is no silent drift.
-# v35: ``validation.required_fields``/``reject_unknown_fields`` are gone — both were read by nothing
-# (the task gate hard-codes the required front matter and denies an unknown key unconditionally), so
-# stripping them removes a knob that never did anything rather than changing any behavior.
-# The parent-path may be dotted (walked segment by segment).
+# has no equivalent under the new model, so it is stripped (not migrated). v38:
+# ``agents.providers.<p>.sandbox`` is gone and is deliberately **absent from this list**. Its one
+# remaining value selected a provider full-access mode, which is now forbidden outright, so there is
+# no value left to migrate to and nothing to strip toward; a config still carrying the key fails to
+# load as an unknown key and the operator deletes the line. Stripping it here would let such a
+# config through silently, which reads as "the key still works, it just does nothing". v33: the flat
+# ``supervisor.model``/``supervisor.reasoning`` are gone — each phase carries its own pair under
+# ``supervisor.observe``/``.finalize``/``.handoff`` (added from template). Deliberately stripped,
+# not migrated: one old value has two new homes, and copying it into both would put the expensive
+# model back on the cheap per-step notes. The operator re-declares what they want; the loss is
+# visible in this command's report, so there is no silent drift. v35:
+# ``validation.required_fields``/``reject_unknown_fields`` are gone — both were read by nothing (the
+# task gate hard-codes the required front matter and denies an unknown key unconditionally), so
+# stripping them removes a knob that never did anything rather than changing any behavior. The
+# parent-path may be dotted (walked segment by segment).
 _REMOVED_KEYS: tuple[tuple[str, str], ...] = (
     ("", "prompts"),
     ("agents", "skip_stages"),
@@ -113,27 +115,8 @@ def upgrade_config_mapping(
     added: list[str] = []
     merged = _merge(template, operator, prefix="", added=added)
     removed = strip_removed_keys(merged)
-    _migrate_codex_sandbox(merged)
     merged["schema_version"] = CONFIG_SCHEMA_VERSION
     return merged, added, removed
-
-
-def _migrate_codex_sandbox(merged: dict[str, Any]) -> None:
-    """v31: fold a Codex ``sandbox`` into the neutral ``permission_profile``, in place.
-
-    A legacy ``agents.providers.codex.sandbox: read-only|workspace-write`` becomes
-    ``permission_profile`` (an explicit operator value wins) and the ``sandbox`` key
-    is dropped. ``danger-full-access`` is left untouched — it remains the operator's full-access
-    escape under ``strict_isolation: false``. Not tracked in ``_REMOVED_KEYS`` because it is a
-    conditional value transform, not an unconditional strip.
-    """
-    providers = merged.get("agents", {}).get("providers", {}) if isinstance(merged, dict) else {}
-    codex = providers.get("codex") if isinstance(providers, dict) else None
-    if not isinstance(codex, dict):
-        return
-    if codex.get("sandbox") in ("read-only", "workspace-write"):
-        codex.setdefault("permission_profile", codex["sandbox"])
-        del codex["sandbox"]
 
 
 def strip_removed_keys(merged: dict[str, Any]) -> list[str]:

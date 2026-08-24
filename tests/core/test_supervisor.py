@@ -9,7 +9,7 @@ plus the single ``record_rework`` accounting path.
 from __future__ import annotations
 
 import json
-import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +35,7 @@ from wastech_orchestrator.core.supervisor import (
     _SUMMARY_MIN_CHARS,
     Supervisor,
 )
+from wastech_orchestrator.git_manager import GitControlDrift, GitControlDriftItem
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
 from wastech_orchestrator.providers.base import (
     AgentRunResult,
@@ -49,6 +50,7 @@ from wastech_orchestrator.routing.router import (
     RouteSource,
     StageOutcome,
 )
+from wastech_orchestrator.runtime_layout import ProviderWriteGuardPolicy
 from wastech_orchestrator.state_store import (
     CheckRunRow,
     EditingLineageRow,
@@ -96,6 +98,16 @@ class FakeRouter:
         self.requests: list[Any] = []
         self.route_providers: list[Any] = []  # the provider arg passed to resolve_route per call
         self._results = list(results) if results is not None else None
+
+    def route_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: Any = None, git_evidence: bool = False
+    ) -> bool:
+        # The real Router asks the adapters whether this attempt gets a shell. The double
+        # answers from the node's grant — a Claude-shaped answer — unless a test sets
+        # ``grants_shell`` to model a provider whose profile carries a shell on its own
+        # (Codex ``read-only``) or a host where it was dropped.
+        override = getattr(self, "grants_shell", None)
+        return git_evidence if override is None else bool(override)
 
     def resolve_route(self, node_id: str, provider: Any = None) -> ResolvedRoute:
         self.route_providers.append(provider)
@@ -146,6 +158,7 @@ def _supervisor(
     security_preamble: str | None = None,
     repo_dir: str = "/repo",
     exchange_root: str = "",
+    git: Any = None,
 ) -> Supervisor:
     (tmp_path / "roles").mkdir(exist_ok=True)
     (tmp_path / "roles" / "supervisor.md").write_text("Observe {task_id} in {repo}.", "utf-8")
@@ -163,6 +176,7 @@ def _supervisor(
         router=router,
         store=store,
         repo_dir=repo_dir,
+        git=git,
         artifacts_root=str(tmp_path / "art"),
         exchange_root=exchange_root,
         flow_dir=tmp_path,
@@ -302,8 +316,8 @@ def test_observe_prompt_bounds_a_long_step_message(tmp_path: Path) -> None:
 
 
 def test_supervisor_observe_writes_rendered_prompt_when_registered(tmp_path: Path) -> None:
-    # A supervisor turn is now part of the audit trail: previously rendered-prompt.md / the
-    # prompt-audit JSON were never written for observe/finalize/handoff turns at all.
+    # A supervisor turn is part of the audit trail like any other: rendered-prompt.md and the
+    # prompt-audit JSON are written for observe/finalize/handoff turns too.
     registered: list[Any] = []
     router, store = FakeRouter(), _store(tmp_path)
     sup = _supervisor(
@@ -569,7 +583,7 @@ def test_finalize_sanitizes_leaked_structured_dump(tmp_path: Path) -> None:
 
 
 def test_finalize_discards_a_collapsed_summary_instead_of_publishing_it(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, package_log_text: Callable[[], str]
 ) -> None:
     # A finalize turn that fights the response schema can collapse to a minimal probe. One did — it
     # wrote a full synthesis three times, was rejected three times for a missing required property,
@@ -580,12 +594,12 @@ def test_finalize_discards_a_collapsed_summary_instead_of_publishing_it(
     router, store = FakeRouter([_ok("s1", "test")]), _store(tmp_path)
     sup = _supervisor(tmp_path, router, store)
 
-    with caplog.at_level(logging.WARNING):
-        result = sup.finalize(task_id=_TASK, task_title="T")
+    result = sup.finalize(task_id=_TASK, task_title="T")
 
     assert result.summary_path is None
     assert not (Path(task_artifact_dir(tmp_path / "art", _TASK)) / "summary.md").exists()
-    assert f"below the {_SUMMARY_MIN_CHARS}-char floor" in caplog.text and "'test'" in caplog.text
+    logged = package_log_text()
+    assert f"below the {_SUMMARY_MIN_CHARS}-char floor" in logged and "'test'" in logged
     payload = json.loads(
         (Path(task_artifact_dir(tmp_path / "art", _TASK)) / "summary.json").read_text("utf-8")
     )
@@ -614,9 +628,9 @@ def test_the_floor_keeps_a_terse_but_complete_prose_summary(tmp_path: Path) -> N
 
 
 def test_supervisor_final_summary_written_matches_what_reached_disk(tmp_path: Path) -> None:
-    # `summary_written` used to be derived from the RAW turn output, before sanitize and before
-    # the floor, so the ledger claimed a summary for a run that wrote none — exactly the case an
-    # operator audits. It now states what actually landed.
+    # `summary_written` states what actually landed on disk. Derived from the RAW turn output —
+    # before sanitize and before the floor — it would claim a summary for a run that wrote none,
+    # which is exactly the case an operator audits.
     dump = '<summary></summary><follow_ups>[{"title":"x"}]</follow_ups>'  # sanitizes to nothing
     cases = ((dump, False), ("test", False), (_prose("Real synthesis."), True))
     # One store per case, under an index-named directory: the messages themselves carry `<`/`>`,
@@ -726,8 +740,8 @@ def test_finalize_runs_fresh_from_the_packet_even_with_a_live_session(tmp_path: 
 
 
 def test_finalize_packet_carries_the_observation_digest(tmp_path: Path) -> None:
-    # The digest that used to be inlined in the revive prompt is now a packet field, so the same
-    # material reaches the turn without being re-sent as prompt input.
+    # The observation digest is a packet field rather than prompt text, so the material reaches
+    # the turn without being re-sent as input on every revive.
     router, store = FakeRouter([_ok("s1", _prose("Synthesis."))]), _store(tmp_path)
     _record_step(store, 5, node="implementation", outcome="done", note="wired the parser")
     _record_step(store, 7, node="review", outcome="accept", note="tests cover the edge case")
@@ -781,7 +795,7 @@ def test_finalize_still_runs_when_the_packet_cannot_be_built(tmp_path: Path) -> 
     assert json.loads(final.findings_json)["packet_built"] is False
 
 
-# -- the SupervisorPacket itself (P0-D2 / P0-D3) -------------------------------
+# -- the SupervisorPacket itself -----------------------------------------------
 
 _DIFF = (
     "diff --git a/src/parser.py b/src/parser.py\n"
@@ -830,7 +844,7 @@ def _seed_diff(tmp_path: Path, text: str = _DIFF) -> None:
 
 
 def test_packet_is_a_pure_function_of_durable_state(tmp_path: Path) -> None:
-    # The reproducibility contract (P0-D2): two builds off the same state.db are byte-identical, so
+    # The reproducibility contract: two builds off the same state.db are byte-identical, so
     # the summary a revive synthesizes is grounded in exactly the same input as the first run's.
     store = _store(tmp_path)
     run_id = _run_row(store, "implementation", "agent", provider_used="claude")
@@ -950,7 +964,7 @@ def test_packet_splits_checks_by_result(tmp_path: Path) -> None:
 
 
 def test_packet_records_fallback_and_retry_facts(tmp_path: Path) -> None:
-    # Kept, not scrubbed (P0-D2): an attempt that landed on the other provider after two tries is
+    # Kept, not scrubbed: an attempt that landed on the other provider after two tries is
     # exactly the material a summary caveat is written from.
     store = _store(tmp_path)
     _run_row(
@@ -1050,7 +1064,7 @@ def test_packet_names_the_latest_evaluator_findings(tmp_path: Path) -> None:
 
 def test_packet_publication_redacts_and_keeps_a_private_copy(tmp_path: Path) -> None:
     # Publication goes through the exchange seam, which redacts on the way in, so the packet
-    # needs no redaction mechanism of its own — only the per-attempt secret literals (P0-D6).
+    # needs no redaction mechanism of its own — only the per-attempt secret literals.
     store = _store(tmp_path)
     run_id = _run_row(store, "implementation", "agent")
     _node_output(tmp_path, "implementation", run_id, "used token hunter2-secret to call the API")
@@ -1791,7 +1805,7 @@ def test_supervisor_unknown_nested_key_rejected(packaged_config_text: str) -> No
 def test_flat_supervisor_model_and_reasoning_are_rejected_by_name(
     packaged_config_text: str, key: str
 ) -> None:
-    # v33 removed the flat pair. Rejected fail-closed rather than tolerated, and the message names
+    # The flat pair is rejected fail-closed rather than tolerated, and the message names
     # the two places the value can go — the operator has to choose, because copying one value into
     # both would put the expensive model back on the cheap per-step notes.
     with pytest.raises(ConfigError) as exc:
@@ -1869,6 +1883,16 @@ class _AttemptsRouter:
         return ResolvedRoute(
             node_id=node_id, primary=self._primary, fallback=None, source=RouteSource.CONFIG
         )
+
+    def route_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: Any = None, git_evidence: bool = False
+    ) -> bool:
+        # The real Router asks the adapters whether this attempt gets a shell. The double answers
+        # from the node's grant — a Claude-shaped answer — unless a test sets ``grants_shell`` to
+        # model a provider whose profile carries a shell on its own (Codex ``read-only``) or a host
+        # where it was dropped.
+        override = getattr(self, "grants_shell", None)
+        return git_evidence if override is None else bool(override)
 
     def run_stage(
         self, request: Any, route: ResolvedRoute, *, snapshot: Any = None
@@ -2033,3 +2057,85 @@ def test_summary_md_carries_no_spend_telemetry(tmp_path: Path) -> None:
     body = result.summary_path.read_text("utf-8")
     for token in ("supervisor_usage", "cost", "duration_seconds", "0.30"):
         assert token not in body
+
+
+# --- The layer's own attempt is bracketed like a graph node's ------------------------------------
+
+
+class _FakeSupervisorGit:
+    """The three GitPort methods the layer's bracket uses; records what it was asked."""
+
+    def __init__(self, *, drift: object | None = None) -> None:
+        self.captures = 0
+        self.resolved: list[str | None] = []
+        self._drift = drift
+
+    def resolve_control_paths(self, exchange_root: str | None = None) -> object:
+        self.resolved.append(exchange_root)
+        return ProviderWriteGuardPolicy(
+            exchange_root=None,
+            git_dir=Path("/repo/.git"),
+            git_common_dir=Path("/repo/.git"),
+            hooks_dir=Path("/repo/.git/hooks"),
+            tasks_dir=Path("/repo/tasks"),
+        )
+
+    def capture_git_control_state(self) -> object:
+        self.captures += 1
+        return object()
+
+    def compare_git_control_state(self, before: object) -> object | None:
+        return self._drift
+
+
+def test_a_shell_bearing_supervisor_turn_carries_the_write_deny_roots(tmp_path: Path) -> None:
+    # The layer is read-only by mandate, but the mandate is not a mechanism — Codex
+    # runs commands on `read-only`, and in the advanced mode so does Claude. With the write guard on
+    # the request the provider's pre-launch canary re-proves the `.git`/`.worc` denies around this
+    # attempt too, which is what makes floor 1's "before every provider attempt" literally true.
+    store = _store(tmp_path)
+    router = FakeRouter([_ok("s", "note")])
+    router.grants_shell = True
+    git = _FakeSupervisorGit()
+    sup = _supervisor(tmp_path, router, store, git=git, exchange_root=str(tmp_path / "io"))
+
+    sup.observe(task_id=_TASK, node_id="n", node_run_id=1, outcome_kind="done")
+
+    assert router.requests[0].write_guard is not None
+    assert git.resolved == [str(tmp_path / "io")]
+    assert git.captures == 1
+
+
+def test_a_supervisor_turn_without_a_shell_is_not_bracketed(tmp_path: Path) -> None:
+    # No attempt pays for a check that cannot apply to it: a Claude turn with no shell can neither
+    # write nor run commands, so neither the guard nor the fingerprint is resolved.
+    store = _store(tmp_path)
+    router = FakeRouter([_ok("s", "note")])
+    router.grants_shell = False
+    git = _FakeSupervisorGit()
+    sup = _supervisor(tmp_path, router, store, git=git)
+
+    sup.observe(task_id=_TASK, node_id="n", node_run_id=1, outcome_kind="done")
+
+    assert router.requests[0].write_guard is None
+    assert git.captures == 0
+    assert git.resolved == []
+
+
+def test_git_control_drift_across_a_supervisor_turn_warns_and_the_run_continues(
+    tmp_path: Path, package_log_text: Callable[[], str]
+) -> None:
+    # The advisory contract decides the verdict: the layer can flag but cannot rework, so drift here
+    # is the same loud line every non-writing node class gets — never a park, which would let an
+    # advisory layer stop a reviewed, passing change.
+    store = _store(tmp_path)
+    router = FakeRouter([_ok("s", "note")])
+    router.grants_shell = True
+    drift = GitControlDrift((GitControlDriftItem("hooks", "hook 'pre-push' added"),))
+    sup = _supervisor(tmp_path, router, store, git=_FakeSupervisorGit(drift=drift))
+
+    sup.observe(task_id=_TASK, node_id="n", node_run_id=1, outcome_kind="done")
+
+    log = package_log_text()
+    assert "git control state changed during a supervisor turn" in log
+    assert "hook 'pre-push' added" in log

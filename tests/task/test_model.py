@@ -1,4 +1,4 @@
-"""Task model: id-regex accept/reject cases, tri-state flags, the clean-task schema (PRE.3)."""
+"""Task model: id-regex accept/reject cases, tri-state flags, the clean-task schema."""
 
 from __future__ import annotations
 
@@ -104,7 +104,7 @@ def test_default_collections_are_independent() -> None:
 
 def test_schema_constants() -> None:
     # A clean task carries only identity/dispatch (``task_type`` selects the flow) + the sanctioned
-    # task-wins gates (PRE.3): ``nodes.<node-id>.enabled`` (disable), ``auto_merge``,
+    # task-wins gates: ``nodes.<node-id>.enabled`` (disable), ``auto_merge``,
     # ``prompt_audit``, ``decomposition``, and ``trust_level``. No provider/model/reasoning/refined.
     assert {
         "id",

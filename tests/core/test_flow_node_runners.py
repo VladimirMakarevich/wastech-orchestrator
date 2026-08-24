@@ -7,6 +7,7 @@ calls the collaborator and maps the result exactly like the direct orchestrator 
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
@@ -47,6 +48,7 @@ from wastech_orchestrator.core.flow.schema import (
 )
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.core.follow_ups import evaluator_finding_follow_ups
+from wastech_orchestrator.git_manager import PushOutcome
 from wastech_orchestrator.providers.artifacts import node_run_dir
 from wastech_orchestrator.providers.base import (
     AgentRunResult,
@@ -81,6 +83,16 @@ class FakeRouter:
             node_id=node_id, primary=ProviderId.CODEX, fallback=None, source=RouteSource.CONFIG
         )
 
+    def route_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: Any = None, git_evidence: bool = False
+    ) -> bool:
+        # The real Router asks the adapters whether this attempt gets a shell. The double answers
+        # from the node's grant — a Claude-shaped answer — unless a test sets ``grants_shell`` to
+        # model a provider whose profile carries a shell on its own (Codex ``read-only``) or a host
+        # where it was dropped.
+        override = getattr(self, "grants_shell", None)
+        return git_evidence if override is None else bool(override)
+
     def run_stage(
         self, request: Any, route: ResolvedRoute, *, snapshot: Any = None
     ) -> StageOutcome:
@@ -91,8 +103,10 @@ class FakeRouter:
 class FakeCheckRunner:
     def __init__(self, outcome: CheckOutcome) -> None:
         self._outcome = outcome
+        self.runs: list[dict[str, Any]] = []  # one entry per invocation, for re-run assertions
 
     def run(self, **kwargs: Any) -> CheckOutcome:
+        self.runs.append(kwargs)
         return self._outcome
 
 
@@ -685,6 +699,128 @@ def test_evaluator_request_carries_security_preamble(tmp_path: Path) -> None:
     assert router.requests[0].security_preamble == "[Orchestrator security contract] baseline"
 
 
+def test_a_shell_bearing_evaluator_reports_git_control_drift(tmp_path: Path) -> None:
+    # An evaluator had no fingerprint at all, though `git_evidence` is a valid field on it and
+    # a Codex reviewer runs commands on its read-only profile today. Reported, never parked — the
+    # same verdict a read-only agent node gets.
+    from wastech_orchestrator.git_manager import ChangedPath, GitControlDrift, GitControlDriftItem
+
+    class _DriftGit(FakeGit):
+        def compare_git_control_state(self, before: object) -> GitControlDrift:
+            return GitControlDrift((GitControlDriftItem("hooks", "hook 'pre-push' added"),))
+
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    router = FakeRouter(_result({"findings": []}))
+    router.grants_shell = True
+    git = _DriftGit(changed_seq=[(), (ChangedPath(status="??", path="stray.txt"),)])
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+        git=git,
+    )
+    node = _evaluator("review")
+    result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "accept"  # the verdict itself is untouched
+    assert result.outcome.git_control_drift == "hooks: hook 'pre-push' added"
+    assert result.outcome.unexpected_write is True
+
+
+def test_the_write_deny_roots_reach_a_shell_bearing_evaluator(tmp_path: Path) -> None:
+    # The write guard is what the provider's pre-launch canary takes its probe paths from,
+    # so an evaluator that can run commands has to carry it — without it the loud floor-1 line's
+    # "re-proved before every provider attempt" held for the agent node alone, and a Codex reviewer
+    # (which has a shell on its read-only profile) went to the provider with nothing to probe.
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    router = FakeRouter(_result({"findings": []}))
+    router.grants_shell = True
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+        git=FakeGit(),
+    )
+    node = _evaluator("review")
+    EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert router.requests[0].write_guard is not None
+
+
+def test_an_evaluator_without_a_shell_carries_no_write_guard(tmp_path: Path) -> None:
+    # The other side of the same key: a reviewer that can run nothing needs no carve-out from a
+    # write it cannot perform, and resolving one would cost a git call per node for nothing.
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    router = FakeRouter(_result({"findings": []}))
+    router.grants_shell = False
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+        git=FakeGit(),
+    )
+    node = _evaluator("review")
+    EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert router.requests[0].write_guard is None
+
+
+def test_evaluator_drift_is_logged_when_the_node_leaves_through_a_raise(
+    tmp_path: Path, package_log_text: Callable[[], str]
+) -> None:
+    # The drift was computed and then thrown away on the paths that raise — a node that
+    # planted a hook and failed to emit parseable findings went to manual with no word about the
+    # clone. That warning is the one signal by which an operator knows to discard it rather than
+    # read on through the findings.
+    from wastech_orchestrator.core.flow.nodes.base import EvaluatorInfraError
+    from wastech_orchestrator.git_manager import GitControlDrift, GitControlDriftItem
+
+    class _DriftGit(FakeGit):
+        def compare_git_control_state(self, before: object) -> GitControlDrift:
+            return GitControlDrift((GitControlDriftItem("hooks", "hook 'pre-push' added"),))
+
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    router = FakeRouter(_result({}))  # no `findings` array → the fail-closed raise
+    router.grants_shell = True
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+        git=_DriftGit(),
+    )
+    node = _evaluator("review")
+    with pytest.raises(EvaluatorInfraError):
+        EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+    log = package_log_text()
+    assert "git control state changed during this evaluator attempt" in log
+    assert "hook 'pre-push' added" in log
+
+
+def test_an_evaluator_without_a_shell_is_not_fingerprinted(tmp_path: Path) -> None:
+    # No node pays for a check that cannot apply to it: a Claude reviewer with no grant runs no
+    # commands, so the capture is skipped entirely rather than taken and discarded.
+    class _ExplodingGit(FakeGit):
+        def capture_git_control_state(self) -> object:
+            raise AssertionError("an evaluator with no shell must not be fingerprinted")
+
+    (tmp_path / "r.md").write_text("review", "utf-8")
+    router = FakeRouter(_result({"findings": []}))
+    router.grants_shell = False
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+        git=_ExplodingGit(),
+    )
+    node = _evaluator("review")
+    result = EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.git_control_drift is None
+    assert result.outcome.unexpected_write is False
+
+
 def test_evaluator_carries_prior_rework_report_from_exchange(tmp_path: Path) -> None:
     # On a rework re-entry the reviewer's request carries the rework-target author node's
     # latest exchange report, so it judges "was the finding addressed" with the implementer's
@@ -1018,7 +1154,11 @@ def test_agent_exchange_mutation_is_detected_from_parent_state(tmp_path: Path) -
     # Detection-in-depth: a provider that mutates the curated (read-only) exchange during
     # its
     # attempt is caught from the parent-held pre/post manifest and routed to non-fallback manual
-    # action, so the changed copy is never consumed downstream.
+    # action, so the changed copy is never consumed downstream. This is the one guard on a
+    # workspace-write node the 2026-08-24 decision deliberately kept: Git control state is the
+    # operator's own repository and is now only reported, while the exchange is the agent's own
+    # assignment — read-only to it by construction, and nothing an operator does in the ordinary
+    # course looks like editing it.
     from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
     from wastech_orchestrator.providers.artifacts import exchange_task_dir
 
@@ -1375,6 +1515,98 @@ def test_agent_hitl_no_signal_proceeds(tmp_path: Path) -> None:
     assert result.outcome.kind == "done"
 
 
+def test_a_writing_hitl_node_passes_the_dangerous_diff_gate(tmp_path: Path) -> None:
+    # The HITL path ran no post-edit guard on any exit, so a flow that declared `hitl` on a
+    # writing node deleted files and published without ever asking. The guard is core-owned and
+    # automatic — asking the operator a question is not an opt-out from it.
+    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
+    from wastech_orchestrator.git_manager import ChangedPath
+    from wastech_orchestrator.notify import AskResult
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(
+        id="impl",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+        hitl=HitlSettings(allow_question=True),
+    )
+    git = FakeGit(changed=(ChangedPath(status="D", path="src/core.py"),))  # always dangerous
+    notifier = FakeNotifier(AskResult(answered=True, approved=False))  # denial → fails closed
+    services = NodeServices(
+        router=FakeRouter(_result({"content": "ok", "human_input": None})),
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=FakeStore(),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        clock=lambda: "ts",
+        git=git,
+        notifier=notifier,
+        ask_timeout_s=60,
+        trust_level="strict",
+    )
+    with pytest.raises(NodeManualRequired):
+        AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert notifier.asks  # the deletion was put to a human, which is the whole point
+
+
+def test_a_writing_hitl_node_gates_after_the_round_trip_too(tmp_path: Path) -> None:
+    # The other returning exit of the same method: the agent asked, the operator answered, the
+    # stage re-ran — and it is the re-run's diff that gets published, so that is the one the guard
+    # must see.
+    from wastech_orchestrator.git_manager import ChangedPath
+    from wastech_orchestrator.notify import AskResult
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(
+        id="impl",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+        hitl=HitlSettings(allow_question=True),
+    )
+
+    class _AsksOnceRouter(FakeRouter):
+        def __init__(self) -> None:
+            super().__init__(None)
+            self._n = 0
+
+        def run_stage(self, request: Any, route: Any, *, snapshot: Any = None) -> Any:
+            self._n += 1
+            signal = (
+                {
+                    "kind": "question",
+                    "question": "Delete the legacy module?",
+                    "context": "",
+                    "risk": "clarification",
+                    "paths": [],
+                }
+                if self._n == 1
+                else None
+            )
+            return _stage_outcome(route, _result({"content": "ok", "human_input": signal}))
+
+    git = FakeGit(changed=(ChangedPath(status="D", path="src/core.py"),))
+    notifier = FakeNotifier(AskResult(answered=True, text="yes", approved=True))
+    services = NodeServices(
+        router=_AsksOnceRouter(),
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=FakeStore(),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        clock=lambda: "ts",
+        git=git,
+        notifier=notifier,
+        ask_timeout_s=60,
+        trust_level="strict",
+    )
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "done"
+    # Two asks: the node's own question, then the guard's approval for the deletion.
+    assert len(notifier.asks) == 2
+    assert notifier.asks[0] == "Delete the legacy module?"
+
+
 def test_agent_hitl_question_round_trip(tmp_path: Path) -> None:
     from wastech_orchestrator.notify import AskResult
 
@@ -1504,6 +1736,20 @@ def test_agent_hitl_round_trip_no_resume_when_first_run_used_fallback(tmp_path: 
         def __init__(self) -> None:
             super().__init__(None)
             self._n = 0
+
+        def route_grants_shell(
+            self,
+            route: ResolvedRoute,
+            *,
+            permission_profile: Any = None,
+            git_evidence: bool = False,
+        ) -> bool:
+            # The real Router asks the adapters whether this attempt gets a shell. The double
+            # answers from the node's grant — a Claude-shaped answer — unless a test sets
+            # ``grants_shell`` to model a provider whose profile carries a shell on its own
+            # (Codex ``read-only``) or a host where it was dropped.
+            override = getattr(self, "grants_shell", None)
+            return git_evidence if override is None else bool(override)
 
         def resolve_route(self, node_id: str, override: Any = None) -> ResolvedRoute:
             return ResolvedRoute(
@@ -2666,6 +2912,14 @@ class FakeGit:
         self.calls: list[tuple[str, ...]] = []
         self._changed = changed
         self._changed_seq = changed_seq
+        # Commits the branch carried that nobody here made — reported by `adopt_foreign_commits`,
+        # which the publish node calls BEFORE the push so the checks over the combination run
+        # first. Plus the notice `create_pr` was handed, so a test can assert what a
+        # reviewer would read.
+        self.adopted: tuple[str, ...] = ()
+        # Commits publishing found already committed inside the run (an agent's own `git commit`).
+        self.locally_adopted = 0
+        self.pr_notice: str | None = None
 
     def commit_code(self, task_id: str, message: str) -> str | None:
         self.calls.append(("commit_code", task_id, message))
@@ -2685,8 +2939,8 @@ class FakeGit:
         return ()
 
     def resolve_control_paths(self, exchange_root: str | None = None) -> ProviderWriteGuardPolicy:
-        # The node runner resolves this for every workspace-write attempt; the fake router
-        # never builds an argv, so dummy paths suffice.
+        # The node runner resolves this for every attempt that can mutate the clone — write tools
+        # or a shell; the fake router never builds an argv, so dummy paths suffice.
         return ProviderWriteGuardPolicy(
             exchange_root=None,
             git_dir=Path("/x/.git"),
@@ -2695,19 +2949,35 @@ class FakeGit:
             tasks_dir=Path("/x/tasks"),
         )
 
-    def push(self, task_id: str, branch: str, **kw: object) -> bool:
-        self.calls.append(("push", task_id, branch, kw.get("mode")))
-        return True
+    def adopted_commit_count(self, task_id: str) -> int:
+        return self.locally_adopted
 
-    def create_pr(self, task_id: str, branch: str, *, title: str, body_path: str) -> str | None:
+    def adopt_foreign_commits(self, task_id: str, branch: str, **kw: object) -> tuple[str, ...]:
+        self.calls.append(("adopt_foreign_commits", task_id, branch, kw.get("mode")))
+        return self.adopted
+
+    def push(self, task_id: str, branch: str, **kw: object) -> PushOutcome:
+        self.calls.append(("push", task_id, branch, kw.get("mode")))
+        return PushOutcome(pushed=True, adopted_commits=())
+
+    def create_pr(
+        self,
+        task_id: str,
+        branch: str,
+        *,
+        title: str,
+        body_path: str,
+        notice: str | None = None,
+    ) -> str | None:
         self.calls.append(("create_pr", task_id, branch, title, body_path))
+        self.pr_notice = notice
         return "https://example/pr/1"
 
     def write_current_diff(self, task_id: str) -> str:
         self.calls.append(("write_current_diff", task_id))
         return "/art/current.diff"
 
-    def changed_code_entries(self) -> tuple[Any, ...]:
+    def changed_code_entries(self, task_id: str = "task-1") -> tuple[Any, ...]:
         if self._changed_seq:
             return self._changed_seq.pop(0) if len(self._changed_seq) > 1 else self._changed_seq[0]
         return self._changed
@@ -2736,7 +3006,13 @@ def test_publish_pull_request_runs_git_sequence(tmp_path: Path) -> None:
     )
     result = PublishNodeRunner(services, inputs).run(node, _ctx(node))
     assert result.outcome.kind == "done"
-    assert [c[0] for c in git.calls] == ["commit_code", "commit_audit", "push", "create_pr"]
+    assert [c[0] for c in git.calls] == [
+        "commit_code",
+        "commit_audit",
+        "adopt_foreign_commits",
+        "push",
+        "create_pr",
+    ]
     assert git.calls[-1] == ("create_pr", "task-1", "worc/task-1-x", "My PR", "/s/summary.md")
     # commit_sha_after is the node's result reference; for a publish node that is the PR URL (an
     # intentional, documented overload — see NodeRunRow / Secondary obs 2), not a commit SHA.
@@ -2809,7 +3085,12 @@ def test_publish_cap_commit_needs_no_body(tmp_path: Path) -> None:
 def test_publish_cap_push_stops_before_pr(tmp_path: Path) -> None:
     # A `push` cap runs commits + push but skips the PR.
     git = _publish_git(tmp_path, publish_scope=PublishScope.PUSH)
-    assert [c[0] for c in git.calls] == ["commit_code", "commit_audit", "push"]
+    assert [c[0] for c in git.calls] == [
+        "commit_code",
+        "commit_audit",
+        "adopt_foreign_commits",
+        "push",
+    ]
 
 
 def test_publish_forwards_branch_mode_to_push(tmp_path: Path) -> None:
@@ -2890,7 +3171,7 @@ def test_publish_git_failure_after_finalize_raises_manual(tmp_path: Path) -> Non
     publish_logger.addHandler(capture)
 
     class FailingPushGit(FakeGit):
-        def push(self, task_id: str, branch: str, **_: object) -> bool:
+        def push(self, task_id: str, branch: str, **_: object) -> PushOutcome:
             self.calls.append(("push", task_id, branch))
             raise GitCommandError("simulated push failure")
 
@@ -2915,7 +3196,12 @@ def test_publish_git_failure_after_finalize_raises_manual(tmp_path: Path) -> Non
     finally:
         publish_logger.removeHandler(capture)
     # commit_code + commit_audit committed before push failed; create_pr never reached.
-    assert [c[0] for c in git.calls] == ["commit_code", "commit_audit", "push"]
+    assert [c[0] for c in git.calls] == [
+        "commit_code",
+        "commit_audit",
+        "adopt_foreign_commits",
+        "push",
+    ]
     # The node run is closed as failed (not left dangling, not "published").
     assert store.completed[-1]["status"] == "failed"
     assert store.completed[-1]["error_class"] == "publish_failed"
@@ -2983,6 +3269,16 @@ class _GateRouter:
         self._results = results
         self.requests: list[Any] = []
         self._n = 0
+
+    def route_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: Any = None, git_evidence: bool = False
+    ) -> bool:
+        # The real Router asks the adapters whether this attempt gets a shell. The double
+        # answers from the node's grant — a Claude-shaped answer — unless a test sets
+        # ``grants_shell`` to model a provider whose profile carries a shell on its own
+        # (Codex ``read-only``) or a host where it was dropped.
+        override = getattr(self, "grants_shell", None)
+        return git_evidence if override is None else bool(override)
 
     def resolve_route(self, node_id: str, override: Any = None) -> ResolvedRoute:
         return _claude_route(node_id)
@@ -3160,40 +3456,97 @@ def test_max_turns_gate_restart_deny_goes_manual(tmp_path: Path) -> None:
 # -- git control-state drift around a workspace-write attempt ------------------
 
 
-def test_workspace_write_git_control_drift_is_manual(tmp_path: Path) -> None:
-    # Control-state drift across a workspace-write attempt is a terminal manual-action
-    # violation (not a fixing route, not fallback), raised before any post-edit git runs.
-    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
-    from wastech_orchestrator.git_manager import GitControlDrift, GitControlDriftItem
-
-    class _DriftGit(FakeGit):
-        def compare_git_control_state(self, before: object) -> GitControlDrift:
-            item = GitControlDriftItem("index", "staged entry changed: .worc-io/x")
-            return GitControlDrift((item,))
-
-    (tmp_path / "roles").mkdir()
-    (tmp_path / "roles" / "impl.md").write_text("Implement {task_path}", "utf-8")
-    node = AgentNode(
+def _write_node() -> AgentNode:
+    return AgentNode(
         id="impl",
         kind="agent",
         role_file="roles/impl.md",
         session_scope=SessionScope.EDITING_LINEAGE,
         permission_profile=PermissionProfile.WORKSPACE_WRITE,
     )
+
+
+def _drift_git(aspect: str, detail: str) -> Any:
+    from wastech_orchestrator.git_manager import GitControlDrift, GitControlDriftItem
+
+    class _DriftGit(FakeGit):
+        def compare_git_control_state(self, before: object) -> GitControlDrift:
+            self.calls.append(("compare_git_control_state",))
+            return GitControlDrift((GitControlDriftItem(aspect, detail),))
+
+    return _DriftGit()
+
+
+# Every aspect the fingerprint emits, so the decision reads out of the tests rather than out of a
+# comment. The three at the end are the ones that are NOT an operator working in their own
+# repository — a planted hook, a retargeted push URL, a swapped binary on PATH — and the owner
+# decision of 2026-08-24 deliberately gives them the same verdict as the other six: a loud warning,
+# no park. If that is ever revisited, these three rows are what has to change.
+_DRIFT_ASPECTS = [
+    ("head", "HEAD commit moved"),
+    ("task_ref", "task branch ref moved"),
+    ("index", "staged entry changed: mobile/chapter.md"),
+    ("remote", "the push destination changed"),
+    ("markers", "operation markers changed: MERGE_HEAD"),
+    ("tool_config", "changed: .codex/config.toml"),
+    ("hooks", "hook 'post-commit' added"),
+    ("config", "changed: remote.origin.pushurl"),
+    ("executables", "git resolved to a different path"),
+]
+
+
+@pytest.mark.parametrize(("aspect", "detail"), _DRIFT_ASPECTS, ids=[a for a, _ in _DRIFT_ASPECTS])
+def test_git_control_drift_on_a_workspace_write_node_reports_and_finishes(
+    tmp_path: Path, aspect: str, detail: str
+) -> None:
+    # A workspace-write attempt that drifts takes the same never-park path as every other node
+    # class: the outcome stays `done`, the run continues, and the redacted aspect-level summary
+    # rides out on the outcome for the post-node hook to warn and trace. Parking would be wrong not
+    # because the detection is wrong but because of its consequence: what it catches in practice is
+    # the operator committing a neighbouring file in their own repository, and it would throw away
+    # a finished node's work for that.
+    (tmp_path / "roles").mkdir()
+    (tmp_path / "roles" / "impl.md").write_text("Implement {task_path}", "utf-8")
+    node = _write_node()
     services = _services(
         FakeRouter(_result()),
         FakeStore(),
         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
-        git=_DriftGit(),
+        git=_drift_git(aspect, detail),
     )
-    with pytest.raises(NodeManualRequired):
-        AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "done"
+    assert result.outcome.git_control_drift == f"{aspect}: {detail}"
+
+
+def test_workspace_write_drift_is_compared_before_the_post_edit_guard_touches_the_clone(
+    tmp_path: Path,
+) -> None:
+    # Why the writing class keeps its own bracket inside `_invoke` instead of joining the outer
+    # reporting one: the post-edit guard's `write_current_diff` brackets the diff with a transient
+    # `git add --intent-to-add` / `git reset`. Compared after that, the orchestrator's own index
+    # touch reads back as `index` drift of its own making — a fabricated warning on every writing
+    # node. The comparison therefore has to be the first thing after the attempt.
+    (tmp_path / "roles").mkdir()
+    (tmp_path / "roles" / "impl.md").write_text("Implement {task_path}", "utf-8")
+    git = _drift_git("index", "staged entry changed: mobile/chapter.md")
+    services = _services(
+        FakeRouter(_result()),
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=git,
+    )
+    AgentNodeRunner(services, _inputs(tmp_path)).run(_write_node(), _ctx(_write_node()))
+    names = [c[0] for c in git.calls]
+    assert "compare_git_control_state" in names and "write_current_diff" in names
+    assert names.index("compare_git_control_state") < names.index("write_current_diff")
 
 
 def test_read_only_node_skips_git_control_capture(tmp_path: Path) -> None:
-    # A read-only attempt without the git-evidence grant has no shell at all, so it is neither
-    # captured nor compared — a git whose capture would explode is never called. (A *granted*
-    # read-only node does get fingerprinted, from the reporting bracket — see the section below.)
+    # An attempt the Router reports as shell-less is neither captured nor compared — a git whose
+    # capture would explode is never called. Here that is a Claude-shaped read-only node without the
+    # grant. (An attempt that *does* have a shell gets fingerprinted from the reporting bracket —
+    # see the section below, including the Codex read-only node that has one without any grant.)
     class _ExplodingGit(FakeGit):
         def capture_git_control_state(self) -> object:
             raise AssertionError("a read-only node must not capture git control state")
@@ -3265,7 +3618,7 @@ def test_a_write_by_a_granted_read_only_node_warns_and_still_finishes(tmp_path: 
     # The sandbox write-denies the whole clone for such a node, so a change means that enforcement
     # did not hold. It is reported, not acted on: the outcome stays `done` and the task is never
     # parked — the grant exists so an audit node can read history, and a stray file is not worth
-    # trading that capability for. `read_only_write` is what the post-node hook turns into the
+    # trading that capability for. `unexpected_write` is what the post-node hook turns into the
     # operator's console warning + ⚠️ trace.
     from wastech_orchestrator.git_manager import ChangedPath
 
@@ -3281,7 +3634,7 @@ def test_a_write_by_a_granted_read_only_node_warns_and_still_finishes(tmp_path: 
     )
     result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "done"
-    assert result.outcome.read_only_write is True
+    assert result.outcome.unexpected_write is True
     # The post-edit guard stays off for a read-only node: no diff is captured, so nothing downstream
     # is ever handed the stray change.
     assert not any(c[0] == "write_current_diff" for c in git.calls)
@@ -3313,7 +3666,99 @@ def test_git_control_drift_by_a_granted_read_only_node_warns_and_still_finishes(
     )
     result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "done"  # warned, not parked
-    assert result.outcome.read_only_git_drift == "hooks: hook 'post-commit' added"
+    assert result.outcome.git_control_drift == "hooks: hook 'post-commit' added"
+
+
+def test_a_read_only_node_with_a_provider_shell_is_bracketed_without_any_grant(
+    tmp_path: Path,
+) -> None:
+    # The rekey: the bracket keys on "does this attempt have a shell", not on the declared
+    # git-evidence grant. A Codex `read-only` node runs commands today and declared nothing, so
+    # before this it was the one class with a shell and no fingerprint at all.
+    from wastech_orchestrator.git_manager import GitControlDrift, GitControlDriftItem
+
+    class _DriftGit(FakeGit):
+        def compare_git_control_state(self, before: object) -> GitControlDrift:
+            return GitControlDrift((GitControlDriftItem("hooks", "hook 'post-commit' added"),))
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(
+        id="audit", kind="agent", role_file="r.md", permission_profile=PermissionProfile.READ_ONLY
+    )
+    router = FakeRouter(_result())
+    router.grants_shell = True  # the provider's read-only profile permits commands
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=_DriftGit(),
+    )
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "done"  # warned, never parked — the verdict is unchanged
+    assert result.outcome.git_control_drift == "hooks: hook 'post-commit' added"
+
+
+def test_a_granted_node_on_a_host_without_a_shell_is_not_bracketed(tmp_path: Path) -> None:
+    # The other direction of the same rekey, and the reason the answer has to come from the
+    # provider: on native Windows under strict isolation the grant's shell is dropped for want of an
+    # OS sandbox. The declaration is still there, so keying on it would fingerprint an attempt that
+    # cannot run a single command.
+    class _ExplodingGit(FakeGit):
+        def capture_git_control_state(self) -> object:
+            raise AssertionError("an attempt with no shell must not be fingerprinted")
+
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    router = FakeRouter(_result())
+    router.grants_shell = False
+    services = _services(
+        router,
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=_ExplodingGit(),
+        allow_git_evidence=True,
+    )
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(_audit_node(), _ctx(_audit_node()))
+    assert result.outcome.kind == "done"
+    assert result.outcome.git_control_drift is None
+
+
+def test_the_write_deny_roots_reach_a_shell_bearing_read_only_attempt(tmp_path: Path) -> None:
+    # The deny roots are what the pre-launch canary probes, so an attempt that can reach `.git`
+    # has to carry them even when it holds no write tools. Keyed on write access alone, a
+    # shell-bearing read-only attempt went to the provider with `write_guard=None` — nothing for the
+    # probes to take its paths from.
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(
+        id="audit", kind="agent", role_file="r.md", permission_profile=PermissionProfile.READ_ONLY
+    )
+    router = FakeRouter(_result())
+    router.grants_shell = True
+    services = _services(
+        router, FakeStore(), FakeCheckRunner(CheckOutcome(passed=True, runs=())), git=FakeGit()
+    )
+    AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert router.requests[0].write_guard is not None
+
+
+def test_the_write_deny_roots_reach_a_writer_whose_shell_was_dropped(tmp_path: Path) -> None:
+    # The other half of the same condition: on native Windows a workspace-write attempt loses Bash
+    # but keeps Edit/Write, so keying the roots on the shell alone would have removed the `.git`
+    # Write/Edit deny exactly where it is the only remaining barrier.
+    (tmp_path / "roles").mkdir(exist_ok=True)
+    (tmp_path / "roles" / "impl.md").write_text("Implement {task_path}", "utf-8")
+    node = AgentNode(
+        id="implementation",
+        kind="agent",
+        role_file="roles/impl.md",
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
+    router = FakeRouter(_result())
+    router.grants_shell = False
+    services = _services(
+        router, FakeStore(), FakeCheckRunner(CheckOutcome(passed=True, runs=())), git=FakeGit()
+    )
+    AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert router.requests[0].write_guard is not None
 
 
 def test_a_clean_granted_read_only_node_raises_no_warning(tmp_path: Path) -> None:
@@ -3331,13 +3776,14 @@ def test_a_clean_granted_read_only_node_raises_no_warning(tmp_path: Path) -> Non
         allow_git_evidence=True,
     )
     result = AgentNodeRunner(services, _inputs(tmp_path)).run(_audit_node(), _ctx(_audit_node()))
-    assert result.outcome.read_only_write is False
-    assert result.outcome.read_only_git_drift is None
+    assert result.outcome.unexpected_write is False
+    assert result.outcome.git_control_drift is None
 
 
 def test_the_write_check_is_skipped_for_a_node_without_the_grant(tmp_path: Path) -> None:
-    # No node pays for a check that cannot apply to it: without the grant there is no shell, so the
-    # tree is never inspected.
+    # No node pays for a check that cannot apply to it: this node declared no grant and the Router
+    # reports no shell for it, so the tree is never inspected. The operator switch being on changes
+    # nothing — the grant needs both halves.
     from wastech_orchestrator.git_manager import ChangedPath
 
     (tmp_path / "r.md").write_text("go", "utf-8")
@@ -3353,4 +3799,307 @@ def test_the_write_check_is_skipped_for_a_node_without_the_grant(tmp_path: Path)
         allow_git_evidence=True,
     )
     result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
-    assert result.outcome.read_only_write is False
+    assert result.outcome.unexpected_write is False
+
+
+# --- publishing after adopting commits the orchestrator did not make ---------------------------
+
+
+class _OrderRecordingChecks(FakeCheckRunner):
+    """A check runner that records which git calls had already happened when the gate ran."""
+
+    def __init__(self, outcome: CheckOutcome, git: FakeGit) -> None:
+        super().__init__(outcome)
+        self._git = git
+        self.calls_before_run: list[str] = []
+
+    def run(self, **kwargs: Any) -> CheckOutcome:
+        self.calls_before_run = [c[0] for c in self._git.calls]
+        return super().run(**kwargs)
+
+
+class _AdoptingGit(FakeGit):
+    """A FakeGit that adopts foreign commits, over a diff a check set can select."""
+
+    def __init__(self, adopted: tuple[str, ...]) -> None:
+        super().__init__()
+        self.adopted = adopted
+
+    def changed_code_paths_since_base(self) -> list[str]:
+        return ["src/x.py"]  # non-empty, so a command set is actually selected
+
+
+def test_publish_reruns_checks_over_adopted_commits_and_declares_them_in_the_pr(
+    tmp_path: Path,
+) -> None:
+    # What the gate passed was "our commits on top of base"; what is published is a
+    # combination it never saw, so the gate runs again. The PR says so too: its diff is measured
+    # from the base, so without the notice it silently describes someone else's work as this task's.
+    node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
+    git, store = _AdoptingGit(("abc1234", "def5678")), FakeStore()
+    checks = FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),)))
+    services = _services(FakeRouter(_result()), store, checks, git=git)
+    inputs = _inputs(
+        tmp_path,
+        branch="worc/task-1-x",
+        pull_request_title="My PR",
+        summary_body_path="/s/summary.md",
+        check_sets=_one_set(),
+    )
+    result = PublishNodeRunner(services, inputs).run(node, _ctx(node))
+
+    assert result.outcome.kind == "done"
+    assert len(checks.runs) == 1  # the gate ran again over the combination
+    assert store.check_runs  # and the re-run is on the audit trail
+    assert git.pr_notice is not None
+    assert "abc1234" in git.pr_notice and "def5678" in git.pr_notice
+    # The same fact leaves the node on its outcome, which is what carries it to the
+    # operator's console + ⚠️ trace — the only surfaces a `push`/`commit` scope has.
+    assert result.outcome.adopted_commits == ("abc1234", "def5678")
+
+
+def test_publish_parks_when_the_checks_over_adopted_commits_fail(tmp_path: Path) -> None:
+    # A failure here is not this task's work going bad — it is an untested combination — so it
+    # parks for a human with the adopted state on disk, never falling into the fixing loop.
+    node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
+    git, store = _AdoptingGit(("abc1234",)), FakeStore()
+    checks = FakeCheckRunner(
+        CheckOutcome(passed=False, runs=(_run(False),), any_quality_failed=True)
+    )
+    services = _services(FakeRouter(_result()), store, checks, git=git)
+    inputs = _inputs(
+        tmp_path,
+        branch="worc/task-1-x",
+        pull_request_title="My PR",
+        summary_body_path="/s/summary.md",
+        check_sets=_one_set(),
+    )
+    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
+
+    with pytest.raises(NodeManualRequired) as excinfo:
+        PublishNodeRunner(services, inputs).run(node, _ctx(node))
+    assert "abc1234" in str(excinfo.value)
+    # No PR opened; the adoption step runs before the push, which is what puts the checks over
+    # the combination ahead of publishing it.
+    assert [c[0] for c in git.calls] == [
+        "commit_code",
+        "commit_audit",
+        "adopt_foreign_commits",
+    ]
+
+
+def test_publish_asks_about_a_dangerous_diff_before_it_commits(tmp_path: Path) -> None:
+    # On the writing agent node alone the gate is not enough: a flow whose last writing node is
+    # followed by a `tool`/`evaluator` (which warn rather than park) — or a flow with no writing
+    # node at all, like the packaged `security_audit` — would reach `commit_code` with content
+    # nobody had been asked about. The ask happens BEFORE the commit, so a denial publishes nothing.
+    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
+    from wastech_orchestrator.git_manager import ChangedPath
+    from wastech_orchestrator.notify import AskResult
+
+    node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
+    git = FakeGit(changed=(ChangedPath(status="D", path="src/core.py"),))  # always dangerous
+    notifier = FakeNotifier(AskResult(answered=True, approved=False))
+    services = NodeServices(
+        router=FakeRouter(_result()),
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=FakeStore(),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        clock=lambda: "ts",
+        git=git,
+        notifier=notifier,
+        ask_timeout_s=60,
+        trust_level="strict",
+    )
+    inputs = _inputs(
+        tmp_path,
+        branch="worc/task-1-x",
+        pull_request_title="My PR",
+        summary_body_path="/s/summary.md",
+    )
+    with pytest.raises(NodeManualRequired, match="not approved"):
+        PublishNodeRunner(services, inputs).run(node, _ctx(node))
+
+    assert notifier.asks  # a human was asked
+    assert [c[0] for c in git.calls] == []  # and nothing was committed, pushed or opened
+
+
+def test_publish_commits_when_the_dangerous_diff_is_approved(tmp_path: Path) -> None:
+    # The other side: an approval lets the whole sequence run — the gate asks, it is not a wall.
+    from wastech_orchestrator.git_manager import ChangedPath
+    from wastech_orchestrator.notify import AskResult
+
+    node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
+    git = FakeGit(changed=(ChangedPath(status="D", path="src/core.py"),))
+    notifier = FakeNotifier(AskResult(answered=True, approved=True))
+    services = NodeServices(
+        router=FakeRouter(_result()),
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=FakeStore(),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        clock=lambda: "ts",
+        git=git,
+        notifier=notifier,
+        ask_timeout_s=60,
+        trust_level="strict",
+    )
+    inputs = _inputs(
+        tmp_path,
+        branch="worc/task-1-x",
+        pull_request_title="My PR",
+        summary_body_path="/s/summary.md",
+    )
+    result = PublishNodeRunner(services, inputs).run(node, _ctx(node))
+
+    assert result.outcome.kind == "done"
+    assert notifier.asks
+    assert "create_pr" in [c[0] for c in git.calls]
+
+
+def test_publish_does_not_ask_when_no_diff_is_dangerous(tmp_path: Path) -> None:
+    # The ordinary path pays nothing: an unremarkable diff reaches publication without a prompt.
+    node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
+    git = FakeGit()
+    notifier = FakeNotifier(None)
+    services = NodeServices(
+        router=FakeRouter(_result()),
+        check_runner=FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        store=FakeStore(),
+        repo_dir="/repo",
+        artifacts_root=str(tmp_path),
+        clock=lambda: "ts",
+        git=git,
+        notifier=notifier,
+        ask_timeout_s=60,
+        trust_level="strict",
+    )
+    inputs = _inputs(
+        tmp_path,
+        branch="worc/task-1-x",
+        pull_request_title="My PR",
+        summary_body_path="/s/summary.md",
+    )
+    PublishNodeRunner(services, inputs).run(node, _ctx(node))
+    assert notifier.asks == []
+
+
+def test_publish_declares_locally_adopted_commits_in_the_pr_body(tmp_path: Path) -> None:
+    # The phase itself rejected "a warning on the shipped default nobody reads" — and then
+    # closed the requirement with a log line. A reviewer of the pull request is the one person
+    # guaranteed to look, and the delivery mechanism was already there for the remote-side case.
+    class _LocallyAdoptingGit(FakeGit):
+        def adopted_commit_count(self, task_id: str) -> int:
+            return 2
+
+    node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
+    git = _LocallyAdoptingGit()
+    services = _services(
+        FakeRouter(_result()),
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=git,
+    )
+    inputs = _inputs(
+        tmp_path,
+        branch="worc/task-1-x",
+        pull_request_title="My PR",
+        summary_body_path="/s/summary.md",
+    )
+    PublishNodeRunner(services, inputs).run(node, _ctx(node))
+
+    assert git.pr_notice is not None
+    assert "Adopted 2 commit(s) this orchestrator did not make" in git.pr_notice
+    assert "passed the dangerous-diff gate" in git.pr_notice
+
+
+def test_publish_checks_the_adopted_combination_before_it_pushes(tmp_path: Path) -> None:
+    # "publishing happens only when checks succeed" — so the merge (local, undoable) and the
+    # gate over the combination both come BEFORE the push (not undoable). Push-then-check would
+    # have already published the untested combination by the time it asked about it.
+    node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
+    git, store = _AdoptingGit(("abc1234",)), FakeStore()
+    checks = _OrderRecordingChecks(CheckOutcome(passed=True, runs=(_run(True),)), git)
+    services = _services(FakeRouter(_result()), store, checks, git=git)
+    inputs = _inputs(
+        tmp_path,
+        branch="worc/task-1-x",
+        pull_request_title="My PR",
+        summary_body_path="/s/summary.md",
+        check_sets=_one_set(),
+    )
+    PublishNodeRunner(services, inputs).run(node, _ctx(node))
+
+    names = [c[0] for c in git.calls]
+    assert names.index("adopt_foreign_commits") < names.index("push")
+    # And the gate itself ran between the two, not after both.
+    assert checks.calls_before_run == ["commit_code", "commit_audit", "adopt_foreign_commits"]
+
+
+def test_publish_parks_before_pushing_an_adopted_combination_that_fails_its_checks(
+    tmp_path: Path,
+) -> None:
+    # The consequence that makes the order matter: nothing reaches origin at all.
+    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
+
+    node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
+    git, store = _AdoptingGit(("abc1234",)), FakeStore()
+    checks = FakeCheckRunner(
+        CheckOutcome(passed=False, runs=(_run(False),), any_quality_failed=True)
+    )
+    services = _services(FakeRouter(_result()), store, checks, git=git)
+    inputs = _inputs(
+        tmp_path,
+        branch="worc/task-1-x",
+        pull_request_title="My PR",
+        summary_body_path="/s/summary.md",
+        check_sets=_one_set(),
+    )
+    with pytest.raises(NodeManualRequired):
+        PublishNodeRunner(services, inputs).run(node, _ctx(node))
+
+    assert "push" not in [c[0] for c in git.calls]
+    assert "create_pr" not in [c[0] for c in git.calls]
+
+
+def test_publish_says_out_loud_when_no_check_set_covers_the_adopted_commits(
+    tmp_path: Path, package_log_text: Callable[[], str]
+) -> None:
+    # The one path where the combination cannot be re-checked — no configured set matches the
+    # combined diff, so there is nothing to re-run. It publishes, and the only thing standing
+    # between the operator and a silent "checks passed" reading is this line, which had no test at
+    # all.
+    node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
+    git, store = _AdoptingGit(("abc1234",)), FakeStore()
+    checks = FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),)))
+    services = _services(FakeRouter(_result()), store, checks, git=git)
+    inputs = _inputs(
+        tmp_path,
+        branch="worc/task-1-x",
+        pull_request_title="My PR",
+        summary_body_path="/s/summary.md",
+        check_sets=(),  # no set at all: nothing can be selected
+    )
+    PublishNodeRunner(services, inputs).run(node, _ctx(node))
+
+    assert checks.runs == []
+    assert "no check set covers the adopted commits" in package_log_text()
+    assert "push" in [c[0] for c in git.calls]
+
+
+def test_publish_does_not_rerun_checks_when_nothing_was_adopted(tmp_path: Path) -> None:
+    # The ordinary path pays nothing: no foreign commits, no second gate run, no PR notice.
+    node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
+    git, store = FakeGit(), FakeStore()
+    checks = FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),)))
+    services = _services(FakeRouter(_result()), store, checks, git=git)
+    inputs = _inputs(
+        tmp_path,
+        branch="worc/task-1-x",
+        pull_request_title="My PR",
+        summary_body_path="/s/summary.md",
+        check_sets=_one_set(),
+    )
+    PublishNodeRunner(services, inputs).run(node, _ctx(node))
+    assert checks.runs == [] and git.pr_notice is None

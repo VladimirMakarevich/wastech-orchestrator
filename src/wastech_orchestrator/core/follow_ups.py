@@ -6,11 +6,11 @@ sources feed it: the supervisor layer's own finalize turn (parsed by :func:`pars
 the evaluator findings a gate **let past** (derived by :func:`evaluator_finding_follow_ups`).
 
 The second source is why this module exists on its own. Deriving follow-ups from the ``evaluations``
-table is a pure function of durable state — no provider call, no LLM — but it used to live inside
-the supervisor layer, so it died whenever the layer did not run: a task whose finalize turn produced
-no prose kept its accepted findings in ``summary.json`` and lost them from the pull-request body.
-Here the derivation is reachable with the layer off, degraded, or absent, and an import-linter
-contract keeps it from growing a dependency back on it.
+table is a pure function of durable state — no provider call, no LLM — so it must not sit inside the
+supervisor layer, where it would die whenever the layer did not run: a task whose finalize turn
+produced no prose would keep its accepted findings in ``summary.json`` and lose them from the
+pull-request body. Here the derivation is reachable with the layer off, degraded, or absent, and an
+import-linter contract keeps it from growing a dependency back on it.
 
 Bounded on purpose: only each evaluator node's FINAL verdict is read (an intermediate rework round's
 finding was fixed, and repeating it would describe work that was done), and a finding's reason is
@@ -65,7 +65,7 @@ _FOLLOW_UPS_FILE_HEADER = (
 
 @dataclass(frozen=True)
 class FollowUp:
-    """One evidence-gated technical-debt / follow-up record (task 1). Minimal and grounded."""
+    """One evidence-gated technical-debt / follow-up record. Minimal and grounded."""
 
     title: str
     rationale: str
@@ -142,12 +142,12 @@ _SENTENCE_ENDS = (". ", "? ", "! ", "; ")
 def _split_reason(reason: str) -> tuple[str, str]:
     """Split one finding's reason into a standalone ``(title, rationale)``.
 
-    The title used to be ``reason[:FINDING_TITLE_MAX] + "…"`` with the *whole* reason repeated as
-    the rationale, so every long finding arrived as a mid-word truncation of the text printed right
-    next to it — a queue whose titles duplicate their own bodies cannot be triaged without opening
-    each item. So: a short reason is its own title with no rationale (unchanged); a long one is cut
-    at the LAST sentence boundary that still fits the bound, else at the last word boundary, and the
-    rationale carries only what is left over — the title never repeats it, and never cuts mid-word.
+    A short reason is its own title with no rationale. A long one is cut at the LAST sentence
+    boundary that still fits the bound, else at the last word boundary, and the rationale carries
+    only what is left over — so the title never repeats the body and never cuts mid-word. Both
+    matter for triage: a blind ``reason[:FINDING_TITLE_MAX]`` gives every long finding a mid-word
+    title that duplicates the text printed right next to it, and a queue like that cannot be triaged
+    without opening each item.
     """
     reason = " ".join(reason.split())
     if len(reason) <= FINDING_TITLE_MAX:

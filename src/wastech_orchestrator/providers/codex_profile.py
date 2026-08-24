@@ -109,8 +109,8 @@ def build_codex_permission_profile(
     deny_policy: InternalDenyPolicy | None,
     write_guard: ProviderWriteGuardPolicy | None,
     denied_read_paths: Sequence[str],
+    network_access: bool = False,
     strict_isolation: bool = True,
-    read_isolation_off: bool = False,
     to_native: NativePath = str,
 ) -> dict[str, Any]:
     """Build the Codex ``[permissions.<name>]`` profile mapping for one attempt.
@@ -119,10 +119,24 @@ def build_codex_permission_profile(
     ``:workspace`` and grants it write, then Write/Edit-denies (as more-specific ``read`` rules) the
     exchange, resolved Git dirs, and ``tasks/`` tree from *write_guard* so they stay readable
     but immutable. Both profiles ``deny`` the *deny_policy* set (private/control homes, resolved
-    env-file, provider auth homes incl. ``CODEX_HOME``, frozen bundles) and the public
-    *denied_read_paths* blacklist. Network is disabled in both (a validator rule keeps a Codex
-    workspace-write node offline). Deny rules are applied last so a deny always wins on any path
-    collision.
+    env-file, frozen bundles) — unconditionally, at every
+    read-isolation setting — and the public *denied_read_paths* blacklist. ``network.enabled``
+    follows *network_access*, which the adapter resolves once for the attempt (the flow's grant, or
+    the advanced mode, which is online for every node) — the same flag that decides the backend-side
+    ``web_search``, so the shell and the native web tool cannot end up on opposite sides of it. Deny
+    rules are applied last so a deny always wins on any path collision.
+
+    ``strict_isolation: false`` — the advanced mode — additionally grants ``write`` on the workspace
+    volume's ROOT, which is what stops ``dotnet build`` failing on ``~/.nuget``. The floor's
+    carve-outs survive it by being more specific paths (Codex resolves ``deny > write > read`` by
+    specificity first, verified live), and unlike Claude's file this profile is re-proven under
+    ``codex sandbox`` before every provider attempt that gets a shell — which on Codex is all of
+    them, an evaluator and the supervisor's own read-only turn included — so the survival is
+    demonstrated rather than assumed. Two
+    honest limits: an inherited ``extends`` grant can still beat an explicit deny (a clone under the
+    global ``/private/tmp`` removes the carve-outs entirely), and the base ``:minimal`` read set may
+    keep some system paths read-only inside the root grant — its exact composition is
+    platform-dependent and nothing here depends on it.
     """
     if permission_profile not in _EXTENDS:
         raise ProviderError(
@@ -132,6 +146,12 @@ def build_codex_permission_profile(
         )
     workspace_root = Path(working_directory)
     filesystem: dict[str, Any] = {":minimal": "read"}
+    if not strict_isolation and workspace_root.anchor:
+        # Advanced mode: write anywhere on this volume, expressed as the workspace path's anchor so
+        # one rule reads ``/`` on POSIX and a drive root on native Windows. Written before the rules
+        # below because that is the order they are read in — broad grant first, carve-outs after —
+        # not because Codex resolves them in written order (it resolves by specificity).
+        filesystem[to_native(Path(workspace_root.anchor))] = "write"
     filesystem[to_native(workspace_root)] = (
         "write" if permission_profile == "workspace-write" else "read"
     )
@@ -142,14 +162,15 @@ def build_codex_permission_profile(
     # Deny last: private/control/secret roots always win over any read/write grant above.
     needs_glob_scan = False
     if deny_policy is not None:
-        # With read-isolation OFF the private set is downgraded from ``deny`` (read+write
-        # blocked) to ``read`` — it stays WRITE-denied (a ``read`` grant more specific than the
-        # workspace ``write`` keeps the control plane immutable) but becomes READABLE so the agent
-        # can run native ``.codex``/config discovery. Under isolation it stays fully ``deny``. The
-        # public ``denied_read_paths`` blacklist below is ``deny`` regardless.
-        internal_grant = "read" if read_isolation_off else "deny"
+        # ``deny`` at EVERY read-isolation setting, never downgraded to ``read``: the private home
+        # and the resolved env-file are where the orchestrator keeps its own secrets, so a
+        # sandboxed shell must not reach them whatever the operator relaxed. The set holds ONLY the
+        # orchestrator's own private surface. ``$CODEX_HOME`` is deliberately absent from it: the
+        # standalone package keeps the ``codex`` BINARY inside that home and ``apply_patch``
+        # re-execs it under the sandbox as its filesystem helper, so a deny there breaks every
+        # patch. The public ``denied_read_paths`` blacklist below is ``deny`` regardless.
         for path in deny_policy.denied_paths:
-            filesystem[to_native(path)] = internal_grant
+            filesystem[to_native(path)] = "deny"
     for pattern in denied_read_paths:
         if not pattern.strip():
             continue
@@ -163,7 +184,7 @@ def build_codex_permission_profile(
     return {
         "extends": _EXTENDS[permission_profile],
         "filesystem": filesystem,
-        "network": {"enabled": False},
+        "network": {"enabled": network_access},
     }
 
 

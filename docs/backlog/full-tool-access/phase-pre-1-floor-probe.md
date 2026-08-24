@@ -1,6 +1,6 @@
 # Фаза Пре-1 — пол доказывается пробой
 
-Status: **ready to implement** Date: 2026-08-17 Owner: Vladimir Makarevich Требования: П1 из [preconditions-floor.md](preconditions-floor.md) `schema_version`: без изменения Зависимости: нет — фаза ни от чего не зависит и может идти первой
+Status: **реализована 2026-08-18** (пробы `write_guard` в канарейке и capability-smoke, платный смоук Claude по `worc preflight --paid-isolation-probe`; живые пробы — см. [README](README.md)) Date: 2026-08-17 Owner: Vladimir Makarevich Требования: П1 из [preconditions-floor.md](preconditions-floor.md) `schema_version`: без изменения Зависимости: нет — фаза ни от чего не зависит и может идти первой
 
 Главный инвариант продукта — «`.git` неизменяем агентом» — сегодня не проверяется **ни одной** пробой ни на одном провайдере. Канарейка Codex гоняет пробы по приватному набору и обменнику и `.git` не трогает ([`codex_canary.py:189`](../../../src/wastech_orchestrator/providers/codex_canary.py)); у Claude пробы нет вовсе, там всё держится на юнит-тесте формы записанного JSON. Живыми пробами подтверждены два способа, которыми объявление молча не срабатывает: CLI принимает незнакомый ключ профиля без ошибки (то есть опечатка даёт не диагностику, а отсутствие политики), и унаследованный из `extends` грант бьёт явный `deny` (клон под `/private/tmp`).
 

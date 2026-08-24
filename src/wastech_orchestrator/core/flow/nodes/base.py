@@ -24,7 +24,12 @@ from wastech_orchestrator.config.schema import (
     BranchMode,
     PublishScope,
 )
-from wastech_orchestrator.git_manager import ChangedPath, GitControlDrift, GitControlState
+from wastech_orchestrator.git_manager import (
+    ChangedPath,
+    GitControlDrift,
+    GitControlState,
+    PushOutcome,
+)
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult
 from wastech_orchestrator.providers.base import AgentRunRequest, ErrorClass, ProviderId
 from wastech_orchestrator.providers.process import ProcessResult, run_process
@@ -45,7 +50,8 @@ from wastech_orchestrator.state_store import (
 RegisterArtifact = Callable[[str, str, str], None]
 
 #: The safe argv process runner (``providers.process.run_process``) the ``dependency_scan`` checker
-#: launches its scanners through (argv-without-shell, mandatory timeout, allowlisted env).
+#: launches its scanners through (argv-without-shell, mandatory timeout, and the policy-built child
+#: env — the allowlist under strict isolation, the parent environment whole in the advanced mode).
 RunProcess = Callable[..., ProcessResult]
 
 
@@ -119,11 +125,20 @@ class RouterPort(Protocol):
     """The slice of :class:`~wastech_orchestrator.routing.router.AgentRouter` runners use.
 
     Runners pass the flow node's declared ``provider`` to ``resolve_route``; ``None`` defaults to
-    the config's global primary (PRE.1). ``node_id`` is carried for audit/logging only — it no
+    the config's global primary. ``node_id`` is carried for audit/logging only — it no
     longer selects the provider.
+
+    ``route_grants_shell`` answers whether an attempt on that route actually gets a shell — the
+    per-attempt fact the Git-control detection brackets key on. It belongs to the Router because
+    only the adapters can answer it (and both ends of a route must be asked), and to this protocol
+    because a runner must be able to ask before it builds a request.
     """
 
     def resolve_route(self, node_id: str, provider: ProviderId | None = None) -> ResolvedRoute: ...
+
+    def route_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: str | None, git_evidence: bool
+    ) -> bool: ...
 
     def run_stage(
         self,
@@ -252,7 +267,8 @@ class GitPort(Protocol):
 
     The publish operations are idempotent (keyed by ``publish_operations``), so a resumed run never
     repeats a commit/push/PR; ``write_current_diff``/``changed_code_entries`` capture the post-edit
-    diff for the dangerous-diff guard + ``{diff_path}``. Git is the orchestrator's sole
+    diff for the dangerous-diff guard + ``{diff_path}``, both measured from the same point in the
+    task. Git is the orchestrator's sole
     responsibility — providers and flows never touch it (the hard invariant).
     """
 
@@ -282,13 +298,43 @@ class GitPort(Protocol):
         self, exchange_root: str | None = None
     ) -> ProviderWriteGuardPolicy: ...
 
-    def push(self, task_id: str, branch: str, *, mode: BranchMode = BranchMode.NEW) -> bool: ...
+    #: How many commits this run adopted rather than made — an agent's or an operator's own
+    #: ``git commit`` that ``commit_code``/``commit_subtask`` found on a clean tree. Declared in the
+    #: PR body beside the remote-side adoptions: a locally adopted commit is the more suspicious of
+    #: the two (the agent made it inside this run), and a reviewer had no way to know.
+    def adopted_commit_count(self, task_id: str) -> int: ...
 
-    def create_pr(self, task_id: str, branch: str, *, title: str, body_path: str) -> str | None: ...
+    #: Merges in commits someone else put on the task branch, before anything is published, and
+    #: reports them. The publish node runs the checks over that combination BEFORE pushing: the
+    #: invariant is "publishing happens only when checks succeed", and a merge is local while a push
+    #: is not. Empty (and a no-op) in the ordinary case where the remote holds nothing of anyone
+    #: else's.
+    def adopt_foreign_commits(
+        self, task_id: str, branch: str, *, mode: BranchMode = BranchMode.NEW
+    ) -> tuple[str, ...]: ...
+
+    #: Publishes the task branch and reports what it had to do to get there.
+    def push(
+        self, task_id: str, branch: str, *, mode: BranchMode = BranchMode.NEW
+    ) -> PushOutcome: ...
+
+    #: ``notice`` is prepended to the PR body — used to declare commits publishing had to adopt,
+    #: without which the PR's base-measured diff would silently describe someone else's work too.
+    def create_pr(
+        self,
+        task_id: str,
+        branch: str,
+        *,
+        title: str,
+        body_path: str,
+        notice: str | None = None,
+    ) -> str | None: ...
 
     def write_current_diff(self, task_id: str) -> str: ...
 
-    def changed_code_entries(self) -> tuple[ChangedPath, ...]: ...
+    #: The task's change — committed or not — measured from the gate's reference point, not from
+    #: ``HEAD``: a commit made inside the task must not be able to empty the dangerous-diff gate.
+    def changed_code_entries(self, task_id: str) -> tuple[ChangedPath, ...]: ...
 
     def changed_code_paths(self) -> list[str]: ...
 
@@ -342,9 +388,10 @@ class NodeServices:
     #: so it verifies the lifecycle ``<id>.md`` was not rewritten under the run. ``None`` in a
     #: flow with no frozen packet (a unit harness / the ephemeral merge flow).
     task_packet_digest: str | None = None
-    #: the ``dependency_scan`` checker's process runner + its allowlisted child env + per-scanner
-    #: timeout. ``process_env`` is the same allowlisted env the Check Runner uses
-    #: (``build_child_env(config.security.allowed_environment)``); empty in unit harnesses.
+    #: the ``dependency_scan`` checker's process runner + its policy-built child env + per-scanner
+    #: timeout. ``process_env`` is the same env the Check Runner uses
+    #: (``build_child_env(config.security)``) — which under ``strict_isolation: false`` is the
+    #: parent environment whole, secrets included; empty in unit harnesses.
     run_process: RunProcess = run_process
     process_env: Mapping[str, str] = field(default_factory=dict)
     scan_timeout_s: int = 600

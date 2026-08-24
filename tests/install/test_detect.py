@@ -129,7 +129,7 @@ def test_warn_if_gh_logged_out_emits_once_when_logged_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(preflight, "has_gh", lambda: True)
-    monkeypatch.setattr(preflight, "gh_auth_ok", lambda: False)
+    monkeypatch.setattr(preflight, "gh_auth_ok", lambda _security=None: False)
     emitted: list[str] = []
     preflight.warn_if_gh_logged_out(emitted.append)
     assert len(emitted) == 1
@@ -143,7 +143,7 @@ def test_warn_if_gh_logged_out_silent_when_authenticated_or_unknown(
 ) -> None:
     # True (authenticated) and None (probe unknown — transient / env-token auth) both stay silent.
     monkeypatch.setattr(preflight, "has_gh", lambda: True)
-    monkeypatch.setattr(preflight, "gh_auth_ok", lambda: auth)
+    monkeypatch.setattr(preflight, "gh_auth_ok", lambda _security=None: auth)
     emitted: list[str] = []
     preflight.warn_if_gh_logged_out(emitted.append)
     assert emitted == []
@@ -153,7 +153,9 @@ def test_warn_if_gh_logged_out_silent_when_gh_absent(monkeypatch: pytest.MonkeyP
     # gh missing is require_gh's job; the advisory must not probe auth or warn.
     monkeypatch.setattr(preflight, "has_gh", lambda: False)
     monkeypatch.setattr(
-        preflight, "gh_auth_ok", lambda: pytest.fail("gh_auth_ok must not run when gh is absent")
+        preflight,
+        "gh_auth_ok",
+        lambda _security=None: pytest.fail("gh_auth_ok must not run when gh is absent"),
     )
     emitted: list[str] = []
     preflight.warn_if_gh_logged_out(emitted.append)
@@ -164,5 +166,5 @@ def test_warn_if_gh_logged_out_never_raises(monkeypatch: pytest.MonkeyPatch) -> 
     # Even if the probe somehow raised, the advisory must never propagate / block the run. Here we
     # assert the happy path returns None and does not raise with the default (logger) emit.
     monkeypatch.setattr(preflight, "has_gh", lambda: True)
-    monkeypatch.setattr(preflight, "gh_auth_ok", lambda: False)
+    monkeypatch.setattr(preflight, "gh_auth_ok", lambda _security=None: False)
     assert preflight.warn_if_gh_logged_out() is None  # default emit = logger; no exception

@@ -110,6 +110,6 @@ def test_documentation_runs_once_after_decomposition(impl_snap: FlowSnapshot) ->
 
 
 def test_documentation_disabled_per_task_skips(impl_snap: FlowSnapshot) -> None:
-    # PRE.3 per-task disable: `nodes.documentation.enabled: false` is routing-sound — the node's
+    # Per-task disable: `nodes.documentation.enabled: false` is routing-sound — the node's
     # `done` skip-outcome takes its single forward edge straight to publish (no mid-run crash).
     validate_disabled_nodes(impl_snap, frozenset({"documentation"}))  # must not raise

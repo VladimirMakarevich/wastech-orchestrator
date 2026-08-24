@@ -23,16 +23,18 @@ Before editing, read the packaged flow reference `.worc/guide/flows/reference.md
    - `reasoning` — overrides effort; **must be valid for the resolved provider** (Claude and Codex effort sets differ) — this one _is_ validated.
    - `timeout_seconds` — per-attempt CLI wall-clock ceiling.
    - `network_access` — tri-state per-node override of the flow's `network_policy` (`true`/`false`/omit).
-   - `git_evidence` — tri-state; `true` asks for the read-only git verbs so the node can inspect delivery history. Honored only while the operator's `security.allow_git_evidence` is on (default off, so the declaration is otherwise inert), and **rejected on a `workspace-write` node** — it already has an unrestricted shell.
+   - `git_evidence` — tri-state; `true` asks for the read-only git verbs so the node can inspect delivery history. Honored only while the operator's `security.allow_git_evidence` is on (`install` writes it on; with it off the declaration is inert), and **rejected on a `workspace-write` node** — it already has an unrestricted shell. Inert as well under `security.strict_isolation: false` (advanced mode), where every node has an unscoped shell already: declaring it there buys nothing, so do not reach for it instead of `workspace-write` on that configuration.
    - `extra_args` — raw CLI flags for this node (subject to the forbidden-args scan).
    - `best_effort` — tolerate an infrastructure failure and continue (e.g. a summary node).
 3. For loop iteration caps, edit the flow-level `budgets:` mapping (each named `fail`/`rework` loop; the engine clamps to `min(flow, config cap)`), not a node field.
 4. Confirm the model/reasoning you chose is actually configured for that provider in `.worc/config.yaml agents.providers.<id>` — if the provider or its reasoning set needs adjusting, that is a config change (use **worc-config**), not a flow edit.
-5. Validate: run `worc validate-flow <name>`. The config-aware layer checks that every `provider` is in `agents.allowed`, that `reasoning` is valid for the resolved provider, and that no Codex `workspace-write` node also has network. `worc preflight` does **not** validate flows.
+5. Validate: run `worc validate-flow <name>`. The config-aware layer checks that every `provider` is in `agents.allowed`, that `reasoning` is valid for the resolved provider, and — on the shipped default — that no Codex `workspace-write` node also has network (that last check is skipped under `security.strict_isolation: false`, where the mode grants both anyway). `worc preflight` does **not** validate flows.
 
 ## Applying the change to a task already in flight
 
 A brand-new task always picks up the edited flow. To apply your edit to a **specific parked/failed task** without re-paying for completed upstream work, resume it with `worc rerun <id> --continue` (add `--from <node>` to re-enter at a chosen step, e.g. `--from review`): an operator `--continue` **adopts** the current on-disk flow — it re-freezes the control plane from your edited files and resumes from the checkpoint under the new knobs. `--dry-run` prints a `note:` when it detects the change. (Only automatic daemon crash-recovery keeps the task's original frozen flow; an operator `--continue` is trusted to adopt.) Editing a task file or a `SKILL.md` is **not** adopted this way — those are frozen per task, so they need a fresh run. (`AGENTS.md`/`CLAUDE.md` are different: the agent reads them live, so an edit between runs is picked up automatically on the next run; a task may also edit them during a run — that is ordinary work, reported to the operator, not blocked.)
+
+Editing a flow **while a run is in flight** is a third case, and the one most likely to surprise you: it does not park the run and it does not take effect. Every node of a run reads the control plane the task froze at its start, so your edit reaches nothing in that run — the orchestrator notices the divergence, prints one warning naming the file, and carries on over the frozen copy. The divergence never stops the task, because the check cannot tell your edit from an agent rewriting a role prompt, and on a repository where flows get tuned several times a day that verdict would come down to whether you saved the file a minute before the freeze or a minute after. So: to fix the run you are watching, let it stop (or stop it) and resume with `--continue`, which adopts. Editing under it changes the next run only.
 
 ## Heuristics
 
@@ -44,6 +46,6 @@ A brand-new task always picks up the edited flow. To apply your edit to a **spec
 
 - Don't put `provider`/`model`/`reasoning` at a **task file's top level** — that is rejected outright (`unknown_top_level_field`). A per-node overlay under `nodes.<node-id>` _is_ accepted, but it is one run only and best-effort (an unsupported value is warned and silently skipped), so it is for a one-off experiment — never the place to record a durable decision. Tune the flow node for that.
 - Don't name a `provider` that is not in `agents.allowed`, or a `reasoning` value invalid for that provider — validation fails.
-- Don't give a Codex `workspace-write` node `network_access: true` — it is rejected; split external fetches into a `read-only` node.
+- Don't give a Codex `workspace-write` node `network_access: true` — it is rejected; split external fetches into a `read-only` node. That refusal belongs to strict isolation: under `security.strict_isolation: false` (advanced mode) the validator accepts the combination, because the mode has already granted every node both the write and the network.
 - Don't invent a `model` id; it is passed through unverified and will only fail at run time. Keep to models the provider actually serves.
-- Don't add full-access `extra_args` under `strict_isolation` — the forbidden-args scan rejects them.
+- Don't add full-access `extra_args` — the forbidden-args scan rejects them at any value of `strict_isolation`.

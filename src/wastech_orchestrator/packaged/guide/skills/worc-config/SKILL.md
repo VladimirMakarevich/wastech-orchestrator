@@ -31,10 +31,10 @@ Before drafting or changing any field, consult `reference.md` in the packaged co
    - which checks are mandatory for safe delivery;
    - whether Telegram should stay disabled.
 3. Start from the existing `.worc/config.yaml` when present. If there is no installed config yet, draft one in the packaged block order (`schema_version`, `orchestrator`, `repo`, `paths`, `agents`, `security`, `validation`, `checks`, `git`, `telegram`, `skills`, `supervisor`, `logging`, `memory`, `tools`, `prompt_audit`). The only thing a config **must** carry is `agents.providers` with exactly one `primary: true` — every other block, `schema_version` and `repo` and `security` included, takes its defaults when omitted, and a file carrying that one block alone loads and validates clean. So write the blocks this repository actually needs rather than a full skeleton of defaults.
-4. Keep the safe defaults unless the operator overrides them deliberately.
+4. Keep these unless the operator overrides them deliberately. Two of them are what `install` writes rather than what is safest — say which, so the operator is choosing rather than inheriting.
    - exactly one provider is `primary: true`, and it is listed in `agents.allowed` — both are hard validation rules, not preferences: zero or two primaries refuses the config outright;
-   - `strict_isolation: true`;
-   - `allow_git_evidence: false` unless a flow here audits delivery history;
+   - `strict_isolation`: `install` writes `false`, which **is** the advanced mode, not a milder sandbox — `true` is the fail-closed one and is what an omitted key means;
+   - `allow_git_evidence`: `install` writes `true`; it is inert beside `strict_isolation: false` and becomes a real grant the moment that is `true`, so turn it off then unless a flow here audits delivery history;
    - `auto_merge: false`;
    - no forbidden `extra_args`;
    - secrets stay in env vars, not YAML.
@@ -56,7 +56,7 @@ Before drafting or changing any field, consult `reference.md` in the packaged co
 ## What not to do
 
 - Do not put token values, chat ids, or passwords into the file.
-- Do not enable full-access runs casually.
+- Never write a `sandbox` key or a full-access `extra_args` selector: the first is an unknown key, the second is forbidden outright, so either one stops the config before it runs.
 - Do not turn on `auto_merge` just to save time.
 - Do not add providers that are not actually installed or intended for use.
 - Do not replace a working operator value unless the user asked for that exact change.

@@ -121,6 +121,6 @@ Offer to persist the actionable items as a backlog item under `docs/backlog/`, a
 - **Don't edit** prompts, config, flows, or code — analysis only. Recommend; don't apply.
 - **Don't leak secrets.** Artifacts and env are allowlisted by design, but if you spot a secret in a log, report the leak as a finding — never reproduce its value.
 - **Don't guess model ids or pricing** — confirm with the `claude-api` skill before recommending a model change.
-- **Don't violate the hard invariants** when proposing fixes (provider abstraction, orchestrator-only commit/push/PR, no per-model allowlist, the state machine). A recommendation that breaks `.agents/rules/` is not a valid finding.
+- **Don't violate the hard invariants** when proposing fixes (provider abstraction, the orchestrator-only publication mandate, no per-model allowlist, the state machine). A recommendation that breaks `.agents/rules/` is not a valid finding. Read it as a MANDATE, not as a mechanism: a finding that the mechanism does not hold — under `security.strict_isolation: false`, or on a host with no sandbox — is a valid finding, not a violation of this rule.
 - **Don't invent problems.** "This run was clean; the one worthwhile tweak is X" is a good result — say it plainly. Tie every finding to evidence.
 - **Don't conflate infra and prompt failures** — a crash/auth/transient error is an env/config finding, not a prompt one.

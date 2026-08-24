@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 
+from wastech_orchestrator.config.schema import SecurityConfig
 from wastech_orchestrator.install.detect import gh_auth_ok, git_version, has_gh
 
 _LOG = logging.getLogger(__name__)
@@ -78,7 +79,9 @@ def require_gh() -> None:
         )
 
 
-def warn_if_gh_logged_out(emit: Callable[[str], None] | None = None) -> None:
+def warn_if_gh_logged_out(
+    emit: Callable[[str], None] | None = None, security: SecurityConfig | None = None
+) -> None:
     """Emit a **non-blocking** advisory when ``gh`` is present but not authenticated.
 
     The soft auth layer on top of the hard :func:`require_gh` ``PATH`` gate: a logged-out ``gh``
@@ -89,11 +92,11 @@ def warn_if_gh_logged_out(emit: Callable[[str], None] | None = None) -> None:
     valid ``GH_TOKEN`` or a flaky probe must not stop a task. ``emit`` defaults to a WARNING log.
     """
     emit = emit if emit is not None else _LOG.warning
-    if has_gh() and gh_auth_ok() is False:
+    if has_gh() and gh_auth_ok(security) is False:
         emit(_GH_LOGGED_OUT_MESSAGE)
 
 
-def preflight_gh() -> tuple[bool, str]:
+def preflight_gh(security: SecurityConfig | None = None) -> tuple[bool, str]:
     """Return ``(ok, line)`` for the gh preflight report line.
 
     Hard-fails when ``gh`` is not on ``PATH``. Auth failure is non-blocking (mirrors
@@ -105,6 +108,6 @@ def preflight_gh() -> tuple[bool, str]:
             "gh: FAIL — not on PATH; install from https://cli.github.com/ "
             "or set git.create_pull_request: false"
         )
-    if gh_auth_ok() is False:
+    if gh_auth_ok(security) is False:
         return True, "gh: WARN — present but not logged in (run 'gh auth login')"
     return True, "gh: OK"

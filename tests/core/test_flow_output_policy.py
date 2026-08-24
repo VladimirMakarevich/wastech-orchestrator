@@ -33,7 +33,7 @@ from wastech_orchestrator.core.flow.output_policy import (
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import AgentNode, FlowDoc, PublishNode
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
-from wastech_orchestrator.git_manager import ChangedPath
+from wastech_orchestrator.git_manager import ChangedPath, PushOutcome
 from wastech_orchestrator.providers.base import AgentRunResult, ProviderId, RunStatus
 from wastech_orchestrator.routing.router import ResolvedRoute, RouteSource, StageOutcome
 from wastech_orchestrator.runtime_layout import ProviderWriteGuardPolicy
@@ -62,6 +62,16 @@ class _Router:
         return ResolvedRoute(
             node_id=node_id, primary=ProviderId.CODEX, fallback=None, source=RouteSource.CONFIG
         )
+
+    def route_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: Any = None, git_evidence: bool = False
+    ) -> bool:
+        # The real Router asks the adapters whether this attempt gets a shell. The double answers
+        # from the node's grant — a Claude-shaped answer — unless a test sets ``grants_shell`` to
+        # model a provider whose profile carries a shell on its own (Codex ``read-only``) or a host
+        # where it was dropped.
+        override = getattr(self, "grants_shell", None)
+        return git_evidence if override is None else bool(override)
 
     def run_stage(
         self, request: Any, route: ResolvedRoute, *, snapshot: Any = None
@@ -105,7 +115,7 @@ class _Git:
     def write_current_diff(self, task_id: str) -> str:
         return "/art/current.diff"
 
-    def changed_code_entries(self) -> tuple[ChangedPath, ...]:
+    def changed_code_entries(self, task_id: str = "task-1") -> tuple[ChangedPath, ...]:
         return self._changed
 
     def commit_code(self, task_id: str, message: str) -> str | None:
@@ -134,11 +144,25 @@ class _Git:
             tasks_dir=Path("/x/tasks"),
         )
 
-    def push(self, task_id: str, branch: str, **_: object) -> bool:
-        self.calls.append("push")
-        return True
+    def adopted_commit_count(self, task_id: str) -> int:
+        return 0
 
-    def create_pr(self, task_id: str, branch: str, *, title: str, body_path: str) -> str | None:
+    def adopt_foreign_commits(self, task_id: str, branch: str, **_: object) -> tuple[str, ...]:
+        return ()  # nothing of anyone else's on the branch: the ordinary case
+
+    def push(self, task_id: str, branch: str, **_: object) -> PushOutcome:
+        self.calls.append("push")
+        return PushOutcome(pushed=True, adopted_commits=())
+
+    def create_pr(
+        self,
+        task_id: str,
+        branch: str,
+        *,
+        title: str,
+        body_path: str,
+        notice: str | None = None,
+    ) -> str | None:
         self.calls.append("create_pr")
         return "url"
 

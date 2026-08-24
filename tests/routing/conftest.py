@@ -71,10 +71,23 @@ class FakeProvider:
     def run(self, request: AgentRunRequest) -> AgentRunResult:
         self.requests.append(request)
         if self._raises is not None:
+            # The real adapters build a complete failed result and write it as `result.json` before
+            # every raise, then hand it to the exception; the fake does the same so what the Router
+            # records for a raised attempt is what it records in production.
             raise ProviderError(
                 self._raises,
                 f"fake {self._raises.value}",
                 resets_at=self._raises_resets_at,
+                result=AgentRunResult(
+                    status=RunStatus.FAILED,
+                    provider=self.id,
+                    node_id=request.node_id,
+                    attempt=request.attempt,
+                    exit_code=1,
+                    started_at=_T0,
+                    finished_at=_T1,
+                    error=NormalizedError(self._raises, f"fake {self._raises.value}"),
+                ),
             )
         error = (
             NormalizedError(ErrorClass.TASK_FAILURE, "fake quality failure")

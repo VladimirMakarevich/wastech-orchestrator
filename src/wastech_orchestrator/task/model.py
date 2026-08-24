@@ -185,7 +185,7 @@ class NormalizedTask:
     # ``min(flow_policy, publish)``; a no-op on a flow with no PR-publishing node.
     publish: PublishScope | None = None
     # Tri-state opt-in to auto-merge (DANGER: bypasses human review). The task value wins outright
-    # (PRE.2): True requests it, False always opts out, None defers to config.git.auto_merge.
+    # True requests it, False always opts out, None defers to config.git.auto_merge.
     auto_merge: bool | None = None
     # Tri-state prompt-audit opt-in: True forces it for this task, False disables it, None defers to
     # the global config.prompt_audit. The task value always wins (no operator gate).

@@ -39,33 +39,6 @@ def test_never_overwrites_existing_leaf() -> None:
     assert added == []
 
 
-def _codex_after_upgrade(operator_codex: dict[str, object]) -> dict[str, object]:
-    template = {"agents": {"providers": {"codex": {"command": "codex"}}}}
-    operator = {"agents": {"providers": {"codex": {"command": "codex", **operator_codex}}}}
-    merged, _, _ = upgrade_config_mapping(template, operator)
-    codex = merged["agents"]["providers"]["codex"]
-    assert isinstance(codex, dict)
-    return codex
-
-
-def test_migrates_safe_codex_sandbox_to_permission_profile() -> None:
-    # A legacy safe `sandbox` folds into the neutral `permission_profile` and is dropped.
-    codex = _codex_after_upgrade({"sandbox": "read-only"})
-    assert "sandbox" not in codex
-    assert codex["permission_profile"] == "read-only"
-
-
-def test_keeps_danger_full_access_sandbox() -> None:
-    codex = _codex_after_upgrade({"sandbox": "danger-full-access"})
-    assert codex["sandbox"] == "danger-full-access"  # the full-access escape is preserved
-
-
-def test_explicit_permission_profile_wins_over_migrated_sandbox() -> None:
-    codex = _codex_after_upgrade({"sandbox": "read-only", "permission_profile": "workspace-write"})
-    assert "sandbox" not in codex
-    assert codex["permission_profile"] == "workspace-write"
-
-
 def test_preserves_operator_only_keys() -> None:
     template = {"agents": {"providers": {"claude": {"command": "claude"}}}}
     operator = {
@@ -85,7 +58,7 @@ def test_list_values_kept_verbatim() -> None:
 
 
 def test_removed_checks_keys_are_stripped() -> None:
-    # v15: the whole `checks.discovery` block and the flat `checks.commands` list are removed —
+    # The whole `checks.discovery` block and the flat `checks.commands` list are dead keys —
     # `upgrade-config` strips both (the operator authors `checks.command_sets` by hand).
     template = {"checks": {"command_sets": {}, "timeout_seconds": 7200}}
     operator = {
@@ -158,32 +131,34 @@ def test_upgrade_swaps_deletion_exempt_paths_for_trust_level() -> None:
     template = packaged_template_mapping()
     operator = {
         "schema_version": 24,
-        "security": {"strict_isolation": False, "deletion_approval_exempt_paths": ["**/*.md"]},
+        # `true` on purpose: the template ships `false`, so an operator value that differs from
+        # the template is the only one that can prove the merge preserved it.
+        "security": {"strict_isolation": True, "deletion_approval_exempt_paths": ["**/*.md"]},
     }
     merged, added, removed = upgrade_config_mapping(template, operator)
     assert "deletion_approval_exempt_paths" not in merged["security"]
     assert "security.deletion_approval_exempt_paths" in removed
     assert merged["security"]["trust_level"] == "auto"
     assert merged["security"]["protected_paths"] == []
-    assert merged["security"]["strict_isolation"] is False  # operator value preserved
+    assert merged["security"]["strict_isolation"] is True  # operator value preserved
     assert "security.trust_level" in added
     assert "security.protected_paths" in added
 
 
 def test_adds_paths_block_from_packaged_template() -> None:
-    # v17 add: an operator config predating `paths` gains the block (default tasks_dir) from the
+    # An operator config predating `paths` gains the block (default tasks_dir) from the
     # packaged template, while keeping its own repo customizations.
     template = packaged_template_mapping()
     operator = {"schema_version": 16, "repo": {"branch_prefix": "feat"}}
     merged, added, _ = upgrade_config_mapping(template, operator)
     assert merged["paths"]["tasks_dir"] == "tasks"
     assert merged["repo"]["branch_prefix"] == "feat"  # operator value preserved
-    # A config predating v17 has no `paths` block at all, so the whole block is added.
+    # A config predating the key has no `paths` block at all, so the whole block is added.
     assert "paths" in added
 
 
 def test_adds_orchestrator_queue_from_packaged_template() -> None:
-    # v18 add: an operator config predating the queue tag gains `orchestrator.queue` (default
+    # An operator config predating the queue tag gains `orchestrator.queue` (default
     # "default") from the packaged template, while keeping its own orchestrator customizations.
     template = packaged_template_mapping()
     operator = {"schema_version": 17, "orchestrator": {"poll_interval_seconds": 60}}
@@ -194,13 +169,13 @@ def test_adds_orchestrator_queue_from_packaged_template() -> None:
 
 
 def test_adds_logging_block_from_packaged_template() -> None:
-    # v23 add: an operator config predating the `logging` block gains it (default info/standard)
-    # from the packaged template, while keeping its own customizations.
+    # An operator config predating the `logging` block gains it (the shipped
+    # warning/standard) from the packaged template, while keeping its own customizations.
     template = packaged_template_mapping()
     operator = {"schema_version": 22, "prompt_audit": True}
     merged, added, _ = upgrade_config_mapping(template, operator)
     assert merged["logging"] == {
-        "level": "info",
+        "level": "warning",
         "artifacts": "standard",
         "clean_runs_on_success": True,
     }
@@ -209,7 +184,7 @@ def test_adds_logging_block_from_packaged_template() -> None:
 
 
 def test_adds_run_cleanup_key_into_an_existing_logging_block() -> None:
-    # v32 add: the new sub-key must reach a config that already HAS a `logging` block, or the switch
+    # The new sub-key must reach a config that already HAS a `logging` block, or the switch
     # is undiscoverable for every existing install (the loader defaults it either way, so this is
     # about the operator being able to see and flip it).
     template = packaged_template_mapping()
@@ -222,19 +197,19 @@ def test_adds_run_cleanup_key_into_an_existing_logging_block() -> None:
 
 
 def test_adds_memory_block_from_packaged_template() -> None:
-    # v24 add: an operator config predating the `memory` block gains it (enabled + bounded knobs)
-    # from the packaged template, while keeping its own customizations.
+    # An operator config predating the `memory` block gains it (the shipped switch +
+    # bounded knobs) from the packaged template, while keeping its own customizations.
     template = packaged_template_mapping()
     operator = {"schema_version": 23, "prompt_audit": True}
     merged, added, _ = upgrade_config_mapping(template, operator)
-    assert merged["memory"]["enabled"] is True
+    assert merged["memory"]["enabled"] is False
     assert merged["memory"]["promote_min_tasks"] == 2
     assert merged["prompt_audit"] is True  # operator value preserved
     assert "memory" in added
 
 
 def test_adds_supervisor_provider_from_packaged_template() -> None:
-    # v27 add: an operator supervisor block predating `provider` gains it from the packaged template
+    # An operator supervisor block predating `provider` gains it from the packaged template
     # (added under the existing block), while keeping its own role_file.
     template = packaged_template_mapping()
     operator = {"schema_version": 26, "supervisor": {"role_file": "roles/mine.md"}}
@@ -247,7 +222,7 @@ def test_adds_supervisor_provider_from_packaged_template() -> None:
 
 
 def test_v33_strips_flat_supervisor_model_and_adds_the_phase_blocks() -> None:
-    # v33 split one model/reasoning pair into three phase blocks. The flat keys are stripped (not
+    # One model/reasoning pair into three phase blocks. The flat keys are stripped (not
     # migrated: one value, two plausible homes) and reported, while the new blocks arrive from the
     # template — so the operator sees exactly what they have to re-declare.
     template = packaged_template_mapping()
@@ -265,7 +240,7 @@ def test_v33_strips_flat_supervisor_model_and_adds_the_phase_blocks() -> None:
 
 
 def test_strips_legacy_prompts_block() -> None:
-    # config v9 removed the whole `prompts` block; upgrade-config drops it from an operator config.
+    # The whole `prompts` block; upgrade-config drops it from an operator config.
     template = {"schema_version": CONFIG_SCHEMA_VERSION}
     operator = {
         "schema_version": 8,
@@ -278,7 +253,7 @@ def test_strips_legacy_prompts_block() -> None:
 
 
 def test_strips_legacy_skip_stages() -> None:
-    # config v10 removed the global `agents.skip_stages` list; upgrade-config drops it (per-task
+    # The global `agents.skip_stages` list; upgrade-config drops it (per-task
     # `nodes.enabled` is the surviving, task-level disable — not in config).
     template = {"schema_version": CONFIG_SCHEMA_VERSION, "agents": {"max_fix_cycles": 15}}
     operator = {
@@ -292,7 +267,7 @@ def test_strips_legacy_skip_stages() -> None:
 
 
 def test_strips_legacy_allow_review_skip() -> None:
-    # config v13 removed `agents.allow_review_skip` (per-task skip is by flow node id, operator owns
+    # `agents.allow_review_skip` (per-task skip is by flow node id, operator owns
     # which nodes are safe to disable); upgrade-config drops it from an operator config.
     template = {"schema_version": CONFIG_SCHEMA_VERSION, "agents": {"max_fix_cycles": 15}}
     operator = {
@@ -306,7 +281,7 @@ def test_strips_legacy_allow_review_skip() -> None:
 
 
 def test_strips_legacy_max_budget_usd() -> None:
-    # config v14 removed `agents.providers.<p>.max_budget_usd` (declared/parsed but read nowhere);
+    # `agents.providers.<p>.max_budget_usd` (declared/parsed but read nowhere);
     # upgrade-config drops it from both provider blocks, preserving every other operator value.
     template = {"schema_version": CONFIG_SCHEMA_VERSION, "agents": {"providers": {"claude": {}}}}
     operator = {
@@ -356,3 +331,20 @@ def test_an_operator_who_already_switched_the_layer_off_keeps_it_off() -> None:
     merged, added, _removed = upgrade_config_mapping(template, operator)
     assert merged["supervisor"]["enabled"] is False
     assert "supervisor.enabled" not in added
+
+
+def test_adds_extra_environment_from_packaged_template() -> None:
+    # A config predating the key gains `security.extra_environment` from the template with
+    # nothing else in the block disturbed — the operator's trimmed allowlist above all stays theirs.
+    template = packaged_template_mapping()
+    operator = {
+        "schema_version": 35,
+        # `true` where the template ships `false` — an operator value must survive the merge.
+        "security": {"allowed_environment": ["PATH", "HOME"], "strict_isolation": True},
+    }
+    merged, added, _ = upgrade_config_mapping(template, operator)
+    assert merged["security"]["extra_environment"] == {}
+    assert "security.extra_environment" in added
+    assert merged["security"]["allowed_environment"] == ["PATH", "HOME"]  # untouched
+    assert merged["security"]["strict_isolation"] is True  # untouched
+    assert merged["schema_version"] == CONFIG_SCHEMA_VERSION

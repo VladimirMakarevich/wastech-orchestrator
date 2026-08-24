@@ -16,7 +16,7 @@ from pathlib import Path
 import pytest
 
 from wastech_orchestrator import cli
-from wastech_orchestrator.config.schema import TelegramConfig
+from wastech_orchestrator.config.schema import SecurityConfig, TelegramConfig
 from wastech_orchestrator.env_file import load_env_file
 from wastech_orchestrator.notify.telegram import check_telegram_preflight
 from wastech_orchestrator.providers.redaction import is_sensitive_key
@@ -211,7 +211,14 @@ def test_loaded_secret_is_not_forwarded_to_children(tmp_path: Path) -> None:
 
     assert os.environ["MY_SERVICE_TOKEN"] == "supersecretvalue123"
     # The allowlist (which does not include it) still gates every child process.
-    child = build_child_env(("PATH", "HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"))
+    child = build_child_env(
+        SecurityConfig(
+            strict_isolation=True,
+            allowed_environment=("PATH", "HOME", "CODEX_HOME", "CLAUDE_CONFIG_DIR"),
+            denied_read_paths=(),
+            denied_commands=(),
+        )
+    )
     assert "MY_SERVICE_TOKEN" not in child
     # And it is a sensitive-named value, so the redaction net harvests it from os.environ.
     assert is_sensitive_key("MY_SERVICE_TOKEN")
