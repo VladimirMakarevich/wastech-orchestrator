@@ -94,10 +94,10 @@ def apply_output_artifact(
 
     A slot whose :attr:`_Slot.redact` is set is scrubbed on the way to disk — ``report`` and
     ``summary``. ``summary`` is the one that leaves the machine: it is read verbatim into the
-    pull-request body and committed as an audit artifact, and it used to be written raw, so an agent
-    could place arbitrary text — including a secret that had reached its own output — into a
-    published document without going near anything the sandbox guards. Advanced mode, where the
-    whole parent environment reaches the agent, only widens what could land there.
+    pull-request body and committed as an audit artifact. Written raw, it would let an agent place
+    arbitrary text — including a secret that had reached its own output — into a published document
+    without going near anything the sandbox guards. Advanced mode, where the whole parent
+    environment reaches the agent, only widens what could land there.
     """
     slot_name = node.output_artifact
     if slot_name is None:
@@ -218,10 +218,10 @@ def _produced_content(
 ) -> str:
     """The declared produced file's text, or ``""`` to fall back to the node's own message.
 
-    A node whose real product is a written document used to publish only its closing summary of it,
-    so the artifact stopped at the node and the next one worked from a pointer thinner than the
-    thing it pointed at. ``output_file`` names that document; here it is read back so the file
-    itself is what crosses the edge.
+    A node whose real product is a written document names it in ``output_file``, and here that file
+    is read back so the document itself is what crosses the edge. Publishing only the node's closing
+    summary of it would strand the artifact at the node and leave the next one working from a
+    pointer thinner than the thing it points at.
 
     Falls back (and says so, once, on the operator log) when the declared file did not appear, is
     not a regular file, is empty, or is not text: losing the channel entirely would be worse than

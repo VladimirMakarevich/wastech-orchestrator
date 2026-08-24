@@ -120,7 +120,7 @@ class ExtraProbes:
 
     ``write_guard_probes`` is ``(label, sentinel path)`` per Git-control / lifecycle root the
     profile declares write-denied — the product's central claim ("the agent cannot change
-    ``.git``"), which until now no probe on any provider tested. Built by
+    ``.git``"). Built by
     :func:`write_guard_probe_paths`, which decides *which* roots are worth a probe launch. Both the
     capability smoke and the per-attempt canary pass them; the other three fields are smoke-only.
     """
@@ -302,7 +302,7 @@ def build_canary_probes(
     Private reads (direct + shell-mediated, and — when *alias_probe* is a workspace symlink/hard
     link that resolves to the private file — through that alias) must be denied. *repo_probe*, when
     given, is the **positive control**: a workspace read that MUST succeed, so a broken probe
-    harness (every command failing) can no longer masquerade as "everything denied → enforcing".
+    harness (every command failing) cannot masquerade as "everything denied → enforcing".
     *repo_write_probe* proves the profile's write level (allowed for ``workspace-write``, denied for
     ``read-only``). The exchange, when a file is available, must be readable but not writable — and
     also serves as a positive control on the per-attempt path where no *repo_probe* is supplied.

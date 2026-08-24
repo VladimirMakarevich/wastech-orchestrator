@@ -404,10 +404,10 @@ class ProviderError(Exception):
         self.resets_at = resets_at
         # The failed attempt's own result, for the same reason and by the same route. The adapter
         # builds a complete one before every raise (it is what `result.json` on disk is written
-        # from), and it used to die with the stack frame: the Router recorded the attempt with
-        # ``result=None``, so the ledger row fell back to two identical clock reads at row-write
-        # time and the real interval — the only way to price a failing node — existed on disk and
-        # nowhere queryable. ``None`` still means what it always meant: no attempt result exists.
+        # from), and without this it would die with the stack frame: the Router would record the
+        # attempt with ``result=None``, the ledger row would fall back to two identical clock reads
+        # at row-write time, and the real interval — the only way to price a failing node — would
+        # exist on disk and nowhere queryable. ``None`` means no attempt result exists.
         self.result = result
 
     @property

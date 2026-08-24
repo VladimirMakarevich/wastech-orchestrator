@@ -124,12 +124,11 @@ def test_tool_surfaces_disabled(
 def test_the_extra_browser_surfaces_and_the_memory_store_are_disabled_too(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # Ам4-11, owner decision of 2026-08-20 on a live `codex features list` inventory: the deny is
-    # extended only where an ENABLED flag is a distinct surface that executes something or reaches
-    # data. An external browser and full CDP access reach the operator's own browser session, the
-    # in-app browser is a third name for the same class, and `memories` persists task content
-    # outside this orchestrator's redaction net — none of the four passes through the profiled
-    # shell, which is what the sandbox covers.
+    # Grounded in a live `codex features list` inventory: the deny is extended only where an ENABLED
+    # flag is a distinct surface that executes something or reaches data. An external browser and
+    # full CDP access reach the operator's own browser session, the in-app browser is a third name
+    # for the same class, and `memories` persists task content outside this orchestrator's redaction
+    # net — none of the four passes through the profiled shell, which is what the sandbox covers.
     argv = _argv(codex_config, make_request())
     disabled = {argv[i + 1] for i, tok in enumerate(argv[:-1]) if tok == "--disable"}
     assert {
@@ -222,7 +221,7 @@ def test_web_search_not_disabled_when_network_granted(
 
     Before this the two halves disagreed: ``web_search`` followed the grant while the profile pinned
     ``network.enabled = false``, so a node the flow put online had a web tool and an offline shell.
-    The pair is one decision now (ТA.8.1). The combination is legal for a ``read-only`` node;
+    The pair is one decision now. The combination is legal for a ``read-only`` node;
     ``workspace-write`` + network is refused by the flow validator outside the advanced mode, which
     is why that pairing is only ever built in the mode's own tests.
     """
@@ -234,7 +233,7 @@ def test_web_search_not_disabled_when_network_granted(
 def test_the_advanced_mode_is_online_for_a_node_that_was_granted_no_network(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    """ТA.8.1/ТA.8.4: in the mode BOTH surfaces open, whatever the flow granted.
+    """In the mode BOTH surfaces open, whatever the flow granted.
 
     Half a network is the failure mode worth its own test, because the two are enforced in different
     places: the profile's sandbox network is what a shell (``restore``, ``npm ci``) needs, while
@@ -534,11 +533,10 @@ def test_no_session_id_has_no_resume(
 def test_advanced_mode_hands_back_every_feature_surface_but_keeps_the_profile(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # Every name in the set was disabled unconditionally (all but `hooks`, which follows
-    # read-isolation), and the only other way to reach them was the full-access escape this product
-    # removed. Keeping them off in the one mode that exists to remove restrictions would turn a
-    # floor control into a plain loss of function — including the browser surfaces and the memory
-    # store the deny grew by in Ам4-11.
+    # Every name in the set is disabled unconditionally under strict isolation (all but `hooks`,
+    # which follows read-isolation). Keeping them off in the one mode that exists to remove
+    # restrictions would turn a floor control into a plain loss of function — including the browser
+    # surfaces and the memory store.
     argv = _argv(
         codex_config,
         make_request(working_directory="/clone"),

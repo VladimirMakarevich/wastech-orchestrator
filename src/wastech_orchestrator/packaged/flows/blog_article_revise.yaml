@@ -106,7 +106,7 @@ flow:
       # Language polish is a bounded pass, not fresh reasoning, so it runs at medium regardless of
       # the flow-wide default — less wall-time on the tail, no quality loss. It is a fresh session
       # (it gets the diff and the reviewer findings as artifacts), so it does NOT re-read revise's
-      # whole transcript — cheaper input. It no longer needs revise's model/provider; pin it to the
+      # whole transcript — cheaper input. It does not need revise's model/provider; pin it to the
       # same as revise only for voice consistency if you pin revise above.
       reasoning: medium
       # provider: codex

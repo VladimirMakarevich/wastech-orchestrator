@@ -51,7 +51,7 @@ _LOGGED_IN = AuthProbe(state=AuthState.LOGGED_IN, method="fake-method", detail="
 def test_task_entry_points_reject_a_config_without_path(
     command: tuple[str, ...], tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """AC0.1.1: every work-starting CLI path goes through validated config loading."""
+    """Every work-starting CLI path goes through validated config loading."""
     clone = tmp_path / "clone"
     clone.mkdir()
     text = build_and_validate(
@@ -447,7 +447,7 @@ def _with_allowed(config, *entries: str):
 def test_preflight_reports_what_each_prefix_pattern_matched_here(
     monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # AC0.3.2b / Т0.3.8. The width of a pattern is host-specific, so this is the only place it can
+    # The width of a pattern is host-specific, so this is the only place it can
     # be shown before it is used — including the zero-match case, which is otherwise
     # indistinguishable from one that worked, and the name the secret filter refused.
     for name in [k for k in os.environ if k.startswith(("DOTNET_", "NUGET_"))]:
@@ -493,7 +493,7 @@ def test_advanced_mode_pattern_report_names_its_git_only_scope(
 def test_preflight_is_silent_when_no_entry_is_a_pattern(
     monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # И-5: the fixture's allowlist holds plain names only, so preflight says nothing new.
+    # The fixture's allowlist holds plain names only, so preflight says nothing new.
     _patch_providers(monkeypatch, make_git_config(git_repo.clone))
     rc = cli.cmd_preflight(_args())
     out = capsys.readouterr().out
@@ -504,7 +504,7 @@ def test_preflight_is_silent_when_no_entry_is_a_pattern(
 def test_preflight_names_assigned_variables_without_their_values(
     monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # Т0.2.8: an operator reading preflight should see which variables every child process receives.
+    # An operator reading preflight should see which variables every child process receives.
     # NAMES only — the values are already in their config, and printing them would give a secret
     # that landed there against the guide's advice one more surface to leak from (a CI log).
     config = make_git_config(
@@ -684,9 +684,9 @@ def test_an_assigned_path_under_a_provider_home_is_ordinary(
     make_git_config,
     tmp_path: Path,
 ) -> None:
-    # Ам-5 Блок Б (owner decision 2026-08-24): the provider config homes left every protected set,
-    # so a toolchain cache assigned inside one is ordinary working state — no FAIL, no
-    # provider-home label. (Outside the clone it still gets the ordinary advisory treatment.)
+    # The provider config homes are in no protected set, so a toolchain cache assigned inside one is
+    # ordinary working state — no FAIL, no provider-home label. (Outside the clone it still gets the
+    # ordinary advisory treatment.)
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
@@ -803,9 +803,10 @@ def test_preflight_capability_smoke_unsupported_warns_with_fallback(
 def test_a_sole_provider_on_a_floorless_host_is_warned_about_by_name(
     monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # Ам1-6: making the host verdict advisory was justified by "a node can fall back to the other
+    # Making the host verdict advisory was justified by "a node can fall back to the other
     # provider" — a compensation that does not exist with one allowed provider. Under strict
-    # isolation the attempt is then refused mid-run and preflight used to say only `ready`.
+    # isolation the attempt is then refused mid-run, which is why preflight must say more than
+    # `ready` here.
     from wastech_orchestrator.providers import claude as claude_mod
 
     monkeypatch.setattr(
@@ -824,8 +825,8 @@ def test_a_sole_provider_on_a_floorless_host_is_warned_about_by_name(
 def test_an_undemonstrable_sandbox_with_no_fallback_fails_under_strict_isolation(
     monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # The unchanged half of the owner decision: under strict isolation the floor is the promise, so
-    # a sole provider that cannot demonstrate its sandbox stops the run before it starts.
+    # The strict half of the rule: under strict isolation the floor is the promise, so a sole
+    # provider that cannot demonstrate its sandbox stops the run before it starts.
     config = make_git_config(git_repo.clone)
     config = replace(config, agents=replace(config.agents, allowed=(ProviderId.CODEX,)))
     _patch_providers(
@@ -1048,7 +1049,7 @@ def test_telegram_test_rejects_disabled_config(
     assert "telegram.enabled is false" in capsys.readouterr().out
 
 
-# --- the gh --repo pin verdict (Пре2-3 / floor 4) -----------------------------------------------
+# --- the gh --repo pin verdict (floor 4) --------------------------------------------------------
 
 
 def test_preflight_reports_the_gh_repo_pin_it_will_use(
@@ -1095,7 +1096,7 @@ def test_an_unpinnable_repository_only_warns_when_no_pr_is_ever_opened(
     assert "preflight: ready" in out
 
 
-# --- The paid Claude isolation probe: a second, explicit opt-in (Пре-1.2) ----------------------
+# --- The paid Claude isolation probe: a second, explicit opt-in --------------------------------
 
 
 def test_the_paid_probe_is_not_run_without_its_flag(
@@ -1193,7 +1194,7 @@ def test_an_undemonstrated_paid_probe_warns_with_a_fallback(
     assert "WARN — isolation probe: NOT DEMONSTRATED" in out
 
 
-# --- the advanced mode's loud line and the pinned executables (ТA.6.1 / ТA.1.7) ------------------
+# --- the advanced mode's loud line and the pinned executables ------------------------------------
 
 
 def _mode(config):
@@ -1207,14 +1208,14 @@ def test_advanced_mode_is_announced_in_one_line(
     make_git_config,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """ТA.6.1, as amended 2026-08-24: the mode is never silent, and never a recital either.
+    """The mode is never silent, and never a recital either.
 
-    The report used to print six relaxation axes and all four floor levels — long enough that the
-    rest of the preflight scrolled past it, which is how a loud line stops being read. That text
-    lives in `guide/config/security.md` now; what has to survive here is that the mode is stated at
-    all, that it names the key that caused it, and that it points at where the floor is written
-    down. The absence assertions are the point of the test, not decoration: they are what stops the
-    recital growing back one axis at a time.
+    Printing six relaxation axes and all four floor levels here would be long enough that the rest
+    of the preflight scrolls past it, which is how a loud line stops being read. That text lives in
+    `guide/config/security.md`; what has to survive here is that the mode is stated at all, that it
+    names the key that caused it, and that it points at where the floor is written down. The
+    absence assertions are the point of the test, not decoration: they are what stops the recital
+    growing back one axis at a time.
     """
     _patch_providers(monkeypatch, _mode(make_git_config(git_repo.clone)))
     rc = cli.cmd_preflight(_args())
@@ -1249,7 +1250,7 @@ def test_read_isolation_off_is_announced_in_one_line(
 
     Two keys can produce it, and which one did is the only part an operator cannot re-derive from
     their own config — so that is the part the line carries. What read-isolation off does and does
-    not open used to follow in a paragraph; it is in the guide now.
+    not open is in the guide, not in this line.
     """
     _patch_providers(monkeypatch, _mode(make_git_config(git_repo.clone)))
     cli.cmd_preflight(_args())
@@ -1281,7 +1282,7 @@ def test_the_mode_warns_when_the_claude_env_scrub_variable_would_shrink_the_writ
     make_git_config,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Ам4-5: one variable in the operator's shell silently narrows the grant this report announces.
+    """One variable in the operator's shell silently narrows the grant this report announces.
 
     In the CLI's env-scrub branch the settings compiler filters a volume-wide ``allowWrite`` out by
     name, and in this mode the parent environment reaches the agent whole — so it takes no config
@@ -1340,7 +1341,7 @@ def test_the_windows_launch_gate_also_protects_git_in_advanced_mode(
     assert "allowed-environment: FAIL" in capsys.readouterr().out
 
 
-# --- provider-binary diagnostic lines (Ам-5 Т5.9) ------------------------------------------------
+# --- provider-binary diagnostic lines ------------------------------------------------------------
 
 
 def _which_table(table: dict[str, str]):
@@ -1350,7 +1351,7 @@ def _which_table(table: dict[str, str]):
 def test_provider_binary_line_says_the_binary_lies_inside_the_config_home(
     monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # The journey-18a layout: the launch path is a symlink whose real file lives INSIDE
+    # The standalone-package layout: the launch path is a symlink whose real file lives INSIDE
     # `$CODEX_HOME` — the one fact that explains why the same build behaves differently on two
     # hosts, and it must not require reading a failed attempt's stderr.
     codex_home = tmp_path / "codex-home"

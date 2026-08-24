@@ -122,8 +122,8 @@ class ChecksNodeRunner:
 
         The authoritative full log is already written privately by the CheckRunner; this copies the
         first failing command's log (redacted) into the exchange and points ``checks_path`` at it,
-        so the live ``fixing`` node receives ``{checks_path}`` with no restart. With no
-        exchange wired (a unit harness) it points at the private log (previously it stayed unset).
+        so the live ``fixing`` node receives ``{checks_path}`` with no restart. With no exchange
+        wired (a unit harness) it points at the private log instead of staying unset.
         """
         log = outcome.first_failure_log
         if log is None:
@@ -170,10 +170,11 @@ class ChecksNodeRunner:
     def _publish_citation_report(self, ctx: NodeContext, artifact: Path) -> None:
         """Publish the per-entry verdicts and point ``{checks_path}`` at them, on BOTH outcomes.
 
-        ``checks_path`` used to be set only by the command-profile failure path, so on a passing
-        citation check the report reached nobody — while the downstream verifier's prompt asserted a
-        guarantee based on it and could not audit that claim. The next evaluator now receives the
-        entry list, including the non-gating ``weak``/``uncheckable`` ones it is responsible for.
+        Set on a pass as well as on a failure: the downstream verifier's prompt asserts a guarantee
+        based on this report, so it must be able to audit that claim, and the next evaluator needs
+        the entry list including the non-gating ``weak``/``uncheckable`` ones it is responsible for.
+        Leaving it to the command-profile failure path alone would deliver the report to nobody
+        exactly when the check passed.
         """
         self._in.checks_path = publish_file(
             self._s.exchange_root,

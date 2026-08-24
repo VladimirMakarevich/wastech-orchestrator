@@ -290,7 +290,7 @@ def test_summary_slot_falls_back_to_final_message(tmp_path: Path) -> None:
 
 
 def test_summary_slot_is_redacted_because_it_becomes_the_pr_body(tmp_path: Path) -> None:
-    """ТA.7.4: a secret in the agent's final_message does not reach `summary.md`.
+    """A secret in the agent's final_message does not reach `summary.md`.
 
     This slot is the one agent-written artifact that leaves the machine — the orchestrator reads it
     verbatim into the pull-request body and commits it as an audit artifact, deliberately without a

@@ -1,19 +1,19 @@
 """The deterministic ``SupervisorPacket`` — the whole-task facts the finalize turn is grounded in.
 
-The supervisor's finalize turn used to be grounded in its own **warm session**: the session that had
-read the diff and accumulated per-step observations during the run. That made the summary depend on
-a live process (a revived task got a thinner one) and made the finalize call's input grow with every
-rework cycle, because the whole editing lineage was re-sent as input on each turn.
+The finalize turn is grounded in this packet — a small, bounded artifact assembled from state the
+run already persisted — rather than in the supervisor's own warm session, the one that read the diff
+and accumulated per-step observations during the run. Grounding it in that session would make the
+summary depend on a live process (a revived task gets a thinner one) and make the finalize call's
+input grow with every rework cycle, since the whole editing lineage is re-sent on each turn.
 
-This module replaces that with a small, bounded artifact assembled from state the run already
-persisted. Determinism is the contract (P0-D2): building the packet is a **pure function of
+Determinism is the contract: building the packet is a **pure function of
 ``state.db`` plus the task's artifacts** — no clock, no environment, no absolute paths, no reliance
 on filesystem traversal order. Steps come in ``node_runs.id`` order, paths inside are repo-relative
 POSIX (the provider's working directory *is* the repo), and the serialization is canonical
 (``sort_keys``), so two builds from the same state are byte-identical and a revive that re-executed
 nothing yields the same bytes.
 
-Bounded by construction (P0-D3): a packet is kilobytes, not the hundreds of kilobytes of history it
+Bounded by construction: a packet is kilobytes, not the hundreds of kilobytes of history it
 replaces. The full diff is inlined only while it is small — skipping it would force the model into
 an extra tool round, and every round re-sends the whole prompt as input, which costs more than the
 4 KB it saves.
@@ -38,7 +38,7 @@ from wastech_orchestrator.core.flow.recorder import StepFacts, collect_step_fact
 from wastech_orchestrator.providers.artifacts import exchange_node_run_dir, exchange_task_dir
 from wastech_orchestrator.state_store import CheckRunRow, EvaluationRow, NodeRunRow
 
-# --- Bounds (P0-D3) ------------------------------------------------------------------------------
+# --- Bounds --------------------------------------------------------------------------------------
 # Named constants, not config — nobody asked for a knob, and a packet whose size an operator can
 # raise stops being the bounded thing the finalize budget relies on.
 
@@ -46,7 +46,7 @@ from wastech_orchestrator.state_store import CheckRunRow, EvaluationRow, NodeRun
 #: diff stat + the path to the full artifact.
 _DIFF_INLINE_MAX = 4_000
 #: Longest per-step message. The SAME cap applies to the observation prompt's ``final_message``
-#: (:func:`bound_step_message`) — a chatty node used to inflate every observe turn without limit.
+#: (:func:`bound_step_message`), so a chatty node cannot inflate every observe turn without limit.
 _STEP_MESSAGE_MAX = 500
 #: Longest rendered observation digest; the oldest lines are dropped and the remainder is marked.
 _OBSERVATIONS_MAX = 8_000
@@ -66,7 +66,7 @@ def bound_step_message(text: str) -> str:
     """Truncate a node's own closing message to the recorded per-step cap, with an ellipsis.
 
     Shared by the packet's ``steps[].message`` and the per-step observation prompt so the cap is
-    stated once (P0-D3) rather than drifting between the two surfaces.
+    stated once rather than drifting between the two surfaces.
     """
     stripped = text.strip()
     if len(stripped) <= _STEP_MESSAGE_MAX:
@@ -163,7 +163,7 @@ def _exchange_relpath(
     """A repo-relative POSIX path to an existing exchange artifact, or ``None``.
 
     Repo-relative because the provider's working directory *is* the repository, and because an
-    absolute path inside the packet would make the bytes machine-dependent (decision P0-D2).
+    absolute path inside the packet would make the bytes machine-dependent.
     Only the exchange copy is ever named — it is the only copy the provider may read.
     """
     if not exchange_root:
@@ -354,7 +354,7 @@ def _checks(check_runs: Sequence[CheckRunRow]) -> dict[str, list[str]]:
 
     Every run is listed, including a command that failed and was later fixed: the packet is the
     run's record, and the finalize turn is expected to read the step order alongside it. This block
-    keeps "which checks passed" writable now that the ``checks`` node is no longer observed.
+    keeps "which checks passed" writable, since the ``checks`` node itself is not observed.
     """
     outcomes = split_check_runs(check_runs)
     return {

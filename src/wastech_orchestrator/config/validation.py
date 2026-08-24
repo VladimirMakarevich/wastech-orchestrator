@@ -51,7 +51,7 @@ def _check_extra_args(pid: ProviderId, args: tuple[str, ...], issues: list[str])
 def _check_global_primary(
     config: OrchestratorConfig, allowed: frozenset[ProviderId], issues: list[str]
 ) -> None:
-    """Exactly one configured provider must be the global primary, and it must be allowed (PRE.1).
+    """Exactly one configured provider must be the global primary, and it must be allowed.
 
     The global primary runs any flow node with no ``provider`` field and is the sole
     infrastructure-fallback target; the router relies on this invariant.
@@ -120,7 +120,7 @@ def validate_config(config: OrchestratorConfig) -> list[str]:
     agents = config.agents
     allowed = frozenset(agents.allowed)
 
-    # Provider routing: exactly one global primary, in agents.allowed (PRE.1 — node-based routing).
+    # Provider routing: exactly one global primary, in agents.allowed (routing is node-based).
     _check_global_primary(config, allowed, issues)
 
     # Watch poll interval: negative is meaningless; 0 means single-pass (no loop).

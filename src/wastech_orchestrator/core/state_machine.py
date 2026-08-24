@@ -7,7 +7,7 @@ atomically (State Store transaction).
 The lifecycle is generic: ``new -> validated -> preparing -> running -> (done | failed |
 manual_action_required)``. Progress *within* ``running`` — which flow node is executing, and the
 per-subtask loop of a decomposed task — is the ``current_node`` in ``node_runs`` and the
-``active_subtask`` counter, not a status. The orchestrator no longer carries per-stage statuses.
+``active_subtask`` counter, not a status — there are no per-stage statuses.
 """
 
 from __future__ import annotations

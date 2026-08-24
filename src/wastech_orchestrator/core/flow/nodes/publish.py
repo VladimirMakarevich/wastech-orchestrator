@@ -78,7 +78,7 @@ def _adoption_notice(branch: str | None, adopted: tuple[str, ...]) -> str | None
     """A PR-body line naming the commits publishing merged in, or ``None`` when there were none.
 
     The reported diff is measured from the base branch, so once foreign commits are in it the diff
-    no longer describes this task alone. A reviewer has to be told that in the PR itself.
+    covers more than this task. A reviewer has to be told that in the PR itself.
 
     Deliberately says "not recorded as pushed by this run" rather than "this orchestrator did not
     make": the fourth case is also reached when the remote probe could not answer during an earlier
@@ -224,8 +224,8 @@ class PublishNodeRunner:
         # The last chance to ask a human about a dangerous change, and for some flows the only
         # one: the gate measures from the last commit the orchestrator made, and any node with a
         # shell can commit — a `tool`, an `evaluator`, a read-only agent attempt — while those
-        # classes only warn by policy. A flow that ends with one of them (or has no writing node at
-        # all) used to reach this commit with content nobody had been asked about.
+        # classes only warn by policy. Without this, a flow that ends with one of them (or has no
+        # writing node at all) reaches this commit with content nobody has been asked about.
         self._require_dangerous_diff_approval(node, ctx)
         message = self._in.commit_message or f"feat({ctx.task_id}): publish"
         git.commit_code(ctx.task_id, message)

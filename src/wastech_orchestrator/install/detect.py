@@ -8,11 +8,11 @@ Everything here is **read-only** and operator-side. Git is launched through the 
 runner (:func:`~wastech_orchestrator.providers.process.run_process`) — an **argv list, never a shell
 string**, with a mandatory timeout — so the no-shell-interpolation invariant holds at every call
 site. These probes are trusted and network-free, but they are not exempt from the git environment
-policy: they used to run on the operator's full environment, which meant a shell ``GIT_DIR`` pointed
-them at another repository and a shell ``GH_REPO`` at another remote — on **every** CLI command, via
-``resolve_config_path``. They now use the same allowlist-plus-scrub environment as every other
-orchestrator-owned git process (:func:`~wastech_orchestrator.git_manager.build_helper_git_env`),
-with ``gh auth status`` alone widened by the two token names it exists to account for.
+policy. They use the same allowlist-plus-scrub environment as every other orchestrator-owned git
+process (:func:`~wastech_orchestrator.git_manager.build_helper_git_env`), with ``gh auth status``
+alone widened by the two token names it exists to account for. On the operator's full environment a
+shell ``GIT_DIR`` would point them at another repository and a shell ``GH_REPO`` at another remote —
+on **every** CLI command, since ``resolve_config_path`` runs them.
 """
 
 from __future__ import annotations

@@ -316,8 +316,8 @@ def test_observe_prompt_bounds_a_long_step_message(tmp_path: Path) -> None:
 
 
 def test_supervisor_observe_writes_rendered_prompt_when_registered(tmp_path: Path) -> None:
-    # A supervisor turn is now part of the audit trail: previously rendered-prompt.md / the
-    # prompt-audit JSON were never written for observe/finalize/handoff turns at all.
+    # A supervisor turn is part of the audit trail like any other: rendered-prompt.md and the
+    # prompt-audit JSON are written for observe/finalize/handoff turns too.
     registered: list[Any] = []
     router, store = FakeRouter(), _store(tmp_path)
     sup = _supervisor(
@@ -628,9 +628,9 @@ def test_the_floor_keeps_a_terse_but_complete_prose_summary(tmp_path: Path) -> N
 
 
 def test_supervisor_final_summary_written_matches_what_reached_disk(tmp_path: Path) -> None:
-    # `summary_written` used to be derived from the RAW turn output, before sanitize and before
-    # the floor, so the ledger claimed a summary for a run that wrote none — exactly the case an
-    # operator audits. It now states what actually landed.
+    # `summary_written` states what actually landed on disk. Derived from the RAW turn output —
+    # before sanitize and before the floor — it would claim a summary for a run that wrote none,
+    # which is exactly the case an operator audits.
     dump = '<summary></summary><follow_ups>[{"title":"x"}]</follow_ups>'  # sanitizes to nothing
     cases = ((dump, False), ("test", False), (_prose("Real synthesis."), True))
     # One store per case, under an index-named directory: the messages themselves carry `<`/`>`,
@@ -740,8 +740,8 @@ def test_finalize_runs_fresh_from_the_packet_even_with_a_live_session(tmp_path: 
 
 
 def test_finalize_packet_carries_the_observation_digest(tmp_path: Path) -> None:
-    # The digest that used to be inlined in the revive prompt is now a packet field, so the same
-    # material reaches the turn without being re-sent as prompt input.
+    # The observation digest is a packet field rather than prompt text, so the material reaches
+    # the turn without being re-sent as input on every revive.
     router, store = FakeRouter([_ok("s1", _prose("Synthesis."))]), _store(tmp_path)
     _record_step(store, 5, node="implementation", outcome="done", note="wired the parser")
     _record_step(store, 7, node="review", outcome="accept", note="tests cover the edge case")
@@ -795,7 +795,7 @@ def test_finalize_still_runs_when_the_packet_cannot_be_built(tmp_path: Path) -> 
     assert json.loads(final.findings_json)["packet_built"] is False
 
 
-# -- the SupervisorPacket itself (P0-D2 / P0-D3) -------------------------------
+# -- the SupervisorPacket itself -----------------------------------------------
 
 _DIFF = (
     "diff --git a/src/parser.py b/src/parser.py\n"
@@ -844,7 +844,7 @@ def _seed_diff(tmp_path: Path, text: str = _DIFF) -> None:
 
 
 def test_packet_is_a_pure_function_of_durable_state(tmp_path: Path) -> None:
-    # The reproducibility contract (P0-D2): two builds off the same state.db are byte-identical, so
+    # The reproducibility contract: two builds off the same state.db are byte-identical, so
     # the summary a revive synthesizes is grounded in exactly the same input as the first run's.
     store = _store(tmp_path)
     run_id = _run_row(store, "implementation", "agent", provider_used="claude")
@@ -964,7 +964,7 @@ def test_packet_splits_checks_by_result(tmp_path: Path) -> None:
 
 
 def test_packet_records_fallback_and_retry_facts(tmp_path: Path) -> None:
-    # Kept, not scrubbed (P0-D2): an attempt that landed on the other provider after two tries is
+    # Kept, not scrubbed: an attempt that landed on the other provider after two tries is
     # exactly the material a summary caveat is written from.
     store = _store(tmp_path)
     _run_row(
@@ -1064,7 +1064,7 @@ def test_packet_names_the_latest_evaluator_findings(tmp_path: Path) -> None:
 
 def test_packet_publication_redacts_and_keeps_a_private_copy(tmp_path: Path) -> None:
     # Publication goes through the exchange seam, which redacts on the way in, so the packet
-    # needs no redaction mechanism of its own — only the per-attempt secret literals (P0-D6).
+    # needs no redaction mechanism of its own — only the per-attempt secret literals.
     store = _store(tmp_path)
     run_id = _run_row(store, "implementation", "agent")
     _node_output(tmp_path, "implementation", run_id, "used token hunter2-secret to call the API")
@@ -1805,7 +1805,7 @@ def test_supervisor_unknown_nested_key_rejected(packaged_config_text: str) -> No
 def test_flat_supervisor_model_and_reasoning_are_rejected_by_name(
     packaged_config_text: str, key: str
 ) -> None:
-    # v33 removed the flat pair. Rejected fail-closed rather than tolerated, and the message names
+    # The flat pair is rejected fail-closed rather than tolerated, and the message names
     # the two places the value can go — the operator has to choose, because copying one value into
     # both would put the expensive model back on the cheap per-step notes.
     with pytest.raises(ConfigError) as exc:
@@ -2059,7 +2059,7 @@ def test_summary_md_carries_no_spend_telemetry(tmp_path: Path) -> None:
         assert token not in body
 
 
-# --- The layer's own attempt is bracketed like a graph node's (Пре1-2 / Пре3-9) ------------------
+# --- The layer's own attempt is bracketed like a graph node's ------------------------------------
 
 
 class _FakeSupervisorGit:
@@ -2089,7 +2089,7 @@ class _FakeSupervisorGit:
 
 
 def test_a_shell_bearing_supervisor_turn_carries_the_write_deny_roots(tmp_path: Path) -> None:
-    # П4.2 / Пре1-2: the layer is read-only by mandate, but the mandate is not a mechanism — Codex
+    # The layer is read-only by mandate, but the mandate is not a mechanism — Codex
     # runs commands on `read-only`, and in the advanced mode so does Claude. With the write guard on
     # the request the provider's pre-launch canary re-proves the `.git`/`.worc` denies around this
     # attempt too, which is what makes floor 1's "before every provider attempt" literally true.

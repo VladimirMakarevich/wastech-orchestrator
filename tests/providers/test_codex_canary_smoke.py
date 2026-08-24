@@ -197,7 +197,7 @@ def test_generated_profile_is_os_enforced(clone: Path, profile: str) -> None:
         f"{outcome.message} :: {outcome.evidence}"
     )
     # the private read (direct + shell) must be denied; the exchange readable but not writable;
-    # and the CLI binary itself executes under the shipped profile (Ам-5 live-probe #2).
+    # and the CLI binary itself executes under the shipped profile.
     verdicts = {e["probe"]: e["denied"] for e in outcome.evidence}
     assert verdicts["private-read-denied"] is True
     assert verdicts["private-shell-read-denied"] is True
@@ -231,12 +231,12 @@ def test_capability_smoke_passes_on_real_host(profile: str) -> None:
 def test_the_advanced_mode_profile_is_enforced_with_the_volume_wide_write_grant(
     profile: str,
 ) -> None:
-    """Ам-4, the half of its live probe that costs nothing: real sandbox, no model, mode profile.
+    """The half of the live probe that costs nothing: real sandbox, no model, mode profile.
 
-    The mode's profile grants ``write`` on the volume ROOT, and the question the phase opens is
-    whether the carve-outs survive being nested inside that grant. The capability smoke is the
+    The mode's profile grants ``write`` on the volume ROOT, and the open question is whether the
+    carve-outs survive being nested inside that grant. The capability smoke is the
     right instrument because it stands up real ``.git`` / hooks / ``tasks`` targets and probes each
-    one — a write that failed for want of a parent would otherwise read as an enforced deny (Пре-1).
+    one — a write that failed for want of a parent would otherwise read as an enforced deny.
     Codex can be asked directly, without a model, so on a host with the CLI this is evidence rather
     than an assumption.
 
@@ -288,12 +288,12 @@ def test_canary_detects_a_non_enforcing_profile(clone: Path) -> None:
 
 
 def test_exec_probe_detects_a_profile_that_denies_the_binary(clone: Path) -> None:
-    # The journey-18a incident, replayed live (Ам-5 Т5.7): the CLI is launched through a symlink
-    # whose target lives inside a denied tree — the standalone layout, rebuilt from symlinks next
-    # to the clone so the test bites whether or not the real codex lives under `$CODEX_HOME` on
-    # this host. The exec probe must classify the refusal as OUR configuration error, on the
-    # sandbox's real refusal output (on macOS that output carries seatbelt prose, the exact wording
-    # that used to reroute the verdict into a fallback). The enforcement is literal-path-based, so
+    # The CLI is launched through a symlink whose target lives inside a denied tree — the
+    # standalone package layout, rebuilt from symlinks next to the clone so the test bites whether
+    # or not the real codex lives under `$CODEX_HOME` on this host. The exec probe must classify
+    # the refusal as OUR configuration error, on the sandbox's real refusal output — on macOS that
+    # output carries seatbelt prose, which is the wording most likely to be misread as a host gap
+    # and rerouted into a fallback. The enforcement is literal-path-based, so
     # the fixture must NOT sit under the system temp root (codex always grants it) — the `clone`
     # fixture already lives under HOME for the same reason.
     fixture_root = clone.parent

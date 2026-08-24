@@ -2849,7 +2849,7 @@ def _logged_out_refusal(pid: ProviderId, auth: AuthProbe) -> str:
     provider is anyone's primary, so a host that only ever uses one CLI has to say so in the config
     rather than leaving a provider listed that no node can actually reach. And it names the
     environment allowlist because that list *replaces* its default — a host whose CLI resolves
-    credentials through a variable the allowlist no longer passes reports logged out while being
+    credentials through a variable the allowlist does not pass reports logged out while being
     logged in, and that failure looks identical to a real one.
     """
     return (
@@ -3085,12 +3085,12 @@ def _append_isolation_probe_lines(
     could not demonstrate the policy degrades like a capability gap. ``None`` means the provider
     offers no such probe — not a verdict, so nothing is printed.
 
-    In the advanced mode an undemonstrable probe is a warning even with no fallback provider (owner
-    decision 2026-08-20, applied identically in the per-attempt canary): the host class that answers
-    "cannot demonstrate" — native Windows without the elevated Codex backend — is exactly the one
-    the mode exists to keep working, and a preflight stop there made the mode unavailable on that
-    host while proving nothing. Under strict isolation the old rule stands: with no fallback to
-    cover the gap, an unprovable sandbox fails preflight.
+    In the advanced mode an undemonstrable probe is a warning even with no fallback provider, and
+    the per-attempt canary applies the same rule: the host class that answers "cannot demonstrate" —
+    native Windows without the elevated Codex backend — is exactly the one the mode exists to keep
+    working, so stopping preflight there makes the mode unavailable on that host while proving
+    nothing. Under strict isolation the stricter rule holds: with no fallback to cover the gap, an
+    unprovable sandbox fails preflight.
     """
     if report is None:
         return ok
@@ -3126,7 +3126,7 @@ def _provider_binary_lines(config: OrchestratorConfig, *, which: Which = shutil.
     the real file behind it after following symlinks, and whether that file falls inside the
     provider's own config home. The standalone-package layout is the one fact that explains why the
     same build behaves differently on two hosts — Codex keeps its binary inside ``$CODEX_HOME``
-    there — and learning it must not require reading a failed attempt's stderr (Т5.9). Diagnostic
+    there — and learning it must not require reading a failed attempt's stderr. Diagnostic
     only: no line is a verdict, and nothing here fails preflight. On Windows ``which`` may answer
     with a ``.cmd`` shim whose contents ``resolve()`` does not chase; the line then truthfully
     reports the shim, which is the file the OS executes.
@@ -3297,7 +3297,7 @@ def run_preflight(
                 advanced_mode=not config.security.strict_isolation,
             )
 
-    # Where each provider binary really lies (Т5.9): informational lines, never a verdict.
+    # Where each provider binary really lies: informational lines, never a verdict.
     lines.extend(_provider_binary_lines(config))
 
     reasons = check_isolation(config, ISOLATION_CHECKS)
@@ -3324,11 +3324,11 @@ def run_preflight(
     # without the work. The same text lands in the run log, from the same formatter.
     floor_gaps = describe_host_floor(config, HOST_FLOOR_CHECKS)
     lines.extend(f"isolation-floor: NONE — {gap}" for gap in floor_gaps)
-    # Ам1-6: the price of making that verdict advisory instead of fatal. Dropping the preflight stop
-    # was justified by "a node can still fall back to the other provider" — a compensation that does
-    # not exist when only one provider is allowed. Under strict isolation the attempt that needs a
-    # sandboxed shell is then refused mid-run with nothing to cover it, and preflight said `ready`.
-    # Still not a FAIL (the host verdict is advisory by decision), but said out loud here.
+    # The price of keeping that verdict advisory: "a node can still fall back to the other
+    # provider" is the compensation that makes it advisory, and it does not exist when only one
+    # provider is allowed. Under strict isolation the attempt that needs a sandboxed shell is then
+    # refused mid-run with nothing to cover it, after preflight said `ready`. Still not a FAIL — the
+    # host verdict stays advisory — but said out loud here.
     if floor_gaps and len(config.agents.allowed) == 1 and config.security.strict_isolation:
         lines.append(
             "isolation-floor: WARN — this host cannot enforce the write floor and "

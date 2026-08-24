@@ -46,8 +46,8 @@ Which = Callable[[str], str | None]
 #: Names to pin on every host. ``ps`` is POSIX-only; the Windows quiescence proof uses a Job Object
 #: and launches nothing. ``bwrap``/``socat`` are Linux-only and probe-only.
 #:
-#: ``worc`` is here because ТA.1.7 names the daemon launcher among the four classes to pin: it is
-#: the one path that hands the *next whole run* to whatever answers.
+#: ``worc`` is here because the daemon launcher is the one path that hands the *next whole run* to
+#: whatever answers.
 #: :func:`~wastech_orchestrator.cli_shell.daemon_argv` resolves it for the actual spawn (it also
 #: tries ``wastech-orchestrator`` and falls back to ``-m``, which no pin can express); this entry is
 #: what puts it under the drift check.

@@ -54,12 +54,11 @@ def test_newer_version_is_refused_on_both_open_paths(tmp_path: Path) -> None:
 
 
 def test_pre_v7_incompatible_shape_is_refused_not_stamped(tmp_path: Path) -> None:
-    # An older versioned database carries a now-incompatible shape (here the legacy
-    # `provider_attempts.stage_run_id`, before the v6 rename to `node_run_id`). Because the v5-v7
-    # changes are destructive and `_migrate` is additive-only, open() must refuse fail-closed — it
-    # must NOT stamp the current version onto the old shape (which previously passed the gate and
-    # then crashed on the first provider-attempt write). Greenfield: the fix is refusal, not a
-    # destructive migration.
+    # An older versioned database carries an incompatible shape (here `provider_attempts` with a
+    # `stage_run_id` column instead of `node_run_id`). Reshaping a table is beyond `_migrate`,
+    # which is additive-only, so open() must refuse fail-closed — stamping the current version onto
+    # the old shape passes the gate and then crashes on the first provider-attempt write. With no
+    # production data anywhere, refusal is the answer, not a destructive migration.
     db = tmp_path / "v6.db"
     conn = sqlite3.connect(str(db))
     conn.execute(

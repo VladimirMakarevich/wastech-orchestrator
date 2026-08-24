@@ -6,9 +6,9 @@ then renders it with PyYAML. ``build_and_validate`` round-trips the rendered tex
 loader and the semantic validator, so the installer can never emit a config that is structurally
 broken or contradictory.
 
-That posture is the **advanced mode** (``strict_isolation: false``) as of 2026-08-24, and it is
-written out key by key rather than left to a fallback: an operator reading their own file sees the
-relaxation, and the dataclass/loader defaults stay fail-closed for a config that omits the key.
+That posture is the **advanced mode** (``strict_isolation: false``), and it is written out key by
+key rather than left to a fallback: an operator reading their own file sees the relaxation, and the
+dataclass/loader defaults stay fail-closed for a config that omits the key.
 No secrets are ever written.
 """
 
@@ -84,7 +84,7 @@ def _provider_block(pid: ProviderId, *, primary: bool) -> dict[str, Any]:
     block["permission_profile"] = "workspace-write"
     block["extra_args"] = []
     if primary:
-        block["primary"] = True  # exactly one global primary (PRE.1)
+        block["primary"] = True  # exactly one global primary
     return block
 
 
@@ -139,8 +139,8 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             },
         },
         "security": {
-            # Advanced mode out of the box (operator decision of 2026-08-24): full freedom for the
-            # agent under the operator's responsibility, except the floor. The dataclass/loader
+            # Advanced mode out of the box: full freedom for the agent under the operator's
+            # responsibility, except the floor. The dataclass/loader
             # fallback stays `true`, so a config that OMITS this key is still fail-closed — only
             # what `install` writes is the relaxed posture, and it writes it visibly.
             "strict_isolation": False,
@@ -248,8 +248,9 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "artifacts": "standard",
             "clean_runs_on_success": True,
         },
-        # Persistent repo-scoped memory is off out of the box (operator decision of 2026-08-24),
-        # which matches the dataclass fallback. Set enabled: true for the store, the candidate
+        # Persistent repo-scoped memory is off out of the box, matching the dataclass fallback:
+        # its store is unaudited, so it is a conscious opt-in. Set enabled: true for the store, the
+        # candidate
         # delta and the memory packets. The tunable knobs default per the schema — the annotated
         # config.example.yaml installed alongside this file documents each one.
         "memory": {"enabled": False},

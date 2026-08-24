@@ -167,9 +167,9 @@ def test_evidence_records_paths_not_contents() -> None:
 
 
 def test_a_refused_cli_exec_is_a_configuration_error() -> None:
-    # Ам-5 Т5.7: the profile refusing to execute the provider's own binary is OUR break, not a host
-    # gap — apply_patch re-execs that binary as its fs sandbox helper, so every patch would fail
-    # the same way. Non-fallback, so the router cannot mask it by falling over to Claude.
+    # The profile refusing to execute the provider's own binary is OUR break, not a host gap —
+    # apply_patch re-execs that binary as its fs sandbox helper, so every patch would fail the same
+    # way. Non-fallback, so the router cannot mask it by falling over to Claude.
     outcome = _run(_seq_runner(_ALL_DENY + _EXCHANGE_OK + [(1, "operation not permitted")]))
     assert not outcome.ok
     assert outcome.error_class is ErrorClass.CONFIGURATION_ERROR
@@ -295,10 +295,10 @@ def test_windows_write_probe_redirects_with_a_bare_operator() -> None:
 def test_private_reads_are_expected_denied_with_no_read_isolation_knob() -> None:
     """The canary asserts the private deny unconditionally — direct, shell-mediated and via alias.
 
-    It used to flip these three to *allowed* whenever read-isolation was off, mirroring a profile
-    that downgraded the private set to ``read``. Both halves are gone, so the probe set no longer
-    has a configuration in which the orchestrator's own private home is expected to be readable, and
-    the canary now proves that deny on every run rather than on the non-default half of them.
+    Flipping these three to *allowed* when read-isolation is off would mirror a profile that
+    downgrades the private set to ``read`` — neither exists. There is no configuration in which the
+    orchestrator's own private home is expected to be readable, so the canary proves that deny on
+    every run rather than on the non-default half of them.
     """
     probes = {
         p.label: p.expect_denied
@@ -411,7 +411,7 @@ def test_capability_smoke_workspace_write_passes(tmp_path: Path) -> None:
 def test_capability_smoke_proves_the_profile_the_advanced_mode_will_actually_launch(
     tmp_path: Path,
 ) -> None:
-    """ТA.9.2: the smoke must not quietly prove a stricter profile than the one that runs.
+    """The smoke must not quietly prove a stricter profile than the one that runs.
 
     It generates its own profile rather than receiving one, so the operator's ``strict_isolation``
     has to reach it — otherwise in the advanced mode this check certifies a floor nobody runs under,
@@ -444,7 +444,7 @@ def test_capability_smoke_proves_the_profile_the_advanced_mode_will_actually_lau
 
 
 def test_capability_smoke_probes_the_git_control_roots_it_created(tmp_path: Path) -> None:
-    # Пре-1.2: the fixture stands up real `.git`, hooks and `tasks/` targets, so the smoke actually
+    # The fixture stands up real `.git`, hooks and `tasks/` targets, so the smoke actually
     # demonstrates the floor instead of inferring it from writes that failed for want of a parent.
     report = run_codex_capability_smoke(
         command="codex",
@@ -464,7 +464,7 @@ def test_capability_smoke_probes_the_git_control_roots_it_created(tmp_path: Path
 def test_capability_smoke_fails_when_a_git_control_write_lands(tmp_path: Path) -> None:
     # The same fixture with a profile whose deny rules are not in force: the write into `.git` goes
     # through and the smoke reports a policy failure (a non-fallback CONFIGURATION_ERROR upstream),
-    # which is the case that used to have no probe at all on either provider.
+    # which is the case no other probe on either provider covers.
     report = run_codex_capability_smoke(
         command="codex",
         home_dir=tmp_path,
@@ -508,9 +508,8 @@ def test_capability_smoke_reports_policy_leak(tmp_path: Path) -> None:
 
 
 def test_capability_smoke_reports_a_profile_that_blocks_the_cli_exec(tmp_path: Path) -> None:
-    # Ам-5 Т5.7 live-probe #2's deterministic half: `worc preflight` (which runs this smoke) now
-    # demonstrates the exec capability without a model call, and a profile that blocks it reports
-    # as policy-failed — never as an unsupported host.
+    # `worc preflight` (which runs this smoke) demonstrates the exec capability without a model
+    # call, and a profile that blocks it reports as policy-failed — never as an unsupported host.
     healthy = _smoke_runner(writable=True)
 
     def _exec_refused(argv: list[str], cwd: str, env: Mapping[str, str]) -> tuple[int, str]:
@@ -547,7 +546,7 @@ def test_capability_smoke_unsupported_when_sandbox_cannot_run(tmp_path: Path) ->
     assert report.status == CAPABILITY_UNSUPPORTED
 
 
-# --- write-guard probes (Пре-1 / AC1.1–AC1.4) -------------------------------------------------
+# --- write-guard probes -----------------------------------------------------------------------
 
 
 def _write_guard(tmp_path: Path, *, linked_worktree: bool = False) -> ProviderWriteGuardPolicy:
@@ -569,7 +568,7 @@ def _write_guard(tmp_path: Path, *, linked_worktree: bool = False) -> ProviderWr
 
 
 def test_every_declared_write_deny_root_is_probed_or_accounted_for(tmp_path: Path) -> None:
-    # AC1.1: `.git` immutability is the product's central claim and no probe tested it. Each
+    # `.git` immutability is the product's central claim and no probe tested it. Each
     # declared root now either gets its own probe or is explicitly collapsed into a probed ancestor
     # — the one thing it may never be is silently absent.
     guard = _write_guard(tmp_path)
@@ -589,7 +588,7 @@ def test_every_declared_write_deny_root_is_probed_or_accounted_for(tmp_path: Pat
 def test_a_linked_worktree_gets_distinguishable_gitdir_and_common_dir_probes(
     tmp_path: Path,
 ) -> None:
-    # AC1.2: a linked worktree's per-worktree gitdir and shared common dir are different
+    # A linked worktree's per-worktree gitdir and shared common dir are different
     # directories, and the Bash sandbox has a built-in linked-worktree `.git` write allowance to
     # override — so one probe covering "the .git" would pass while the other root stayed open.
     guard = _write_guard(tmp_path, linked_worktree=True)
@@ -603,7 +602,7 @@ def test_a_linked_worktree_gets_distinguishable_gitdir_and_common_dir_probes(
 
 
 def test_a_missing_root_is_reported_rather_than_probed(tmp_path: Path) -> None:
-    # AC1.4: writing into a directory that does not exist fails for want of a parent, and that
+    # Writing into a directory that does not exist fails for want of a parent, and that
     # failure is indistinguishable from an enforced deny. A root with no directory therefore yields
     # no probe at all — it is named as undemonstrable instead of quietly certified.
     guard = _write_guard(tmp_path)
@@ -622,7 +621,7 @@ def test_a_missing_root_is_reported_rather_than_probed(tmp_path: Path) -> None:
 def test_a_write_guard_probe_that_succeeds_is_a_leak_and_its_file_is_removed(
     tmp_path: Path,
 ) -> None:
-    # П1.3: an unexpected pass fails the attempt closed before the model — and the file the probe
+    # An unexpected pass fails the attempt closed before the model — and the file the probe
     # created inside the operator's `.git` is the orchestrator's litter, so it is removed.
     guard = _write_guard(tmp_path)
     targets = write_guard_probe_paths(guard.denied_write_paths)
@@ -689,7 +688,7 @@ def test_the_probe_count_grows_with_the_write_guard_roots(tmp_path: Path) -> Non
 
 
 def test_a_deny_that_covers_only_the_gitdir_fails_on_the_common_dir_probe(tmp_path: Path) -> None:
-    # AC1.2: in a linked worktree the per-worktree gitdir and the shared common dir are different
+    # In a linked worktree the per-worktree gitdir and the shared common dir are different
     # directories, and the sandboxes have a built-in linked-worktree `.git` allowance to override. A
     # profile that closed only one of them must fail on the other — one probe covering "the .git"
     # would have passed while the common dir stayed writable.

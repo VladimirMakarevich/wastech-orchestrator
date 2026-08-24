@@ -63,7 +63,7 @@ def test_preamble_is_a_pure_function_of_its_three_config_flags() -> None:
 
 
 def test_the_mode_paragraph_appears_only_in_the_mode_and_still_forbids_publishing() -> None:
-    """ТA.6.4: the mode gets its own paragraph, and it does not soften the two hard rules.
+    """The mode gets its own paragraph, and it does not soften the two hard rules.
 
     Advisory by design and labelled as such — but this is the configuration where the advisory layer
     is closest to being all there is, so the paragraph has to be explicit about which two rules
@@ -76,7 +76,7 @@ def test_the_mode_paragraph_appears_only_in_the_mode_and_still_forbids_publishin
     tail = on[len(off) :]
     assert "Do not publish anything" in tail
     assert f"`{CONTROL_HOME_DIRNAME}/`" in tail and "`.git/`" in tail
-    # Ам-4: with the network and credentials the CLI picks up by itself, "that is the orchestrator's
+    # With the network and credentials the CLI picks up by itself, "that is the orchestrator's
     # job" no longer implies WHERE — so the ban names any address and any route outright, and the
     # paragraph says what the run actually got rather than only what it must not do with it.
     assert "not to any other address" in tail and "by any route" in tail
@@ -84,7 +84,7 @@ def test_the_mode_paragraph_appears_only_in_the_mode_and_still_forbids_publishin
 
 
 def test_the_no_sandbox_paragraph_is_withheld_where_a_sandbox_exists() -> None:
-    """ТA.9.3: say "nothing enforces this" only where nothing does.
+    """Say "nothing enforces this" only where nothing does.
 
     Rendered on every run it would be false on most of them, and a block that overstates once is
     discounted from then on — which costs exactly the hosts where it is the only thing left.
@@ -112,7 +112,7 @@ def test_preamble_field_is_not_a_prompt_variable() -> None:
 
 
 def test_the_no_sandbox_paragraph_covers_the_nodes_that_only_read() -> None:
-    """ТA.9.3: the honest statement got wider when every node gained a shell.
+    """The honest statement got wider when every node gained a shell.
 
     Before this phase a read-only node had no shell on any host, so "nothing keeps a write out"
     was a statement about writers. It now applies to every node in the run, and a paragraph that

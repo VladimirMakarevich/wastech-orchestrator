@@ -1,10 +1,10 @@
 """Frozen control bundle — a per-task immutable snapshot of the effective control plane.
 
 The operator control plane (``<repo>/.worc`` = ``control_home``: the flow YAML, role/supervisor
-prompts, and ``tools/`` executables) lives under the provider working directory. Every consumer
-historically re-read it **live** on each call, so a workspace-write agent could rewrite a later role
-prompt or a tool executable mid-run and a *later* orchestrator node would then read/execute those
-provider-chosen bytes outside the provider sandbox with the orchestrator's own authority.
+prompts, and ``tools/`` executables) lives under the provider working directory. Re-reading it
+**live** on each call would let a workspace-write agent rewrite a later role prompt or a tool
+executable mid-run, and a *later* orchestrator node would then read/execute those provider-chosen
+bytes outside the provider sandbox with the orchestrator's own authority.
 
 At task start the orchestrator freezes the exact effective control inputs referenced by the task's
 flow into a private, immutable bundle under ``<private_home>/runs/control-bundles/<task-id>/`` and

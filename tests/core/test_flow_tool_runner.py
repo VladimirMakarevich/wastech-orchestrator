@@ -479,7 +479,7 @@ def test_tool_timeout_resolution_precedence(tmp_path: Path) -> None:
     assert fake3.calls[0]["timeout"] == 3600  # built-in fallback
 
 
-# -- Git-control bracket (П4.4) -----------------------------------------------
+# -- Git-control bracket ------------------------------------------------------
 
 
 class _FakeGit:

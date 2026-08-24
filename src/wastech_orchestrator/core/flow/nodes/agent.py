@@ -421,16 +421,16 @@ class AgentNodeRunner:
         meant to: what makes a working-tree write or ``.git`` drift possible is the shell, so keying
         on the profile alone would leave exactly that class unwatched. It keys on
         :meth:`_can_run_commands` rather than on the git-evidence grant for the same reason — the
-        grant is one way to arrive at a shell (Claude), while a Codex ``read-only`` node has had one
-        all along and was therefore watched by nothing. Both signals are *reported*, never acted
-        on — as is every node class's drift, since the workspace-write exception was withdrawn.
+        grant is one way to arrive at a shell (Claude), while a Codex ``read-only`` node has one
+        without asking and would otherwise be watched by nothing. Both signals are *reported*, never
+        acted on, the same as every other node class's drift.
 
         Snapshotting before rather than reading state once afterwards is what keeps an earlier
         writer's diff — or the orchestrator's own branch prep — from being blamed on this node in a
         flow that mixes the two profiles. One bracket spans every attempt of the node, so a HITL
         re-run is covered without accumulating anything. A workspace-write node is bracketed instead
         inside :meth:`_invoke`, per attempt, because only there is the comparison ahead of the
-        orchestrator's own `git`; the verdict has been the same for both since 2026-08-24.
+        orchestrator's own `git`; the verdict is the same for both.
         """
         git = self._s.git
         if git is None or self._is_workspace_write(node, ctx):
@@ -456,13 +456,13 @@ class AgentNodeRunner:
         change here — in the working tree or in Git control state — means that enforcement did not
         hold. Both are reported rather than acted on: the outcome stays ``done``, the run continues,
         and the operator gets a warning plus a ⚠️ trace from the post-node hook. No node class parks
-        on drift any more, so this is where every class's lands: ``attempt_drift`` carries what
+        on drift, so this is where every class's lands: ``attempt_drift`` carries what
         :meth:`_invoke`'s per-attempt bracket saw on a workspace-write node, which cannot be
         compared out here because the post-edit guard's own `git` has already run by then.
 
-        That is a real trade, and it is the one the operator decision of 2026-08-24 accepted: the
-        warning is the only thing standing between a poisoned hook and the orchestrator's next git
-        command, which is why it carries the drift's aspect-level summary and not just a flag.
+        That trade is deliberate, and it is why the warning carries the drift's aspect-level summary
+        rather than just a flag: it is the only thing standing between a poisoned hook and the
+        orchestrator's next git command.
 
         A read-only node's working-tree change is additionally never *consumed* — no diff is
         published and nothing downstream is handed it, since the post-edit guard stays off for such
@@ -587,15 +587,15 @@ class AgentNodeRunner:
         # The result is trusted (the quiescence barrier proved the provider tree empty inside the
         # adapter), so compare now — before `_apply_post_edit_guard`'s `git diff` touches the clone
         # and before any downstream node reads the exchange. Git control-state drift is REPORTED,
-        # never parked (operator decision, 2026-08-24): a moved `HEAD`, a moved task ref, a changed
-        # index or a branch that moved on `origin` is ordinary working state in the operator's own
-        # repository, of exactly the kind publishing already reuses rather than treats as evidence
-        # of foreign ownership — and parking on it discarded a finished node's work after the fact.
-        # The same decision covers the three aspects that are NOT ordinary work (`hooks`, `config`,
-        # `executables`): they are loud warnings too, and what that costs is stated in the shipped
-        # guide's floor rather than softened here. What still holds the change is the dangerous-diff
-        # gate, which measures from the last commit the orchestrator itself made — so whatever the
-        # drift committed is on the far side of that reference and a human is still asked about it.
+        # never parked: a moved `HEAD`, a moved task ref, a changed index or a branch that moved on
+        # `origin` is ordinary working state in the operator's own repository, of exactly the kind
+        # publishing reuses rather than treats as evidence of foreign ownership — and parking on it
+        # would discard a finished node's work after the fact. The three aspects that are NOT
+        # ordinary work (`hooks`, `config`, `executables`) are loud warnings on the same path, and
+        # what that costs is stated in the shipped guide's floor rather than softened here. What
+        # still holds the change is the dangerous-diff gate, which measures from the last commit the
+        # orchestrator itself made — so whatever the drift committed is on the far side of that
+        # reference and a human is still asked about it.
         # An exchange mutation is a different question and still parks: it is the agent editing its
         # own assignment, which no ordinary operator action looks like.
         drift: str | None = None

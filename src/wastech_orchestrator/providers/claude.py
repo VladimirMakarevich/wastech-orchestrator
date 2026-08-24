@@ -166,11 +166,10 @@ _GIT_EVIDENCE_VERBS: tuple[str, ...] = (
 # `TOOL_REGISTRY_READ_FROM_VERSION`, and that version is written down because it is what makes "how
 # far has this drifted" answerable: the CLI validates no tool name (``claude -p --tools
 # BogusToolXYZ`` behaves like a correct one) and offers no way to enumerate the set at run time.
-# What it DOES have — and what the earlier note here said it did not — is an explicit registry of
-# names inside the binary, readable offline. That is where the fourth editor (`MultiEdit`) came
-# from, and reading it is how the floor stopped being a list written from memory. A name added on
-# spec still denies nothing, so re-read the binary when the pinned version moves; the health probe
-# below turns that into a warning rather than a thing to remember.
+# What it DOES have is an explicit registry of names inside the binary, readable offline — that is
+# where these names come from, rather than from memory. A name invented on spec denies nothing, so
+# re-read the binary when the pinned version moves; the health probe below turns that into a warning
+# rather than a thing to remember.
 #
 # Advanced mode (``security.strict_isolation: false``) hands EVERY node a shell, ``read-only``
 # included. ``Bash`` and ``PowerShell`` are the two shells; the other three are the shell's own
@@ -187,14 +186,13 @@ _ADVANCED_MODE_TOOLS: tuple[str, ...] = (
 # FRICTION AND TELEMETRY — deliberately NOT part of the floor, and not to be read as one. A shell
 # walks around every one of these, so what they buy is a line in the log saying the agent tried.
 # Only the first is an honest ban on its merits: a headless run has nobody to answer a question, so
-# the node would hang and burn turns. The other three are kept because they cost nothing, but their
-# stated justifications no longer hold and saying so is part of the requirement: ``CronCreate`` and
-# ``RemoteTrigger`` were justified by the process-silence barrier, yet the right to write outside
-# the clone (``~/Library/LaunchAgents``, ``~/.config/systemd/user``, a shell rc file) buys the same
-# persistence with no tool at all; ``EnterWorktree`` was justified by a worktree's own gitdir
-# escaping the write guard, but that guard covers ``git_common_dir`` too — which IS the linked
-# worktree case — and ``git worktree add`` must write into the denied ``.git/worktrees/`` anyway.
-# Persistence is therefore NOT held by this mode, and the shipped guide says so outright.
+# the node would hang and burn turns. The other three are kept because they cost nothing, and it has
+# to be said plainly that none of them holds a boundary. ``CronCreate`` and ``RemoteTrigger`` do not
+# hold persistence: the right to write outside the clone (``~/Library/LaunchAgents``,
+# ``~/.config/systemd/user``, a shell rc file) buys the same persistence with no tool at all.
+# ``EnterWorktree`` does not hold the write guard either: that guard covers ``git_common_dir`` —
+# which IS the linked-worktree case — and ``git worktree add`` must write into the denied
+# ``.git/worktrees/`` anyway. Persistence is NOT held by this mode, and the shipped guide says so.
 _ADVANCED_MODE_FRICTION_DENIES: tuple[str, ...] = (
     "AskUserQuestion",
     "CronCreate",
@@ -220,7 +218,7 @@ def _effective_network_access(granted: bool, *, strict_isolation: bool) -> bool:
     """Whether this attempt reaches the network — the ONE place the formula lives.
 
     The flow's grant, OR the advanced mode, which hands every node the whole network whatever its
-    flow said (ТA.8.1). Both surfaces read it: the OS sandbox's ``allowedDomains`` and the built-in
+    flow said. Both surfaces read it: the OS sandbox's ``allowedDomains`` and the built-in
     web tools, which do NOT pass through that sandbox — so a single formula is what keeps them from
     disagreeing about whether this run is online.
     """
@@ -583,9 +581,10 @@ def _deny_read_tools_for(denied_read_paths: Sequence[str]) -> list[str]:
 def claude_config_home() -> Path:
     """The Claude Code config/credential home: ``$CLAUDE_CONFIG_DIR`` or the ``~/.claude`` default.
 
-    Resolved from the same environment the spawned child inherits. No deny is built from it (owner
-    decision 2026-08-24: the provider config homes left the deny set entirely); its consumer is the
-    ``worc preflight`` diagnostic that reports whether the provider binary lies inside this home.
+    Resolved from the same environment the spawned child inherits. No deny is built from it — a
+    provider's own config home is the operator's to protect, and a whole-home deny breaks a CLI
+    whose binary or helpers live inside it. Its consumer is the ``worc preflight`` diagnostic that
+    reports whether the provider binary lies inside this home.
 
     Raises ``RuntimeError`` when neither source answers — no ``CLAUDE_CONFIG_DIR`` and no resolvable
     home directory.
@@ -767,8 +766,8 @@ def build_sandbox_settings(
     pass through this sandbox at all.
     """
     internal = [_sandbox_path(p) for p in deny_policy.denied_paths]
-    # With read-isolation OFF the private set stays WRITE-denied (control plane immutable) but
-    # is no longer read-denied, so the sandboxed Bash may read it for native discovery. The env-file
+    # With read-isolation OFF the private set stays WRITE-denied (control plane immutable) but is
+    # not read-denied, so the sandboxed Bash may read it for native discovery. The env-file
     # ``credentials`` deny below is a targeted secret protection and is kept regardless.
     deny_read = [] if read_isolation_off else list(internal)
     deny_write = list(internal)
@@ -858,10 +857,10 @@ def _disallowed_tools(
 ) -> list[str]:
     """Assemble the whole ``--disallowedTools`` value for one attempt.
 
-    Split out of :func:`build_claude_argv` because in the advanced mode this list stops being one
-    input among several and becomes the entire tool-side boundary — everything the removed
-    ``--tools`` gate used to say implicitly now has to be said here, out loud, in one readable
-    place. Two categories live in it and must not be read as one: the path-scoped write denies
+    Split out of :func:`build_claude_argv` because in the advanced mode no tool allowlist reaches
+    the CLI at all, so this list is the entire tool-side boundary and every part of it has to be
+    said out loud, in one readable place. Two categories live in it and must not be read as one:
+    the path-scoped write denies
     (:func:`_write_deny_kinds`) are the floor a shell cannot walk around, because the CLI's own
     editing tools never pass through the OS sandbox; the command patterns and
     :data:`_ADVANCED_MODE_FRICTION_DENIES` are friction and telemetry.
@@ -870,22 +869,19 @@ def _disallowed_tools(
     """
     denied_tools = _deny_tools_for(denied_commands) + _deny_read_tools_for(denied_read_paths)
     if advanced_mode:
-        # Everything below is named because the existence gate no longer names it. The write tools
-        # are the floor for a node that is not meant to write; the friction set is not a floor and
-        # is documented as such. The web tools used to be denied here for a node whose flow granted
-        # no network — that was this list holding the network axis shut for one phase, until the
-        # phase that opens it deliberately. The mode is online for every node now, so nothing about
-        # the network is said here at all.
+        # With no allowlist to gate tool existence, everything that must not exist is named here.
+        # The write tools are the floor for a node that is not meant to write; the friction set is
+        # not a floor and is documented as such. Nothing about the network is said here: the mode
+        # is online for every node, whatever its flow granted.
         if profile == "read-only":
             denied_tools += list(_write_deny_kinds(advanced_mode=True))
         denied_tools += list(_ADVANCED_MODE_FRICTION_DENIES)
-    # The private set is Read+Write+Edit-denied at EVERY read-isolation setting. It used to become
-    # merely WRITE-denied when read-isolation was off — that is, on the shipped default — and since
-    # the resolved env-file is part of this set, the plain ``Read`` tool could open the
+    # The private set is Read+Write+Edit-denied at EVERY read-isolation setting: the resolved
+    # env-file is part of it, so anything less would let the plain ``Read`` tool open the
     # orchestrator's own ``.env``. Read-isolation relaxes native *discovery*, and discovery needs
-    # nothing from here: the provider's own config home carries no deny at all (owner decision
-    # 2026-08-24), and a project's instructions/settings are ordinary repository paths outside this
-    # set. The public ``denied_read_paths`` blacklist is unchanged.
+    # nothing from here — the provider's own config home carries no deny at all, and a project's
+    # instructions/settings are ordinary repository paths outside this set. The public
+    # ``denied_read_paths`` blacklist is unaffected either way.
     denied_tools += _internal_deny_tools(
         internal_deny_read_paths, ("Read", *_write_deny_kinds(advanced_mode=advanced_mode))
     )
@@ -942,8 +938,8 @@ def build_claude_argv(
 
     ``strict_isolation: false`` (the advanced mode) inverts the first half of that: **no**
     ``--tools`` is emitted, so every built-in tool exists and ``--disallowedTools`` becomes the sole
-    carrier of the floor. What it then has to name itself, because nothing else does any more: the
-    write tools for a ``read-only`` node and :data:`_ADVANCED_MODE_FRICTION_DENIES`. The mode is
+    carrier of the floor. What it then has to name itself, because nothing else does: the write
+    tools for a ``read-only`` node and :data:`_ADVANCED_MODE_FRICTION_DENIES`. The mode is
     also online for every node, so the web tools are auto-approved rather than denied there. With
     With the mode off nothing here applies: ``--tools`` is still the existence gate, the path
     denies still name the historical pair only, and no friction deny is emitted. That is what the
@@ -1565,12 +1561,12 @@ class ClaudeCodeProvider(BaseCliProvider):
         required = _REQUIRED_CLAUDE_FLAGS
         if not self._security.strict_isolation:
             # The advanced mode emits no existence gate, and preflight must not demand a flag the
-            # adapter never passes: a CLI that dropped ``--tools`` runs this configuration fine.
+            # adapter never passes: a CLI without ``--tools`` runs this configuration fine.
             # Everything the mode DOES depend on stays required, ``--disallowedTools`` above all.
             required = tuple(f for f in required if f != "--tools")
         if self._security.read_isolation_off:
-            # With read-isolation OFF the adapter no longer emits ``--strict-mcp-config`` (it
-            # runs native MCP discovery), so the CLI need not expose it. ``--setting-sources`` is
+            # With read-isolation OFF the adapter emits no ``--strict-mcp-config`` (it runs
+            # native MCP discovery), so the CLI need not expose it. ``--setting-sources`` is
             # still emitted (``project``) and the permission-mode / hard tool gate stay required.
             required = tuple(f for f in required if f != "--strict-mcp-config")
         missing = [flag for flag in required if flag not in help_text]
@@ -1683,13 +1679,12 @@ class ClaudeCodeProvider(BaseCliProvider):
         (:meth:`_record_paid_probe_evidence`): the per-path verdicts plus the model's last message,
         beside the report rather than inside a temporary tree.
 
-        It used to return ``None`` under ``strict_isolation: false`` as well, on the grounds that
-        there was no claim to prove. That is not true: the sandbox settings file is written whenever
-        the resolved tool set keeps a shell and the host can sandbox it, at either setting — so in
-        advanced mode the write-deny on ``.git`` and ``.worc`` is still asserted, and it is the only
-        part of the floor that does not depend on the agent cooperating. The same reasoning as the
-        Codex smoke above: the configuration that leans hardest on the profile is the last one to
-        excuse from proving it.
+        It runs under ``strict_isolation: false`` too, because there is a claim to prove there: the
+        sandbox settings file is written whenever the resolved tool set keeps a shell and the host
+        can sandbox it, at either setting — so in advanced mode the write-deny on ``.git`` and
+        ``.worc`` is still asserted, and it is the only part of the floor that does not depend on
+        the agent cooperating. The same reasoning as the Codex smoke above: the configuration that
+        leans hardest on the profile is the last one to excuse from proving it.
 
         In the mode it is also the ONLY instrument that can answer the open precedence question: the
         settings file it launches under carries the volume-wide ``allowWrite`` with the carve-outs

@@ -187,9 +187,9 @@ class EvaluatorNodeRunner:
         exchange_before = capture_exchange_manifest(self._s.exchange_root, ctx.task_id)
         # The same bracket the agent runner takes around an attempt that has a shell but no write
         # access: an evaluator is read-only by construction, yet whether it can run commands is the
-        # provider's answer, not ours — a Codex reviewer has a shell today. Reported, never
-        # parked, as every node class now is (operator decision, 2026-08-24). Skipped when the
-        # attempt has no shell, so no node pays for a check that cannot apply to it.
+        # provider's answer, not ours — a Codex reviewer has a shell. Reported, never parked, like
+        # every other node class. Skipped when the attempt has no shell, so no node pays for a check
+        # that cannot apply to it.
         control_before = self._control_before(has_shell, ctx.task_id)
         outcome = self._s.router.run_stage(request, route, snapshot=self._s.snapshot)
         raw_findings = (
@@ -291,8 +291,8 @@ class EvaluatorNodeRunner:
         findings: list[dict[str, Any]],
         summary: str | None,
     ) -> None:
-        # Per-run dir keyed by node.id + run_id: a second evaluator (e.g. test_quality) no longer
-        # clobbers review, and every pass of a fix→review loop keeps its own findings on disk.
+        # Per-run dir keyed by node.id + run_id, so a second evaluator (e.g. test_quality) cannot
+        # clobber review and every pass of a fix→review loop keeps its own findings on disk.
         run_dir = node_run_dir(self._s.artifacts_root, ctx.task_id, node.id, run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
         findings_path = run_dir / "findings.json"

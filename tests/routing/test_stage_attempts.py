@@ -187,10 +187,10 @@ def test_a_raised_attempt_carries_its_own_result_not_a_row_write_clock(
     make_request: Callable[..., AgentRunRequest],
 ) -> None:
     # The adapter builds a complete result for a failed attempt — it is what `result.json` on disk
-    # is written from — and it used to die with the stack frame: the Router recorded the attempt
-    # with `result=None`, and the ledger row then stamped two identical reads of the row-write
-    # clock. So the one thing an operator wants to know about a node failing over and over — what
-    # the failing attempt cost, and how long it burned first — was on disk and nowhere queryable.
+    # is written from — and it must not die with the stack frame. If the Router records the attempt
+    # with `result=None`, the ledger row stamps two identical reads of the row-write clock, and the
+    # one thing an operator wants to know about a node failing over and over — what the failing
+    # attempt cost, and how long it burned first — is on disk and nowhere queryable.
     primary = make_fake_provider(ProviderId.CODEX, raises=ErrorClass.PERMISSION_DENIED)
     fallback = make_fake_provider(ProviderId.CLAUDE)
     router = _router(config, primary, fallback)

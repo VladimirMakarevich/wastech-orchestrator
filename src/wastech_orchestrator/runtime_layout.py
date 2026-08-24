@@ -1,8 +1,8 @@
 """Canonical runtime directory layout — the one seam that names the orchestrator's roots.
 
-The orchestrator writes to three distinct on-disk surfaces that historically all lived under a
-single ``<repo>/.worc`` literal reconstructed independently across the CLI, Core, memory, Git,
-output-policy, and process-control paths:
+The orchestrator writes to three distinct on-disk surfaces, all under ``<repo>/.worc``. They are
+named here once so the CLI, Core, memory, Git, output-policy, and process-control paths resolve them
+from a single seam instead of each reconstructing the literal:
 
 * **control_home** — the discoverable operator control plane (``config.yaml``, ``guide/``,
   ``flows/``, ``tools/``, install metadata). Editable by the operator, resolved by config discovery.
@@ -130,10 +130,9 @@ class InternalDenyPolicy:
     ``security.denied_read_paths`` config list (which also drives redaction and skill scanning). It
     names the roots and secret sources the agent must not read: the control home, the private home,
     the resolved default/explicit ``--env-file`` (which may live outside ``private_home``), and the
-    per-task runtime root. The provider CLIs' own config homes are deliberately NOT here (owner
-    decision 2026-08-24): denying them broke the providers' own machinery — Codex re-execs its
-    binary from inside ``$CODEX_HOME`` on standalone installs — and they are the operator's, not
-    the orchestrator's, to protect.
+    per-task runtime root. The provider CLIs' own config homes are deliberately NOT here: denying
+    them breaks the providers' own machinery — Codex re-execs its binary from inside ``$CODEX_HOME``
+    on standalone installs — and they are the operator's, not the orchestrator's, to protect.
 
     ``runs_home`` is the parent of every per-task private root: the frozen control snapshot, the
     frozen agent inputs (canonical task packet, skill packages, root repository instruction files),

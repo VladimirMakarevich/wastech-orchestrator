@@ -434,7 +434,7 @@ def test_threat_node_full_access_is_always_rejected(
     # A target repository authors the flow, so a node's extra_args is the one full-access surface an
     # operator never reviews. The rejection sits in the config-FREE ceiling layer, and that is what
     # no config key can unlock — so the resolution path is driven with both values of the key that
-    # used to be exactly that unlock, rather than the claim being argued from the signature.
+    # comes closest to being such an unlock, rather than the claim being argued from the signature.
     flows_dir = tmp_path / "flows"
     flows_dir.mkdir()
     (flows_dir / "t.yaml").write_text(_flow(extra=extra))

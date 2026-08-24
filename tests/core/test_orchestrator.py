@@ -930,7 +930,7 @@ def test_supervisor_layer_costs_one_call_on_a_clean_run_and_still_writes_the_sum
     assert any(r["kind"] == "in_flow_verdict" and r["node_id"] == "review" for r in rows)
     # The summary is always written (no config.summary_enabled gate) and committed as the PR body.
     assert (task_artifact_dir(art, "task-sup") / "summary.md").exists()
-    # There is no summary graph node anymore — the layer owns it.
+    # There is no summary graph node — the layer owns it.
     assert "summary" not in _ran_nodes(store, "task-sup")
     # That one call is labelled with the job it did, so the layer's spend is readable per phase and
     # not as one lump; a graph node's attempts stay unlabelled and out of the layer's report.
@@ -1303,8 +1303,8 @@ def test_an_observed_step_carries_the_evaluator_findings_not_just_the_label(
 def test_supervisor_turns_write_rendered_prompt_and_prompt_audit(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    """The supervisor's own turns are now part of the audit trail: previously rendered-prompt.md
-    and the prompt-audit JSON/timeline were never written for observe/finalize turns at all."""
+    """The supervisor's own turns are part of the audit trail: rendered-prompt.md and the
+    prompt-audit JSON/timeline are written for observe/finalize turns too."""
     providers = _both()
     orch, _, _, art = _build(
         git_repo,
@@ -1428,7 +1428,7 @@ def test_supervisor_summary_once_per_whole_task_not_subtask(
 
 
 def test_live_route_defaults_to_global_primary(git_repo, make_git_config, tmp_path: Path) -> None:
-    # Routing is node-based now (PRE.1): the packaged implementation flow declares no per-node
+    # Routing is node-based now: the packaged implementation flow declares no per-node
     # `provider`, so every node resolves to the config's global primary (claude) on the live engine
     # path, tagged RouteSource.CONFIG. A task can no longer repoint a stage's provider.
     providers = _both()
@@ -1474,7 +1474,7 @@ def test_vague_task_runs_refinement(git_repo, make_git_config, tmp_path: Path) -
 
     result = orch.run_task(str(path))
     assert result.final_status is Status.DONE
-    # No acceptance criteria → needs_enrichment → refinement node ran (deterministic, PRE.3).
+    # No acceptance criteria → needs_enrichment → refinement node ran (deterministic).
     assert "refinement" in _ran_nodes(store, "task-002")
     assert (art / "logs" / "task-002" / "task.enriched.md").exists()
 
@@ -1900,11 +1900,11 @@ def test_live_control_plane_edit_during_run_warns_once_and_runs_on_the_frozen_co
 ) -> None:
     # A live control file rewritten mid-run (here the flow YAML) is caught by the post-node compare,
     # but the compare cannot say whose hand did it — and on a repository whose operator edits flows
-    # daily it is usually theirs. So it warns and the run continues (owner decision, 2026-08-24).
-    # Nothing is lost by continuing, which is the whole point of freezing: every node runs on the
-    # frozen bundle, so the edit cannot select control bytes for a downstream node either way. It
-    # takes effect from the next run, or from a `rerun --continue`, which adopts it deliberately.
-    # The warning names the diverged key and is printed once per run, not once per remaining node.
+    # daily it is usually theirs. So it warns and the run continues. Nothing is lost by continuing,
+    # which is the whole point of freezing: every node runs on the frozen bundle, so the edit cannot
+    # select control bytes for a downstream node either way. It takes effect from the next run, or
+    # from a `rerun --continue`, which adopts it deliberately. The warning names the diverged key
+    # and is printed once per run, not once per remaining node.
     providers = _both()
     orch, store, ledger, _ = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
@@ -2715,7 +2715,7 @@ def _collected_warnings(level: int = logging.WARNING) -> Iterator[list[str]]:
 def test_environment_patterns_are_announced_once_per_run(
     git_repo, make_git_config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC0.3.2 (run half): the pattern expansion reaches the run log ONCE, not per child process.
+    """2 (run half): the pattern expansion reaches the run log ONCE, not per child process.
 
     The run builds a child environment many times over — every agent turn, every check command,
     every git invocation — so the announcement deliberately does not live in the builder. It fires
@@ -2749,7 +2749,7 @@ def test_environment_patterns_are_announced_once_per_run(
 def test_clean_environment_pattern_expansion_is_announced_at_info(
     git_repo, make_git_config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """AC0.3.2: the ordinary, no-secret pattern branch is observable in the run log."""
+    """The ordinary, no-secret pattern branch is observable in the run log."""
     monkeypatch.setenv("DOTNET_ROOT", "/opt/dotnet")
     orch, _store, _ledger, _art = _build(
         git_repo,
@@ -2835,7 +2835,7 @@ def test_a_failed_assigned_cache_exclude_warns_without_stopping_the_task(
 def test_a_config_without_patterns_announces_nothing(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # И-5: no pattern, no line. The announcement reports what is in effect, and the plain-name case
+    # No pattern, no line. The announcement reports what is in effect, and the plain-name case
     # is the one every existing config is in.
     orch, _store, _ledger, _art = _build(
         git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
@@ -2874,9 +2874,9 @@ def test_degraded_summary_is_loud_on_done_path(git_repo, make_git_config, tmp_pa
     summary = (art / "logs" / "task-degraded" / "summary.md").read_text(encoding="utf-8")
     assert "Fallback summary" in summary  # visible degradation callout in the PR body
     assert any("summary degraded to deterministic fallback" in m for m in messages)
-    # The p0-2 hole, closed: a finding the gate let past used to land in summary.json and vanish
-    # from the PR body on exactly this path, because the derivation lived inside the turn that
-    # failed. It is deterministic, so it survives the failure.
+    # A finding the gate let past must not land in summary.json and vanish from the PR body on
+    # this path. It would, if the derivation lived inside the turn that failed; it is deterministic
+    # instead, so it survives the failure.
     assert "## Technical debt / follow-ups" in summary
     assert finding_text in summary
 
@@ -3520,7 +3520,7 @@ def test_advanced_mode_is_announced_in_the_run_log_and_recorded_durably(
     make_git_config,
     tmp_path: Path,
 ) -> None:
-    """ТA.6.2/ТA.6.3: the mode reaches the run log, the ledger record and the frozen bundle.
+    """The mode reaches the run log, the ledger record and the frozen bundle.
 
     Three carriers, one question, and they do not overlap by accident. The log line is the same text
     preflight prints, from the same formatter, so a run cannot describe itself differently from the
@@ -3547,9 +3547,9 @@ def test_advanced_mode_is_announced_in_the_run_log_and_recorded_durably(
     assert result.final_status is not Status.FAILED  # announced, never refused
     assert any("advanced-mode: ON (security.strict_isolation=false)" in m for m in messages)
     assert any("guide/config/security.md" in m for m in messages)
-    # One line, not the recital this used to be (2026-08-24). The floor levels and the relaxation
-    # axes live in the guide now; asserting their absence is what keeps the posture block from
-    # growing back into the thing that buried the run it introduces.
+    # One line, not a recital. The floor levels and the relaxation axes live in the guide;
+    # asserting their absence is what keeps the posture block from growing into something that
+    # buries the run it introduces.
     assert not any("floor 3 of 4" in m for m in messages)
     assert not any("EVERY node gets a shell" in m for m in messages)
     assert not any("EVERY node reaches the whole network" in m for m in messages)
@@ -3574,7 +3574,7 @@ def test_a_default_run_carries_the_mode_marker_as_false(
 def test_config_legality_is_checked_even_with_strict_isolation_off(
     monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:
-    """ТA.9.1: `check_isolation` no longer skips when `strict_isolation` is false.
+    """`check_isolation` no longer skips when `strict_isolation` is false.
 
     What is left of that check after the host half moved out is "is this provider configuration
     legal?" — pure, host-independent, and nothing a configuration value earns an exemption from.
@@ -4008,13 +4008,10 @@ def test_dangerous_diff_requires_approval(
 def test_an_agent_self_commit_on_a_writing_node_is_still_put_to_the_gate(
     git_repo, make_git_config, tmp_path: Path, git_run
 ) -> None:
-    # The guarantee that has to hold now that the park is gone, and the test the phase called
-    # mandatory. Until 2026-08-24 an agent committing its own work inside a writing attempt hit the
-    # git-control fingerprint and the task died before the gate ran, which is why Пре-3 could only
-    # prove this on the classes that warned. It is now the primary path: the writing node commits,
-    # the run carries on, and the deletion inside that commit still has to be approved by a human —
-    # because the gate measures from the last commit the orchestrator itself made, never from
-    # `HEAD`, so a commit made inside the task cannot empty it.
+    # The guarantee that carries the whole never-park rule on the writing class: the node commits
+    # its own work, the run carries on, and the deletion inside that commit still has to be
+    # approved by a human — because the gate measures from the last commit the orchestrator itself
+    # made, never from `HEAD`, so a commit made inside the task cannot empty it.
     class SelfCommittingProvider(FakeProvider):
         def run(self, request: AgentRunRequest) -> AgentRunResult:
             if request.node_id == "implementation":
@@ -4274,10 +4271,9 @@ def _merge_gh(
 def test_an_operator_commit_inside_a_writing_node_reaches_publication(
     git_repo, make_git_config, tmp_path: Path, package_log_text, git_run
 ) -> None:
-    # The run this whole phase came out of, reproduced. The operator commits an unrelated file in
-    # their own repository while the writing node is working; the fingerprint sees `HEAD` and the
-    # task ref move; and the task used to die of it — after the node had already finished its work,
-    # which was then thrown away. Now it warns and publishes.
+    # The everyday case, reproduced: the operator commits an unrelated file in their own
+    # repository while the writing node is working, so the fingerprint sees `HEAD` and the task ref
+    # move. Parking there would throw away a node's finished work; it warns and publishes instead.
     #
     # The three things that have to be true for that to be safe, all asserted below: the node's own
     # work is still committed (`commit_code` did not degrade to the adoption arm, which is what a
@@ -4380,7 +4376,7 @@ def test_auto_merge_resolution_matrix(git_repo, make_git_config, tmp_path: Path)
         task = NormalizedTask(id="t", title="T", description="d", auto_merge=task_am)
         return orch._auto_merge_on(task)
 
-    # The per-task value wins outright (PRE.2), in every config combination.
+    # The per-task value wins outright, in every config combination.
     for cfg_am in (True, False):
         assert eff(False, cfg_am) is False
         assert eff(True, cfg_am) is True
@@ -4430,7 +4426,7 @@ def test_no_auto_merge_leaves_pr_open(git_repo, make_git_config, tmp_path: Path)
 
 
 def test_per_task_true_wins_over_global_false(git_repo, make_git_config, tmp_path: Path) -> None:
-    # PRE.2: a per-task ``auto_merge: true`` wins outright over the instance default ``false``;
+    # A per-task ``auto_merge: true`` wins outright over the instance default ``false``;
     # there is no operator gate — auto-merge is a publishing-policy call owned by the task author,
     # the same trusted party as the config, not something the orchestrator second-guesses.
     providers = _both()
@@ -4915,7 +4911,7 @@ def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path
         assert rec["agents"] and rec["agents"][0]["status"] == "succeeded"
         assert "route_primary" in rec and "provider_used" in rec
 
-    # Who-metadata is correct: every node defaults to the global primary (claude) now (PRE.1).
+    # Who-metadata is correct: every node defaults to the global primary (claude) now.
     review = next(r for r in timeline if r["node_id"] == "review")
     assert review["provider_used"] == "claude"
     assert review["agents"][0]["provider"] == "claude"
@@ -5728,10 +5724,10 @@ def test_containment_unverified_on_evaluator_marks_unsafe_and_skips_seal(
 def test_leftover_exchange_entry_is_cleared_and_named_not_parked(
     git_repo, make_git_config, tmp_path: Path, package_log_text
 ) -> None:
-    # A prior task's directory left in the exchange root — a run interrupted before its seal — used
-    # to stop the next task before any provider launched. It is not evidence of anything: the
+    # A prior task's directory left in the exchange root — a run interrupted before its seal — must
+    # not stop the next task before any provider launches. It is not evidence of anything: the
     # directory is private, gitignored and rebuilt from durable facts on every launch, so it is
-    # deleted, named in the log, and the run proceeds (owner decision, 2026-08-24).
+    # deleted, named in the log, and the run proceeds.
     providers = _both()
     orch, store, ledger, _ = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
@@ -6126,11 +6122,11 @@ def test_disabled_layer_still_writes_the_deterministic_handoff_floor(
 def test_assigned_environment_reaches_node_services(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    """AC0.2.1 (orchestrator call site): the env handed to the flow's own child processes.
+    """The orchestrator call site: the env handed to the flow's own child processes.
 
     `NodeServices.process_env` is what the `dependency_scan` checker and every `tool` node launch
     their argv with. It is assembled here rather than by the Check Runner, so it is its own delivery
-    point — and the whole reason Т0.5 exists is that these two must not drift apart.
+    point — and these two must not drift apart.
     """
     from wastech_orchestrator.core.decomposition import DecompositionDecision
     from wastech_orchestrator.core.loop_control import LoopCounters

@@ -22,7 +22,7 @@ from wastech_orchestrator.providers.redaction import redact_text
 
 #: Which built-in typed-output contract a flow node's structured result must satisfy. Derived per
 #: node (never from a stage name): ``human_input`` = a question/approval round-trip; ``planning``
-#: adds the decomposition proposal; ``none`` = a plain author node. (Skill selection is no longer a
+#: adds the decomposition proposal; ``none`` = a plain author node. (Skill selection is not a
 #: planning concern — it is resolved by the Core from operator pins + the supervisor's proposal.)
 OutputContract = Literal["none", "human_input", "planning"]
 

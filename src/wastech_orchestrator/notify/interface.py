@@ -33,8 +33,8 @@ TRACE_UNEXPECTED_WRITE = "done (node wrote to the workspace unexpectedly)"
 
 #: Synthetic ``send_trace`` outcome label for the sharper half of the same event: the node
 #: changed Git **control** state — a moved ``HEAD``, the index, a hook, ``.git/config``. The node
-#: still finished (``done``) and the run continues (since 2026-08-24 no node class parks on this),
-#: so this ⚠️ is what lets the operator tell their own mid-run commit — which is what it usually is
+#: still finished (``done``) and the run continues — no node class parks on this — so this ⚠️ is
+#: what lets the operator tell their own mid-run commit — which is what it usually is
 #: — from something planted, and stop the run before the next orchestrator git command executes it.
 #: Distinct from :data:`TRACE_UNEXPECTED_WRITE` because the two need different reactions: a stray
 #: file can be ignored, a poisoned hook cannot.

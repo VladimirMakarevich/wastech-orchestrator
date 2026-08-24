@@ -90,9 +90,9 @@ def test_router_receives_isolation_checks(git_repo, make_git_config, tmp_path: P
 def test_orchestrator_receives_host_floor_checks(git_repo, make_git_config, tmp_path: Path) -> None:
     # Wiring guard for the advisory twin: without the injected table the run says nothing at all
     # about a host that cannot enforce the write floor, which is the exact silence this verdict
-    # exists to end. BOTH providers answer (Ам1-4): Claude classifies its host offline, Codex says
-    # that on native Windows its own CLI is the only thing that can — a Codex-only park on that host
-    # used to get no line and no preamble paragraph at all.
+    # exists to end. BOTH providers answer: Claude classifies its host offline, Codex says
+    # that on native Windows its own CLI is the only thing that can — without both answers a
+    # Codex-only fleet on that host gets no line and no preamble paragraph at all.
     config = make_git_config(git_repo.clone, checks=["pytest"])
     layout = _distinct_layout(git_repo.clone, tmp_path)
     orch = build_orchestrator(config, layout=layout)
@@ -123,8 +123,8 @@ def test_orchestrator_consumers_receive_the_right_field(
 
 
 def test_deny_policy_carries_no_provider_home(git_repo, tmp_path: Path, monkeypatch) -> None:
-    # Ам-5 Блок Б acceptance (owner decision 2026-08-24): the assembly no longer feeds provider
-    # config homes into the deny set — while the orchestrator's own private four stay in it.
+    # The assembly never feeds provider config homes into the deny set — while the orchestrator's
+    # own private four stay in it.
     claude_home = tmp_path / "homes" / ".claude"
     codex_home = tmp_path / "homes" / ".codex"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))

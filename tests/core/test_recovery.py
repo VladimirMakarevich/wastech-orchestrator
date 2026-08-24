@@ -583,7 +583,7 @@ def _seed_control_bundle(
         ("refinement", ProviderId.CLAUDE, "refinement"),
         ("planning", ProviderId.CLAUDE, "planning"),
         ("implementation", ProviderId.CLAUDE, "implementation"),
-        # Every node defaults to the global primary (claude) now — routing is node-based (PRE.1).
+        # Every node defaults to the global primary (claude) now — routing is node-based.
         ("testing", ProviderId.CLAUDE, "review"),  # checks node → first agent node is review
         ("review", ProviderId.CLAUDE, "review"),
         ("fixing", ProviderId.CLAUDE, "fixing"),

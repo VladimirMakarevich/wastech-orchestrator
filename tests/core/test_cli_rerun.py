@@ -750,9 +750,9 @@ def test_rerun_continue_at_review_survives_real_resume_with_dirty_tree(
 ) -> None:
     """Regression (RERUN-BUG-REPORT): resuming ``--continue`` at review on a task branch with
     legitimate uncommitted WIP must not detour through ``base_branch`` — ``git checkout main``
-    refuses over a dirty tree, which used to crash the resume with a raw git error. Only
-    ``_engine_run`` is stubbed (past the point that used to crash); ``prepare_branch`` runs for
-    real against the repo, so this exercises the exact path the mocked-``resume`` tests above skip.
+    refuses over a dirty tree, so the detour crashes the resume with a raw git error. Only
+    ``_engine_run`` is stubbed (past the point where that crash happens); ``prepare_branch`` runs
+    for real against the repo, so this exercises the path the mocked-``resume`` tests above skip.
     """
     project = tmp_path / "project"
     project.mkdir()
@@ -804,7 +804,7 @@ def test_rerun_continue_at_review_survives_real_resume_with_dirty_tree(
 def test_a_resume_carries_the_branch_mode_so_the_gate_measures_from_the_task(
     git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git_run
 ) -> None:
-    """Пре3-8: the resume called ``prepare_branch`` without a mode, so an ``existing``/``current``
+    """The resume called ``prepare_branch`` without a mode, so an ``existing``/``current``
     task re-entered through the ``new`` path — which never restores the task's own start commit.
     The dangerous-diff gate then measured from ``base_branch``, i.e. from the whole unmerged chain,
     and ``rerun --continue`` on a chain task asked the operator about previous tasks' deletions.

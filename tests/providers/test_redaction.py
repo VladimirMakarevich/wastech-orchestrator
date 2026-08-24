@@ -166,8 +166,8 @@ def test_benign_identifiers_survive_text_redaction(benign: str) -> None:
 )
 def test_secret_bearing_names_still_lose_their_value(secret_bearing: str, value: str) -> None:
     # The direction that matters: narrowing the NAME matcher must not un-redact a real secret. The
-    # quoted-key rows are new coverage — a JSON key's closing quote used to end the match, so
-    # `"access_token": "…"` was never redacted despite the module claiming to handle that form.
+    # quoted-key rows are the ones to watch — if a JSON key's closing quote ends the match,
+    # `"access_token": "…"` goes unredacted despite the module claiming to handle that form.
     out = redact_text(secret_bearing + value)
     assert value.rstrip('"') not in out
     assert REDACTED in out
@@ -176,7 +176,7 @@ def test_secret_bearing_names_still_lose_their_value(secret_bearing: str, value:
 # -- JSON-lines sinks stay parseable (harm 1) ---------------------------------
 
 # Source-shaped payloads a provider streams back as tool results: each holds an escaped quote right
-# next to a sensitive-looking name, which is what used to break the line.
+# next to a sensitive-looking name, which is the shape that breaks a naive character-level scrub.
 _JSONL_CORPUS = (
     {"text": '  tokens: "tokens",'},  # the real p9-09 events.jsonl corruption
     {"text": '  password: "hunter2value",'},
@@ -265,7 +265,7 @@ def test_assigned_variables_never_shrink_the_harvest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """И-4: the redaction literal set may only grow, never shrink, as the env policy widens.
+    """The redaction literal set may only grow, never shrink, as the env policy widens.
 
     The harvester exempts a name **because it is on the forward allowlist** — an allowlisted secret
     is exported on purpose, not a value to scrub. `security.extra_environment` must not buy the same
@@ -301,7 +301,7 @@ def test_prefix_patterns_never_shrink_the_harvest(
     monkeypatch: pytest.MonkeyPatch,
     patterns: tuple[str, ...],
 ) -> None:
-    """AC0.3.5 (И-4 as a property): no set of prefix patterns shrinks the redaction literal set.
+    """As a property: no set of prefix patterns shrinks the redaction literal set.
 
     True by construction — the harvester exempts a name by **exact** membership in the allowlist,
     and
@@ -329,7 +329,7 @@ def test_prefix_patterns_never_shrink_the_harvest(
     assert "supersecretvalue123" in widened._secret_env_values()
 
 
-# --- И-4 across the mode, plus the exemption that keeps it holdable (ТA.7.1–ТA.7.3) --------------
+# --- the literal set across the mode, plus the exemption that keeps it holdable ------------------
 
 
 def test_advanced_mode_never_shrinks_the_harvest(
@@ -338,7 +338,7 @@ def test_advanced_mode_never_shrinks_the_harvest(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """И-4 as a property over the mode itself: the mode's literal set is a superset, never smaller.
+    """As a property over the mode itself: the mode's literal set is a superset, never smaller.
 
     The rule inverts because the strict one collapses: with the parent environment forwarded whole,
     "secret-named AND not allowlisted" matches nothing, so the layer that exists for secrets with no
@@ -373,9 +373,9 @@ def test_env_file_values_stay_in_the_harvest_in_the_mode(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ТA.7.3: withholding an env-file name from the CHILD must not drop it from the scrub.
+    """Withholding an env-file name from the CHILD must not drop it from the scrub.
 
-    The two rules pull in opposite directions and meet here. ТA.2.3 keeps `.worc/.env` names out of
+    The two rules pull in opposite directions and meet here. One keeps `.worc/.env` names out of
     the child environment; the harvest still has to scrub their values, because the orchestrator's
     own process holds them and they can reach a log line or an artifact through it. The natural
     implementation — harvest from the environment the child was given — would silently drop them,
@@ -405,15 +405,15 @@ def test_the_working_directory_is_not_harvested_as_a_secret(
     monkeypatch: pytest.MonkeyPatch,
     strict_isolation: bool,
 ) -> None:
-    """ТA.7.2: `PWD` matches the `pwd` segment and holds a path, so it was scrubbing every citation.
+    """`PWD` matches the `pwd` segment and holds a path, so it was scrubbing every citation.
 
     A live defect before the mode existed: `PWD` is absent from the default allowlist, so the run's
     own absolute path became a redaction literal and `<repo>/src/foo.py:42` printed as
     `[REDACTED]/src/foo.py:42` in reports and pull-request bodies. Parameterized over both settings
     because the exemption has to hold in both: strict isolation had a workaround (allowlist the
     name) and the mode takes it away, so an exemption on one side only would fix the mode and leave
-    the shipped default broken — and И-4 is compared after the exemption, so applying it on both
-    sides is also what keeps that property true.
+    the shipped default broken — and the literal set is compared after the exemption, so applying it
+    on both sides is also what keeps that property true.
     """
     monkeypatch.setenv("PWD", "/Users/someone/work/orchestrator")
     monkeypatch.setenv("OLDPWD", "/Users/someone/elsewhere")

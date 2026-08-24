@@ -293,10 +293,10 @@ def test_plan_merge_is_read_only(git_repo, fake_cli, git_run, tmp_path: Path) ->
 def test_a_staging_gate_refusal_still_aborts_the_merge(
     git_repo, fake_cli, git_run, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # `commit_merge_resolution`'s own gates raise ManualActionRequired, not GitCommandError, and
-    # used to escape past the abort — leaving the clone mid-merge, which blocks cleanup and the
-    # next task. The tree must be restored, and the outcome must keep its class (a block for a
-    # human), not be downgraded to a pipeline failure.
+    # `commit_merge_resolution`'s own gates raise ManualActionRequired, not GitCommandError, so
+    # they escape past a GitCommandError-only abort and leave the clone mid-merge, which blocks
+    # cleanup and the next task. The tree must be restored, and the outcome must keep its class
+    # (a block for a human), not be downgraded to a pipeline failure.
     gh = FakeGh("OPEN")
     orch = _build(git_repo, fake_cli, tmp_path, scenario="success", gh=gh)
     _seed_task(orch._store)

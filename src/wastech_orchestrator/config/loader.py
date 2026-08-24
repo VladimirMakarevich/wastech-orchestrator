@@ -455,19 +455,17 @@ def _build_provider(raw: Any, pid: ProviderId, issues: list[str]) -> ProviderCon
         where,
         issues,
         # ``max_budget_usd`` (removed v14) is tolerated, not accepted — a stale config still loads.
-        # ``sandbox`` (removed v38) gets a named message below instead of the generic unknown-key
-        # one: it is the key whose removal has no migration, so this message is the entire cost of
-        # that decision, and "unknown key" sends the operator to `upgrade-config`, which cannot
-        # strip it either.
+        # ``sandbox`` gets a named message below instead of the generic unknown-key one: nothing
+        # strips it for the operator, and a bare "unknown key" would send them to
+        # `upgrade-config`, which does not remove it either.
         tolerated={"max_budget_usd", "sandbox"},
     )
     if "sandbox" in m:
         issues.append(
-            f"{where}.sandbox: this key no longer exists (config v38) — delete the line. There is "
-            "no value it could take: the provider full-access modes are refused at every value of "
-            "security.strict_isolation, and everything else it used to select is now decided by "
-            "permission_profile plus security.strict_isolation. `worc upgrade-config` will not "
-            "remove it for you"
+            f"{where}.sandbox: this key does not exist — delete the line. There is no value it "
+            "could take: the provider full-access modes are refused at every value of "
+            "security.strict_isolation, and the isolation level is decided by permission_profile "
+            "plus security.strict_isolation. `worc upgrade-config` will not remove it for you"
         )
     reasoning_raw = _opt_str(m, "reasoning", where, issues)
     if reasoning_raw is not None and reasoning_raw not in _REASONING_LEVELS:
@@ -523,7 +521,7 @@ def _build_decomposition(raw: Any, issues: list[str]) -> DecompositionConfig:
 def _build_retry(raw: Any, issues: list[str]) -> RetryConfig:
     where = "agents.retry"
     if raw is None:
-        return RetryConfig()  # whole block optional → defaults (back-compat)
+        return RetryConfig()  # the whole block is optional → defaults
     m = _mapping(raw, where, issues)
     _check_keys(m, {"max_attempts", "base_delay_s", "max_delay_s", "max_blocked_s"}, where, issues)
     return RetryConfig(
@@ -698,9 +696,8 @@ def _build_footprint(raw: Any, issues: list[str]) -> FootprintConfig:
 def _build_git(raw: Any, issues: list[str]) -> GitConfig:
     where = "git"
     m = _mapping(raw, where, issues)
-    # ``auto_merge_allow_per_task`` (removed v11) is tolerated, not accepted: a per-task
-    # ``auto_merge`` now wins outright (PRE.2), so the gate is gone. Old configs load fail-open;
-    # ``upgrade-config`` strips the dead key.
+    # ``auto_merge_allow_per_task`` is tolerated, not accepted: a per-task ``auto_merge`` wins
+    # outright, so there is no gate for it to open. ``upgrade-config`` strips the dead key.
     _check_keys(
         m,
         {

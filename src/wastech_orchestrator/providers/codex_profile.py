@@ -162,15 +162,13 @@ def build_codex_permission_profile(
     # Deny last: private/control/secret roots always win over any read/write grant above.
     needs_glob_scan = False
     if deny_policy is not None:
-        # ``deny`` at EVERY read-isolation setting. This set used to be downgraded to ``read``
-        # when read-isolation was off — that is, on the shipped default — which made the private
-        # home and the resolved env-file readable to the sandboxed shell. It holds ONLY the
-        # orchestrator's own private set: the provider config home is deliberately absent at every
-        # setting (owner decision 2026-08-24). A deny on ``$CODEX_HOME`` used to live here, argued
-        # safe because the CLI loads its config and auth outside this profile — which missed that
-        # the standalone package keeps the ``codex`` BINARY inside that home, and ``apply_patch``
-        # re-execs it under the sandbox as its fs helper, so the deny broke every patch. The public
-        # ``denied_read_paths`` blacklist below is ``deny`` regardless.
+        # ``deny`` at EVERY read-isolation setting, never downgraded to ``read``: the private home
+        # and the resolved env-file are where the orchestrator keeps its own secrets, so a
+        # sandboxed shell must not reach them whatever the operator relaxed. The set holds ONLY the
+        # orchestrator's own private surface. ``$CODEX_HOME`` is deliberately absent from it: the
+        # standalone package keeps the ``codex`` BINARY inside that home and ``apply_patch``
+        # re-execs it under the sandbox as its filesystem helper, so a deny there breaks every
+        # patch. The public ``denied_read_paths`` blacklist below is ``deny`` regardless.
         for path in deny_policy.denied_paths:
             filesystem[to_native(path)] = "deny"
     for pattern in denied_read_paths:

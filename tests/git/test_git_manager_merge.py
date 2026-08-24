@@ -200,10 +200,10 @@ def test_push_branch_update_refuses_a_destination_changed_since_branch_prep(
     make_git_config: ConfigFactory,
     git_run: GitRunner,
 ) -> None:
-    # Пре2-2: П2.4 asks for the destination to be re-read before EVERY push, and this is the push
-    # that happens after the agent has had its run at the clone — in a later process that prepares
-    # no branch. With the baseline held only in memory the gate found nothing to compare and let the
-    # branch go to a rewritten `pushurl`, carrying this orchestrator's credentials with it.
+    # The destination is re-read before EVERY push, and this is the push that happens after the
+    # agent has had its run at the clone — in a later process that prepares no branch. With the
+    # baseline held only in memory the gate would find nothing to compare and let the branch go to
+    # a rewritten `pushurl`, carrying this orchestrator's credentials with it.
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
     _task(store)
     gm.prepare_branch("task-001", "slug", epoch=1)  # stamps the baseline, pre-provider

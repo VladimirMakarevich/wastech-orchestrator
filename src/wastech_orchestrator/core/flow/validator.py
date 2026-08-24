@@ -694,7 +694,7 @@ def lint_prompt_variables(snapshot: FlowSnapshot) -> list[PromptVarWarning]:
 def global_primary(config: OrchestratorConfig) -> ProviderId | None:
     """The single global-primary provider, or ``None`` when zero or several are marked primary.
 
-    A node with no declared provider runs under this provider (PRE.1). Shared by the config-aware
+    A node with no declared provider runs under this provider. Shared by the config-aware
     flow validator and the task node-override resolver (``core.node_overrides``) so both resolve the
     same effective provider when a node/override leaves it implicit.
     """

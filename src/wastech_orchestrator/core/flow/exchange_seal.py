@@ -418,14 +418,14 @@ def clear_foreign_exchange_entries(
     inspect: FileInspector | None = None,
     remover: TreeRemover = _default_remove_tree,
 ) -> tuple[str, ...]:
-    """Clear what the pre-launch invariant used to refuse over, then enforce what is left of it.
+    """Clear the reclaimable half of the pre-launch invariant, then enforce what is left of it.
 
     A previous task's directory or a stray file in the exchange root is the residue of a run that
-    died before its seal — an operator's interrupt, most often. Refusing to start over it made the
-    next task unrunnable *before any provider had launched*, for a state that costs one recursive
-    delete: this directory is private, gitignored, and rebuilt from durable facts on every launch,
-    so there is nothing in it to preserve and nothing it can prove about ownership (owner decision,
-    2026-08-24 — leftover state is not evidence).
+    died before its seal — an operator's interrupt, most often. Refusing to start over it would make
+    the next task unrunnable *before any provider had launched*, for a state that costs one
+    recursive delete: this directory is private, gitignored, and rebuilt from durable facts on every
+    launch, so there is nothing in it to preserve and leftover state proves nothing about
+    ownership.
 
     What removal cannot make true is still fail-closed, and
     :func:`~wastech_orchestrator.providers.exchange.assert_exchange_current_task_only` is left to

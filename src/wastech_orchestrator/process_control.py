@@ -437,8 +437,8 @@ def stop_process(
       is blocked, and a later ``--force-full`` can still target it.
     * ``"full"`` — hard stop. **POSIX**: SIGKILL the daemon's own process group (daemon + any checks
       child), **and** reap the recorded active agent's whole subtree via ``subtree_kill_fn`` (the
-      agent leads its own group, so the daemon-group kill no longer reaches it — the recorded
-      ``children_file`` handle is now the route). Nothing is orphaned; recovery is the next
+      agent leads its own group, so the daemon-group kill does not reach it — the recorded
+      ``children_file`` handle is the route). Nothing is orphaned; recovery is the next
       ``resume()``. **Windows**: there is no cross-process group kill, so if ``hard_kill_fn`` is
       supplied it tree-kills the daemon (``taskkill /F /T``, reaching the agent as a descendant) and
       the recorded agent for good measure, and sets ``tree_killed``; with no ``hard_kill_fn`` it

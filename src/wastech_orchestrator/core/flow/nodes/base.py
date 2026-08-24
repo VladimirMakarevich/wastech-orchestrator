@@ -125,7 +125,7 @@ class RouterPort(Protocol):
     """The slice of :class:`~wastech_orchestrator.routing.router.AgentRouter` runners use.
 
     Runners pass the flow node's declared ``provider`` to ``resolve_route``; ``None`` defaults to
-    the config's global primary (PRE.1). ``node_id`` is carried for audit/logging only — it no
+    the config's global primary. ``node_id`` is carried for audit/logging only — it no
     longer selects the provider.
 
     ``route_grants_shell`` answers whether an attempt on that route actually gets a shell — the

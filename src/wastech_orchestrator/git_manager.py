@@ -151,10 +151,11 @@ _GIT_HARDENING_CONFIG: tuple[tuple[str, str], ...] = (
 # system/global config holds the credentials push/fetch/gh need, and clearing it would take those
 # with it. Trusted, then, but not unreachable: under `security.strict_isolation: false` the agent
 # may write outside the clone, `~/.gitconfig` included, so `pushInsteadOf`, `credential.helper` and
-# `core.sshCommand` are agent-writable there too. What answers that is detection, by owner decision,
-# not a wider ban: the user git config is fingerprinted by digest around every attempt, every `gh`
-# call names its repository outright, and a push re-reads its own destination immediately before
-# sending. The repo-local half stays the filter gate's business below.
+# `core.sshCommand` are agent-writable there too. What answers that is detection rather than a wider
+# ban, because the ban would take the credentials with it: the user git config is fingerprinted by
+# digest around every attempt, every `gh` call names its repository outright, and a push re-reads
+# its own destination immediately before sending. The repo-local half stays the filter gate's
+# business below.
 _GIT_HARDENING_ENV: dict[str, str] = {
     "GIT_TERMINAL_PROMPT": "0",
     "GIT_OPTIONAL_LOCKS": "0",
@@ -186,20 +187,20 @@ _GIT_HARDENING_ENV: dict[str, str] = {
 # `~/.gitconfig`, which is trusted on purpose (it holds the credentials push/fetch need — see
 # `_GIT_HARDENING_ENV` above). What covers it is the control-state fingerprint, and covers it
 # honestly: `_user_git_config_paths` digests the file git ACTUALLY reads under this environment, so
-# when the variable is set that file is the one fingerprinted and the two default locations are
-# not. A swap during a run is therefore detected rather than silently honored.
-# The inversion the scrub list needed (owner decision Ам2-В2, variant «b»). A deny list of names
-# has to chase `git` and `gh` releases: the audit found two of that class it did not hold —
-# `GIT_CONFIG_PARAMETERS` (which injects config a `-c` cannot outrank, including `credential.helper`
-# and `url.*.pushInsteadOf`) and `GH_CONFIG_DIR` (the env twin of a planted `hosts.yml`, i.e. the
-# host and token for every `gh` call). So the rule for the `GIT_*`/`GH_*` namespace is now a
-# *whitelist*: a name in that namespace reaches an orchestrator-owned git/gh process only if it is
-# listed here, and a name added by a future release is closed by default.
+# when the variable is set that file is the one fingerprinted and the two default locations are not.
+# A swap during a run is therefore detected rather than silently honored. The `GIT_*`/`GH_*`
+# namespace is closed by *whitelist*, not by a deny list: a name in it reaches an orchestrator-owned
+# git/gh process only if it is listed here, and a name a future release adds is closed by default. A
+# deny list would have to chase `git` and `gh` releases, and the two names it is easiest to miss are
+# the two worst — `GIT_CONFIG_PARAMETERS` injects config a `-c` cannot outrank (`credential.helper`,
+# `url.*.pushInsteadOf`), and `GH_CONFIG_DIR` is the env twin of a planted `hosts.yml`, i.e. the
+# host and token for every `gh` call.
 #
 # Three entries, each for a reason the security rule itself gives:
 #
-# * `GIT_CONFIG_GLOBAL` — the ТA.1.7 decision. Unsetting it is what sends git back to the real
-#   `~/.gitconfig`, which is trusted on purpose (it holds the credentials push/fetch need). What
+# * `GIT_CONFIG_GLOBAL` — deliberately allowed through. Unsetting it is what sends git back to
+#   the real `~/.gitconfig`, which is trusted on purpose (it holds the credentials push/fetch
+#   need). What
 #   covers it is the control-state fingerprint, honestly: `_user_git_config_paths` digests the file
 #   git ACTUALLY reads under this environment, so when the variable is set that file is the one
 #   fingerprinted and the two default locations are not.
@@ -315,9 +316,8 @@ def _append_missing_lines(target: Path, lines: Sequence[str]) -> list[str]:
 # exists. Still an allowlist, just the built-in one: the cross-platform base plus this host's
 # OS-launch essentials, which is what a read-only `git` needs (`PATH` so it is found, `HOME` for the
 # global config that decides `core.excludesFile`), scrubbed and hardened like every other
-# orchestrator git process. Those helpers used to take the full `os.environ` — alone among the git
-# call sites, and with no comment saying why — so a shell `GIT_DIR` moved them off the clone, and
-# Phase 0.4's `.git/info/exclude` decision rests on their answer.
+# orchestrator git process. The full `os.environ` must never reach them: a shell `GIT_DIR` would
+# move them off the clone, and the `.git/info/exclude` repair decision rests on their answer.
 def build_helper_git_env(
     *extra_allowed: str, security: SecurityConfig | None = None
 ) -> dict[str, str]:
@@ -705,9 +705,9 @@ def _compact_pr_section(section: str, *, keep_follow_ups: bool = False) -> str:
 
     The stub points at the task's committed ``<id>.summary.md`` when the section recorded one
     (:data:`_SUMMARY_POINTER_PREFIX`) — that file is in this PR's own diff, so a reader on GitHub
-    can open it. Otherwise it names the run host: the working copy lives under the git-excluded
-    ``.worc/``, and the stub used to spell that as ``logs/<id>/summary.md``, which read as a
-    repository path and was a dead link. Idempotent in both modes: the marker block is carried
+    can open it. Otherwise it names the run host, because the working copy lives under the
+    git-excluded ``.worc/`` — spelling it as a bare ``logs/<id>/summary.md`` would read as a
+    repository path and be a dead link. Idempotent in both modes: the marker block is carried
     through verbatim, so re-compacting a stub is a no-op and a follow-ups-preserving pass can still
     be tightened by a second one.
     """
@@ -1972,14 +1972,13 @@ class GitManager:
         branch, with this orchestrator's credentials, somewhere the operator did not choose.
 
         What is deliberately NOT watched, and why: the task branch moving on ``origin`` and open
-        pull requests appearing or changing. Both used to park a writing attempt on the premise
-        that a branch or PR without one of our rows belongs to someone else — but a missing row is
-        not evidence of that (a recreated ``state.db`` loses every row while the branch and its PR
-        remain ours), and the publish path already handles a diverged remote properly: it merges
-        the foreign commits in locally, re-runs the checks over the combination, and only then
-        pushes. Parking here was that same recovery, spent earlier and less usefully. The base
-        branch was never watched either — it moves legitimately whenever someone merges their own
-        PR.
+        pull requests appearing or changing. A branch or PR without one of our rows is not evidence
+        that it belongs to someone else — a recreated ``state.db`` loses every row while the branch
+        and its PR remain ours — and the publish path handles a diverged remote properly anyway: it
+        merges the foreign commits in locally, re-runs the checks over the combination, and only
+        then pushes. Parking on either signal would be that same recovery, spent earlier and less
+        usefully. The base branch is not watched either — it moves legitimately whenever someone
+        merges their own PR.
         """
         items: list[GitControlDriftItem] = []
         if (
@@ -2083,11 +2082,11 @@ class GitManager:
         """The commit this task's change is measured from by the dangerous-diff gate.
 
         The last commit the **orchestrator** made for this task, or — until it has made one — the
-        task's diff base, the same point :meth:`write_current_diff` reports from. So the two
-        definitions of "what changed" that used to live side by side (the gate measured against
-        ``HEAD``, the report against the base) coincide inside one subtask, and a commit made
-        *inside* the task can no longer empty the gate: whoever made it, its content is still on the
-        far side of this reference and the human is still asked.
+        task's diff base, the same point :meth:`write_current_diff` reports from. One definition of
+        "what changed" serves both the gate and the report inside a subtask, and a commit made
+        *inside* the task cannot empty the gate: whoever made it, its content is still on the far
+        side of this reference and the human is still asked. Measuring against ``HEAD`` instead
+        would answer "what is not committed yet" rather than "what this task did".
 
         The fallback is the task's own start point, not a live branch name, and that direction
         matters: measured against a *moved* ``origin/<base>`` the gate prints other people's
@@ -2612,10 +2611,10 @@ class GitManager:
         four cases: it matches us (nothing to send), it is behind us (an ordinary push), it
         diverged from the commit *we* recorded leaving there (a lease-guarded force-push — the
         lease is what protects an operator commit: it simply will not match, dropping to the last
-        case), or it diverged from something we never pushed (merge it in, then push). An
-        existing remote branch used to be taken as proof of our own earlier push and recorded as a
-        completed publication with nothing sent — which is wrong whenever the branch name comes
-        from the task file or the operator picked the branch.
+        case), or it diverged from something we never pushed (merge it in, then push). The mere
+        existence of the remote branch is never proof of our own earlier push — the branch name can
+        come from the task file, or the operator can have picked it — so it never short-circuits
+        into a completed publication with nothing sent.
 
         The fourth case's merge is normally done by the caller BEFORE this
         (:meth:`adopt_foreign_commits`), so the checks over the combination run before anything is
@@ -2624,8 +2623,8 @@ class GitManager:
         "never force-push over someone else's work" true whoever calls it.
 
         Note that ``rerun`` clears the publish rows, so a task re-run onto the *same* branch name
-        no longer has the recorded commit the lease needs and takes the merge case instead: one
-        extra merge commit, never a silent overwrite.
+        lacks the recorded commit the lease needs and takes the merge case instead: one extra merge
+        commit, never a silent overwrite.
         """
         base = self._config.repo.base_branch
         if branch == base and mode is BranchMode.NEW:
@@ -2836,12 +2835,11 @@ class GitManager:
         reused = self._find_open_pr(task_id, branch, pr_base)
         if reused is not None:
             # An open PR on this head is reused whether or not one of our rows already names it.
-            # It used to be refused unless a row did, on the premise that an unrecorded PR is
-            # someone else's — but absence of a row is not evidence of that: a recreated
-            # ``state.db`` loses every row while the branch and its PR are still ours, and that
-            # refusal then blocked publishing with no way forward but closing our own PR. Reusing
-            # it records it, so the question is settled from here on. The cost, stated plainly:
-            # a PR a person opened on this same head is retitled and appended to.
+            # The absence of a row is not evidence that the PR is someone else's: a recreated
+            # ``state.db`` loses every row while the branch and its PR are still ours, and refusing
+            # there would block publishing with no way forward but closing our own PR. Reusing it
+            # records it, so the question is settled from here on. The cost, stated plainly: a PR a
+            # person opened on this same head is retitled and appended to.
             self._log_pr(task_id).info(
                 "reusing the open pull request for this head", extra={"pr": reused}
             )
@@ -3117,22 +3115,22 @@ class GitManager:
         HEAD``), so it captures the task's net change whether or not it is committed yet — the same
         base-vs-worktree coverage the deterministic report's diff stat is derived from — that stat
         reads *this* artifact rather than running its own ``git diff``, so the report stays a pure
-        function of durable state. ``git diff HEAD`` only showed uncommitted working-tree edits, so
-        in a decomposed run (where each subtask is committed) it collapsed to
-        just the trailing uncommitted hunk and badly understated the change in ``current.diff`` /
-        ``{diff_path}`` / the PR body / the failure report. For ``new`` mode the base is
+        function of durable state. ``git diff HEAD`` would report only uncommitted working-tree
+        edits, so in a decomposed run (where each subtask is committed) it collapses to the trailing
+        uncommitted hunk and badly understates the change in ``current.diff`` / ``{diff_path}`` /
+        the PR body / the failure report. For ``new`` mode the base is
         ``base_branch`` (the branch is cut from it and it does not advance), so a non-decomposed run
         equals ``git diff HEAD``; for a ``existing``/``current`` chain branch the base is the branch
         tip at task start, so review/docs see only this task's change, not the whole unmerged
-        chain (which previously showed every prior task — e.g. 35 files for ~5 changed). The
+        chain — measuring from the branch tip instead would show every prior task in it. The
         dangerous-diff guard classifies from :meth:`changed_code_entries`, which measures from
         :meth:`gate_reference` — the base until the orchestrator commits, its own last commit
         after — so inside one subtask the guard and this artifact describe the same change, while
         across a decomposed run this artifact keeps every subtask and the guard asks only about the
         new one.
 
-        Two completeness fixes: plain ``git diff`` never reports untracked files, so a brand
-        new file was silently missing from the artifact — bracket the diff with a transient
+        Two completeness measures: plain ``git diff`` never reports untracked files, so a brand
+        new file would be silently missing from the artifact — bracket the diff with a transient
         intent-to-add (staged, then immediately reset back to untracked; no persistent index
         change, so :meth:`changed_code_entries`/:meth:`changed_code_paths` still see them as
         ``??``) so their full content is included. ``--text`` forces a textual diff even for a file

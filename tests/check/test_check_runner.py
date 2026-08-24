@@ -408,7 +408,7 @@ def test_skipped_check_has_instant_interval(tmp_path: Path) -> None:
 
 
 def test_assigned_environment_reaches_every_check_process(tmp_path: Path) -> None:
-    """AC0.2.1 (Check Runner call site) + Т0.5: the quality gate sees what the agent sees.
+    """The Check Runner call site: the quality gate sees what the agent sees.
 
     The failure this guards against is the expensive one: the agent builds the project with
     `NUGET_PACKAGES` pointing into the clone, the checks run without it, and the task dies on "SDK
@@ -424,6 +424,6 @@ def test_assigned_environment_reaches_every_check_process(tmp_path: Path) -> Non
         selected=(_set("a", _check("pytest", ("pytest",))),),
     )
     assert fake.calls[0]["env"]["NUGET_PACKAGES"] == "/repo/.toolcache/nuget"
-    # Т0.5 as an equality, not an overlap: the checks environment IS the agent-attempt environment
+    # An equality, not an overlap: the checks environment IS the agent-attempt environment
     # for the same config, so no variable can reach one and miss the other.
     assert fake.calls[0]["env"] == build_child_env(config.security)

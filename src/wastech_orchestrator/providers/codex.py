@@ -97,22 +97,20 @@ _OUTPUT_SCHEMA_FILENAME = "output-schema.json"
 # Codex feature flags disabled for an autonomous orchestrator attempt: the non-shell tool
 # surfaces that could reach the local filesystem or spawn work outside the profiled shell
 # sandbox — hooks, custom subagents/multi-agent, computer use, the browser surfaces, apps/plugins,
-# and the persistent memory store. Each is emitted as ``--disable <name>`` (an earlier note here
-# said ``-c features.<name>=false``, which the code stopped doing). Emission is conditional twice
-# over: ``hooks`` is not disabled when read-isolation is off — that is, on the shipped default —
-# and NOTHING is disabled in the advanced mode, where these surfaces are handed back deliberately.
-# Leaving them off there would mean the only way to have them was the full-access escape this
-# product removed, turning a floor control into a plain loss of function.
+# and the persistent memory store. Each is emitted as ``--disable <name>``. Emission is conditional
+# twice over: ``hooks`` is not disabled when read-isolation is off — that is, on the shipped
+# default — and NOTHING is disabled in the advanced mode, where these surfaces are handed back
+# deliberately: in a mode whose whole point is full freedom under the operator's responsibility,
+# withholding them would be a floor control that buys nothing and a plain loss of function.
 #
-# The set is grounded in a live no-model inventory, not in guesswork: ``codex features list`` on
-# codex-cli 0.144.4 (2026-08-20) reports 92 flags, 29 of them enabled, and ``codex sandbox
-# --disable <name>`` validates every name here while rejecting an invented one ("Unknown feature
-# flag"). Owner decision of that date, on that inventory: extend only where an enabled flag is a
-# distinct surface that really executes something or reaches data. That added the two extra browser
-# surfaces (an EXTERNAL browser and full CDP access reach the operator's own browser session, and
-# neither passes through the profiled shell) and ``memories`` (a persistent store outside this
-# orchestrator's redaction net and audit — the same risk the Claude-side native-memory deny exists
-# for). Deliberately NOT added, so the next reader does not have to re-derive it: ``unified_exec``
+# The set is grounded in a live no-model inventory, not in guesswork: ``codex features list``
+# enumerates the flags and their enabled state, and ``codex sandbox --disable <name>`` validates
+# every name here while rejecting an invented one ("Unknown feature flag"). The rule for extending
+# it: only where an enabled flag is a distinct surface that really executes something or reaches
+# data. That is what puts the two extra browser surfaces here (an EXTERNAL browser and full CDP
+# access reach the operator's own browser session, and neither passes through the profiled shell)
+# and ``memories`` (a persistent store outside this orchestrator's redaction net and audit).
+# Deliberately NOT added, so the next reader does not have to re-derive it: ``unified_exec``
 # is the profiled shell itself; ``plugin_sharing``/``remote_plugin`` are sub-surfaces of the
 # already-denied ``plugins``; ``enable_mcp_apps`` and ``standalone_web_search`` ship disabled;
 # MCP elicitation is neutralized by ``--ignore-user-config`` plus the untrusted project layer;
@@ -287,10 +285,10 @@ def codex_config_home() -> Path:
     """The Codex config/credential home: ``$CODEX_HOME`` or the ``~/.codex`` default.
 
     Codex authenticates through the operator's own home (credentials stay outside the orchestrator).
-    No deny is built from it (owner decision 2026-08-24: the provider config homes left the deny set
-    entirely — the standalone package keeps the ``codex`` binary itself inside this home, and a deny
-    on it stopped ``apply_patch``'s own sandbox helper from executing); its consumer is the
-    ``worc preflight`` diagnostic that reports whether the provider binary lies inside this home.
+    No deny is built from it: the standalone package keeps the ``codex`` binary itself inside this
+    home, and ``apply_patch`` re-execs that binary under the sandbox as its filesystem helper, so a
+    deny here stops every patch from landing. Its consumer is the ``worc preflight`` diagnostic that
+    reports whether the provider binary lies inside this home.
     """
     raw = os.environ.get("CODEX_HOME")
     config_dir = Path(raw) if raw else Path.home() / ".codex"
@@ -755,16 +753,15 @@ class CodexProvider(BaseCliProvider):
         takes — a deny that covers the binary broke every patch while every read probe stayed
         green), and every
         Git-control / lifecycle root the profile write-denies actually refuses a write — the
-        product's central claim, which no probe tested before. On real launch env. Skipped only
-        when there is no internal deny set to prove (a unit harness with no ``deny_policy``). A leak
+        product's central claim. On real launch env. Skipped only when there is no internal deny set
+        to prove (a unit harness with no ``deny_policy``). A leak
         — and a refused exec of the CLI binary — fails closed as a non-fallback security error; an
         undemonstrable sandbox as
         ``CAPABILITY_UNAVAILABLE``.
 
-        A missing profile in the argv used to return quietly, which was legal while the full-access
-        escape existed and emitted none. It no longer does: every attempt emits a profile, so
-        ``None`` means the argv is not one this adapter built — and skipping the canary on it would
-        be fail-open on the run's central proof. It is a configuration error instead.
+        Every attempt emits a profile, so a missing one in the argv means the argv is not one this
+        adapter built. Returning quietly there would be fail-open on the run's central proof, so it
+        is a configuration error instead.
         """
         if self._deny_policy is None:
             return
@@ -798,11 +795,11 @@ class CodexProvider(BaseCliProvider):
         )
         if not outcome.ok:
             assert outcome.error_class is not None  # set whenever ok is False
-            # Owner decision (2026-08-20), applied identically in `worc preflight`, in the router's
-            # fallback rule and here: in the ADVANCED mode a probe that could not demonstrate the
-            # sandbox is a warning and the attempt proceeds — that host class (native Windows
-            # without the elevated backend) is exactly the one the mode exists to keep working, and
-            # refusing it would make the mode unavailable there while proving nothing. A *proven*
+            # The same rule `worc preflight` and the router's fallback apply: in the ADVANCED mode
+            # a probe that could not demonstrate the sandbox is a warning and the attempt proceeds —
+            # that host class (native Windows without the elevated backend) is exactly the one the
+            # mode exists to keep working, and refusing it would make the mode unavailable there
+            # while proving nothing. A *proven*
             # leak (`CONFIGURATION_ERROR`) stays fatal at either setting: that is not an
             # unclassifiable host, it is an enforcement failure. Under strict isolation nothing
             # changes — an undemonstrable sandbox still refuses the attempt, fallback-eligible.
@@ -851,9 +848,9 @@ class CodexProvider(BaseCliProvider):
         throwaway fixture. A proven leak is fatal (a non-fallback result); an undemonstrable
         sandbox is advisory (degrades like a capability gap).
 
-        Runs at every value of ``strict_isolation``. It used to return ``None`` when that was off —
-        i.e. it declined to prove the profile in the one configuration where the profile is the
-        whole local floor. It is also the only check that proves the generated profile is applied by
+        Runs at every value of ``strict_isolation``, including off — that is the configuration
+        where the generated profile is the whole local floor, so it is the last one to excuse from
+        proving it. It is also the only check that proves the profile is applied by
         the operating system rather than swallowed by the CLI, which accepts an unknown profile key
         without complaint: a typo there yields no policy and no diagnostic.
         """

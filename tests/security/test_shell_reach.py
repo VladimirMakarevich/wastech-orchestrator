@@ -1,7 +1,7 @@
 """«У попытки есть шелл» — security/shell_reach.py + адаптерные attempt_has_shell + запрос роутера.
 
-Проверяет предусловие П4.2: брекет детекта кейится на фактическом наличии шелла у этого провайдера
-на этом хосте, а не на объявленном гранте git-evidence. Ни один тест не запускает CLI.
+Брекет детекта кейится на фактическом наличии шелла у этого провайдера на этом хосте, а не на
+объявленном гранте git-evidence. Ни один тест не запускает CLI.
 """
 
 from __future__ import annotations
@@ -48,9 +48,9 @@ def base_config(packaged_config_text: str) -> OrchestratorConfig:
     """The packaged config with strict isolation pinned back on.
 
     These tests are about the CONTRAST between the two isolation values, so the baseline has to be
-    stated rather than inherited: the packaged config ships `strict_isolation: false` since
-    2026-08-24, which would otherwise make every "no shell here" case silently untrue and the
-    advanced-mode case a comparison against itself. The mode is opted into per test.
+    stated rather than inherited: the packaged config ships `strict_isolation: false`, which would
+    otherwise make every "no shell here" case silently untrue and the advanced-mode case a
+    comparison against itself. The mode is opted into per test.
     """
     cfg = loads_config(packaged_config_text).config
     return replace(cfg, security=replace(cfg.security, strict_isolation=True))

@@ -561,9 +561,9 @@ class BaseCliProvider:
         # Redact every captured sink before it is written: a leaked secret must never land
         # in stdout.log or events.jsonl. Parsing uses the in-memory raw stream for correctness.
         # Both stdout sinks are JSON-lines streams, so they are redacted per DECODED line
-        # (``redact_jsonl``): scrubbing the serialized characters instead used to consume the
-        # backslash of an escaped quote and leave a line that no longer parses, which silently cost
-        # the audit trail whole tool results. stderr is plain text and stays on ``redact_text``.
+        # (``redact_jsonl``): scrubbing the serialized characters instead consumes the backslash of
+        # an escaped quote and leaves a line that no longer parses, which silently costs the audit
+        # trail whole tool results. stderr is plain text and stays on ``redact_text``.
         extra_secrets = self._extra_secrets(request)
         raw_stdout = read_text(paths.stdout_path)
         redacted_stdout = redact_jsonl(raw_stdout, extra_secrets=extra_secrets)

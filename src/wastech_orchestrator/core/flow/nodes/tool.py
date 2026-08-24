@@ -146,8 +146,7 @@ class ToolNodeRunner:
         # write access by design — the class the Git-control bracket exists for. Fingerprinted here
         # like a shell-bearing agent attempt: the program is expected to report, not to rewrite a
         # hook, `.git/config` or the index, and without this bracket nothing in the run would notice
-        # if it did. Reported, never parked, as every node class now is (operator decision,
-        # 2026-08-24) — see the comparison below.
+        # if it did. Reported, never parked, like every other node class — see the comparison below.
         control_before = self._control_before(ctx.task_id)
         result = self._s.run_process(
             _launch_argv(tool_path),

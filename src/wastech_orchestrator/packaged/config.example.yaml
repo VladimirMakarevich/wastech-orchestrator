@@ -316,7 +316,7 @@ validation:                         # input hardening gate; rejects broken tasks
   max_line_bytes: 8192              # reject any single line longer than this (bytes)
   max_control_ratio: 0.01           # reject if control/binary chars exceed this fraction (0.01 = 1%)
   quarantine_folder: "./.worc/tasks/rejected"   # rejected task files are moved here
-  # NOT configurable (and no longer accepted as keys, config v35): the required front matter
+  # NOT configurable (and not accepted as keys): the required front matter
   # (`id`, a non-blank `title`, a non-empty `Description` section) and the deny on an unrecognized
   # front-matter key are hard-coded in the task gate. `upgrade-config` strips both old keys.
 
@@ -449,8 +449,9 @@ supervisor:                         # oversight layer above any flow (not a node
   # A flow may NARROW this in its own `supervisor.observe.mode` (a content flow ships `none`) but
   # never widen it — a broader flow mode fails validation. Ranking: none < events < selected < all.
   # When a flow does narrow yours, the run prints one line at the start naming both modes and, when
-  # the flow lands on `none`, the `triggers` below that stop applying — the loss used to be silent,
-  # so an operator asking for fallback notes got none from a content flow and nothing said why.
+  # the flow lands on `none`, the `triggers` below that stop applying — otherwise the loss is
+  # silent, and an operator asking for fallback notes gets none from a content flow with no reason
+  # given anywhere.
   # That check does not apply at `enabled: false`: there is no cadence to widen, so a flow declaring
   # any mode still runs. That is why switching the layer off is its own key, not a global `none`.
   # The once-per-task skill proposal (`skills.dynamic`) uses the `observe` model/effort — same cheap

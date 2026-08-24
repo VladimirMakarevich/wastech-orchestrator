@@ -30,145 +30,14 @@ def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
-# The SQLite schema version, stamped into ``PRAGMA user_version``. Bumped only when the schema
-# changes (not on every release). ``open()`` adopts a ``0`` (brand-new, or pre-versioning) database
-# as the current version (``_SCHEMA`` creates it at the current shape); both open paths refuse a
-# database stamped newer than this. Because every bump below is **destructive** and ``_migrate``
-# only adds columns, a database stamped ``1..DB_SCHEMA_VERSION-1`` cannot be reshaped in place and
-# is also refused fail-closed (see :func:`_enforce_schema_version`) — greenfield means there is no
-# production data to migrate, so the local ``state.db`` is simply recreated.
-#
-# The entries below describe how the **current** ``_SCHEMA`` differs from each past version (they
-# document the cutover, they are NOT migration steps ``_migrate`` performs):
-# v4: added the ``node_runs`` per-node audit table and the durable
-# :class:`~wastech_orchestrator.core.flow.run_state.FlowRunState` checkpoint columns
-# (``tasks.current_node`` / ``tasks.flow_run_counters`` / ``tasks.flow_fingerprint``). These are the
-# only **additive** columns ``_migrate`` knows how to add to a ``0``/new database.
-# v5: the ``provider_attempts`` FK to ``stage_runs`` was dropped so the
-# flow-engine path can store the ``node_runs`` id there (both monotonic).
-# v6: the legacy ``stage_runs`` table was dropped (the engine writes
-# ``node_runs``) and ``provider_attempts.stage_run_id`` was renamed to ``node_run_id``.
-# v7: ``tasks.interrupted_status`` was dropped — the granular statuses it
-# stored are gone; ``rerun --continue`` re-enters at the ``current_node`` flow checkpoint.
-# v8: added the immutable, append-only ``evaluations`` table — the per-verdict
-# audit for in-flow evaluators (``in_flow_verdict``) and the constant supervisor layer's per-step /
-# final advisory observations (``supervisor_step`` / ``supervisor_final``). A fresh database creates
-# it via ``_SCHEMA``; a brand-new (``0``) database adopts it (no additive column to migrate).
-# v9: added the ``editing_lineage`` table — the durable per-execution-unit
-# editing session (provider + raw session id), the **only** place a raw session id is ever stored
-# (it is redacted everywhere else). One active editing session per ``(task_id, subtask_order)``;
-# resume for Claude/Codex reads it, the author nodes (implementation/fixing) update it. Created on a
-# fresh DB by ``_SCHEMA`` (no additive column to migrate).
-# v10: added the ``node_lineage`` table — the durable own session for a
-# ``resume_own_lineage`` node (the research critic), keyed by ``(task_id, node_id, subtask_order)``
-# so a node remembers what it flagged across rework rounds. Like ``editing_lineage`` the raw session
-# id lives only here. Created on a fresh DB by ``_SCHEMA`` (no additive column to migrate).
-# v11 (2026-06-22, audit remediation #17): the always-0 ``tasks.stage_attempts`` column was dropped
-# — ``stage_attempts`` is an inherently per-node quantity that lives on ``node_runs`` (the
-# task-level integer was never populated). A destructive change (dropped column), so an older
-# versioned DB is refused fail-closed and recreated (greenfield). ``node_runs.stage_attempts`` is
-# untouched.
-# v12 (2026-06-23, checks-monorepo): added ``check_runs.skipped`` — a check whose ``command_sets``
-# entry is ``skip_if_unavailable`` and whose toolchain binary is absent is recorded as skipped
-# (distinct from a quality failure), which surfaces in the summary/PR and blocks ``git.auto_merge``
-# (an incomplete gate is never auto-merged). Created on a fresh DB by ``_SCHEMA``; an older
-# versioned DB is refused fail-closed and recreated (greenfield — no production data to migrate).
-# v13 (2026-06-27, transient provider recovery): added the **additive** ``tasks.blocked_since``
-# column — the wall-clock instant a task first parked as resumable because every allowed provider
-# was transiently unavailable (B-lite). Set once on first park, cleared at terminal; the task is
-# failed only after it stays parked longer than ``agents.retry.max_blocked_s``. Additive, so
-# ``_migrate`` adds it on a brand-new (``0``) database; an older versioned DB is still refused
-# fail-closed and recreated (greenfield).
-# v14 (2026-07-08): added the **additive** ``tasks.test_fix_total`` /
-# ``tasks.review_fix_total`` columns — the cumulative per-loop rework totals for the whole task.
-# Unlike the consecutive
-# ``*_fix_cycles`` columns (zeroed when the loop converges), these are never reset, so a task that
-# succeeded after N reworks records N (the consecutive columns legitimately read 0 at that point).
-# Additive, so ``_migrate`` adds them on a brand-new (``0``) database; an older versioned DB is
-# refused fail-closed and recreated (greenfield).
-# v15 (2026-07-08, multiple editing lineages): added ``editing_lineage.lineage_key`` and widened the
-# primary key to ``(task_id, subtask_order, lineage_key)`` so one execution unit can hold more than
-# one durable editing session. The lineage key is derived from the flow graph
-# (``node.lineage_affinity or node.id``), so an affinity-less ``editing_lineage`` node owns a
-# lineage named after itself and a node with ``lineage_affinity: X`` joins lineage ``X``. A widened
-# primary key is a destructive change (not an additive column), so an older versioned DB is refused
-# fail-closed and recreated (greenfield — no production data to migrate).
-# v16 (2026-07-16, normalized usage accounting): added the **additive** normalized-token-usage
-# columns — the per-run delta on ``provider_attempts`` (``usage_scope`` / ``usage_input_total`` /
-# ``usage_cache_read`` / ``usage_cache_write`` / ``usage_uncached_input`` / ``usage_output_total`` /
-# ``usage_reasoning_output`` / ``usage_cost`` / ``usage_delta_status`` / ``provider_usage_raw``) and
-# the running-cumulative ``usage_snapshot`` on ``editing_lineage`` and ``node_lineage``. All
-# nullable, so ``_migrate`` adds them on a brand-new (``0``) database; an older versioned DB is
-# refused fail-closed and recreated (greenfield).
-# v19 (provider-attempt task anchor + supervisor spend): ``provider_attempts`` gains a
-# ``task_id`` (so a cost/usage roll-up no longer has to join through ``node_runs.id``) and its
-# ``node_run_id`` becomes NULLABLE — the constant supervisor layer records its own provider calls
-# with ``node_run_id`` NULL (it is not a graph node, so it has no ``node_runs`` row to point at).
-# A task-level roll-up is now ``WHERE task_id = ?`` and includes the supervisor spend; the
-# supervisor's rows are exactly the ``node_run_id IS NULL`` ones. Additive; an older versioned DB is
-# refused fail-closed and recreated (greenfield — no production data to migrate).
-# v20 (per-function supervisor spend): ``provider_attempts`` gains the nullable
-# ``supervisor_function`` (``observe`` / ``finalize`` / ``handoff`` / ``skill``; NULL for an
-# ordinary graph node). ``node_run_id IS NULL`` already separated the supervisor layer's calls from
-# the graph's, but not the layer's own phases from each other — so "what did the observations cost
-# against the summary" needed the label. One column rather than a side table keeps the
-# reconciliation a single ``GROUP BY``: no row is filtered out, so the buckets always sum to the
-# task's total.
-# Additive; an older versioned DB is refused fail-closed and recreated (greenfield).
-# v21 (provider-reported wake instant): added the **additive** nullable ``tasks.blocked_until``
-# column — the earliest instant a parked task may attempt a provider again, stamped only when the
-# exhausted stage's provider reported its own reset time and clamped to the park ceiling. NULL keeps
-# the previous blind behavior (retry on the next tick), so the column can only ever *shorten* a
-# wait, never extend one; the ceiling still terminates the task regardless. Additive, ``_migrate``
-# adds
-# it on a brand-new (``0``) database; an older versioned DB is still refused fail-closed and
-# recreated (greenfield — no production data to migrate).
-# v22 (dangerous-diff gate reference point): added the **additive** nullable
-# ``tasks.gate_reference_sha`` column — the commit the dangerous-diff gate measures the task's
-# change from. The gate used to diff against ``HEAD``, which measures "what is not committed yet"
-# rather than "what this task did", so any commit inside the task (an agent's own, on a node the
-# profile bracket does not park) emptied the one question a human is asked before publishing. NULL
-# means "the task's diff base", which is what a run has until the orchestrator commits — the point
-# the task started from, and deliberately not a remote-tracking ref: measured against a base that
-# moved on the remote, the gate prints other people's additions as this task's deletions. Each
-# orchestrator commit that carries code
-# (code / subtask / merge) stamps its SHA here, which is what keeps a decomposed run from re-asking
-# about the deletions its first subtask already got approved. Additive, ``_migrate`` adds it on a
-# brand-new (``0``) database; an older versioned DB is still refused fail-closed and recreated
-# (greenfield).
-# v23 (pushed-branch identity): added the **additive** nullable ``publish_operations.pushed_sha``
-# column — the commit the orchestrator actually left on the remote when it pushed. Push recorded
-# the branch *name* in both ``fingerprint`` and ``result_ref``, so nothing on our side said what
-# the remote ref should hold, and a branch someone else moved was indistinguishable from the one
-# we put there — which is what let an unexpected remote state be recorded as our own success.
-# NULL is its real meaning ("we have not pushed this branch"), which is the honest state before a
-# first push and for every operation that is not a push, so no default. ``fingerprint`` is
-# deliberately left alone: it keys push idempotency, and reusing it would change the very
-# short-circuit this column exists to fix. Additive, ``_migrate`` adds it on a brand-new (``0``)
-# database; an older versioned DB is still refused fail-closed and recreated (greenfield).
-# v24 (push-destination baseline): added the **additive** nullable ``tasks.push_url_digest`` column
-# — the sha256 of where a push would go, read once when the task's branch was prepared and before
-# any provider ran. The baseline used to live only in the Git Manager's in-memory active-task
-# record, so the unconditional pre-push re-read had nothing to compare against on the one path
-# that pushes *after* the agent is gone without preparing a branch first (``merge-task``), and a
-# rewritten ``pushurl`` sent the branch — with this orchestrator's credentials — wherever it
-# pointed. NULL is its real meaning ("no baseline was taken", e.g. a task whose branch prep could
-# not read the URL), and a missing answer is never read as a rewrite. Additive, ``_migrate`` adds
-# it on a brand-new
-# (``0``) database; an older versioned DB is still refused fail-closed and recreated (greenfield).
-# v25 (task diff base): added the **additive** nullable ``tasks.base_ref`` column — the commit the
-# working branch sat at when THIS task started, which is what "what did this task change" is
-# measured from until the orchestrator makes its first commit. Same defect as v24 and the same fix:
-# it lived only in the Git Manager's in-memory active-task record, which does not survive the
-# process. A resume does carry the branch mode, so it re-enters the right path — but that path reads
-# the base from ``HEAD``, which is the correct answer only the first time. Re-read after the run has
-# already committed to the branch, it walks the base forward, and the task's reported change shrinks
-# to whatever is still uncommitted: a decomposed run reports its last subtask, a ``--continue``
-# reports the tail. Stamped once here and restored afterwards instead. Rare while a mid-run ``HEAD``
-# move parked the task outright; ordinary once it does not, which is why it is fixed alongside that
-# change. NULL is its real meaning ("the config base branch is the task's start", exactly true in
-# ``new`` mode), so no default. Additive, ``_migrate`` adds it on a brand-new (``0``) database; an
-# older versioned DB is still refused fail-closed and recreated (greenfield).
+# The SQLite schema version, stamped into ``PRAGMA user_version``. Bumped whenever ``_SCHEMA``
+# changes shape. ``open()`` adopts a ``0`` (brand-new, or pre-versioning) database as the current
+# version — ``_SCHEMA`` creates it at the current shape and :func:`_migrate` adds the few columns
+# a pre-versioning file can lack — and both open paths refuse a database stamped newer than this.
+# A database stamped ``1..DB_SCHEMA_VERSION-1`` is refused fail-closed as well: reshaping tables
+# in place is beyond an additive-only migration, and with no production data anywhere the honest
+# answer is to recreate the local ``state.db`` rather than run on a shape the code does not match
+# (see :func:`_enforce_schema_version`).
 DB_SCHEMA_VERSION = 25
 
 
@@ -183,20 +52,23 @@ def _migrate(conn: sqlite3.Connection) -> None:
     a brand-new DB (``_SCHEMA`` already created the columns) and adds only what an older DB lacks.
     """
     task_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(tasks)")}
-    # v4: the FlowRunState checkpoint columns (flow-engine execution path).
+    # The FlowRunState checkpoint columns (flow-engine execution path).
     if "current_node" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN current_node TEXT")
     if "flow_run_counters" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN flow_run_counters TEXT")
     if "flow_fingerprint" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN flow_fingerprint TEXT")
-    # v13: the B-lite soft-pause timestamp (transient-provider-failure-recovery).
+    # The soft-pause timestamp: when the task first parked because every allowed provider was
+    # transiently unavailable. Set once on first park, cleared at terminal.
     if "blocked_since" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN blocked_since TEXT")
-    # v21: the provider-reported instant a parked task may next attempt a provider.
+    # The provider-reported instant a parked task may next attempt a provider. NULL means "retry on
+    # the next tick", so the column can only ever shorten a wait, never extend one.
     if "blocked_until" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN blocked_until TEXT")
-    # v14: cumulative per-loop rework totals.
+    # Cumulative per-loop rework totals, never reset — unlike the consecutive ``*_fix_cycles``
+    # columns, which zero when the loop converges and so read 0 on a task that reworked N times.
     if "test_fix_total" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN test_fix_total INTEGER NOT NULL DEFAULT 0")
     if "review_fix_total" not in task_cols:
@@ -204,12 +76,12 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # The frozen control-bundle digest (parent-held identity a continue/resume verifies).
     if "control_bundle_digest" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN control_bundle_digest TEXT")
-    # v17: the frozen agent-input instruction-manifest digest (task packet + skill
+    # The frozen agent-input instruction-manifest digest (task packet + skill
     # packages + root repository instructions + the control digest). Parent-held identity a
     # continue/resume verifies; a differing digest is never resumed into the same provider session.
     if "instruction_manifest_digest" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN instruction_manifest_digest TEXT")
-    # v18: terminal-exchange sealing guard flags. ``exchange_contaminated`` records that
+    # Terminal-exchange sealing guard flags. ``exchange_contaminated`` records that
     # the tamper check detected an agent-side exchange mutation, so the terminal seam quarantines
     # the tree as evidence instead of sealing it (and continue is refused).
     # ``exchange_active_unsafe`` records
@@ -225,17 +97,23 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE tasks ADD COLUMN exchange_active_unsafe INTEGER NOT NULL DEFAULT 0"
         )
-    # Three per-task reference points, all nullable because NULL is each one's real meaning
-    # rather than a placeholder: v22 ``gate_reference_sha`` (the commit the dangerous-diff gate
-    # measures from — NULL: the task's diff base), v24 ``push_url_digest`` (where a push would go as
-    # read at branch prep — NULL: no baseline was taken) and v25 ``base_ref`` (the commit the task's
-    # branch sat at when it started — NULL: the config base branch is the start). One loop rather
-    # than three near-identical branches.
+    # Three per-task reference points, all nullable because NULL is each one's real meaning rather
+    # than a placeholder: ``gate_reference_sha`` (the commit the dangerous-diff gate measures the
+    # task's change from — NULL: the task's diff base), ``push_url_digest`` (the sha256 of where a
+    # push would go, read once at branch prep and before any provider ran, so the unconditional
+    # pre-push re-read has a baseline to compare against — NULL: no baseline was taken, which is
+    # never read as a rewrite) and ``base_ref`` (the commit the working branch sat at when the task
+    # started — NULL: the config base branch is the start). All three must survive the process:
+    # re-derived from ``HEAD`` after the run has committed they walk forward, and the task's
+    # reported change shrinks to whatever is still uncommitted. One loop rather than three
+    # near-identical branches.
     for column in ("gate_reference_sha", "push_url_digest", "base_ref"):
         if column not in task_cols:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} TEXT")
-    # v23: the commit a push left on the remote. Nullable — NULL is its real meaning ("not pushed
-    # by us"), not a placeholder, so no default.
+    # The commit a push actually left on the remote, so a branch someone else moved is
+    # distinguishable from the one we put there. Nullable — NULL is its real meaning ("not pushed by
+    # us"), not a placeholder, so no default. ``fingerprint`` is deliberately left alone: it keys
+    # push idempotency, and reusing it would change the short-circuit this column exists to fix.
     publish_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(publish_operations)")}
     if "pushed_sha" not in publish_cols:
         conn.execute("ALTER TABLE publish_operations ADD COLUMN pushed_sha TEXT")
@@ -243,16 +121,16 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_usage_columns(conn: sqlite3.Connection) -> None:
-    """Additive usage columns (v16 normalized-usage, the v19 task anchor, the v20 phase label).
+    """Additive usage columns: the per-run delta, the task anchor, and the supervisor phase label.
 
-    v16 added the per-run delta on ``provider_attempts`` and the running cumulative snapshot on the
-    two lineage tables — all nullable, so no defaults. v19 added the ``task_id`` anchor to
-    ``provider_attempts`` (NOT NULL with a placeholder default so the additive ALTER is legal; every
-    writer supplies the real id, and this path is only reachable by a pre-versioning ``0`` database
-    that predates the column — none exist in greenfield). The coupled ``node_run_id`` NULLABILITY
-    change is fresh-schema-only (SQLite cannot drop a column's NOT NULL in place) — unreachable here
-    for the same greenfield reason. v20 added ``supervisor_function``, nullable like the v16 block
-    because NULL is its real meaning for a graph node, not a placeholder.
+    The per-run delta on ``provider_attempts`` and the running cumulative snapshot on the two
+    lineage tables are all nullable, so no defaults. ``task_id`` anchors an attempt to its task so a
+    cost roll-up needs no join through ``node_runs`` — NOT NULL with a placeholder default, because
+    only that shape makes the additive ALTER legal; every writer supplies the real id. The coupled
+    ``node_run_id`` nullability (the supervisor layer is not a graph node, so it has no
+    ``node_runs`` row to point at) is fresh-schema-only: SQLite cannot drop a column's NOT NULL in
+    place. ``supervisor_function`` labels which supervisor phase spent the tokens, nullable because
+    NULL is its real meaning for an ordinary graph node, not a placeholder.
     """
     attempt_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(provider_attempts)")}
     if "task_id" not in attempt_cols:
@@ -295,13 +173,12 @@ def _enforce_schema_version(conn: sqlite3.Connection, *, writable: bool) -> None
             f"({DB_SCHEMA_VERSION}); upgrade wastech-orchestrator or start a fresh workspace"
         )
     if 0 < current < DB_SCHEMA_VERSION:
-        # The v5-v7 schema changes were destructive (dropped/renamed tables and columns) and
-        # ``_migrate`` only *adds* columns, so an older database cannot be reshaped in place.
-        # Greenfield (no production data): refuse fail-closed rather than stamp the current version
-        # onto a still-old shape — which used to pass the version gate and then crash on the first
-        # write to a reshaped table (e.g. ``provider_attempts.node_run_id``). A brand-new / pre-
-        # versioning database (``current == 0``) is created at the current shape by ``_SCHEMA`` and
-        # is adopted normally below.
+        # Reshaping a table (a dropped or renamed column) is beyond ``_migrate``, which only *adds*
+        # columns, so a database stamped at an earlier version cannot be brought to the current
+        # shape in place. With no production data anywhere, refuse fail-closed rather than stamp the
+        # current version onto an old shape: that combination passes the version gate and then
+        # crashes on the first write to a reshaped table. A brand-new / pre-versioning database
+        # (``current == 0``) is created at the current shape by ``_SCHEMA`` and is adopted below.
         raise IncompatibleStateError(
             f"state.db schema version {current} predates an incompatible (destructive) schema "
             f"change and cannot be migrated in place; delete the local state.db or start a fresh "
@@ -1001,7 +878,7 @@ class StateStore:
                 flow_run_counters=None,
                 flow_fingerprint=None,
                 # A fresh rerun starts from a clean exchange, so any prior terminal guard
-                # (contaminated tree / unsafe active dir) no longer applies to the new attempt.
+                # (contaminated tree / unsafe active dir) does not apply to the new attempt.
                 exchange_contaminated=0,
                 exchange_active_unsafe=0,
             )
@@ -1203,8 +1080,8 @@ class StateStore:
         daemon mid-node, so that finalize never runs and the row is stranded ``status='running'`` /
         ``finished_at IS NULL`` forever. On any terminal transition (clean ``_go_terminal`` or the
         hand-finish ``finalize_task``) this closes such orphans to ``status`` (default ``aborted``),
-        stamping ``finished_at`` and the operator-action reason, so an interrupted node is no longer
-        indistinguishable from one still executing. Returns the **pre-update** rows (so the caller
+        stamping ``finished_at`` and the operator-action reason, so an interrupted node stays
+        distinguishable from one still executing. Returns the **pre-update** rows (so the caller
         can record the killed provider attempt from ``route_primary``), or ``[]`` — the no-orphan
         common case, where a clean run already finalized every node and nothing is reconciled.
         """
@@ -1512,7 +1389,7 @@ class StateStore:
     def get_check_runs(self, task_id: str) -> list[CheckRunRow]:
         """All check runs for a task in execution order (ascending id).
 
-        Read by the supervisor's finalize packet: the ``checks`` node is no longer observed
+        Read by the supervisor's finalize packet: the ``checks`` node is not observed
         step-by-step, so these rows are the only durable record of which commands ran and how they
         ended — the material behind the summary's "which checks passed".
         """

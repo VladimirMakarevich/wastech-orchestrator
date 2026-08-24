@@ -848,7 +848,7 @@ def test_preflight_missing_binary_makes_no_credential_claim(
     assert provider.preflight().auth is None
 
 
-# --- paid isolation probe (Пре-1.2 / П1.2) ----------------------------------------------------
+# --- paid isolation probe ---------------------------------------------------------------------
 
 
 class _WritingRun(FakeRun):
@@ -931,7 +931,7 @@ def test_the_paid_probe_passes_when_only_the_allowed_path_is_written(
 def test_the_paid_probe_pass_says_it_did_not_answer_the_nesting_question_without_a_shell_attempt(
     claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
 ) -> None:
-    # Ам4-10: two mechanisms stand on those paths at once, and only a shell write tests the one the
+    # Two mechanisms stand on those paths at once, and only a shell write tests the one the
     # floor line reports as unproven (a denyWrite nested inside an allowWrite). A model that met the
     # refusal with its file-writing tool alone still passes — the write did not land — but the
     # verdict must not be read as the answer to that question.
@@ -951,8 +951,8 @@ def test_the_paid_probe_pass_says_it_did_not_answer_the_nesting_question_without
 def test_the_paid_probe_pass_answers_the_nesting_question_with_a_shell_attempt_per_path(
     claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
 ) -> None:
-    # The other half of Ам4-10: when the answer reports a shell attempt on every denied path, this
-    # probe IS the instrument the floor-1 line points an operator at, and says so.
+    # When the answer reports a shell attempt on every denied path, this probe IS the instrument
+    # the floor-1 line points an operator at, and says so.
     fake = _WritingRun(
         write=lambda path: "src" in path.parts, report_shell=True, stdout=_success_stream()
     )
@@ -998,9 +998,8 @@ def test_a_report_naming_one_path_does_not_credit_the_other_three(tmp_path: Path
 def test_the_paid_probe_reports_not_demonstrated_when_nothing_was_written(
     claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
 ) -> None:
-    # П1.2's load-bearing rule: a model that politely declined every write leaves the same empty
-    # filesystem as a perfectly sandboxed one. That is "not demonstrated", never a pass — the exact
-    # error this phase exists to remove from the Codex side too.
+    # The load-bearing rule: a model that politely declined every write leaves the same empty
+    # filesystem as a perfectly sandboxed one. That is "not demonstrated", never a pass.
     fake = _WritingRun(write=lambda path: False, stdout=_success_stream())
     provider = _paid_provider(claude_config, security_config, tmp_path, fake)
     report = provider.paid_isolation_probe(home_dir=tmp_path)
@@ -1048,7 +1047,7 @@ def test_the_paid_probe_probes_both_git_directories_and_the_control_home(
 def test_the_paid_probe_leaves_its_evidence_beside_the_report(
     claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
 ) -> None:
-    # Пре1-7: the probe's fixture — and everything the paid call produced — is deleted on the way
+    # The probe's fixture — and everything the paid call produced — is deleted on the way
     # out, so without this the most expensive of the three probes was the only one leaving no trace.
     # The one outcome worth investigating is `NOT DEMONSTRATED`, and the only way to tell "the
     # sandbox refused" from "the model never tried" is the model's own account.
@@ -1112,13 +1111,13 @@ def test_the_paid_probe_is_skipped_without_an_os_sandbox(
 def test_the_paid_probe_runs_in_advanced_mode_too(
     claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
 ) -> None:
-    """ТA.9.2 applied to the paid probe: `strict_isolation: false` is not an exemption from proof.
+    """The paid probe: `strict_isolation: false` is not an exemption from proof.
 
-    It used to return `None` there on the grounds that no claim was being made. The claim is made:
-    the sandbox settings file is written whenever the resolved tool set keeps a shell and the host
-    can sandbox it, at either setting — so in advanced mode the write-deny on `.git` and `.worc` is
-    still asserted, and it is the only part of the floor that does not need the agent's cooperation.
-    Declining to prove it exactly where the rest of the enforcement is relaxed had it backwards.
+    There is a claim to prove there: the sandbox settings file is written whenever the resolved tool
+    set keeps a shell and the host can sandbox it, at either setting — so in advanced mode the
+    write-deny on `.git` and `.worc` is still asserted, and it is the only part of the floor that
+    does not need the agent's cooperation. Declining to prove it exactly where the rest of the
+    enforcement is relaxed would have it backwards.
     """
     fake = _WritingRun(write=lambda path: True, stdout=_success_stream())
     provider = _paid_provider(
@@ -1127,8 +1126,8 @@ def test_the_paid_probe_runs_in_advanced_mode_too(
     report = provider.paid_isolation_probe(home_dir=tmp_path)
     assert report is not None
     assert fake.calls == 1
-    # And it asks the one question Ам-4 opened and no free probe can: the settings file it launches
-    # under carries the mode's volume-wide `allowWrite` WITH the carve-outs nested inside it, so an
+    # And it asks the one question no free probe can: the settings file it launches under carries
+    # the mode's volume-wide `allowWrite` WITH the carve-outs nested inside it, so an
     # operator running this opt-in is testing that precedence for real rather than taking the
     # adapter's word for it. That is why the "not proven" row names this command.
     assert fake.sandbox_settings is not None

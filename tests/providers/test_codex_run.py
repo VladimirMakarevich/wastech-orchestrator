@@ -194,7 +194,7 @@ def test_the_canary_probes_the_write_guard_roots_from_the_request(
     tmp_path: Path,
     make_request: Callable[..., AgentRunRequest],
 ) -> None:
-    # Пре-1: the roots come from the request the Core built, so the probes test the profile that is
+    # The roots come from the request the Core built, so the probes test the profile that is
     # about to launch. Five base probes, plus one per probed deny root — the count is asserted
     # because a silently shrinking probe set is exactly how a floor claim stops being tested.
     from wastech_orchestrator.providers.codex_canary import WRITE_GUARD_SENTINEL
@@ -248,7 +248,7 @@ def test_an_argv_without_a_generated_profile_refuses_the_attempt(
     tmp_path: Path,
     make_request: Callable[..., AgentRunRequest],
 ) -> None:
-    # Ам1-8: returning quietly here was legal while the full-access escape existed and emitted no
+    # Returning quietly here was legal while the full-access escape existed and emitted no
     # profile. It no longer does — every attempt emits one — so `None` means the argv is not one
     # this adapter built, and skipping the canary on it is fail-open on the run's central proof.
     from wastech_orchestrator.providers.artifacts import ArtifactPaths
@@ -287,7 +287,7 @@ def test_a_declared_root_with_no_directory_warns_and_the_attempt_still_runs(
     make_request: Callable[..., AgentRunRequest],
     package_log_text: Callable[[], str],
 ) -> None:
-    # П1.3: "the probe could not be run" is a loud line, and the attempt continues. The asymmetry
+    # "the probe could not be run" is a loud line, and the attempt continues. The asymmetry
     # with the preflight smoke (which answers `unsupported` for the same input) is deliberate and
     # documented in the shipped guide — an attempt must not be refused because a directory it never
     # needed is absent — so the warning is the only carrier of "this root was not proved". Both
@@ -342,7 +342,7 @@ def test_a_git_dir_write_that_lands_fails_closed_before_any_model_launch(
     tmp_path: Path,
     make_request: Callable[..., AgentRunRequest],
 ) -> None:
-    # AC1.1: a profile that does not actually carve `.git` out is a non-fallback CONFIGURATION_ERROR
+    # A profile that does not actually carve `.git` out is a non-fallback CONFIGURATION_ERROR
     # with zero model calls — the point of running the probe before `codex exec` rather than after.
     fake = FakeRun(stdout=_success_stream())
     # Private reads denied, exchange read allowed, exchange write denied, cli exec fine — then the
@@ -491,11 +491,11 @@ def test_a_profile_that_blocks_the_cli_exec_fails_closed_pre_model(
     make_request: Callable[..., AgentRunRequest],
     strict_isolation: bool,
 ) -> None:
-    # The journey-18a regression (Ам-5 Т5.7): a profile covering the codex binary itself broke
-    # every apply_patch while all seven read/append probes stayed green — the router fell back to
-    # Claude five runs in a row and the break read as "Codex is unavailable today". Now the exec
-    # probe catches it pre-model as a non-fallback CONFIGURATION_ERROR, at either isolation
-    # setting, even though the refusal output carries the sandbox's own prose.
+    # A profile covering the codex binary itself breaks every apply_patch while the read/append
+    # probes all stay green, so without this the router falls back to Claude run after run and the
+    # break reads as "Codex is unavailable today". The exec probe catches it pre-model as a
+    # non-fallback CONFIGURATION_ERROR, at either isolation setting, even though the refusal output
+    # carries the sandbox's own prose.
     fake = FakeRun(stdout=_success_stream())
     canary = FakeCanary(
         results=[
@@ -1232,7 +1232,7 @@ def test_preflight_auth_is_unknown_when_the_sentence_is_unrecognized(
     assert health.auth.state is AuthState.UNKNOWN
 
 
-# --- AC0.2.1: the three provider-side build_child_env call sites --------------------------------
+# --- the three provider-side build_child_env call sites -----------------------------------------
 #
 # Each of the three asserts one thing: the environment this call site hands to its child process was
 # built from the whole security policy, so an assigned variable is in it. The other three sites are
@@ -1271,7 +1271,7 @@ def test_assigned_environment_reaches_preflight(
 def test_the_capability_smoke_runs_in_advanced_mode(
     codex_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
 ) -> None:
-    """ТA.9.2: the smoke used to return `None` in the one mode that needs it most.
+    """The smoke runs in the one mode that needs it most.
 
     It is the only check that proves the generated profile is applied by the operating system rather
     than swallowed by the CLI, which accepts an unknown profile key without complaint: a typo there
@@ -1298,7 +1298,7 @@ def test_the_agent_and_the_checks_get_the_same_environment_under_both_policies(
     tmp_path: Path,
     strict_isolation: bool,
 ) -> None:
-    """Т0.5/ТA.2.2: each policy reaches both sides of the quality gate identically.
+    """Each policy reaches both sides of the quality gate identically.
 
     Partial delivery is the expensive failure here, not a missing variable: the agent builds the
     project with a toolchain root it can see, then the check set fails on "SDK not found" after the

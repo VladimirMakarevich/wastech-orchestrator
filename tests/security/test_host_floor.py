@@ -92,7 +92,7 @@ def test_the_verdict_ignores_the_configured_profile(
     # differently for a read-only provider default. The floor question is about the machine, and the
     # machine does not change when a profile does.
     #
-    # Ам1-11: the parametrization has to reach something that CAN see the profile, or it measures
+    # The parametrization has to reach something that CAN see the profile, or it measures
     # nothing — the provider function does not take one. So the assertion runs through
     # `describe_host_floor` over a config whose Claude block carries each profile in turn: the line
     # must be identical either way, which is the property the review correction asked for.
@@ -152,7 +152,7 @@ def test_a_provider_outside_the_allowlist_is_not_asked(base_config: Orchestrator
     assert describe_host_floor(replace(base_config, agents=agents), table) == ()
 
 
-# --- Codex: a host whose answer only its own CLI has (Ам1-4 / Ам2-8) ------------------------------
+# --- Codex: a host whose answer only its own CLI has ----------------------------------------------
 
 
 def test_codex_says_a_windows_host_is_not_classifiable_offline() -> None:
@@ -176,8 +176,8 @@ def test_codex_says_nothing_on_a_posix_host(system: str) -> None:
 
 
 def test_a_codex_only_fleet_on_windows_gets_a_floor_line(base_config: OrchestratorConfig) -> None:
-    # The end the finding was about: `allowed: [codex]` used to produce an empty report on the one
-    # host class where the floor is least certain.
+    # `allowed: [codex]` must not produce an empty report on the one host class where the floor is
+    # least certain.
     agents = replace(base_config.agents, allowed=(ProviderId.CODEX,))
     lines = describe_host_floor(replace(base_config, agents=agents), _table(codex_system="Windows"))
     assert len(lines) == 1 and lines[0].startswith("codex: native Windows")

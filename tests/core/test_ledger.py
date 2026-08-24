@@ -109,7 +109,7 @@ def test_records_tolerate_missing_rerun_keys(tmp_path: Path) -> None:
 def test_the_advanced_mode_marker_round_trips_and_defaults_for_older_records(
     tmp_path: Path,
 ) -> None:
-    """ТA.6.3: the durable record of the run's security posture, readable next to older lines.
+    """The durable record of the run's security posture, readable next to older lines.
 
     The ledger is append-only and never rewritten, which is exactly why the field needs a default: a
     record written before it existed has to keep reading, and it has to read as "not in the mode" —

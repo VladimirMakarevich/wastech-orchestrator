@@ -83,8 +83,8 @@ _SENSITIVE_WORD = (
 )
 #
 # The optional quote BEFORE the separator is what makes the ``"NAME": "VALUE"`` form in the comment
-# above real: the name group cannot cross a quote, so a JSON key's closing quote used to end the
-# match and ``"access_token": "…"`` was never redacted at all.
+# above real: the name group cannot cross a quote, so without it a JSON key's closing quote ends the
+# match and ``"access_token": "…"`` is never redacted at all.
 _ASSIGNMENT = re.compile(
     rf"(?i)([A-Za-z0-9_]*{_SENSITIVE_WORD}[A-Za-z0-9_]*)(\"?\s*[:=]\s*\"?)([^\s\"]+)",
 )
@@ -139,9 +139,9 @@ def is_sensitive_key(name: str) -> bool:
 # It applies to BOTH branches below on purpose. Under strict isolation an operator could work around
 # the defect by allowlisting ``PWD``; advanced mode takes that escape away (the allowlist stops
 # exempting anything), so an exemption that only existed in the wide branch would fix the mode and
-# leave the default broken — and И-4 ("the mode's literal set is never smaller") is compared after
-# the exemption, so applying it once on each side keeps that property intact rather than one-sidedly
-# breaking it.
+# leave the default broken. The property "the mode's literal set is never smaller than the strict
+# one" is also compared after the exemption, so applying it once on each side keeps that intact
+# rather than one-sidedly breaking it.
 _HARVEST_EXEMPT_NAMES: frozenset[str] = frozenset({"PWD", "OLDPWD"})
 
 
@@ -162,7 +162,7 @@ def secret_env_values(
 
     * **True** (strict isolation) — an allowlisted variable is exported on purpose, so it is not a
       secret to scrub, and leaving it alone keeps legitimate values readable in artifacts.
-    * **False** (advanced mode) — the allowlist no longer gates what a child receives
+    * **False** (advanced mode) — the allowlist does not gate what a child receives
       (:func:`~wastech_orchestrator.security.env.build_child_env`), so "not allowlisted" would match
       nothing and this layer would collect an empty set — precisely when the environment holds the
       most secrets, and precisely for the secrets that have no recognizable shape for the structural

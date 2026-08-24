@@ -103,12 +103,12 @@ def test_deny_applied_last_wins_over_read_guard(tmp_path: Path) -> None:
 def test_the_private_set_stays_denied_whatever_read_isolation_says(tmp_path: Path) -> None:
     """The private/control set is ``deny`` unconditionally — the profile has no read-isolation knob.
 
-    It used to be downgraded to ``read`` when read-isolation was off, i.e. on the shipped default,
-    which handed the sandboxed shell the private home and the resolved env-file. ТA.2.3 withholds
-    those names from the child environment *because* the agent cannot read the file; that reasoning
+    Downgrading it to ``read`` when read-isolation is off — i.e. on the shipped default — would
+    hand the sandboxed shell the private home and the resolved env-file. The env-file names are
+    withheld from the child environment *because* the agent cannot read the file, and that reasoning
     only holds while this stays ``deny``. Native discovery loses nothing: the CLI reads its own user
     config and auth outside this profile, and ``--ignore-user-config`` is what gates them. The
-    provider config home is not in this set at all (owner decision 2026-08-24, Ам-5 Блок Б).
+    provider config home is not in this set at all.
     """
     root = tmp_path / "clone"
     profile = build_codex_permission_profile(
@@ -120,7 +120,7 @@ def test_the_private_set_stays_denied_whatever_read_isolation_says(tmp_path: Pat
     )
     fs = profile["filesystem"]
     assert fs[str(root / ".worc")] == "deny"  # private set unreadable and unwritable
-    assert fs[str(root / ".worc" / ".env")] == "deny"  # the env-file ТA.2.3 depends on
+    assert fs[str(root / ".worc" / ".env")] == "deny"  # the env-file the withholding rule needs
     assert fs[str(root / ".worc" / "runs")] == "deny"  # frozen bundles / seals / quarantine
     assert fs[str(root / ".env")] == "deny"  # public blacklist unchanged
     assert fs[str(root / "secrets")] == "deny"
@@ -234,11 +234,11 @@ def test_git_evidence_does_not_change_the_codex_profile(tmp_path: Path) -> None:
     unchangeable, nothing published) rather than on a symmetric list of verbs.
 
     The second half of that contract is a DEFAULT, not an invariant, and this is one of the places
-    that used to read as though it were. ``security.strict_isolation: false`` puts every node online
-    (asserted below), so ``git push`` there has somewhere to go and credentials it picks up by
-    itself; what keeps publication the orchestrator's is the product mandate plus detection on our
-    own ``origin``, not this profile. The first half — the workspace mounted ``read`` — survives the
-    mode, and that is asserted below too.
+    most easily misread as though it were. ``security.strict_isolation: false`` puts every node
+    online (asserted below), so ``git push`` there has somewhere to go and credentials it picks up
+    by itself; what keeps publication the orchestrator's is the product mandate plus detection on
+    our own ``origin``, not this profile. The first half — the workspace mounted ``read`` —
+    survives the mode, and that is asserted below too.
     """
     root = tmp_path / "clone"
     profile = build_codex_permission_profile(
@@ -268,13 +268,13 @@ def test_git_evidence_does_not_change_the_codex_profile(tmp_path: Path) -> None:
 
 
 def test_the_advanced_mode_grants_the_volume_root_and_keeps_every_carve_out(tmp_path: Path) -> None:
-    """ТA.4.1: write extends to the whole volume, and the floor survives by being more specific.
+    """Write extends to the whole volume, and the floor survives by being more specific.
 
     The carve-out set is asserted by NAME, one entry at a time, because the short form of the floor
     ("`.git` and `.worc`") does not show all of it: ``runs_home`` and the resolved env-file are the
     entries an implementer reading that short form drops. The provider config home is deliberately
-    NOT a carve-out (owner decision 2026-08-24, Ам-5 Блок Б) — a deny there stopped Codex's own
-    ``apply_patch`` sandbox helper from executing on standalone installs.
+    NOT a carve-out — a deny there stops Codex's own ``apply_patch`` sandbox helper from executing
+    on standalone installs, where the ``codex`` binary lives inside that home.
     """
     root = tmp_path / "clone"
     profile = build_codex_permission_profile(

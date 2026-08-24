@@ -36,10 +36,11 @@ flow:
       { session_scope: fresh_disposable, permission_profile: read-only, gate_severity: medium }
 
   nodes:
-    # Runs on every task. It used to be gated on `derived.needs_refinement`, which is true only for
-    # an ill-formed task file — a non-empty description plus an `## Acceptance criteria` section
-    # already counts as complete — so on any well-formed task the scoping pass never ran. A complete
-    # task file and a *scoped* task are different things: this node decomposes the question into
+    # Runs on every task, deliberately ungated. `derived.needs_refinement` would be the obvious
+    # gate and is the wrong one: it is true only for an ill-formed task file — a non-empty
+    # description plus an `## Acceptance criteria` section already counts as complete — so on any
+    # well-formed task the scoping pass would never run. A complete task file and a *scoped* task
+    # are different things: this node decomposes the question into
     # sub-questions and anchors each one to where its evidence lives, and the analysis passes
     # downstream consume that brief. Skip it PER TASK (`nodes.refinement.enabled: false`) when the
     # question is narrow enough not to need scoping.

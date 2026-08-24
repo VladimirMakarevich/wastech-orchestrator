@@ -700,7 +700,7 @@ def test_evaluator_request_carries_security_preamble(tmp_path: Path) -> None:
 
 
 def test_a_shell_bearing_evaluator_reports_git_control_drift(tmp_path: Path) -> None:
-    # П4.4: an evaluator had no fingerprint at all, though `git_evidence` is a valid field on it and
+    # An evaluator had no fingerprint at all, though `git_evidence` is a valid field on it and
     # a Codex reviewer runs commands on its read-only profile today. Reported, never parked — the
     # same verdict a read-only agent node gets.
     from wastech_orchestrator.git_manager import ChangedPath, GitControlDrift, GitControlDriftItem
@@ -728,7 +728,7 @@ def test_a_shell_bearing_evaluator_reports_git_control_drift(tmp_path: Path) -> 
 
 
 def test_the_write_deny_roots_reach_a_shell_bearing_evaluator(tmp_path: Path) -> None:
-    # Пре1-2: the write guard is what the provider's pre-launch canary takes its probe paths from,
+    # The write guard is what the provider's pre-launch canary takes its probe paths from,
     # so an evaluator that can run commands has to carry it — without it the loud floor-1 line's
     # "re-proved before every provider attempt" held for the agent node alone, and a Codex reviewer
     # (which has a shell on its read-only profile) went to the provider with nothing to probe.
@@ -768,7 +768,7 @@ def test_an_evaluator_without_a_shell_carries_no_write_guard(tmp_path: Path) -> 
 def test_evaluator_drift_is_logged_when_the_node_leaves_through_a_raise(
     tmp_path: Path, package_log_text: Callable[[], str]
 ) -> None:
-    # Пре3-10: the drift was computed and then thrown away on the paths that raise — a node that
+    # The drift was computed and then thrown away on the paths that raise — a node that
     # planted a hook and failed to emit parseable findings went to manual with no word about the
     # clone. That warning is the one signal by which an operator knows to discard it rather than
     # read on through the findings.
@@ -1516,7 +1516,7 @@ def test_agent_hitl_no_signal_proceeds(tmp_path: Path) -> None:
 
 
 def test_a_writing_hitl_node_passes_the_dangerous_diff_gate(tmp_path: Path) -> None:
-    # П4.4: the HITL path ran no post-edit guard on any exit, so a flow that declared `hitl` on a
+    # The HITL path ran no post-edit guard on any exit, so a flow that declared `hitl` on a
     # writing node deleted files and published without ever asking. The guard is core-owned and
     # automatic — asking the operator a question is not an opt-out from it.
     from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
@@ -2913,8 +2913,8 @@ class FakeGit:
         self._changed = changed
         self._changed_seq = changed_seq
         # Commits the branch carried that nobody here made — reported by `adopt_foreign_commits`,
-        # which the publish node calls BEFORE the push so the checks over the combination run first
-        # (П3.5/П3.6 paths). Plus the notice `create_pr` was handed, so a test can assert what a
+        # which the publish node calls BEFORE the push so the checks over the combination run
+        # first. Plus the notice `create_pr` was handed, so a test can assert what a
         # reviewer would read.
         self.adopted: tuple[str, ...] = ()
         # Commits publishing found already committed inside the run (an agent's own `git commit`).
@@ -3499,12 +3499,12 @@ _DRIFT_ASPECTS = [
 def test_git_control_drift_on_a_workspace_write_node_reports_and_finishes(
     tmp_path: Path, aspect: str, detail: str
 ) -> None:
-    # The withdrawal of the last parking verdict (owner decision, 2026-08-24). A workspace-write
-    # attempt that drifts now takes the same never-park path as every other node class: the outcome
-    # stays `done`, the run continues, and the redacted aspect-level summary rides out on the
-    # outcome for the post-node hook to warn and trace. What made the old verdict wrong was not the
-    # detection but its consequence: the thing it caught in practice was the operator committing a
-    # neighbouring file in their own repository, and it threw away a finished node's work for it.
+    # A workspace-write attempt that drifts takes the same never-park path as every other node
+    # class: the outcome stays `done`, the run continues, and the redacted aspect-level summary
+    # rides out on the outcome for the post-node hook to warn and trace. Parking would be wrong not
+    # because the detection is wrong but because of its consequence: what it catches in practice is
+    # the operator committing a neighbouring file in their own repository, and it would throw away
+    # a finished node's work for that.
     (tmp_path / "roles").mkdir()
     (tmp_path / "roles" / "impl.md").write_text("Implement {task_path}", "utf-8")
     node = _write_node()
@@ -3672,7 +3672,7 @@ def test_git_control_drift_by_a_granted_read_only_node_warns_and_still_finishes(
 def test_a_read_only_node_with_a_provider_shell_is_bracketed_without_any_grant(
     tmp_path: Path,
 ) -> None:
-    # The rekey (П4.2): the bracket keys on "does this attempt have a shell", not on the declared
+    # The rekey: the bracket keys on "does this attempt have a shell", not on the declared
     # git-evidence grant. A Codex `read-only` node runs commands today and declared nothing, so
     # before this it was the one class with a shell and no fingerprint at all.
     from wastech_orchestrator.git_manager import GitControlDrift, GitControlDriftItem
@@ -3832,7 +3832,7 @@ class _AdoptingGit(FakeGit):
 def test_publish_reruns_checks_over_adopted_commits_and_declares_them_in_the_pr(
     tmp_path: Path,
 ) -> None:
-    # AC3.5 — what the gate passed was "our commits on top of base"; what is published is a
+    # What the gate passed was "our commits on top of base"; what is published is a
     # combination it never saw, so the gate runs again. The PR says so too: its diff is measured
     # from the base, so without the notice it silently describes someone else's work as this task's.
     node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
@@ -3853,7 +3853,7 @@ def test_publish_reruns_checks_over_adopted_commits_and_declares_them_in_the_pr(
     assert store.check_runs  # and the re-run is on the audit trail
     assert git.pr_notice is not None
     assert "abc1234" in git.pr_notice and "def5678" in git.pr_notice
-    # Пре2-8: the same fact leaves the node on its outcome, which is what carries it to the
+    # The same fact leaves the node on its outcome, which is what carries it to the
     # operator's console + ⚠️ trace — the only surfaces a `push`/`commit` scope has.
     assert result.outcome.adopted_commits == ("abc1234", "def5678")
 
@@ -3889,9 +3889,9 @@ def test_publish_parks_when_the_checks_over_adopted_commits_fail(tmp_path: Path)
 
 
 def test_publish_asks_about_a_dangerous_diff_before_it_commits(tmp_path: Path) -> None:
-    # Пре3-1: the gate used to live only on the writing agent node, so a flow whose last writing
-    # node is followed by a `tool`/`evaluator` (which warn rather than park) — or a flow with no
-    # writing node at all, like the packaged `security_audit` — reached `commit_code` with content
+    # On the writing agent node alone the gate is not enough: a flow whose last writing node is
+    # followed by a `tool`/`evaluator` (which warn rather than park) — or a flow with no writing
+    # node at all, like the packaged `security_audit` — would reach `commit_code` with content
     # nobody had been asked about. The ask happens BEFORE the commit, so a denial publishes nothing.
     from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
     from wastech_orchestrator.git_manager import ChangedPath
@@ -3986,7 +3986,7 @@ def test_publish_does_not_ask_when_no_diff_is_dangerous(tmp_path: Path) -> None:
 
 
 def test_publish_declares_locally_adopted_commits_in_the_pr_body(tmp_path: Path) -> None:
-    # Пре3-5: the phase itself rejected "a warning on the shipped default nobody reads" — and then
+    # The phase itself rejected "a warning on the shipped default nobody reads" — and then
     # closed the requirement with a log line. A reviewer of the pull request is the one person
     # guaranteed to look, and the delivery mechanism was already there for the remote-side case.
     class _LocallyAdoptingGit(FakeGit):
@@ -4015,9 +4015,9 @@ def test_publish_declares_locally_adopted_commits_in_the_pr_body(tmp_path: Path)
 
 
 def test_publish_checks_the_adopted_combination_before_it_pushes(tmp_path: Path) -> None:
-    # Пре2-4: "publishing happens only when checks succeed" — so the merge (local, undoable) and the
-    # gate over the combination both come BEFORE the push (not undoable). The order used to be
-    # push-then-check, which had already published the untested combination when it asked about it.
+    # "publishing happens only when checks succeed" — so the merge (local, undoable) and the
+    # gate over the combination both come BEFORE the push (not undoable). Push-then-check would
+    # have already published the untested combination by the time it asked about it.
     node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
     git, store = _AdoptingGit(("abc1234",)), FakeStore()
     checks = _OrderRecordingChecks(CheckOutcome(passed=True, runs=(_run(True),)), git)
@@ -4066,9 +4066,10 @@ def test_publish_parks_before_pushing_an_adopted_combination_that_fails_its_chec
 def test_publish_says_out_loud_when_no_check_set_covers_the_adopted_commits(
     tmp_path: Path, package_log_text: Callable[[], str]
 ) -> None:
-    # Пре2-12: the one path where П3.5 cannot be honored — no configured set matches the combined
-    # diff, so there is nothing to re-run. It publishes, and the only thing standing between the
-    # operator and a silent "checks passed" reading is this line, which had no test at all.
+    # The one path where the combination cannot be re-checked — no configured set matches the
+    # combined diff, so there is nothing to re-run. It publishes, and the only thing standing
+    # between the operator and a silent "checks passed" reading is this line, which had no test at
+    # all.
     node = PublishNode(id="publish", kind="publish", policy=PublishingPolicy.PULL_REQUEST)
     git, store = _AdoptingGit(("abc1234",)), FakeStore()
     checks = FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),)))

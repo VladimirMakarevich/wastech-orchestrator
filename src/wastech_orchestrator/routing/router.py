@@ -1,11 +1,11 @@
-"""Agent Router: route resolution and infrastructure-only fallback (PRE.1).
+"""Agent Router: route resolution and infrastructure-only fallback.
 
 The layer between the Orchestrator Core and the provider adapters. For each node it:
 
 * resolves the ``(primary, fallback)`` pair from the flow node's ``provider`` field — the node's
   declared provider runs it, else the config's single global primary
   (``agents.providers.<id>.primary``); the fallback is that global primary (the sole infra-fallback
-  target) unless the primary already *is* it (PRE.1);
+  target) unless the primary already *is* it;
 * runs the primary and, **only** for infrastructure ``ProviderError`` classes (plus the conditional
   auth/permission case), falls back to the global primary;
 * counts ``stage_attempts`` across the fallback, bounded by ``agents.max_stage_attempts``;
@@ -115,7 +115,7 @@ def _earlier(current: str | None, candidate: str | None) -> str | None:
 
 
 def _resolve_global_primary(config: OrchestratorConfig) -> ProviderId:
-    """The single ``agents.providers.<id>.primary: true`` provider (PRE.1).
+    """The single ``agents.providers.<id>.primary: true`` provider.
 
     ``validate_config`` already guarantees exactly one; this is defensive so a router built from an
     unvalidated config fails loud (``ConfigError``) rather than silently picking a provider.
@@ -145,7 +145,7 @@ class ResolvedRoute:
     """The chosen primary/fallback for a node, with its route source.
 
     ``node_id`` is the flow node's id, carried for audit/logging only — it never selects the
-    provider (routing is node-based via the node's ``provider`` field, PRE.1).
+    provider (routing is node-based via the node's ``provider`` field).
     """
 
     node_id: str
@@ -260,17 +260,16 @@ class AgentRouter:
         node_id: str,
         provider: ProviderId | None = None,
     ) -> ResolvedRoute:
-        """Resolve ``(primary, fallback)`` for a node from its declared ``provider`` (PRE.1).
+        """Resolve ``(primary, fallback)`` for a node from its declared ``provider``.
 
         A non-``None`` ``provider`` (the flow node's declared executor) runs the node; ``None``
         defaults to the config's global primary. When the resolved primary differs from the global
         primary, the fallback is that global primary. When the resolved primary already *is* the
         global primary, the fallback is the single *other* allowed+configured provider — symmetric
-        cross-provider failover (transient provider recovery, extending PRE.1's single fallback
-        target). With only one allowed provider there is no fallback (an infra failure on it is
-        handled by the same-provider retry budget, then the soft pause). ``node_id`` is carried for
-        audit/logging only; it no longer selects the provider. Raises :class:`ConfigError` on an
-        unknown or unavailable provider.
+        cross-provider failover. With only one allowed provider there is no fallback (an infra
+        failure on it is handled by the same-provider retry budget, then the soft pause).
+        ``node_id`` is carried for audit/logging only and never selects the provider. Raises
+        :class:`ConfigError` on an unknown or unavailable provider.
         """
         primary = provider if provider is not None else self._global_primary
         source = RouteSource.FLOW_NODE if provider is not None else RouteSource.CONFIG

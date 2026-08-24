@@ -107,9 +107,8 @@ def internal_protected_paths(config: OrchestratorConfig) -> tuple[ProtectedPath,
     Everything here follows from ``repo.local_path`` and two config keys, so it is the same on every
     machine. Deliberately *not* here: an explicit ``--env-file``, which is resolved from the command
     line — it is host state, so it joins the set only in ``worc preflight``, which is allowed to be
-    host-specific. The provider config/credential homes are not protected anywhere at all (owner
-    decision 2026-08-24): they are ordinary paths, so an assigned toolchain variable may point
-    inside them.
+    host-specific. The provider config/credential homes are not protected anywhere at all: they are
+    ordinary paths, so an assigned toolchain variable may point inside them.
 
     ``denied_read_paths`` entries are handled separately by :func:`denied_read_path_collision` so
     their real glob semantics are preserved instead of broadening a pattern to its fixed prefix.
@@ -155,8 +154,8 @@ def denied_read_path_collision(
     """The first assigned element that actually matches a repo-relative deny glob.
 
     Matching the concrete assigned directory avoids both errors caused by reducing a glob to its
-    wildcard-free prefix: leading-``**`` patterns remain effective, while ``conf/*.yaml`` no longer
-    rejects an unrelated cache directory under ``conf/``. This deliberately does not speculate
+    wildcard-free prefix: leading-``**`` patterns stay effective, while ``conf/*.yaml`` does not
+    reject an unrelated cache directory under ``conf/``. This deliberately does not speculate
     about files a toolchain might create below a directory; it evaluates the configured value.
     """
     fold = _folds_case(system)

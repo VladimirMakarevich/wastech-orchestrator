@@ -23,7 +23,7 @@ Read-isolation is orthogonal to the fatal gate. The operator escape hatch
 ``security.disable_read_isolation`` — like the master ``strict_isolation: false`` — relaxes only the
 READ side, and only the *native discovery* half of it: the private read-deny projection (``.worc``,
 the env-file, the frozen bundles) stays ``Read``-denied at either value; the provider CLIs' own
-config homes carry no deny at all (owner decision 2026-08-24). This preflight validates
+config homes carry no deny at all, at either value. This preflight validates
 the WRITE/permission/sandbox ceiling, which stays in force regardless. So ``disable_read_isolation``
 is a sanctioned opt-out, never itself a preflight reason (the per-provider ``isolation_reasons`` do
 not examine it), and the ``strict_isolation`` preflight is unaffected.
@@ -84,11 +84,11 @@ _FLOOR_LOSS_SHELL_WITHHELD = (
 # each and have already drifted in wording. Subject + ON/OFF + the key that caused it, matching the
 # shape those two established.
 #
-# One line, not a recital. This used to print six axes (environment, redaction, tools, write,
-# network) and all four floor levels into every preflight report and every run log. That text now
-# lives in `guide/config/security.md`, where it is read once instead of scrolled past on every run
-# — the operator decision of 2026-08-24, which replaces the "announced in full" half of ТA.1.4 and
-# ТA.6.1. What is announced has not changed; only how much of it the report recites.
+# One line, not a recital: the six axes (environment, redaction, tools, write, network) and the
+# four floor levels are spelled out in `guide/config/security.md`, where they are read once, instead
+# of being recited into every preflight report and every run log and scrolled past. The report still
+# announces that the mode is on and names the key that turned it on — a weakening is never silent —
+# it just does not restate the whole document.
 _MODE_SUBJECT = (
     "advanced-mode: ON (security.strict_isolation=false) — full freedom for the agent under the "
     "operator's responsibility, except the floor; guide/config/security.md says what that floor "

@@ -205,7 +205,7 @@ def test_queue_whitespace_only_rejected(config: OrchestratorConfig) -> None:
 
 
 def test_refined_is_now_an_unknown_field(config: OrchestratorConfig) -> None:
-    # PRE.3: the clean task dropped ``refined`` (refinement-skip is completeness-driven). The key
+    # The clean task dropped ``refined`` (refinement-skip is completeness-driven). The key
     # is no longer in the allowlist → fail-closed UNKNOWN_TOP_LEVEL_FIELD.
     text = "---\nid: task-001\ntitle: T\nrefined: true\n---\n\n## Description\n\nx\n"
     result = _gate(config).validate(_src(text))
@@ -378,7 +378,7 @@ def test_recovery_rerun_allowance_is_scoped_to_the_named_id(config: Orchestrator
 
 
 def test_agents_route_override_is_now_an_unknown_field(config: OrchestratorConfig) -> None:
-    # PRE.3: per-task provider routing is gone — a node declares its own ``provider``. The
+    # Per-task provider routing is gone — a node declares its own ``provider``. The
     # front-matter ``agents`` key is no longer in the allowlist → fail-closed.
     text = "---\nid: task-001\ntitle: T\nagents:\n  review: codex\n---\n\n## Description\n\nx\n"
     result = _gate(config).validate(_src(text))
@@ -425,7 +425,7 @@ def test_phase_b_acceptance_prose_without_section_needs_enrichment(
 
 
 def test_phase_b_complete_with_acceptance_criteria(config: OrchestratorConfig) -> None:
-    # PRE.3: completeness is the only input to the refinement-skip — a description + acceptance
+    # Completeness is the only input to the refinement-skip — a description + acceptance
     # criteria classifies COMPLETE (no ``refined`` flag).
     text = (
         "---\nid: task-001\ntitle: T\n---\n\n"
@@ -574,7 +574,7 @@ def test_decomposition_non_boolean_is_rejected(config: OrchestratorConfig) -> No
 
 @pytest.mark.parametrize("field", ["model", "reasoning"])
 def test_model_and_reasoning_are_now_unknown_fields(config: OrchestratorConfig, field: str) -> None:
-    # PRE.3: model/reasoning live on the flow node, never the task → unknown top-level fields now.
+    # Model/reasoning live on the flow node, never the task → unknown top-level fields now.
     text = f"---\nid: task-001\ntitle: T\n{field}: x\n---\n\n## Description\n\nDo it.\n"
     result = _gate(config).validate(_src(text))
     assert result.reason is ValidationReason.UNKNOWN_TOP_LEVEL_FIELD

@@ -101,7 +101,7 @@ def _seed_diff(tmp_path: Path, text: str = _DIFF) -> None:
 
 
 def test_build_packet_facts_is_a_pure_function_of_durable_state(tmp_path: Path) -> None:
-    # The reproducibility contract (P0-D2), asserted on the assembly itself now that two surfaces
+    # The reproducibility contract, asserted on the assembly itself now that two surfaces
     # are built from it: the same state.db must yield equal facts and byte-identical rendered bytes.
     store = _store(tmp_path)
     run_id = _run_row(store, "implementation", "agent", provider_used="claude")

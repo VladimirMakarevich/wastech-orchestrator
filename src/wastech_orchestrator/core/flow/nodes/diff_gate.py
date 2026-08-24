@@ -12,9 +12,8 @@ commit the orchestrator itself made, and *any* node with a shell can commit — 
 ``evaluator``, a read-only agent attempt, and in advanced mode that is every node. A flow whose last
 writing node is followed by such a node (or that has no writing node at all, like the packaged
 ``security_audit``) therefore reached ``commit_code`` with content no human had been asked about.
-A commit made inside a run is now reported and never parked (operator decision, 2026-08-24,
-superseding the 2026-08-05 split), which makes this the one place left to ask — and the only thing
-that still holds such a commit before it goes out.
+A commit made inside a run is reported and never parked, so this gate is the one place left to ask
+about it — and the only thing that holds such a commit before it goes out.
 """
 
 from __future__ import annotations

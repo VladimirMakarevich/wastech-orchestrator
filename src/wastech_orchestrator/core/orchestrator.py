@@ -1770,9 +1770,10 @@ class Orchestrator:
             raise PipelineFailed(f"merge-task failed: {exc}") from exc
         except Exception:
             # The staging gates inside `commit_merge_resolution` raise ManualActionRequired, not
-            # GitCommandError, and used to escape past the abort — leaving the tree mid-merge, which
-            # blocks cleanup and the next task. Abort here too and re-raise unchanged, so the class
-            # of the outcome (a block a human must clear) is preserved rather than downgraded.
+            # GitCommandError, so without this clause they escape past the abort and leave the tree
+            # mid-merge, which blocks cleanup and the next task. Abort here too and re-raise
+            # unchanged, so the class of the outcome (a block a human must clear) is preserved
+            # rather than downgraded.
             self._git.merge_abort()
             raise
         return self._merge_finalize(row, pr_url)
@@ -2021,7 +2022,7 @@ class Orchestrator:
         continues from ``current_node`` (the decomposed re-entry is handled in :meth:`_run_phases`).
         A task with no flow checkpoint (interrupted before the engine started) restarts from the
         A checkpointed continue reuses the **frozen** control bundle (verified in
-        :meth:`_engine_run`), so a live-flow edit no longer silently restarts the run — it is a
+        :meth:`_engine_run`), so a live-flow edit never silently restarts the run — it is a
         parked-conflict the operator resolves with a fresh rerun/restart. Side-effect idempotency
         (commit/push/PR) lives in ``publish_operations``, so a resumed run never duplicates them."""
         run_state = hydrate_run_state(self._store, p.task.id)
@@ -2295,15 +2296,14 @@ class Orchestrator:
         pointer at something else, and nothing an operator does in the ordinary course looks like
         it.
 
-        A **content** change is a warning and the run continues (owner decision, 2026-08-24). The
-        code cannot tell an agent rewriting a role prompt from the operator editing their own flow
-        YAML mid-run — the invariant used to claim it could — and on a repository where the operator
-        edits flows several times a day the second reading is the common one. Whether the run had
-        parked came down to whether they saved the file a minute before the freeze or a minute
-        after. What the freeze already guarantees is what happens instead: the run continues on the
-        **frozen** bundle, so the edit does not take effect and cannot select control bytes for a
-        downstream node. It applies from the next run, or from a ``rerun --continue``, which adopts
-        it on purpose.
+        A **content** change is a warning and the run continues. The code cannot tell an agent
+        rewriting a role prompt from the operator editing their own flow YAML mid-run, and on a
+        repository where the operator edits flows several times a day the second reading is the
+        common one — parking would come down to whether they saved the file a minute before the
+        freeze or a minute after. Nothing is lost by continuing, because that is what the freeze is
+        for: the run continues on the **frozen** bundle, so the edit cannot select control bytes for
+        a downstream node either way. It applies from the next run, or from a ``rerun --continue``,
+        which adopts it on purpose.
 
         The warning names the diverged keys, because "the control plane changed" is not actionable
         and "flows/content_chapter.yaml" is. ``reported`` is the run's set of live digests already
@@ -2491,8 +2491,8 @@ class Orchestrator:
 
         Published from the frozen canonical file (verified on resume), so the exchange copy is a
         redaction of the immutable snapshot — never a re-read of the live file. Repository
-        instructions are no longer published or injected: the agent reads the repo's root
-        instruction files itself; those files are write-denied for the run (immutable).
+        instructions are neither published nor injected: the agent reads the repo's root instruction
+        files itself, and those files are write-denied for the run (immutable).
         """
         secrets = self._memory_extra_secrets()
         if (bundle_dir / TASK_PACKET_KEY).is_file():
@@ -2714,13 +2714,12 @@ class Orchestrator:
             try:
                 contaminated, active_unsafe = self._store.get_exchange_guard(p.task.id)
                 if contaminated and adopt:
-                    # The contamination flag stops being a life sentence (owner decision,
-                    # 2026-08-24). Detection still parks the run and still quarantines the tree as
-                    # evidence — that is the one agent-side guard the phase kept — but an operator
-                    # who has read the diagnosis had no way to continue at all, only to re-pay for a
-                    # fresh run. Their `--continue` clears it, on the same trust the control
-                    # plane is adopted on; the daemon's own recovery sets no marker and still
-                    # refuses.
+                    # An explicit operator `--continue` clears the contamination flag, on the same
+                    # trust the control plane is adopted on. Detection still parks the run and still
+                    # quarantines the tree as evidence — that is the agent-side guard — but without
+                    # this an operator who has read the diagnosis could not continue at all, only
+                    # re-pay for a fresh run. The daemon's own crash recovery sets no such marker
+                    # and still refuses.
                     self._store.update_task(p.task.id, exchange_contaminated=0)
                     contaminated = False
                     self._log(p.task.id).warning(
@@ -3471,12 +3470,12 @@ class Orchestrator:
     ) -> Callable[[str], bool]:
         """Resolve a flow ``when`` fact (``derived.*`` / ``config.*``) to a boolean.
 
-        Per-task node-disable no longer flows through a ``config.*_enabled`` fact — it is handed to
-        the engine directly as ``disabled_nodes`` (keyed by node id), so the only facts left are the
+        Per-task node-disable does not flow through a ``config.*_enabled`` fact — it is handed to
+        the engine directly as ``disabled_nodes`` (keyed by node id), so the only facts here are the
         deterministic refinement-skip and the flow-capability ``config.external_research``.
         """
         # Refinement-skip is deterministic — driven purely by completeness classification, never a
-        # task flag (PRE.3): a ``complete`` task skips refinement, anything else runs it.
+        # task flag: a ``complete`` task skips refinement, anything else runs it.
         needs_refinement = completeness is not Completeness.COMPLETE
         # External research (deep_research) is available iff the flow grants network — there is no
         # separate config knob (config.yaml stays infra-only): an optional node's availability is a
@@ -3528,10 +3527,10 @@ class Orchestrator:
     ) -> None:
         """Say it once per run when the flow observes less often than the operator asked for.
 
-        The narrowing itself is legitimate and stays — a flow is the narrower authority, and the
-        validator already refused the other direction — but it used to happen in silence. An
-        operator who configured ``events`` with ``triggers: [rework, failure, fallback]`` and then
-        ran a packaged content flow (they all ship ``none``) got five runs with a real provider
+        The narrowing itself is legitimate — a flow is the narrower authority, and the validator
+        refuses the other direction — but it must not happen in silence. An operator who configures
+        ``events`` with ``triggers: [rework, failure, fallback]`` and then runs a packaged content
+        flow (they all ship ``none``) would otherwise get run after run with a real provider
         fallback in them and not one observation, with nothing anywhere saying why. So the line
         names both modes and the triggers that stop applying, which is the part that is actually
         surprising: the triggers are configured globally and discarded per flow.
@@ -3661,14 +3660,14 @@ class Orchestrator:
                     "the tree, this should have been denied",
                     extra={"stage": node.id},
                 )
-            # The sharper half of the same never-park rule, and since 2026-08-24 it covers every
-            # node class including the writing one: git control state moved — a moved `HEAD`, the
-            # index, a hook, `.git/config`. Most of that is the operator working in their own
-            # repository, which is why it no longer stops the task; the part that is not is the
-            # reason this stays a warning rather than an info, because continuing means the
-            # orchestrator's own next git command (commit / branch switch / push) runs in that
-            # clone. So it names the drifted aspect and says to stop the run rather than merely
-            # "inspect" — the operator is the one who can tell their own commit from a planted hook.
+            # The sharper half of the same never-park rule, on every node class including the
+            # writing one: git control state moved — a moved `HEAD`, the index, a hook,
+            # `.git/config`. Most of that is the operator working in their own repository, which is
+            # why it does not stop the task; the part that is not is why this stays a warning rather
+            # than an info, because continuing means the orchestrator's own next git command
+            # (commit / branch switch / push) runs in that clone. So it names the drifted aspect and
+            # says to stop the run rather than merely "inspect" — the operator is the one who can
+            # tell their own commit from a planted hook.
             if outcome.git_control_drift is not None:
                 self._log(p.task.id).warning(
                     "git control state changed during this node — continuing per policy; if you "
@@ -4147,8 +4146,8 @@ class Orchestrator:
         """Write the deterministic ``summary.{md,json}`` report from the run's recorded facts.
 
         Reads the same durable facts the oversight layer's own close-out is grounded in, so the two
-        bodies cannot disagree about what the run did — and the evaluator findings a gate let past,
-        which used to reach only the local metadata, reach the pull-request body on every path.
+        bodies cannot disagree about what the run did, and the evaluator findings a gate let past
+        reach the pull-request body on every path rather than only the local metadata.
         """
         evaluations = self._store.get_evaluations(p.task.id)
         # Merged, not assigned: on a degraded DONE the supervisor already computed its own list
@@ -4557,16 +4556,16 @@ class Orchestrator:
             cleanup_completed=cleanup.safe,
             cleanup_completed_at=self._clock() if cleanup.safe else None,
             cleanup_last_error=last_error,
-            # A terminal task is no longer parked, and a surviving wake instant would defer a
-            # later rerun that nobody is waiting on.
+            # A terminal task is not parked, and a surviving wake instant would defer a later
+            # rerun that nobody is waiting on.
             blocked_since=None,
             blocked_until=None,
         )
-        # Only ``done`` explains itself. Every other terminal used to depend on which path
-        # reached it: a publish failure logged its git stderr and already had a summary (finalize
-        # runs inside the publish node), while a node raising ``NodeManualRequired`` came straight
-        # here and left its reason in ``tasks.cleanup_last_error`` and nowhere else — the operator
-        # saw "status changed to manual_action_required" and had to open SQLite to learn why.
+        # Only ``done`` explains itself; every other terminal is explained here, from one place,
+        # whichever path reached it. A publish failure logs its git stderr and already has a summary
+        # (finalize runs inside the publish node), while a node raising ``NodeManualRequired`` comes
+        # straight here — without this the operator would see "status changed to
+        # manual_action_required" and have to open SQLite to learn why.
         if final is not Status.DONE:
             already_moved = self._explain_terminal(p, final, last_error) or already_moved
         # Close any node run left ``running`` by a hard stop before recording the terminal
@@ -4888,7 +4887,7 @@ class Orchestrator:
         self._transition_status(task.id, Status.NEW, Status.VALIDATED)
 
     def _decomposition_gate_on(self, task: NormalizedTask) -> bool:
-        """Whether decomposition is permitted at all (PRE.3): the task value overrides the global.
+        """Whether decomposition is permitted at all: the task value overrides the global.
 
         Mirrors :meth:`_prompt_audit_on`: a per-task ``decomposition: true``/``false`` is honored
         verbatim (true permits a split even when ``agents.decomposition.enabled`` is off, false
@@ -4918,7 +4917,7 @@ class Orchestrator:
     def _auto_merge_on(self, task: NormalizedTask) -> bool:
         """Resolve the effective auto-merge decision (DANGER: bypasses human review).
 
-        The task value wins outright (PRE.2): an explicit per-task ``True``/``False`` is honored
+        The task value wins outright: an explicit per-task ``True``/``False`` is honored
         verbatim; absent (``None``) defers to the instance default ``git.auto_merge``. Auto-merge
         is a publishing-policy choice owned by the operator (the same trusted author as the config),
         not a sandbox/approvals ceiling, so there is no separate operator gate: skipping the human

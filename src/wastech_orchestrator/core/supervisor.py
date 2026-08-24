@@ -8,11 +8,11 @@ and at whole-task close synthesizes the ``summary`` + advisory caveats.
 
 Two things bound that cost. The deterministic ``tool`` / ``checks`` nodes are **not** observed —
 their result is already a durable fact (``node_runs`` / ``check_runs``), so an LLM note about it
-buys nothing. And the whole-task ``finalize`` no longer depends on the warm session at all: it runs
+buys nothing. And the whole-task ``finalize`` does not depend on the warm session at all: it runs
 on a **fresh** session seeded by the :mod:`~wastech_orchestrator.core.supervisor_packet`
 ``SupervisorPacket`` — a small deterministic artifact built from durable state and handed over as a
-path. So a normal run and a revive follow one reproducible path, and the finalize call's input stops
-growing with the run's rework cycles.
+path. So a normal run and a revive follow one reproducible path, and the finalize call's input does
+not grow with the run's rework cycles.
 
 It is **advisory by construction**: it never reworks, reopens, or routes. Each observation is
 recorded as an immutable ``evaluations`` row (``supervisor_step`` / ``supervisor_final``,
@@ -175,18 +175,18 @@ _SKILL_MAP_SCHEMA: dict[str, Any] = {
 }
 
 
-# The evidence-gated ``follow_ups`` schema (task 1). Hardcoded in code — a flow author reshapes the
+# The evidence-gated ``follow_ups`` schema. Hardcoded in code — a flow author reshapes the
 # supervisor's *wording* via its prompt files, but never the machine contract the orchestrator
 # parses. Each record is minimal and grounded: an unsupported "refactor idea" carries no evidence
 # and is dropped by :func:`parse_follow_ups`.
 # Nullable array root (``["array", "null"]``) + full ``required`` so this validates under OpenAI
 # strict mode when nested as the finalize turn's ``follow_ups``: no follow-ups → ``null``.
-# Formerly-optional ``paths``/``action_hint`` are nullable so the model may still omit them;
-# :func:`parse_follow_ups` treats ``null`` identically to an absent key.
-# The root ``description`` is load-bearing, not decoration: without it a model that had nothing to
-# report OMITTED the key (following the prose "leave the array empty"), was rejected three times for
-# a missing required property, and collapsed to a four-byte probe summary that shipped as a PR body.
-# The schema now states the contract the prompt states, so the two cannot disagree.
+# ``paths``/``action_hint`` are nullable rather than optional so the model may still omit them under
+# that same strict mode; :func:`parse_follow_ups` treats ``null`` identically to an absent key.
+# The root ``description`` is load-bearing, not decoration: without it a model with nothing to
+# report omits the key (following the prose "leave the array empty"), is rejected for a missing
+# required property, and collapses to a few-byte summary that then ships as a PR body. It states in
+# the schema what the prompt states in prose, so the two cannot disagree.
 _FOLLOW_UPS_SCHEMA: dict[str, Any] = {
     "type": ["array", "null"],
     "description": (
@@ -628,12 +628,12 @@ class Supervisor:
         ``summary.json`` is always written. Returns the summary path + the delta + the follow-ups.
 
         The turn **always** runs on a fresh session seeded by the ``SupervisorPacket``, on a normal
-        run exactly as on a revive: the warm session it used to resume was the reason a revived
-        task got a thinner summary and the reason this call's input grew with every rework cycle.
-        There is no warm auto-fallback if the packet cannot be built — that would put
-        non-determinism back into the one path this makes reproducible and hide the build failure;
-        the fallback stays what it was, the orchestrator's deterministic minimal summary after a
-        turn that produced nothing.
+        run exactly as on a revive: resuming a warm session instead would give a revived task a
+        thinner summary and grow this call's input with every rework cycle. There is no warm
+        auto-fallback if the packet cannot be built — that would put non-determinism back into the
+        one path this makes reproducible and hide the build failure. The fallback is the
+        orchestrator's deterministic minimal summary, the same one a turn that produced nothing
+        gets.
         """
         # ``node_run_id=0`` is the once-per-task finalize sentinel; per-step observations use the
         # observed step's id, so each supervisor turn writes a distinct artifact dir (no collision).

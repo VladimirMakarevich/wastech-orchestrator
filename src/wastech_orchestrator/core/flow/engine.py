@@ -151,10 +151,10 @@ class NodeOutcome:
 
     ``git_control_drift`` is the second, sharper event on that same never-park path: the node
     changed **Git control state** — a moved ``HEAD``, the index, a hook, ``.git/config``. Every node
-    class reports it and none parks on it (operator decision, 2026-08-24, widening the 2026-07-26
-    read-only decision to the writing class): most of what this catches is the operator working in
-    their own repository, which is ordinary state and not evidence, and parking on it threw away
-    finished work after the fact. It carries the redacted drift summary rather than a bool precisely
+    class reports it and none parks on it: most of what this catches is the operator working in
+    their own repository, which is ordinary state and not evidence, and parking on it would throw
+    away finished work after the fact. It carries the redacted drift summary rather than a bool
+    precisely
     because the warning *is* the mitigation for the rest — an operator told only "something changed"
     would inspect the working tree, while the aspect that matters ("hooks: hook 'post-commit'
     added") is the one that makes the next orchestrator git command execute provider-supplied

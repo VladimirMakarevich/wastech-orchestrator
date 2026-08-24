@@ -1,4 +1,4 @@
-"""The executables the orchestrator launches as itself resolve once, not per call (ТA.1.7.3)."""
+"""The executables the orchestrator launches as itself resolve once, not per call."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ def test_git_and_gh_are_pinned_on_every_host(make_git_config, tmp_path) -> None:
 
 
 def test_the_daemon_launcher_is_pinned(make_git_config, tmp_path) -> None:
-    # Ам2-7: ТA.1.7 names the daemon launcher among the classes to pin. It was resolved in
+    # 7 names the daemon launcher among the classes to pin. It was resolved in
     # `cli_shell` for the spawn and never re-checked for drift — while being the one path that
     # hands the NEXT WHOLE RUN to whatever answers to the name.
     config: OrchestratorConfig = make_git_config(tmp_path / "clone")

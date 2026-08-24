@@ -13,221 +13,12 @@ from enum import StrEnum
 
 from wastech_orchestrator.providers.base import ProviderId
 
-# The config.yaml format version. Bumped only when the *format* changes (not on every release). The
-# loader refuses a config whose ``schema_version`` is newer than this (fail-loud); an absent or
-# older value is accepted — the older case is the hook for a future migration runner. See the
-# spec's "Versioning & compatibility" section.
-# v2: added the opt-in ``git.auto_merge*`` keys (auto-merge bypass). Old (v1/absent) configs omit
-# them and take the safe ``false`` defaults — no migration flips anything.
-# v3: added the optional ``prompts`` block (operator-customizable stage prompts). Old (v1/v2/absent)
-# configs omit it and take the safe defaults (packaged templates, append mode) — no migration.
-# v4: added the optional ``agents.skip_stages`` / ``agents.allow_review_skip`` keys (stage-skip
-# control). Old configs omit them and take the safe defaults (no skips, review-skip disallowed) — no
-# migration flips anything.
-# v5 (2026-06-14, post-test-run): adds the optional `skills:` block and the
-# `checks.discovery.{run_at_task_start,approve_command_changes}` keys. All are
-# backward-compatible (absent => safe defaults); `upgrade-config` adds them to an older config.
-# v6 (2026-06-14, prompt-templates-simplification): prompt overrides are now auto-detected by file
-# presence in `prompts.templates_dir` — the `prompts.overrides` map and `prompts.strict` flag are
-# removed, and `prompts.mode` now defaults to `replace`. Legacy `overrides`/`strict` keys are
-# tolerated (ignored) on load; `upgrade-config` strips them. Old configs still load fail-open.
-# v7 (2026-06-16, worc-home-consolidation): the git footprint collapses to a single canonical
-# layout — all runtime files live under the gitignored `<repo>/.worc/` home, while the task file and
-# its `<id>.summary.md` stay at the repo root and are audit-committed. The `git.footprint.location`,
-# `.tracking`, and `.external_root` keys are removed; `git.footprint` now carries only
-# `audit_commit_message` + `audit_on_branch`.
-# v8 (2026-06-16, prompt-audit): adds the optional top-level `prompt_audit` flag (default false).
-# Old configs omit it and take the safe `false` default — no migration flips anything;
-# `upgrade-config` adds it from the packaged template. A per-task `prompt_audit` overrides it.
-# v9: the `prompts` block (`templates_dir`/`mode`) is removed — a flow
-# node's prompt template is its `role_file`, not a stage-indexed packaged default. `upgrade-config`
-# strips an operator's `prompts:` block; old configs still load fail-open (the key is ignored).
-# v10 (2026-06-19, flexible-flow stage-skip): the global `agents.skip_stages` list is removed — with
-# fully configurable flows, "skip a stage for every task" is redundant (drop the node from the flow,
-# or author an operator flow). Per-task `stages.<stage>.enabled: false` survives as a bounded,
-# validated toggle, and `agents.allow_review_skip` stays (now gating only the
-# per-task review skip). `upgrade-config` strips `agents.skip_stages`; old configs still load
-# fail-open (the key is tolerated/ignored).
-# v11 (2026-06-19, flow-engine PRE.1/PRE.2): provider routing moves onto the flow node. The
-# stage-keyed `agents.routing` block is removed — a node declares its own `provider` (else the
-# global primary), and exactly one `agents.providers.<id>.primary: true` marks that global primary
-# (the sole infra-fallback target). The per-task auto-merge gate `git.auto_merge_allow_per_task` is
-# also removed: a per-task `auto_merge` now wins outright (PRE.2). `upgrade-config` strips both dead
-# keys; old configs still load fail-open (the keys are tolerated/ignored).
-# v12 (2026-06-22, audit remediation #5): the decorative `agents.decomposition.min_size_signal` and
-# `agents.decomposition.commit_per_subtask` keys are removed — neither was ever read (subtask commit
-# is unconditional; no prompt consumes the size signal). `upgrade-config` strips both; old configs
-# still load fail-open (the keys are tolerated/ignored).
-# v13 (2026-06-22, Stage-enum removal): the `Stage` enum is deleted and per-task skip is re-founded
-# on flow node ids (`nodes.<node-id>.enabled: false`). `agents.allow_review_skip` is removed — there
-# is no `review`-special-case; which nodes are safe to disable is the operator's flow-authoring
-# responsibility. `upgrade-config` strips `agents.allow_review_skip`; old configs still load
-# fail-open (the key is tolerated/ignored).
-# v14 (2026-06-22, provider-config-cleanup): the unused `agents.providers.<p>.max_budget_usd` key
-# is removed — declared/parsed but read nowhere (only `max_turns` reaches an argv). `upgrade-config`
-# strips it from both provider blocks; old configs still load fail-open (the key is tolerated). (The
-# same bump also ships explicit default `model`/`reasoning` and makes each provider's full-access
-# mode operator-selectable under `security.strict_isolation: false` — neither is a format change.)
-# v15 (2026-06-23, checks-monorepo): a *format* change to the `checks` block. The whole
-# `checks.discovery` block (modes / agent-fallback / refresh / approval) is removed and the flat
-# `checks.commands` list is replaced by named `checks.command_sets` — each a `paths` glob list +
-# optional `timeout_seconds` / `skip_if_unavailable` + structured `commands`, every command gaining
-# an optional repo-relative `cwd`. The only check behavior is "operator lists command sets; empty =
-# no gate". A stale `discovery` / `commands` key is tolerated (ignored) on load and `upgrade-config`
-# strips it, but `command_sets` is operator-authored — never auto-generated (no host inspection).
-# v16 (2026-06-25, deletion-approval-allowlist): a *format* add of optional
-# `security.deletion_approval_exempt_paths` — a list of repo-relative globs whose deletions/renames
-# are exempt from the dangerous-diff approval gate. Default `[]` = today's
-# behavior (everything gated). It filters only the deletion classification; dependency manifests are
-# never exemptable. Old configs load fail-open (the key defaults to empty) and `upgrade-config`
-# adds it from the template.
-# v17 (2026-06-26, configurable-tasks-dir): a *format* add of the optional `paths` block with
-# `tasks_dir` (default "tasks") — the repo-relative directory holding the pending/done/failed task
-# lifecycle. Lets an operator avoid colliding with a repo that already uses `tasks/`.
-# Validated repo-relative (no `..`/absolute, never under `.worc/`). Default reproduces today's
-# behavior; old configs omit it and take the default, and `upgrade-config` adds it from the
-# template.
-# v18 (2026-06-26, queue-tag): a *format* add of the optional `orchestrator.queue` (default
-# "default") — the instance's queue selector. With several worc instances sharing one
-# git-distributed task pool, an instance only picks a pending task when
-# `task.queue == orchestrator.queue` (plain string equality, static partitioning, no balancing).
-# Validated non-empty. Default reproduces today's behavior; old configs omit it and take "default",
-# and `upgrade-config` adds it from the template.
-# v19 (2026-06-27, skills-selection-rework): the `skills:` block is replaced outright (greenfield).
-# `scan_root`/`exclude` are gone — discovery is automatic and whole-repo (`git ls-files` for tracked
-# `**/SKILL.md`), and operators pin skills per flow node instead of denylisting. The block shrinks
-# to `dynamic` (the once-per-task supervisor proposal of a node→skills map; on, skip-when-empty) and
-# `strict` (whether an unresolved operator pin stops the task). `upgrade-config` strips the two
-# removed keys.
-# v20 (2026-06-27, transient-provider-failure-recovery): a *format* add of the optional
-# `agents.retry` block — `{max_attempts, base_delay_s, max_delay_s, max_blocked_s}` — the bounded
-# same-provider transient-retry policy (Option A) plus the B-lite soft-pause ceiling. Absent => safe
-# defaults; old configs load fail-open and `upgrade-config` adds it from the template. The values
-# v20 shipped were `max_attempts=2, base_delay_s=2.0, max_delay_s=30.0, max_blocked_s=3600.0`;
-# `max_blocked_s` was later raised to 21600.0 (6h > a provider's ~5h usage window, so a
-# rate-limited task waits out the reset instead of failing an hour in) — `RetryConfig` below is the
-# live source for all four.
-# v21 (2026-06-27, telegram-step-trace): a *format* add of the optional `telegram.trace` bool
-# (default false) — a one-way, best-effort live progress feed that pushes one message per flow node
-# finish (`<emoji> <node-id> → <outcome>`, node id + outcome only, no secrets). A no-op when
-# Telegram is disabled. Old configs omit it and take false; `upgrade-config` adds it from template.
-# v22 adds two fail-closed operator-confirmation gates for full-auto `watch`: optional
-# `orchestrator.auto_mode.confirm_next_task` (Telegram approve/deny before claiming a pending task)
-# and optional `agents.providers.<id>.max_turns_gate` (a continue/stop prompt when a Claude run hits
-# its turn cap). Both default false and require `telegram.enabled` when on (preflight-enforced).
-# v23 (2026-06-27, log-management): a *format* add of the optional `logging` block — `level`
-# (debug|info|warning|error, default info) persists the operator trace verbosity (the `--log-level`
-# flag overrides it) and `artifacts` (minimal|standard|full, default standard) controls which
-# per-attempt provider files are kept under `logs/<task-id>/stages/.../<attempt>-<provider>/`
-# (minimal=result.json only; standard=+stdout/stderr; full=all). Absent => safe defaults; old
-# configs load fail-open and `upgrade-config` adds it from the template.
-# v24 (2026-06-30, memory-subsystem foundations): a *format* add of the optional `memory` block — a
-# global enable/disable plus bounded knobs (short-term TTL, per-node packet caps, promotion
-# thresholds, background-cleanup budget) for the persistent repo-scoped memory subsystem.
-# Absent block => disabled (today's behavior exactly: no store, no delta,
-# empty packets, CLI no-op, no cleanup); the packaged template ships `enabled: true` for a fresh
-# install. Old configs load fail-open with defaults and `upgrade-config` adds it from the template.
-# No behavior consumes the knobs yet (phase 01 wires the shape only).
-# v25 (2026-07-03, trust-levels-danger-approval): replaces `security.deletion_approval_exempt_paths`
-# with the approval-policy knob `security.trust_level` (strict|auto, default `auto` everywhere —
-# dataclass, loader, and install) plus `security.protected_paths` (repo-relative
-# globs that ALWAYS require approval, at any trust_level — the always-ask floor). `strict` keeps the
-# old behavior (gate every deletion/rename or dependency-manifest edit); `auto` turns the diff-shape
-# gate off so only a `protected_paths` match raises approval. The old key is removed outright
-# (greenfield, no back-compat) — a config still carrying it is rejected as an unknown key.
-# v26 (2026-07-04, branch-mode): adds the optional `repo.branch_mode` (new|existing|current, default
-# `new`) — the instance default for where task git operations point. Absent => `new` (today's
-# create-from-base behavior exactly); a per-task `branch_mode` overrides it. Old configs load
-# fail-open with the default and `upgrade-config` adds it from the template.
-# v27 (2026-07-07, supervisor-provider): adds the optional `supervisor.provider` (codex|claude,
-# default null = inherit the global primary). Lets the supervisor layer pin its own provider so its
-# `model` reaches a provider that accepts it (fixes claude-model-on-codex under a codex primary);
-# validated ∈ `agents.allowed` and for reasoning support, symmetric with flow nodes. Absent =>
-# inherit primary (today's behavior exactly). Old configs load fail-open; `upgrade-config` adds it.
-# v28 (2026-07-08, custom tool-nodes): adds the optional `tools` block with
-# `default_timeout_seconds` (default 3600 = 1h) — the flow-wide default wall-clock timeout for a
-# `tool` node whose own `timeout_seconds` is unset. Absent block => 3600s exactly; a per-node
-# `timeout_seconds` overrides it. Old configs load fail-open with the default; `config_writer`
-# writes the block on a fresh install (discoverability, like `logging`).
-# v29 (2026-07-11, agent-native-memory-opt-in): adds the optional Claude-only
-# `agents.providers.claude.allow_native_memory` bool (default false) — an operator opt-in that, when
-# true, drops the native-memory deny so Claude Code's own auto-memory (`~/.claude/projects/
-# <repo>/memory/`) persists across tasks — that subtree only, the config home above it stays
-# write-denied. Off (default/absent) => the deny stays in place (today's behavior exactly). It
-# relaxes a security control (that store is unaudited, no redaction
-# guarantee), so it is a conscious opt-in: `config_writer` does NOT write it on a fresh install and
-# `upgrade-config` does not add it — documented in `config.example.yaml` only. Old configs load
-# fail-open with the safe default. Inert on Codex (no deny to gate there). (Removed again in v39.)
-# v30 (2026-07-14, cleanup-checkout-opt-out): adds the optional tri-state
-# `repo.checkout_base_on_cleanup` (bool | null, default null) gating whether cleanup returns
-# the tree to `base_branch`. null defers to `branch_mode` (new returns; existing/current
-# stay); false never returns (global off); true forces new + existing to return; current always
-# stays. Old (absent) configs take null => today's `new`-mode behavior is preserved. `config_writer`
-# does NOT write it on a fresh install; documented in `config.example.yaml` only.
-# v31: a Codex node's isolation is a generated permission profile driven by
-# `permission_profile`; the legacy `agents.providers.codex.sandbox: read-only|workspace-write` is
-# rejected by the validator and folded into `permission_profile` by `upgrade-config`. `sandbox`
-# survives only as the `danger-full-access` escape (removed again in v38).
-# v32: adds the optional `logging.clean_runs_on_success` (bool, default true) — a successful task
-# evicts its own per-task `runs/` subtree (frozen bundles + sealed exchanges). Old (absent) configs
-# take the default, so cleanup is on out of the box; set false to retain every run for analysis.
-# v33 (2026-08-03, supervisor-observation-cadence-p1): the flat `supervisor.model` /
-# `supervisor.reasoning` are REMOVED; each supervisor phase carries its own pair under
-# `supervisor.observe` / `.finalize` / `.handoff`, and `observe` additionally holds the cadence
-# (`mode`, `triggers`, `include_nodes`). `role_file` and `provider` stay top-level. Values are NOT
-# migrated (one old `model` has two new homes and copying it would put the expensive model back on
-# the cheap notes): the loader rejects a flat key fail-closed naming the new place, and
-# `upgrade-config` strips it with a visible report line.
-# v34 (2026-08-03, supervisor-disable-switch-p3): adds `supervisor.enabled` (bool, default true) —
-# the whole oversight layer is not built when false, so none of its four phases happens (the
-# per-step observation, the whole-task finalize that writes `summary.md`, the handoff brief, and
-# `skills.dynamic` node→skills proposal). Absent or true => today's behavior exactly. Two couplings
-# ride with it, both resolved at LOAD time so no runtime path grows a second "is the layer on?"
-# condition: the rest of the `supervisor` block becomes inert and is no longer validated (one
-# warning names the keys), and `memory.enabled: true` is forced false for the run too, because
-# the layer's finalize turn is the only path that writes anything memory can later read back. Old
-# configs load fail-open with the default; `upgrade-config` adds the key from the template.
-# v35 (2026-08-11, dead-validation-keys): removes `validation.required_fields` and
-# `validation.reject_unknown_fields`. Both were parsed, stored, and even written by `install`, yet
-# read by nothing: the task gate hard-codes the requirement (`id`, a non-blank `title`, a non-empty
-# `Description` section) and rejects an unrecognized front-matter key unconditionally against
-# `task.model.ALLOWED_TASK_KEYS`. Neither belongs to the operator: a config able to drop `id` from
-# the required set, or to open the fail-closed unknown-key gate, would weaken invariants the branch
-# names, run dirs, and state store all depend on. Removing the keys is therefore the fix, not wiring
-# them up. Both are tolerated (ignored) on load — every config `install` wrote carries them, so they
-# must not become a hard unknown-key error — and `upgrade-config` strips them.
-# v36 (2026-08-18, full-tool-access step 0 phase 0.2): adds `security.extra_environment` (mapping
-# `name -> string value`, default empty) — the orchestrator *assigns* these variables to every child
-# process, where `allowed_environment` only forwards a name whose value comes from the operator's
-# shell. Additive and back-compatible: an absent key is an empty mapping, so the child environment
-# stays byte-for-byte what it is today; `upgrade-config` adds it from the template. It carries a
-# version bump anyway because a config using it, loaded by an older orchestrator, would be rejected
-# as an unknown key rather than silently under-delivering.
-# v37 (2026-08-18, full-tool-access step 0 phase 0.3): an `security.allowed_environment` entry may
-# be a **prefix pattern** — a name plus one trailing `*` (`DOTNET_*`, `npm_config_*`) — resolved
-# against the parent environment, with the secret-name filter applied to every name it produces. Not
-# back-compatible in the silent direction, which is why it carries a bump: an older orchestrator
-# reading `DOTNET_*` treats it as an exact name, finds no such variable, and forwards *nothing* —
-# the symptom being a build that behaves differently than in a terminal, with no error anywhere. A
-# config
-# using only exact names is unaffected in either direction.
-# v38 (2026-08-19, full-tool-access advanced mode): removes `agents.providers.<provider>.sandbox`.
-# Its one remaining value selected a provider full-access mode, which discarded the generated
-# permission profile wholesale — the clone's `.git` became writable and the enforcement canary had
-# no profile left to prove — and that mode is now absolutely forbidden, so the field has no legal
-# value at all. Removal, not deprecation: a config still carrying the key is rejected on load as an
-# unknown key, and `upgrade-config` does not strip it, because there is no deployed installation to
-# migrate and a tolerated key would only keep the impression that some value of it still works.
-# v39 (2026-08-24, am-5-provider-config-homes): removes
-# `agents.providers.claude.allow_native_memory`.
-# The provider config homes (`~/.claude` / `$CLAUDE_CONFIG_DIR`, `$CODEX_HOME`) left the internal
-# deny set entirely (owner decision 2026-08-24: the deny was never a separate owner decision, it
-# broke Codex's `apply_patch` outright where the standalone package keeps the binary inside
-# `$CODEX_HOME`, and it protected a directory where the need is per-file), so the opt-in gates
-# nothing at any value — a key that decides nothing but reads as a security opt-in is worse than an
-# absent one. Removal, not toleration (the v25 pattern, not v35): `install`/`upgrade-config` never
-# wrote it, so a config carrying it was typed by the operator and is rejected on load as an unknown
-# key; `upgrade-config` does not strip it.
+# The config.yaml format version, bumped only when the *format* changes — a key added, renamed,
+# removed, or given a new shape — never on an ordinary release. The loader refuses a config whose
+# ``schema_version`` is newer than this and names the fix (upgrade the orchestrator); an absent or
+# lower value loads, since every removed key is either tolerated-and-ignored or reported by name.
+# There is no migration runner: an installation that has drifted is repaired by ``upgrade-config``,
+# which merges the packaged template over the operator's file and stamps this value.
 CONFIG_SCHEMA_VERSION = 39
 
 
@@ -389,7 +180,7 @@ class ProviderConfig:
     max_turns: int | None = None
     reasoning: str | None = None  # provider-specific: "minimal" | "low" | "medium" | "high" | ...
     # Exactly one configured provider must set ``primary: true`` — the global primary that runs any
-    # flow node with no ``provider`` field, and the single infrastructure-fallback target (PRE.1).
+    # flow node with no ``provider`` field, and the single infrastructure-fallback target.
     primary: bool = False
     # Claude-only: when true, a run that exhausts ``max_turns`` (``error_max_turns``)
     # pauses for a durable Telegram continue/stop prompt instead of failing immediately; continue
@@ -508,7 +299,7 @@ class SecurityConfig:
     # ``.worc``, the resolved env-file and the frozen bundles stay ``Read``-denied either way, since
     # native discovery needs nothing from them while opening them handed the agent the
     # orchestrator's own ``.env``. The provider CLIs' own config homes are not part of any deny
-    # projection at any setting (owner decision 2026-08-24). The WRITE side
+    # projection at any setting. The WRITE side
     # stays throughout: exchange/Git/``tasks/``/instruction write-deny, the commit/staging gates,
     # and the PR control layer. The public ``denied_read_paths`` blacklist also stays enforced.
     # Operator- config ONLY (never a task / ``extra_args`` / flow-node key). Defaults to ``True`` —
@@ -789,10 +580,10 @@ class MemoryConfig:
     memory packets, ``worc memory`` is a no-op, no background cleanup). A fresh ``worc install``
     writes ``enabled: false`` explicitly (both the packaged ``config.example.yaml`` and the
     generated ``config.yaml`` via ``config_writer.build_config_mapping``) so the operator finds the
-    switch rather than the block's absence; it shipped ``true`` until 2026-08-24. Every numeric knob
-    carries a locked default and is a bounded, runtime-clamped value — none is a
-    fatal config error (an odd value is clamped at use, per the "fatal only without a safe fallback"
-    rule). The write / read / curation paths consume these knobs at runtime (all phases shipped).
+    switch rather than the block's absence; off is the shipped posture because the store is
+    unaudited and carries no redaction guarantee, so keeping it is a conscious opt-in. Every numeric
+    knob carries a locked default and is a bounded, runtime-clamped value — none is a fatal config
+    error (an odd value is clamped at use, per the "fatal only without a safe fallback" rule).
     """
 
     enabled: bool = False
@@ -803,9 +594,8 @@ class MemoryConfig:
     packet_max_lines: int = 120
     packet_max_long_term: int = 3
     packet_max_entity: int = 5
-    # Inert: the episodic tier is write-only (never injected into a packet),
-    # so this cap is no longer read; kept as the absent-block default to avoid a schema churn for a
-    # dead knob (mirrors ``cleanup_promotions_per_pass``).
+    # Inert: the episodic tier is write-only (never injected into a packet), so nothing reads this
+    # cap — like ``cleanup_promotions_per_pass``.
     packet_max_episodic: int = 3
     # Promotion-to-long-term thresholds. The recurrence gate
     # applies only to ``artifact-backed`` lessons — repo-verified / human-curated / review-verified

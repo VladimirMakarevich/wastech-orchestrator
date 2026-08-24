@@ -137,7 +137,7 @@ def test_denied_commands_become_disallowed_tools(
     assert "Bash(git commit:*)" in disallowed
     assert "Bash(git push:*)" in disallowed
     assert "Bash(gh pr create:*)" in disallowed
-    # Ам3-2: both shells. Keeping this list at all was justified by "otherwise there is no trace in
+    # Both shells. Keeping this list at all was justified by "otherwise there is no trace in
     # the log of an attempt" — and on Windows, where PowerShell is the shell, there was none.
     assert "PowerShell(git commit:*)" in disallowed
     assert "PowerShell(git push:*)" in disallowed
@@ -147,7 +147,7 @@ def test_denied_commands_become_disallowed_tools(
 def test_the_full_editor_set_is_denied_by_path_in_the_advanced_mode(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest], tmp_path: Path
 ) -> None:
-    # Ам3-1: the floor on the tool side is a list of names — and it was written from memory,
+    # The floor on the tool side is a list of names — and it was written from memory,
     # missing the fourth editor the pinned binary's own registry carries. `MultiEdit` in a path deny
     # is what keeps a `read-only` node in the mode from editing the working tree with a tool that
     # appeared in no list at all.
@@ -198,9 +198,9 @@ def test_no_deny_of_any_kind_on_the_claude_config_home(
     tmp_path: Path,
     read_isolation_off: bool,
 ) -> None:
-    # Ам-5 Блок Б acceptance (owner decision 2026-08-24): the Claude config home carries no deny of
-    # any kind — no Read, no Write/Edit, no glob at any depth — at either read-isolation value. The
-    # home glob prefix covers every shape the removed rules used (`/**`, `/*`, `/*/*`).
+    # The Claude config home carries no deny of any kind — no Read, no Write/Edit, no glob at any
+    # depth — at either read-isolation value. The home glob prefix covers every shape a deny rule
+    # could take (`/**`, `/*`, `/*/*`).
     config_dir = tmp_path / "isolated-claude"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
     argv = _argv(
@@ -216,7 +216,7 @@ def test_no_deny_of_any_kind_on_the_claude_config_home(
 def test_a_flow_node_cannot_escalate_the_permission_mode(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # Ам1-1: `--permission-mode` is last-wins in this CLI and `extra_args` are appended verbatim,
+    # `--permission-mode` is last-wins in this CLI and `extra_args` are appended verbatim,
     # so a flow node — the one surface an operator does not review — could hand itself the rank
     # directly under the forbidden bypass value. On a read-only node that turns "the tool exists
     # but asks" into "auto-approved" for everything not named in a deny.
@@ -243,8 +243,8 @@ def test_the_escalation_check_covers_the_inline_form_and_the_provider_config(
 def test_a_permission_mode_that_is_not_weaker_is_still_allowed(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # The operator keeps the legal override (decision Ам1-В2 (а), not (б)): only a WEAKER rank than
-    # the profile's own mode is refused, so restating the mode a workspace-write node already has is
+    # The operator keeps the legal override: only a WEAKER rank than the profile's own mode is
+    # refused, so restating the mode a workspace-write node already has is
     # fine — and so is picking a stricter one.
     argv = _argv(claude_config, make_request(extra_args=["--permission-mode", "acceptEdits"]))
     assert argv[-2:] == ["--permission-mode", "acceptEdits"]
@@ -688,17 +688,16 @@ def test_build_sandbox_settings_shape_is_hardened() -> None:
 
 
 def test_the_advanced_mode_grants_write_outside_the_clone_and_keeps_every_carve_out() -> None:
-    """ТA.4.1: ``allowWrite`` on the volume root, with the floor listed one entry at a time.
+    """``allowWrite`` on the volume root, with the floor listed one entry at a time.
 
     The carve-outs are asserted by NAME rather than by "the write guard is in there", because the
     short form of the floor ("`.git` and `.worc`") does not show all of them: the frozen ``runs``
     tree and the resolved env-file are exactly what an implementer reading that short form drops.
-    The provider config homes are deliberately NOT carve-outs any more (owner decision 2026-08-24,
-    Ам-5 Блок Б) — nothing in the mode covers them.
+    The provider config homes are deliberately NOT carve-outs — nothing in the mode covers them.
 
     What this does NOT prove, and cannot: that the CLI ranks a ``denyWrite`` inside an
-    ``allowWrite`` the way this file assumes. That is a live probe, recorded as "not proven" in the
-    campaign README and in the loud preflight line on floor 1.
+    ``allowWrite`` the way this file assumes. That needs a live probe on a real host, and the loud
+    preflight line on floor 1 says it is not proven.
     """
     deny = InternalDenyPolicy(
         control_home=Path("/repo/.worc"),
@@ -738,9 +737,9 @@ def test_no_allow_write_key_appears_outside_the_advanced_mode() -> None:
 def test_sandbox_settings_carry_no_deny_on_the_claude_config_home(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    # Ам-5 Блок Б acceptance, the settings-file surface: the OS sandbox policy carries no denyRead
-    # and no denyWrite on the Claude config home — including in the advanced mode, whose volume-wide
-    # allowWrite used to be carved back out for it.
+    # The settings-file surface: the OS sandbox policy carries no denyRead and no denyWrite on the
+    # Claude config home — including in the advanced mode, whose volume-wide allowWrite is not
+    # carved back out for it.
     config_dir = tmp_path / "isolated-claude"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
     for kwargs in ({}, {"allow_write_root": Path("/")}):
@@ -793,13 +792,13 @@ def test_the_private_set_is_read_denied_at_either_read_isolation_setting(
     make_request: Callable[..., AgentRunRequest],
     read_isolation_off: bool,
 ) -> None:
-    """The private set keeps its Read deny even with read-isolation OFF (ТA.2.3's precondition).
+    """The private set keeps its Read deny even with read-isolation OFF.
 
-    It used to lose it, and since the resolved env-file is in that set, the plain ``Read`` tool
-    could open the orchestrator's own ``.worc/.env`` on the shipped default — while ТA.2.3 relies on
-    exactly that read being denied to justify withholding those names from the child environment.
-    Parameterized over both settings because the point is that the verdict no longer depends on the
-    hatch: read-isolation restores native *discovery*, never the orchestrator's own secrets.
+    Losing it would put the resolved env-file — which is in that set — within reach of the plain
+    ``Read`` tool on the shipped default, and the rule that withholds those names from the child
+    environment is justified by exactly that read being denied. Parameterized over both settings
+    because the point is that the verdict does not depend on the hatch: read-isolation restores
+    native *discovery*, never the orchestrator's own secrets.
     """
     argv = _argv(
         claude_config,
@@ -929,8 +928,8 @@ def test_read_only_shell_kept_on_native_windows_when_isolation_is_off() -> None:
 
 
 def test_granted_read_only_shell_refuses_a_linux_host_missing_sandbox_deps() -> None:
-    # The refusal used to be reachable only through workspace-write. Re-keying it on "the plan keeps
-    # Bash" is what makes it fire here too: a shell that cannot be sandboxed is not run at all.
+    # Keyed on "the plan keeps Bash" rather than on the profile, so it fires for a granted
+    # read-only shell too: a shell that cannot be sandboxed is not run at all.
     with pytest.raises(ProviderError) as excinfo:
         resolve_claude_tools(
             "read-only", SandboxCapability.LINUX_MISSING_DEPS, False, git_evidence=True
@@ -1020,7 +1019,7 @@ def test_sandbox_settings_unchanged_when_no_deny_write_root_is_passed() -> None:
     ) == build_sandbox_settings(policy, _write_guard(), network_access=False, deny_write_root=None)
 
 
-# --- Advanced mode: the tool-existence gate is gone (Ам-3) ---------------------------------------
+# --- Advanced mode: the tool-existence gate is gone ----------------------------------------------
 
 
 def test_advanced_mode_emits_no_existence_gate_and_gives_every_node_a_shell(
@@ -1092,7 +1091,7 @@ def test_advanced_mode_keeps_a_read_only_node_from_writing(
 def test_the_advanced_mode_is_online_for_every_node_whatever_the_flow_granted(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    """ТA.8.1/ТA.8.4: the mode opens the network for every node, and that is three surfaces.
+    """The mode opens the network for every node, and that is three surfaces.
 
     For one phase these two names were DENIED here for a node whose flow granted none — the tool
     list holding the network axis shut while the phase that opens it deliberately was still ahead.

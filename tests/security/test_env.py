@@ -124,7 +124,7 @@ def test_empty_assigned_value_is_a_real_assignment() -> None:
 
 
 def test_no_assigned_variables_reproduces_the_forward_only_environment() -> None:
-    # И-5: absent key => today's behavior byte for byte, including key order.
+    # Absent key => today's behavior byte for byte, including key order.
     parent = {"PATH": "/usr/bin", "HOME": "/home/u", "CODEX_HOME": "/c"}
     forwarded = _security("PATH", "HOME", "CODEX_HOME")
     child = build_child_env(forwarded, parent)
@@ -225,7 +225,7 @@ _TOOLCHAIN_PARENT = {
 
 
 def test_pattern_forwards_every_matching_name_and_nothing_else() -> None:
-    # AC0.3.1. Strict equality, not a subset: the point of a pattern is coverage, and its risk is
+    # Strict equality, not a subset: the point of a pattern is coverage, and its risk is
     # over-coverage, so both halves are asserted at once.
     child = build_child_env(_security("PATH", "DOTNET_*"), _TOOLCHAIN_PARENT)
     assert child == {
@@ -236,7 +236,7 @@ def test_pattern_forwards_every_matching_name_and_nothing_else() -> None:
 
 
 def test_secret_named_match_is_dropped_after_expansion() -> None:
-    # AC0.3.2, and the reason the filter runs after expansion rather than over the config: the
+    # And the reason the filter runs after expansion rather than over the config: the
     # operator wrote `NUGET_*` knowing four cache paths, not knowing the publish key shares the
     # prefix. `NUGET_PACKAGES` goes through, the key does not.
     child = build_child_env(_security("PATH", "NUGET_*"), _TOOLCHAIN_PARENT)
@@ -257,7 +257,7 @@ def test_expansion_attributes_a_dropped_name_to_its_pattern() -> None:
 
 
 def test_pattern_matching_nothing_is_still_reported() -> None:
-    # AC0.3.2b. The case an operator cannot otherwise distinguish from one that worked: a typo
+    # The case an operator cannot otherwise distinguish from one that worked: a typo
     # (`DOTNET*` for `DOTNET_*` would match, `GO_*` here does not) or an uninstalled toolchain.
     names, expansions = expand_allowed_environment(
         ("PATH", "GO_*"), _TOOLCHAIN_PARENT, system="Linux"
@@ -268,7 +268,7 @@ def test_pattern_matching_nothing_is_still_reported() -> None:
 
 
 def test_a_config_without_patterns_is_returned_untouched() -> None:
-    # И-5: the entries pass through in place, and no expansion record is produced — so neither the
+    # The entries pass through in place, and no expansion record is produced — so neither the
     # child environment nor the diagnostics change for a config that has no pattern.
     names, expansions = expand_allowed_environment(
         ("PATH", "HOME", "CODEX_HOME"), _TOOLCHAIN_PARENT, system="Linux"
@@ -278,7 +278,7 @@ def test_a_config_without_patterns_is_returned_untouched() -> None:
 
 
 def test_windows_matches_a_pattern_case_insensitively() -> None:
-    # AC0.3.4, Windows half: the parent environment is case-insensitive there, so a pattern spelled
+    # Windows half: the parent environment is case-insensitive there, so a pattern spelled
     # in the other case really does reach the variable, and the forwarded name keeps the PARENT's
     # spelling (that is the key the lookup then has to hit).
     names, _ = expand_allowed_environment(("dotnet_*",), {"DOTNET_ROOT": "/a"}, system="Windows")
@@ -299,7 +299,7 @@ def test_lone_star_is_fail_closed_even_without_the_validator() -> None:
 
 
 def test_posix_matches_a_pattern_case_sensitively() -> None:
-    # AC0.3.4, POSIX half: the same config on Linux/macOS matches nothing, because there
+    # POSIX half: the same config on Linux/macOS matches nothing, because there
     # `dotnet_root` and `DOTNET_ROOT` are two different variables.
     names, _ = expand_allowed_environment(("dotnet_*",), {"DOTNET_ROOT": "/a"}, system="Linux")
     assert names == ()
@@ -373,7 +373,7 @@ def test_a_pattern_that_cannot_yield_systemroot_still_fails() -> None:
     assert launch_critical_env_issue(("PATH", "DOTNET_*"), "Windows") is not None
 
 
-# --- advanced mode: the parent environment forwarded whole (ТA.2.1) ------------------------------
+# --- advanced mode: the parent environment forwarded whole ---------------------------------------
 
 
 _MODE_PARENT = {
@@ -386,7 +386,7 @@ _MODE_PARENT = {
 
 
 def test_mode_off_reproduces_the_allowlisted_environment_byte_for_byte() -> None:
-    """Т0.5/ТA.2.1: with strict isolation on, the child environment is exactly what it always was.
+    """With strict isolation on, the child environment is exactly what it always was.
 
     The regression this guards is the whole reason the mode is a branch and not a rewrite: an
     implementation that "simplified" the strict path while adding the wide one would change every
@@ -407,11 +407,11 @@ def test_mode_off_reproduces_the_allowlisted_environment_byte_for_byte() -> None
 
 
 def test_mode_on_forwards_every_parent_name_including_secret_named_ones() -> None:
-    """ТA.2.1: `strict_isolation: false` drops the name gate entirely — no allowlist consulted.
+    """`strict_isolation: false` drops the name gate entirely — no allowlist consulted.
 
     `NPM_TOKEN` is in the parent and in no allowlist, and it is forwarded: a toolchain the agent has
-    to drive needs it. That is the trade the mode makes, and ТA.7.1 is what pays for it — the same
-    value becomes a redaction literal instead of being withheld.
+    to drive needs it. That is the trade the mode makes, and redaction is what pays for it — the
+    same value becomes a redaction literal instead of being withheld.
     """
     child = build_child_env(_security(strict_isolation=False), _MODE_PARENT)
     assert child == _MODE_PARENT
@@ -439,7 +439,7 @@ def test_mode_on_sorts_the_forwarded_names_and_assigns_extras_last() -> None:
 def test_env_file_names_are_withheld_from_the_wide_forward(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """ТA.2.3: the orchestrator's own `.worc/.env` names never ride the mode's pass-through.
+    """The orchestrator's own `.worc/.env` names never ride the mode's pass-through.
 
     The agent is denied reading that file (the private deny set covers it at every read-isolation
     setting); forwarding its contents in the environment would hand over exactly what the deny
@@ -455,8 +455,8 @@ def test_an_env_file_name_comes_back_only_by_explicit_assignment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # The documented way back: `extra_environment` is assignment, i.e. a decision in the operator's
-    # config rather than an inherited default. It must win over the withholding, or the escape hatch
-    # ТA.2.3 points at would not exist.
+    # config rather than an inherited default. It must win over the withholding, or the escape
+    # hatch the withholding rule points at would not exist.
     monkeypatch.setattr(env_mod, "env_file_names", lambda: frozenset({"NPM_TOKEN"}))
     child = build_child_env(
         _security(assigned={"NPM_TOKEN": "chosen"}, strict_isolation=False), _MODE_PARENT
@@ -497,7 +497,7 @@ def test_extra_environment_restores_a_pattern_withheld_name_under_strict_isolati
 
 
 def test_the_orchestrators_own_processes_keep_the_allowlist_in_the_mode() -> None:
-    """ТA.2.1/ТA.1.6: the mode widens what the agent may do; git/gh are not the agent.
+    """The mode widens what the agent may do; git/gh are not the agent.
 
     Byte-for-byte the strict result, with the mode on — the property that keeps a shell `GH_REPO` or
     `GIT_DIR` from reaching the one code path that publishes.

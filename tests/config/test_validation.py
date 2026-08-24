@@ -1,4 +1,4 @@
-"""Validator: every reject path, including the global-primary rule (PRE.1)."""
+"""Validator: every reject path, including the global-primary rule."""
 
 from __future__ import annotations
 
@@ -123,7 +123,7 @@ def test_allowed_environment_accepts_a_prefix_pattern(
     base_config: OrchestratorConfig, entry: str
 ) -> None:
     # One trailing `*` after a valid variable name. `PATH*` is in the list deliberately: it is
-    # legitimate, and the phase-0.1 "PATH is mandatory" gate used to reject it.
+    # legitimate, and a naive "PATH is mandatory" gate rejects it.
     assert validate_config(_with_security(base_config, allowed_environment=("PATH", entry))) == []
 
 
@@ -135,7 +135,7 @@ def test_allowed_environment_pattern_can_satisfy_the_path_requirement(
 
 
 def test_allowed_environment_lone_star_is_rejected(base_config: OrchestratorConfig) -> None:
-    # И-1/Н0.1: a lone `*` is the inversion of the mechanism (everything minus a deny-list), which
+    # A lone `*` is the inversion of the mechanism (everything minus a deny-list), which
     # the environment gate deliberately does not offer — a value leaks by being present at all. The
     # message has to say that, not just "invalid syntax".
     cfg = _with_security(base_config, allowed_environment=("PATH", "*"))
@@ -148,7 +148,7 @@ def test_allowed_environment_lone_star_is_rejected(base_config: OrchestratorConf
 def test_allowed_environment_misplaced_star_is_rejected(
     base_config: OrchestratorConfig, entry: str
 ) -> None:
-    # AC0.3.3. One wildcard, one position: anything else would read like a glob and silently match
+    # One wildcard, one position: anything else would read like a glob and silently match
     # nothing.
     cfg = _with_security(base_config, allowed_environment=("PATH", entry))
     with pytest.raises(ConfigError) as exc:
@@ -160,7 +160,7 @@ def test_allowed_environment_misplaced_star_is_rejected(
 def test_allowed_environment_secret_prefix_pattern_is_rejected(
     base_config: OrchestratorConfig, entry: str
 ) -> None:
-    # AC0.3.2a / Т0.3.7. Such a pattern is not dangerous — the secret filter runs after expansion,
+    # Such a pattern is not dangerous — the secret filter runs after expansion,
     # so it can only ever forward the empty set. It is refused because accepting it would leave the
     # operator certain the variables went through, and the message explains that mechanism.
     cfg = _with_security(base_config, allowed_environment=("PATH", entry))
@@ -175,7 +175,7 @@ def test_allowed_environment_plain_name_grammar_is_left_alone(
     base_config: OrchestratorConfig,
 ) -> None:
     # Deliberately NOT validated: a `*`-free entry that matches nothing has always been inert, and
-    # turning that into a load error would reject configs that work today (И-5).
+    # turning that into a load error would reject configs that work today.
     cfg = _with_security(base_config, allowed_environment=("PATH", "not a name"))
     assert validate_config(cfg) == []
 
@@ -317,7 +317,7 @@ def test_assigned_paths_match_denied_read_globs_without_prefix_broadening(
 
 @pytest.mark.parametrize("name", ["PATH", "path", "Path"])
 def test_extra_environment_cannot_assign_path(base_config: OrchestratorConfig, name: str) -> None:
-    # И-3: reassigning PATH substitutes every binary the child resolves. Case-insensitive because a
+    # Reassigning PATH substitutes every binary the child resolves. Case-insensitive because a
     # Windows child honors `Path` exactly as it honors `PATH`.
     cfg = _with_security(base_config, extra_environment={name: "/tmp/evil"})
     with pytest.raises(ConfigError) as exc:
@@ -327,7 +327,7 @@ def test_extra_environment_cannot_assign_path(base_config: OrchestratorConfig, n
 
 @pytest.mark.parametrize("name", ["GITHUB_TOKEN", "MY_API_KEY", "npm_password"])
 def test_extra_environment_rejects_secret_names(base_config: OrchestratorConfig, name: str) -> None:
-    # И-2: one definition of "secret name" (is_sensitive_key), no second list of masks.
+    # One definition of "secret name" (is_sensitive_key), no second list of masks.
     cfg = _with_security(base_config, extra_environment={name: "x"})
     with pytest.raises(ConfigError) as exc:
         validate_config(cfg)
@@ -415,7 +415,7 @@ def test_extra_environment_must_be_a_mapping() -> None:
 
 
 def test_extra_environment_absent_key_is_an_empty_mapping(packaged_config_text: str) -> None:
-    # И-5: the key is optional and its absence is not a special case — it is the empty mapping, so
+    # The key is optional and its absence is not a special case — it is the empty mapping, so
     # the child environment stays exactly what forwarding alone produces.
     text = packaged_config_text.replace("  extra_environment: {}", "", 1)
     assert "  extra_environment: {}" not in text  # guard: the packaged key really was removed

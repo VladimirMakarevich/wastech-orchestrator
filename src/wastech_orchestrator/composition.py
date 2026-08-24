@@ -71,8 +71,9 @@ def build_internal_deny_policy(
     Collects the control/private homes from the provider-neutral ``layout``, the resolved
     default/explicit ``env_file`` (which may live outside ``private_home``), and the per-task
     runtime root (``layout.runs_home``) that parents every frozen bundle, seal, and quarantined
-    tree. The provider CLIs' own config homes are deliberately not collected (owner decision
-    2026-08-24; see :class:`InternalDenyPolicy`).
+    tree. The provider CLIs' own config homes are deliberately not collected — the deny they would
+    carry is per-file, not per-directory, and a whole-home deny breaks a CLI whose own binary or
+    helpers live inside it (see :class:`InternalDenyPolicy`).
 
     These are representations only; the provider adapters project them into their own policy.
     """

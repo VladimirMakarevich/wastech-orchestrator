@@ -48,8 +48,8 @@ def test_markdown_only_change_runs_only_docs_and_always_on() -> None:
 
 def test_unmatched_path_runs_only_always_on_sets() -> None:
     # A changed path claimed by no path-bearing set runs no set on its account: only the always-on
-    # set (no `paths`) runs. (Previously this fell back to running ALL sets — removed because on a
-    # real monorepo any unclaimed root/docs edit then triggered a full-repo run.)
+    # set (no `paths`) runs. Falling back to running ALL sets would mean that on a real monorepo
+    # any unclaimed root/docs edit triggers a full-repo run.
     assert _names(select_check_sets(_SETS, ["build/codegen.py"])) == ["lint"]
 
 

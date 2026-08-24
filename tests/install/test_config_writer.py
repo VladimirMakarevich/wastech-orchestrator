@@ -158,7 +158,7 @@ def test_create_pr_and_auto_mode_are_reflected(tmp_path: Path) -> None:
 
 
 def test_install_seeds_empty_command_sets(tmp_path: Path) -> None:
-    # `init` no longer seeds commands (v15): it writes an empty gate; the operator authors it.
+    # `init` seeds no commands: it writes an empty gate, and the operator authors it.
     cfg = loads_config(build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))).config
     assert cfg.checks.command_sets == {}
 
@@ -192,7 +192,7 @@ def test_generated_config_includes_optional_sections(tmp_path: Path) -> None:
     assert cfg.telegram.trace is False
     assert "trace:" in text
     assert cfg.prompt_audit is False
-    # Fresh install ships trust_level: auto (routine in-repo deletions no longer gate) + no floor.
+    # Fresh install ships trust_level: auto (routine in-repo deletions do not gate) + no floor.
     assert cfg.security.trust_level == "auto"
     assert cfg.security.protected_paths == ()
     for key in ("supervisor:", "skills:", "prompt_audit:", "trust_level:", "protected_paths:"):

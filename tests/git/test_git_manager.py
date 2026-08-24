@@ -937,7 +937,7 @@ def test_create_pr_disabled_returns_none(
 # --- merge_pr (auto-merge bypass, idempotency) ---
 
 _PR_URL = "https://github.com/o/r/pull/1"
-#: What every `gh` call is pinned to (П2.1б) — derived from the test config's `repo.url`
+#: What every `gh` call is pinned to — derived from the test config's `repo.url`
 #: (`git@example.com:o/r.git`), host kept because it is not github.com.
 _GH_SLUG = "example.com/o/r"
 
@@ -2449,7 +2449,7 @@ def test_resolve_control_paths_linked_worktree_splits_gitdir_and_common(
 def test_assigned_environment_reaches_git_and_gh_processes(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
-    """AC0.2.1 (Git Manager call site): git/gh are child processes too.
+    """1 (Git Manager call site): git/gh are child processes too.
 
     Not academic: `gh` resolves the token through the operator's own environment, and a repo whose
     hooks or LFS filters need a toolchain root sees it only if the assignment reaches here.
@@ -2467,7 +2467,7 @@ def test_assigned_environment_reaches_git_and_gh_processes(
 def test_locale_pin_cannot_be_overridden_by_the_config(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
-    """Т0.6.1: `LC_ALL=C` is pinned ON TOP of the config, so no assignment can localize git.
+    """`LC_ALL=C` is pinned ON TOP of the config, so no assignment can localize git.
 
     This module decides whether a push failure is retryable, whether a conflict marker was left
     behind and whether a PR was already merged by matching English strings in git/gh output. A
@@ -2491,7 +2491,7 @@ def test_locale_pin_cannot_be_overridden_by_the_config(
 def test_transient_push_classification_survives_a_localized_config(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
-    """AC0.6.1: the retry decision still fires with a localizing config in place."""
+    """The retry decision still fires with a localizing config in place."""
     gm = _manager(
         git_repo,
         store,
@@ -2518,10 +2518,10 @@ def test_transient_push_classification_survives_a_localized_config(
 def test_non_ascii_commit_message_and_path_survive_the_locale_pin(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
 ) -> None:
-    """AC0.6.2: `LC_ALL=C` changes the message locale, not byte handling.
+    """`LC_ALL=C` changes the message locale, not byte handling.
 
-    The mandated safety net for Т0.6: if the pin had broken non-ASCII, the fallback was to narrow it
-    to `LC_MESSAGES=C`. It does not — git stores paths and messages as bytes, and `core.quotepath`
+    The safety net for the pin: were it to break non-ASCII, the way out would be narrowing it to
+    `LC_MESSAGES=C`. It does not — git stores paths and messages as bytes, and `core.quotepath`
     (not the locale) governs how a non-ASCII path is displayed.
     """
     _task(store)
@@ -2539,7 +2539,7 @@ def test_non_ascii_commit_message_and_path_survive_the_locale_pin(
     assert "документация.md" in committed
 
 
-# --- dangerous-diff gate reference point (П4.1 / AC4.1–AC4.4) ---------------------------------
+# --- dangerous-diff gate reference point ------------------------------------------------------
 
 
 def test_the_gate_reference_starts_at_the_task_diff_base(
@@ -2559,9 +2559,9 @@ def test_the_gate_reference_starts_at_the_task_diff_base(
 def test_an_agent_self_commit_does_not_hide_a_deletion_from_the_gate(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
 ) -> None:
-    # AC4.1: the gate used to diff against HEAD, so a commit made inside the task — by an agent with
-    # a shell on a node the profile bracket does not park — emptied it. Measured from the reference,
-    # the deletion is still there to be asked about.
+    # Diffing against HEAD would let a commit made inside the task — by an agent with a shell on a
+    # node the profile bracket does not park — empty the gate. Measured from the reference, the
+    # deletion is still there to be asked about.
     _task(store)
     (git_repo.clone / "doomed.py").write_text("x = 1\n", encoding="utf-8")
     git_run(["add", "doomed.py"], git_repo.clone)
@@ -2582,8 +2582,8 @@ def test_an_agent_self_commit_does_not_hide_a_deletion_from_the_gate(
 def test_the_gate_and_the_reported_diff_measure_the_same_paths(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
 ) -> None:
-    # AC4.4: two definitions of "changed" used to live side by side — the gate against HEAD, the
-    # report against the base. Inside one subtask they must describe the same change.
+    # The gate and the reported diff are two definitions of "changed" — inside one subtask they
+    # must describe the same change, which is what measuring both from the reference buys.
     _task(store)
     (git_repo.clone / "a.py").write_text("a = 1\n", encoding="utf-8")
     git_run(["add", "a.py"], git_repo.clone)
@@ -2604,7 +2604,7 @@ def test_the_gate_and_the_reported_diff_measure_the_same_paths(
 def test_a_subtask_commit_moves_the_reference_so_the_next_one_is_not_re_asked(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
 ) -> None:
-    # AC4.2: the first subtask's approved deletion must not be put to the human again on the second.
+    # The first subtask's approved deletion must not be put to the human again on the second.
     # The reference moves to the commit that carries it, so the second subtask's gate sees only what
     # the second subtask did — while the reported diff (from the base) still carries both.
     _task(store)
@@ -2653,9 +2653,9 @@ def test_commit_code_records_and_announces_a_state_it_did_not_commit(
     git_run: GitRunner,
     package_log_text: Callable[[], str],
 ) -> None:
-    # AC4.3: with the working tree clean, commit_code used to return HEAD and write nothing — so
-    # the run reported a code commit it never made. The state is still published (its content passed
-    # the gate), but the audit trail now says what was published and the operator is told whose
+    # With the working tree clean there is nothing to commit, and returning HEAD silently would
+    # have the run report a code commit it never made. The state is still published (its content
+    # passed the gate), but the audit trail says what was published and the operator is told whose
     # commit it is.
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
@@ -2680,7 +2680,7 @@ def test_commit_subtask_adopts_a_clean_tree_the_same_way_commit_code_does(
     git_run: GitRunner,
     package_log_text: Callable[[], str],
 ) -> None:
-    # Пре3-4: the same entry condition (nothing left to stage because someone else committed it)
+    # The same entry condition (nothing left to stage because someone else committed it)
     # was handled in one of the two commit paths. On the subtask path it returned HEAD in silence,
     # so the reference point stayed put — and the NEXT subtask's gate asked the operator again about
     # deletions already cleared, which is the regression the phase's own rollback note called the
@@ -2709,7 +2709,7 @@ def test_a_self_commit_reaches_the_gate_of_the_next_writing_node(
     make_git_config: ConfigFactory,
     git_run: GitRunner,
 ) -> None:
-    # Пре3-3 / AC4.1: the load-bearing claim, end to end on real git and along the product path that
+    # The load-bearing claim, end to end on real git and along the product path that
     # does NOT park — a node whose class only warns commits a deletion, and the gate input of the
     # next writing node still contains it. Measured through `changed_code_entries`, which is exactly
     # what the runner hands `evaluate_diff_gate`, and paired with `git diff HEAD` being empty: that
@@ -2820,7 +2820,7 @@ def test_push_case_two_fast_forwards_a_remote_that_is_behind(
     make_git_config: ConfigFactory,
     git_run: GitRunner,
 ) -> None:
-    # AC3.1 — case 2: the remote branch exists but is behind us, so it must actually be pushed.
+    # Case 2: the remote branch exists but is behind us, so it must actually be pushed.
     # This is the case the old remote-existence shortcut recorded as published while sending
     # nothing.
     _task(store)
@@ -2870,7 +2870,7 @@ def test_push_case_four_adopts_commits_we_never_made(
     make_git_config: ConfigFactory,
     git_run: GitRunner,
 ) -> None:
-    # AC3.2/AC3.3 — case 4: someone else pushed onto the task branch after our push, so the lease
+    # Case 4: someone else pushed onto the task branch after our push, so the lease
     # cannot match. Their commit is merged in, never overwritten, and reported to the caller.
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
@@ -2936,7 +2936,7 @@ def test_a_remote_branch_named_by_the_task_is_never_adopted_as_our_own_push(
     git_run: GitRunner,
 ) -> None:
     # `branch_name` from the task file is taken verbatim, so an existing remote branch of that name
-    # proves nothing about us. It used to be recorded as a completed publication with nothing sent.
+    # proves nothing about us — recording it as a completed publication would send nothing at all.
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
     other = tmp_path / "other"
@@ -2973,10 +2973,10 @@ def test_a_task_branch_appearing_on_the_remote_during_an_attempt_is_not_drift(
     make_git_config: ConfigFactory,
     git_run: GitRunner,
 ) -> None:
-    # A branch showing up on origin while the agent works used to park the task, on the premise
-    # that a branch without one of our rows is someone else's. It is not evidence of that, and the
-    # publish path already recovers from a diverged remote (it merges the commits in locally, then
-    # re-runs the checks). So this is ordinary working state now, not drift.
+    # A branch showing up on origin while the agent works is ordinary working state, not drift: a
+    # branch without one of our rows is not evidence that it is someone else's, and the publish
+    # path recovers from a diverged remote anyway (it merges the commits in locally, then re-runs
+    # the checks).
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
     branch = gm.prepare_branch("task-001", "x", epoch=_EPOCH)
@@ -3032,7 +3032,7 @@ def test_base_branch_movement_is_not_drift(
     make_git_config: ConfigFactory,
     git_run: GitRunner,
 ) -> None:
-    # AC2.2 — the base branch moves legitimately whenever someone merges their own PR, so it is
+    # The base branch moves legitimately whenever someone merges their own PR, so it is
     # deliberately outside the comparison. Only the task branch is watched.
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
@@ -3122,7 +3122,7 @@ def test_push_refuses_when_the_push_destination_was_rewritten(
     make_git_config: ConfigFactory,
     git_run: GitRunner,
 ) -> None:
-    # AC2.3 — the one place a rewrite reaches a real branch is the push itself, so the destination
+    # The one place a rewrite reaches a real branch is the push itself, so the destination
     # is re-read there unconditionally. The URL is reported with its credentials stripped.
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
@@ -3200,7 +3200,7 @@ def test_the_repo_pin_falls_back_to_the_clone_origin_when_the_config_names_none(
 
 
 def test_no_gh_call_site_bypasses_the_pinning_wrapper() -> None:
-    # Пре2-12: the behavioral test above drives two of the eight `gh` call sites, while floor 4
+    # The behavioral test above drives two of the eight `gh` call sites, while floor 4
     # promises the pin for all of them. What makes the promise uniform is that every site goes
     # through `_gh`, which appends `--repo` — so assert exactly that, structurally, for all eight:
     # no site spells the executable itself, and none passes its own `--repo` (a double pin).
@@ -3240,7 +3240,7 @@ def test_no_gh_call_site_bypasses_the_pinning_wrapper() -> None:
     assert launched_outside == []
 
 
-# --- the publish path is exempt from advanced mode (ТA.2.1 / ТA.2.4 / ТA.1.6) --------------------
+# --- the publish path is exempt from advanced mode -----------------------------------------------
 
 
 def _mode_manager(
@@ -3264,7 +3264,7 @@ def _mode_manager(
 def test_advanced_mode_does_not_widen_the_git_environment(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
-    """ТA.2.1: `strict_isolation: false` forwards the parent environment whole to the AGENT only.
+    """`strict_isolation: false` forwards the parent environment whole to the AGENT only.
 
     Byte-for-byte equality with the strict manager, key order included. This is the phase's headline
     risk written as a test: the mode reaches five call sites through one shared builder, and the
@@ -3298,7 +3298,7 @@ def test_a_shell_variable_cannot_retarget_the_publish_path(
     name: str,
     value: str,
 ) -> None:
-    """ТA.2.4: the names that would move publication are absent from every orchestrator git process.
+    """The names that would move publication are absent from every orchestrator git process.
 
     Exported in the operator's own shell, with the mode on — the configuration in which every other
     child gets the parent environment whole. `GH_REPO` alone would send the pull request to another
@@ -3352,7 +3352,7 @@ def test_the_git_namespace_is_a_whitelist_not_a_deny_list(
     name: str,
     value: str,
 ) -> None:
-    """Ам2-5 (owner decision Ам2-В2 «b»): the `GIT_*`/`GH_*` namespace is closed by default.
+    """The `GIT_*`/`GH_*` namespace is closed by default.
 
     Reachability is the same as for every named entry — a `GIT_*` prefix pattern in
     `allowed_environment`, or an assignment in `extra_environment` — and the mode makes the
@@ -3393,7 +3393,7 @@ def test_the_token_names_publication_needs_are_whitelisted(
 def test_the_global_gitconfig_pointer_is_deliberately_not_scrubbed(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
-    """ТA.1.7: `GIT_CONFIG_GLOBAL` stays, because unsetting it is what restores `~/.gitconfig`.
+    """`GIT_CONFIG_GLOBAL` stays, because unsetting it is what restores `~/.gitconfig`.
 
     That file is trusted on purpose — it holds the credentials push/fetch need — so the answer to a
     swapped one is the control-state fingerprint, not a scrub that would hand git the real file
@@ -3414,7 +3414,7 @@ def test_the_global_gitconfig_pointer_is_deliberately_not_scrubbed(
 def test_the_fingerprint_digests_the_global_config_git_actually_reads(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
-    # Пре2-5: leaving `GIT_CONFIG_GLOBAL` out of the scrub is only honest if the fingerprint follows
+    # Leaving `GIT_CONFIG_GLOBAL` out of the scrub is only honest if the fingerprint follows
     # git to the file it then reads. Digesting `~/.gitconfig` while git reads a third file would
     # fingerprint a file nobody consults and miss the one that decides `credential.helper`.
     chosen = tmp_path / "operator-chosen-gitconfig"
@@ -3447,7 +3447,7 @@ def test_the_user_config_half_of_the_fingerprint_is_reachable_without_touching_a
     make_git_config: ConfigFactory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Пре2-12: the loud line calls the user git config the FIRST half of what floor 4 watches, and
+    # The loud line calls the user git config the FIRST half of what floor 4 watches, and
     # it had no test at all — `Path.home()` was read directly, so there was no seam to substitute.
     # `XDG_CONFIG_HOME` is that seam for the second location, and it is read from the same
     # environment the orchestrator's git runs under.
@@ -3479,7 +3479,7 @@ def test_the_user_config_half_of_the_fingerprint_is_reachable_without_touching_a
 def test_a_fifo_in_the_codex_tree_cannot_hang_the_fingerprint(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
-    # Пре2-7: the walked tree is one the agent may write into on purpose (that is what `.codex/` is
+    # The walked tree is one the agent may write into on purpose (that is what `.codex/` is
     # for), and everything `os.walk` called a file was read. A FIFO there blocks the read forever,
     # and this capture runs before every attempt with no timeout — so the run did not park, it hung
     # holding the processing slot.
@@ -3521,11 +3521,11 @@ def test_an_oversize_codex_entry_is_fingerprinted_by_size_not_read(
 def test_the_module_level_git_helpers_run_on_the_allowlist_too(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """ТA.2.1: `check-ignore` and the stdout twin are inside "allowlist everywhere in Git Manager".
+    """`check-ignore` and the stdout twin are inside "allowlist everywhere in Git Manager".
 
-    They used to be the one git call site on the full `os.environ`, and they are the pair Phase
-    0.4's `.git/info/exclude` decision rests on: a shell `GIT_DIR` pointed them at another
-    repository, so they answered about the wrong clone. They hold no `SecurityConfig` (the installer
+    They are the pair the `.git/info/exclude` repair decision rests on, so the full `os.environ`
+    must never reach them: a shell `GIT_DIR` would point them at another repository and they would
+    answer about the wrong clone. They hold no `SecurityConfig` (the installer
     and preflight call them), hence the built-in allowlist — which still has to carry what a
     read-only git needs.
     """
