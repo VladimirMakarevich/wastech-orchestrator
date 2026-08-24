@@ -673,7 +673,10 @@ class Orchestrator:
         # the Router, so a stop either interrupts at a clean node boundary or suppresses fallback
         # when a hard-killed provider exits abnormally mid-node.
         self._is_cancelled = is_cancelled
-        # Repo skill inventory scanner. Defaults to the target repo clone's `.claude/skills`.
+        # Repo skill inventory scanner. Defaults to a WHOLE-REPO scan of the target clone —
+        # every tracked ``SKILL.md`` wherever it sits (``git ls-files``), not a `.claude/skills`
+        # directory: a monorepo scatters them, and the tracked-file enumeration is what makes
+        # the scan ignore-aware and bounded for free.
         self._skill_scanner = skill_scanner or self._default_skill_scanner()
         # Per-id attempt number stamped onto the next ledger record, set by ``rerun``/``continue``.
         self._rerun_attempt: dict[str, int] = {}
