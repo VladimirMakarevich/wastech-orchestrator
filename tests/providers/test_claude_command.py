@@ -17,7 +17,6 @@ from wastech_orchestrator.providers.claude import (
     build_context_footer,
     build_effective_prompt,
     build_sandbox_settings,
-    claude_config_home,
     map_permission,
     resolve_claude_tools,
 )
@@ -191,91 +190,27 @@ def test_the_shipped_default_keeps_the_historical_editor_pair(
     assert f"NotebookEdit({gitdir})" not in disallowed
 
 
-def _native_memory_glob(config_dir: Path) -> str:
-    # Mirrors claude._native_memory_deny_tools: //-anchored, symlink-canonicalized, POSIX slashes.
-    return "//" + config_dir.resolve().as_posix().lstrip("/") + "/**"
-
-
-def test_native_memory_paths_denied_for_custom_config_dir(
+@pytest.mark.parametrize("read_isolation_off", [False, True])
+def test_no_deny_of_any_kind_on_the_claude_config_home(
     claude_config: ProviderConfig,
     make_request: Callable[..., AgentRunRequest],
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    read_isolation_off: bool,
 ) -> None:
-    # The spawned agent must not read/inject/leak Claude Code's native project memory, which
-    # lives under the config dir OUTSIDE the target working tree. Write/Edit/Read are denied there,
-    # honoring a custom CLAUDE_CONFIG_DIR. No denied_commands passed — the deny applies on its own,
-    # by default (allow_native_memory off).
+    # Ам-5 Блок Б acceptance (owner decision 2026-08-24): the Claude config home carries no deny of
+    # any kind — no Read, no Write/Edit, no glob at any depth — at either read-isolation value. The
+    # home glob prefix covers every shape the removed rules used (`/**`, `/*`, `/*/*`).
     config_dir = tmp_path / "isolated-claude"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
-    argv = _argv(claude_config, make_request())
+    argv = _argv(
+        claude_config, make_request(), denied=DENIED, read_isolation_off=read_isolation_off
+    )
     disallowed = argv[argv.index("--disallowedTools") + 1]
-    glob = _native_memory_glob(config_dir)
-    assert f"Write({glob})" in disallowed
-    assert f"Edit({glob})" in disallowed
-    assert f"Read({glob})" in disallowed
-
-
-def test_native_memory_deny_defaults_to_home_claude(
-    claude_config: ProviderConfig,
-    make_request: Callable[..., AgentRunRequest],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    # Absent CLAUDE_CONFIG_DIR, the deny covers the ~/.claude default.
-    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    argv = _argv(claude_config, make_request())
-    disallowed = argv[argv.index("--disallowedTools") + 1]
-    assert f"Write({_native_memory_glob(Path.home() / '.claude')})" in disallowed
-
-
-def test_allow_native_memory_opens_the_store_and_nothing_above_it(
-    claude_config: ProviderConfig,
-    make_request: Callable[..., AgentRunRequest],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    # Ам4-1 (owner decision 2026-08-20): the opt-in opens the per-project MEMORY STORE, not the
-    # config home it lives in. It used to drop the deny for the whole home — and since the internal
-    # projection carves that home out as well, `~/.claude` (credentials, settings, every project's
-    # session transcripts) was left with no tool-level deny at all, in the one mode where the agent
-    # also has an unscoped shell.
-    config_dir = tmp_path / "isolated-claude"
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
-    opted_in = replace(claude_config, allow_native_memory=True)
-    argv = _argv(opted_in, make_request(), denied=DENIED)
-    disallowed = argv[argv.index("--disallowedTools") + 1]
-    home = config_dir.resolve().as_posix().lstrip("/")
-    # The whole home is no longer denied wholesale — that is what the opt-in buys...
-    assert f"Write({_native_memory_glob(config_dir)})" not in disallowed
-    # ...but the credential/settings layer and each project's own files still are.
-    assert f"Write(//{home}/*)" in disallowed
-    assert f"Edit(//{home}/*)" in disallowed
-    assert f"Write(//{home}/*/*)" in disallowed
-    # The read axis belongs to `disable_read_isolation`, and the opt-in was never a read grant.
-    assert f"Read(//{home}/*)" not in disallowed
-    # The publish blacklist is unaffected by the memory opt-in.
+    home_glob = "//" + config_dir.resolve().as_posix().lstrip("/")
+    assert home_glob not in disallowed
+    # The publish blacklist is untouched by the removal.
     assert "Bash(git commit:*)" in disallowed
-
-
-def test_the_memory_store_itself_is_left_writable_under_the_opt_in(
-    claude_config: ProviderConfig,
-    make_request: Callable[..., AgentRunRequest],
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    # The other side: no emitted pattern may match the store, or the opt-in would buy nothing. The
-    # store sits three segments below the home, and the denies stop at two.
-    config_dir = tmp_path / "isolated-claude"
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
-    opted_in = replace(claude_config, allow_native_memory=True)
-    argv = _argv(opted_in, make_request())
-    disallowed = argv[argv.index("--disallowedTools") + 1]
-    home = config_dir.resolve().as_posix().lstrip("/")
-    store = f"//{home}/projects/some-slug/memory"
-    assert f"Write({store}/**)" not in disallowed
-    assert f"Write({store}/*)" not in disallowed
-    # And nothing was emitted at the depth the store lives at.
-    assert f"Write(//{home}/*/*/*)" not in disallowed
 
 
 def test_a_flow_node_cannot_escalate_the_permission_mode(
@@ -571,7 +506,6 @@ def _deny_policy() -> InternalDenyPolicy:
         control_home=Path("/repo/.worc"),
         private_home=Path("/repo/.worc"),
         env_file=Path("/repo/.worc/.env"),
-        provider_homes=(Path("/home/me/.claude"),),
     )
 
 
@@ -686,19 +620,6 @@ def test_write_guard_denies_write_edit_but_keeps_exchange_readable(
         assert name not in disallowed
 
 
-def test_claude_config_home_left_to_memory_rule_not_re_denied_by_internal(
-    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
-) -> None:
-    # ~/.claude is owned by the native-memory rule (gated by allow_native_memory); the internal
-    # deny projection must exclude it so the opt-in is not broken.
-    home = claude_config_home()
-    argv = _argv(claude_config, make_request(), internal_deny=(Path("/repo/.worc"), home))
-    disallowed = argv[argv.index("--disallowedTools") + 1]
-    home_glob = "//" + home.as_posix().lstrip("/")
-    assert f"Read({home_glob}/**)" in disallowed  # native-memory rule present
-    assert f"Read({home_glob})" not in disallowed  # internal projection did NOT re-add the node
-
-
 def test_settings_flag_present_only_when_path_given(
     claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
@@ -746,7 +667,6 @@ def test_build_sandbox_settings_shape_is_hardened() -> None:
         control_home=Path("/repo/.worc"),
         private_home=Path("/repo/.worc"),
         env_file=Path("/repo/.worc/.env"),
-        provider_homes=(Path("/home/me/.claude"),),
         runs_home=Path("/repo/.worc/runs"),
     )
     settings = build_sandbox_settings(deny, _write_guard(), network_access=False)["sandbox"]
@@ -771,10 +691,10 @@ def test_the_advanced_mode_grants_write_outside_the_clone_and_keeps_every_carve_
     """ТA.4.1: ``allowWrite`` on the volume root, with the floor listed one entry at a time.
 
     The carve-outs are asserted by NAME rather than by "the write guard is in there", because the
-    short form of the floor ("`.git` and `.worc`") does not show all of them: both provider auth
-    homes are write-denied today and are exactly what an implementer reading that short form drops.
-    On the shipped default Codex loads ``$CODEX_HOME/config.toml``, so a writable one is code
-    execution on the next attempt — that is the cost of losing an entry nobody can see.
+    short form of the floor ("`.git` and `.worc`") does not show all of them: the frozen ``runs``
+    tree and the resolved env-file are exactly what an implementer reading that short form drops.
+    The provider config homes are deliberately NOT carve-outs any more (owner decision 2026-08-24,
+    Ам-5 Блок Б) — nothing in the mode covers them.
 
     What this does NOT prove, and cannot: that the CLI ranks a ``denyWrite`` inside an
     ``allowWrite`` the way this file assumes. That is a live probe, recorded as "not proven" in the
@@ -784,7 +704,6 @@ def test_the_advanced_mode_grants_write_outside_the_clone_and_keeps_every_carve_
         control_home=Path("/repo/.worc"),
         private_home=Path("/repo/.worc"),
         env_file=Path("/etc/worc/.env"),  # resolved outside the private home on purpose
-        provider_homes=(Path("/home/me/.claude"), Path("/home/me/.codex")),
         runs_home=Path("/repo/.worc/runs"),
     )
     settings = build_sandbox_settings(
@@ -799,13 +718,13 @@ def test_the_advanced_mode_grants_write_outside_the_clone_and_keeps_every_carve_
         "/repo/.worc",  # the control plane
         "/etc/worc/.env",  # the orchestrator's own secrets, wherever they resolved
         "/repo/.worc/runs",  # the frozen bundles, denied by name rather than by location
-        "/home/me/.claude",  # provider auth/config home — invisible in the short form of the floor
-        "/home/me/.codex",  # and the one that is LOADED as config on the shipped default
         "/repo/.worc-io",  # the curated exchange
         "/repo/.git",  # gitdir and, for a linked worktree, the shared common dir
         "/repo/.git/hooks",
         "/repo/tasks",  # the committed lifecycle tree
     } <= deny_write
+    # And the provider config homes are NOT in it — no deny covers them in the mode.
+    assert not any(p.endswith((".claude", ".codex")) for p in deny_write)
 
 
 def test_no_allow_write_key_appears_outside_the_advanced_mode() -> None:
@@ -816,12 +735,28 @@ def test_no_allow_write_key_appears_outside_the_advanced_mode() -> None:
     assert set(settings["sandbox"]["filesystem"]) == {"denyRead", "denyWrite"}
 
 
+def test_sandbox_settings_carry_no_deny_on_the_claude_config_home(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # Ам-5 Блок Б acceptance, the settings-file surface: the OS sandbox policy carries no denyRead
+    # and no denyWrite on the Claude config home — including in the advanced mode, whose volume-wide
+    # allowWrite used to be carved back out for it.
+    config_dir = tmp_path / "isolated-claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    for kwargs in ({}, {"allow_write_root": Path("/")}):
+        settings = build_sandbox_settings(
+            _deny_policy(), _write_guard(), network_access=False, **kwargs
+        )["sandbox"]
+        home = str(config_dir.resolve())
+        assert home not in settings["filesystem"].get("denyRead", [])
+        assert home not in settings["filesystem"]["denyWrite"]
+
+
 def test_build_sandbox_settings_network_grant_allows_domains() -> None:
     deny = InternalDenyPolicy(
         control_home=Path("/repo/.worc"),
         private_home=Path("/repo/.worc"),
         env_file=None,
-        provider_homes=(),
     )
     settings = build_sandbox_settings(deny, None, network_access=True)["sandbox"]
     assert settings["network"]["allowedDomains"] == ["*"]
@@ -836,7 +771,6 @@ def _read_isolation_off_deny() -> InternalDenyPolicy:
         control_home=Path("/repo/.worc"),
         private_home=Path("/repo/.worc"),
         env_file=Path("/repo/.worc/.env"),
-        provider_homes=(Path("/home/me/.codex"),),
         runs_home=Path("/repo/.worc/runs"),
     )
 
@@ -884,36 +818,6 @@ def test_the_private_set_is_read_denied_at_either_read_isolation_setting(
     # Write side stays: command denies + write-guard Write/Edit.
     assert "Bash(git commit:*)" in disallowed
     assert "Write(//repo/.worc-io/**)" in disallowed
-
-
-def test_read_isolation_off_lifts_the_native_memory_read_deny_but_keeps_the_write_deny(
-    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
-) -> None:
-    # Reading native Claude memory (~/.claude) is restored for native discovery; WRITING it is not.
-    # Regression: this rule is the ONLY thing covering ~/.claude (the internal projection excludes
-    # it), so skipping it wholesale left that store with zero deny rules on the shipped default and
-    # agents wrote memory files into the operator's HOME — outside the clone, the frozen bundle, and
-    # the redaction net.
-    home_glob = "//" + claude_config_home().as_posix().lstrip("/")
-    argv = _argv(claude_config, make_request(), denied=DENIED, read_isolation_off=True)
-    disallowed = argv[argv.index("--disallowedTools") + 1]
-    assert f"Read({home_glob}/**)" not in disallowed
-    assert f"Write({home_glob}/**)" in disallowed
-    assert f"Edit({home_glob}/**)" in disallowed
-
-
-def test_read_isolation_off_with_allow_native_memory_drops_every_deny(
-    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
-) -> None:
-    # The opt-in is the only switch that lifts the write side, and it still does with the read hatch
-    # open — the operator owns that risk, and the escape hatch must keep working.
-    home_glob = "//" + claude_config_home().as_posix().lstrip("/")
-    opted_in = replace(claude_config, allow_native_memory=True)
-    argv = _argv(opted_in, make_request(), denied=DENIED, read_isolation_off=True)
-    disallowed = argv[argv.index("--disallowedTools") + 1]
-    for kind in ("Read", "Write", "Edit"):
-        assert f"{kind}({home_glob}/**)" not in disallowed
-    assert "Bash(git commit:*)" in disallowed  # the publish blacklist is untouched either way
 
 
 def test_read_isolation_off_sandbox_lifts_denyread_keeps_denywrite() -> None:
@@ -1151,23 +1055,21 @@ def test_advanced_mode_floor_survives_every_other_relaxation(
     # through the OS sandbox. It has to hold at EVERY combination of the other relaxations, since
     # each of them is an independent switch an operator can flip.
     for read_isolation_off in (False, True):
-        for native_memory in (False, True):
-            for profile in ("read-only", "workspace-write"):
-                config = replace(claude_config, allow_native_memory=native_memory)
-                req = make_request(permission_profile=profile, write_guard=_write_guard())
-                argv = _argv(
-                    config,
-                    req,
-                    internal_deny=_INTERNAL_DENY,
-                    strict_isolation=False,
-                    read_isolation_off=read_isolation_off,
-                )
-                case = (read_isolation_off, native_memory, profile)
-                disallowed = argv[argv.index("--disallowedTools") + 1]
-                for path in ("//repo/.git", "//repo/.git/hooks", "//repo/tasks", "//repo/.worc"):
-                    for kind in ("Write", "Edit", "NotebookEdit"):
-                        assert f"{kind}({path}/**)" in disallowed, (case, path, kind)
-                assert "EnterWorktree" in disallowed.split(","), case
+        for profile in ("read-only", "workspace-write"):
+            req = make_request(permission_profile=profile, write_guard=_write_guard())
+            argv = _argv(
+                claude_config,
+                req,
+                internal_deny=_INTERNAL_DENY,
+                strict_isolation=False,
+                read_isolation_off=read_isolation_off,
+            )
+            case = (read_isolation_off, profile)
+            disallowed = argv[argv.index("--disallowedTools") + 1]
+            for path in ("//repo/.git", "//repo/.git/hooks", "//repo/tasks", "//repo/.worc"):
+                for kind in ("Write", "Edit", "NotebookEdit"):
+                    assert f"{kind}({path}/**)" in disallowed, (case, path, kind)
+            assert "EnterWorktree" in disallowed.split(","), case
 
 
 def test_advanced_mode_keeps_a_read_only_node_from_writing(

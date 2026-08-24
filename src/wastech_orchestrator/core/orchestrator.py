@@ -647,8 +647,8 @@ class Orchestrator:
         # exchange from ``exchange_root``. ``control_home`` and ``private_home`` are the same today.
         self._layout = layout
         self._artifacts_root: Path = layout.private_home
-        # Internal provider deny policy: the control/private homes, resolved
-        # env-file, and provider auth homes to deny. Stored here for the adapters to project into
+        # Internal provider deny policy: the control/private homes and the resolved
+        # env-file to deny. Stored here for the adapters to project into
         # provider enforcement; not consumed yet.
         self._deny_policy = deny_policy
         # The provider-readable exchange root ``<repo>/.worc-io``, a sibling of the
@@ -2629,16 +2629,6 @@ class Orchestrator:
                     "disable_read_isolation": self._config.security.disable_read_isolation,
                     "strict_isolation": self._config.security.strict_isolation,
                 },
-            )
-        claude_cfg = self._config.agents.providers.get(ProviderId.CLAUDE)
-        if claude_cfg is not None and claude_cfg.allow_native_memory:
-            self._log(p.task.id).warning(
-                "native Claude memory ON — the agent may read and write its own per-project memory "
-                "store under the Claude config home (operator-sanctioned via "
-                "agents.providers.claude.allow_native_memory); that store is outside this run's "
-                "audit trail, artifact manifest, and redaction net, and it carries state across "
-                "tasks",
-                extra={"allow_native_memory": True},
             )
         if self._config.security.allow_git_evidence:
             inert = "" if self._config.security.strict_isolation else " (inert in advanced mode)"

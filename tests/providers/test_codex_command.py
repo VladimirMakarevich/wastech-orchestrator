@@ -161,7 +161,6 @@ def test_deny_policy_and_write_guard_projected_into_profile(
         control_home=Path("/clone/.worc"),
         private_home=Path("/clone/.worc"),
         env_file=None,
-        provider_homes=(Path("/home/op/.codex"),),
     )
     wg = ProviderWriteGuardPolicy(
         exchange_root=Path("/clone/.worc-io"),
@@ -178,7 +177,6 @@ def test_deny_policy_and_write_guard_projected_into_profile(
     )
     profile = _profile_arg(argv)
     assert _fs_rule("/clone/.worc", "deny") in profile  # private/control home denied
-    assert _fs_rule("/home/op/.codex", "deny") in profile  # provider auth home denied
     assert _fs_rule("/clone/.env", "deny") in profile  # denied_read_paths projected
     assert _fs_rule("/clone/secrets", "deny") in profile
     assert _fs_rule("/clone/.worc-io", "read") in profile  # exchange readable, write-denied

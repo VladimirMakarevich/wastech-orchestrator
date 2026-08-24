@@ -485,7 +485,6 @@ def test_workspace_write_run_with_deny_policy_writes_sandbox_settings(
         control_home=tmp_path / ".worc",
         private_home=tmp_path / ".worc",
         env_file=None,
-        provider_homes=(),
     )
     fake = FakeRun(stdout=_success_stream())
     provider = ClaudeCodeProvider(
@@ -519,7 +518,6 @@ def test_a_read_only_run_in_the_advanced_mode_gets_the_sandbox_that_holds_it_to_
         control_home=tmp_path / ".worc",
         private_home=tmp_path / ".worc",
         env_file=None,
-        provider_homes=(),
     )
     fake = FakeRun(stdout=_success_stream())
     provider = ClaudeCodeProvider(
@@ -562,7 +560,6 @@ def test_the_advanced_mode_writes_the_volume_root_and_the_open_network_into_the_
         control_home=tmp_path / ".worc",
         private_home=tmp_path / ".worc",
         env_file=None,
-        provider_homes=(),
     )
     fake = FakeRun(stdout=_success_stream())
     provider = ClaudeCodeProvider(
@@ -915,7 +912,6 @@ def _paid_provider(
             control_home=tmp_path / "real" / ".worc",
             private_home=tmp_path / "real" / ".worc",
             env_file=None,
-            provider_homes=(),
         ),
     )
 

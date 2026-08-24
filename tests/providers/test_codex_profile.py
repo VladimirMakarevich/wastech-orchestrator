@@ -19,19 +19,12 @@ from wastech_orchestrator.providers.codex_profile import (
 )
 from wastech_orchestrator.runtime_layout import InternalDenyPolicy, ProviderWriteGuardPolicy
 
-# The fixture provider home, plus the profile key it renders to. The generator normalizes every
-# path through the `to_native=str` seam, so a POSIX fixture literal becomes `\opt\codexhome` on
-# native Windows — assert the normalized form, not the literal, or these tests only pass on POSIX.
-PROVIDER_HOME = Path("/opt/codexhome")
-PROVIDER_HOME_KEY = str(PROVIDER_HOME)
-
 
 def _deny(root: Path) -> InternalDenyPolicy:
     return InternalDenyPolicy(
         control_home=root / ".worc",
         private_home=root / ".worc",
         env_file=root / ".worc" / ".env",
-        provider_homes=(PROVIDER_HOME,),
         runs_home=root / ".worc" / "runs",
     )
 
@@ -83,7 +76,6 @@ def test_workspace_write_grants_write_and_readonly_guard(tmp_path: Path) -> None
     assert fs[str(root / "tasks")] == "read"
     # deny set still wins
     assert fs[str(root / ".worc")] == "deny"
-    assert fs[PROVIDER_HOME_KEY] == "deny"
     # Governance/instruction files are ordinary, editable content — no per-file guard entry.
     for name in ("AGENTS.md", "AGENTS.override.md", "CLAUDE.md"):
         assert not any(name in key for key in fs)
@@ -97,7 +89,6 @@ def test_deny_applied_last_wins_over_read_guard(tmp_path: Path) -> None:
         control_home=root / ".worc",
         private_home=root / ".worc",
         env_file=root / ".worc-io",
-        provider_homes=(),
     )
     profile = build_codex_permission_profile(
         permission_profile="workspace-write",
@@ -116,7 +107,8 @@ def test_the_private_set_stays_denied_whatever_read_isolation_says(tmp_path: Pat
     which handed the sandboxed shell the private home and the resolved env-file. ТA.2.3 withholds
     those names from the child environment *because* the agent cannot read the file; that reasoning
     only holds while this stays ``deny``. Native discovery loses nothing: the CLI reads its own user
-    config and auth outside this profile, and ``--ignore-user-config`` is what gates them.
+    config and auth outside this profile, and ``--ignore-user-config`` is what gates them. The
+    provider config home is not in this set at all (owner decision 2026-08-24, Ам-5 Блок Б).
     """
     root = tmp_path / "clone"
     profile = build_codex_permission_profile(
@@ -130,7 +122,6 @@ def test_the_private_set_stays_denied_whatever_read_isolation_says(tmp_path: Pat
     assert fs[str(root / ".worc")] == "deny"  # private set unreadable and unwritable
     assert fs[str(root / ".worc" / ".env")] == "deny"  # the env-file ТA.2.3 depends on
     assert fs[str(root / ".worc" / "runs")] == "deny"  # frozen bundles / seals / quarantine
-    assert fs[PROVIDER_HOME_KEY] == "deny"  # provider home too — auth needs no profile grant
     assert fs[str(root / ".env")] == "deny"  # public blacklist unchanged
     assert fs[str(root / "secrets")] == "deny"
     assert fs[str(root)] == "write"  # workspace still writable
@@ -280,10 +271,10 @@ def test_the_advanced_mode_grants_the_volume_root_and_keeps_every_carve_out(tmp_
     """ТA.4.1: write extends to the whole volume, and the floor survives by being more specific.
 
     The carve-out set is asserted by NAME, one entry at a time, because the short form of the floor
-    ("`.git` and `.worc`") does not show all of it: the provider auth home is write-denied today and
-    is the entry an implementer reading that short form drops — and on the shipped default Codex
-    LOADS its own ``config.toml`` from there, so a writable one is code execution on the next
-    attempt. ``runs_home`` and the resolved env-file are in the same position.
+    ("`.git` and `.worc`") does not show all of it: ``runs_home`` and the resolved env-file are the
+    entries an implementer reading that short form drops. The provider config home is deliberately
+    NOT a carve-out (owner decision 2026-08-24, Ам-5 Блок Б) — a deny there stopped Codex's own
+    ``apply_patch`` sandbox helper from executing on standalone installs.
     """
     root = tmp_path / "clone"
     profile = build_codex_permission_profile(
@@ -304,7 +295,6 @@ def test_the_advanced_mode_grants_the_volume_root_and_keeps_every_carve_out(tmp_
     # The private set: denied outright, including BOTH halves the short form hides.
     for private in (root / ".worc", root / ".worc" / ".env", root / ".worc" / "runs"):
         assert fs[str(private)] == "deny", private
-    assert fs[PROVIDER_HOME_KEY] == "deny"
 
 
 def test_outside_the_mode_no_root_grant_appears(tmp_path: Path) -> None:
@@ -329,7 +319,6 @@ def test_outside_the_mode_no_root_grant_appears(tmp_path: Path) -> None:
         str(root / ".worc"),
         str(root / ".worc" / ".env"),
         str(root / ".worc" / "runs"),
-        PROVIDER_HOME_KEY,
     }
 
 

@@ -60,17 +60,8 @@ SHELL_CHECKS: dict[ProviderId, ShellCheck] = {
     ProviderId.CODEX: codex.attempt_has_shell,
 }
 
-# ProviderId → its config/credential home resolver, bound here (the composition root) so the
-# provider-neutral :class:`RuntimeLayout` never learns a provider-specific path. Used to populate
-# the :class:`InternalDenyPolicy` with the operator-owned auth homes to deny.
-_PROVIDER_CONFIG_HOMES: dict[ProviderId, Callable[[], Path]] = {
-    ProviderId.CLAUDE: claude.claude_config_home,
-    ProviderId.CODEX: codex.codex_config_home,
-}
-
 
 def build_internal_deny_policy(
-    config: OrchestratorConfig,
     layout: RuntimeLayout,
     *,
     env_file: Path | None = None,
@@ -78,24 +69,17 @@ def build_internal_deny_policy(
     """Assemble the internal deny policy at the composition boundary.
 
     Collects the control/private homes from the provider-neutral ``layout``, the resolved
-    default/explicit ``env_file`` (which may live outside ``private_home``), the config or
-    credential homes of the *configured* providers (:data:`_PROVIDER_CONFIG_HOMES`), and the
-    per-task runtime root (``layout.runs_home``) that parents every frozen bundle, seal, and
-    quarantined tree. Resolving the provider homes here — not inside :class:`RuntimeLayout` — keeps
-    the layout provider-neutral.
+    default/explicit ``env_file`` (which may live outside ``private_home``), and the per-task
+    runtime root (``layout.runs_home``) that parents every frozen bundle, seal, and quarantined
+    tree. The provider CLIs' own config homes are deliberately not collected (owner decision
+    2026-08-24; see :class:`InternalDenyPolicy`).
 
     These are representations only; the provider adapters project them into their own policy.
     """
-    provider_homes = tuple(
-        _PROVIDER_CONFIG_HOMES[pid]()
-        for pid in config.agents.providers
-        if pid in _PROVIDER_CONFIG_HOMES
-    )
     return InternalDenyPolicy(
         control_home=layout.control_home,
         private_home=layout.private_home,
         env_file=env_file,
-        provider_homes=provider_homes,
         runs_home=layout.runs_home,
     )
 
@@ -120,7 +104,7 @@ def build_providers(
     """
     root = str(layout.private_home)
     artifact_level = config.logging.artifacts
-    policy = deny_policy if deny_policy is not None else build_internal_deny_policy(config, layout)
+    policy = deny_policy if deny_policy is not None else build_internal_deny_policy(layout)
     providers: dict[ProviderId, AgentProvider] = {}
     for pid, provider_cfg in config.agents.providers.items():
         if pid is ProviderId.CLAUDE:
@@ -182,7 +166,7 @@ def build_orchestrator(
     # into the providers (read/write-deny projection), the Orchestrator (audit), and — as the
     # offline
     # isolation-check table — the Router's ``CAPABILITY_UNAVAILABLE`` fallback-eligibility gate.
-    deny_policy = build_internal_deny_policy(config, layout, env_file=env_file)
+    deny_policy = build_internal_deny_policy(layout, env_file=env_file)
     providers = build_providers(
         config,
         layout=layout,

@@ -678,12 +678,15 @@ def test_preflight_labels_an_explicit_env_file_accurately(
     assert any("orchestrator environment file" in line for line in lines)
 
 
-def test_preflight_labels_a_provider_home_accurately(
+def test_an_assigned_path_under_a_provider_home_is_ordinary(
     monkeypatch: pytest.MonkeyPatch,
     git_repo,
     make_git_config,
     tmp_path: Path,
 ) -> None:
+    # Ам-5 Блок Б (owner decision 2026-08-24): the provider config homes left every protected set,
+    # so a toolchain cache assigned inside one is ordinary working state — no FAIL, no
+    # provider-home label. (Outside the clone it still gets the ordinary advisory treatment.)
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
@@ -691,8 +694,8 @@ def test_preflight_labels_a_provider_home_accurately(
     _patch_providers(monkeypatch, config)
 
     ok, lines = cli.run_preflight(config, env_file=None)
-    assert not ok
-    assert any("provider's own config or credential home" in line for line in lines)
+    assert ok
+    assert not any("provider's own config or credential home" in line for line in lines)
 
 
 def test_the_assigned_path_report_never_prints_a_value(
@@ -1335,3 +1338,97 @@ def test_the_windows_launch_gate_also_protects_git_in_advanced_mode(
     _patch_providers(monkeypatch, _without_systemroot(make_git_config(git_repo.clone)))
     assert cli.cmd_preflight(_args()) == 1
     assert "allowed-environment: FAIL" in capsys.readouterr().out
+
+
+# --- provider-binary diagnostic lines (Ам-5 Т5.9) ------------------------------------------------
+
+
+def _which_table(table: dict[str, str]):
+    return table.get
+
+
+def test_provider_binary_line_says_the_binary_lies_inside_the_config_home(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The journey-18a layout: the launch path is a symlink whose real file lives INSIDE
+    # `$CODEX_HOME` — the one fact that explains why the same build behaves differently on two
+    # hosts, and it must not require reading a failed attempt's stderr.
+    codex_home = tmp_path / "codex-home"
+    real = codex_home / "packages" / "bin" / "codex"
+    real.parent.mkdir(parents=True)
+    real.write_text("#!/bin/sh\n", encoding="utf-8")
+    launcher = tmp_path / "bin" / "codex"
+    launcher.parent.mkdir(parents=True)
+    try:
+        launcher.symlink_to(real)
+    except (OSError, NotImplementedError):  # pragma: no cover - host cannot create symlinks
+        pytest.skip("host cannot create a symlink fixture")
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    config = make_git_config(git_repo.clone)
+    lines = cli._provider_binary_lines(config, which=_which_table({"codex": str(launcher)}))
+    codex_line = next(line for line in lines if line.startswith("codex-binary:"))
+    assert str(launcher) in codex_line
+    assert str(real.resolve()) in codex_line
+    assert "inside the provider's config home" in codex_line
+
+
+def test_provider_binary_line_says_the_binary_lies_outside_the_config_home(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-home"))
+    binary = tmp_path / "opt" / "claude"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    config = make_git_config(git_repo.clone)
+    lines = cli._provider_binary_lines(config, which=_which_table({"claude": str(binary)}))
+    claude_line = next(line for line in lines if line.startswith("claude-binary:"))
+    assert "outside the provider's config home" in claude_line
+    # A direct path (no symlink) carries no "file it runs" clause — nothing was resolved away.
+    assert "the file it runs is" not in claude_line
+
+
+def test_provider_binary_line_when_the_command_does_not_resolve(git_repo, make_git_config) -> None:
+    config = make_git_config(git_repo.clone)
+    lines = cli._provider_binary_lines(config, which=_which_table({}))
+    assert any("does not resolve on PATH" in line for line in lines)
+    # Diagnostic only — no line is a verdict, and nothing here can fail preflight.
+    assert not any("FAIL" in line for line in lines)
+
+
+def test_provider_binary_line_survives_an_unresolvable_config_home(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, tmp_path: Path
+) -> None:
+    def _raiser() -> Path:
+        raise RuntimeError("no home directory")
+
+    monkeypatch.setattr(cli, "claude_config_home", _raiser)
+    binary = tmp_path / "claude"
+    binary.write_text("#!/bin/sh\n", encoding="utf-8")
+    config = make_git_config(git_repo.clone)
+    lines = cli._provider_binary_lines(config, which=_which_table({"claude": str(binary)}))
+    claude_line = next(line for line in lines if line.startswith("claude-binary:"))
+    assert "config home could not be resolved" in claude_line
+
+
+def test_provider_binary_lines_are_one_per_configured_provider(git_repo, make_git_config) -> None:
+    config = make_git_config(git_repo.clone)
+    lines = cli._provider_binary_lines(config, which=_which_table({}))
+    assert len(lines) == len(config.agents.providers)
+
+
+def test_preflight_prints_a_binary_line_per_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repo,
+    make_git_config,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # Integration: `worc preflight` carries the lines, one per configured provider, and the verdict
+    # is untouched by them. Only the subject prefixes are asserted — the host's real PATH decides
+    # the rest, and the line must be true on every CI host.
+    config = make_git_config(git_repo.clone)
+    _patch_providers(monkeypatch, config)
+    rc = cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert out.count("codex-binary:") == 1
+    assert out.count("claude-binary:") == 1
+    assert rc == 0

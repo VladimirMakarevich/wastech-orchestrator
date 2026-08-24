@@ -157,7 +157,7 @@ from wastech_orchestrator.providers.base import ProviderId
 # relaxes a security control (that store is unaudited, no redaction
 # guarantee), so it is a conscious opt-in: `config_writer` does NOT write it on a fresh install and
 # `upgrade-config` does not add it — documented in `config.example.yaml` only. Old configs load
-# fail-open with the safe default. Inert on Codex (no deny to gate there).
+# fail-open with the safe default. Inert on Codex (no deny to gate there). (Removed again in v39.)
 # v30 (2026-07-14, cleanup-checkout-opt-out): adds the optional tri-state
 # `repo.checkout_base_on_cleanup` (bool | null, default null) gating whether cleanup returns
 # the tree to `base_branch`. null defers to `branch_mode` (new returns; existing/current
@@ -218,7 +218,17 @@ from wastech_orchestrator.providers.base import ProviderId
 # value at all. Removal, not deprecation: a config still carrying the key is rejected on load as an
 # unknown key, and `upgrade-config` does not strip it, because there is no deployed installation to
 # migrate and a tolerated key would only keep the impression that some value of it still works.
-CONFIG_SCHEMA_VERSION = 38
+# v39 (2026-08-24, am-5-provider-config-homes): removes
+# `agents.providers.claude.allow_native_memory`.
+# The provider config homes (`~/.claude` / `$CLAUDE_CONFIG_DIR`, `$CODEX_HOME`) left the internal
+# deny set entirely (owner decision 2026-08-24: the deny was never a separate owner decision, it
+# broke Codex's `apply_patch` outright where the standalone package keeps the binary inside
+# `$CODEX_HOME`, and it protected a directory where the need is per-file), so the opt-in gates
+# nothing at any value — a key that decides nothing but reads as a security opt-in is worse than an
+# absent one. Removal, not toleration (the v25 pattern, not v35): `install`/`upgrade-config` never
+# wrote it, so a config carrying it was typed by the operator and is rejected on load as an unknown
+# key; `upgrade-config` does not strip it.
+CONFIG_SCHEMA_VERSION = 39
 
 
 class AuditBranch(StrEnum):
@@ -386,16 +396,6 @@ class ProviderConfig:
     # resumes the same agent session with a fresh turn grant. Requires ``telegram.enabled``
     # (preflight). With this on, a low ``max_turns`` (~50–100) is safe — extendable on demand.
     max_turns_gate: bool = False
-    # Claude-only opt-in: when true, the adapter drops the
-    # native-memory deny so Claude Code's own auto-memory (``<config_dir>/projects/<repo>/memory/``)
-    # persists across tasks on this repo. Default false keeps the deny in place. It opens THAT
-    # SUBTREE ONLY: the config home around it (credentials, settings, other projects) keeps its
-    # tool-level write deny at every value of ``strict_isolation``, and if the home cannot be
-    # resolved the run is refused rather than left unprotected (owner decision 2026-08-20). RISK:
-    # that store is outside the orchestrator's redaction net and audit (an unredacted
-    # ``originSessionId`` was once observed leaking there) — a deliberate, operator-owned risk
-    # acceptance. Inert on Codex.
-    allow_native_memory: bool = False
 
 
 @dataclass(frozen=True)
@@ -507,10 +507,8 @@ class SecurityConfig:
     # :class:`~wastech_orchestrator.runtime_layout.InternalDenyPolicy` read-deny projection:
     # ``.worc``, the resolved env-file and the frozen bundles stay ``Read``-denied either way, since
     # native discovery needs nothing from them while opening them handed the agent the
-    # orchestrator's own ``.env``. One exception, and it is provider-specific: Claude's own config
-    # home is carved out of that projection entirely and governed by
-    # ``agents.providers.claude.allow_native_memory`` alone — with read-isolation off and the opt-in
-    # off, its per-project memory store is ``Read``-able (it stays write-denied). The WRITE side
+    # orchestrator's own ``.env``. The provider CLIs' own config homes are not part of any deny
+    # projection at any setting (owner decision 2026-08-24). The WRITE side
     # stays throughout: exchange/Git/``tasks/``/instruction write-deny, the commit/staging gates,
     # and the PR control layer. The public ``denied_read_paths`` blacklist also stays enforced.
     # Operator- config ONLY (never a task / ``extra_args`` / flow-node key). Defaults to ``True`` —
@@ -547,7 +545,7 @@ class SecurityConfig:
     # fail-closed: ``PATH`` (any case) is refused — reassigning it is how you substitute every
     # binary — as is a secret-looking name and a name outside ``[A-Za-z_][A-Za-z0-9_]*``. The
     # assigned path may not overlap the orchestrator control/private roots, Git metadata, the
-    # exchange, task lifecycle files, provider homes, the env-file, or a ``denied_read_paths``
+    # exchange, task lifecycle files, the env-file, or a ``denied_read_paths``
     # target; config validation handles lexical paths and preflight/run resolve host aliases. The
     # **value** cannot be checked for secrecy and sits in plaintext in ``config.yaml``, so
     # credentials never go here; that is a documented contract, not an enforced one.

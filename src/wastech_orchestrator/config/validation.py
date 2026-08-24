@@ -443,8 +443,8 @@ def _validate_assigned_paths(config: OrchestratorConfig, issues: list[str]) -> N
     onto it just as effectively as naming something inside it.
 
     Only the half that needs no filesystem lives here, so one config file gets one verdict on every
-    machine. The rest — symlinks, ``~``, the case and UNC aliases of a path, and the provider homes
-    resolved from the environment — is a ``worc preflight`` FAIL.
+    machine. The rest — symlinks, ``~``, the case and UNC aliases of a path, and the env-file
+    resolved from the command line — is a ``worc preflight`` FAIL.
 
     The message names the variable and what it collided with, never the value: the operator reads
     the value in their own config, and a value holding something secret against the guide's advice

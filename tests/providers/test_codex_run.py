@@ -137,9 +137,7 @@ class FakeCanary:
 
 def _deny_for(request: AgentRunRequest) -> InternalDenyPolicy:
     wd = Path(request.working_directory)
-    return InternalDenyPolicy(
-        control_home=wd / ".worc", private_home=wd / ".worc", env_file=None, provider_homes=()
-    )
+    return InternalDenyPolicy(control_home=wd / ".worc", private_home=wd / ".worc", env_file=None)
 
 
 def _isolated_provider(
@@ -170,9 +168,12 @@ def test_canary_passes_then_run_proceeds_and_writes_evidence(
 ) -> None:
     # With a deny set present, the pre-launch canary runs; the frozen exchange task
     # packet is the mandatory positive control. Probe order: private-read, private-shell-read,
-    # exchange-read (allowed), exchange-write (denied). When they hold, the real launch proceeds.
+    # exchange-read (allowed), exchange-write (denied), cli-exec (allowed). When they hold, the
+    # real launch proceeds.
     fake = FakeRun(stdout=_success_stream(), last_message='{"summary":"ok"}')
-    canary = FakeCanary(results=[(1, "denied"), (1, "denied"), (0, "task"), (1, "denied")])
+    canary = FakeCanary(
+        results=[(1, "denied"), (1, "denied"), (0, "task"), (1, "denied"), (0, "codex-cli 0.0.0")]
+    )
     exchange = tmp_path / "task.md"
     exchange.write_text("EXCHANGE_TASK", encoding="utf-8")
     request = make_request(task_path=str(exchange))
@@ -182,7 +183,7 @@ def test_canary_passes_then_run_proceeds_and_writes_evidence(
     result = provider.run(request)
     assert result.status is RunStatus.SUCCEEDED
     assert fake.calls == 1  # launched only AFTER the canary passed
-    assert canary.calls == 4  # 2 private-deny + exchange-read (positive control) + exchange-write
+    assert canary.calls == 5  # 2 private-deny + exchange read/write + the cli-exec probe
     canary_json = _attempt_dir(tmp_path) / "canary.json"
     assert json.loads(canary_json.read_text())["ok"] is True
 
@@ -194,12 +195,21 @@ def test_the_canary_probes_the_write_guard_roots_from_the_request(
     make_request: Callable[..., AgentRunRequest],
 ) -> None:
     # Пре-1: the roots come from the request the Core built, so the probes test the profile that is
-    # about to launch. Four probes as before, plus one per probed deny root — the count is asserted
+    # about to launch. Five base probes, plus one per probed deny root — the count is asserted
     # because a silently shrinking probe set is exactly how a floor claim stops being tested.
     from wastech_orchestrator.providers.codex_canary import WRITE_GUARD_SENTINEL
 
     fake = FakeRun(stdout=_success_stream(), last_message='{"summary":"ok"}')
-    canary = FakeCanary(results=[(1, "denied"), (1, "denied"), (0, "task"), (1, "denied")])
+    canary = FakeCanary(
+        results=[
+            (1, "denied"),
+            (1, "denied"),
+            (0, "task"),
+            (1, "denied"),
+            (0, "codex-cli 0.0.0"),
+            (1, "denied"),  # repeats for every write-guard probe
+        ]
+    )
     clone = tmp_path / "clone"
     (clone / ".git" / "hooks").mkdir(parents=True)
     (clone / "tasks").mkdir(parents=True)
@@ -228,7 +238,7 @@ def test_the_canary_probes_the_write_guard_roots_from_the_request(
     # covered by the probed `.git` above it.
     assert len(write_guard_probes) == 3
     assert all(p["expect_denied"] and p["denied"] for p in write_guard_probes)
-    assert canary.calls == 4 + 3
+    assert canary.calls == 5 + 3
     assert not (clone / ".git" / WRITE_GUARD_SENTINEL).exists()  # nothing left behind
 
 
@@ -285,7 +295,16 @@ def test_a_declared_root_with_no_directory_warns_and_the_attempt_still_runs(
     # debug, because a root that quietly leaves the probe set is how a floor claim stops being
     # tested.
     fake = FakeRun(stdout=_success_stream(), last_message='{"summary":"ok"}')
-    canary = FakeCanary(results=[(1, "denied"), (1, "denied"), (0, "task"), (1, "denied")])
+    canary = FakeCanary(
+        results=[
+            (1, "denied"),
+            (1, "denied"),
+            (0, "task"),
+            (1, "denied"),
+            (0, "codex-cli 0.0.0"),
+            (1, "denied"),  # repeats for every write-guard probe
+        ]
+    )
     clone = tmp_path / "clone"
     (clone / ".git" / "hooks").mkdir(parents=True)  # hooks collapses into the probed `.git`
     exchange_root = clone / ".worc-io"
@@ -326,10 +345,18 @@ def test_a_git_dir_write_that_lands_fails_closed_before_any_model_launch(
     # AC1.1: a profile that does not actually carve `.git` out is a non-fallback CONFIGURATION_ERROR
     # with zero model calls — the point of running the probe before `codex exec` rather than after.
     fake = FakeRun(stdout=_success_stream())
-    # Private reads denied, exchange read allowed, exchange write denied — then the `.git` write
-    # LANDS, which is the profile failing to enforce its central claim.
+    # Private reads denied, exchange read allowed, exchange write denied, cli exec fine — then the
+    # `.git` write LANDS, which is the profile failing to enforce its central claim.
     canary = FakeCanary(
-        results=[(1, "denied"), (1, "denied"), (0, "task"), (1, "denied"), (1, "denied"), (0, "")]
+        results=[
+            (1, "denied"),
+            (1, "denied"),
+            (0, "task"),
+            (1, "denied"),
+            (0, "codex-cli 0.0.0"),
+            (1, "denied"),
+            (0, ""),
+        ]
     )
     clone = tmp_path / "clone"
     (clone / ".git" / "hooks").mkdir(parents=True)
@@ -454,6 +481,50 @@ def test_a_proven_leak_is_still_fatal_in_the_advanced_mode(
 
     assert exc.value.error_class is ErrorClass.CONFIGURATION_ERROR
     assert fake.calls == 0
+
+
+@pytest.mark.parametrize("strict_isolation", [True, False])
+def test_a_profile_that_blocks_the_cli_exec_fails_closed_pre_model(
+    codex_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    make_request: Callable[..., AgentRunRequest],
+    strict_isolation: bool,
+) -> None:
+    # The journey-18a regression (Ам-5 Т5.7): a profile covering the codex binary itself broke
+    # every apply_patch while all seven read/append probes stayed green — the router fell back to
+    # Claude five runs in a row and the break read as "Codex is unavailable today". Now the exec
+    # probe catches it pre-model as a non-fallback CONFIGURATION_ERROR, at either isolation
+    # setting, even though the refusal output carries the sandbox's own prose.
+    fake = FakeRun(stdout=_success_stream())
+    canary = FakeCanary(
+        results=[
+            (1, "denied"),
+            (1, "denied"),
+            (0, "task"),
+            (1, "denied"),
+            (1, "sandbox-exec: execvp() of 'codex' failed: Operation not permitted"),
+        ]
+    )
+    exchange = tmp_path / "task.md"
+    exchange.write_text("EXCHANGE_TASK", encoding="utf-8")
+    request = make_request(task_path=str(exchange))
+    provider = _isolated_provider(
+        codex_config,
+        replace(security_config, strict_isolation=strict_isolation),
+        tmp_path,
+        fake,
+        canary=canary,
+        deny=_deny_for(request),
+    )
+    with pytest.raises(ProviderError) as exc:
+        provider.run(request)
+    assert exc.value.error_class is ErrorClass.CONFIGURATION_ERROR
+    assert exc.value.error_class not in FALLBACK_ELIGIBLE
+    assert fake.calls == 0  # the model was NEVER launched
+    probes = json.loads((_attempt_dir(tmp_path) / "canary.json").read_text())["probes"]
+    exec_probe = next(p for p in probes if p["probe"] == "cli-exec-allowed")
+    assert exec_probe["denied"] is True and exec_probe["expect_denied"] is False
 
 
 def test_canary_skipped_without_deny_policy(

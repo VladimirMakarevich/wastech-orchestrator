@@ -129,9 +129,11 @@ class InternalDenyPolicy:
     This is **internal provider policy**, deliberately kept separate from the overloaded public
     ``security.denied_read_paths`` config list (which also drives redaction and skill scanning). It
     names the roots and secret sources the agent must not read: the control home, the private home,
-    the resolved default/explicit ``--env-file`` (which may live outside ``private_home``), the
-    provider-owned auth/config homes (``~/.claude`` / ``$CLAUDE_CONFIG_DIR``, ``$CODEX_HOME``), and
-    the per-task runtime root.
+    the resolved default/explicit ``--env-file`` (which may live outside ``private_home``), and the
+    per-task runtime root. The provider CLIs' own config homes are deliberately NOT here (owner
+    decision 2026-08-24): denying them broke the providers' own machinery — Codex re-execs its
+    binary from inside ``$CODEX_HOME`` on standalone installs — and they are the operator's, not
+    the orchestrator's, to protect.
 
     ``runs_home`` is the parent of every per-task private root: the frozen control snapshot, the
     frozen agent inputs (canonical task packet, skill packages, root repository instruction files),
@@ -148,16 +150,14 @@ class InternalDenyPolicy:
     control_home: Path
     private_home: Path
     env_file: Path | None
-    provider_homes: tuple[Path, ...]
     runs_home: Path | None = None
 
     @property
     def denied_paths(self) -> tuple[Path, ...]:
-        """The full deny set, ordered + de-duplicated (homes, env-file, provider homes, runs)."""
+        """The full deny set, ordered + de-duplicated (homes, env-file, runs)."""
         ordered: list[Path] = [self.control_home, self.private_home]
         if self.env_file is not None:
             ordered.append(self.env_file)
-        ordered.extend(self.provider_homes)
         if self.runs_home is not None:
             ordered.append(self.runs_home)
         return _dedupe(ordered)

@@ -287,8 +287,10 @@ def codex_config_home() -> Path:
     """The Codex config/credential home: ``$CODEX_HOME`` or the ``~/.codex`` default.
 
     Codex authenticates through the operator's own home (credentials stay outside the orchestrator).
-    Shared with the ``InternalDenyPolicy`` assembly (composition root) so the provider-owned
-    auth/config home is a single source of truth rather than a duplicated literal.
+    No deny is built from it (owner decision 2026-08-24: the provider config homes left the deny set
+    entirely — the standalone package keeps the ``codex`` binary itself inside this home, and a deny
+    on it stopped ``apply_patch``'s own sandbox helper from executing); its consumer is the
+    ``worc preflight`` diagnostic that reports whether the provider binary lies inside this home.
     """
     raw = os.environ.get("CODEX_HOME")
     config_dir = Path(raw) if raw else Path.home() / ".codex"
@@ -584,7 +586,7 @@ def host_floor_gap(*, system: str | None = None) -> str | None:
     return (
         "native Windows: whether the Codex sandbox can enforce here is decided by the CLI's "
         "elevated sandbox backend, which cannot be classified offline — run "
-        "`worc preflight --capability-smoke` to get the answer before a task does. An "
+        "`worc preflight` (it runs the capability smoke) to get the answer before a task does. An "
         "undemonstrable sandbox is a warning under strict_isolation: false (the run continues, "
         "unproven) and refuses the attempt under strict_isolation: true"
     )
@@ -748,11 +750,15 @@ class CodexProvider(BaseCliProvider):
         """Prove the generated permission profile is OS-enforced before ``codex exec``.
 
         Runs the *same* profile under ``codex sandbox -P`` (no model, no network) and checks the
-        private home is denied (direct and shell-mediated), the exchange is read-only, and every
+        private home is denied (direct and shell-mediated), the exchange is read-only, the CLI
+        binary itself executes under the profile (the path ``apply_patch``'s fs sandbox helper
+        takes — a deny that covers the binary broke every patch while every read probe stayed
+        green), and every
         Git-control / lifecycle root the profile write-denies actually refuses a write — the
         product's central claim, which no probe tested before. On real launch env. Skipped only
         when there is no internal deny set to prove (a unit harness with no ``deny_policy``). A leak
-        fails closed as a non-fallback security error; an undemonstrable sandbox as
+        — and a refused exec of the CLI binary — fails closed as a non-fallback security error; an
+        undemonstrable sandbox as
         ``CAPABILITY_UNAVAILABLE``.
 
         A missing profile in the argv used to return quietly, which was legal while the full-access

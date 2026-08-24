@@ -2,7 +2,7 @@
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 # This is the packaged copy used by `wastech-orchestrator init` (the only example config; nothing else to sync).
 
-schema_version: 38                  # config format version; the orchestrator refuses newer configs
+schema_version: 39                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -85,17 +85,6 @@ agents:
       max_turns: 400           # Claude turn cap (positive int); "none" or "max" = no cap (unlimited)
       max_turns_gate: false    # when true, hitting max_turns pauses for a Telegram continue/stop
                                # prompt (requires telegram); a low cap (~50–100) is then safe
-      # allow_native_memory: false  # OPT-IN RISK — when true, drops the deny that confines Claude
-                               # Code's own auto-memory (~/.claude/projects/<repo>/memory/), letting
-                               # it persist across tasks. That store is OUTSIDE the orchestrator's
-                               # redaction net and audit; leave off unless you accept that. This is
-                               # the ONLY switch that makes it writable (disable_read_isolation
-                               # below lifts only reads), and each run then logs
-                               # "native Claude memory ON". It opens THAT SUBTREE ONLY: the Claude
-                               # config home around it — credentials, settings, other projects —
-                               # keeps its write deny at either value of strict_isolation, and if
-                               # that home cannot be resolved on this host `worc preflight` refuses
-                               # the run instead of leaving it unprotected. Claude-only.
       permission_profile: "workspace-write"   # read-only | workspace-write (a flow node's ceiling may lower it)
       extra_args: []           # raw CLI flags appended verbatim; forbidden ones fail preflight
       primary: true            # the global primary (exactly one provider; must be in `allowed`)
@@ -106,8 +95,9 @@ agents:
       timeout_seconds: 7200    # per-attempt CLI wall-clock ceiling (seconds)
       permission_profile: "workspace-write"   # read-only | workspace-write — codex's isolation knob:
                                # a generated permission profile grants only this level, denies the
-                               # private/control homes + secrets + CODEX_HOME, and keeps the exchange
-                               # read-only, proven by a no-model `codex sandbox` canary before each run
+                               # private/control homes + secrets, and keeps the exchange
+                               # read-only, proven by a no-model `codex sandbox` canary before each
+                               # run (which also proves the CLI binary itself executes under it)
       extra_args: []           # raw CLI flags appended verbatim; forbidden ones fail preflight
 
 security:
@@ -139,7 +129,7 @@ security:
                                       #   CLAUDE.md + project settings/hooks/MCP/skills (via
                                       #   --setting-sources project) and Codex reloads the user +
                                       #   project .codex config/hooks/rules. It does NOT open the
-                                      #   PRIVATE set (.worc, the env-file, provider homes, frozen
+                                      #   PRIVATE set (.worc, the env-file, frozen
                                       #   bundles): that stays read+write-denied at either value —
                                       #   native discovery never needed it, and opening it handed
                                       #   the agent .worc/.env through the plain Read tool. The

@@ -162,7 +162,9 @@ def test_codex_says_a_windows_host_is_not_classifiable_offline() -> None:
     gap = codex_mod.host_floor_gap(system="Windows")
     assert gap is not None
     assert "cannot be classified offline" in gap
-    assert "worc preflight --capability-smoke" in gap
+    # No `--capability-smoke` flag exists — `worc preflight` runs the smoke unconditionally.
+    assert "worc preflight" in gap
+    assert "--capability-smoke" not in gap
     # And it states the verdict the owner chose, in both directions.
     assert "warning under strict_isolation: false" in gap
     assert "refuses the attempt under strict_isolation: true" in gap

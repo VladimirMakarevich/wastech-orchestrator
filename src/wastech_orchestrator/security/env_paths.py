@@ -105,10 +105,11 @@ def internal_protected_paths(config: OrchestratorConfig) -> tuple[ProtectedPath,
     """The protected paths derivable from the config alone — the set the lexical half compares to.
 
     Everything here follows from ``repo.local_path`` and two config keys, so it is the same on every
-    machine. Deliberately *not* here: the provider config/credential homes (``$CODEX_HOME``,
-    ``$CLAUDE_CONFIG_DIR``, ``~/.claude``) and an explicit ``--env-file``, which are resolved from
-    the environment and the command line — they are host state, so they join the deny set only in
-    ``worc preflight``, which is allowed to be host-specific.
+    machine. Deliberately *not* here: an explicit ``--env-file``, which is resolved from the command
+    line — it is host state, so it joins the set only in ``worc preflight``, which is allowed to be
+    host-specific. The provider config/credential homes are not protected anywhere at all (owner
+    decision 2026-08-24): they are ordinary paths, so an assigned toolchain variable may point
+    inside them.
 
     ``denied_read_paths`` entries are handled separately by :func:`denied_read_path_collision` so
     their real glob semantics are preserved instead of broadening a pattern to its fixed prefix.
@@ -140,10 +141,6 @@ def host_protected_paths(
     entries = list(internal_protected_paths(config))
     if deny_policy.env_file is not None:
         entries.append(ProtectedPath("the orchestrator environment file", deny_policy.env_file))
-    entries.extend(
-        ProtectedPath("a provider's own config or credential home", path)
-        for path in deny_policy.provider_homes
-    )
     return _dedupe_by_path(entries)
 
 

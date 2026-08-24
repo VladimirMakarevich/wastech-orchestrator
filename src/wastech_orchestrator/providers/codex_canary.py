@@ -10,15 +10,20 @@ Classification (mirrors the provider error-class split):
 
 * a **denied path that turned out readable/writable** (a real leak) → ``CONFIGURATION_ERROR``, a
   non-fallback security result: the profile is not enforcing and no other provider should be tried;
+* a **profile that refuses to execute the provider's own binary** (the exec probe) →
+  ``CONFIGURATION_ERROR`` too: the capability provably exists — the denied binary launched the
+  probe — so only our profile (or a policy over it) can be taking it away, and falling back would
+  mask a break that is ours to fix;
 * the **sandbox could not run / could not demonstrate the requested policy** on this host (Codex
   itself refuses to run unsandboxed on native Windows when it cannot enforce a split policy; a Linux
   host missing its sandbox helper; an allowed path wrongly blocked) → ``CAPABILITY_UNAVAILABLE``, a
   deterministic pre-model infrastructure result the Router may only fall over to a same-or-stricter,
   self-isolating provider for.
 
-The probes read files that already exist (the attempt's own ``request.json`` under the private home;
-the frozen task packet in the exchange), so the canary never writes into — and never mutates — the
-curated exchange.
+The read/write probes touch only files that already exist (the attempt's own ``request.json`` under
+the private home; the frozen task packet in the exchange), so the canary never mutates the curated
+exchange; the exec probe runs the provider CLI's own ``--version``, the same re-exec shape
+``apply_patch``'s fs sandbox helper uses.
 """
 
 from __future__ import annotations
@@ -89,12 +94,19 @@ class CanaryProbe:
     deny did not hold, the file the probe created is the orchestrator's litter, so it removes it
     before failing the attempt closed. Probes that append to a pre-existing file leave it ``None`` —
     there is nothing to delete and the file is evidence.
+
+    ``denied_error_class`` is what a denial of an ``expect_denied=False`` probe proves. The default
+    keeps today's reading — a required read was blocked, a host-capability gap. The exec probe sets
+    ``CONFIGURATION_ERROR``: the capability provably exists (the denied binary is the very
+    executable that launched the probe), so a refusal means the generated profile — or a policy
+    layered over it — took it away, and that is a non-fallback configuration error, not a host gap.
     """
 
     label: str
     command: list[str]
     expect_denied: bool
     cleanup_path: str | None = None
+    denied_error_class: ErrorClass = ErrorClass.CAPABILITY_UNAVAILABLE
 
 
 @dataclass(frozen=True)
@@ -283,6 +295,7 @@ def build_canary_probes(
     repo_write_probe: str | None = None,
     repo_writable: bool = False,
     write_guard_probes: Sequence[tuple[str, str]] = (),
+    exec_probe: str | None = None,
 ) -> list[CanaryProbe]:
     """The probe set for the profile under test.
 
@@ -301,6 +314,14 @@ def build_canary_probes(
     carves out (see :func:`write_guard_probe_paths`). These are the probes behind the product's
     central claim — the agent cannot change ``.git`` — which no probe tested before: each writes a
     sentinel file into the root and expects to be refused.
+
+    ``exec_probe`` (the provider CLI's own launch path) adds an exec probe: the binary must
+    *execute* under the profile, because ``apply_patch`` re-execs it inside the sandbox as its fs
+    helper — the one capability every read/append probe above misses, and the one a deny over
+    ``$CODEX_HOME`` silently broke on hosts where the standalone package keeps the binary inside
+    that home. Placed last in the base set so a generically broken harness/host is classified first
+    by the weaker probes; its denial escalates to ``CONFIGURATION_ERROR`` only on the selective
+    signature — reads work, exec of the provider's own binary does not.
     """
     probes = [
         CanaryProbe("private-read-denied", _read_cmd(private_probe, system), expect_denied=True),
@@ -337,6 +358,15 @@ def build_canary_probes(
         probes.append(
             CanaryProbe(
                 "exchange-write-denied", _write_cmd(exchange_probe, system), expect_denied=True
+            )
+        )
+    if exec_probe is not None:
+        probes.append(
+            CanaryProbe(
+                "cli-exec-allowed",
+                [exec_probe, "--version"],
+                expect_denied=False,
+                denied_error_class=ErrorClass.CONFIGURATION_ERROR,
             )
         )
     for label, sentinel in write_guard_probes:
@@ -409,6 +439,79 @@ def _sandbox_probe_env(env: Mapping[str, str], system: str) -> Iterator[dict[str
         yield {**dict(env), "CODEX_HOME": codex_home}
 
 
+def _classify_probe(
+    probe: CanaryProbe,
+    *,
+    denied: bool,
+    lowered: str,
+    evidence: list[dict[str, object]],
+) -> CanaryOutcome | None:
+    """One probe's failing verdict, or ``None`` when the probe holds and the loop continues.
+
+    Order matters and is part of the contract. A probe whose denial is itself the verdict
+    (``denied_error_class`` = ``CONFIGURATION_ERROR``, the exec probe) is judged BEFORE the
+    capability-marker scan: enforcement prose in the refusal output must not reroute it to a
+    capability gap — on macOS the refused exec's own stderr carries seatbelt/sandbox wording, which
+    is exactly how this break was masked as "Codex is unavailable today" while the router burned
+    five runs falling back. Only the runner's own marker (``codex sandbox`` itself failed to launch
+    or timed out) stays a host verdict for that probe.
+    """
+    if (
+        denied
+        and not probe.expect_denied
+        and probe.denied_error_class is ErrorClass.CONFIGURATION_ERROR
+        and _CANARY_UNRUNNABLE not in lowered
+    ):
+        return CanaryOutcome(
+            ok=False,
+            error_class=ErrorClass.CONFIGURATION_ERROR,
+            message=(
+                f"permission-profile canary FAILED: {probe.label!r} — the sandbox refused "
+                f"to execute the provider's own binary ({probe.command[0]}), which "
+                "provably runs on this host: it is the same executable that launched this "
+                "probe. The generated profile (or a policy layered over it) is taking the "
+                "capability away — Codex's apply_patch re-execs this binary as its fs "
+                "sandbox helper and would fail every patch the same way"
+            ),
+            evidence=tuple(evidence),
+        )
+    capability_marker = next((marker for marker in _CAPABILITY_MARKERS if marker in lowered), None)
+    if capability_marker is not None:
+        return CanaryOutcome(
+            ok=False,
+            error_class=ErrorClass.CAPABILITY_UNAVAILABLE,
+            message=(
+                f"codex sandbox could not enforce the permission profile on this host "
+                f"(probe {probe.label!r}); the requested isolation cannot be demonstrated "
+                f"({capability_marker})"
+            ),
+            evidence=tuple(evidence),
+        )
+    if probe.expect_denied and not denied:
+        removed = _remove_probe_litter(probe)
+        return CanaryOutcome(
+            ok=False,
+            error_class=ErrorClass.CONFIGURATION_ERROR,
+            message=(
+                f"permission-profile canary FAILED: {probe.label!r} was expected to be "
+                "denied but succeeded — the profile is not enforcing (security "
+                f"violation){removed}"
+            ),
+            evidence=tuple(evidence),
+        )
+    if not probe.expect_denied and denied:
+        return CanaryOutcome(
+            ok=False,
+            error_class=ErrorClass.CAPABILITY_UNAVAILABLE,
+            message=(
+                f"permission-profile canary could not demonstrate the requested policy: "
+                f"{probe.label!r} (a required read) was blocked on this host"
+            ),
+            evidence=tuple(evidence),
+        )
+    return None
+
+
 def run_codex_canary(
     *,
     command: str,
@@ -446,6 +549,7 @@ def run_codex_canary(
         repo_write_probe=extra.repo_write_probe,
         repo_writable=extra.repo_writable,
         write_guard_probes=extra.write_guard_probes,
+        exec_probe=command,
     )
     saw_positive_control = False
     with _sandbox_probe_env(env, system) as probe_env:
@@ -465,43 +569,18 @@ def run_codex_canary(
             evidence.append(
                 {"probe": probe.label, "expect_denied": probe.expect_denied, "denied": denied}
             )
-            capability_marker = next(
-                (marker for marker in _CAPABILITY_MARKERS if marker in lowered), None
+            verdict = _classify_probe(probe, denied=denied, lowered=lowered, evidence=evidence)
+            if verdict is not None:
+                return verdict
+            # The positive control screens the *read* harness: the deny probes are reads, and the
+            # documented failure class it guards against (a read that looks like enforcement) is
+            # screened only by an allowed probe of the same shape. A successful exec proves the
+            # exec capability, not read-selectivity, so the exec probe does not certify the deny
+            # verdicts.
+            saw_positive_control = saw_positive_control or (
+                not probe.expect_denied
+                and probe.denied_error_class is not ErrorClass.CONFIGURATION_ERROR
             )
-            if capability_marker is not None:
-                return CanaryOutcome(
-                    ok=False,
-                    error_class=ErrorClass.CAPABILITY_UNAVAILABLE,
-                    message=(
-                        f"codex sandbox could not enforce the permission profile on this host "
-                        f"(probe {probe.label!r}); the requested isolation cannot be demonstrated "
-                        f"({capability_marker})"
-                    ),
-                    evidence=tuple(evidence),
-                )
-            if probe.expect_denied and not denied:
-                removed = _remove_probe_litter(probe)
-                return CanaryOutcome(
-                    ok=False,
-                    error_class=ErrorClass.CONFIGURATION_ERROR,
-                    message=(
-                        f"permission-profile canary FAILED: {probe.label!r} was expected to be "
-                        "denied but succeeded — the profile is not enforcing (security "
-                        f"violation){removed}"
-                    ),
-                    evidence=tuple(evidence),
-                )
-            if not probe.expect_denied and denied:
-                return CanaryOutcome(
-                    ok=False,
-                    error_class=ErrorClass.CAPABILITY_UNAVAILABLE,
-                    message=(
-                        f"permission-profile canary could not demonstrate the requested policy: "
-                        f"{probe.label!r} (a required read) was blocked on this host"
-                    ),
-                    evidence=tuple(evidence),
-                )
-            saw_positive_control = saw_positive_control or not probe.expect_denied
     if not saw_positive_control:
         return CanaryOutcome(
             ok=False,
@@ -584,7 +663,8 @@ def run_codex_capability_smoke(
     best-effort) a workspace symlink resolving to the private file. It generates the real profile
     for *permission_profile* and runs the full probe battery through :func:`run_codex_canary`
     (private denied direct+shell+alias, repo-read positive control, repo write per profile, exchange
-    read/write, and a write into every declared Git-control / lifecycle root), then records a
+    read/write, an exec of the CLI binary itself, and a write into every declared Git-control /
+    lifecycle root), then records a
     no-model tool-surface inventory (``codex mcp list``). Returns a
     :class:`CapabilitySmokeReport` whose ``status`` distinguishes ``passed`` / ``unsupported``
     (``CAPABILITY_UNAVAILABLE``) / ``policy-failed`` (``CONFIGURATION_ERROR``) — never silently
@@ -640,7 +720,6 @@ def run_codex_capability_smoke(
             control_home=control,
             private_home=control,
             env_file=None,
-            provider_homes=(),
         )
         write_guard = ProviderWriteGuardPolicy(
             exchange_root=exchange,

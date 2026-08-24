@@ -449,7 +449,6 @@ def _build_provider(raw: Any, pid: ProviderId, issues: list[str]) -> ProviderCon
             "extra_args",
             "max_turns",
             "max_turns_gate",
-            "allow_native_memory",
             "reasoning",
             "primary",
         },
@@ -487,7 +486,6 @@ def _build_provider(raw: Any, pid: ProviderId, issues: list[str]) -> ProviderCon
         reasoning=reasoning_raw,
         primary=_bool(m, "primary", False, where, issues),
         max_turns_gate=_bool(m, "max_turns_gate", False, where, issues),
-        allow_native_memory=_bool(m, "allow_native_memory", False, where, issues),
     )
 
 

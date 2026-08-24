@@ -316,6 +316,10 @@ def _run_codex_sandbox(cli_args: list[str]) -> int:
     probe = cli_args[cli_args.index("--") + 1 :] if "--" in cli_args else []
     probe_str = " ".join(probe)
     profile = cli_args[cli_args.index("-c") + 1] if "-c" in cli_args else ""
+    if probe and probe[-1] == "--version":
+        # The cli-exec probe: the provider binary itself must execute under the profile.
+        sys.stdout.write("codex-cli 99.9.9\n")
+        return 0
     is_write = ">>" in probe_str
     reads_exchange = ".worc-io" in probe_str  # exchange subtree (not a substring of `.worc/…`)
     # Assert the posture rather than branch on it: the generated profile denies the private home

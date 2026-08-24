@@ -29,9 +29,10 @@ from wastech_orchestrator.providers.codex_canary import (
 )
 from wastech_orchestrator.runtime_layout import ProviderWriteGuardPolicy
 
-# Probe order: private-read, private-shell-read, exchange-read, exchange-write.
+# Probe order: private-read, private-shell-read, exchange-read, exchange-write, cli-exec.
 _ALL_DENY = [(1, "operation not permitted"), (1, "operation not permitted")]
 _EXCHANGE_OK = [(0, "task contents"), (1, "operation not permitted")]
+_EXEC_OK = [(0, "codex-cli 0.0.0")]
 
 
 def _seq_runner(results: list[tuple[int, str]]):
@@ -57,25 +58,26 @@ def _run(runner, *, exchange: str | None = "/clone/.worc-io/t/task.md"):
 
 
 def test_canary_passes_when_denies_hold_and_exchange_read_only() -> None:
-    outcome = _run(_seq_runner(_ALL_DENY + _EXCHANGE_OK))
+    outcome = _run(_seq_runner(_ALL_DENY + _EXCHANGE_OK + _EXEC_OK))
     assert outcome.ok
     assert outcome.error_class is None
-    assert len(outcome.evidence) == 4
+    assert len(outcome.evidence) == 5
 
 
 def test_canary_without_positive_control_is_capability_unavailable() -> None:
-    # With no exchange probe (and no repo probe), only deny probes run — there is no positive
-    # control, so a broken probe harness would make every denial look enforced. The canary must
-    # refuse to certify (CAPABILITY_UNAVAILABLE), never silently pass.
-    outcome = _run(_seq_runner(_ALL_DENY), exchange=None)
+    # With no exchange probe (and no repo probe), only deny probes and the exec probe run. A
+    # successful exec is NOT a positive control — it proves the exec capability, not the read
+    # harness's selectivity — so a broken read harness would still make every denial look enforced.
+    # The canary must refuse to certify (CAPABILITY_UNAVAILABLE), never silently pass.
+    outcome = _run(_seq_runner(_ALL_DENY + _EXEC_OK), exchange=None)
     assert not outcome.ok
     assert outcome.error_class is ErrorClass.CAPABILITY_UNAVAILABLE
-    assert len(outcome.evidence) == 2
+    assert len(outcome.evidence) == 3
 
 
 def test_repo_read_positive_control_satisfies_selective_enforcement() -> None:
     # A repo-read positive control (rc=0) is enough to prove selective enforcement even without
-    # an exchange probe. Probe order: private-read, private-shell-read, repo-read.
+    # an exchange probe. Probe order: private-read, private-shell-read, repo-read, cli-exec.
     outcome = run_codex_canary(
         command="codex",
         profile_arg="permissions.worc={ }",
@@ -85,13 +87,14 @@ def test_repo_read_positive_control_satisfies_selective_enforcement() -> None:
         extra=ExtraProbes(repo_probe="/clone/src/main.py"),
         env={},
         system="Linux",
-        runner=_seq_runner([(1, "denied"), (1, "denied"), (0, "print(1)")]),
+        runner=_seq_runner([(1, "denied"), (1, "denied"), (0, "print(1)"), *_EXEC_OK]),
     )
     assert outcome.ok
     assert {e["probe"] for e in outcome.evidence} == {
         "private-read-denied",
         "private-shell-read-denied",
         "repo-read-allowed",
+        "cli-exec-allowed",
     }
 
 
@@ -157,10 +160,54 @@ def test_runner_timeout_is_capability_unavailable() -> None:
 
 
 def test_evidence_records_paths_not_contents() -> None:
-    outcome = _run(_seq_runner(_ALL_DENY + _EXCHANGE_OK))
+    outcome = _run(_seq_runner(_ALL_DENY + _EXCHANGE_OK + _EXEC_OK))
     for entry in outcome.evidence:
         assert set(entry) == {"probe", "expect_denied", "denied"}
         assert "SECRET" not in str(entry)
+
+
+def test_a_refused_cli_exec_is_a_configuration_error() -> None:
+    # Ам-5 Т5.7: the profile refusing to execute the provider's own binary is OUR break, not a host
+    # gap — apply_patch re-execs that binary as its fs sandbox helper, so every patch would fail
+    # the same way. Non-fallback, so the router cannot mask it by falling over to Claude.
+    outcome = _run(_seq_runner(_ALL_DENY + _EXCHANGE_OK + [(1, "operation not permitted")]))
+    assert not outcome.ok
+    assert outcome.error_class is ErrorClass.CONFIGURATION_ERROR
+    assert "cli-exec-allowed" in outcome.message
+
+
+def test_a_refused_cli_exec_with_sandbox_prose_is_still_a_configuration_error() -> None:
+    # The trap this probe exists to close: on macOS the refused exec's own stderr carries
+    # seatbelt/sandbox wording, which the capability-marker scan would otherwise reroute into
+    # CAPABILITY_UNAVAILABLE — the router falls back, and the break is masked as "Codex is
+    # unavailable today" exactly as it was for five runs.
+    refusal = (
+        "failed to start sandbox: seatbelt deny ... "
+        "sandbox-exec: execvp() of '/x/codex' failed: Operation not permitted"
+    )
+    outcome = _run(_seq_runner(_ALL_DENY + _EXCHANGE_OK + [(1, refusal)]))
+    assert not outcome.ok
+    assert outcome.error_class is ErrorClass.CONFIGURATION_ERROR
+    assert "cli-exec-allowed" in outcome.message
+
+
+def test_an_unrunnable_cli_exec_probe_stays_a_capability_gap() -> None:
+    # The one denial that is NOT escalated: the runner's own marker means `codex sandbox` itself
+    # failed to launch or timed out — a host verdict, not a profile one.
+    outcome = _run(_seq_runner(_ALL_DENY + _EXCHANGE_OK + [(127, "canary-sandbox-unrunnable")]))
+    assert not outcome.ok
+    assert outcome.error_class is ErrorClass.CAPABILITY_UNAVAILABLE
+
+
+def test_the_exec_probe_command_is_identical_on_every_platform() -> None:
+    # The exec probe is an argv pair with no shell and no cmd wrapper, so the platform seam that
+    # rewrites read/write probes must leave it alone.
+    for system in ("Linux", "Windows", "Darwin"):
+        probes = build_canary_probes(
+            private_probe="/p", exchange_probe=None, system=system, exec_probe="/abs/codex"
+        )
+        exec_probe = next(p for p in probes if p.label == "cli-exec-allowed")
+        assert exec_probe.command == ["/abs/codex", "--version"], system
 
 
 def test_build_canary_command_is_no_model_sandbox_invocation() -> None:
@@ -279,6 +326,8 @@ def _smoke_runner(*, writable: bool, write_guard_holds: bool = True):
     def _run(argv: list[str], cwd: str, env: Mapping[str, str]) -> tuple[int, str]:
         probe = " ".join(argv[argv.index("--") + 1 :])
         is_write = ">>" in probe
+        if probe.endswith("--version"):  # the cli-exec probe: the binary executes under the profile
+            return (0, "codex-cli 0.0.0")
         if WRITE_GUARD_SENTINEL in probe:  # a Git-control / lifecycle root write-deny probe
             return (1, "operation not permitted") if write_guard_holds else (0, "ok")
         if ".worc-io" in probe:  # exchange: readable, not writable (check before ``.worc``)
@@ -458,6 +507,31 @@ def test_capability_smoke_reports_policy_leak(tmp_path: Path) -> None:
     assert report.status == CAPABILITY_POLICY_FAILED
 
 
+def test_capability_smoke_reports_a_profile_that_blocks_the_cli_exec(tmp_path: Path) -> None:
+    # Ам-5 Т5.7 live-probe #2's deterministic half: `worc preflight` (which runs this smoke) now
+    # demonstrates the exec capability without a model call, and a profile that blocks it reports
+    # as policy-failed — never as an unsupported host.
+    healthy = _smoke_runner(writable=True)
+
+    def _exec_refused(argv: list[str], cwd: str, env: Mapping[str, str]) -> tuple[int, str]:
+        probe = " ".join(argv[argv.index("--") + 1 :])
+        if probe.endswith("--version"):
+            return 1, "sandbox-exec: execvp() of 'codex' failed: Operation not permitted"
+        return healthy(argv, cwd, env)
+
+    report = run_codex_capability_smoke(
+        command="codex",
+        home_dir=tmp_path,
+        env={},
+        permission_profile="workspace-write",
+        system="Linux",
+        runner=_exec_refused,
+        inventory_probe=_empty_inventory,
+    )
+    assert report.status == CAPABILITY_POLICY_FAILED
+    assert "cli-exec" in report.detail
+
+
 def test_capability_smoke_unsupported_when_sandbox_cannot_run(tmp_path: Path) -> None:
     def _unrunnable(argv: list[str], cwd: str, env: Mapping[str, str]) -> tuple[int, str]:
         return 1, "refusing to run unsandboxed"
@@ -558,6 +632,8 @@ def test_a_write_guard_probe_that_succeeds_is_a_leak_and_its_file_is_removed(
         # which is what a profile whose deny rules never applied looks like. The file is created
         # where the probe actually points, so cleanup is judged against the real path.
         joined = " ".join(argv)
+        if joined.endswith("--version"):  # the cli-exec probe executes fine here
+            return 0, "codex-cli 0.0.0"
         if "printf" in joined:
             target = Path(shlex.split(argv[-1])[-1])
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -587,22 +663,29 @@ def test_a_write_guard_probe_that_succeeds_is_a_leak_and_its_file_is_removed(
 
 
 def test_the_probe_count_grows_with_the_write_guard_roots(tmp_path: Path) -> None:
-    # The count is pinned so growth cannot pass unnoticed: four probes without a write guard
-    # (private read + shell read + exchange read/write), and one more per probed deny root.
+    # The count is pinned so growth cannot pass unnoticed: five probes without a write guard
+    # (private read + shell read + exchange read/write + cli exec), and one more per probed root.
     guard = _write_guard(tmp_path)
     targets = write_guard_probe_paths(guard.denied_write_paths)
-    base = build_canary_probes(private_probe="/p", exchange_probe="/x", system="Linux")
+    base = build_canary_probes(
+        private_probe="/p", exchange_probe="/x", system="Linux", exec_probe="/bin/codex"
+    )
     with_guard = build_canary_probes(
         private_probe="/p",
         exchange_probe="/x",
         system="Linux",
         write_guard_probes=targets.probes,
+        exec_probe="/bin/codex",
     )
-    assert len(base) == 4
-    assert len(with_guard) == 4 + len(targets.probes)
-    assert len(with_guard) >= 6
-    assert all(p.expect_denied for p in with_guard[4:])
-    assert all(p.cleanup_path is not None for p in with_guard[4:])
+    assert len(base) == 5
+    assert base[4].label == "cli-exec-allowed"
+    assert base[4].expect_denied is False
+    assert base[4].cleanup_path is None
+    assert base[4].command == ["/bin/codex", "--version"]
+    assert len(with_guard) == 5 + len(targets.probes)
+    assert len(with_guard) >= 7
+    assert all(p.expect_denied for p in with_guard[5:])
+    assert all(p.cleanup_path is not None for p in with_guard[5:])
 
 
 def test_a_deny_that_covers_only_the_gitdir_fails_on_the_common_dir_probe(tmp_path: Path) -> None:
@@ -624,6 +707,8 @@ def test_a_deny_that_covers_only_the_gitdir_fails_on_the_common_dir_probe(tmp_pa
         argv: list[str], cwd: str, env: Mapping[str, str]
     ) -> tuple[int, str]:
         joined = " ".join(argv)
+        if joined.endswith("--version"):  # the cli-exec probe executes fine here
+            return 0, "codex-cli 0.0.0"
         if WRITE_GUARD_SENTINEL in joined:
             # Only the shared common dir accepts the write — including the per-worktree gitdir,
             # which is what a profile that closed "the .git" and nothing else would look like.

@@ -84,6 +84,8 @@ from wastech_orchestrator.preflight import preflight_gh
 from wastech_orchestrator.providers import process as agent_process
 from wastech_orchestrator.providers._adapter_base import IsolationCapabilityReport
 from wastech_orchestrator.providers.base import AuthProbe, AuthState, ProviderId
+from wastech_orchestrator.providers.claude import claude_config_home
+from wastech_orchestrator.providers.codex import codex_config_home
 from wastech_orchestrator.runtime_layout import CONTROL_HOME_DIRNAME, RuntimeLayout, runs_root
 from wastech_orchestrator.security.env import (
     describe_expansions,
@@ -102,6 +104,7 @@ from wastech_orchestrator.security.isolation import (
     describe_advanced_mode,
     describe_host_floor,
 )
+from wastech_orchestrator.security.launchers import Which, resolve_launcher
 from wastech_orchestrator.state_store import IncompatibleStateError, StateStore, TaskRow
 from wastech_orchestrator.task.model import DEFAULT_QUEUE, priority_rank
 from wastech_orchestrator.task.parser import read_task_source, split_frontmatter
@@ -2911,7 +2914,7 @@ def require_launch_environment(
     ``worc preflight`` remains the full diagnostic surface, but a daemon or explicit run must not
     depend on the operator remembering to invoke it after every config edit. This repeats only the
     launch-critical checks whose damage occurs during a run: the Windows ``SystemRoot`` floor and
-    canonical assigned-path collisions (symlinks, case aliases, provider homes, and the env-file).
+    canonical assigned-path collisions (symlinks, case aliases, and the env-file).
     Values are never included in the error.
 
     :raises ConfigError: the current host cannot safely use the configured environment.
@@ -2924,7 +2927,7 @@ def require_launch_environment(
     clone = Path(config.repo.local_path)
     protected = host_protected_paths(
         config,
-        build_internal_deny_policy(config, layout_for(config), env_file=env_file),
+        build_internal_deny_policy(layout_for(config), env_file=env_file),
     )
     for name, value in config.security.extra_environment.items():
         entry = canonical_collision(value, protected, system=system)
@@ -2985,8 +2988,8 @@ def _assigned_path_lines(
     environment of *this* machine:
 
     * a value that reaches a protected directory through a **symlink**, a Windows case variant, or a
-      drive-letter/UNC alias of the same path — and the provider config/credential homes, which are
-      read from ``$CODEX_HOME`` / ``$CLAUDE_CONFIG_DIR`` and so are host state, not config. The
+      drive-letter/UNC alias of the same path — and the resolved env-file, which is host state, not
+      config. The
       plain-path half of this is a load error already, so a config cannot be valid-here-only;
     * a value pointing **into the clone**, which is the recipe that makes a toolchain cache work at
       all: the orchestrator excludes it from git itself, and only reports a failure if the path is
@@ -3004,7 +3007,7 @@ def _assigned_path_lines(
     """
     protected = host_protected_paths(
         config,
-        build_internal_deny_policy(config, layout_for(config), env_file=env_file),
+        build_internal_deny_policy(layout_for(config), env_file=env_file),
     )
     clone = Path(config.repo.local_path)
     clone_present = clone.is_dir()
@@ -3114,6 +3117,58 @@ def _append_isolation_probe_lines(
 #: mode's write grant quietly does not apply. Named here because ``worc preflight`` is the one place
 #: that announces that grant, and in the mode the parent environment reaches the agent whole.
 _CLAUDE_ENV_SCRUB_VAR = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"
+
+
+def _provider_binary_lines(config: OrchestratorConfig, *, which: Which = shutil.which) -> list[str]:
+    """One diagnostic line per configured provider: where its CLI binary really lies.
+
+    Prints the launch path (the same ``resolve_launcher`` answer the run pins into ``argv[0]``),
+    the real file behind it after following symlinks, and whether that file falls inside the
+    provider's own config home. The standalone-package layout is the one fact that explains why the
+    same build behaves differently on two hosts — Codex keeps its binary inside ``$CODEX_HOME``
+    there — and learning it must not require reading a failed attempt's stderr (Т5.9). Diagnostic
+    only: no line is a verdict, and nothing here fails preflight. On Windows ``which`` may answer
+    with a ``.cmd`` shim whose contents ``resolve()`` does not chase; the line then truthfully
+    reports the shim, which is the file the OS executes.
+    """
+    resolvers: dict[ProviderId, Callable[[], Path]] = {
+        ProviderId.CLAUDE: claude_config_home,
+        ProviderId.CODEX: codex_config_home,
+    }
+    lines: list[str] = []
+    for pid, provider_cfg in config.agents.providers.items():
+        subject = f"{pid.value}-binary"
+        resolved = resolve_launcher(provider_cfg.command, which=which)
+        if resolved is None:
+            lines.append(f"{subject}: {provider_cfg.command!r} does not resolve on PATH")
+            continue
+        try:
+            real = Path(resolved).resolve()
+        except OSError:
+            real = Path(resolved)
+        head = f"{subject}: {resolved} — "
+        if real != Path(resolved):
+            head = f"{subject}: {resolved} — the file it runs is {real}, "
+        resolver = resolvers.get(pid)
+        if resolver is None:  # defensive: a provider id with no home resolver bound
+            lines.append(f"{subject}: {resolved}")
+            continue
+        try:
+            home = resolver()
+        except (RuntimeError, OSError) as exc:
+            lines.append(
+                f"{head}the provider's config home could not be resolved ({exc}), so whether "
+                "the binary lies inside it is unknown"
+            )
+            continue
+        if real.is_relative_to(home):
+            lines.append(
+                f"{head}inside the provider's config home ({home}): whatever covers that home "
+                "covers the binary itself"
+            )
+        else:
+            lines.append(f"{head}outside the provider's config home ({home})")
+    return lines
 
 
 def _gh_repo_pin_line(config: OrchestratorConfig) -> tuple[bool, str]:
@@ -3241,6 +3296,9 @@ def run_preflight(
                 has_fallback=has_fallback,
                 advanced_mode=not config.security.strict_isolation,
             )
+
+    # Where each provider binary really lies (Т5.9): informational lines, never a verdict.
+    lines.extend(_provider_binary_lines(config))
 
     reasons = check_isolation(config, ISOLATION_CHECKS)
     if reasons:

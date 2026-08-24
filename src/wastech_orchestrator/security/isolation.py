@@ -22,8 +22,8 @@ dispatches by :class:`~wastech_orchestrator.providers.base.ProviderId` and frame
 Read-isolation is orthogonal to the fatal gate. The operator escape hatch
 ``security.disable_read_isolation`` — like the master ``strict_isolation: false`` — relaxes only the
 READ side, and only the *native discovery* half of it: the private read-deny projection (``.worc``,
-the env-file, the frozen bundles) stays ``Read``-denied at either value, with Claude's own config
-home the one carve-out (``allow_native_memory`` governs that path alone). This preflight validates
+the env-file, the frozen bundles) stays ``Read``-denied at either value; the provider CLIs' own
+config homes carry no deny at all (owner decision 2026-08-24). This preflight validates
 the WRITE/permission/sandbox ceiling, which stays in force regardless. So ``disable_read_isolation``
 is a sanctioned opt-out, never itself a preflight reason (the per-provider ``isolation_reasons`` do
 not examine it), and the ``strict_isolation`` preflight is unaffected.

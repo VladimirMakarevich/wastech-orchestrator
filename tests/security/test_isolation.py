@@ -81,36 +81,6 @@ def test_claude_bypass_permission_mode_extra_arg_is_flagged(claude_config: Provi
     assert reasons
 
 
-def test_the_memory_opt_in_needs_a_resolvable_config_home(
-    claude_config: ProviderConfig, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    # Owner decision 2026-08-20: the opt-in is expressed as a NARROWED write-deny over the config
-    # home, so a home nobody can name has no deny — and that home holds the credentials. Refusing
-    # the configuration is the only honest answer; a deny over a guessed path protects nothing.
-    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
-    monkeypatch.setattr(
-        claude_mod.Path, "home", classmethod(lambda cls: (_ for _ in ()).throw(RuntimeError("no")))
-    )
-    opted_in = replace(claude_config, allow_native_memory=True)
-
-    reasons = claude_mod.isolation_reasons(opted_in)
-
-    assert reasons and any("allow_native_memory" in r for r in reasons)
-    # With the opt-in off there is nothing to build and nothing to refuse.
-    assert claude_mod.isolation_reasons(replace(claude_config, allow_native_memory=False)) == []
-
-
-def test_the_memory_opt_in_is_legal_with_an_explicit_config_dir(
-    claude_config: ProviderConfig, monkeypatch: pytest.MonkeyPatch, tmp_path
-) -> None:
-    # The remedy the message names has to work: an absolute `CLAUDE_CONFIG_DIR` needs no home dir.
-    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
-    monkeypatch.setattr(
-        claude_mod.Path, "home", classmethod(lambda cls: (_ for _ in ()).throw(RuntimeError("no")))
-    )
-    assert claude_mod.isolation_reasons(replace(claude_config, allow_native_memory=True)) == []
-
-
 def test_codex_full_access_sandbox_in_extra_args_is_flagged(codex_config: ProviderConfig) -> None:
     reasons = codex_mod.isolation_reasons(
         replace(codex_config, extra_args=("--sandbox", "danger-full-access"))

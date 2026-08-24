@@ -119,7 +119,7 @@ def build_codex_permission_profile(
     ``:workspace`` and grants it write, then Write/Edit-denies (as more-specific ``read`` rules) the
     exchange, resolved Git dirs, and ``tasks/`` tree from *write_guard* so they stay readable
     but immutable. Both profiles ``deny`` the *deny_policy* set (private/control homes, resolved
-    env-file, provider auth homes incl. ``CODEX_HOME``, frozen bundles) — unconditionally, at every
+    env-file, frozen bundles) — unconditionally, at every
     read-isolation setting — and the public *denied_read_paths* blacklist. ``network.enabled``
     follows *network_access*, which the adapter resolves once for the attempt (the flow's grant, or
     the advanced mode, which is online for every node) — the same flag that decides the backend-side
@@ -164,12 +164,13 @@ def build_codex_permission_profile(
     if deny_policy is not None:
         # ``deny`` at EVERY read-isolation setting. This set used to be downgraded to ``read``
         # when read-isolation was off — that is, on the shipped default — which made the private
-        # home and the resolved env-file readable to the sandboxed shell. Native discovery never
-        # needed that grant: the CLI loads its own user ``config.toml`` and auth from ``CODEX_HOME``
-        # in its own process, outside this profile (which is why auth works today with that home
-        # denied), and a project's ``.codex`` tree is an ordinary workspace path. What restores
-        # discovery is dropping ``--ignore-user-config`` and trusting the project, both in the argv
-        # builder. The public ``denied_read_paths`` blacklist below is ``deny`` regardless.
+        # home and the resolved env-file readable to the sandboxed shell. It holds ONLY the
+        # orchestrator's own private set: the provider config home is deliberately absent at every
+        # setting (owner decision 2026-08-24). A deny on ``$CODEX_HOME`` used to live here, argued
+        # safe because the CLI loads its config and auth outside this profile — which missed that
+        # the standalone package keeps the ``codex`` BINARY inside that home, and ``apply_patch``
+        # re-execs it under the sandbox as its fs helper, so the deny broke every patch. The public
+        # ``denied_read_paths`` blacklist below is ``deny`` regardless.
         for path in deny_policy.denied_paths:
             filesystem[to_native(path)] = "deny"
     for pattern in denied_read_paths:

@@ -48,7 +48,6 @@ Do not use it to paper over a broken default developer environment. If a check i
 - `allowed_environment` should name variables, not embed their contents. Prefer a prefix pattern (`DOTNET_*`) over guessing a toolchain's ten variable names one at a time, and read back what it matched in `worc preflight` before relying on it. In strict mode, a prefix match alone never forwards a name loaded from `.worc/.env` to agent-side children; an exact entry is the explicit grant. In advanced mode the list gates only orchestrator-owned `git`/`gh`, while agent-side children receive the parent environment minus all `.worc/.env` names.
 - `extra_environment` is the one place a **value** enters the config, and it is in plaintext: put toolchain roots and cache paths there (`NUGET_PACKAGES`, `npm_config_cache`) and never a credential. Nothing can check a value for secrecy, so this rule is a contract, not a gate — the load-time refusal only covers secret-looking *names*. Agent/check/tool children receive these; orchestrator-owned `git`/`gh` receives them only after a whitelist over the `GIT_*`/`GH_*`/`GITHUB_*` namespace — `GIT_CONFIG_GLOBAL` and the two token names pass, everything else in those namespaces is dropped, including a name a future release invents. `worc preflight` prints names, never values, and the agent CLIs get their own credentials from their own stores, so a token is never needed here.
 - Avoid host-specific absolute paths unless the orchestrator really runs on a single fixed machine.
-- Leave `agents.providers.claude.allow_native_memory` off (its default) unless you deliberately accept the risk: turning it on lets Claude's own auto-memory write to a HOME store that is **outside** the orchestrator's redaction net and audit trail. It is off by default and `install` never writes it — enable it only as a conscious choice.
 
 If several operators share the same repo, a config with fewer machine assumptions survives longer.
 
@@ -103,6 +102,7 @@ That matters because `upgrade-config` preserves values but re-emits the file and
 
 - provider binaries missing from `PATH`, and any allowed provider whose CLI reports no credentials;
 - invalid or unsafe provider settings;
+- a provider binary whose real file lies inside the provider's config home (the `codex-binary:` / `claude-binary:` lines — informational, but the one fact that explains per-host divergence of the same build);
 - `gh` missing from `PATH` while `git.create_pull_request` is on;
 - Telegram misconfiguration.
 

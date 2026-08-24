@@ -2881,30 +2881,6 @@ def test_degraded_summary_is_loud_on_done_path(git_repo, make_git_config, tmp_pa
     assert finding_text in summary
 
 
-def test_native_memory_opt_in_is_announced_per_run(
-    git_repo, make_git_config, tmp_path: Path
-) -> None:
-    # The one relaxation whose effects land OUTSIDE the run's audit: Claude's own per-project memory
-    # store lives in the operator's HOME, so what a task writes there escapes the frozen bundle, the
-    # diff, and the redaction net — and a later task on the same repo reads it. The hatch stays (it
-    # is operator-owned) but it is never silent, like read-isolation and git-evidence before it.
-    for opted_in, announced in ((True, True), (False, False)):
-        providers = _both()
-        orch, _, _, _ = _build(
-            git_repo,
-            make_git_config,
-            tmp_path / f"native-{int(opted_in)}",
-            providers=providers,
-            check_verdicts=[0],
-            config_kwargs={"allow_native_memory": opted_in},
-        )
-        _patch_impl_edit(providers, git_repo)
-        with _collected_warnings() as messages:
-            result = orch.run_task(_complete_task(tmp_path, f"task-native-{int(opted_in)}"))
-        assert result.final_status is Status.DONE
-        assert any("native Claude memory ON" in m for m in messages) is announced
-
-
 def test_decomposed_task_commits_each_subtask(
     git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:
