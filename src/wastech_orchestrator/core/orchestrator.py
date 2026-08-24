@@ -1126,16 +1126,30 @@ class Orchestrator:
     def _worktree_is_task_output(self, task_id: str) -> bool:
         """Whether a dirty working tree is the task's own uncommitted work rather than foreign.
 
-        True once the task has reached a stage that operates on *produced* code — any
-        ``evaluator`` / ``checks`` / ``publish`` node has run — which means implementation already
-        wrote to the tree, so the dirty state is the legitimate input to a ``--continue`` re-entry
-        at review / fixing / publish. Before that (planning / refinement) a dirty tree is almost
-        certainly foreign and stays refused. Read off the recorded ``node_runs`` (``node_kind``)
-        rather than re-loading the flow, so it needs no ``task_type`` and stays correct even if the
-        flow file drifted since the interrupted run.
+        True once a node that writes to the tree has run for this task: an ``agent`` node (the
+        writers themselves) or an ``evaluator`` / ``checks`` / ``publish`` node (which operate on
+        *produced* code, so writing already happened upstream). Counting the writers directly is
+        what closes the blind window every flow has between its first writing node and its first
+        critic — with only the downstream kinds counted, a task parked mid-writing was told its own
+        finished work was foreign and had to be thrown away before ``--continue`` would run. Before
+        any of those kinds has run (nothing entered the graph yet, or only ``tool`` / ``hitl`` nodes
+        did) a dirty tree is almost certainly foreign and stays refused. Read off the recorded
+        ``node_runs`` (``node_kind``) rather than re-loading the flow, so it needs no ``task_type``
+        and stays correct even if the flow file drifted since the interrupted run.
+
+        Two known limitations, both needing a carrier ``node_runs`` does not have today:
+
+        * A ``read-only`` agent node counts like a writing one — ``node_kind`` is all the row
+          records, and telling the two apart needs a ``permission_profile`` column. In advanced mode
+          every node class has a shell anyway, so a ``read-only`` node writes no worse than a
+          ``workspace-write`` one.
+        * The answer is sticky across attempts: ``get_node_runs`` returns the task's whole history,
+          so a task that once passed a writing node keeps answering True even if the current attempt
+          parked before writing anything. Bounding it to the current attempt needs a per-attempt
+          marker on the row.
         """
         return any(
-            r.node_kind in ("evaluator", "checks", "publish")
+            r.node_kind in ("agent", "evaluator", "checks", "publish")
             for r in self._store.get_node_runs(task_id)
         )
 
@@ -1204,9 +1218,9 @@ class Orchestrator:
                 resume_tolerates_wip = self._worktree_is_task_output(task_id)
         # A fresh rerun resets the branch to base, so a dirty tree would be
         # destroyed and is always refused. On ``--continue`` the branch is reused (never reset) and
-        # the task's own uncommitted work is the legitimate input to a review / fixing / publish
-        # re-entry — tolerated once ``resume_tolerates_wip`` holds (the task reached a
-        # code-operating stage). Before that a dirty tree is still unexpected and refused. Artifact
+        # the task's own uncommitted work is the legitimate input to a writing / review / fixing /
+        # publish re-entry — tolerated once ``resume_tolerates_wip`` holds (a node that writes to
+        # the tree has run). Before that a dirty tree is still unexpected and refused. Artifact
         # dirs (`.worc/`, tasks/) stay excluded by ``unaccounted_dirty_paths`` in every mode.
         dirty = self._git.unaccounted_dirty_paths()
         if dirty and not resume_tolerates_wip:
