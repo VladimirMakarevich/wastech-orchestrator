@@ -72,6 +72,20 @@ return any(
 
 Проверка, которую стоит держать тестом: флоу без единого `evaluator` / `checks` / `publish` узла, припаркованное после пишущего узла, продолжается `--continue` и своё WIP не теряет.
 
-## Что проба всё-таки доказала
+## Чем кончилась проба
+
+После обоих обходов прогон прошёл целиком: `journey-18a-journey-recap` → `done`, PR [#8](https://github.com/VladimirMakarevich/wastime-app-content/pull/8), 19:19 → 20:51, `fix_iterations=5`, дерево после публикации чистое.
+
+**Блок Б доказан живьём.** Шесть попыток Codex, все `succeeded`, ни одного `permission_denied` и ни одного отката на Claude — при том что предыдущие пять прогонов подряд падали на первой же попытке Codex:
+
+| Узел | Модель | Время | Итог |
+| --- | --- | --- | --- |
+| `polish` | `gpt-5.6-sol` | 411 с | succeeded |
+| `rules_critic` ×3 | `gpt-5.6-sol` | 308 / 160 / 160 с | succeeded |
+| `rules_fixing` ×2 | `gpt-5.5` | 165 / 153 с | succeeded |
+
+`rules_fixing` важнее остальных: он правит файлы, то есть проходит ровно тем путём `apply_patch` → fs sandbox helper → re-exec бинаря под `sandbox-exec`, который деналь на `$CODEX_HOME` и ломала. Это закрывает вторую живую пробу из DoD фазы на этом хосте.
+
+## Что проба доказала попутно
 
 Обе находки — про путь **до** прогона. Сам сценарий Ам-5 после обходов пошёл штатно: `--continue` усыновил живую контрольную плоскость (`control plane adopted on --continue`, `bundle_digest=2effd5a89bf5`) вместе с правкой флоу, сделанной оператором за полчаса до запуска, — то есть Т5.4 работает на живом хосте, а не только в тестах. Т5.13 тоже видна строкой: `observation cadence narrowed by the flow; the whole-task summary is unaffected` с перечнем отброшенных триггеров. Т5.9 печатает раскладку обоих бинарей в `preflight`, включая `codex … inside the provider's config home`.
