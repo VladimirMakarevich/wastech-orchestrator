@@ -80,131 +80,32 @@ _FLOOR_LOSS_SHELL_WITHHELD = (
 
 # The mode's own announcement, in one formatter for the reason `describe_host_floor` is: preflight
 # and the run log must not be able to describe the same configuration differently, and the two
-# existing relaxation lines (`read-isolation: OFF`, `git-evidence: ON`) are hand-written twice each
-# and have already drifted in wording. Subject + ON/OFF + the key that caused it, matching the shape
-# those two established, then one indented line per floor level.
+# neighbouring relaxation lines (`read-isolation: OFF`, `git-evidence: ON`) are hand-written twice
+# each and have already drifted in wording. Subject + ON/OFF + the key that caused it, matching the
+# shape those two established.
+#
+# One line, not a recital. This used to print six axes (environment, redaction, tools, write,
+# network) and all four floor levels into every preflight report and every run log. That text now
+# lives in `guide/config/security.md`, where it is read once instead of scrolled past on every run
+# — the operator decision of 2026-08-24, which replaces the "announced in full" half of ТA.1.4 and
+# ТA.6.1. What is announced has not changed; only how much of it the report recites.
 _MODE_SUBJECT = (
     "advanced-mode: ON (security.strict_isolation=false) — full freedom for the agent under the "
-    "operator's responsibility, except the floor below"
-)
-
-# What the mode changes. Written per axis so each line became true as its phase landed, rather than
-# one sentence that was part-false while the campaign ran; with the write and network axes below all
-# four are now present-tense true.
-_MODE_ENVIRONMENT = (
-    "environment: the parent environment is forwarded WHOLE to agent processes, the check "
-    "commands, the scanners and the tool nodes — security.allowed_environment is not consulted "
-    "for them. Withheld: the names the orchestrator's own env-file defines (return one with "
-    "security.extra_environment). The orchestrator's own git/gh keep the allowlist"
-)
-_MODE_REDACTION = (
-    "redaction: secret-named values are scrubbed from logs and artifacts by NAME alone now, "
-    "without the allowlist excusing any — so a secret-named variable holding something harmless "
-    "may appear as [REDACTED] in output"
-)
-_MODE_TOOLS = (
-    "tools: the agent CLI's built-in tool set is no longer gated by an allowlist, so EVERY node "
-    "gets a shell — read-only ones included — and a tool shipped by a future CLI release is "
-    "available the day it ships, without anyone here having read its name. What is still denied: "
-    "the file-editing tools on .git, .worc and the task tree, which is the floor; and four names "
-    "that are friction rather than a boundary, since a shell walks around all four. Persistence is "
-    "NOT held — a task can leave behind a launch agent, a systemd unit or a shell rc line"
-)
-
-_MODE_WRITE = (
-    "write: the agent may write ANYWHERE ON THIS VOLUME that the host lets the sandbox reach, "
-    "not only inside the clone — a toolchain cache under $HOME, a scratch tree in the system "
-    "temp, and just as much a directory on PATH or a shell rc file. Say that one out loud: the "
-    "right to write a directory on PATH is the right to replace an executable that later runs "
-    "OUTSIDE the sandbox, including one this orchestrator launches as itself. One volume, not "
-    "every volume: the grant is expressed as the workspace path's anchor, so on Windows a "
-    "second drive (D:) stays unwritable — a toolchain cache kept there will still fail, and it "
-    "will look like a broken toolchain. What is still write-denied is floor 1 below, plus the "
-    "agent CLIs' own config homes (~/.claude / $CLAUDE_CONFIG_DIR, $CODEX_HOME), because one of "
-    "those files is loaded as configuration on the shipped default. "
-    "agents.providers.claude.allow_native_memory narrows that last one and only that one: it "
-    "opens the per-project memory store under the Claude home (projects/<slug>/memory) while "
-    "the credential and settings layers above it stay write-denied"
-)
-_MODE_NETWORK = (
-    "network: EVERY node reaches the whole network whatever its flow granted, and so do the CLIs' "
-    "own web tools. That is three surfaces, not one boundary: the sandboxed shell (a sandbox "
-    "policy), the built-in WebFetch/WebSearch (which do not pass through it), and Codex's "
-    "web_search (which runs on its backend, outside the permission profile). There is no domain "
-    "filtering and none is planned — an allowlist that had to pass github.com for ordinary "
-    "dependencies would hold nothing, and on Codex a domain list is not enforced at all without an "
-    "experimental feature that ships disabled"
-)
-
-
-# The four levels, in the words of ТA.1. The third was deliberately in the future tense for two
-# phases — the agent had no network, and a line that overstates is discounted exactly like one
-# that understates — and it turns present-tense here, with the phase that hands the network over.
-_FLOOR_LEVELS: tuple[str, ...] = (
-    (
-        "floor 1 of 4 — the integrity of the task's own state is held MECHANICALLY: the clone's "
-        ".git and the private .worc stay unwritable, wherever this host can enforce a sandbox at "
-        "all (an isolation-floor line above says where it cannot). One qualifier, since the write "
-        "granted above is filesystem-wide: what keeps these paths out of it is the carve-out being "
-        "the more specific rule, which Codex re-proves under its own sandbox before every provider "
-        "attempt that gets a shell — an agent node, an evaluator and the supervisor's own "
-        "read-only turn alike — and Claude does not. There this level rests on the tool-level "
-        "write denies. How that CLI ranks a denyWrite inside an allowWrite is a first-class "
-        "construction of the vendor's own (its settings compiler carries the carve-outs as "
-        "denyWithinAllow and applies them inside the allowed set) — but it is not proven on THIS "
-        "host, and the instrument that can prove it is the opt-in "
-        "`worc preflight --paid-isolation-probe`"
-    ),
-    (
-        "floor 2 of 4 — publication to this repository's origin IS NOT HELD, and is not detected "
-        "either: a task branch that appears or moves on origin, and a pull request that appears "
-        "on its head, are ordinary working state. Neither parks a run and neither is compared "
-        "against the orchestrator's own records — a missing record is not evidence that someone "
-        "else owns the branch (a recreated state.db has no records at all), and that comparison "
-        "used to refuse publishing with no way forward but closing our own pull request. What "
-        "happens instead is recovery: at publish time a diverged remote is merged in locally, the "
-        "checks re-run over the combination, and only then does anything go out; an open pull "
-        "request on this head is appended to and adopted. Only a merge conflict or failing checks "
-        "over the adopted combination stop the run. One consequence to know: a pull request a "
-        "person opened on the task branch is retitled and appended to like any other"
-    ),
-    (
-        "floor 3 of 4 — publication anywhere else IS HELD BY NOTHING, and is reachable today: the "
-        "agent has the network, and credentials are picked up automatically and are not withheld, "
-        "so a repository assembled outside the clone and pushed to any address is neither "
-        "prevented nor seen. Nothing is planned to hold it"
-    ),
-    (
-        "floor 4 of 4 — publication AS THE ORCHESTRATOR is held by DETECTION: the user git config "
-        "and the clone's own agent-CLI config are fingerprinted around the attempt, every gh call "
-        "names its repository outright WHEN that repository can be named at all (an ssh alias, a "
-        "file:// URL or a local path in repo.url yields no pin at all — worc "
-        "preflight prints that as its own gh-repo-pin line), and the executables the orchestrator "
-        "launches are pinned to the paths resolved at startup. Not covered, and not coverable this "
-        "way: a substitution made between runs, and an edit to the installed package's own code"
-    ),
+    "operator's responsibility, except the floor; guide/config/security.md says what that floor "
+    "holds and what it does not"
 )
 
 
 def describe_advanced_mode(config: OrchestratorConfig) -> tuple[str, ...]:
-    """The mode's loud announcement: a subject, then what it relaxes, then all four floor levels.
+    """The mode's announcement: one line, or nothing at all when the mode is off.
 
-    Empty when the mode is off, so a caller can extend its report unconditionally. The floor lines
-    are stated whether or not this host can enforce level 1 — what that host cannot do is
-    :func:`describe_host_floor`'s answer, printed beside this one, and merging the two would let a
-    host-specific gap read as a property of the mode.
+    A tuple rather than ``str | None`` so a caller can extend its report unconditionally, and one
+    formatter rather than two literals so preflight and the run log cannot describe the same
+    configuration differently. What this *host* cannot enforce is :func:`describe_host_floor`'s
+    answer, printed beside this one — merging the two would let a host-specific gap read as a
+    property of the mode.
     """
-    if config.security.strict_isolation:
-        return ()
-    return (
-        _MODE_SUBJECT,
-        _MODE_ENVIRONMENT,
-        _MODE_REDACTION,
-        _MODE_TOOLS,
-        _MODE_WRITE,
-        _MODE_NETWORK,
-        *_FLOOR_LEVELS,
-    )
+    return () if config.security.strict_isolation else (_MODE_SUBJECT,)
 
 
 def check_isolation(

@@ -7,7 +7,7 @@ Read [README.md](README.md) first. This file is about keeping a project-specific
 Prefer the smallest config that can run safely:
 
 - one `primary` provider;
-- `strict_isolation: true` (`false` is the advanced mode, not a milder sandbox);
+- a deliberate `strict_isolation` — `install` writes `false`, which **is** the advanced mode rather than a milder sandbox; set `true` if you want the fail-closed one;
 - `security.protected_paths` naming the repo's sensitive surfaces — the default `trust_level: auto` raises the approval gate on nothing else, and the default empty list is no floor at all;
 - `auto_merge: false`;
 - Telegram disabled until a human-in-the-loop path is really needed;

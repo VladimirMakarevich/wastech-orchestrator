@@ -111,99 +111,28 @@ agents:
       extra_args: []           # raw CLI flags appended verbatim; forbidden ones fail preflight
 
 security:
-  strict_isolation: true              # fail-closed sandbox (default). A provider whose configured
-                                      #   isolation can't be enabled fails preflight (no silent
-                                      #   downgrade). Full-access provider modes (Codex
-                                      #   `--sandbox danger-full-access`, Claude `--permission-mode
-                                      #   bypassPermissions`) are NOT gated by this key — they are
-                                      #   forbidden at any value, like --dangerously-skip-permissions,
-                                      #   --yolo and --ignore-rules. A host that has no OS sandbox at
-                                      #   all (native Windows; Linux/WSL2 without bubblewrap+socat)
-                                      #   does not fail: preflight and the run log print a loud line
-                                      #   saying .git and .worc are writable there.
-                                      #
-                                      #   false IS THE ADVANCED MODE — there is no second key. It
-                                      #   means "full freedom for the agent under your
-                                      #   responsibility, except the floor": read-isolation is
-                                      #   forced off, and the parent environment is forwarded WHOLE
-                                      #   to the agent CLIs, the check commands, the scanners and
-                                      #   the tool nodes, so allowed_environment is not consulted
-                                      #   for them at all. Still withheld: the names your
-                                      #   .worc/.env defines (return one with extra_environment).
-                                      #   The orchestrator's own git/gh keep the allowlist. It
-                                      #   unlocks no full-access provider mode and skips no proof —
-                                      #   the config-legality check and the capability probes run
-                                      #   at either value.
-                                      #
-                                      #   The floor that survives, in four levels, printed in full
-                                      #   by `worc preflight` and in the run log:
-                                      #     1. the task's own state is held MECHANICALLY — the
-                                      #        clone's .git and .worc stay unwritable wherever this
-                                      #        host can sandbox at all. Since the write below is
-                                      #        volume-wide, what keeps them out of it is the
-                                      #        carve-out being the more specific rule: Codex
-                                      #        re-proves that under its own sandbox before every
-                                      #        provider attempt that gets a shell (agent node,
-                                      #        evaluator, supervisor turn), Claude does not, so
-                                      #        there this level rests on the tool-level write denies
-                                      #        — `worc preflight --paid-isolation-probe` is the one
-                                      #        instrument that can answer it on your host;
-                                      #     2. publication to your origin is NOT held and NOT
-                                      #        detected — a branch appearing or moving on origin,
-                                      #        and a PR appearing on the task head, are ordinary
-                                      #        working state: publishing merges a diverged remote
-                                      #        in locally, re-runs the checks, and adopts an open
-                                      #        PR on that head (yours included — it gets retitled
-                                      #        and appended to);
-                                      #     3. publication ANYWHERE ELSE is held by NOTHING and is
-                                      #        reachable today: the agent has the network, and
-                                      #        credentials are picked up automatically. Nothing is
-                                      #        planned to hold it;
-                                      #     4. publication AS THE ORCHESTRATOR is held by DETECTION
-                                      #        — your git config and the clone's agent-CLI config
-                                      #        are fingerprinted, every gh call names its
-                                      #        repository, and the launched executables are pinned
-                                      #        to the paths resolved at startup. NOT covered: a
-                                      #        substitution made between runs, and an edit to the
-                                      #        installed package's own code.
-                                      #
-                                      #   Redaction widens to compensate: secret-named values are
-                                      #   scrubbed by NAME alone, so a secret-named variable with a
-                                      #   harmless value may print as [REDACTED].
-                                      #
-                                      #   Tools: no allowlist is passed to the agent CLI, so EVERY
-                                      #   built-in tool exists and EVERY node gets a shell —
-                                      #   read-only ones too, and a tool shipped by a future CLI
-                                      #   release is available the day it ships. Still denied: the
-                                      #   file-editing tools on .git, .worc and tasks/ (that is
-                                      #   level 1 above), plus AskUserQuestion, CronCreate,
-                                      #   RemoteTrigger and EnterWorktree. Read those four as
-                                      #   friction, not as a boundary: a shell walks around all of
-                                      #   them, so PERSISTENCE IS NOT HELD — a task can leave
-                                      #   behind a launch agent, a systemd unit or a shell rc line
-                                      #   with no tool at all. Codex likewise stops disabling its
-                                      #   multi-agent / computer-use / browser / apps / plugins
-                                      #   surfaces; its permission profile and the canary that
-                                      #   proves it are still emitted on every attempt.
-                                      #
-                                      #   Write: the agent writes ANYWHERE the sandbox reaches, not
-                                      #   only inside the clone — so `dotnet build` finds ~/.nuget
-                                      #   and `npm ci` finds ~/.npm without you redirecting a cache.
-                                      #   Read that plainly: it includes a directory on PATH, which
-                                      #   is the right to replace an executable that later runs
-                                      #   OUTSIDE the sandbox, this orchestrator's own git/gh
-                                      #   included. Still write-denied: level 1 above plus the agent
-                                      #   CLIs' own config homes (~/.claude, $CODEX_HOME) — one of
-                                      #   those files is loaded as configuration by default.
-                                      #
-                                      #   Network: EVERY node is online whatever its flow granted,
-                                      #   and that is three surfaces, not one — the sandboxed shell,
-                                      #   the CLI's built-in web tools (which do not pass through
-                                      #   the sandbox), and Codex's backend-side web_search. There
-                                      #   is no domain filtering and none is planned: an allowlist
-                                      #   that has to pass github.com for ordinary dependencies
-                                      #   holds nothing, and on Codex a domain list is not enforced
-                                      #   without an experimental feature that ships disabled.
+  strict_isolation: false             # SHIPPED DEFAULT false, and false IS THE ADVANCED MODE —
+                                      #   there is no second key. It means "full freedom for the
+                                      #   agent under YOUR responsibility, except the floor": read
+                                      #   isolation is forced off, the parent environment is
+                                      #   forwarded whole to every process run on the agent's
+                                      #   behalf, every node gets a shell and the network, and the
+                                      #   agent may write anywhere on the workspace's own volume.
+                                      #   true = the fail-closed sandbox instead.
+                                      #   What holds either way: the provider full-access modes
+                                      #   (Codex --sandbox danger-full-access, Claude
+                                      #   --permission-mode bypassPermissions) are forbidden at
+                                      #   BOTH values, together with --dangerously-skip-permissions,
+                                      #   --yolo and --ignore-rules; and no proof is skipped — the
+                                      #   config-legality check and the capability probes run at
+                                      #   either setting.
+                                      #   `worc preflight` and the run log announce the mode in ONE
+                                      #   line. What that line stands for — the four levels of the
+                                      #   floor, what each one is held by, and the two that are held
+                                      #   by nothing — is in guide/config/security.md. Read it once
+                                      #   before you keep this value; levels 3 and 4 are the ones
+                                      #   worth deciding about.
+                                      #   Operator-config ONLY (never a task/flow/extra_args key).
   disable_read_isolation: true        # DEFAULT true — read-isolation is OFF out of the box (set
                                       #   false to KEEP it on). true disables READ-isolation for
                                       #   provider runs: Claude reloads native
@@ -223,19 +152,20 @@ security:
                                       #   effect — never a silent weakening. Native Windows Codex
                                       #   needs the elevated sandbox backend when read-isolation is
                                       #   ON; without it preflight/the pre-launch canary fails closed.
-  allow_git_evidence: false           # DEFAULT false. Master switch for the read-only git-evidence
-                                      #   grant: a flow node that declares `git_evidence: true` may
-                                      #   run the read-only git verbs (log, show, diff, blame,
-                                      #   status, rev-list, rev-parse, ls-files, shortlog, describe,
-                                      #   cat-file, for-each-ref) so an audit node can cite a commit
-                                      #   instead of grepping a changelog for delivery history.
-                                      #   While this is false a declaring flow still loads and
-                                      #   validates — it just runs exactly as it does today, with no
-                                      #   shell. Under strict_isolation: false this key does nothing
-                                      #   at all — every node already has an unscoped shell, so
-                                      #   there is no capability left to grant and the verb list is
-                                      #   not applied. Turning it on does NOT make the node
-                                      #   writable: the sandbox write-denies the whole clone
+  allow_git_evidence: true            # SHIPPED DEFAULT true. Master switch for the read-only
+                                      #   git-evidence grant: a flow node that declares
+                                      #   `git_evidence: true` may run the read-only git verbs (log,
+                                      #   show, diff, blame, status, rev-list, rev-parse, ls-files,
+                                      #   shortlog, describe, cat-file, for-each-ref) so an audit
+                                      #   node can cite a commit instead of grepping a changelog for
+                                      #   delivery history. While this is false a declaring flow
+                                      #   still loads and validates — it just runs with no shell.
+                                      #   Beside the shipped strict_isolation: false this key does
+                                      #   nothing at all — every node already has an unscoped shell,
+                                      #   so there is no capability left to grant and the verb list
+                                      #   is not applied; it starts mattering the moment you set
+                                      #   strict_isolation: true. Turning it on does NOT make the
+                                      #   node writable: the sandbox write-denies the whole clone
                                       #   (Claude) / forbids every mutation outright (Codex),
                                       #   denied_commands is rendered as friction (it binds tool
                                       #   calls, not the shell), and publication stays the
@@ -534,7 +464,7 @@ supervisor:                         # oversight layer above any flow (not a node
   # shape — and runs regardless of `mode`, which gates per-step observations only.
 
 logging:                            # operator log verbosity + on-disk artifact retention (optional)
-  level: info                       # debug | info | warning | error. Persists the structured operator
+  level: warning                    # debug | info | warning | error. Persists the structured operator
                                     #   trace level; the --log-level CLI flag overrides it when given.
   artifacts: standard               # per-attempt provider files kept under logs/<id>/stages/.../<attempt>-<provider>/:
                                     #   minimal  = result.json only (even on failure)
@@ -553,7 +483,7 @@ logging:                            # operator log verbosity + on-disk artifact 
                                     #   they stay with `worc logs clean`. See guide/footprint.md.
 
 memory:                             # persistent, repo-scoped memory (optional)
-  enabled: true                     # false / omit the whole block = today's behavior: no store, no
+  enabled: false                    # SHIPPED DEFAULT false. false / omit the whole block = no store, no
                                     #   candidate delta, empty memory packets, CLI no-op, no cleanup
                                     # Needs `supervisor.enabled: true`: that layer's closing turn is the
                                     #   only path that writes anything memory can read back, so with the

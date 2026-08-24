@@ -131,14 +131,16 @@ def test_upgrade_swaps_deletion_exempt_paths_for_trust_level() -> None:
     template = packaged_template_mapping()
     operator = {
         "schema_version": 24,
-        "security": {"strict_isolation": False, "deletion_approval_exempt_paths": ["**/*.md"]},
+        # `true` on purpose: the template ships `false`, so an operator value that differs from
+        # the template is the only one that can prove the merge preserved it.
+        "security": {"strict_isolation": True, "deletion_approval_exempt_paths": ["**/*.md"]},
     }
     merged, added, removed = upgrade_config_mapping(template, operator)
     assert "deletion_approval_exempt_paths" not in merged["security"]
     assert "security.deletion_approval_exempt_paths" in removed
     assert merged["security"]["trust_level"] == "auto"
     assert merged["security"]["protected_paths"] == []
-    assert merged["security"]["strict_isolation"] is False  # operator value preserved
+    assert merged["security"]["strict_isolation"] is True  # operator value preserved
     assert "security.trust_level" in added
     assert "security.protected_paths" in added
 
@@ -167,13 +169,13 @@ def test_adds_orchestrator_queue_from_packaged_template() -> None:
 
 
 def test_adds_logging_block_from_packaged_template() -> None:
-    # v23 add: an operator config predating the `logging` block gains it (default info/standard)
-    # from the packaged template, while keeping its own customizations.
+    # v23 add: an operator config predating the `logging` block gains it (the shipped
+    # warning/standard) from the packaged template, while keeping its own customizations.
     template = packaged_template_mapping()
     operator = {"schema_version": 22, "prompt_audit": True}
     merged, added, _ = upgrade_config_mapping(template, operator)
     assert merged["logging"] == {
-        "level": "info",
+        "level": "warning",
         "artifacts": "standard",
         "clean_runs_on_success": True,
     }
@@ -195,12 +197,12 @@ def test_adds_run_cleanup_key_into_an_existing_logging_block() -> None:
 
 
 def test_adds_memory_block_from_packaged_template() -> None:
-    # v24 add: an operator config predating the `memory` block gains it (enabled + bounded knobs)
-    # from the packaged template, while keeping its own customizations.
+    # v24 add: an operator config predating the `memory` block gains it (the shipped switch +
+    # bounded knobs) from the packaged template, while keeping its own customizations.
     template = packaged_template_mapping()
     operator = {"schema_version": 23, "prompt_audit": True}
     merged, added, _ = upgrade_config_mapping(template, operator)
-    assert merged["memory"]["enabled"] is True
+    assert merged["memory"]["enabled"] is False
     assert merged["memory"]["promote_min_tasks"] == 2
     assert merged["prompt_audit"] is True  # operator value preserved
     assert "memory" in added
@@ -337,11 +339,12 @@ def test_adds_extra_environment_from_packaged_template() -> None:
     template = packaged_template_mapping()
     operator = {
         "schema_version": 35,
-        "security": {"allowed_environment": ["PATH", "HOME"], "strict_isolation": False},
+        # `true` where the template ships `false` — see the note in the v25 test above.
+        "security": {"allowed_environment": ["PATH", "HOME"], "strict_isolation": True},
     }
     merged, added, _ = upgrade_config_mapping(template, operator)
     assert merged["security"]["extra_environment"] == {}
     assert "security.extra_environment" in added
     assert merged["security"]["allowed_environment"] == ["PATH", "HOME"]  # untouched
-    assert merged["security"]["strict_isolation"] is False  # untouched
+    assert merged["security"]["strict_isolation"] is True  # untouched
     assert merged["schema_version"] == CONFIG_SCHEMA_VERSION

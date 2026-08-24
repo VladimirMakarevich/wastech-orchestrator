@@ -3344,7 +3344,8 @@ def test_advanced_mode_is_announced_in_the_run_log_and_recorded_durably(
 
     Three carriers, one question, and they do not overlap by accident. The log line is the same text
     preflight prints, from the same formatter, so a run cannot describe itself differently from the
-    report. The bundle's manifest records the posture the task STARTED in — written before the first
+    report — one line since 2026-08-24, with what it stands for in the shipped security guide.
+    The bundle's manifest records the posture the task STARTED in — written before the first
     node, so it exists for a task that never reached a terminal transition. The ledger record
     answers for a task that finished. Together they are the only durable answer to "what was this
     run allowed to do": the attempt's `request.json`, which carries the permission profile and the
@@ -3365,13 +3366,13 @@ def test_advanced_mode_is_announced_in_the_run_log_and_recorded_durably(
 
     assert result.final_status is not Status.FAILED  # announced, never refused
     assert any("advanced-mode: ON (security.strict_isolation=false)" in m for m in messages)
-    # Level 3 in the present tense: the network landed, so the line that hedged it away is gone.
-    assert any("floor 3 of 4" in m and "IS HELD BY NOTHING" in m for m in messages)
-    assert not any("no network yet" in m for m in messages)
-    # The axes, in the same lines and from the same formatter as preflight's.
-    assert any("EVERY node gets a shell" in m and "Persistence is NOT held" in m for m in messages)
-    assert any("EVERY node reaches the whole network" in m for m in messages)
-    assert any("directory on PATH" in m for m in messages)
+    assert any("guide/config/security.md" in m for m in messages)
+    # One line, not the recital this used to be (2026-08-24). The floor levels and the relaxation
+    # axes live in the guide now; asserting their absence is what keeps the posture block from
+    # growing back into the thing that buried the run it introduces.
+    assert not any("floor 3 of 4" in m for m in messages)
+    assert not any("EVERY node gets a shell" in m for m in messages)
+    assert not any("EVERY node reaches the whole network" in m for m in messages)
     assert ledger.records()[0]["advanced_mode"] is True
     manifests = list(art.rglob("control-bundles/*/manifest.json"))
     assert manifests, "the frozen control bundle should exist with clean_runs_on_success off"

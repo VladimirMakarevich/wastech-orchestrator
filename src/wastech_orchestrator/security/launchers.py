@@ -27,8 +27,8 @@ package's own code — pinning the launcher answers "which ``worc``", never "who
 ``git_manager.py``". Both limits belong in the operator guide next to the floor they qualify, not in
 a comment only we read.
 
-Provider-neutral: this module resolves names on ``PATH`` and formats prose. ``which`` is injected
-everywhere so both host classes are testable on either.
+Provider-neutral: this module resolves names on ``PATH``. ``which`` is injected everywhere so both
+host classes are testable on either.
 """
 
 from __future__ import annotations
@@ -43,26 +43,14 @@ from wastech_orchestrator.config.schema import OrchestratorConfig
 #: ``shutil.which``'s shape, injected so a test can describe a host it is not running on.
 Which = Callable[[str], str | None]
 
-#: What each name is for, printed beside its path so an operator reading the report can tell which
-#: line matters. Keyed by the logical name, not the resolved path.
-_ROLES: Mapping[str, str] = {
-    "git": "the orchestrator's own commits and pushes",
-    "gh": "the orchestrator's own pull requests",
-    "ps": "the process-quiescence barrier's descendant sweep",
-    "bwrap": "the Claude host sandbox probe (probed, never launched by us)",
-    "socat": "the Claude host sandbox probe (probed, never launched by us)",
-    "worc": "the watch daemon this process re-invokes as itself",
-}
-
 #: Names to pin on every host. ``ps`` is POSIX-only; the Windows quiescence proof uses a Job Object
 #: and launches nothing. ``bwrap``/``socat`` are Linux-only and probe-only.
 #:
-#: ``worc`` is here because ТA.1.7 names the daemon launcher among the four classes to pin and the
-#: report claims to print it: it is the one path that hands the *next whole run* to whatever
-#: answers, so a report listing five binaries and not this one describes a narrower pin than exists.
+#: ``worc`` is here because ТA.1.7 names the daemon launcher among the four classes to pin: it is
+#: the one path that hands the *next whole run* to whatever answers.
 #: :func:`~wastech_orchestrator.cli_shell.daemon_argv` resolves it for the actual spawn (it also
 #: tries ``wastech-orchestrator`` and falls back to ``-m``, which no pin can express); this entry is
-#: what puts it in the printed set and under the drift check.
+#: what puts it under the drift check.
 _ALWAYS: tuple[str, ...] = ("git", "gh", "worc")
 
 
@@ -124,13 +112,6 @@ class PinnedLaunchers:
                 f"mid-run; the orchestrator kept using the path it pinned"
             )
         return tuple(lines)
-
-    def describe(self) -> tuple[str, ...]:
-        """One operator-facing line per pinned name: where it resolved, and what it is for."""
-        return tuple(
-            f"{name} -> {path or '<not found on PATH>'} ({_ROLES.get(name, 'agent CLI')})"
-            for name, path in self.paths.items()
-        )
 
 
 def pin_launchers(

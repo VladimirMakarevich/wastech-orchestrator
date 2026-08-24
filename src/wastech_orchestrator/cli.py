@@ -102,7 +102,6 @@ from wastech_orchestrator.security.isolation import (
     describe_advanced_mode,
     describe_host_floor,
 )
-from wastech_orchestrator.security.launchers import pin_launchers
 from wastech_orchestrator.state_store import IncompatibleStateError, StateStore, TaskRow
 from wastech_orchestrator.task.model import DEFAULT_QUEUE, priority_rank
 from wastech_orchestrator.task.parser import read_task_source, split_frontmatter
@@ -3252,24 +3251,15 @@ def run_preflight(
         enforced = "enforced" if config.security.strict_isolation else "strict_isolation=false"
         lines.append(f"isolation: OK ({enforced})")
 
-    # Loudly surface the operator's read-isolation escape hatch — never a silent weakening.
+    # Loudly surface the operator's read-isolation escape hatch — never a silent weakening. One
+    # line: what it does and does not open is `guide/config/security.md`'s job, not every report's.
     if config.security.read_isolation_off:
         why = (
             "security.disable_read_isolation=true"
             if config.security.strict_isolation
             else "strict_isolation=false"
         )
-        lines.append(
-            f"read-isolation: OFF ({why}) — providers use native project-instruction/config "
-            "discovery (Claude CLAUDE.md + project settings/hooks/MCP/skills; Codex user + .codex "
-            "config/hooks/rules). The private set is NOT opened: .worc, the env-file and the "
-            "frozen bundles stay read- and write-denied, as do the write-guard, commit/staging, PR "
-            "control, and the denied_read_paths blacklist. One exception, provider-specific: "
-            "Claude's own config home is governed by "
-            "agents.providers.claude.allow_native_memory alone, so with read-isolation off its "
-            "per-project memory store is READABLE by the Read tool (it stays write-denied). "
-            "Codex's home is not: it keeps the read-deny"
-        )
+        lines.append(f"read-isolation: OFF ({why})")
 
     # What this host cannot enforce, whatever the config says. Deliberately not a FAIL: the floor
     # is missing either way, and refusing to run would leave the operator without the guarantee AND
@@ -3287,27 +3277,17 @@ def run_preflight(
             f"{config.agents.allowed[0].value} is the only allowed provider, so a node needing a "
             "sandboxed shell will be refused mid-run (CAPABILITY_UNAVAILABLE) with no fallback to "
             "cover it. Allow a second provider, install the missing sandbox dependencies, or set "
-            "security.strict_isolation: false and read the advanced-mode lines below"
+            "security.strict_isolation: false and read guide/config/security.md for what that mode "
+            "holds instead"
         )
 
-    # The mode itself: the loudest line in the report, from the shared formatter so the run log says
-    # the same thing. Placed after the host-floor lines because level 1 refers to them, and never a
-    # FAIL — the operator chose this, and refusing to report on a configuration the run accepts is
-    # what produced the `isolation:` disagreement this phase also fixed.
+    # The mode itself: the loudest line in the report, from the shared formatter so the run log
+    # says the same thing. Placed after the host-floor lines because the floor those lines qualify
+    # is the one the mode's line points at, and never a FAIL — the operator chose this, and
+    # refusing to report on a configuration the run accepts is what produced the `isolation:`
+    # disagreement this phase also fixed.
     mode_lines = describe_advanced_mode(config)
-    if mode_lines:
-        subject, *rest = mode_lines
-        lines.append(subject)
-        lines.extend(f"  - {line}" for line in rest)
-
-    # Where each executable the orchestrator launches as itself actually resolved on this host. Only
-    # in the mode: elsewhere it is noise, while here it is the evidence behind floor 4 — the
-    # operator can see WHICH `git` will do the pushing, and a `<not found>` explains a later launch
-    # failure before it happens.
-    if mode_lines:
-        pins = pin_launchers(config)
-        lines.append("pinned-executables: resolved once, used as-is for this process")
-        lines.extend(f"  - {line}" for line in pins.describe())
+    lines.extend(mode_lines)
 
     # The one environment variable that silently changes what the mode's write grant means. In the
     # CLI's env-scrub branch the settings compiler filters a volume-wide `allowWrite` entry by name,
@@ -3319,20 +3299,17 @@ def run_preflight(
         lines.append(
             f"write-grant: WARN — {_CLAUDE_ENV_SCRUB_VAR} is set in this environment, and the "
             "Claude CLI filters the volume-wide write grant out of its settings in that branch. "
-            "The write axis above then overstates what the agent gets: expect writes outside the "
+            "The mode's write grant then does not apply as documented: expect writes outside the "
             "clone to be refused, and unset the variable if you meant the grant to apply"
         )
 
     # Same principle for the git-evidence grant: an operator reading preflight should see which
-    # optional capabilities are live, not have to infer them from the config file.
+    # optional capabilities are live, not have to infer them from the config file. The mode makes
+    # the grant inert (every node has an unscoped shell there), which the line has to say — else it
+    # announces a capability it did not add.
     if config.security.allow_git_evidence:
-        lines.append(
-            "git-evidence: ON (security.allow_git_evidence=true) — a flow node declaring "
-            "git_evidence may run the read-only git verbs to inspect delivery history; the "
-            "repository stays unwritable (sandbox) and publication stays the orchestrator's. "
-            "Not applied at all under strict_isolation=false: every node has an unscoped shell "
-            "there, so read the advanced-mode lines above for what holds instead"
-        )
+        inert = "" if config.security.strict_isolation else " — inert under strict_isolation=false"
+        lines.append(f"git-evidence: ON (security.allow_git_evidence=true){inert}")
 
     # The host-dependent half of the ``allowed_environment`` gate — its host-independent half
     # (``PATH`` is mandatory) is a validator error, because one config file must get the same

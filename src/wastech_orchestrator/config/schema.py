@@ -448,10 +448,11 @@ class SecurityConfig:
     # legality check and the provider capability probes run at either setting, because the generated
     # permission profile is what the local floor rests on and that matters most here.
     #
-    # The floor that survives, in four honest levels — announced in full by ``worc preflight`` and
-    # in the run log, never silently. (1) The integrity of the task's own state is held
-    # MECHANICALLY: the clone's ``.git`` and private ``.worc`` stay unwritable wherever it can
-    # sandbox
+    # The floor that survives, in four honest levels. ``worc preflight`` and the run log announce
+    # the mode in one line and point at ``guide/config/security.md``, which carries these four for
+    # the operator; this comment is the same answer for whoever reads the code.
+    # (1) The integrity of the task's own state is held MECHANICALLY: the clone's ``.git`` and
+    # private ``.worc`` stay unwritable wherever it can sandbox
     # at all. One qualifier, since the write grant above is volume-wide — what keeps those paths
     # out of it is the carve-out being the more specific rule, which Codex re-proves under its own
     # sandbox before every provider attempt that gets a shell (agent node, evaluator, supervisor
@@ -787,10 +788,10 @@ class MemoryConfig:
     """Repo-scoped persistent memory: global toggle + bounded knobs.
 
     Absent block => ``enabled=False`` — the pre-memory behavior (no store, no candidate delta, empty
-    memory packets, ``worc memory`` is a no-op, no background cleanup). This dataclass default
-    stays ``False`` as the safe fallback, but a fresh ``worc install`` ships ``enabled: true`` (both
-    the packaged ``config.example.yaml`` and the generated ``config.yaml`` via
-    ``config_writer.build_config_mapping``), so memory is on out of the box. Every numeric knob
+    memory packets, ``worc memory`` is a no-op, no background cleanup). A fresh ``worc install``
+    writes ``enabled: false`` explicitly (both the packaged ``config.example.yaml`` and the
+    generated ``config.yaml`` via ``config_writer.build_config_mapping``) so the operator finds the
+    switch rather than the block's absence; it shipped ``true`` until 2026-08-24. Every numeric knob
     carries a locked default and is a bounded, runtime-clamped value — none is a
     fatal config error (an odd value is clamped at use, per the "fatal only without a safe fallback"
     rule). The write / read / curation paths consume these knobs at runtime (all phases shipped).

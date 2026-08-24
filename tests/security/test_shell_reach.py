@@ -45,7 +45,15 @@ def _checks(
 
 @pytest.fixture
 def base_config(packaged_config_text: str) -> OrchestratorConfig:
-    return loads_config(packaged_config_text).config
+    """The packaged config with strict isolation pinned back on.
+
+    These tests are about the CONTRAST between the two isolation values, so the baseline has to be
+    stated rather than inherited: the packaged config ships `strict_isolation: false` since
+    2026-08-24, which would otherwise make every "no shell here" case silently untrue and the
+    advanced-mode case a comparison against itself. The mode is opted into per test.
+    """
+    cfg = loads_config(packaged_config_text).config
+    return replace(cfg, security=replace(cfg.security, strict_isolation=True))
 
 
 @pytest.fixture

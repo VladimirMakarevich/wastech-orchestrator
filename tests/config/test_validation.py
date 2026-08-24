@@ -65,11 +65,13 @@ def test_disable_read_isolation_default_and_validates(
 
 def test_loader_parses_disable_read_isolation(packaged_config_text: str) -> None:
     # Operator-config key parsed from the security block: the packaged config ships `true`
-    # (read-isolation OFF), and an explicit `false` is honored (keeps read-isolation ON).
+    # (read-isolation OFF), and an explicit `false` is honored on the key itself. The EFFECTIVE
+    # state needs `strict_isolation: true` too — the packaged config now ships the advanced mode,
+    # which forces read-isolation off whatever this key says, so flip both to see the key land.
     assert loads_config(packaged_config_text).config.security.disable_read_isolation is True
     text = packaged_config_text.replace(
         "disable_read_isolation: true", "disable_read_isolation: false"
-    )
+    ).replace("strict_isolation: false", "strict_isolation: true")
     assert "disable_read_isolation: false" in text  # guard: the packaged key still exists
     cfg = loads_config(text).config
     assert cfg.security.disable_read_isolation is False
@@ -777,20 +779,23 @@ def test_confirmation_gates_with_telegram_validate_clean(base_config: Orchestrat
     assert validate_config(cfg) == []
 
 
-def test_allow_git_evidence_defaults_off_and_validates(base_config: OrchestratorConfig) -> None:
-    # The git-evidence grant is opt-in: absent the key, a flow that declares git_evidence gets
-    # nothing. Both the default and an explicit True validate cleanly.
-    assert base_config.security.allow_git_evidence is False
-    assert validate_config(_with_security(base_config, allow_git_evidence=True)) == []
+def test_allow_git_evidence_ships_on_and_validates_either_way(
+    base_config: OrchestratorConfig,
+) -> None:
+    # The packaged config ships the grant ON. Beside the shipped `strict_isolation: false` it adds
+    # no capability (every node has an unscoped shell there) — it is what a declaring node gets the
+    # moment strict isolation returns. Both values validate cleanly.
+    assert base_config.security.allow_git_evidence is True
+    assert validate_config(_with_security(base_config, allow_git_evidence=False)) == []
 
 
 def test_loader_parses_allow_git_evidence(packaged_config_text: str) -> None:
     # A key the loader does not know is a key that is silently ignored, so parse it from the
-    # packaged security block explicitly: shipped `false`, and an explicit `true` honored.
-    assert loads_config(packaged_config_text).config.security.allow_git_evidence is False
-    text = packaged_config_text.replace("allow_git_evidence: false", "allow_git_evidence: true")
-    assert "allow_git_evidence: true" in text  # guard: the packaged key still exists
-    assert loads_config(text).config.security.allow_git_evidence is True
+    # packaged security block explicitly: shipped `true`, and an explicit `false` honored.
+    assert loads_config(packaged_config_text).config.security.allow_git_evidence is True
+    text = packaged_config_text.replace("allow_git_evidence: true", "allow_git_evidence: false")
+    assert "allow_git_evidence: false" in text  # guard: the packaged key still exists
+    assert loads_config(text).config.security.allow_git_evidence is False
 
 
 # --- supervisor.enabled: false (P3) ------------------------------------------

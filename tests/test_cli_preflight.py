@@ -1198,53 +1198,62 @@ def _mode(config):
     return replace(config, security=replace(config.security, strict_isolation=False))
 
 
-def test_advanced_mode_is_announced_with_all_four_floor_levels(
+def test_advanced_mode_is_announced_in_one_line(
     monkeypatch: pytest.MonkeyPatch,
     git_repo,
     make_git_config,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """ТA.6.1: the mode is never silent, and the line names every level of the floor.
+    """ТA.6.1, as amended 2026-08-24: the mode is never silent, and never a recital either.
 
-    Neither of the two relaxation lines that already existed (`read-isolation: OFF`, `git-evidence:
-    ON`) had a test, which is how their wording drifted from the run log's. The mode's own line is
-    the one that must not: it is what an operator reads before deciding to keep the key. Level 3 is
-    asserted in its PRESENT tense, and the absence of the old future-tense wording is asserted too:
-    it was deliberately written as "once the agent has the network" while the network was still two
-    phases away, and the phase that hands it over is the one that owes the correction — a line that
-    understates is discounted exactly like one that overstates.
+    The report used to print six relaxation axes and all four floor levels — long enough that the
+    rest of the preflight scrolled past it, which is how a loud line stops being read. That text
+    lives in `guide/config/security.md` now; what has to survive here is that the mode is stated at
+    all, that it names the key that caused it, and that it points at where the floor is written
+    down. The absence assertions are the point of the test, not decoration: they are what stops the
+    recital growing back one axis at a time.
     """
     _patch_providers(monkeypatch, _mode(make_git_config(git_repo.clone)))
     rc = cli.cmd_preflight(_args())
     out = capsys.readouterr().out
     assert rc == 0  # the operator chose this; reporting it is not refusing it
     assert "advanced-mode: ON (security.strict_isolation=false)" in out
+    assert "guide/config/security.md" in out
+    # The recital is gone: one line per axis, per floor level, and the pin block.
     for level in ("floor 1 of 4", "floor 2 of 4", "floor 3 of 4", "floor 4 of 4"):
-        assert level in out
-    assert "held MECHANICALLY" in out  # level 1 — the only one that is a mechanism
-    # Level 3, present tense now, and the old future-tense hedge gone with it.
-    assert "IS HELD BY NOTHING" in out and "reachable today" in out
-    assert "no network yet" not in out
-    assert "forwarded WHOLE" in out  # what the mode actually changed today
-    # The tool axis: the gate is gone, every node has a shell, and the friction denies must not be
-    # announced as a boundary they are not.
-    assert "no longer gated by an allowlist" in out and "EVERY node gets a shell" in out
-    assert "Persistence is NOT held" in out
-    # The write and network axes, which this phase made true. Both name what an operator has to
-    # decide about: a directory on PATH is an executable that later runs outside the sandbox, and
-    # "the network" is three surfaces rather than one boundary.
-    assert "write anywhere" in out.lower() and "directory on PATH" in out
-    assert "EVERY node reaches the whole network" in out
-    assert "three surfaces" in out
-    # Level 1 keeps its qualifier: under a volume-wide write grant, what holds the carve-outs is
-    # specificity — re-proven on Codex before every provider attempt with a shell, and on Claude a
-    # vendor-supported construction that is still unproven on THIS host, with the instrument that
-    # could prove it named (Ам4-5: it used to say "documented nowhere", which the binary's own
-    # settings compiler contradicts).
-    assert "more specific rule" in out
-    assert "denyWithinAllow" in out and "not proven on THIS host" in out
-    assert "worc preflight --paid-isolation-probe" in out
+        assert level not in out
+    for axis in (
+        "forwarded WHOLE",
+        "no longer gated by an allowlist",
+        "EVERY node gets a shell",
+        "EVERY node reaches the whole network",
+        "three surfaces",
+        "directory on PATH",
+        "denyWithinAllow",
+    ):
+        assert axis not in out
+    assert "pinned-executables" not in out
     assert "preflight: ready" in out
+
+
+def test_read_isolation_off_is_announced_in_one_line(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repo,
+    make_git_config,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The relaxation is stated with the key that caused it, and nothing more.
+
+    Two keys can produce it, and which one did is the only part an operator cannot re-derive from
+    their own config — so that is the part the line carries. What read-isolation off does and does
+    not open used to follow in a paragraph; it is in the guide now.
+    """
+    _patch_providers(monkeypatch, _mode(make_git_config(git_repo.clone)))
+    cli.cmd_preflight(_args())
+    out = capsys.readouterr().out
+    assert "read-isolation: OFF (strict_isolation=false)" in out
+    assert "native project-instruction" not in out
+    assert "denied_read_paths blacklist" not in out
 
 
 def test_the_mode_line_is_absent_under_strict_isolation(
@@ -1261,25 +1270,6 @@ def test_the_mode_line_is_absent_under_strict_isolation(
     assert "advanced-mode" not in out
     assert "floor 1 of 4" not in out
     assert "pinned-executables" not in out
-
-
-def test_the_mode_prints_where_each_launched_executable_resolved(
-    monkeypatch: pytest.MonkeyPatch,
-    git_repo,
-    make_git_config,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    """ТA.1.7 item 3: the pins are shown, because a pin nobody can read is not a control.
-
-    They are the evidence behind floor 4 — the operator can see WHICH `git` will do the pushing — so
-    the report has to name the path, not merely claim that one was resolved.
-    """
-    _patch_providers(monkeypatch, _mode(make_git_config(git_repo.clone)))
-    cli.cmd_preflight(_args())
-    out = capsys.readouterr().out
-    assert "pinned-executables: resolved once, used as-is for this process" in out
-    assert "git -> " in out and "the orchestrator's own commits and pushes" in out
-    assert "gh -> " in out
 
 
 def test_the_mode_warns_when_the_claude_env_scrub_variable_would_shrink_the_write_grant(

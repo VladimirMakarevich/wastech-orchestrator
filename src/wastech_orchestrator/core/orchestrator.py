@@ -2576,14 +2576,11 @@ class Orchestrator:
         """Record the effective environment/isolation posture for a fresh or resumed entry."""
         self._announce_environment_patterns(p)
         if self._config.security.read_isolation_off:
+            # One line, and the structured fields beside it. What read-isolation off does and does
+            # not open is `guide/config/security.md`'s job; repeating it into every run log is what
+            # made the posture block longer than the run it introduces.
             self._log(p.task.id).warning(
-                "read-isolation OFF — providers run native project-instruction/config discovery "
-                "(operator-sanctioned). The private set is NOT opened: .worc, the env-file and "
-                "the frozen bundles stay read- and write-denied, as do the write-guard, "
-                "commit/staging gates, PR control, and denied_read_paths blacklist. One "
-                "provider-specific exception: Claude's config home is governed by "
-                "allow_native_memory alone, so its per-project memory store is READABLE here "
-                "(still write-denied); Codex's home keeps the read-deny",
+                "read-isolation OFF (operator-sanctioned) — see guide/config/security.md",
                 extra={
                     "disable_read_isolation": self._config.security.disable_read_isolation,
                     "strict_isolation": self._config.security.strict_isolation,
@@ -2600,13 +2597,8 @@ class Orchestrator:
                 extra={"allow_native_memory": True},
             )
         if self._config.security.allow_git_evidence:
-            self._log(p.task.id).info(
-                "git-evidence ON — a node declaring git_evidence may run the read-only git verbs "
-                "to inspect delivery history; the repository stays unwritable (the sandbox denies "
-                "writes) and publication stays the orchestrator's. Not applied at all under "
-                "strict_isolation=false: every node has an unscoped shell there, so the "
-                "advanced-mode lines below say what holds instead"
-            )
+            inert = "" if self._config.security.strict_isolation else " (inert in advanced mode)"
+            self._log(p.task.id).info(f"git-evidence ON{inert}")
         for mode_line in describe_advanced_mode(self._config):
             self._log(p.task.id).warning(mode_line)
         for floor_gap in describe_host_floor(self._config, self._host_floor_checks):

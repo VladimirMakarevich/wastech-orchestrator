@@ -84,27 +84,38 @@ def test_generated_config_is_stamped_with_schema_version(tmp_path: Path) -> None
 
 
 def test_generated_config_includes_logging_defaults(tmp_path: Path) -> None:
+    # A fresh install ships the quiet level. The dataclass/loader fallback stays "info" — this is
+    # an install-time posture, not a change to what an omitted key means.
     cfg = loads_config(build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))).config
-    assert cfg.logging.level == "info"
+    assert cfg.logging.level == "warning"
     assert cfg.logging.artifacts == "standard"
 
 
-def test_generated_config_enables_memory_out_of_the_box(tmp_path: Path) -> None:
-    # A fresh install ships the memory subsystem on (the schema default stays False as the
-    # absent-block safe fallback; the installer writes enabled: true explicitly).
+def test_generated_config_ships_memory_off(tmp_path: Path) -> None:
+    # A fresh install ships the memory subsystem off, and writes the key rather than relying on
+    # the absent-block fallback: the operator finds the switch in their own file.
     cfg = loads_config(build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))).config
-    assert cfg.memory.enabled is True
+    assert cfg.memory.enabled is False
+    assert "enabled: false" in build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))
 
 
-def test_safe_security_defaults_are_written(tmp_path: Path) -> None:
-    cfg = loads_config(build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))).config
-    assert cfg.security.strict_isolation is True
+def test_shipped_security_posture_is_written(tmp_path: Path) -> None:
+    text = build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))
+    cfg = loads_config(text).config
+    # Advanced mode out of the box, written key by key so the relaxation is visible in the
+    # operator's own file. The dataclass/loader fallback stays fail-closed for a config that omits
+    # the key — only what `install` writes is the relaxed posture.
+    assert cfg.security.strict_isolation is False
+    assert "strict_isolation: false" in text
+    assert cfg.security.disable_read_isolation is True
+    assert "disable_read_isolation: true" in text
     # USER must be allowlisted so macOS subscription CLIs can reach their Keychain credentials.
     assert "USER" in cfg.security.allowed_environment
-    # The git-evidence grant is seeded OFF, and seeded explicitly rather than left to the schema
-    # default: an opt-in capability belongs in the operator's own config where they can find it.
-    assert cfg.security.allow_git_evidence is False
-    assert "allow_git_evidence: false" in build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))
+    # The git-evidence grant is seeded ON, and seeded explicitly rather than left to the schema
+    # default: it is inert beside the advanced mode above and becomes the node's capability the
+    # moment the operator sets strict_isolation: true.
+    assert cfg.security.allow_git_evidence is True
+    assert "allow_git_evidence: true" in text
     assert "git push" in cfg.security.denied_commands
     # Assigned variables are seeded empty and, for the same reason as the grant above, explicitly:
     # a fresh install shows the key exists rather than leaving it to be discovered in the reference.

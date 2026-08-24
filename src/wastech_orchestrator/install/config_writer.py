@@ -1,10 +1,14 @@
 """Generate a ``config.yaml`` from the installer's resolved settings.
 
 Builds a plain dict mirroring the packaged ``config.example.yaml`` — only the selected providers,
-absolute native paths, exactly one global ``primary`` provider, and **immutable safe security
-defaults** — then renders it with PyYAML. ``build_and_validate`` round-trips the rendered text back
-through the loader and the semantic validator, so the installer can never emit a config that is
-structurally broken, contradictory, or that weakens the sandbox.
+absolute native paths, exactly one global ``primary`` provider, and the shipped security posture —
+then renders it with PyYAML. ``build_and_validate`` round-trips the rendered text back through the
+loader and the semantic validator, so the installer can never emit a config that is structurally
+broken or contradictory.
+
+That posture is the **advanced mode** (``strict_isolation: false``) as of 2026-08-24, and it is
+written out key by key rather than left to a fallback: an operator reading their own file sees the
+relaxation, and the dataclass/loader defaults stay fail-closed for a config that omits the key.
 No secrets are ever written.
 """
 
@@ -135,7 +139,16 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             },
         },
         "security": {
-            "strict_isolation": True,
+            # Advanced mode out of the box (operator decision of 2026-08-24): full freedom for the
+            # agent under the operator's responsibility, except the floor. The dataclass/loader
+            # fallback stays `true`, so a config that OMITS this key is still fail-closed — only
+            # what `install` writes is the relaxed posture, and it writes it visibly.
+            "strict_isolation": False,
+            # Written explicitly although it is redundant at `strict_isolation: false` (the
+            # effective value is `disable_read_isolation OR NOT strict_isolation`): the operator
+            # asked for the read-side posture to be readable in their own file rather than inferred
+            # from the master switch, and it is what takes effect if they turn strict back on.
+            "disable_read_isolation": True,
             # OS-aware: the cross-platform base plus the OS-launch essentials of the machine the
             # installer runs on (e.g. SystemRoot on Windows, without which the Node-based claude.exe
             # crashes at startup). We write the host OS's set only — the other OS's names are never
@@ -153,10 +166,12 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             # match asks.
             "trust_level": "auto",
             "protected_paths": [],
-            # Seeded off, and seeded *explicitly*: the read-only git-evidence grant is an opt-in the
-            # operator should find in their own config rather than discover as a hidden default. Off
-            # means a flow node asking for it runs exactly as it does without the declaration.
-            "allow_git_evidence": False,
+            # Seeded on, and seeded *explicitly*: the read-only git-evidence grant is a decision
+            # the operator should find in their own config rather than discover as a hidden
+            # default. Inert beside the `strict_isolation: false` above — the advanced mode already
+            # hands every node an unscoped shell, so the grant has no capability left to add — and
+            # it is what a node declaring `git_evidence` gets the moment strict isolation returns.
+            "allow_git_evidence": True,
         },
         "validation": {
             "max_task_bytes": 262144,
@@ -229,14 +244,15 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "handoff": {"model": _PROVIDER_DEFAULTS[primary_pid][0], "reasoning": "high"},
         },
         "logging": {
-            "level": "info",
+            "level": "warning",
             "artifacts": "standard",
             "clean_runs_on_success": True,
         },
-        # Persistent repo-scoped memory is on out of the box. Omit the block (or set enabled: false)
-        # for the pre-memory behavior. The tunable knobs default per the schema — the annotated
+        # Persistent repo-scoped memory is off out of the box (operator decision of 2026-08-24),
+        # which matches the dataclass fallback. Set enabled: true for the store, the candidate
+        # delta and the memory packets. The tunable knobs default per the schema — the annotated
         # config.example.yaml installed alongside this file documents each one.
-        "memory": {"enabled": True},
+        "memory": {"enabled": False},
         # Custom tool-node default timeout. Written at the schema default for discoverability;
         # a per-node `timeout_seconds` in a flow overrides it. Omit the block for the same 3600s.
         "tools": {"default_timeout_seconds": DEFAULT_TOOL_TIMEOUT_SECONDS},

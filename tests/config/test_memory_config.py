@@ -56,7 +56,8 @@ def test_wrong_typed_memory_value_is_rejected() -> None:
     assert any("memory.enabled" in issue for issue in exc.value.issues)
 
 
-def test_packaged_example_ships_memory_enabled(packaged_config_text: str) -> None:
-    # A fresh install (the packaged template) ships memory enabled: true.
+def test_packaged_example_ships_memory_disabled(packaged_config_text: str) -> None:
+    # A fresh install (the packaged template) ships memory enabled: false — the key is written
+    # rather than omitted, so the operator finds the switch instead of the block's absence.
     cfg = loads_config(packaged_config_text).config
-    assert cfg.memory.enabled is True
+    assert cfg.memory.enabled is False
