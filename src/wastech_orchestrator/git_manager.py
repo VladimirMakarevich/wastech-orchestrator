@@ -394,8 +394,9 @@ def gh_repo_pin(
     anchor), the clone's ``origin`` second — exposed as a module function so ``worc preflight`` can
     report the verdict without constructing a Git Manager. ``(None, …)`` means no pin: the URL names
     no hosted repository (an ssh alias, a ``file://`` URL, a local path), and then ``gh`` infers the
-    repository from the clone and the open-PR probe is not asked at all. Both halves of floor 4
-    quietly switch off there, which is exactly why this is printed rather than inferred.
+    repository from the clone — including for the reuse probe that decides which pull request this
+    task appends to. That half of floor 4 quietly switches off there, which is exactly why this is
+    printed rather than inferred.
     """
     slug = parse_gh_repo_slug(repo_url)
     if slug is not None:
@@ -765,28 +766,20 @@ class PushOutcome:
 
 @dataclass(frozen=True)
 class RemoteState:
-    """What ``origin`` holds around a provider attempt — the half a local fingerprint cannot see.
+    """Where a push would go around a provider attempt — the half a local fingerprint cannot see.
 
-    Cutting the agent off from ``.git`` stops one publishing operation out of four: pushing an
-    existing history writes nothing under ``.git``, and ``gh pr create``/``gh pr merge`` write
-    nothing locally at all. So the remote side is fingerprinted too.
+    Only the push *destination* lives here. What ``origin`` holds for the task branch, and whether
+    that branch has an open pull request, deliberately do not: an existing branch or PR is ordinary
+    working state, not evidence that someone else owns it, and publishing already recovers from a
+    diverged remote by merging it in locally before anything goes out (see :meth:`push`). Watching
+    them here only parked tasks over a condition the publish path already handles.
 
-    ``None`` in any field means the probe did not answer (an unreachable remote, no ``gh``, PRs
-    disabled, an unknown repository) and is never read as a change — a failed probe is not
-    evidence. An *empty* value is an answer: ``""`` = ``origin`` has no such head, ``()`` = no
-    open PR. ``push_url`` is kept as a digest for the same reason config values are: it can carry
-    a token.
+    ``None`` means the probe did not answer (no push URL, an unreadable remote) and is never read
+    as a change — a failed probe is not evidence. The URL is kept as a digest for the same reason
+    config values are: it can carry a token.
     """
 
-    task_branch_sha: str | None  # origin's commit for the task branch ("" == no such head)
     push_url_digest: str | None  # sha256 of `remote get-url --push origin` (the final URL)
-    open_pr_urls: tuple[str, ...] | None  # open PRs whose head is the task branch
-    #: The commit this orchestrator recorded pushing for the task branch (``publish_operations``),
-    #: or ``None`` when it has pushed nothing yet. Carried so the comparison can ask the question
-    #: П2.2 actually asks — "does origin still hold OUR commit" — instead of only "did it move
-    #: between two snapshots": a foreign push that lands *between* two brackets would otherwise
-    #: become the baseline of the next one and never be drift at all.
-    recorded_push_sha: str | None
 
 
 @dataclass(frozen=True)
@@ -1674,7 +1667,7 @@ class GitManager:
             hooks=self._capture_hooks(),
             markers=frozenset(m for m in _CONTROL_MARKERS if self._marker_present(m)),
             tool_config=self._capture_tool_config(),
-            remote=self.capture_remote_state(branch or None),
+            remote=self.capture_remote_state(),
         )
 
     def compare_git_control_state(self, before: GitControlState) -> GitControlDrift | None:
@@ -1787,32 +1780,15 @@ class GitManager:
             tasks_dir=Path(self._clone) / self._tasks_dir,
         )
 
-    def capture_remote_state(self, branch: str | None) -> RemoteState:
-        """Read what ``origin`` holds for *branch* — its head, our push destination, its open PRs.
+    def capture_remote_state(self) -> RemoteState:
+        """Read where a push to ``origin`` would actually go.
 
-        Three cheap probes (one ``ls-remote`` round-trip, one local ``git remote``, at most one
-        ``gh`` API call). Each degrades to ``None`` on its own rather than failing the capture:
-        an unreachable remote must not park a task, and a probe that did not answer is compared
-        against nothing.
+        One cheap local probe (``git remote get-url --push``), degrading to ``None`` rather than
+        failing the capture: a probe that did not answer is compared against nothing. The branch
+        head and the open-PR list are deliberately not read here — an existing branch or PR is
+        ordinary working state, and the publish path recovers from a diverged remote on its own.
         """
-        return RemoteState(
-            task_branch_sha=self._remote_head(branch) if branch else None,
-            push_url_digest=self._push_url_digest(),
-            open_pr_urls=self._open_pr_urls(branch) if branch else None,
-            recorded_push_sha=self._recorded_push_sha(),
-        )
-
-    def _recorded_push_sha(self) -> str | None:
-        """The commit we recorded pushing for the active task, or ``None`` if we pushed nothing.
-
-        Local, no round-trip: it reads ``publish_operations``. ``None`` outside a task (no active
-        record) and for a row that predates the column, which is what keeps this from turning "we
-        never pushed" into a reason to park.
-        """
-        if self._active is None:
-            return None
-        op = self._store.get_publish_op(self._active.task_id, KIND_PUSH, None)
-        return op.pushed_sha if op is not None else None
+        return RemoteState(push_url_digest=self._push_url_digest())
 
     def _remote_head(self, branch: str) -> str | None:
         """``origin``'s commit for *branch*.
@@ -1835,26 +1811,6 @@ class GitManager:
         if not result.ok:
             return None
         return hashlib.sha256(result.stdout.strip().encode("utf-8")).hexdigest()
-
-    def _open_pr_urls(self, branch: str) -> tuple[str, ...] | None:
-        """Open PRs whose head is *branch*, or ``None`` when the question cannot be asked.
-
-        Not asked when PRs are disabled (nothing of ours could reuse one) or when the repository
-        is unknown — without ``--repo`` ``gh`` would infer it from the clone, i.e. from the very
-        surface this probe exists to watch, so the answer would prove nothing.
-        """
-        if not self._config.git.create_pull_request or self._gh_repo_slug() is None:
-            return None
-        result = self._gh(["pr", "list", "--head", branch, "--state", "open", "--json", "url"])
-        if not result.ok:
-            return None
-        try:
-            rows = json.loads(result.stdout or "[]")
-        except ValueError:
-            return None
-        if not isinstance(rows, list):
-            return None
-        return tuple(sorted(str(row.get("url")) for row in rows if row.get("url")))
 
     def _capture_tool_config(self) -> dict[str, str]:
         """Content digests of the CLI/git configuration the publishing processes read.
@@ -1987,41 +1943,28 @@ class GitManager:
 
     @staticmethod
     def _diff_remote(before: RemoteState, after: RemoteState) -> list[GitControlDriftItem]:
-        """Remote-side changes, skipping any probe that did not answer on either side.
+        """Remote-side changes, skipping the probe if it did not answer on either side.
 
-        The base branch is deliberately absent: it moves legitimately whenever someone merges
-        their own PR, and parking for that would make the detector useless.
+        Only the push destination is watched: a rewritten ``insteadOf`` / ``pushurl`` sends the
+        branch, with this orchestrator's credentials, somewhere the operator did not choose.
+
+        What is deliberately NOT watched, and why: the task branch moving on ``origin`` and open
+        pull requests appearing or changing. Both used to park a writing attempt on the premise
+        that a branch or PR without one of our rows belongs to someone else — but a missing row is
+        not evidence of that (a recreated ``state.db`` loses every row while the branch and its PR
+        remain ours), and the publish path already handles a diverged remote properly: it merges
+        the foreign commits in locally, re-runs the checks over the combination, and only then
+        pushes. Parking here was that same recovery, spent earlier and less usefully. The base
+        branch was never watched either — it moves legitimately whenever someone merges their own
+        PR.
         """
         items: list[GitControlDriftItem] = []
-        pairs = (
-            (before.task_branch_sha, after.task_branch_sha, "the task branch on origin moved"),
-            (before.push_url_digest, after.push_url_digest, "the push destination changed"),
-            (
-                before.open_pr_urls,
-                after.open_pr_urls,
-                "open pull requests for the task branch changed",
-            ),
-        )
-        for was, now, detail in pairs:
-            if was is None or now is None or was == now:
-                continue
-            items.append(GitControlDriftItem("remote", detail))
-        # The absolute half of П2.2, and the reason the deltas above are not enough: what origin
-        # holds must be the commit we recorded pushing. A foreign push landing between two brackets
-        # is identical in both snapshots, so the delta cannot see it — this can. Only asked once we
-        # have pushed something (a branch that appeared before this task pushed anything is the
-        # publish path's business, and parking for it here would park every rerun onto a live
-        # branch); an unanswered probe (``None``) is still never read as a change.
         if (
-            after.recorded_push_sha
-            and after.task_branch_sha is not None
-            and after.task_branch_sha != after.recorded_push_sha
+            before.push_url_digest is not None
+            and after.push_url_digest is not None
+            and before.push_url_digest != after.push_url_digest
         ):
-            items.append(
-                GitControlDriftItem(
-                    "remote", "the task branch on origin is not the commit we pushed"
-                )
-            )
+            items.append(GitControlDriftItem("remote", "the push destination changed"))
         return items
 
     @staticmethod
@@ -2869,15 +2812,16 @@ class GitManager:
             body_path = self._body_with_notice(task_id, body_path, notice)
         reused = self._find_open_pr(task_id, branch, pr_base)
         if reused is not None:
-            if not self._store.publish_ref_recorded(KIND_PR, reused):
-                # Someone else's PR on this head. Appending to it would retitle it, could truncate
-                # its author's text, and would publish this task's work under their description —
-                # so stop before `gh pr create` (which refuses a duplicate head→base anyway).
-                raise ManualActionRequired(
-                    f"an open pull request for {branch!r} → {pr_base!r} exists that this "
-                    f"orchestrator did not open ({reused}); it will not be written into. Close it, "
-                    "or publish this task on a branch of its own"
-                )
+            # An open PR on this head is reused whether or not one of our rows already names it.
+            # It used to be refused unless a row did, on the premise that an unrecorded PR is
+            # someone else's — but absence of a row is not evidence of that: a recreated
+            # ``state.db`` loses every row while the branch and its PR are still ours, and that
+            # refusal then blocked publishing with no way forward but closing our own PR. Reusing
+            # it records it, so the question is settled from here on. The cost, stated plainly:
+            # a PR a person opened on this same head is retitled and appended to.
+            self._log_pr(task_id).info(
+                "reusing the open pull request for this head", extra={"pr": reused}
+            )
             self._append_reused_pr_body(
                 task_id, reused, branch=branch, title=title, body_path=body_path
             )

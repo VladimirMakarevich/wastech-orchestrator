@@ -2936,20 +2936,21 @@ def test_a_remote_branch_named_by_the_task_is_never_adopted_as_our_own_push(
 # --- the remote side of the per-attempt fingerprint --------------------------------------------
 
 
-def test_a_task_branch_appearing_on_the_remote_during_an_attempt_is_drift(
+def test_a_task_branch_appearing_on_the_remote_during_an_attempt_is_not_drift(
     git_repo,
     store: StateStore,
     tmp_path: Path,
     make_git_config: ConfigFactory,
     git_run: GitRunner,
 ) -> None:
-    # AC2.1 — the fingerprint now covers the remote: a task branch that shows up on origin while
-    # the agent is working is drift, which parks the task before it ever reaches checks.
+    # A branch showing up on origin while the agent works used to park the task, on the premise
+    # that a branch without one of our rows is someone else's. It is not evidence of that, and the
+    # publish path already recovers from a diverged remote (it merges the commits in locally, then
+    # re-runs the checks). So this is ordinary working state now, not drift.
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
     branch = gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     before = gm.capture_git_control_state()
-    assert before.remote.task_branch_sha == ""  # answered: origin has no such head
 
     other = tmp_path / "other"
     git_run(["clone", str(git_repo.remote), str(other)], tmp_path)
@@ -2960,22 +2961,19 @@ def test_a_task_branch_appearing_on_the_remote_during_an_attempt_is_drift(
     git_run(["commit", "--allow-empty", "-m", "pushed behind our back"], other)
     git_run(["push", "-u", "origin", branch], other)
 
-    drift = gm.compare_git_control_state(before)
-    assert drift is not None
-    assert any(item.aspect == "remote" for item in drift.items)
+    assert gm.compare_git_control_state(before) is None
 
 
-def test_a_foreign_push_between_two_brackets_is_still_drift(
+def test_a_foreign_push_over_our_own_pushed_commit_is_not_drift(
     git_repo,
     store: StateStore,
     tmp_path: Path,
     make_git_config: ConfigFactory,
     git_run: GitRunner,
 ) -> None:
-    # Пре2-1 / П2.2: the reference is the commit WE recorded pushing, not the previous snapshot. A
-    # foreign push that lands between two brackets is identical on both sides of the delta, so it
-    # used to become the baseline of the next attempt and never be drift at all — while the branch
-    # on origin was someone else's.
+    # The case the removed absolute comparison existed for: origin holds a commit that is not the
+    # one we recorded pushing. It is no longer drift — `push` sees the same divergence at publish
+    # time and merges it in before anything goes out, which is the recovery this parking pre-empted.
     _task(store)
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
     branch = gm.prepare_branch("task-001", "x", epoch=_EPOCH)
@@ -2993,30 +2991,7 @@ def test_a_foreign_push_between_two_brackets_is_still_drift(
     git_run(["commit", "--allow-empty", "-m", "someone else's commit"], other)
     git_run(["push", "origin", branch], other)
 
-    # Both snapshots are taken AFTER the foreign push, so the delta sees nothing: this is exactly
-    # the window the recorded-commit comparison exists to cover.
     before = gm.capture_git_control_state()
-    drift = gm.compare_git_control_state(before)
-    assert drift is not None
-    details = [item.detail for item in drift.items if item.aspect == "remote"]
-    assert details == ["the task branch on origin is not the commit we pushed"]
-
-
-def test_a_remote_branch_we_never_pushed_is_not_reported_against_a_recorded_commit(
-    git_repo,
-    store: StateStore,
-    tmp_path: Path,
-    make_git_config: ConfigFactory,
-) -> None:
-    # The other side of the same rule: with nothing recorded as pushed there is nothing to compare
-    # against, and a branch that existed before this task pushed anything is the publish path's
-    # business (four cases) — parking for it here would park every rerun onto a live branch.
-    _task(store)
-    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
-    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
-    before = gm.capture_git_control_state()
-    assert before.remote.recorded_push_sha is None
-
     assert gm.compare_git_control_state(before) is None
 
 
@@ -3137,21 +3112,27 @@ def test_push_refuses_when_the_push_destination_was_rewritten(
     assert op is None or op.status != "completed"  # never recorded as published
 
 
-def test_an_open_pr_we_did_not_open_parks_and_is_not_rewritten(
+def test_an_open_pr_with_no_recorded_row_is_reused_and_recorded(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
-    # AC2.4/AC3.4 — an open PR on this head that appears in none of our rows belongs to someone
-    # else. Writing into it would retitle it and publish this task under their description.
+    # Regression for the failure that motivated dropping the row check: a recreated `state.db` has
+    # no publish rows, so the orchestrator's own open PR appeared in none of them and publishing
+    # refused with no way forward but closing that PR. An open PR on this head is now reused
+    # whether or not a row names it — and reusing it writes the row, settling the question.
     _task(store)
     calls: list[list[str]] = []
     gh = _reuse_gh(calls, list_stdout='[{"url": "https://x/pull/5", "updatedAt": "2026-01-01"}]')
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    assert store.get_publish_op("task-001", "pr") is None  # nothing recorded it as ours
 
-    with pytest.raises(ManualActionRequired) as excinfo:
-        gm.create_pr("task-001", "feature/shared", title="t", body_path="x")
-    assert "https://x/pull/5" in str(excinfo.value)
-    assert [c[:2] for c in calls] == [["pr", "list"]]  # no view, no edit, no create
-    assert store.get_publish_op("task-001", "pr") is None
+    assert gm.create_pr("task-001", "feature/shared", title="t", body_path="x") == (
+        "https://x/pull/5"
+    )
+
+    verbs = [c[:2] for c in calls]
+    assert ["pr", "create"] not in verbs  # reused, never re-created
+    op = store.get_publish_op("task-001", "pr")
+    assert op is not None and op.result_ref == "https://x/pull/5"
 
 
 def test_every_gh_call_is_pinned_to_the_configured_repository(
@@ -3189,10 +3170,11 @@ def test_the_repo_pin_falls_back_to_the_clone_origin_when_the_config_names_none(
 
 
 def test_no_gh_call_site_bypasses_the_pinning_wrapper() -> None:
-    # Пре2-12: the behavioral test above drives two of the nine `gh` call sites, while floor 4
+    # Пре2-12: the behavioral test above drives two of the eight `gh` call sites, while floor 4
     # promises the pin for all of them. What makes the promise uniform is that every site goes
-    # through `_gh`, which appends `--repo` — so assert exactly that, structurally, for all nine:
+    # through `_gh`, which appends `--repo` — so assert exactly that, structurally, for all eight:
     # no site spells the executable itself, and none passes its own `--repo` (a double pin).
+    # Was nine until the per-attempt open-PR probe was removed with the branch/PR provenance gates.
     import ast
 
     source = Path(git_manager.__file__).read_text(encoding="utf-8")
@@ -3212,7 +3194,7 @@ def test_no_gh_call_site_bypasses_the_pinning_wrapper() -> None:
             for arg in ast.walk(node):
                 if isinstance(arg, ast.Constant) and arg.value == "--repo":
                     raise AssertionError("a gh call site adds its own --repo; the wrapper does it")
-    assert through_wrapper >= 9  # every site the audit counted, and any added since
+    assert through_wrapper >= 8  # every site the audit counted, and any added since
 
     # And the executable is launched from one place only: an argv list starting with "gh" outside
     # the wrapper would be a site the pin never reaches.

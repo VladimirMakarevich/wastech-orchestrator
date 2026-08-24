@@ -1573,22 +1573,6 @@ class StateStore:
             pushed_sha=row["pushed_sha"],
         )
 
-    def publish_ref_recorded(self, kind: str, result_ref: str) -> bool:
-        """True iff *result_ref* is one this orchestrator recorded for *kind* — for any task.
-
-        Deliberately not scoped to a single task: a chain of tasks on one branch converges on one
-        PR, so the second task must recognise the first task's PR as ours. What it separates is
-        ours from everyone's — a PR opened by a person (or by an agent that got hold of ``gh``)
-        appears in no row, and publishing must not write into it.
-        """
-        if not result_ref:
-            return False
-        cur = self._conn.execute(
-            "SELECT 1 FROM publish_operations WHERE kind = ? AND result_ref = ? LIMIT 1",
-            (kind, result_ref),
-        )
-        return cur.fetchone() is not None
-
     def clear_publish_operations(
         self, task_id: str, conn: sqlite3.Connection | None = None
     ) -> None:

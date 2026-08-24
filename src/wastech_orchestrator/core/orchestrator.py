@@ -1272,10 +1272,15 @@ class Orchestrator:
                 pr_url = self._git.recorded_pr_url(task_id)
                 has_remote = bool(row.branch) and self._git.remote_branch_exists(row.branch or "")
                 if (has_remote or pr_url) and not force_reset_remote:
-                    refusals.append(
+                    # A note, not a refusal: a leftover remote branch or open PR is ordinary
+                    # working state that publishing reuses (the push recovers from a diverged
+                    # remote, and an open PR on this head is appended to and recorded). Refusing
+                    # here forced `finalize` or --force-reset-remote for a condition that needs
+                    # neither. --force-reset-remote remains for deliberately deleting the branch.
+                    notes.append(
                         f"a prior attempt left a remote branch / open PR ({pr_url or row.branch}); "
-                        "resolve it with `finalize` first, or pass --force-reset-remote to delete "
-                        "the remote branch (this closes the PR)"
+                        "it will be reused — pass --force-reset-remote to delete the remote branch "
+                        "instead (this closes the PR)"
                     )
             elif self._store.get_flow_checkpoint(task_id)[0]:
                 refusals.append(

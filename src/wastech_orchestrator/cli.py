@@ -3135,8 +3135,8 @@ def _gh_repo_pin_line(config: OrchestratorConfig) -> tuple[bool, str]:
     detail = (
         "repo.url names no hosted OWNER/REPO (an ssh alias, a file:// URL or a local path), so no "
         "gh call can be pinned with --repo: gh would infer the repository from the clone, which is "
-        "the surface the control-state fingerprint exists to watch, and the open-PR probe behind "
-        "floor 2 is not asked at all"
+        "the surface the control-state fingerprint exists to watch — the probe that decides which "
+        "pull request this task appends to included"
     )
     if config.git.create_pull_request:
         return False, (
@@ -3381,8 +3381,8 @@ def run_preflight(
     # Whether every `gh` call can actually name its repository — the second half of floor 4, which
     # switches off silently when the configured URL names no hosted repository (an ssh alias, a
     # `file://` URL, a local path). Without the pin `gh` infers the repository from the clone, i.e.
-    # from the very surface the fingerprint exists to watch, and the open-PR probe is not asked at
-    # all. Printed at every isolation setting: the pin is not a mode feature.
+    # from the very surface the fingerprint exists to watch, the pull-request reuse probe included.
+    # Printed at every isolation setting: the pin is not a mode feature.
     pin_ok, pin_line = _gh_repo_pin_line(config)
     ok = ok and pin_ok
     lines.append(pin_line)

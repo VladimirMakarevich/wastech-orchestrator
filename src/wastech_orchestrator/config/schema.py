@@ -309,7 +309,7 @@ class RepoConfig:
     # or an ``insteadOf`` rewrite cannot retarget a pull request. A URL that names no hosted
     # repository (an ssh alias like ``git@ghwork:o/n.git``, a ``file://`` URL, a local path) yields
     # no pin —
-    # ``gh`` then infers the repository from the clone and the open-PR probe is not asked at all.
+    # ``gh`` then infers the repository from the clone, the pull-request reuse probe included.
     # ``worc preflight`` prints that verdict as its own ``gh-repo-pin`` line: fatal when this
     # configuration opens pull requests, a warning otherwise. Prefer the
     # ``https://host/owner/name`` form when the ssh transport is not required.

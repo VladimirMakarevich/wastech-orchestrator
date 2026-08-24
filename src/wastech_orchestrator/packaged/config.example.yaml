@@ -148,9 +148,13 @@ security:
                                       #        there this level rests on the tool-level write denies
                                       #        — `worc preflight --paid-isolation-probe` is the one
                                       #        instrument that can answer it on your host;
-                                      #     2. publication to your origin is held by DETECTION — a
-                                      #        branch or PR appearing without the orchestrator's
-                                      #        record parks the task;
+                                      #     2. publication to your origin is NOT held and NOT
+                                      #        detected — a branch appearing or moving on origin,
+                                      #        and a PR appearing on the task head, are ordinary
+                                      #        working state: publishing merges a diverged remote
+                                      #        in locally, re-runs the checks, and adopts an open
+                                      #        PR on that head (yours included — it gets retitled
+                                      #        and appended to);
                                       #     3. publication ANYWHERE ELSE is held by NOTHING and is
                                       #        reachable today: the agent has the network, and
                                       #        credentials are picked up automatically. Nothing is
