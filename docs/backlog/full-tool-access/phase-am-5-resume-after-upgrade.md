@@ -16,7 +16,7 @@ cannot be migrated in place; delete the local state.db or start a fresh workspac
 (greenfield — there is no production data to preserve)
 ```
 
-Отказ ставит ветка `0 < current < DB_SCHEMA_VERSION` в [`_enforce_schema_version`](../../../src/wastech_orchestrator/state_store.py) ([`state_store.py:180-186`](../../../src/wastech_orchestrator/state_store.py)). Она не смотрит, **чем** отличаются две схемы: любая версия ниже текущей объявлена разрушительной по построению.
+Отказ ставит ветка `0 < current < DB_SCHEMA_VERSION` в [`_enforce_schema_version`](../../../src/wastech_orchestrator/state_store.py) ([`state_store.py:175-186`](../../../src/wastech_orchestrator/state_store.py)). Она не смотрит, **чем** отличаются две схемы: любая версия ниже текущей объявлена разрушительной по построению.
 
 **Почему это неверно здесь.** Разница между v24 и v25 ровно одна колонка, и она аддитивная и nullable:
 
@@ -42,7 +42,7 @@ sqlite3 .worc/state.db "ALTER TABLE tasks ADD COLUMN base_ref TEXT; PRAGMA user_
 
 Отрицательное требование: не превращать `_migrate` в общий движок миграций. Разрушительные ступеньки остаются fail-closed, меняется только то, что аддитивная перестаёт выдавать себя за разрушительную.
 
-## Ам5-2 — своя незакоммиченная работа не опознаётся, если её написал `agent`-узел
+## Ам5-2 — своя незакоммиченная работа не опознаётся, пока не отработал критик
 
 **Что произошло.** Дерево после парковки держало написанную главу — выход узлов `write` и `polish`. `rerun --continue` отказал:
 
@@ -51,7 +51,7 @@ rerun: the working tree has unaccounted changes
 (mobile/wastime-journey-book/18a_journey_recap_time_journey_ru.md); resolve them before rerun
 ```
 
-Отказ ставит [`orchestrator.py:1209-1213`](../../../src/wastech_orchestrator/core/orchestrator.py) по предикату `resume_tolerates_wip` ([`:1201`](../../../src/wastech_orchestrator/core/orchestrator.py)), а тот — [`_worktree_is_task_output`](../../../src/wastech_orchestrator/core/orchestrator.py) ([`:1123`](../../../src/wastech_orchestrator/core/orchestrator.py)):
+Отказ ставит [`orchestrator.py:1212-1216`](../../../src/wastech_orchestrator/core/orchestrator.py) по предикату `resume_tolerates_wip` ([`:1204`](../../../src/wastech_orchestrator/core/orchestrator.py)), а тот — [`_worktree_is_task_output`](../../../src/wastech_orchestrator/core/orchestrator.py) ([`:1126`](../../../src/wastech_orchestrator/core/orchestrator.py)):
 
 ```python
 return any(
@@ -60,17 +60,82 @@ return any(
 )
 ```
 
-**Почему это неверно.** Предикат отвечает на вопрос «дошла ли задача до стадии, которая работает по произведённому коду» — и берёт ответ по трём видам узлов, ни один из которых не пишет. Пишет `agent`. В прогоне 18A к моменту парковки отработали `brief` (agent), `write` (agent), `prose_lint` (**tool**) и `polish` (agent): глава написана целиком и вычитана, а предикат говорит «дерево чужое».
+### Что предикат меряет на самом деле
 
-Это не частный случай флоу. Контентные флоу этого репозитория собраны из `agent` и `tool`: гейты — `check_prose` и `check_journey`, оба `kind: tool`. То есть **ни один прогон такого флоу не может быть продолжен через `--continue`, если он припарковался в фазе письма** — а именно там он и паркуется, потому что там живёт вся работа.
+Докстринг обещает «дошла ли задача до стадии, которая работает по **произведённому** коду», и это верное намерение. Но реализация — **префиксная проверка по позиции в графе**, а не вопрос «писал ли кто-нибудь». Она включается ровно тогда, когда **стартовал** первый узел вида `evaluator` / `checks` / `publish`: строка в `node_runs` заводится со `status="running"` в начале узла ([`agent.py:498`](../../../src/wastech_orchestrator/core/flow/nodes/agent.py), [`evaluator.py:156`](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py)), а не по его завершении.
 
-**Второй носитель того же предиката.** `preserve_own_wip` ([`:1958`](../../../src/wastech_orchestrator/core/orchestrator.py) и [`:4529`](../../../src/wastech_orchestrator/core/orchestrator.py)) считается им же. Данные при этом не теряются — `terminal_cleanup` в `new`-режиме на грязном дереве без `preserve_own_wip` не чекаутит базу поверх работы, а честно отдаёт `safe=False` ([`git_manager.py:3236-3243`](../../../src/wastech_orchestrator/git_manager.py)). Но слот остаётся заблокированным, и оператор получает второй отказ там, где фаза Ам-5 обещала предупреждение.
+Из этого следует главное: между **первым пишущим узлом** и **первым критиком** у каждого флоу есть окно, в котором работа уже вся на диске, а предикат ещё отвечает «дерево чужое». Назовём его слепым окном.
 
-**Обход, применённый руками.** Написанная глава закоммичена оператором на ветку задачи отдельным коммитом, дерево стало чистым, `rerun --continue --from polish` пошёл. Обход рабочий, но он делает ровно то, чего Т5.2 не хотела: работа задачи попадает в PR коммитом оператора, а не коммитом `commit_code`, и в отчётный дифф от `base_ref` она уже не войдёт — `base_ref` встанет на resume поверх неё.
+### Слепое окно есть почти у всех флоу, а не у контентных
 
-**Что нужно.** Предикат должен опознавать выход пишущего узла. Носитель уже есть и уже читается — `node_runs.node_kind`; добавляется `agent` с непустым `permission_profile: workspace-write` (или просто `agent`, если различать профили не нужно). Тогда «дошла ли задача до стадии, которая пишет» отвечается по тому, что действительно писало, а не по трём видам узлов, которые бывают рядом.
+Замер по всем поставляемым и всем операторским флоу этого хоста — узлы от первого `agent` с `permission_profile: workspace-write` до первого `evaluator` / `checks` / `publish`:
 
-Проверка, которую стоит держать тестом: флоу без единого `evaluator` / `checks` / `publish` узла, припаркованное после пишущего узла, продолжается `--continue` и своё WIP не теряет.
+| Флоу | Слепое окно | Предикат включает |
+| --- | --- | --- |
+| `implementation` (поставляемый) | `implementation` | `testing` (checks) |
+| `merge` (поставляемый) | `conflict_resolution` | `testing` (checks) |
+| `blog_article` / `blog_article_revise` | `draft` / `revise`, `length` | `tone_style` (evaluator) |
+| `content_chapter` (поставляемый) | `revise`, `constraints` | `story_critic` (evaluator) |
+| `content_translate` | `adapt_en`, `constraints_en` | `en_critic` (evaluator) |
+| `content_structure` | `restructure`, `constraints` | `structure_critic` (evaluator) |
+| `content_book` | `assemble` | `book_critic` (evaluator) |
+| `content_chapter` (операторский, 20 узлов) | `write`, `prose_lint`, `polish`, `form_gate`, `form_fixing` | `continuity_critic` (evaluator) |
+| `deep_research` | — | `coverage_gate` стоит **до** письма |
+| `security_audit` | — | пишущего узла нет вовсе |
+
+То есть исключений два, и оба по случайности раскладки: `deep_research` ставит гейт покрытия раньше письма, а `security_audit` вообще ничего не пишет. **Все остальные тринадцать имеют окно**, включая `implementation` — флагманский кодовый флоу, где окно состоит ровно из узла `implementation`, самого длинного и самого вероятного места парковки во всей кампании.
+
+Отдельно снимаю собственную формулировку первой редакции этого документа: «контентные флоу собраны из `agent` и `tool`, гейтов-`evaluator` у них нет» — неверно. У операторского `content_chapter` пять `evaluator`-узлов (`continuity_critic`, `reader_critic`, `rules_critic`, `regression_critic`, `bookkeeping_critic`). Дело не в том, что критиков нет, а в том, что все пять стоят **после** фазы письма — а окно длиной в пять узлов делает эту фазу самым вероятным местом парковки в этом флоу.
+
+### Трассировка 18A
+
+`node_runs` на момент отказа — четыре строки, ни одной подходящей под предикат:
+
+```text
+id  node_id     node_kind  status
+78  brief       agent      succeeded
+79  write       agent      succeeded     ← глава написана целиком
+80  prose_lint  tool       passed
+81  polish      agent      succeeded     ← вычитана; здесь парковка
+```
+
+Глава на диске — 8 601 байт, семь страниц, ни одной заглушки. Предикат: `any(kind in {evaluator, checks, publish})` по `{agent, agent, tool, agent}` → `False`. Вердикт — «дерево чужое», хотя каждый байт в нём написан этой самой задачей.
+
+### Один и тот же узел даёт два разных вердикта
+
+`get_node_runs` возвращает **все** строки задачи без фильтра по попытке ([`state_store.py:1048-1053`](../../../src/wastech_orchestrator/state_store.py)). Значит предикат липкий: стоит задаче один раз пройти первого критика, и он остаётся истинным навсегда.
+
+Проверяется на этой же задаче. Тот же `journey-18a-journey-recap` после успешного прогона держит в `node_runs` двадцать четыре строки, включая `continuity_critic` (evaluator) и `publish` (publish). Припаркуйся она сейчас на `polish` второй раз, с тем же деревом и тем же содержимым, — `--continue` пройдёт без замечания. Разный ответ на одно и то же состояние, и различает их не дерево, а история попыток.
+
+### Второй носитель того же предиката
+
+`preserve_own_wip` считается им же — [`orchestrator.py:1961`](../../../src/wastech_orchestrator/core/orchestrator.py) (штатный путь) и [`:4532`](../../../src/wastech_orchestrator/core/orchestrator.py) (`_go_terminal`). Данные при этом не теряются: `terminal_cleanup` в `new`-режиме на грязном дереве без `preserve_own_wip` не чекаутит базу поверх работы, а отдаёт `safe=False` ([`git_manager.py:3236-3242`](../../../src/wastech_orchestrator/git_manager.py)). Но слот остаётся заблокированным, и оператор получает второй отказ там же, где Ам-5 обещала предупреждение. В прогоне 18A это не выстрелило только потому, что `branch_mode: current` уводит `terminal_cleanup` в раннюю ветку `returns_to_base(mode) == False` — то есть спасла настройка репозитория, а не логика.
+
+### Обход, применённый руками
+
+Написанная глава закоммичена на ветку задачи отдельным коммитом (`8cc1e6b`), дерево стало чистым, `rerun --continue --from polish` пошёл. Цена обхода видна в результате и стоит того, чтобы её назвать:
+
+- работа задачи попала в PR коммитом оператора, а не коммитом `commit_code`;
+- `base_ref` встал на resume **поверх** этого коммита, поэтому в отчётный дифф задачи глава не вошла — итоговый `commit_code` показывает 14 строк правок вместо всей главы;
+- то есть обход руками производит ровно тот эффект, против которого написана Т5.2: «увидено и предъявлено» превращается в «предъявлено под чужим именем».
+
+Альтернатива обходу была одна — выбросить дерево и переписать главу с нуля, то есть заплатить второй раз за работу, которая уже сделана и лежит на диске.
+
+### Что нужно
+
+Предикат должен отвечать на вопрос, который заявлен в его докстринге: **писал ли кто-нибудь в это дерево от имени задачи**. Два варианта, оба по уже читаемому носителю:
+
+1. **Дёшево и почти точно:** добавить `"agent"` в множество. Одна строка. Плата: `read-only` агент-узел тоже засчитается — но в advanced mode шелл есть у каждого класса узлов ([Ам-3](phase-am-3-tools-and-shell.md)), так что `read-only` там пишет ничуть не хуже, и для режима это скорее уточнение, чем послабление.
+2. **Точно:** различать по `permission_profile`. Носителя нет — в `node_runs` этой колонки нет (`id, task_id, node_id, node_kind, subtask_order, status, outcome, route_*, provider_used, error_class, stage_attempts, commit_sha_*, started_at, finished_at, skipped, skip_reason`), а перечитывать флоу предикат намеренно не хочет: докстринг объясняет, что он читает `node_runs` именно затем, чтобы не зависеть от `task_type` и пережить дрейф файла флоу. Значит это аддитивная колонка — то есть упирается в [Ам5-1] и должна ехать вместе с ней.
+
+Рекомендация: вариант 1 сейчас, вариант 2 — если появится причина различать профили, вместе с починкой [Ам5-1].
+
+### Проверки, которые стоит держать тестами
+
+- Флоу, припаркованное на пишущем узле **до** первого `evaluator` / `checks` / `publish`, продолжается `--continue` и своё WIP не теряет. Минимальный граф: `agent(workspace-write)` → `publish`; парковка на первом узле.
+- Тот же граф в `new`-режиме: `terminal_cleanup` не отдаёт `safe=False` на своём же WIP, а оставляет `HEAD` на ветке.
+- Обратное свойство сохраняется: дерево, грязное **до** первого пишущего узла (парковка на `brief` / планировании), по-прежнему отказывает — это и есть тот чужой WIP, ради которого сторож заводился.
+- Против липкости: задача, у которой в истории уже есть `evaluator`, но текущая попытка припарковалась до пишущего узла, отказывает. Сегодня она проходит.
 
 ## Чем кончилась проба
 
