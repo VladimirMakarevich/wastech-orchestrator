@@ -46,6 +46,7 @@ from wastech_orchestrator.core.flow.control_bundle import (
     ControlBundleError,
     FrozenControlBundle,
     digest_live_control_inputs,
+    diverged_control_inputs,
     freeze_control_bundle,
     load_control_bundle,
 )
@@ -63,6 +64,7 @@ from wastech_orchestrator.core.flow.engine_driver import (
 from wastech_orchestrator.core.flow.exchange_seal import (
     ExchangeCleanupBlocked,
     ExchangeSealError,
+    clear_foreign_exchange_entries,
     ensure_current_exchange,
     quarantine_contaminated,
     seal_exchange,
@@ -215,7 +217,6 @@ from wastech_orchestrator.providers.base import (
 )
 from wastech_orchestrator.providers.exchange import (
     ExchangeError,
-    assert_exchange_current_task_only,
     clear_exchange_task_dir,
     diff_exchange_manifests,
 )
@@ -2278,24 +2279,67 @@ class Orchestrator:
         return frozen, bundle, live_flow_dir
 
     def _verify_control_plane_unchanged(
-        self, snapshot: FlowSnapshot, live_flow_dir: Path, expected_digest: str
+        self,
+        p: _Pipeline,
+        snapshot: FlowSnapshot,
+        live_flow_dir: Path,
+        expected_digest: str,
+        bundle_dir: Path | None,
+        reported: set[str],
     ) -> None:
-        """Fail closed (manual) unless the live control plane still matches the frozen digest.
+        """Compare the live control plane against the frozen digest; two findings, two verdicts.
 
-        Re-hashes the live flow/role/tool inputs the bundle was frozen from and compares to the
-        parent-held digest. A planted symlink/hard-link (surfaced by the no-follow identity checks)
-        or any content change is a non-fallback security violation — the provider tree is already
-        proven quiescent, so a change means a control file was mutated under the run.
+        A **substituted** file — a planted symlink or hard-link where a control input should be,
+        surfaced by the no-follow identity checks — stays a fail-closed
+        ``manual_action_required``. That is not "the file changed"; it is the file replaced by a
+        pointer at something else, and nothing an operator does in the ordinary course looks like
+        it.
+
+        A **content** change is a warning and the run continues (owner decision, 2026-08-24). The
+        code cannot tell an agent rewriting a role prompt from the operator editing their own flow
+        YAML mid-run — the invariant used to claim it could — and on a repository where the operator
+        edits flows several times a day the second reading is the common one. Whether the run had
+        parked came down to whether they saved the file a minute before the freeze or a minute
+        after. What the freeze already guarantees is what happens instead: the run continues on the
+        **frozen** bundle, so the edit does not take effect and cannot select control bytes for a
+        downstream node. It applies from the next run, or from a ``rerun --continue``, which adopts
+        it on purpose.
+
+        The warning names the diverged keys, because "the control plane changed" is not actionable
+        and "flows/content_chapter.yaml" is. ``reported`` is the run's set of live digests already
+        warned about: the check runs after every node, and one edit would otherwise print the same
+        line once per remaining node in the flow.
         """
         try:
             live_digest = digest_live_control_inputs(snapshot, live_flow_dir, self._tool_registry)
         except ControlBundleError as exc:
             raise NodeManualRequired(f"control plane changed during the run: {exc}") from exc
-        if live_digest != expected_digest:
-            raise NodeManualRequired(
-                "control plane (flow / role prompt / tool) was modified during a provider attempt; "
-                "refusing to run downstream nodes on provider-selected control bytes"
-            )
+        if live_digest == expected_digest or live_digest in reported:
+            return
+        reported.add(live_digest)
+        self._log(p.task.id).warning(
+            "the live control plane no longer matches the frozen bundle; this run continues on the "
+            "frozen copy, so the edit takes effect from the next run or from `rerun --continue`",
+            extra={"changed": self._diverged_control_keys(snapshot, live_flow_dir, bundle_dir)},
+        )
+
+    def _diverged_control_keys(
+        self, snapshot: FlowSnapshot, live_flow_dir: Path, bundle_dir: Path | None
+    ) -> str:
+        """The diverged control-input keys for the warning, as one comma-separated field.
+
+        Best-effort and message-only: the verdict above is already decided against the parent-held
+        digest. This reads the frozen copies off disk to name what moved, so it cannot see a
+        provider that rewrote a live file and its frozen twin together — which is exactly the case
+        the parent-held digest catches, and the case this reports as ``unidentified``.
+        """
+        if bundle_dir is None:
+            return "unidentified"
+        try:
+            keys = diverged_control_inputs(snapshot, live_flow_dir, self._tool_registry, bundle_dir)
+        except (ControlBundleError, OSError):
+            return "unidentified"
+        return ", ".join(keys) if keys else "unidentified"
 
     def _resolve_node_overrides(
         self, p: _Pipeline, snapshot: FlowSnapshot
@@ -2648,25 +2692,51 @@ class Orchestrator:
     ) -> PipelineResult:
         """Build the node services/inputs and drive the flow (fresh or resumed). The preamble
         (preflight, branch) + terminal handling live in the callers; this is the engine core."""
-        # Pre-launch invariant (fresh + resume): the exchange root may hold at most this
-        # task's directory. Fails closed on a stale/foreign exchange before any provider launches.
-        # A stale/foreign/locked entry is an operator-remediable condition — route it to a clean
+        # Pre-launch invariant (fresh + resume): the exchange root may hold at most this task's
+        # directory. Leftover entries from a run that died before its seal are cleared and named —
+        # the directory is private and rebuilt from durable facts, so refusing to start over it
+        # stopped a task for a state one delete fixes. A root or task entry *substituted* by a
+        # symlink is a different finding and still fails closed: route it to a clean
         # ``manual_action_required`` (naming the offending entry) instead of letting the bare
         # ``ExchangeError`` escape uncaught and crash-loop the daemon (the border already holds — no
         # provider has launched). Mirrors the adjacent ``ExchangeSealError`` handling below.
         try:
-            assert_exchange_current_task_only(self._exchange_root, p.task.id)
-        except ExchangeError as exc:
+            cleared = clear_foreign_exchange_entries(self._exchange_root, p.task.id)
+        except (ExchangeError, OSError) as exc:
             return self._go_terminal(
                 p, Status.MANUAL_ACTION_REQUIRED, manual_reason=f"exchange not clean: {exc}"
             )
+        if cleared:
+            self._log(p.task.id).warning(
+                "cleared leftover exchange entries from an earlier run",
+                extra={"removed": ", ".join(cleared)},
+            )
+        # Operator ``rerun --continue`` (``continue_task``) sets this marker; automatic
+        # crash-recovery never does. It is what separates "a person read the diagnosis and decided"
+        # from "the daemon came back up", and both the exchange guard below and the control-plane
+        # freeze further down key their trust on it.
+        adopt = resume and p.task.id in self._continue_adopt
         # On a continue, establish the verified current-task exchange before any node runs:
         # restore + verify the latest sealed snapshot (terminal continue), verify-and-reuse the
-        # still-active exchange (parked/crashed continue), or refuse a contaminated/unsafe task. A
-        # fresh run starts from the clean exchange the rerun/restart path already cleared.
+        # still-active exchange (parked/crashed continue), or refuse an unsafe task. A fresh run
+        # starts from the clean exchange the rerun/restart path already cleared.
         if resume:
             try:
                 contaminated, active_unsafe = self._store.get_exchange_guard(p.task.id)
+                if contaminated and adopt:
+                    # The contamination flag stops being a life sentence (owner decision,
+                    # 2026-08-24). Detection still parks the run and still quarantines the tree as
+                    # evidence — that is the one agent-side guard the phase kept — but an operator
+                    # who has read the diagnosis had no way to continue at all, only to re-pay for a
+                    # fresh run. Their `--continue` clears it, on the same trust the control
+                    # plane is adopted on; the daemon's own recovery sets no marker and still
+                    # refuses.
+                    self._store.update_task(p.task.id, exchange_contaminated=0)
+                    contaminated = False
+                    self._log(p.task.id).warning(
+                        "continuing over an exchange flagged contaminated by mutation detection — "
+                        "the operator asked for this resume; the quarantined evidence is kept"
+                    )
                 ensure_current_exchange(
                     self._exchange_root,
                     self._artifacts_root,
@@ -2681,9 +2751,8 @@ class Orchestrator:
         # Freeze (fresh/restart) or load+verify (continue) the control plane before any
         # node runs, then bind every flow/supervisor/tool consumer to the frozen bundle instead of
         # live ``.worc``. A freeze/verify/parked-conflict failure is a fail-closed manual condition.
-        # Operator ``rerun --continue`` (``continue_task``) adopts the live control plane; automatic
-        # crash-recovery never sets the marker, so it keeps the fail-closed parked-conflict refuse.
-        adopt = resume and p.task.id in self._continue_adopt
+        # Operator ``rerun --continue`` adopts the live control plane; automatic crash-recovery
+        # never sets the marker, so it keeps the fail-closed parked-conflict refuse.
         try:
             snapshot, bundle, live_flow_dir = self._prepare_control_bundle(
                 p, resume=resume, adopt=adopt
@@ -2773,6 +2842,7 @@ class Orchestrator:
                 resume=resume,
                 live_flow_dir=live_flow_dir,
                 control_digest=bundle.bundle_digest,
+                control_bundle_dir=bundle.root,
             )
         except NodeManualRequired as exc:
             self._sync_counters_from_run_state(p, run_state)
@@ -3011,6 +3081,7 @@ class Orchestrator:
         resume: bool = False,
         live_flow_dir: Path | None = None,
         control_digest: str | None = None,
+        control_bundle_dir: Path | None = None,
     ) -> FlowRunResult:
         """Drive the flow in phases. Fresh: a flow with no decomposition runs in one pass; a
         decomposed one runs pre (entry…proposed_by) once, the sub_flow region once per subtask
@@ -3019,7 +3090,12 @@ class Orchestrator:
         ``current_node``, and a decomposed run re-enters the active uncommitted subtask at the
         region entry (committed subtasks are skipped, never re-committed)."""
         post_node = self._engine_post_node(
-            p, inputs, snapshot, live_flow_dir=live_flow_dir, control_digest=control_digest
+            p,
+            inputs,
+            snapshot,
+            live_flow_dir=live_flow_dir,
+            control_digest=control_digest,
+            control_bundle_dir=control_bundle_dir,
         )
         facts = self._engine_facts(completeness, snapshot)
         if resume and run_state.current_node is None:
@@ -3457,6 +3533,35 @@ class Orchestrator:
             triggers=triggers,
         )
 
+    def _announce_observe_cadence(
+        self, p: _Pipeline, configured: ObserveMode, in_force: ObserveMode
+    ) -> None:
+        """Say it once per run when the flow observes less often than the operator asked for.
+
+        The narrowing itself is legitimate and stays — a flow is the narrower authority, and the
+        validator already refused the other direction — but it used to happen in silence. An
+        operator who configured ``events`` with ``triggers: [rework, failure, fallback]`` and then
+        ran a packaged content flow (they all ship ``none``) got five runs with a real provider
+        fallback in them and not one observation, with nothing anywhere saying why. So the line
+        names both modes and the triggers that stop applying, which is the part that is actually
+        surprising: the triggers are configured globally and discarded per flow.
+
+        Whether a ``failure`` / ``fallback`` trigger *should* survive a narrowing is a question for
+        the operator, not for this method. It makes the loss visible; it does not decide it.
+        """
+        if in_force is configured:
+            return
+        extra: dict[str, object] = {
+            "configured_observe_mode": configured.value,
+            "observe_mode": in_force.value,
+        }
+        if in_force is ObserveMode.NONE and self._config.supervisor.observe.triggers:
+            extra["dropped_triggers"] = ",".join(self._config.supervisor.observe.triggers)
+        self._log(p.task.id).info(
+            "observation cadence narrowed by the flow; the whole-task summary is unaffected",
+            extra=extra,
+        )
+
     def _engine_post_node(
         self,
         p: _Pipeline,
@@ -3465,6 +3570,7 @@ class Orchestrator:
         *,
         live_flow_dir: Path | None = None,
         control_digest: str | None = None,
+        control_bundle_dir: Path | None = None,
     ) -> Callable[[FlowNode, NodeOutcome, int], None]:
         """Engine post-node hook: verify the live control plane is unchanged, let the
         supervisor layer observe the completed step (when the kind is observable at all and the
@@ -3477,10 +3583,12 @@ class Orchestrator:
         # once per run from data — the engine never maps a flow name or a node id to a mode.
         flow_supervisor = snapshot.doc.supervisor
         flow_observe = flow_supervisor.observe if flow_supervisor is not None else None
+        configured_mode = self._config.supervisor.observe.mode
         observe_mode = observe_cadence.resolve_mode(
-            self._config.supervisor.observe.mode,
+            configured_mode,
             flow_observe.mode if flow_observe is not None else None,
         )
+        self._announce_observe_cadence(p, configured_mode, observe_mode)
         # Redaction literals for the node-output writer, harvested once per run (same set the memory
         # write path uses): raw structured output is not adapter-redacted, so scrub it at write.
         node_output_secrets = self._memory_extra_secrets()
@@ -3490,15 +3598,26 @@ class Orchestrator:
         report_dir = resolve_output_policy(snapshot.doc.output_policy, p.task.id).report_dir(
             self._config.repo.local_path
         )
+        # Live control-plane digests already warned about in this run — see the verify method.
+        reported_control_drift: set[str] = set()
 
         def post_node(node: FlowNode, outcome: NodeOutcome, node_run_id: int) -> None:
-            # Before any downstream consumer runs, prove the live control plane (flow /
-            # role / tool) has not changed since freeze. The quiescence barrier has proven the
-            # provider
-            # tree quiescent for this node's attempt(s), so a diff here means a control file was
-            # mutated under the running task — a non-fallback manual-action security violation.
+            # Compare the live control plane (flow / role / tool) against the freeze before any
+            # downstream consumer runs. The quiescence barrier has proven the provider tree
+            # quiescent for this node's attempt(s), so a diff here means a control file moved under
+            # the running task — but the fingerprint cannot say whose hand moved it, and on a
+            # repository whose operator edits flows daily it is usually theirs. So a content change
+            # warns and the run carries on over the frozen bytes, while a file *substituted* by a
+            # symlink or hard-link is still fail-closed. See the method.
             if live_flow_dir is not None and control_digest is not None:
-                self._verify_control_plane_unchanged(snapshot, live_flow_dir, control_digest)
+                self._verify_control_plane_unchanged(
+                    p,
+                    snapshot,
+                    live_flow_dir,
+                    control_digest,
+                    control_bundle_dir,
+                    reported_control_drift,
+                )
             # The constant supervisor layer observes the completed step read-only (advisory),
             # subject
             # to two independent gates. First the kind: the three in `_UNOBSERVED_NODE_KINDS` are
@@ -3552,16 +3671,19 @@ class Orchestrator:
                     "the tree, this should have been denied",
                     extra={"stage": node.id},
                 )
-            # The sharper half of the same never-park rule (operator decision 2): such a node
-            # changed git control state — a hook, `.git/config`, the index. Continuing means
-            # the orchestrator's own next git command (commit / branch switch / push) runs in that
-            # clone, so this warning names the drifted aspect and says to stop the run rather than
-            # merely "inspect". A workspace-write agent node doing the same still parks the task.
+            # The sharper half of the same never-park rule, and since 2026-08-24 it covers every
+            # node class including the writing one: git control state moved — a moved `HEAD`, the
+            # index, a hook, `.git/config`. Most of that is the operator working in their own
+            # repository, which is why it no longer stops the task; the part that is not is the
+            # reason this stays a warning rather than an info, because continuing means the
+            # orchestrator's own next git command (commit / branch switch / push) runs in that
+            # clone. So it names the drifted aspect and says to stop the run rather than merely
+            # "inspect" — the operator is the one who can tell their own commit from a planted hook.
             if outcome.git_control_drift is not None:
                 self._log(p.task.id).warning(
-                    "a node with no write access changed git control state — continuing per "
-                    "policy, but stop the run and discard the clone before it is committed or "
-                    "pushed",
+                    "git control state changed during this node — continuing per policy; if you "
+                    "did not do this yourself, stop the run and discard the clone before it is "
+                    "committed or pushed",
                     extra={"stage": node.id, "drift": outcome.git_control_drift},
                 )
             # Publishing had to merge in commits this orchestrator did not make. The run is a
@@ -4226,6 +4348,43 @@ class Orchestrator:
             )
         return self._go_terminal(p, status, manual_reason=error, already_moved=moved)
 
+    def _explain_terminal(self, p: _Pipeline, final: Status, reason: str | None) -> bool:
+        """Say why a non-``done`` terminal happened, and leave the artifacts needed to act on it.
+
+        Three things, in the order a human reads them: the reason as a ``warning`` beside the
+        status change, ``failure_report.json``/``stuck.md`` for the failing node's evidence, and
+        the run summary for what did happen before the stop. Each is produced only when it is not
+        already there — ``_fail`` and the engine's fix-budget recorder write the report on their
+        own paths, the publish node's finalize hook writes the summary on its own — so this fills
+        the gap rather than doing anyone's work twice.
+
+        The summary degrades to the deterministic minimum (the packet's durable facts; no LLM, no
+        supervisor turn), which on this path is the only option: the finalize hook lives inside the
+        publish node, and a task that stopped at an earlier node never reaches it. Returns whether
+        the task file was moved, which the caller folds into its ``already_moved``.
+
+        Best-effort by construction. The terminal status is already computed and must stay stable,
+        so a filesystem or git problem here is logged rather than raised.
+        """
+        log = self._log(p.task.id)
+        if reason:
+            log.warning("task stopped", extra={"final_status": final.value, "reason": reason})
+        row = self._store.get_task(p.task.id)
+        if row is not None and not row.failure_report_path:
+            self._write_infra_failure_report(
+                p,
+                node_id=self._store.get_flow_checkpoint(p.task.id)[0],
+                error=reason or f"terminal transition to {final.value}",
+                run_state=None,
+            )
+        if (task_artifact_dir(self._artifacts_root, p.task.id) / SUMMARY_MD_FILENAME).exists():
+            return False
+        try:
+            return self._finalize_task_artifacts(p, final) is not None
+        except (GitCommandError, OSError) as exc:
+            log.warning("terminal summary not written", extra={"error": str(exc)})
+            return False
+
     def _write_infra_failure_report(
         self,
         p: _Pipeline,
@@ -4413,6 +4572,13 @@ class Orchestrator:
             blocked_since=None,
             blocked_until=None,
         )
+        # Only ``done`` explains itself. Every other terminal used to depend on which path
+        # reached it: a publish failure logged its git stderr and already had a summary (finalize
+        # runs inside the publish node), while a node raising ``NodeManualRequired`` came straight
+        # here and left its reason in ``tasks.cleanup_last_error`` and nowhere else — the operator
+        # saw "status changed to manual_action_required" and had to open SQLite to learn why.
+        if final is not Status.DONE:
+            already_moved = self._explain_terminal(p, final, last_error) or already_moved
         # Close any node run left ``running`` by a hard stop before recording the terminal
         # state. A no-op on the normal path (the engine finalizes every node it runs); it catches a
         # node stranded by an interrupt that still reached ``_go_terminal``.

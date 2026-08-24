@@ -117,8 +117,8 @@ def build_orchestrator_security_preamble(
             "— not to this repository's remote and not to any other address, by any route, "
             "including a second clone assembled elsewhere. That is the orchestrator's job. And do "
             f"not read or write `{CONTROL_HOME_DIRNAME}/`, `{EXCHANGE_HOME_DIRNAME}/`, `.git/` "
-            "or `tasks/`. Both are checked after you finish, and either one parks the task for a "
-            "human instead of being fixed up."
+            "or `tasks/`. Both are checked after you finish, and what they find goes to a "
+            "human instead of being fixed up on the way out."
         )
     if no_write_floor:
         paragraphs.append(

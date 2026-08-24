@@ -81,7 +81,8 @@ def test_the_gate_reference_column_is_added_to_a_pre_versioning_database(tmp_pat
     # v22 is additive, so the one database `_migrate` may reshape — a `0`-stamped, pre-versioning
     # one — gains `tasks.gate_reference_sha` and keeps the rows it already had. (An *older
     # versioned* database is refused fail-closed instead, as the test above shows; greenfield means
-    # there is no production data to migrate.)
+    # there is no production data to migrate.) v25's `tasks.base_ref` rides the same additive loop,
+    # so it is asserted here rather than in a copy of this test.
     db = tmp_path / "prev.db"
     conn = sqlite3.connect(str(db))
     conn.execute(
@@ -101,6 +102,8 @@ def test_the_gate_reference_column_is_added_to_a_pre_versioning_database(tmp_pat
         columns = {str(row[1]) for row in store._conn.execute("PRAGMA table_info(tasks)")}
         assert "gate_reference_sha" in columns
         assert store.get_gate_reference("task-001") is None  # NULL means "the task's diff base"
+        assert "base_ref" in columns
+        assert store.get_base_ref("task-001") is None  # NULL means "the config base branch"
         row = store._conn.execute(
             "SELECT title FROM tasks WHERE task_id = ?", ("task-001",)
         ).fetchone()

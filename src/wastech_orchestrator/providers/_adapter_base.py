@@ -585,8 +585,8 @@ class BaseCliProvider:
                 ErrorClass.CONTAINMENT_UNVERIFIED,
                 f"{message_for(ErrorClass.CONTAINMENT_UNVERIFIED)} ({proc.quiescence.detail})",
             )
-            self._finalize_failure(paths, request, started_at, finished_at, proc, error)
-            raise ProviderError(error.error_class, error.message)
+            failed = self._finalize_failure(paths, request, started_at, finished_at, proc, error)
+            raise ProviderError(error.error_class, error.message, result=failed)
 
         # True infrastructure failure (launch / timeout) → no usable stream → classify + raise.
         if proc.launch_error is not None or proc.timed_out:
@@ -597,8 +597,8 @@ class BaseCliProvider:
                 launch_error=proc.launch_error,
                 signatures=self._signatures(),
             )
-            self._finalize_failure(paths, request, started_at, finished_at, proc, error)
-            raise ProviderError(error.error_class, error.message)
+            failed = self._finalize_failure(paths, request, started_at, finished_at, proc, error)
+            raise ProviderError(error.error_class, error.message, result=failed)
 
         # Parse the structured event stream. A CLI emits a terminal ``result`` event even when it
         # stops on an error and exits non-zero (e.g. Claude's ``error_max_turns`` exits 1): a
@@ -616,10 +616,16 @@ class BaseCliProvider:
                     launch_error=proc.launch_error,
                     signatures=self._signatures(),
                 )
-                self._finalize_failure(paths, request, started_at, finished_at, proc, error)
-                raise ProviderError(error.error_class, error.message) from exc
+                failed = self._finalize_failure(
+                    paths, request, started_at, finished_at, proc, error
+                )
+                raise ProviderError(error.error_class, error.message, result=failed) from exc
             error = NormalizedError(exc.error_class, str(exc))
-            self._finalize_failure(paths, request, started_at, finished_at, proc, error)
+            # Re-raised as-is (the parse error already carries the right class), so the result is
+            # attached to the exception in flight rather than handed to a fresh constructor.
+            exc.result = self._finalize_failure(
+                paths, request, started_at, finished_at, proc, error
+            )
             raise
 
         # The raw session id lives ONLY in state.db (durable sessions). The resume id was
@@ -644,11 +650,13 @@ class BaseCliProvider:
                 message_for(ErrorClass.RATE_LIMITED),
                 resets_at=_iso_instant(parsed.rate_limit_resets_at),
             )
-            self._finalize_failure(paths, request, started_at, finished_at, proc, error)
+            failed = self._finalize_failure(paths, request, started_at, finished_at, proc, error)
             # Set on the raised exception too, not only on the recorded error: the Router rebuilds
             # its own normalized error from what was RAISED, so an instant living only here would be
             # dropped before the Core ever saw it.
-            raise ProviderError(error.error_class, error.message, resets_at=error.resets_at)
+            raise ProviderError(
+                error.error_class, error.message, resets_at=error.resets_at, result=failed
+            )
 
         if not parsed.succeeded and _produced_no_work(parsed, request):
             # EXPERIMENTAL(no-work-infra) — trial block; revert this whole `if` to fall back to
@@ -662,8 +670,8 @@ class BaseCliProvider:
             error = NormalizedError(
                 ErrorClass.AGENT_NO_PROGRESS, message_for(ErrorClass.AGENT_NO_PROGRESS)
             )
-            self._finalize_failure(paths, request, started_at, finished_at, proc, error)
-            raise ProviderError(error.error_class, error.message)
+            failed = self._finalize_failure(paths, request, started_at, finished_at, proc, error)
+            raise ProviderError(error.error_class, error.message, result=failed)
 
         if parsed.succeeded:
             infra_error = self._post_success_infra_error(proc.stderr_text)
@@ -674,8 +682,10 @@ class BaseCliProvider:
                 # false success. Because this raises, ``outcome.result`` is None and no resumable
                 # session lineage is persisted for the broken run — the next hop is a fallback, not
                 # a resume of a session that did nothing.
-                self._finalize_failure(paths, request, started_at, finished_at, proc, infra_error)
-                raise ProviderError(infra_error.error_class, infra_error.message)
+                failed = self._finalize_failure(
+                    paths, request, started_at, finished_at, proc, infra_error
+                )
+                raise ProviderError(infra_error.error_class, infra_error.message, result=failed)
 
         if parsed.succeeded:
             status, error_obj = RunStatus.SUCCEEDED, None
@@ -780,7 +790,7 @@ class BaseCliProvider:
         finished_at: str,
         proc: ProcessResult,
         error: NormalizedError,
-    ) -> None:
+    ) -> AgentRunResult:
         result = AgentRunResult(
             status=RunStatus.FAILED,
             provider=self.id,
@@ -798,6 +808,7 @@ class BaseCliProvider:
         # ``minimal`` is strict — only result.json survives, even on failure (it records the exit
         # code + normalized error class). ``standard`` keeps stdout/stderr for debuggability.
         prune_attempt_artifacts(paths, self._artifact_level)
+        return result
 
     def _extra_secrets(self, request: AgentRunRequest) -> tuple[str, ...]:
         """Literal secrets to redact: secret-named parent env values + denied-read file contents +

@@ -187,9 +187,9 @@ class EvaluatorNodeRunner:
         exchange_before = capture_exchange_manifest(self._s.exchange_root, ctx.task_id)
         # The same bracket the agent runner takes around an attempt that has a shell but no write
         # access: an evaluator is read-only by construction, yet whether it can run commands is the
-        # provider's answer, not ours — a Codex reviewer has a shell today. Reported, never parked
-        # (operator decision 2). Skipped when the attempt has no shell, so no node pays for a check
-        # that cannot apply to it.
+        # provider's answer, not ours — a Codex reviewer has a shell today. Reported, never
+        # parked, as every node class now is (operator decision, 2026-08-24). Skipped when the
+        # attempt has no shell, so no node pays for a check that cannot apply to it.
         control_before = self._control_before(has_shell, ctx.task_id)
         outcome = self._s.router.run_stage(request, route, snapshot=self._s.snapshot)
         raw_findings = (

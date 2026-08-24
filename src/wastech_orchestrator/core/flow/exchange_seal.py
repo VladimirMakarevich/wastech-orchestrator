@@ -57,6 +57,7 @@ from wastech_orchestrator.providers.artifacts import assert_contained_path, exch
 from wastech_orchestrator.providers.exchange import (
     ExchangeManifest,
     FileInspector,
+    assert_exchange_current_task_only,
     build_exchange_manifest,
     default_file_inspector,
 )
@@ -408,6 +409,46 @@ def restore_for_continue(
             f"restored exchange {task_dir.as_posix()} does not match sealed snapshot {seal_no}"
         )
     return RestoreResult(task_dir=task_dir, manifest_digest=recorded, restored=True)
+
+
+def clear_foreign_exchange_entries(
+    exchange_root: str | Path,
+    task_id: str,
+    *,
+    inspect: FileInspector | None = None,
+    remover: TreeRemover = _default_remove_tree,
+) -> tuple[str, ...]:
+    """Clear what the pre-launch invariant used to refuse over, then enforce what is left of it.
+
+    A previous task's directory or a stray file in the exchange root is the residue of a run that
+    died before its seal — an operator's interrupt, most often. Refusing to start over it made the
+    next task unrunnable *before any provider had launched*, for a state that costs one recursive
+    delete: this directory is private, gitignored, and rebuilt from durable facts on every launch,
+    so there is nothing in it to preserve and nothing it can prove about ownership (owner decision,
+    2026-08-24 — leftover state is not evidence).
+
+    What removal cannot make true is still fail-closed, and
+    :func:`~wastech_orchestrator.providers.exchange.assert_exchange_current_task_only` is left to
+    say so in the one voice it always has: a **substituted** root or task directory — a symlink, or
+    something that is not a directory — is the private surface replaced by a pointer at something
+    else, which no cleanup can fix and no ordinary interrupt produces.
+
+    Removal goes through the same tree remover the terminal seam uses, so a symlinked entry is
+    unlinked and never walked, a Windows read-only attribute is cleared once, and no error is
+    swallowed. Returns the removed names in order, for the caller to say out loud.
+    """
+    inspector = inspect or default_file_inspector()
+    root = Path(exchange_root)
+    removed: list[str] = []
+    if os.path.lexists(root):
+        facts = inspector(root)
+        if not facts.is_symlink and facts.is_dir:
+            for child in sorted(root.iterdir()):
+                if child.name != task_id:
+                    remover(child)
+                    removed.append(child.name)
+    assert_exchange_current_task_only(exchange_root, task_id, inspect=inspector)
+    return tuple(removed)
 
 
 def ensure_current_exchange(

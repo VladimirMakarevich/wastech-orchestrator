@@ -815,7 +815,10 @@ class GitControlState:
 class GitControlDriftItem:
     """One redacted control-state change (path/key/name level only — never a value or content)."""
 
-    aspect: str  # index | head | task_ref | config | hooks | markers | executables
+    # index | head | task_ref | config | hooks | markers | tool_config | remote | executables.
+    # Nothing branches on this: every aspect carries the same verdict (a warning naming it),
+    # so it exists to be read by a person, not matched by the code.
+    aspect: str
     detail: str
 
 
@@ -859,7 +862,9 @@ class _ActiveTask:
     # ``existing``/``current`` (chain-continuation) modes, where the branch already carries prior
     # tasks' commits; ``None`` for ``new`` (the branch is cut fresh from ``base_branch``, so the
     # config base is exactly the task's start). Diffs use it so review/docs see only this task's
-    # change, not the whole unmerged chain.
+    # change, not the whole unmerged chain. Mirrors the durable ``tasks.base_ref``, which is
+    # authoritative: it is written at the first branch prep and restored, never re-read, at every
+    # later one.
     base_ref: str | None = None
     # sha256 of the push destination as it stood when this task's branch was prepared — before any
     # provider ran. Re-read immediately before every push; see `_assert_push_destination_unchanged`.
@@ -1228,6 +1233,18 @@ class GitManager:
         # prepares no branch, so an in-memory-only baseline is always absent exactly where the push
         # happens after the agent is gone.
         if self._active is not None:
+            # The task's start commit is stamped once and afterwards only ever restored.
+            # ``_prepare_existing`` / ``_prepare_current`` read it from ``HEAD``, which is the right
+            # answer on the first prep and the wrong one on every later one: a resume re-attaches
+            # the same branch after the run has already committed to it, so re-reading ``HEAD``
+            # walks the base forward and the task's reported change shrinks to whatever is still
+            # uncommitted. Persisted for the same reason the push baseline below is — the in-memory
+            # active-task record does not survive the process, and a resume is a new one.
+            stored_base = self._store.get_base_ref(task_id)
+            if stored_base:
+                self._active.base_ref = stored_base
+            elif self._active.base_ref:
+                self._store.set_base_ref(task_id, self._active.base_ref)
             digest = self._push_url_digest()
             self._active.push_url_digest = digest
             if digest is not None:
@@ -1292,10 +1309,16 @@ class GitManager:
         """The ref the task's change is diffed against: the per-task chain start when set,
         else the config ``base_branch``. Equal to ``base_branch`` for ``new`` mode, so a
         non-chained run's diffs are unchanged; for ``existing``/``current`` it is the branch tip at
-        task start, so review/docs/PR body see only this task's change, not the whole chain."""
-        if self._active is not None and self._active.base_ref:
-            return self._active.base_ref
-        return self._config.repo.base_branch
+        task start, so review/docs/PR body see only this task's change, not the whole chain.
+
+        The durable column is consulted before the config base, so a process that pushes or reports
+        without preparing a branch first (``merge-task``) measures from the same point the run did
+        rather than from the whole unmerged chain."""
+        if self._active is None:
+            return self._config.repo.base_branch
+        if not self._active.base_ref:
+            self._active.base_ref = self._store.get_base_ref(self._active.task_id)
+        return self._active.base_ref or self._config.repo.base_branch
 
     def current_branch(self) -> str | None:
         """The working tree's symbolic branch name, or ``None`` when HEAD is detached."""

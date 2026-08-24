@@ -179,3 +179,27 @@ def test_non_fallback_infra_error_stops_at_primary(
     assert outcome.result is None
     assert outcome.terminal_error is not None
     assert outcome.terminal_error.error_class is ErrorClass.CONFIGURATION_ERROR
+
+
+def test_a_raised_attempt_carries_its_own_result_not_a_row_write_clock(
+    config: OrchestratorConfig,
+    make_fake_provider: Callable[..., object],
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # The adapter builds a complete result for a failed attempt — it is what `result.json` on disk
+    # is written from — and it used to die with the stack frame: the Router recorded the attempt
+    # with `result=None`, and the ledger row then stamped two identical reads of the row-write
+    # clock. So the one thing an operator wants to know about a node failing over and over — what
+    # the failing attempt cost, and how long it burned first — was on disk and nowhere queryable.
+    primary = make_fake_provider(ProviderId.CODEX, raises=ErrorClass.PERMISSION_DENIED)
+    fallback = make_fake_provider(ProviderId.CLAUDE)
+    router = _router(config, primary, fallback)
+    outcome = router.run_stage(
+        make_request(node_id="polish"), router.resolve_route("polish", ProviderId.CODEX)
+    )
+    raised = next(a for a in outcome.attempts if a.provider is ProviderId.CODEX)
+    assert raised.status is None  # still no verdict — the row raised, nothing may read one off it
+    assert raised.error_class is ErrorClass.PERMISSION_DENIED
+    assert raised.result is not None
+    assert raised.result.started_at != raised.result.finished_at  # a real interval
+    assert raised.result.exit_code == 1

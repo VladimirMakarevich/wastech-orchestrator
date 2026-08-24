@@ -31,12 +31,13 @@ TRACE_REWORK_EXHAUSTED = "accept (rework budget exhausted)"
 #: needs a look. Same producer/transport split as :data:`TRACE_REWORK_EXHAUSTED`.
 TRACE_UNEXPECTED_WRITE = "done (node wrote to the workspace unexpectedly)"
 
-#: Synthetic ``send_trace`` outcome label for the sharper half of the same event: such a node
-#: changed Git **control** state — a hook, ``.git/config``, the index. The node still finished
-#: (``done``) and the run continues (none of these node classes parks a task), so this ⚠️ is what
-#: tells the operator to stop the run before the next orchestrator git command executes whatever was
-#: planted. Distinct from :data:`TRACE_UNEXPECTED_WRITE` because the two need different reactions: a
-#: stray file can be ignored, a poisoned hook cannot.
+#: Synthetic ``send_trace`` outcome label for the sharper half of the same event: the node
+#: changed Git **control** state — a moved ``HEAD``, the index, a hook, ``.git/config``. The node
+#: still finished (``done``) and the run continues (since 2026-08-24 no node class parks on this),
+#: so this ⚠️ is what lets the operator tell their own mid-run commit — which is what it usually is
+#: — from something planted, and stop the run before the next orchestrator git command executes it.
+#: Distinct from :data:`TRACE_UNEXPECTED_WRITE` because the two need different reactions: a stray
+#: file can be ignored, a poisoned hook cannot.
 TRACE_GIT_CONTROL_DRIFT = "done (node changed git control state)"
 
 #: Synthetic ``send_trace`` outcome label for a publish that had to merge in commits this

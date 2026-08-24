@@ -376,6 +376,30 @@ def _build(
     return orch, store, ledger, art
 
 
+@contextmanager
+def _log_fields() -> Iterator[list[dict[str, object]]]:
+    """Collect the structured ``extra=`` fields of each package log record.
+
+    ``package_log_text`` keeps only the message, and the operator-facing detail of several
+    warnings — which exchange entry was cleared, which control-plane key diverged — travels in
+    ``extra``. It is rendered into the logfmt line the operator reads, so a test that means to
+    assert the operator can see it has to read the fields, not the message.
+    """
+    fields: list[dict[str, object]] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            fields.append(dict(getattr(record, "logfmt_fields", {}) or {}))
+
+    logger = logging.getLogger("wastech_orchestrator")
+    handler = _Collect(level=logging.DEBUG)
+    logger.addHandler(handler)
+    try:
+        yield fields
+    finally:
+        logger.removeHandler(handler)
+
+
 def _complete_task(tmp_path: Path, task_id: str = "task-001") -> str:
     path = tmp_path / f"{task_id}.md"
     path.write_text(
@@ -939,6 +963,63 @@ def test_packaged_flow_cadence_narrows_a_broader_global_mode(
     assert orch.run_task(_complete_task(tmp_path, "task-narrow")).final_status is Status.DONE
     assert _observed_nodes(store, "task-narrow") == []
     assert len(_supervisor_attempts(store, "task-narrow")) == 1  # finalize only
+
+
+def test_a_flow_narrowing_the_observation_cadence_says_so_once(
+    git_repo, make_git_config, tmp_path: Path, package_log_text
+) -> None:
+    # The narrowing is legitimate and stays; what was wrong is that it happened in silence. An
+    # operator who configured `events` with all three triggers and then ran a packaged content flow
+    # (they all ship `none`) got run after run with a real provider fallback in them and not one
+    # observation, with nothing anywhere saying why. So the line names both modes and the triggers
+    # that stop applying — the surprising half, since the triggers are configured globally and
+    # discarded per flow. It does not decide whether they *should* survive; it makes the loss
+    # visible.
+    providers = _both()
+    orch, _store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"supervisor_observe": "all"},
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    with _log_fields() as fields:
+        assert orch.run_task(_complete_task(tmp_path, "task-say")).final_status is Status.DONE
+
+    assert package_log_text().count("observation cadence narrowed by the flow") == 1
+    said = [f for f in fields if f.get("configured_observe_mode")]
+    assert [(f["configured_observe_mode"], f["observe_mode"]) for f in said] == [("all", "events")]
+
+
+def test_no_cadence_line_when_the_flow_declares_nothing_to_narrow(
+    git_repo, make_git_config, tmp_path: Path, package_log_text
+) -> None:
+    # The other direction, so the line stays a signal: a flow with no `supervisor:` block inherits
+    # the operator's mode, nothing is lost, and nothing is said.
+    flows = tmp_path / "flows"
+    (flows / "roles").mkdir(parents=True)
+    (flows / "roles" / "implementation.md").write_text("Implement {task_path}.", "utf-8")
+    (flows / "roles" / "review.md").write_text("Review {diff_path}.", "utf-8")
+    (flows / "implementation.yaml").write_text(_NO_SUPERVISOR_BLOCK_FLOW, "utf-8")
+    providers = _both()
+    orch, _store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"supervisor_observe": "events"},
+    )
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
+    _patch_impl_edit(providers, git_repo)
+
+    assert orch.run_task(_complete_task(tmp_path, "task-quiet")).final_status is Status.DONE
+    assert "observation cadence narrowed" not in package_log_text()
 
 
 # A flow with no `supervisor:` block at all: it inherits the operator's global cadence, which is
@@ -1759,13 +1840,71 @@ def test_containment_unverified_goes_manual_action_required(
     assert ledger.records()[0]["final_status"] == "manual_action_required"
 
 
-def test_live_control_plane_edit_during_run_is_manual_not_fallback(
-    git_repo, make_git_config, tmp_path: Path
+def test_a_park_from_a_node_explains_itself_in_the_log_and_in_artifacts(
+    git_repo, make_git_config, tmp_path: Path, package_log_text
 ) -> None:
-    # An agent that rewrites a live control file (here the flow YAML) during a provider
-    # attempt is caught by the post-node verify — the provider tree is already proven quiescent
-    # so a live diff means a control file was mutated under the run. It is a non-fallback
-    # manual-action security violation, and no downstream node runs on the provider-selected bytes.
+    # The whole of block V of the phase, in one run. A node raising to manual_action_required went
+    # straight to the terminal transition, skipping the finalize hook that lives inside the publish
+    # node — so the reason it stopped was computed, written to `tasks.cleanup_last_error`, and
+    # nowhere else. The operator got "status changed to manual_action_required": no warning, no
+    # failure report, no summary of what the run had managed to do first. Diagnosing one such run
+    # took an hour of reading SQLite. Now every non-`done` terminal leaves all three.
+    providers = _both(
+        infra_fail={"implementation"}, infra_error_class=ErrorClass.CONTAINMENT_UNVERIFIED
+    )
+    orch, store, ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    with _log_fields() as fields:
+        result = orch.run_task(_complete_task(tmp_path, "task-why"))
+
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+    task = store.get_task("task-why")
+    assert task is not None and task.cleanup_last_error is not None
+    # 1. the reason, out loud, beside the status change rather than only in the column
+    assert "task stopped" in package_log_text()
+    stopped = [f for f in fields if f.get("final_status") == "manual_action_required"]
+    assert any("containment_unverified" in str(f.get("reason", "")) for f in stopped)
+    # 2. the node evidence — the same two artifacts an infra terminal always wrote
+    assert (art / "logs" / "task-why" / "failure_report.json").exists()
+    assert (art / "logs" / "task-why" / "stuck.md").exists()
+    assert task.failure_report_path is not None
+    # 3. what did happen before the stop, from the deterministic packet — no supervisor turn needed
+    assert (art / "logs" / "task-why" / "summary.md").exists()
+    assert ledger.records()[0]["final_status"] == "manual_action_required"
+
+
+def test_a_done_terminal_gains_no_failure_report(
+    git_repo, make_git_config, tmp_path: Path, package_log_text
+) -> None:
+    # The bound on the above: `done` explains itself, so it gets neither the warning nor the report.
+    # A failure report on a successful run would make "is there a stuck.md" useless as a question.
+    providers = _both()
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    assert orch.run_task(_complete_task(tmp_path, "task-ok")).final_status is Status.DONE
+
+    task = store.get_task("task-ok")
+    assert task is not None and task.failure_report_path is None
+    assert not (art / "logs" / "task-ok" / "failure_report.json").exists()
+    assert "task stopped" not in package_log_text()
+
+
+def test_live_control_plane_edit_during_run_warns_once_and_runs_on_the_frozen_copy(
+    git_repo, make_git_config, tmp_path: Path, package_log_text
+) -> None:
+    # A live control file rewritten mid-run (here the flow YAML) is caught by the post-node compare,
+    # but the compare cannot say whose hand did it — and on a repository whose operator edits flows
+    # daily it is usually theirs. So it warns and the run continues (owner decision, 2026-08-24).
+    # Nothing is lost by continuing, which is the whole point of freezing: every node runs on the
+    # frozen bundle, so the edit cannot select control bytes for a downstream node either way. It
+    # takes effect from the next run, or from a `rerun --continue`, which adopts it deliberately.
+    # The warning names the diverged key and is printed once per run, not once per remaining node.
     providers = _both()
     orch, store, ledger, _ = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
@@ -1784,14 +1923,16 @@ def test_live_control_plane_edit_during_run_is_manual_not_fallback(
 
     providers[ProviderId.CLAUDE].run = run_mutate  # type: ignore[method-assign]
 
-    result = orch.run_task(_complete_task(tmp_path, "task-mut"))
+    with _log_fields() as fields:
+        result = orch.run_task(_complete_task(tmp_path, "task-mut"))
 
-    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+    assert result.final_status is Status.DONE
     ran = _ran_nodes(store, "task-mut")
-    assert "planning" in ran  # the mutating node completed
-    assert "implementation" not in ran  # ...but nothing downstream ran on the mutated control
-    assert "publish" not in ran
-    assert ledger.records()[0]["final_status"] == "manual_action_required"
+    assert "implementation" in ran and "publish" in ran  # the run finished on the frozen bundle
+    assert ledger.records()[0]["final_status"] == "done"
+    # Once for the run, not once per remaining node: the compare runs after every one of them.
+    assert package_log_text().count("the live control plane no longer matches") == 1
+    assert any(f.get("changed") == "flows/implementation.yaml" for f in fields)
 
 
 def test_autorecovery_after_parked_live_edit_stays_conflict_manual(
@@ -1862,6 +2003,69 @@ def test_continue_task_after_parked_live_edit_adopts_flow(
     assert store.get_instruction_manifest_digest("task-adopt") != inst_before
     assert "publish" in _ran_nodes(store, "task-adopt")  # resumed past implementation
     assert ledger.records()[0]["final_status"] == "done"
+
+
+def test_continue_task_clears_a_contaminated_exchange_flag(
+    git_repo, make_git_config, tmp_path: Path, package_log_text
+) -> None:
+    # Detection of an agent-side exchange mutation still parks the run and still quarantines the
+    # tree as evidence — that is the one guard on the writing class the phase kept. What it stopped
+    # being on 2026-08-24 is a life sentence: the flag refused every `--continue` forever, so an
+    # operator who had read the diagnosis and decided it was fine had no way forward except paying
+    # for a whole fresh run. Their `--continue` clears it, on the same trust the control plane is
+    # adopted on.
+    providers = _both(
+        infra_fail={"implementation"}, infra_error_class=ErrorClass.PROVIDER_UNAVAILABLE
+    )
+    orch, store, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    first = orch.run_task(_complete_task(tmp_path, "task-contadopt"))
+    assert first.final_status is Status.RUNNING  # parked, resumable
+    for provider in providers.values():
+        provider.heal()
+    store.update_task("task-contadopt", exchange_contaminated=1)  # as detection would have
+
+    result = orch.continue_task("task-contadopt")
+
+    assert result.final_status is Status.DONE
+    contaminated, _unsafe = store.get_exchange_guard("task-contadopt")
+    assert contaminated is False  # cleared by the operator's own command, not by a config knob
+    assert "continuing over an exchange flagged contaminated" in package_log_text()
+    assert ledger.records()[0]["final_status"] == "done"
+
+
+def test_autorecovery_over_a_contaminated_exchange_still_refuses(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The other half, and the reason the unlock is safe: the daemon coming back up sets no marker,
+    # so it is still refused. A crash can follow the very mutation that set the flag, and nothing
+    # about a restart says a person looked at it.
+    providers = _both(
+        infra_fail={"implementation"}, infra_error_class=ErrorClass.PROVIDER_UNAVAILABLE
+    )
+    orch, store, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    first = orch.run_task(_complete_task(tmp_path, "task-contauto"))
+    assert first.final_status is Status.RUNNING
+    for provider in providers.values():
+        provider.heal()
+    store.update_task("task-contauto", exchange_contaminated=1)
+
+    result = orch.resume()  # auto-recovery path — no adopt marker
+
+    assert result is not None and result.final_status is Status.MANUAL_ACTION_REQUIRED
+    task = store.get_task("task-contauto")
+    assert task is not None and task.cleanup_last_error is not None
+    assert "contaminated" in task.cleanup_last_error
+    contaminated, _unsafe = store.get_exchange_guard("task-contauto")
+    assert contaminated is True  # untouched: only an operator command clears it
+    assert ledger.records()[0]["final_status"] == "manual_action_required"
 
 
 def test_stop_cancellation_parks_task_resumable(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -3825,6 +4029,51 @@ def test_dangerous_diff_requires_approval(
     assert "documentation" in _ran_nodes(store, f"task-{danger}-approval")
 
 
+def test_an_agent_self_commit_on_a_writing_node_is_still_put_to_the_gate(
+    git_repo, make_git_config, tmp_path: Path, git_run
+) -> None:
+    # The guarantee that has to hold now that the park is gone, and the test the phase called
+    # mandatory. Until 2026-08-24 an agent committing its own work inside a writing attempt hit the
+    # git-control fingerprint and the task died before the gate ran, which is why Пре-3 could only
+    # prove this on the classes that warned. It is now the primary path: the writing node commits,
+    # the run carries on, and the deletion inside that commit still has to be approved by a human —
+    # because the gate measures from the last commit the orchestrator itself made, never from
+    # `HEAD`, so a commit made inside the task cannot empty it.
+    class SelfCommittingProvider(FakeProvider):
+        def run(self, request: AgentRunRequest) -> AgentRunResult:
+            if request.node_id == "implementation":
+                (git_repo.clone / "README.md").unlink()  # the dangerous half: a deletion
+                (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+                git_run(["add", "-A", "README.md", "feature.py"], git_repo.clone)
+                git_run(["commit", "-m", "agent: my own commit"], git_repo.clone)
+            return super().run(request)
+
+    providers = {
+        ProviderId.CLAUDE: SelfCommittingProvider("claude"),
+        ProviderId.CODEX: SelfCommittingProvider("codex"),
+    }
+    notifier = RecordingNotifier(
+        ask_results=[AskResult(answered=True, text="approved", approved=True)]
+    )
+    orch, store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+        # The diff-shape gate is `strict`-only; `auto` (the default) asks on protected_paths alone.
+        config_kwargs={"trust_level": "strict"},
+    )
+
+    result = orch.run_task(_complete_task(tmp_path, "task-selfcommit"))
+
+    assert result.final_status is Status.DONE  # reported, not parked
+    approvals = [c for c in notifier.ask_calls if c["kind"] == "approval"]
+    assert approvals, "the deletion the agent committed itself must still be asked about"
+    assert "publish" in _ran_nodes(store, "task-selfcommit")
+
+
 def test_denied_dependency_change_gets_one_safe_reconsideration(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
@@ -4044,6 +4293,70 @@ def _merge_gh(
         )  # pr create (+ anything else)
 
     return gh
+
+
+def test_an_operator_commit_inside_a_writing_node_reaches_publication(
+    git_repo, make_git_config, tmp_path: Path, package_log_text, git_run
+) -> None:
+    # The run this whole phase came out of, reproduced. The operator commits an unrelated file in
+    # their own repository while the writing node is working; the fingerprint sees `HEAD` and the
+    # task ref move; and the task used to die of it — after the node had already finished its work,
+    # which was then thrown away. Now it warns and publishes.
+    #
+    # The three things that have to be true for that to be safe, all asserted below: the node's own
+    # work is still committed (`commit_code` did not degrade to the adoption arm, which is what a
+    # `HEAD`-relative staging set would have done), the operator's commit is not lost from what the
+    # run reports, and the drift is said out loud so the operator can tell their own commit from
+    # something planted. What the run does NOT do is rewrite the operator's commit out of the
+    # branch: it is an ancestor of the task's head, and pulling it out is not something the
+    # orchestrator does to someone else's work.
+    providers = _both()
+    orch, store, ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_operator_commit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")  # the task's
+            neighbour = git_repo.clone / "neighbour.md"  # the operator's, in another file entirely
+            neighbour.write_text("an unrelated chapter\n", encoding="utf-8")
+            git_run(["add", "neighbour.md"], git_repo.clone)
+            git_run(["commit", "-m", "chore: a neighbouring chapter"], git_repo.clone)
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_operator_commit  # type: ignore[method-assign]
+
+    with _log_fields() as fields:
+        result = orch.run_task(_complete_task(tmp_path, "task-18a"))
+
+    assert result.final_status is Status.DONE
+    assert "publish" in _ran_nodes(store, "task-18a")
+    assert ledger.records()[0]["final_status"] == "done"
+
+    # The node's work reached a commit of ours, rather than being swept into the adoption arm.
+    code_commit = store.get_publish_op("task-18a", "code_commit", None)
+    assert code_commit is not None and code_commit.result_ref
+    committed = git_run(
+        ["diff-tree", "--no-commit-id", "--name-only", "-r", str(code_commit.result_ref)],
+        git_repo.clone,
+    )
+    assert "feature.py" in committed
+    assert "neighbour.md" not in committed  # theirs stayed theirs; we did not restage it
+
+    # And the operator's commit did not vanish from what the run measured: the reported diff is
+    # taken from the task's base, so it covers both, and the branch carries both commits.
+    assert "neighbour.md" in (art / "logs" / "task-18a" / "current.diff").read_text("utf-8")
+    task = store.get_task("task-18a")
+    assert task is not None and task.branch
+    branch_subjects = git_run(["log", "--format=%s", "-4", task.branch], git_repo.clone)
+    assert "chore: a neighbouring chapter" in branch_subjects
+
+    # Said out loud, naming the aspects, because the operator is the one who can tell their own
+    # commit from a planted hook — and the previous behaviour told them by killing the task.
+    assert "git control state changed during this node" in package_log_text()
+    drift = [str(f.get("drift", "")) for f in fields if f.get("drift")]
+    assert any("head" in d for d in drift)
 
 
 def _patch_impl_edit(providers: dict[ProviderId, FakeProvider], git_repo) -> None:
@@ -5436,28 +5749,58 @@ def test_containment_unverified_on_evaluator_marks_unsafe_and_skips_seal(
     assert task is not None and task.cleanup_completed is False  # Git/cleanup withheld
 
 
-def test_stale_foreign_exchange_goes_manual_not_crash(
+def test_leftover_exchange_entry_is_cleared_and_named_not_parked(
+    git_repo, make_git_config, tmp_path: Path, package_log_text
+) -> None:
+    # A prior task's directory left in the exchange root — a run interrupted before its seal — used
+    # to stop the next task before any provider launched. It is not evidence of anything: the
+    # directory is private, gitignored and rebuilt from durable facts on every launch, so it is
+    # deleted, named in the log, and the run proceeds (owner decision, 2026-08-24).
+    providers = _both()
+    orch, store, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+    exchange_root = Path(git_repo.clone) / ".worc-io"
+    leftover = exchange_root / "task-OTHER"
+    leftover.mkdir(parents=True)
+    (leftover / "plan.md").write_text("a previous task's assignment", encoding="utf-8")
+
+    with _log_fields() as fields:
+        result = orch.run_task(_complete_task(tmp_path, "task-h1"))
+
+    assert result.final_status is Status.DONE
+    assert not leftover.exists()  # cleared, not merely tolerated
+    assert "cleared leftover exchange entries" in package_log_text()
+    assert any(f.get("removed") == "task-OTHER" for f in fields)  # named, not silently swept
+    task = store.get_task("task-h1")
+    assert task is not None and task.status is Status.DONE
+    assert ledger.records()[0]["final_status"] == "done"
+
+
+def test_a_symlinked_exchange_task_entry_still_parks(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # A stale/foreign entry left in the exchange root (e.g. a prior task whose seal was
-    # interrupted) must fail closed to manual_action_required — never let a bare ExchangeError
-    # escape uncaught and crash-loop the daemon. The border still holds (no provider launches over a
-    # dirty exchange), so nothing downstream runs.
+    # The other half of the same invariant, and the half that stays fail-closed: the task's own
+    # exchange entry replaced by a symlink is not leftover state that a delete could fix — it is the
+    # private surface pointed at something else. Nothing an interrupted run produces looks like it.
     providers = _both()
     orch, store, ledger, _ = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
     )
     exchange_root = Path(git_repo.clone) / ".worc-io"
-    (exchange_root / "task-OTHER").mkdir(parents=True)  # foreign leftover from a prior task
+    exchange_root.mkdir(parents=True, exist_ok=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (exchange_root / "task-h2").symlink_to(elsewhere, target_is_directory=True)
 
-    # Must NOT raise — returns a clean terminal instead of crashing.
-    result = orch.run_task(_complete_task(tmp_path, "task-h1"))
+    result = orch.run_task(_complete_task(tmp_path, "task-h2"))
 
     assert result.final_status is Status.MANUAL_ACTION_REQUIRED
-    task = store.get_task("task-h1")
-    assert task is not None and task.status is Status.MANUAL_ACTION_REQUIRED
-    assert not _ran_nodes(store, "task-h1")  # no node launched over the dirty exchange
-    assert task.cleanup_last_error is not None and "task-OTHER" in task.cleanup_last_error
+    assert not _ran_nodes(store, "task-h2")  # no provider launched over a substituted exchange
+    task = store.get_task("task-h2")
+    assert task is not None and task.cleanup_last_error is not None
+    assert "not a real directory" in task.cleanup_last_error
     assert ledger.records()[0]["final_status"] == "manual_action_required"
 
 
@@ -5557,12 +5900,12 @@ def test_read_only_node_that_writes_warns_operator_and_never_parks_the_task(
 def test_read_only_node_that_poisons_a_git_hook_warns_operator_and_never_parks_the_task(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # The sharper half of the same rule (operator decision 2, read literally): the granted read-only
-    # node plants a `.git/hooks/post-commit`, the drift event — the next git command in
-    # that clone is the orchestrator's own, so a hook is how a read-only node borrows the
-    # orchestrator's credentials. It still does not park the task: the operator gets a warning
-    # naming the drifted aspect plus the ⚠️ trace, and the run continues. A workspace-write node
-    # doing the same is still terminal (see test_workspace_write_git_control_drift_is_manual).
+    # The sharper half of the same rule: the granted read-only node plants a
+    # `.git/hooks/post-commit`, the drift event — the next git command in that clone is the
+    # orchestrator's own, so a hook is how a node borrows the orchestrator's credentials. It does
+    # not park the task: the operator gets a warning naming the drifted aspect plus the ⚠️ trace,
+    # and the run continues. Since 2026-08-24 a workspace-write node doing the same gets the same
+    # treatment — see the per-aspect matrix in test_flow_node_runners.
     from wastech_orchestrator.core.flow.registry import FlowRegistry
     from wastech_orchestrator.notify import TRACE_GIT_CONTROL_DRIFT
 
@@ -5615,7 +5958,7 @@ def test_read_only_node_that_poisons_a_git_hook_warns_operator_and_never_parks_t
     assert result.final_status is Status.DONE  # warned, not parked
     audit_traces = [c["outcome"] for c in notifier.trace_calls if c["node_id"] == "audit"]
     assert audit_traces == [TRACE_GIT_CONTROL_DRIFT]
-    assert any("changed git control state" in m for m in messages)
+    assert any("git control state changed during this node" in m for m in messages)
 
 
 # --- supervisor.enabled: false — the whole layer removed (P3) -------------------------------

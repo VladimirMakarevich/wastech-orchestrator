@@ -388,7 +388,12 @@ class ProviderError(Exception):
     """Provider exception carrying a normalized error class."""
 
     def __init__(
-        self, error_class: ErrorClass, message: str, *, resets_at: str | None = None
+        self,
+        error_class: ErrorClass,
+        message: str,
+        *,
+        resets_at: str | None = None,
+        result: AgentRunResult | None = None,
     ) -> None:
         super().__init__(message)
         self.error_class = error_class
@@ -397,6 +402,13 @@ class ProviderError(Exception):
         # dropped before the Core could act on it. Keyword-only so every positional raise site — and
         # there are many — stays untouched.
         self.resets_at = resets_at
+        # The failed attempt's own result, for the same reason and by the same route. The adapter
+        # builds a complete one before every raise (it is what `result.json` on disk is written
+        # from), and it used to die with the stack frame: the Router recorded the attempt with
+        # ``result=None``, so the ledger row fell back to two identical clock reads at row-write
+        # time and the real interval — the only way to price a failing node — existed on disk and
+        # nowhere queryable. ``None`` still means what it always meant: no attempt result exists.
+        self.result = result
 
     @property
     def is_fallback_eligible(self) -> bool:

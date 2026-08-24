@@ -380,7 +380,12 @@ class AgentRouter:
                         attempt=attempt_no,
                         status=None,
                         error_class=exc.error_class,
-                        result=None,
+                        # The adapter's own result for the attempt that RAISED, when it built one.
+                        # ``status`` stays ``None`` — this row returned no verdict and nothing
+                        # downstream may read one off it — while the measured interval, the exit
+                        # code and the artifact directory become queryable instead of being
+                        # replaced by two identical reads of the row-write clock.
+                        result=exc.result,
                     )
                 )
                 log.info(
@@ -438,7 +443,7 @@ class AgentRouter:
                                 attempt=fresh_no,
                                 status=None,
                                 error_class=fresh_exc.error_class,
-                                result=None,
+                                result=fresh_exc.result,
                             )
                         )
                         exc = fresh_exc  # the fallback decision below uses the fresh error
@@ -621,7 +626,7 @@ class AgentRouter:
                         attempt=audit_attempt,
                         status=None,
                         error_class=exc.error_class,
-                        result=None,
+                        result=exc.result,
                     )
                 )
                 log.info(

@@ -1264,6 +1264,36 @@ def test_current_diff_new_mode_unchanged_uses_base_branch(
     assert gm._diff_base() == "main"
 
 
+def test_the_task_diff_base_is_stamped_once_and_restored_not_re_read(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # The base is the commit the branch sat at when THIS task started, and `_prepare_current` reads
+    # it from `HEAD` — which is the right answer exactly once. A resume re-attaches the same branch
+    # in a new process, after the run has already committed to it, and re-reading `HEAD` there walks
+    # the base forward: the task's reported change then shrinks to whatever is still uncommitted, so
+    # a decomposed run reports only its last subtask and a `--continue` reports only the tail.
+    # Stamped once, restored afterwards.
+    _task(store)
+    git_run(["checkout", "-b", "operator/chain"], git_repo.clone)
+    start = git_run(["rev-parse", "HEAD"], git_repo.clone)
+
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH, mode=BranchMode.CURRENT)
+    assert gm._diff_base() == start
+    assert store.get_base_ref("task-001") == start  # durable, not only in this manager
+
+    (git_repo.clone / "src.py").write_text("x\n", encoding="utf-8")
+    gm.commit_code("task-001", "feat: the task's own work")
+    moved = git_run(["rev-parse", "HEAD"], git_repo.clone)
+    assert moved != start
+
+    # A fresh manager over the same store is what a resume actually is.
+    resumed = _manager(git_repo, store, tmp_path / "art2", make_git_config)
+    resumed.prepare_branch("task-001", "x", epoch=_EPOCH, mode=BranchMode.CURRENT)
+    assert resumed._diff_base() == start  # restored, not re-read from the moved HEAD
+    assert "src.py" in resumed.changed_code_paths_since_task_base()
+
+
 def test_prepare_branch_current_uses_head_without_switch_or_pull(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
 ) -> None:

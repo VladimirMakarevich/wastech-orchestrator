@@ -281,6 +281,32 @@ def digest_live_control_inputs(
     return digest_entries(entries)
 
 
+def diverged_control_inputs(
+    snapshot: FlowSnapshot,
+    flow_dir: Path,
+    tools: ToolRegistry,
+    bundle_dir: Path,
+    *,
+    inspect: FileInspector | None = None,
+) -> tuple[str, ...]:
+    """The bundle-relative keys whose live bytes no longer match the frozen copy.
+
+    Names what :func:`digest_live_control_inputs` can only report as a single mismatched digest. It
+    is for the *message*, not for the verdict: the verdict compares against the parent-held digest,
+    which is what catches a provider that rewrote a live file and the frozen copy together, while
+    this reads the frozen copies off disk and so cannot. An empty tuple next to a mismatched digest
+    therefore means exactly that case, and the caller says so rather than naming nothing.
+    """
+    inspector = inspect or default_file_inspector()
+    diverged: list[str] = []
+    for ref in _referenced_inputs(snapshot, flow_dir, tools):
+        frozen = bundle_dir / ref.key
+        frozen_sha = sha256_file(frozen) if frozen.is_file() else None
+        if sha256_file(_checked(ref.source, inspector)) != frozen_sha:
+            diverged.append(ref.key)
+    return tuple(diverged)
+
+
 def _checked(path: Path, inspector: FileInspector) -> Path:
     """Inspect ``path`` no-follow and return it (so the live-digest reads as one expression)."""
     _inspect_source(path, inspector)

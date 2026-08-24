@@ -1154,7 +1154,11 @@ def test_agent_exchange_mutation_is_detected_from_parent_state(tmp_path: Path) -
     # Detection-in-depth: a provider that mutates the curated (read-only) exchange during
     # its
     # attempt is caught from the parent-held pre/post manifest and routed to non-fallback manual
-    # action, so the changed copy is never consumed downstream.
+    # action, so the changed copy is never consumed downstream. This is the one guard on a
+    # workspace-write node the 2026-08-24 decision deliberately kept: Git control state is the
+    # operator's own repository and is now only reported, while the exchange is the agent's own
+    # assignment — read-only to it by construction, and nothing an operator does in the ordinary
+    # course looks like editing it.
     from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
     from wastech_orchestrator.providers.artifacts import exchange_task_dir
 
@@ -3452,34 +3456,90 @@ def test_max_turns_gate_restart_deny_goes_manual(tmp_path: Path) -> None:
 # -- git control-state drift around a workspace-write attempt ------------------
 
 
-def test_workspace_write_git_control_drift_is_manual(tmp_path: Path) -> None:
-    # Control-state drift across a workspace-write attempt is a terminal manual-action
-    # violation (not a fixing route, not fallback), raised before any post-edit git runs.
-    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
-    from wastech_orchestrator.git_manager import GitControlDrift, GitControlDriftItem
-
-    class _DriftGit(FakeGit):
-        def compare_git_control_state(self, before: object) -> GitControlDrift:
-            item = GitControlDriftItem("index", "staged entry changed: .worc-io/x")
-            return GitControlDrift((item,))
-
-    (tmp_path / "roles").mkdir()
-    (tmp_path / "roles" / "impl.md").write_text("Implement {task_path}", "utf-8")
-    node = AgentNode(
+def _write_node() -> AgentNode:
+    return AgentNode(
         id="impl",
         kind="agent",
         role_file="roles/impl.md",
         session_scope=SessionScope.EDITING_LINEAGE,
         permission_profile=PermissionProfile.WORKSPACE_WRITE,
     )
+
+
+def _drift_git(aspect: str, detail: str) -> Any:
+    from wastech_orchestrator.git_manager import GitControlDrift, GitControlDriftItem
+
+    class _DriftGit(FakeGit):
+        def compare_git_control_state(self, before: object) -> GitControlDrift:
+            self.calls.append(("compare_git_control_state",))
+            return GitControlDrift((GitControlDriftItem(aspect, detail),))
+
+    return _DriftGit()
+
+
+# Every aspect the fingerprint emits, so the decision reads out of the tests rather than out of a
+# comment. The three at the end are the ones that are NOT an operator working in their own
+# repository — a planted hook, a retargeted push URL, a swapped binary on PATH — and the owner
+# decision of 2026-08-24 deliberately gives them the same verdict as the other six: a loud warning,
+# no park. If that is ever revisited, these three rows are what has to change.
+_DRIFT_ASPECTS = [
+    ("head", "HEAD commit moved"),
+    ("task_ref", "task branch ref moved"),
+    ("index", "staged entry changed: mobile/chapter.md"),
+    ("remote", "the push destination changed"),
+    ("markers", "operation markers changed: MERGE_HEAD"),
+    ("tool_config", "changed: .codex/config.toml"),
+    ("hooks", "hook 'post-commit' added"),
+    ("config", "changed: remote.origin.pushurl"),
+    ("executables", "git resolved to a different path"),
+]
+
+
+@pytest.mark.parametrize(("aspect", "detail"), _DRIFT_ASPECTS, ids=[a for a, _ in _DRIFT_ASPECTS])
+def test_git_control_drift_on_a_workspace_write_node_reports_and_finishes(
+    tmp_path: Path, aspect: str, detail: str
+) -> None:
+    # The withdrawal of the last parking verdict (owner decision, 2026-08-24). A workspace-write
+    # attempt that drifts now takes the same never-park path as every other node class: the outcome
+    # stays `done`, the run continues, and the redacted aspect-level summary rides out on the
+    # outcome for the post-node hook to warn and trace. What made the old verdict wrong was not the
+    # detection but its consequence: the thing it caught in practice was the operator committing a
+    # neighbouring file in their own repository, and it threw away a finished node's work for it.
+    (tmp_path / "roles").mkdir()
+    (tmp_path / "roles" / "impl.md").write_text("Implement {task_path}", "utf-8")
+    node = _write_node()
     services = _services(
         FakeRouter(_result()),
         FakeStore(),
         FakeCheckRunner(CheckOutcome(passed=True, runs=())),
-        git=_DriftGit(),
+        git=_drift_git(aspect, detail),
     )
-    with pytest.raises(NodeManualRequired):
-        AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+    assert result.outcome.kind == "done"
+    assert result.outcome.git_control_drift == f"{aspect}: {detail}"
+
+
+def test_workspace_write_drift_is_compared_before_the_post_edit_guard_touches_the_clone(
+    tmp_path: Path,
+) -> None:
+    # Why the writing class keeps its own bracket inside `_invoke` instead of joining the outer
+    # reporting one: the post-edit guard's `write_current_diff` brackets the diff with a transient
+    # `git add --intent-to-add` / `git reset`. Compared after that, the orchestrator's own index
+    # touch reads back as `index` drift of its own making — a fabricated warning on every writing
+    # node. The comparison therefore has to be the first thing after the attempt.
+    (tmp_path / "roles").mkdir()
+    (tmp_path / "roles" / "impl.md").write_text("Implement {task_path}", "utf-8")
+    git = _drift_git("index", "staged entry changed: mobile/chapter.md")
+    services = _services(
+        FakeRouter(_result()),
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        git=git,
+    )
+    AgentNodeRunner(services, _inputs(tmp_path)).run(_write_node(), _ctx(_write_node()))
+    names = [c[0] for c in git.calls]
+    assert "compare_git_control_state" in names and "write_current_diff" in names
+    assert names.index("compare_git_control_state") < names.index("write_current_diff")
 
 
 def test_read_only_node_skips_git_control_capture(tmp_path: Path) -> None:

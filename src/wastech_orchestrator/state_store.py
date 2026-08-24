@@ -156,7 +156,20 @@ def _utc_now_iso() -> str:
 # not read the URL), and a missing answer is never read as a rewrite. Additive, ``_migrate`` adds
 # it on a brand-new
 # (``0``) database; an older versioned DB is still refused fail-closed and recreated (greenfield).
-DB_SCHEMA_VERSION = 24
+# v25 (task diff base): added the **additive** nullable ``tasks.base_ref`` column — the commit the
+# working branch sat at when THIS task started, which is what "what did this task change" is
+# measured from until the orchestrator makes its first commit. Same defect as v24 and the same fix:
+# it lived only in the Git Manager's in-memory active-task record, which does not survive the
+# process. A resume does carry the branch mode, so it re-enters the right path — but that path reads
+# the base from ``HEAD``, which is the correct answer only the first time. Re-read after the run has
+# already committed to the branch, it walks the base forward, and the task's reported change shrinks
+# to whatever is still uncommitted: a decomposed run reports its last subtask, a ``--continue``
+# reports the tail. Stamped once here and restored afterwards instead. Rare while a mid-run ``HEAD``
+# move parked the task outright; ordinary once it does not, which is why it is fixed alongside that
+# change. NULL is its real meaning ("the config base branch is the task's start", exactly true in
+# ``new`` mode), so no default. Additive, ``_migrate`` adds it on a brand-new (``0``) database; an
+# older versioned DB is still refused fail-closed and recreated (greenfield).
+DB_SCHEMA_VERSION = 25
 
 
 class IncompatibleStateError(Exception):
@@ -212,12 +225,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
         conn.execute(
             "ALTER TABLE tasks ADD COLUMN exchange_active_unsafe INTEGER NOT NULL DEFAULT 0"
         )
-    # v22: the commit the dangerous-diff gate measures from. Nullable — NULL is its real meaning
-    # ("the task's diff base"), not a placeholder, so no default.
-    if "gate_reference_sha" not in task_cols:
-        conn.execute("ALTER TABLE tasks ADD COLUMN gate_reference_sha TEXT")
-    if "push_url_digest" not in task_cols:
-        conn.execute("ALTER TABLE tasks ADD COLUMN push_url_digest TEXT")
+    # Three per-task reference points, all nullable because NULL is each one's real meaning
+    # rather than a placeholder: v22 ``gate_reference_sha`` (the commit the dangerous-diff gate
+    # measures from — NULL: the task's diff base), v24 ``push_url_digest`` (where a push would go as
+    # read at branch prep — NULL: no baseline was taken) and v25 ``base_ref`` (the commit the task's
+    # branch sat at when it started — NULL: the config base branch is the start). One loop rather
+    # than three near-identical branches.
+    for column in ("gate_reference_sha", "push_url_digest", "base_ref"):
+        if column not in task_cols:
+            conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} TEXT")
     # v23: the commit a push left on the remote. Nullable — NULL is its real meaning ("not pushed
     # by us"), not a placeholder, so no default.
     publish_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(publish_operations)")}
@@ -339,7 +355,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     exchange_contaminated INTEGER NOT NULL DEFAULT 0,
     exchange_active_unsafe INTEGER NOT NULL DEFAULT 0,
     gate_reference_sha TEXT,
-    push_url_digest TEXT
+    push_url_digest TEXT,
+    base_ref TEXT
 );
 
 CREATE TABLE IF NOT EXISTS node_runs (
@@ -1361,6 +1378,34 @@ class StateStore:
             c.execute(
                 "UPDATE tasks SET push_url_digest = ?, updated_at = ? WHERE task_id = ?",
                 (digest, self._clock(), task_id),
+            )
+
+    def get_base_ref(self, task_id: str) -> str | None:
+        """The commit this task's working branch sat at when it started, or ``None``.
+
+        ``None`` means the config ``base_branch`` is the task's start — exactly true in ``new``
+        mode, where the branch is cut from it and it does not advance inside a run.
+        """
+        cur = self._conn.execute("SELECT base_ref FROM tasks WHERE task_id = ?", (task_id,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        value = row["base_ref"]
+        return str(value) if value else None
+
+    def set_base_ref(self, task_id: str, sha: str, conn: sqlite3.Connection | None = None) -> None:
+        """Stamp the task's start commit, read at branch prep — before any provider ran.
+
+        Persisted rather than kept in memory for the reason ``push_url_digest`` is: a resume
+        re-attaches the branch without knowing the mode, so the in-memory value is absent on exactly
+        the runs that have already done work worth reporting. Written once per task and never moved
+        — unlike :meth:`set_gate_reference`, which advances with each of our commits. The two are
+        the same point only until the orchestrator makes its first one.
+        """
+        with self._writer(conn) as c:
+            c.execute(
+                "UPDATE tasks SET base_ref = ?, updated_at = ? WHERE task_id = ?",
+                (sha, self._clock(), task_id),
             )
 
     def record_provider_attempt(

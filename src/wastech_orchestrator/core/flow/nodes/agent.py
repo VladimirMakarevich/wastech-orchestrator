@@ -135,9 +135,11 @@ class AgentNodeRunner:
 
     def _run_simple(self, node: AgentNode, ctx: NodeContext, route: ResolvedRoute) -> NodeResult:
         before = self._granted_shell_before(node, ctx, route)
-        run_id, outcome = self._invoke_with_turn_gate(node, ctx, route, human_input_path=None)
-        self._apply_post_edit_guard(node, ctx, route)
-        return self._result(node, ctx, outcome, run_id, before)
+        run_id, outcome, drift = self._invoke_with_turn_gate(
+            node, ctx, route, human_input_path=None
+        )
+        drift = _merge_drift(drift, self._apply_post_edit_guard(node, ctx, route))
+        return self._result(node, ctx, outcome, run_id, before, drift)
 
     # -- embedded HITL (refinement / planning) --------------------------------
 
@@ -161,15 +163,15 @@ class AgentNodeRunner:
             human_input_path = self._resume_interaction(node, ctx, path, persisted)
 
         before = self._granted_shell_before(node, ctx, route)
-        run_id, outcome = self._invoke_with_turn_gate(
+        run_id, outcome, drift = self._invoke_with_turn_gate(
             node, ctx, route, human_input_path=human_input_path
         )
         typed = self._typed(node, ctx, outcome)
         if typed.human_input is None:
-            self._apply_post_edit_guard(node, ctx, route)
+            drift = _merge_drift(drift, self._apply_post_edit_guard(node, ctx, route))
             if had_interaction:
                 mark_consumed(path)
-            return self._result(node, ctx, outcome, run_id, before)
+            return self._result(node, ctx, outcome, run_id, before, drift)
         if had_interaction:
             raise NodeManualRequired(f"agent node {node.id!r}: unexpected repeated HITL request")
 
@@ -185,7 +187,7 @@ class AgentNodeRunner:
         # Resume the first run's session so the agent continues the same conversation with the
         # operator's answer (it does not re-derive from scratch). Same-provider only; across a
         # restart the first-run outcome is gone, so resume falls back to fresh + the answer file.
-        run_id2, outcome2 = self._invoke_with_turn_gate(
+        run_id2, outcome2, drift2 = self._invoke_with_turn_gate(
             node,
             ctx,
             route,
@@ -197,9 +199,11 @@ class AgentNodeRunner:
         )
         if self._typed(node, ctx, outcome2).human_input is not None:
             raise NodeManualRequired(f"agent node {node.id!r}: second HITL request after an answer")
-        self._apply_post_edit_guard(node, ctx, route)
+        # One bracket spans the node, so both attempts' drift is carried out together — the
+        # operator is told the clone moved, not which half of a round-trip moved it.
+        drift = _merge_drift(drift, drift2, self._apply_post_edit_guard(node, ctx, route))
         mark_consumed(path)
-        return self._result(node, ctx, outcome2, run_id2, before)
+        return self._result(node, ctx, outcome2, run_id2, before, drift)
 
     def _resume_interaction(
         self, node: AgentNode, ctx: NodeContext, path: Any, persisted: Mapping[str, Any]
@@ -306,7 +310,7 @@ class AgentNodeRunner:
         human_input_path: str | None,
         resume_session_id: str | None = None,
         resume_usage_baseline: NormalizedUsage | None = None,
-    ) -> tuple[int, StageOutcome]:
+    ) -> tuple[int, StageOutcome, str | None]:
         """Invoke the provider; when the Claude max-turns gate is on, pause on ``error_max_turns``
         for a durable operator continue/stop decision instead of failing immediately.
 
@@ -343,7 +347,7 @@ class AgentNodeRunner:
             # The in-memory session is gone after a restart; let _invoke fall back to the durable
             # editing-lineage session (state.db) for editing nodes, else a fresh run + fresh grant.
             resume_session_id = None
-        run_id, outcome = self._invoke(
+        run_id, outcome, drift = self._invoke(
             node,
             ctx,
             route,
@@ -360,16 +364,18 @@ class AgentNodeRunner:
                 path=gate_path,
             )
             if not _gate_approved(result):
-                return run_id, outcome  # deny / timeout / transport → STOP (terminal as today)
+                # deny / timeout / transport → STOP (terminal as today)
+                return run_id, outcome, drift
             mark_consumed(gate_path)
-            run_id, outcome = self._invoke(
+            run_id, outcome, more = self._invoke(
                 node,
                 ctx,
                 route,
                 human_input_path=human_input_path,
                 resume_session_id=_same_provider_session_id(outcome, route),
             )
-        return run_id, outcome
+            drift = _merge_drift(drift, more)
+        return run_id, outcome, drift
 
     # -- shared invocation ----------------------------------------------------
 
@@ -416,14 +422,15 @@ class AgentNodeRunner:
         on the profile alone would leave exactly that class unwatched. It keys on
         :meth:`_can_run_commands` rather than on the git-evidence grant for the same reason — the
         grant is one way to arrive at a shell (Claude), while a Codex ``read-only`` node has had one
-        all along and was therefore watched by nothing. Both signals are *reported*, never acted on
-        (operator decision 2), which is why they live out here on the reporting path rather than at
-        the compare site that parks a workspace-write attempt.
+        all along and was therefore watched by nothing. Both signals are *reported*, never acted
+        on — as is every node class's drift, since the workspace-write exception was withdrawn.
 
         Snapshotting before rather than reading state once afterwards is what keeps an earlier
         writer's diff — or the orchestrator's own branch prep — from being blamed on this node in a
         flow that mixes the two profiles. One bracket spans every attempt of the node, so a HITL
-        re-run is covered without accumulating anything.
+        re-run is covered without accumulating anything. A workspace-write node is bracketed instead
+        inside :meth:`_invoke`, per attempt, because only there is the comparison ahead of the
+        orchestrator's own `git`; the verdict has been the same for both since 2026-08-24.
         """
         git = self._s.git
         if git is None or self._is_workspace_write(node, ctx):
@@ -441,29 +448,33 @@ class AgentNodeRunner:
         outcome: StageOutcome,
         run_id: int,
         before: _GrantedShellBefore | None,
+        attempt_drift: str | None = None,
     ) -> NodeResult:
-        """The node's result, flagged when a read-only node with a shell changed what it could not.
+        """The node's result, flagged when the node changed what it was not there to change.
 
-        The provider's sandbox write-denies the whole clone for such an attempt, so a change here —
-        in the working tree or in Git control state — means that enforcement did not hold. Both are
-        reported rather than acted on: the outcome stays ``done``, the run continues, and the
-        operator gets a warning from the post-node hook. Per operator decision 2 a read-only node
-        never parks the task, so control-state drift warns here where a ``workspace-write`` attempt
-        would raise :class:`~.base.NodeManualRequired` in :meth:`_invoke`. That is a real trade: the
+        For a read-only node with a shell the provider's sandbox write-denies the whole clone, so a
+        change here — in the working tree or in Git control state — means that enforcement did not
+        hold. Both are reported rather than acted on: the outcome stays ``done``, the run continues,
+        and the operator gets a warning plus a ⚠️ trace from the post-node hook. No node class parks
+        on drift any more, so this is where every class's lands: ``attempt_drift`` carries what
+        :meth:`_invoke`'s per-attempt bracket saw on a workspace-write node, which cannot be
+        compared out here because the post-edit guard's own `git` has already run by then.
+
+        That is a real trade, and it is the one the operator decision of 2026-08-24 accepted: the
         warning is the only thing standing between a poisoned hook and the orchestrator's next git
         command, which is why it carries the drift's aspect-level summary and not just a flag.
 
-        A working-tree change is additionally never *consumed* — no diff is published and nothing
-        downstream is handed it, since the post-edit guard that would do that stays off for a
-        read-only node. Control state is compared first, so the ``git status`` behind the tree
-        comparison cannot land between the attempt and the fingerprint that judges it.
+        A read-only node's working-tree change is additionally never *consumed* — no diff is
+        published and nothing downstream is handed it, since the post-edit guard stays off for such
+        a node. Control state is compared first, so the ``git status`` behind the tree comparison
+        cannot land between the attempt and the fingerprint that judges it.
         """
         git = self._s.git
-        drift = None
+        drift = attempt_drift
         wrote = False
         if before is not None and git is not None:
             control_drift = git.compare_git_control_state(before.control)
-            drift = control_drift.summary() if control_drift is not None else None
+            drift = _merge_drift(drift, control_drift.summary() if control_drift else None)
             wrote = git.changed_code_entries(ctx.task_id) != before.tree
         return NodeResult(
             node_id=node.id,
@@ -482,7 +493,7 @@ class AgentNodeRunner:
         human_input_path: str | None,
         resume_session_id: str | None = None,
         resume_usage_baseline: NormalizedUsage | None = None,
-    ) -> tuple[int, StageOutcome]:
+    ) -> tuple[int, StageOutcome, str | None]:
         started_at = self._s.clock()
         run_id = self._s.store.record_node_run(
             NodeRunRow(
@@ -504,12 +515,12 @@ class AgentNodeRunner:
             node, ctx, route, run_id, human_input_path, session_id, guard_output_baseline(baseline)
         )
         assert_request_contained(request, self._s.exchange_root)
-        # Fingerprint the Git control state before a workspace-write attempt; the compare
-        # after `run_stage` (below) runs before any orchestrator git touches the possibly-poisoned
-        # clone, and drift there parks the task. An attempt that is not meant to write but has a
-        # shell can reach `.git` all the same — it is fingerprinted too, but from the outer
-        # reporting bracket (`_granted_shell_before`), because such a node deliberately warns
-        # instead of parking.
+        # Fingerprint the Git control state before a workspace-write attempt. The compare after
+        # `run_stage` (below) has to happen here, before any orchestrator git touches the clone:
+        # `_apply_post_edit_guard`'s own `git add --intent-to-add` / `git reset` would otherwise
+        # read back as index drift of our own making. An attempt that is not meant to write but has
+        # a shell can reach `.git` all the same — it is fingerprinted too, but from the outer
+        # reporting bracket (`_granted_shell_before`), which runs where no such collision exists.
         #
         # The Write/Edit-deny roots (exchange/gitdir/common/hooks/tasks) are resolved fresh here —
         # they are only final after branch prep — and threaded onto the request for every attempt
@@ -574,35 +585,45 @@ class AgentNodeRunner:
                 resets_at=outcome.terminal_error.resets_at if outcome.terminal_error else None,
             )
         # The result is trusted (the quiescence barrier proved the provider tree empty inside the
-        # adapter), so compare now — before `_apply_post_edit_guard`'s `git diff`/commit touch the
-        # clone and before any downstream node reads the exchange. Git control-state drift on a
-        # workspace-write attempt or an exchange mutation is a non-fallback policy violation →
-        # manual action; the changed copy is never consumed downstream.
+        # adapter), so compare now — before `_apply_post_edit_guard`'s `git diff` touches the clone
+        # and before any downstream node reads the exchange. Git control-state drift is REPORTED,
+        # never parked (operator decision, 2026-08-24): a moved `HEAD`, a moved task ref, a changed
+        # index or a branch that moved on `origin` is ordinary working state in the operator's own
+        # repository, of exactly the kind publishing already reuses rather than treats as evidence
+        # of foreign ownership — and parking on it discarded a finished node's work after the fact.
+        # The same decision covers the three aspects that are NOT ordinary work (`hooks`, `config`,
+        # `executables`): they are loud warnings too, and what that costs is stated in the shipped
+        # guide's floor rather than softened here. What still holds the change is the dangerous-diff
+        # gate, which measures from the last commit the orchestrator itself made — so whatever the
+        # drift committed is on the far side of that reference and a human is still asked about it.
+        # An exchange mutation is a different question and still parks: it is the agent editing its
+        # own assignment, which no ordinary operator action looks like.
+        drift: str | None = None
         if control_before is not None and git is not None:
-            drift = git.compare_git_control_state(control_before)
-            if drift is not None:
-                raise NodeManualRequired(
-                    f"agent node {node.id!r}: git control state changed during a provider attempt "
-                    f"({drift.summary()})"
-                )
+            control_drift = git.compare_git_control_state(control_before)
+            drift = control_drift.summary() if control_drift is not None else None
         assert_exchange_unchanged(
             exchange_before, self._s.exchange_root, ctx.task_id, node_id=node.id
         )
         self._persist_session(node, ctx, outcome)
-        return run_id, outcome
+        return run_id, outcome, drift
 
     def _apply_post_edit_guard(
         self, node: AgentNode, ctx: NodeContext, route: ResolvedRoute
-    ) -> None:
+    ) -> str | None:
         """After a workspace-write edit, write the diff (``{diff_path}``) and gate dangerous diffs.
 
         Core-owned and automatic — the flow never declares or disables it. A
         deletion/dependency diff requires a durable human approval (or a matching planning
         pre-approval); on denial the stage reconsiders once with the denial context and, if the diff
         is still dangerous, fails closed to manual review.
+
+        Returns the Git control-state drift of the reconsider attempt, if it ran and if it drifted
+        — that attempt is bracketed like any other, and its comparison would otherwise be computed
+        and dropped on the floor. ``None`` on every other path.
         """
         if not self._is_workspace_write(node, ctx) or self._s.git is None:
-            return
+            return None
         private_diff = self._s.git.write_current_diff(ctx.task_id)
         # Keep the private authoritative diff as the audit artifact; expose only the redacted
         # exchange copy as {diff_path} to the provider.
@@ -619,7 +640,7 @@ class AgentNodeRunner:
         entries = self._s.git.changed_code_entries(ctx.task_id)
         dangerous = evaluate_diff_gate(entries, self._s.trust_level, self._s.protected_paths)
         if dangerous is None:
-            return
+            return None
         path = guardrail_interaction_path(
             self._s.artifacts_root,
             ctx.task_id,
@@ -631,7 +652,8 @@ class AgentNodeRunner:
         if persisted is not None:
             approved = self._resume_guardrail(node, path, persisted, dangerous)
         elif already_approved_in_task(self._s.artifacts_root, ctx.task_id, dangerous):
-            return  # this exact dangerous diff was already approved earlier in the task
+            # this exact dangerous diff was already approved earlier in the task
+            return None
         else:
             result = self._gate().request(
                 task_id=ctx.task_id,
@@ -644,8 +666,8 @@ class AgentNodeRunner:
             approved = result.approved is True
         if approved:
             mark_consumed(path)
-            return
-        self._reconsider(node, ctx, route, path)
+            return None
+        return self._reconsider(node, ctx, route, path)
 
     def _apply_output_containment_guard(self, node: AgentNode, ctx: NodeContext) -> None:
         """After a workspace-write edit, enforce the flow's ``output_policy`` write containment.
@@ -692,10 +714,16 @@ class AgentNodeRunner:
 
     def _reconsider(
         self, node: AgentNode, ctx: NodeContext, route: ResolvedRoute, path: Any
-    ) -> None:
-        """Approval denied: re-run the node with the denial context, then re-classify."""
+    ) -> str | None:
+        """Approval denied: re-run the node with the denial context, then re-classify.
+
+        Returns this attempt's Git control-state drift for the node's outcome to carry, so a clone
+        that moved during the reconsider pass is reported like one that moved during any other.
+        """
         mark_interaction_status(path, "reconsidering")
-        self._invoke(node, ctx, route, human_input_path=self._exchange_human_input(node, ctx, path))
+        _run_id, _outcome, drift = self._invoke(
+            node, ctx, route, human_input_path=self._exchange_human_input(node, ctx, path)
+        )
         assert self._s.git is not None
         private_diff = self._s.git.write_current_diff(ctx.task_id)
         self._in.diff_path = publish_file(
@@ -717,6 +745,7 @@ class AgentNodeRunner:
                 f"agent node {node.id!r}: retained dangerous changes after approval was denied"
             )
         mark_interaction_status(path, "reconsidered")
+        return drift
 
     def _build_request(
         self,
@@ -965,6 +994,19 @@ def _lineage_key(node: AgentNode) -> str:
     they share this one helper. The validator forbids affinity chains (rule 7), so the target is
     always a lineage owner and one hop is enough — no transitive resolution here."""
     return node.lineage_affinity or node.id
+
+
+def _merge_drift(*parts: str | None) -> str | None:
+    """Join the drift summaries of a node's attempts into the one its outcome carries.
+
+    A node can attempt more than once — a HITL round-trip, a max-turns continue, a reconsider pass
+    after a denied approval — and each attempt is bracketed on its own. Reporting only the last one
+    would drop the earlier clone move, which is precisely the aspect an operator needs; a second
+    carrier on ``NodeOutcome`` would buy nothing over one joined line. ``None`` when no attempt
+    drifted, which is the ordinary case.
+    """
+    found = [part for part in parts if part]
+    return "; ".join(found) if found else None
 
 
 def _agent_outcome(outcome: StageOutcome) -> NodeOutcome:

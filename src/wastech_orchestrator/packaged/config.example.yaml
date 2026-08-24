@@ -458,6 +458,9 @@ supervisor:                         # oversight layer above any flow (not a node
   # is already a durable fact the finalize packet carries verbatim.
   # A flow may NARROW this in its own `supervisor.observe.mode` (a content flow ships `none`) but
   # never widen it — a broader flow mode fails validation. Ranking: none < events < selected < all.
+  # When a flow does narrow yours, the run prints one line at the start naming both modes and, when
+  # the flow lands on `none`, the `triggers` below that stop applying — the loss used to be silent,
+  # so an operator asking for fallback notes got none from a content flow and nothing said why.
   # That check does not apply at `enabled: false`: there is no cadence to widen, so a flow declaring
   # any mode still runs. That is why switching the layer off is its own key, not a global `none`.
   # The once-per-task skill proposal (`skills.dynamic`) uses the `observe` model/effort — same cheap

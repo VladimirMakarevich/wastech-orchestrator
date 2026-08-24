@@ -149,13 +149,16 @@ class NodeOutcome:
     too. A pull request carries the same fact in its body, so this exists for the scopes that open
     none (``publish: push`` / ``commit``), where the run's own trace is the only carrier.
 
-    ``git_control_drift`` is the second, sharper event on that same never-park path (operator
-    decision 2, 2026-07-26): the same node changed **Git control state** — a hook,
-    ``.git/config``, the index. It carries the redacted drift summary rather than a bool precisely
-    because the warning *is* the mitigation here — an operator told only "something changed" would
-    inspect the working tree, while the aspect that matters ("hooks: hook 'post-commit' added") is
-    the one that makes the next orchestrator git command execute provider-supplied code. An agent
-    node on a ``workspace-write`` profile still parks the task; see the agent runner.
+    ``git_control_drift`` is the second, sharper event on that same never-park path: the node
+    changed **Git control state** — a moved ``HEAD``, the index, a hook, ``.git/config``. Every node
+    class reports it and none parks on it (operator decision, 2026-08-24, widening the 2026-07-26
+    read-only decision to the writing class): most of what this catches is the operator working in
+    their own repository, which is ordinary state and not evidence, and parking on it threw away
+    finished work after the fact. It carries the redacted drift summary rather than a bool precisely
+    because the warning *is* the mitigation for the rest — an operator told only "something changed"
+    would inspect the working tree, while the aspect that matters ("hooks: hook 'post-commit'
+    added") is the one that makes the next orchestrator git command execute provider-supplied
+    code.
     """
 
     kind: str
