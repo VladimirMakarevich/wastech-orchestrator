@@ -328,7 +328,7 @@ git:
   auto_merge_strategy: {auto_merge_strategy}
   auto_merge_wait_for_checks: {str(auto_merge_wait_for_checks).lower()}
   footprint:
-    audit_commit_message: "chore(orchestrator): audit trail for {{task_id}}"
+    audit_commit_message: "chore(worc): audit trail for {{task_id}}"
     audit_on_branch: {audit_on_branch}
 prompt_audit: {str(prompt_audit).lower()}
 {memory_block}{logging_block}{skills_block}{supervisor_block}"""

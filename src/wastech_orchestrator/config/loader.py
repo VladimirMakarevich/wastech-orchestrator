@@ -58,7 +58,7 @@ from wastech_orchestrator.providers.capabilities import all_reasoning_levels
 from wastech_orchestrator.security.env import default_allowed_environment
 
 # Defaults mirror / the packaged config.example.yaml so a partial config still loads safely.
-_DEFAULT_AUDIT_MESSAGE = "chore(orchestrator): audit trail for {task_id}"
+_DEFAULT_AUDIT_MESSAGE = "chore(worc): audit trail for {task_id}"
 
 _REASONING_LEVELS: frozenset[str] = all_reasoning_levels()
 

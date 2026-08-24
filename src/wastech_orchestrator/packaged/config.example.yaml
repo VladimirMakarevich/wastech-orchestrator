@@ -459,7 +459,7 @@ git:
                                     # gitignored <repo>/.worc/ home; only the task file and its
                                     # <id>.summary.md are committed, at the repo root under tasks/.
                                     # This is a separate audit commit, not a second code commit.
-    audit_commit_message: "chore(orchestrator): audit trail for {task_id}"
+    audit_commit_message: "chore(worc): audit trail for {task_id}"
     audit_on_branch: task           # task = same branch as the code; sibling = <branch>-audit
 
 telegram:                           # human-in-the-loop + notifications (optional)

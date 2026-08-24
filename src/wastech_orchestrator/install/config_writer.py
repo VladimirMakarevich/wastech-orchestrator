@@ -183,7 +183,7 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "footprint": {
                 # The task file + its <id>.summary.md are audit-committed in the repo under tasks/;
                 # all other runtime artifacts live under the gitignored .worc/ home.
-                "audit_commit_message": "chore(orchestrator): audit trail for {task_id}",
+                "audit_commit_message": "chore(worc): audit trail for {task_id}",
                 "audit_on_branch": "task",
             },
         },

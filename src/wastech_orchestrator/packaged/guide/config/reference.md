@@ -61,7 +61,7 @@ The reference is split by concern, so a page you open to answer one question is 
 | `git.auto_merge_strategy` | `merge` \| `squash` \| `rebase` | `squash` | The `gh pr merge` strategy when a merge fires. |
 | `git.auto_merge_wait_for_checks` | bool | `false` | `true` arms GitHub-native auto-merge (`--auto`) — merge only after required checks pass. |
 | `git.merge_flow` | string | `"merge"` | The flow `worc merge-task` runs to resolve base-merge conflicts (seeded at `.worc/flows/merge.yaml`). Clean merges are mechanical; only a conflicting base-merge runs it. |
-| `git.footprint.audit_commit_message` | string | `"chore(orchestrator): audit trail for {task_id}"` | Template for the separate audit commit (the task file + its `<id>.summary.md`, not a second code commit). |
+| `git.footprint.audit_commit_message` | string | `"chore(worc): audit trail for {task_id}"` | Template for the separate audit commit (the task file + its `<id>.summary.md`, not a second code commit). |
 | `git.footprint.audit_on_branch` | `task` \| `sibling` | `task` | `task` = audit commit on the same branch as the code; `sibling` = on `<branch>-audit`. |
 
 ### When the task branch already exists on the remote
