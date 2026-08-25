@@ -243,10 +243,11 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "clean_runs_on_success": True,
         },
         # Persistent repo-scoped memory is off out of the box, matching the dataclass fallback:
-        # its store is unaudited, so it is a conscious opt-in. Set enabled: true for the store, the
-        # candidate
-        # delta and the memory packets. The tunable knobs default per the schema — the annotated
-        # config.example.yaml installed alongside this file documents each one.
+        # the subsystem is EXPERIMENTAL (unaudited store, no redaction guarantee, curation quality
+        # still being reworked), so it is a conscious opt-in and never on by default. Set
+        # enabled: true for the store, the candidate delta and the memory packets. The tunable knobs
+        # default per the schema — the annotated config.example.yaml installed alongside this file
+        # documents each one.
         "memory": {"enabled": False},
         # Custom tool-node default timeout. Written at the schema default for discoverability;
         # a per-node `timeout_seconds` in a flow overrides it. Omit the block for the same 3600s.

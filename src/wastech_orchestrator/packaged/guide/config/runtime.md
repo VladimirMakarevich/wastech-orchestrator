@@ -24,6 +24,8 @@ For the fields not on this page see [reference.md](reference.md), which also car
 
 ## `memory` — persistent, repo-scoped memory
 
+> **Experimental — not stable.** The subsystem runs, but its store is unaudited and carries no redaction guarantee, and its curation quality is still being reworked. The block's shape, defaults and knobs can change without a migration path, so leave it off (the shipped default) unless you are deliberately experimenting.
+
 Omitting the whole block ⇒ `enabled: false` (no store, empty packets, CLI no-op). All numeric knobs are runtime-clamped — never fatal. Defaults are deliberately small (precision over recall).
 
 Memory also requires `supervisor.enabled: true`. That layer's closing turn is the only path that writes anything memory can later read back, so with the layer off memory would keep adding a packet to every prompt without ever learning — `supervisor.enabled: false` therefore resolves `memory.enabled` to `false` for the run and prints a warning naming both keys. Set `memory.enabled: false` yourself to make the file say what runs.

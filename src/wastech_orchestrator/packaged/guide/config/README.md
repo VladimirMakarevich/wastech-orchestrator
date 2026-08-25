@@ -95,14 +95,14 @@ Keep publishing conservative by default:
 
 ### 6. Optional blocks
 
-Touch these only when the operator asked for them (each field is documented in full in [reference.md](reference.md)). Two are already on after `install` — `supervisor` (`enabled: true`) and `memory` (`enabled: true`) — so for those the question is whether to turn them off, not on:
+Touch these only when the operator asked for them (each field is documented in full in [reference.md](reference.md)). One is already on after `install` — `supervisor` (`enabled: true`) — so for that one the question is whether to turn it off, not on:
 
 - `orchestrator` — the `watch` loop cadence (`poll_interval_seconds`), the instance `queue` selector, and `auto_mode` task chaining.
 - `paths` — `tasks_dir`, the repo-relative home of the task lifecycle (rename only to avoid clashing with an existing `tasks/`).
 - `telegram` — real human-in-the-loop and notifications.
 - `supervisor` — the read-only oversight layer, **on by default**. This is where you turn it off (`enabled: false`) or set per-phase model/effort under `observe` / `finalize` / `handoff`.
 - `logging` — operator log `level` and per-attempt artifact retention (`artifacts`).
-- `memory` — persistent, repo-scoped memory (`enabled` plus retrieval/promotion/cleanup caps).
+- `memory` — persistent, repo-scoped memory (`enabled` plus retrieval/promotion/cleanup caps). **Experimental and off out of the box** — turn it on only when the operator explicitly asks to experiment with it.
 - `prompt_audit` — prompt recording for debugging or compliance.
 - `tools` — only its `default_timeout_seconds` (default `3600`), the flow-wide timeout for custom `tool` nodes. The tool feature itself is enabled per-flow (a `kind: tool` node reading `.worc/tools/`), not here — see `flows/README.md`. Set this only to change the default timeout.
 

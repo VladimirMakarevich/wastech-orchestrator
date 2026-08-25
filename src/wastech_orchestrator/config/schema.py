@@ -556,8 +556,10 @@ class MemoryConfig:
     memory packets, ``worc memory`` is a no-op, no background cleanup). A fresh ``worc install``
     writes ``enabled: false`` explicitly (both the packaged ``config.example.yaml`` and the
     generated ``config.yaml`` via ``config_writer.build_config_mapping``) so the operator finds the
-    switch rather than the block's absence; off is the shipped posture because the store is
-    unaudited and carries no redaction guarantee, so keeping it is a conscious opt-in. Every numeric
+    switch rather than the block's absence; off is the shipped posture because the subsystem is
+    **experimental and not stable** — the store is unaudited and carries no redaction guarantee, and
+    its curation quality is still being reworked — so keeping it is a conscious opt-in and no
+    install ever turns it on. Every numeric
     knob carries a locked default and is a bounded, runtime-clamped value — none is a fatal config
     error (an odd value is clamped at use, per the "fatal only without a safe fallback" rule).
     """

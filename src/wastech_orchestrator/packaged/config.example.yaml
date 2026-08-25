@@ -466,7 +466,11 @@ logging:                            # operator log verbosity + on-disk artifact 
                                     #   orchestrator also does it itself). Per-task log dirs are separate:
                                     #   they stay with `worc logs clean`. See guide/footprint.md.
 
-memory:                             # persistent, repo-scoped memory (optional)
+memory:                             # persistent, repo-scoped memory (optional) — EXPERIMENTAL
+  # EXPERIMENTAL / NOT STABLE. The subsystem runs, but its store is unaudited and carries no
+  #   redaction guarantee, and its curation quality is still being reworked — the block's shape,
+  #   defaults and knobs can change without a migration path. Leave it off unless you are
+  #   deliberately experimenting, and expect to re-read this block after an upgrade.
   enabled: false                    # SHIPPED DEFAULT false. false / omit the whole block = no store, no
                                     #   candidate delta, empty memory packets, CLI no-op, no cleanup
                                     # Needs `supervisor.enabled: true`: that layer's closing turn is the
