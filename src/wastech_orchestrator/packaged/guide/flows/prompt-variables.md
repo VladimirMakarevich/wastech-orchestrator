@@ -18,7 +18,6 @@ Each variable names **which runner populates it** and **when it may be empty**. 
 | `{diff_path}` | agent, evaluator | no workspace-write edit has happened yet |
 | `{checks_path}` | agent, evaluator | the `checks` node has not run yet |
 | `{review_path}` | agent, evaluator | the `evaluator` (review) node has not run yet |
-| `{skills_path}` | agent | the node has no resolved skills (several resolved skills render as newline-separated paths) |
 | `{memory_path}` | agent, evaluator | memory is disabled, or nothing relevant was retrieved |
 | `{subtask_order}` | agent | the task is **not** decomposed (whole-task run) |
 | `{subtask_count}` | agent | the task is **not** decomposed |
@@ -78,7 +77,7 @@ Both `agent` and `evaluator` role prompts resolve these names, so an evaluator c
 
 **Not allowed:**
 
-- A node id that collides with a reserved core-variable prefix (`task`, `plan`, `diff`, `checks`, `review`, `repo`, `skills`, `memory`, `stage`, or anything starting with `subtask`) — a fatal flow-load error, because `{plan_path}` etc. already mean the core variable.
+- A node id that collides with a reserved core-variable prefix (`task`, `plan`, `diff`, `checks`, `review`, `repo`, `memory`, `stage`, or anything starting with `subtask`) — a fatal flow-load error, because `{plan_path}` etc. already mean the core variable.
 - `{X_path}` where `X` names no node in the flow — it renders verbatim (and the lint warns).
 - Expecting **two** named outputs from one node — a node exposes exactly one `{<id>_path}`. A node that fills a fixed slot with `output_artifact` (`enriched_spec` / `plan` / `summary` / `report`) writes **no** `{<id>_path}` at all: that slot is its channel. Only `plan` has a prompt variable (`{plan_path}`); the other three are orchestrator/audit outputs no downstream prompt can name.
 - `{<id>_path}` **of** an `evaluator` / `checks` / `hitl` / `publish` node — only agent and `tool` nodes _expose_ one; an evaluator and a checks node publish through their dedicated `{review_path}` / `{checks_path}` instead. (An evaluator prompt may freely _read_ an agent's or tool's `{<id>_path}`.)

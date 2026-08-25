@@ -78,9 +78,9 @@ class FollowUp:
 def parse_follow_ups(raw: Any) -> tuple[FollowUp, ...]:
     """Parse the finalize turn's ``follow_ups`` array defensively — **evidence-gated**.
 
-    Best-effort, mirroring ``_parse_skill_map``: a non-list yields ``()`` and any record without
-    a non-empty ``title`` or ``evidence`` is dropped (never raised), so an ungrounded "refactor
-    idea" the model invented cannot reach ``summary.{json,md}``.
+    Best-effort, like the layer's other structured-output parsers: a non-list yields ``()`` and any
+    record without a non-empty ``title`` or ``evidence`` is dropped (never raised), so an ungrounded
+    "refactor idea" the model invented cannot reach ``summary.{json,md}``.
     """
     if not isinstance(raw, list):
         return ()

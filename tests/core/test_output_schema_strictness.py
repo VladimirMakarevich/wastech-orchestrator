@@ -34,7 +34,6 @@ from wastech_orchestrator.core.hitl import typed_output_schema
 from wastech_orchestrator.core.supervisor import (
     _FOLLOW_UPS_SCHEMA,
     _HANDOFF_SCHEMA,
-    _SKILL_MAP_SCHEMA,
     _finalize_schema,
 )
 from wastech_orchestrator.memory.delta import DELTA_OUTPUT_SCHEMA
@@ -45,7 +44,6 @@ _OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     "evaluator._FINDINGS_SCHEMA": _FINDINGS_SCHEMA,
     "hitl.typed_output_schema('human_input')": typed_output_schema("human_input") or {},
     "hitl.typed_output_schema('planning')": typed_output_schema("planning") or {},
-    "supervisor._SKILL_MAP_SCHEMA": _SKILL_MAP_SCHEMA,
     "supervisor._FOLLOW_UPS_SCHEMA": _FOLLOW_UPS_SCHEMA,
     "supervisor._HANDOFF_SCHEMA": _HANDOFF_SCHEMA,
     # All three shapes: the dynamic ``required`` must list exactly the present keys in each branch.

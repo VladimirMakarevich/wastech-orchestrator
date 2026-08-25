@@ -102,7 +102,6 @@ _AGENT_FIELDS = frozenset(
         "best_effort",
         "hitl",
         "extra_args",
-        "skills",
         "when",
     }
 )
@@ -172,7 +171,7 @@ _OUTPUT_ARTIFACT_SLOTS = frozenset({"enriched_spec", "plan", "summary", "report"
 # ``{subtask_spec_path}``, …). A collision is a fatal load error. Evaluator/checks/human nodes do
 # not get ``{<id>_path}`` (so the packaged ``review`` evaluator and ``testing`` checks node are ok).
 _RESERVED_NODE_ID_NAMES = frozenset(
-    {"task", "plan", "diff", "checks", "review", "repo", "skills", "memory", "stage"}
+    {"task", "plan", "diff", "checks", "review", "repo", "memory", "stage"}
 )
 _RESERVED_NODE_ID_PREFIX = "subtask"
 
@@ -210,25 +209,6 @@ def _parse_tristate(raw: dict[str, Any], key: str) -> bool | None:
     """
     value = raw.get(key)
     return None if value is None else bool(value)
-
-
-def _parse_skills(raw: Any, ctx: str) -> tuple[str, ...]:
-    """Parse a node's ``skills:`` pin list — structure only (existence is a task-start check).
-
-    Each pin is a non-empty bounded string (a skill's unique ``name`` or repo-relative ``SKILL.md``
-    path); whether it resolves is checked against the discovered inventory at task start, since
-    skills live in the clone (absent at flow-load time). Order is preserved, blanks stripped.
-    """
-    if raw is None:
-        return ()
-    if not isinstance(raw, list):
-        raise FlowLoadError(f"'skills' must be a list in {ctx}")
-    pins: list[str] = []
-    for item in raw:
-        if not isinstance(item, str) or not item.strip() or len(item) > 512:
-            raise FlowLoadError(f"each 'skills' entry must be a non-empty bounded string in {ctx}")
-        pins.append(item.strip())
-    return tuple(pins)
 
 
 @dataclass(frozen=True, slots=True)
@@ -415,7 +395,6 @@ def _parse_agent_node(raw: dict[str, Any]) -> AgentNode:
         best_effort=bool(raw.get("best_effort", False)),
         hitl=_parse_hitl_settings(raw.get("hitl")),
         extra_args=tuple(str(a) for a in raw.get("extra_args", [])),
-        skills=_parse_skills(raw.get("skills"), ctx),
         when=_parse_when(raw.get("when")),
     )
 

@@ -530,28 +530,19 @@ def _impl_fingerprint() -> str:
     return registry.resolve("implementation").flow_fingerprint
 
 
-def _seed_control_bundle(
-    orch,
-    store: StateStore,
-    task_id: str,
-    *,
-    skill_packages: tuple[tuple[str, str, list[str]], ...] = (),
-) -> None:
+def _seed_control_bundle(orch, store: StateStore, task_id: str) -> None:
     """Seed the control + instruction bundles an interrupted task left on disk.
 
     A resume verifies both frozen bundles against their persisted digests before reusing them; these
     recovery tests seed the checkpoint directly (bypassing the fresh run that freezes), so they must
     also freeze the implementation-flow control bundle the checkpoint fingerprints AND a minimal
-    instruction bundle (task packet + any tracked root repo instructions + any selected skill
-    packages), recording both digests. ``skill_packages`` is ``(folder, skill_md_rel, files_rel)``
-    per selected skill (matching what a fresh run would freeze for a resumed skill map).
+    instruction bundle (task packet + any tracked root repo instructions), recording both digests.
     """
     from wastech_orchestrator.core.flow.control_bundle import freeze_control_bundle
     from wastech_orchestrator.core.flow.instruction_bundle import (
         REPO_INSTRUCTION_NAMES,
         discover_repository_instructions,
         freeze_repository_instructions,
-        freeze_skill_package,
         freeze_task_packet,
         write_instruction_manifest,
     )
@@ -576,9 +567,6 @@ def _seed_control_bundle(
         ib_dir, discover_repository_instructions(repo_root, tracked)
     )
     entries = [task_entry, *repo_entries]
-    for folder, skill_md_rel, files_rel in skill_packages:
-        package = freeze_skill_package(ib_dir, folder, skill_md_rel, files_rel, repo_root)
-        entries.extend(package.entries)
     digest = write_instruction_manifest(
         ib_dir, entries=entries, control_digest=bundle.bundle_digest
     )
@@ -689,90 +677,6 @@ def test_resume_continues_persisted_checkpoint(
         ).as_posix()
         assert node_requests[0].check_artifacts_path == expected_checks
         assert failed_check.exists()
-
-
-def test_resume_restores_skill_map_without_re_proposing(
-    git_repo, make_git_config, git_run, tmp_path: Path
-) -> None:
-    # skills-selection-rework: the effective per-node skill map was resolved + persisted to
-    # skill_map.json before the interruption. A resume restores it (and does NOT re-run the
-    # supervisor proposal), so the resumed implementation node still receives the skill path.
-    import json
-
-    from wastech_orchestrator.task.model import NormalizedTask
-    from wastech_orchestrator.task.parser import slugify, write_normalized
-
-    providers = _make_providers(git_repo)
-    orch, store, _, art, _ = _build_orchestrator(
-        git_repo, make_git_config, tmp_path, providers, [0]
-    )
-    task_id = "resume-skills"
-    title = "Resume checkpoint"
-    slug = slugify(title)
-    branch = f"worc/{task_id}-{slug}"
-    write_normalized(
-        NormalizedTask(id=task_id, title=title, description="Implement the requested change."),
-        str(art),
-    )
-    git_run(["checkout", "-b", branch], git_repo.clone)
-    store.insert_task(
-        TaskRow(
-            task_id=task_id,
-            title=title,
-            status=Status.RUNNING,
-            branch=branch,
-            slug=slug,
-            decomposition_accepted=False,
-        )
-    )
-    store.save_flow_checkpoint(
-        task_id,
-        current_node="implementation",
-        counters_json="{}",
-        flow_fingerprint=_impl_fingerprint(),
-        fix_iterations=0,
-    )
-    # The skill exists in the clone; the per-node map was persisted before the interruption.
-    # Identity is the repo-relative POSIX path (joined onto the clone when surfaced to a provider).
-    skill_md = git_repo.clone / ".claude" / "skills" / "safe-change" / "SKILL.md"
-    skill_md.parent.mkdir(parents=True, exist_ok=True)
-    skill_md.write_text("---\nname: safe-change\ndescription: d\n---\n# Body\n", "utf-8")
-    # A fresh run would have frozen the selected skill's package into the instruction bundle; seed
-    # it so resume reconstructs the same frozen exchange path (not a re-read of the live SKILL.md).
-    _seed_control_bundle(
-        orch,
-        store,
-        task_id,
-        skill_packages=(
-            (
-                "safe-change",
-                ".claude/skills/safe-change/SKILL.md",
-                [".claude/skills/safe-change/SKILL.md"],
-            ),
-        ),
-    )
-    skill_map = art / "logs" / task_id / "skill_map.json"
-    skill_map.parent.mkdir(parents=True, exist_ok=True)
-    skill_map.write_text(
-        json.dumps(
-            {
-                "implementation": [
-                    {
-                        "name": "safe-change",
-                        "description": "d",
-                        "path": ".claude/skills/safe-change/SKILL.md",
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    result = orch.resume()
-    assert result is not None and result.final_status is Status.DONE
-
-    impl = next(r for p in providers.values() for r in p.requests if r.node_id == "implementation")
-    assert any(path.endswith("safe-change/SKILL.md") for path in impl.skill_reference_paths)
 
 
 def test_resume_waits_on_persisted_planning_prompt_without_resending(

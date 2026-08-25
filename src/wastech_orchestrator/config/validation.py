@@ -180,7 +180,6 @@ def validate_config(config: OrchestratorConfig) -> list[str]:
     _validate_telegram(config, issues)
     _validate_confirmation_gates(config, issues)
     _validate_supervisor(config, issues, warnings)
-    _validate_skills(config, warnings)
     _validate_security(config, issues)
     _validate_paths(config, issues)
 
@@ -215,28 +214,6 @@ def _validate_paths(config: OrchestratorConfig, issues: list[str]) -> None:
 
 #: Named once so the warning below and the early return it guards cannot drift apart.
 _INERT_SUPERVISOR_KEYS = "role_file / provider / observe / finalize / handoff"
-
-
-def _validate_skills(config: OrchestratorConfig, warnings: list[str]) -> None:
-    """A dynamic skill map needs the layer that proposes it.
-
-    A warning rather than a fatal issue, because the dynamic layer is fail-open by design (a
-    proposal naming a skill that does not resolve is filtered out, never an error): "each node
-    gets only the
-    skills pinned on it in the flow" is a correct degradation, not a lost guarantee. It is silent,
-    though, which is what earns the warning.
-
-    Worded about the **resolved** value on purpose: a ``skills:`` block written without a
-    ``dynamic:`` key resolves to true (the loader's default for a present block), so this can
-    fire for
-    an operator who never typed the word.
-    """
-    if config.skills.dynamic and not config.supervisor.enabled:
-        warnings.append(
-            "skills.dynamic resolves to true but supervisor.enabled is false — the once-per-task "
-            "node→skills proposal is a supervisor turn, so each node gets only the skills pinned "
-            "on it in the flow YAML"
-        )
 
 
 def _validate_supervisor(

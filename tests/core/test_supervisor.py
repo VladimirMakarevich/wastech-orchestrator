@@ -28,7 +28,6 @@ from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import SupervisorBlock
 from wastech_orchestrator.core.follow_ups import FINDING_TITLE_MAX
 from wastech_orchestrator.core.loop_control import record_rework
-from wastech_orchestrator.core.skills import SkillInventory, SkillRef
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.core.supervisor import (
     _HANDOFF_RUN_ID_BASE,
@@ -412,81 +411,6 @@ def test_supervisor_step_artifact_run_id_is_the_observed_step(tmp_path: Path) ->
     sup.observe(task_id=_TASK, node_id="implementation", node_run_id=5, outcome_kind="done")
     sup.observe(task_id=_TASK, node_id="review", node_run_id=7, outcome_kind="accept")
     assert [r.node_run_id for r in router.requests] == [5, 7]
-
-
-# -- upfront skill-map proposal (skills-selection-rework) ---------------------
-
-_INV = SkillInventory(
-    skills=(SkillRef("safe-change", "review", ".claude/skills/safe-change/SKILL.md"),)
-)
-
-
-def _proposal_result(assignments: list[dict[str, Any]]) -> AgentRunResult:
-    return AgentRunResult(
-        status=RunStatus.SUCCEEDED,
-        provider="claude",
-        node_id="supervisor",
-        attempt=1,
-        exit_code=0,
-        started_at="t0",
-        finished_at="t1",
-        final_message=None,
-        structured_output={"assignments": assignments},
-        session_id="sess-super",
-    )
-
-
-def test_supervisor_propose_skill_map_parses_and_records(tmp_path: Path) -> None:
-    result = _proposal_result([{"node": "implementation", "skills": ["safe-change", "ghost"]}])
-    router, store = FakeRouter([result]), _store(tmp_path)
-    sup = _supervisor(tmp_path, router, store)
-
-    proposed = sup.propose_skill_map(
-        task_id=_TASK,
-        agent_node_ids=["implementation", "review"],
-        inventory=_INV,
-        task_path="/x/.worc-io/t/task.md",
-    )
-    # The supervisor proposes verbatim tokens (the Core resolves them against the inventory later).
-    assert proposed == {"implementation": ("safe-change", "ghost")}
-    # One read-only structured turn, on its own session, carrying the proposal output schema.
-    assert len(router.requests) == 1
-    req = router.requests[0]
-    assert req.permission_profile == "read-only"
-    assert req.output_schema is not None and "assignments" in str(req.output_schema)
-    # Recorded as exactly one advisory evaluation row (the supervisor proposes, never routes).
-    evals = store.get_evaluations(_TASK)
-    assert [e.kind for e in evals] == ["supervisor_skill_proposal"]
-    assert evals[0].verdict == "advisory" and evals[0].node_id is None
-
-
-def test_supervisor_propose_skill_map_skips_when_inventory_empty(tmp_path: Path) -> None:
-    router, store = FakeRouter(), _store(tmp_path)
-    sup = _supervisor(tmp_path, router, store)
-    proposed = sup.propose_skill_map(
-        task_id=_TASK,
-        agent_node_ids=["implementation"],
-        inventory=SkillInventory(),
-        task_path=None,
-    )
-    assert proposed == {}
-    assert router.requests == []  # no LLM call when there is nothing to propose
-    assert store.get_evaluations(_TASK) == []
-
-
-def test_supervisor_propose_skill_map_best_effort_on_infra_failure(tmp_path: Path) -> None:
-    router, store = FakeRouter([None]), _store(tmp_path)  # the turn could not run
-    sup = _supervisor(tmp_path, router, store)
-    proposed = sup.propose_skill_map(
-        task_id=_TASK,
-        agent_node_ids=["implementation"],
-        inventory=_INV,
-        task_path=None,
-    )
-    assert proposed == {}  # advisory: a failed proposal never raises, the run continues on pins
-    evals = store.get_evaluations(_TASK)
-    assert [e.kind for e in evals] == ["supervisor_skill_proposal"]
-    assert json.loads(evals[0].findings_json)["proposal_failed"] is True
 
 
 def test_supervisor_records_observation_failure_distinctly(tmp_path: Path) -> None:
@@ -1147,20 +1071,15 @@ def test_observe_and_finalize_use_their_own_model_and_reasoning(tmp_path: Path) 
     assert (finalize_request.model, finalize_request.reasoning) == ("opus", "high")
 
 
-def test_handoff_and_skill_proposal_run_independently_of_the_observation_cadence(
-    tmp_path: Path,
-) -> None:
-    # Both are unaffected by `observe.mode`: they are not per-step observations. With observations
-    # off
-    # entirely they still run — and the skill proposal rides the cheap `observe` model/effort, since
-    # it is a one-shot schema-bound turn rather than the whole-task synthesis.
+def test_handoff_runs_independently_of_the_observation_cadence(tmp_path: Path) -> None:
+    # The handoff brief is unaffected by `observe.mode`: it is not a per-step observation, so with
+    # observations off entirely it still runs.
     router, store = (
         FakeRouter(
             [
                 _structured_handoff(
                     {"new_surface_area": "a", "locked_decisions": "", "open_edges": ""}
                 ),
-                _proposal_result([{"node": "implementation", "skills": ["safe-change"]}]),
             ]
         ),
         _store(tmp_path),
@@ -1174,14 +1093,10 @@ def test_handoff_and_skill_proposal_run_independently_of_the_observation_cadence
     )
 
     assert sup.handoff(task_id=_TASK, subtask_order=1, floor_context="floor") is not None
-    assert sup.propose_skill_map(
-        task_id=_TASK, agent_node_ids=["implementation"], inventory=_INV
-    ) == {"implementation": ("safe-change",)}
 
-    handoff_request, proposal_request = router.requests
+    (handoff_request,) = router.requests
     # `handoff` takes neither observe's nor finalize's pair — it has its own block (unset here).
     assert handoff_request.model is None
-    assert (proposal_request.model, proposal_request.reasoning) == ("haiku", "low")
 
 
 def test_observe_turn_caps_max_reasoning(tmp_path: Path) -> None:
@@ -1991,18 +1906,17 @@ def test_supervisor_provider_attempt_usage_is_summation_safe_delta(tmp_path: Pat
 
 
 def test_each_phase_labels_its_own_provider_calls(tmp_path: Path) -> None:
-    # The phase cannot be inferred from the turn settings — the skill proposal deliberately shares
-    # the observe phase's cheap model + effort — so each call site states which job it is.
+    # The phase cannot be inferred from the turn settings (`handoff` may well share a pair with
+    # another phase), so each call site states which job it is.
     store = _store(tmp_path)
-    router = _AttemptsRouter([_claude_turn(cost=0.01, output_total=1) for _ in range(4)])
+    router = _AttemptsRouter([_claude_turn(cost=0.01, output_total=1) for _ in range(3)])
     sup = _supervisor(tmp_path, router, store)
-    sup.propose_skill_map(task_id=_TASK, agent_node_ids=["implementation"], inventory=_INV)
     sup.observe(task_id=_TASK, node_id="implementation", node_run_id=5, outcome_kind="done")
     sup.handoff(task_id=_TASK, subtask_order=1, floor_context="floor")
     sup.finalize(task_id=_TASK, task_title="T")
 
     labels = [r.supervisor_function for r in store.get_provider_attempts_for_task(_TASK)]
-    assert labels == ["skill", "observe", "handoff", "finalize"]
+    assert labels == ["observe", "handoff", "finalize"]
 
 
 def test_summary_json_reports_what_the_layer_spent_per_phase(tmp_path: Path) -> None:

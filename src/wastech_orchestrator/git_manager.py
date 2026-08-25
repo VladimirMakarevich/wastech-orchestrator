@@ -1146,28 +1146,11 @@ class GitManager:
             self._gh_repo_slug_cache = configured
         return self._gh_repo_slug_cache
 
-    def list_tracked_skill_files(self) -> tuple[str, ...]:
-        """Repo-relative POSIX paths of every tracked ``SKILL.md`` (whole-repo skill discovery).
-
-        Enumerates tracked files via ``git ls-files`` (ignore-aware and bounded for free — untracked
-        ``node_modules``/build/vendor trees never appear) and keeps the ``SKILL.md`` basenames,
-        wherever they sit in the tree. ``ls-files`` emits forward-slash paths on every platform.
-        Best-effort: a working copy with no git data (some tests) yields ``()`` so the inventory is
-        simply empty rather than failing the task.
-        """
-        result = self._git("ls-files", "-z")
-        if not result.ok:
-            return ()
-        return tuple(
-            item for item in result.stdout.split("\0") if item and item.split("/")[-1] == "SKILL.md"
-        )
-
     def list_tracked_files(self, *pathspecs: str) -> tuple[str, ...]:
         """Repo-relative POSIX paths of every tracked file, optionally under ``pathspecs``.
 
         Used by the instruction bundle to discover which root repository-instruction files
-        (``AGENTS.md`` etc.) are
-        tracked and to enumerate a selected skill's package closure (``ls-files -- <package-dir>``).
+        (``AGENTS.md`` etc.) are tracked.
         ``ls-files`` is ignore-aware, bounded (untracked build/vendor trees never appear), and emits
         forward-slash paths on every platform. Best-effort: a working copy with no git data yields
         ``()`` so a caller degrades to "nothing tracked" rather than failing the task.

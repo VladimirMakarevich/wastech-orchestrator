@@ -185,9 +185,6 @@ def test_generated_config_includes_optional_sections(tmp_path: Path) -> None:
     assert cfg.supervisor.observe.mode is ObserveMode.EVENTS
     # Provider is pinned to the primary so it stays aligned with the models (also the primary's).
     assert cfg.supervisor.provider == ProviderId.CLAUDE
-    # The dynamic skill layer is off out of the box (opt-in).
-    assert cfg.skills.dynamic is False
-    assert cfg.skills.strict is False
     # The documented telegram.trace knob is present in the delivered config.
     assert cfg.telegram.trace is False
     assert "trace:" in text
@@ -195,7 +192,7 @@ def test_generated_config_includes_optional_sections(tmp_path: Path) -> None:
     # Fresh install ships trust_level: auto (routine in-repo deletions do not gate) + no floor.
     assert cfg.security.trust_level == "auto"
     assert cfg.security.protected_paths == ()
-    for key in ("supervisor:", "skills:", "prompt_audit:", "trust_level:", "protected_paths:"):
+    for key in ("supervisor:", "prompt_audit:", "trust_level:", "protected_paths:"):
         assert key in text
 
 

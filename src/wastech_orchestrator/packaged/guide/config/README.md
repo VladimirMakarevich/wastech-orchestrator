@@ -22,12 +22,11 @@ Only build from scratch when there is no installed config yet. In that case, kee
 8. `checks`
 9. `git`
 10. `telegram`
-11. `skills`
-12. `supervisor`
-13. `logging`
-14. `memory`
-15. `tools`
-16. `prompt_audit`
+11. `supervisor`
+12. `logging`
+13. `memory`
+14. `tools`
+15. `prompt_audit`
 
 ## Build in this order
 
@@ -101,7 +100,6 @@ Touch these only when the operator asked for them (each field is documented in f
 - `orchestrator` — the `watch` loop cadence (`poll_interval_seconds`), the instance `queue` selector, and `auto_mode` task chaining.
 - `paths` — `tasks_dir`, the repo-relative home of the task lifecycle (rename only to avoid clashing with an existing `tasks/`).
 - `telegram` — real human-in-the-loop and notifications.
-- `skills` — how discovered skills attach to flow nodes. Discovery itself is automatic and whole-repo (every tracked `**/SKILL.md`, wherever it sits), so this block only carries `dynamic` and `strict`.
 - `supervisor` — the read-only oversight layer, **on by default**. This is where you turn it off (`enabled: false`) or set per-phase model/effort under `observe` / `finalize` / `handoff`.
 - `logging` — operator log `level` and per-attempt artifact retention (`artifacts`).
 - `memory` — persistent, repo-scoped memory (`enabled` plus retrieval/promotion/cleanup caps).

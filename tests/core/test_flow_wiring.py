@@ -71,9 +71,6 @@ def test_build_node_inputs_maps_pipeline_paths(tmp_path: Path) -> None:
     assert inputs.diff_path == "/a/current.diff"
     assert inputs.checks_path == "/a/check.log"  # p.check_log -> {checks_path}
     assert inputs.review_path == "/a/review/findings.json"
-    # Per-node skill paths are populated by the orchestrator's task-start resolution, not this
-    # builder — it leaves the map empty (the global ``selected_skills`` channel is gone).
-    assert inputs.skill_paths_by_node == {}
     assert inputs.subtask_count == 3  # decomposition accepted -> n surfaced
     assert inputs.branch == "worc/task-1-x"
     assert inputs.pull_request_title == "My PR"

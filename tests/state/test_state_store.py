@@ -374,7 +374,7 @@ def test_supervisor_function_round_trips_and_is_null_for_a_graph_node(store: Sta
     store.record_provider_attempt(
         ProviderAttemptRow(task_id="task-001", node_run_id=run_id, provider="claude", attempt=1)
     )
-    for function in ("observe", "finalize", "handoff", "skill"):
+    for function in ("observe", "finalize", "handoff"):
         store.record_provider_attempt(
             ProviderAttemptRow(
                 task_id="task-001",
@@ -394,7 +394,6 @@ def test_supervisor_function_round_trips_and_is_null_for_a_graph_node(store: Sta
         "observe",
         "finalize",
         "handoff",
-        "skill",
     ]
 
 

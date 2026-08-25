@@ -438,10 +438,6 @@ class NodeInputs:
     diff_path: str | None = None
     checks_path: str | None = None
     review_path: str | None = None
-    #: per-node read-only skill reference paths (absolute POSIX), keyed by node id — the effective
-    #: set the Core resolved for each node (operator pins ∪ accepted dynamic proposal). A node with
-    #: no skills is simply absent from the map (``skills_for`` returns ``()``).
-    skill_paths_by_node: dict[str, tuple[str, ...]] = field(default_factory=dict)
     subtask_count: int | None = None
     subtask_spec_path: str | None = None
     #: the intra-task subtask handoff brief path, set by the
@@ -465,7 +461,3 @@ class NodeInputs:
     commit_message: str | None = None
     #: notification recipients for HITL prompts (the task's contacts).
     contacts: tuple[str, ...] = ()
-
-    def skills_for(self, node_id: str) -> tuple[str, ...]:
-        """The read-only skill reference paths resolved for *node_id* (``()`` when it has none)."""
-        return self.skill_paths_by_node.get(node_id, ())

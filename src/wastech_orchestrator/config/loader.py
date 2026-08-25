@@ -45,7 +45,6 @@ from wastech_orchestrator.config.schema import (
     RepoConfig,
     RetryConfig,
     SecurityConfig,
-    SkillsConfig,
     SupervisorConfig,
     SupervisorObserveConfig,
     SupervisorTurnConfig,
@@ -748,18 +747,6 @@ def _build_telegram(raw: Any, issues: list[str]) -> TelegramConfig:
     )
 
 
-def _build_skills(raw: Any, issues: list[str]) -> SkillsConfig:
-    where = "skills"
-    if raw is None:
-        return SkillsConfig()
-    m = _mapping(raw, where, issues)
-    _check_keys(m, {"dynamic", "strict"}, where, issues)
-    return SkillsConfig(
-        dynamic=_bool(m, "dynamic", True, where, issues),
-        strict=_bool(m, "strict", False, where, issues),
-    )
-
-
 def _reasoning(m: Mapping[str, Any], where: str, issues: list[str]) -> str | None:
     """A ``reasoning`` value checked against the provider-agnostic union of levels.
 
@@ -953,7 +940,6 @@ _TOP_LEVEL_KEYS = {
     "checks",
     "git",
     "telegram",
-    "skills",
     "supervisor",
     "paths",
     "logging",
@@ -1010,7 +996,6 @@ def _parse(raw: Mapping[str, Any], issues: list[str], warnings: list[str]) -> Or
         checks=_build_checks(raw.get("checks"), issues),
         git=_build_git(raw.get("git"), issues),
         telegram=_build_telegram(raw.get("telegram"), issues),
-        skills=_build_skills(raw.get("skills"), issues),
         supervisor=supervisor,
         paths=_build_paths(raw.get("paths"), issues),
         logging=_build_logging(raw.get("logging"), issues),
