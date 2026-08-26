@@ -2750,6 +2750,12 @@ def test_clean_environment_pattern_expansion_is_announced_at_info(
     git_repo, make_git_config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The ordinary, no-secret pattern branch is observable in the run log."""
+    # A prefix pattern resolves against the LIVE environment, so a test asserting an exact
+    # expansion has to own the namespace first — a GitHub Ubuntu runner ships DOTNET_NOLOGO,
+    # DOTNET_MULTILEVEL_LOOKUP and DOTNET_SKIP_FIRST_TIME_EXPERIENCE of its own, and the
+    # assertion below would then read four names instead of one.
+    for name in [k for k in os.environ if k.startswith("DOTNET_")]:
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("DOTNET_ROOT", "/opt/dotnet")
     orch, _store, _ledger, _art = _build(
         git_repo,
