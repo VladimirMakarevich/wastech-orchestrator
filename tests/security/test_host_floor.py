@@ -124,12 +124,14 @@ def test_an_incapable_host_is_never_a_fatal_reason(
 @pytest.mark.parametrize("capability", _INCAPABLE)
 def test_the_line_states_the_loss_and_matches_the_strict_state(
     base_config: OrchestratorConfig,
-    monkeypatch: pytest.MonkeyPatch,
     capability: claude_mod.SandboxCapability,
 ) -> None:
-    monkeypatch.setattr(claude_mod, "default_sandbox_probe", lambda: capability)
-    (relaxed,) = describe_host_floor(_with_strict(base_config, False), HOST_FLOOR_CHECKS)
-    (strict,) = describe_host_floor(_with_strict(base_config, True), HOST_FLOOR_CHECKS)
+    # Through the injected table, not HOST_FLOOR_CHECKS: the unpacking below expects the Claude
+    # line alone, and on a native-Windows host the real Codex probe contributes a second one — so
+    # the live table would make this test's arity a property of the machine running it. `_table`
+    # pins Codex to a capable host, which is the whole reason the file has that seam.
+    (relaxed,) = describe_host_floor(_with_strict(base_config, False), _table(claude=capability))
+    (strict,) = describe_host_floor(_with_strict(base_config, True), _table(claude=capability))
     for line in (relaxed, strict):
         assert line.startswith("claude: ")
         assert ".git" in line and ".worc" in line and "state.db" in line

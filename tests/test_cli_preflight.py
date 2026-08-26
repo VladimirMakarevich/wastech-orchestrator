@@ -465,8 +465,17 @@ def test_preflight_reports_what_each_prefix_pattern_matched_here(
     monkeypatch.setenv("DOTNET_NOLOGO", "1")
     monkeypatch.setenv("NUGET_PACKAGES", "/repo/.toolcache/nuget")
     monkeypatch.setenv("NUGET_API_KEY", "oy2-secret")
+    # SystemRoot rides along because `_with_allowed` REPLACES the list: without it preflight
+    # returns a launch-critical FAIL on Windows and this test would measure that instead of the
+    # pattern report. It is an exact name, so it changes no pattern count below; on POSIX it is
+    # absent from the environment and forwards nothing.
     config = _with_allowed(
-        make_git_config(git_repo.clone), "PATH", "DOTNET_*", "NUGET_*", "WASTECH_NO_SUCH_*"
+        make_git_config(git_repo.clone),
+        "PATH",
+        "SystemRoot",
+        "DOTNET_*",
+        "NUGET_*",
+        "WASTECH_NO_SUCH_*",
     )
     _patch_providers(monkeypatch, config)
     rc = cli.cmd_preflight(_args())
@@ -490,7 +499,7 @@ def test_advanced_mode_pattern_report_names_its_git_only_scope(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setenv("DOTNET_ROOT", "/usr/share/dotnet")
-    config = _mode(_with_allowed(make_git_config(git_repo.clone), "PATH", "DOTNET_*"))
+    config = _mode(_with_allowed(make_git_config(git_repo.clone), "PATH", "SystemRoot", "DOTNET_*"))
     _patch_providers(monkeypatch, config)
 
     assert cli.cmd_preflight(_args()) == 0

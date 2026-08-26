@@ -118,14 +118,15 @@ def test_git_calls_use_trusted_containment_but_gh_does_not(
     less constrained — keeps the full quiescence barrier. Asserts the ``trusted`` flag the runner
     receives per binary, so the fast path is scoped to git alone.
 
-    ``argv[0]`` is recorded by basename: it reaches the runner as the absolute path pinned when the
-    manager was built, so the literal spelling depends on where this host installed the binary. The
-    decision under test is which binary got the fast path, and that is what the basename answers."""
+    ``argv[0]`` is recorded by stem, lowercased: it reaches the runner as the absolute path pinned
+    when the manager was built, so the literal spelling depends on where this host installed the
+    binary AND on the OS — Windows resolves it to ``git.EXE``. The decision under test is which
+    binary got the fast path, and that survives both."""
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
     seen: list[tuple[str, bool]] = []
 
     def spy_run_process(argv, **kwargs) -> ProcessResult:
-        seen.append((Path(argv[0]).name, bool(kwargs.get("trusted", False))))
+        seen.append((Path(argv[0]).stem.lower(), bool(kwargs.get("trusted", False))))
         Path(kwargs["stdout_path"]).write_text("", encoding="utf-8")
         return ProcessResult(
             exit_code=0,
@@ -3077,7 +3078,11 @@ def test_agent_cli_config_is_fingerprinted_by_digest_not_by_value(
     # git config), so the fingerprint keeps digests and the drift line keeps labels — never values.
     _task(store)
     secret = "tok_do_not_leak_me"
-    (git_repo.clone / ".mcp.json").write_text(f'{{"token": "{secret}"}}\n', encoding="utf-8")
+    # newline="" throughout: the digest is over the file's BYTES, and the default translation would
+    # write \r\n on Windows while the expected digest below is computed over \n.
+    (git_repo.clone / ".mcp.json").write_text(
+        f'{{"token": "{secret}"}}\n', encoding="utf-8", newline=""
+    )
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
     gm.prepare_branch("task-001", "x", epoch=_EPOCH)
 
@@ -3086,7 +3091,9 @@ def test_agent_cli_config_is_fingerprinted_by_digest_not_by_value(
     assert digest == hashlib.sha256(f'{{"token": "{secret}"}}\n'.encode()).hexdigest()
     assert secret not in "".join(state.tool_config.values())
 
-    (git_repo.clone / ".mcp.json").write_text('{"token": "rotated"}\n', encoding="utf-8")
+    (git_repo.clone / ".mcp.json").write_text(
+        '{"token": "rotated"}\n', encoding="utf-8", newline=""
+    )
     drift = gm.compare_git_control_state(state)
     assert drift is not None and secret not in drift.summary()
 
@@ -3530,7 +3537,11 @@ def test_the_module_level_git_helpers_run_on_the_allowlist_too(
     read-only git needs.
     """
     env = build_helper_git_env()
-    assert "PATH" in env and "HOME" in env  # git must be findable and read its global config
+    # git must be findable and able to read its global config. The name carrying "the home" is the
+    # OS's, not POSIX's — Windows has USERPROFILE and no HOME — so the assertion is that at least
+    # one of them survived the allowlist, which is what the built-in list forwards on either OS.
+    assert "PATH" in env
+    assert {"HOME", "USERPROFILE"} & set(env)
     assert env["LC_ALL"] == "C"  # hardened like every other orchestrator git process
     assert not {"GIT_DIR", "GIT_WORK_TREE", "GH_REPO"} & set(env)
 
