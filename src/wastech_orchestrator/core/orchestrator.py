@@ -18,7 +18,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
@@ -76,7 +76,6 @@ from wastech_orchestrator.core.flow.instruction_bundle import (
     assert_no_required_secret,
     discover_repository_instructions,
     freeze_repository_instructions,
-    freeze_skill_package,
     freeze_task_packet,
     governance_changed_paths,
     instruction_bundle_dir,
@@ -147,13 +146,6 @@ from wastech_orchestrator.core.recovery import (
     RecoveryAction,
     RecoveryPlan,
     RecoveryReconciler,
-)
-from wastech_orchestrator.core.skills import (
-    SkillInventory,
-    SkillInventoryScanner,
-    SkillRef,
-    SkillSelection,
-    resolve_skills,
 )
 from wastech_orchestrator.core.state_machine import Status, assert_transition
 from wastech_orchestrator.core.summary_report import (
@@ -528,16 +520,9 @@ class _Pipeline:
     branch: str = ""
     slug: str = ""
     check_sets: tuple[ResolvedCheckSet, ...] = ()  # normalized command_sets, resolved at preflight
-    # Repo skill inventory discovered at task start (`git ls-files`, whole-repo). `skill_map` is the
-    # effective per-node selection (operator pins ∪ the accepted supervisor proposal), keyed by node
-    # id and persisted to `skill_map.json`, so a resume restores it without re-proposing (see
-    # `_resolve_skill_layers`). Both are populated in `_engine_run`, not at construction.
-    skill_inventory: SkillInventory = field(default_factory=SkillInventory)
-    skill_map: dict[str, tuple[SkillRef, ...]] = field(default_factory=dict)
-    # Instruction-bundle staging: the frozen ``(bundle-key, sha256)`` entries accumulated
-    # while the agent inputs are frozen (task packet first, then repository instructions, then the
-    # per-node skill packages after the supervisor proposal). Combined with the control-plane
-    # digest into the composite ``instruction_manifest_digest`` by ``_finalize_instruction_bundle``.
+    # The frozen ``(bundle-key, sha256)`` entries accumulated while the agent inputs are frozen
+    # (task packet, then the root repository instructions). Combined with the control-plane digest
+    # into the composite ``instruction_manifest_digest`` by ``_finalize_instruction_bundle``.
     instruction_entries: list[tuple[str, str]] = field(default_factory=list)
     # Per-task disabled flow node ids (``nodes.<id>.enabled: false``). Re-derived every run/resume
     # from front-matter, so a restart recovers it without persistence (node-disable control).
@@ -628,7 +613,6 @@ class Orchestrator:
         monotonic: Callable[[], float] = time.monotonic,
         notifier: Notifier | None = None,
         resolver: CheckResolver | None = None,
-        skill_scanner: SkillInventoryScanner | None = None,
         heartbeat_seconds: float = 30.0,
         isolation_checks: Mapping[ProviderId, IsolationCheck] | None = None,
         host_floor_checks: Mapping[ProviderId, HostFloorCheck] | None = None,
@@ -673,11 +657,6 @@ class Orchestrator:
         # the Router, so a stop either interrupts at a clean node boundary or suppresses fallback
         # when a hard-killed provider exits abnormally mid-node.
         self._is_cancelled = is_cancelled
-        # Repo skill inventory scanner. Defaults to a WHOLE-REPO scan of the target clone —
-        # every tracked ``SKILL.md`` wherever it sits (``git ls-files``), not a `.claude/skills`
-        # directory: a monorepo scatters them, and the tracked-file enumeration is what makes
-        # the scan ignore-aware and bounded for free.
-        self._skill_scanner = skill_scanner or self._default_skill_scanner()
         # Per-id attempt number stamped onto the next ledger record, set by ``rerun``/``continue``.
         self._rerun_attempt: dict[str, int] = {}
         # Task ids whose next resume is an operator ``rerun --continue`` that ADOPTS the current
@@ -717,13 +696,6 @@ class Orchestrator:
         enabled when this is on, so a configured gate always has a live transport."""
         claude = self._config.agents.providers.get(ProviderId.CLAUDE)
         return claude is not None and claude.max_turns_gate
-
-    def _default_skill_scanner(self) -> SkillInventoryScanner:
-        return SkillInventoryScanner(
-            self._config.repo.local_path,
-            self._git.list_tracked_skill_files,
-            denied_read_paths=self._config.security.denied_read_paths,
-        )
 
     # --- entry point ----------------------------------------------------------------------
 
@@ -2141,8 +2113,6 @@ class Orchestrator:
                         extra_secrets=secrets,
                         private_path=str(review),
                     )
-        # The per-node skill map is restored separately by ``_resolve_skill_layers`` (from
-        # ``skill_map.json``), since it must be in place for a fresh run too — not only on resume.
         # The fixing-resume check log is task-scoped — a decomposed subtask re-runs its region
         # from the top (region entry), regenerating its own check log.
         latest_check = self._store.latest_failed_check_log(p.task.id, None)
@@ -2451,8 +2421,7 @@ class Orchestrator:
         The source task file and ``AGENTS.md``/``CLAUDE.md`` stay ordinary repository content; the
         provider only ever reads the redacted exchange copies published here from the immutable
         frozen canonical (never live) — immutability comes from the canonical digest, not from the
-        exchange copy (which is the redacted projection). Skill packages are frozen later, after the
-        supervisor proposal (``_skill_paths_by_node``), because the proposal reads the frozen task.
+        exchange copy (which is the redacted projection).
 
         Fresh/restart re-freezes from live and gates each required input against a known secret
         (fail-closed). Continue verifies the persisted composite digest first, then
@@ -2526,13 +2495,13 @@ class Orchestrator:
     ) -> None:
         """Write the composite manifest + persist the ``instruction_manifest_digest``.
 
-        Fresh/restart folds the task/instruction/skill entries and the control digest into
-        one composite digest and persists it (the parent-held identity a later continue verifies).
+        Fresh/restart folds the task/instruction entries and the control digest into one composite
+        digest and persists it (the parent-held identity a later continue verifies).
         A plain continue is a no-op: the digest was already verified in stage 1 against the
         persisted value. An operator ``--continue`` that adopted a re-frozen control plane
         (``adopt``) re-writes the manifest so its embedded control digest re-binds to the NEW one,
-        keeping the composite identity consistent; the already-frozen task/repo/skill entries
-        (restored into ``p.instruction_entries`` on resume) are preserved, not re-frozen from live.
+        keeping the composite identity consistent; the already-frozen task/repo entries (restored
+        into ``p.instruction_entries`` on resume) are preserved, not re-frozen from live.
         """
         if resume and not adopt:
             return
@@ -2660,8 +2629,8 @@ class Orchestrator:
 
         Keeps the orchestrator-owned preamble (isolation + check preflight, branch prep) and the
         terminal handling (auto-merge + cleanup); the refinement→…→publish body is expressed as the
-        validated flow graph and executed by the engine. Per-node post-processing (artifact slots,
-        skills) runs in the post-node hook; the publish node finalizes the task file + opens the PR.
+        validated flow graph and executed by the engine. Per-node post-processing (artifact slots)
+        runs in the post-node hook; the publish node finalizes the task file + opens the PR.
         Infra failure → ``failed``; a node needing human action → ``manual_action_required``.
         """
         self._resolve_flow(p)  # fail closed on an unknown/invalid flow before any side-effect
@@ -2803,21 +2772,14 @@ class Orchestrator:
             publish_scope=p.task.publish,
         )
         # Freeze the agent inputs into a private, immutable bundle and expose only redacted
-        # exchange copies. Staged because the skill packages can only be frozen after the supervisor
-        # proposal (which itself reads the frozen task packet). Fresh/restart freezes + records the
-        # composite ``instruction_manifest_digest``; continue loads+verifies it and refuses to
-        # resume a session whose digest differs. A freeze/verify/secret-gate failure is a
-        # fail-closed manual condition (Core-detected, never fallback).
+        # exchange copies. Fresh/restart freezes + records the composite
+        # ``instruction_manifest_digest``; continue loads+verifies it and refuses to resume a
+        # session whose digest differs. A freeze/verify/secret-gate failure is a fail-closed
+        # manual condition (Core-detected, never fallback).
         try:
             self._freeze_task_and_repo_instructions(p, inputs, resume=resume)
             if resume:
                 self._restore_engine_inputs(p, inputs)  # diff/checks/review/plan paths from disk
-            # Resolve the per-node skill selection before any node runs: discover the inventory,
-            # apply operator pins (strict/warn) + the supervisor's proposal, and thread the
-            # effective map into ``inputs``. On resume the persisted map is restored (no
-            # reproposal). Skill
-            # *packages* are frozen here too (fresh) via ``_skill_paths_by_node``.
-            self._resolve_skill_layers(p, snapshot, inputs, resume=resume)
             self._finalize_instruction_bundle(
                 p, control_digest=bundle.bundle_digest, resume=resume, adopt=adopt
             )
@@ -3581,8 +3543,8 @@ class Orchestrator:
         """Engine post-node hook: verify the live control plane is unchanged, let the
         supervisor layer observe the completed step (when the kind is observable at all and the
         cadence in force selects it), persist a node's output_artifact slot + its
-        generic ``<node_id>.out.md``, resolve plan skills, and — for the decomposition
-        ``proposed_by`` node — decide + materialize the decomposition."""
+        generic ``<node_id>.out.md``, and — for the decomposition ``proposed_by`` node — decide +
+        materialize the decomposition."""
         decomp = snapshot.doc.decomposition
         # The observation cadence for this run: the flow's own mode when it declares one, else the
         # operator's global mode (the validator has already refused a flow that widens it). Resolved
@@ -3833,204 +3795,6 @@ class Orchestrator:
                 )
                 for s in decision.subtasks
             ]
-        )
-
-    def _resolve_skill_layers(
-        self, p: _Pipeline, snapshot: FlowSnapshot, inputs: NodeInputs, *, resume: bool
-    ) -> None:
-        """Resolve the per-node skill selection once at task start (before any node runs).
-
-        Discovers the whole-repo inventory, applies operator pins (subject to ``skills.strict``) and
-        — when ``skills.dynamic`` and the inventory is non-empty — the supervisor's once-per-task
-        proposal, then threads the effective per-node map (pins ∪ the accepted proposal) into
-        ``inputs`` as absolute read-only reference paths. The map is persisted to ``skill_map.json``
-        so a resume restores it without re-proposing; a resume whose map file is missing
-        (interrupted before it was written) falls back to a fresh, idempotent resolution.
-        """
-        map_file = task_artifact_dir(self._artifacts_root, p.task.id) / "skill_map.json"
-        if resume and map_file.exists():
-            p.skill_map = self._load_skill_map(map_file)
-            inputs.skill_paths_by_node = self._skill_paths_by_node(p, p.skill_map, resume=True)
-            return
-        p.skill_inventory = self._skill_scanner.collect()
-        agent_nodes = [n for n in snapshot.doc.nodes if isinstance(n, AgentNode)]
-        pins = {n.id: resolve_skills(n.skills, p.skill_inventory) for n in agent_nodes}
-        self._enforce_pin_strictness(p, pins)
-        proposed = self._propose_skill_map(p, agent_nodes, inputs)
-        # Effective set per node = Core_filter(pins ∪ accepted proposal). Dynamic tokens that do
-        # not resolve are dropped here (only ``.refs`` kept); pins already passed strict/warn.
-        skill_map = {
-            n.id: resolve_skills((*n.skills, *proposed.get(n.id, ())), p.skill_inventory).refs
-            for n in agent_nodes
-        }
-        p.skill_map = {nid: refs for nid, refs in skill_map.items() if refs}
-        self._persist_skill_map(p, map_file)
-        inputs.skill_paths_by_node = self._skill_paths_by_node(p, p.skill_map, resume=False)
-
-    def _enforce_pin_strictness(self, p: _Pipeline, pins: dict[str, SkillSelection]) -> None:
-        """Strict/warn handling for unresolved operator pins (a dynamic proposal is never an error).
-
-        ``skills.strict`` true stops the task in ``manual_action_required`` with a report; false
-        (default, fail-open) logs a warning per node and continues, dropping the unresolved pins.
-        """
-        unresolved = {nid: sel.unresolved for nid, sel in pins.items() if sel.unresolved}
-        if not unresolved:
-            return
-        report = "; ".join(f"{nid}: {', '.join(toks)}" for nid, toks in sorted(unresolved.items()))
-        if self._config.skills.strict:
-            raise ManualActionRequired(f"unresolved skill pin(s) (skills.strict): {report}")
-        self._log(p.task.id).warning(
-            "unresolved skill pin(s) skipped (skills.strict=false)", extra={"pins": report}
-        )
-
-    def _propose_skill_map(
-        self, p: _Pipeline, agent_nodes: list[AgentNode], inputs: NodeInputs
-    ) -> dict[str, tuple[str, ...]]:
-        """The supervisor's once-per-task proposal (when ``dynamic`` and skills exist), else {}.
-
-        The proposal reads the task from the frozen exchange packet (``inputs.task_path``,
-        already set by stage-1 freezing) — the task title/description is never inlined into the
-        supervisor prompt.
-        """
-        if not self._config.skills.dynamic or not p.skill_inventory.skills:
-            return {}
-        if self._supervisor is None:  # defensive — the layer is built before this runs
-            return {}
-        return self._supervisor.propose_skill_map(
-            task_id=p.task.id,
-            agent_node_ids=[n.id for n in agent_nodes],
-            inventory=p.skill_inventory,
-            task_path=inputs.task_path,
-        )
-
-    def _persist_skill_map(self, p: _Pipeline, map_file: Path) -> None:
-        """Persist the effective per-node skill map so a resume restores it without re-proposing."""
-        data = {
-            nid: [{"name": r.name, "description": r.description, "path": r.path} for r in refs]
-            for nid, refs in p.skill_map.items()
-        }
-        map_file.parent.mkdir(parents=True, exist_ok=True)
-        map_file.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-        self._register_artifact(p.task.id, "skill_map", str(map_file))
-
-    def _load_skill_map(self, map_file: Path) -> dict[str, tuple[SkillRef, ...]]:
-        """Rebuild the per-node skill map from ``skill_map.json`` (repo-relative paths kept)."""
-        raw = json.loads(map_file.read_text(encoding="utf-8"))
-        return {
-            nid: tuple(
-                SkillRef(name=d["name"], description=d["description"], path=d["path"]) for d in refs
-            )
-            for nid, refs in raw.items()
-        }
-
-    def _skill_paths_by_node(
-        self, p: _Pipeline, skill_map: dict[str, tuple[SkillRef, ...]], *, resume: bool
-    ) -> dict[str, tuple[str, ...]]:
-        """Node id → the selected skills' frozen-exchange ``SKILL.md`` reference paths.
-
-        Each selected skill is frozen as a *package closure* (every tracked regular file inside its
-        ``SKILL.md`` directory, caps + link/special/ADS/collision refused) into the private bundle,
-        then the whole package is published redacted (read-only in the provider sandbox) to the
-        exchange
-        under ``skills/<folder>/...`` so the agent reads the immutable copy (with sibling resources
-        intact) and never the live repository file. There is no live-path fallback — a missing or
-        unrepresentable package fails strict resolution. Continue re-points to the packages
-        already frozen (and verified in stage 1) without re-freezing.
-
-        The folder name is the ``SKILL.md`` parent-directory basename; two selected skills whose
-        packages share a basename collide and fail strict (rather than silently clobbering).
-        """
-        bundle_dir = self._instruction_bundle_dir(p.task.id)
-        repo_root = Path(self._config.repo.local_path)
-        secrets = self._memory_extra_secrets()
-        # Freeze/publish each unique selected skill package once; map ref.path -> exchange SKILL.md.
-        unique_refs = {ref.path: ref for refs in skill_map.values() for ref in refs}
-        folders: dict[str, str] = {}  # folder -> ref.path (cross-package collision guard)
-        skill_md_by_path: dict[str, str] = {}
-        for rel, ref in sorted(unique_refs.items()):
-            folder = PurePosixPath(rel).parent.name
-            if folders.setdefault(folder, rel) != rel:
-                raise InstructionBundleError(
-                    f"selected skills collide on package folder {folder!r}: "
-                    f"{folders[folder]!r} vs {rel!r}"
-                )
-            skill_md_by_path[rel] = self._freeze_and_publish_skill(
-                p, bundle_dir, repo_root, ref, folder, secrets, resume=resume
-            )
-        return {
-            nid: tuple(skill_md_by_path[ref.path] for ref in refs)
-            for nid, refs in skill_map.items()
-        }
-
-    def _freeze_and_publish_skill(
-        self,
-        p: _Pipeline,
-        bundle_dir: Path,
-        repo_root: Path,
-        ref: SkillRef,
-        folder: str,
-        secrets: tuple[str, ...],
-        *,
-        resume: bool,
-    ) -> str:
-        """Freeze (fresh) then publish one skill package to the exchange; return its SKILL.md path.
-
-        Fresh/restart freezes the package closure into the bundle and records its entries; continue
-        reuses the already-verified frozen files. Either way every package file is gated against a
-        known secret and published (redacted) to the exchange from the frozen canonical, so a
-        mid-task edit to a ``SKILL.md`` or resource cannot change what the agent reads.
-        """
-        skill_md_key = f"skills/{folder}/SKILL.md"
-        if not resume:
-            package_files = list(self._git.list_tracked_files(str(PurePosixPath(ref.path).parent)))
-            package = freeze_skill_package(bundle_dir, folder, ref.path, package_files, repo_root)
-            p.instruction_entries.extend(package.entries)
-            keys = [key for key, _ in package.entries]
-            skill_md_key = package.skill_md_key
-        else:
-            skill_root = bundle_dir / "skills" / folder
-            keys = sorted(
-                f"skills/{folder}/{path.relative_to(skill_root).as_posix()}"
-                for path in skill_root.rglob("*")
-                if path.is_file()
-            )
-        skill_md_path = ""
-        for key in keys:
-            published = self._gate_and_publish_instruction_file(
-                p, bundle_dir / key, key, secrets, label=f"skill {folder!r}"
-            )
-            if key == skill_md_key:
-                skill_md_path = published
-        return skill_md_path
-
-    def _gate_and_publish_instruction_file(
-        self,
-        p: _Pipeline,
-        canonical: Path,
-        exchange_relpath: str,
-        secrets: tuple[str, ...],
-        *,
-        label: str,
-    ) -> str:
-        """Gate a frozen instruction file against a secret, then publish it redacted to exchange.
-
-        A non-UTF-8 file cannot be faithfully projected to the (text) exchange, so it is an
-        unrepresentable resource that fails closed rather than being shipped as mojibake.
-        """
-        try:
-            text = canonical.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
-            raise InstructionBundleError(
-                f"{label} file {exchange_relpath!r} is not readable UTF-8 text and cannot be "
-                f"safely projected to the agent-readable exchange: {exc}"
-            ) from exc
-        assert_no_required_secret(text, extra_secrets=secrets, label=f"{label}:{exchange_relpath}")
-        return publish_file(
-            str(self._exchange_root),
-            p.task.id,
-            exchange_relpath,
-            str(canonical),
-            extra_secrets=secrets,
         )
 
     def _finish_engine_run(self, p: _Pipeline, result: FlowRunResult) -> PipelineResult:

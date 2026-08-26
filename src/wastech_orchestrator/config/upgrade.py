@@ -33,9 +33,11 @@ from wastech_orchestrator.config.schema import CONFIG_SCHEMA_VERSION
 # ``agents.providers.<p>.max_budget_usd`` is gone — declared/parsed but read nowhere. v15: the whole
 # ``checks.discovery`` block and the flat ``checks.commands`` list are gone — replaced by named
 # ``checks.command_sets``, which ``upgrade-config`` cannot synthesize (host inspection is removed);
-# the operator authors it (see config.example.yaml). v19: ``skills.scan_root``/``skills.exclude``
-# are gone — discovery is automatic and whole-repo, and operators pin skills per flow node instead
-# of denylisting; the block shrinks to ``skills.dynamic``/``skills.strict`` (added from template).)
+# the operator authors it (see config.example.yaml). The whole ``skills`` block is gone and is
+# deliberately **absent from this list**: repo-skill selection was removed outright, so there is
+# nothing left to migrate toward. A config still carrying the block fails to load as an unknown
+# key and the operator deletes it — stripping it here would read as "the block still works, it
+# just does nothing".)
 # v25: ``security.deletion_approval_exempt_paths`` is gone — replaced by the ``trust_level`` policy
 # (added from template) plus the always-ask ``security.protected_paths`` floor; the old allowlist
 # has no equivalent under the new model, so it is stripped (not migrated). v38:
@@ -65,8 +67,6 @@ _REMOVED_KEYS: tuple[tuple[str, str], ...] = (
     ("agents.providers.codex", "max_budget_usd"),
     ("checks", "discovery"),
     ("checks", "commands"),
-    ("skills", "scan_root"),
-    ("skills", "exclude"),
     ("security", "deletion_approval_exempt_paths"),
     ("supervisor", "model"),
     ("supervisor", "reasoning"),

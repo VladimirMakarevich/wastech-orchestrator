@@ -54,8 +54,8 @@ RUNS_DIRNAME = "runs"
 # out of tree together with the rest of the private runtime state.
 CONTROL_BUNDLE_DIRNAME = "control-bundles"
 
-# The per-task frozen instruction bundles: the canonical (unredacted) task packet, selected skill
-# packages, and root repository instruction files, plus the composite manifest. Each task's snapshot
+# The per-task frozen instruction bundles: the canonical (unredacted) task packet and the root
+# repository instruction files, plus the composite manifest. Each task's snapshot
 # is ``<runs>/<INSTRUCTION_BUNDLE_DIRNAME>/<task-id>/``. The redacted, agent-readable *injection*
 # copies go to the exchange, never here.
 INSTRUCTION_BUNDLE_DIRNAME = "instruction-bundles"
@@ -127,7 +127,7 @@ class InternalDenyPolicy:
     """The orchestrator's internal set of paths a provider must never read.
 
     This is **internal provider policy**, deliberately kept separate from the overloaded public
-    ``security.denied_read_paths`` config list (which also drives redaction and skill scanning). It
+    ``security.denied_read_paths`` config list (which also drives redaction). It
     names the roots and secret sources the agent must not read: the control home, the private home,
     the resolved default/explicit ``--env-file`` (which may live outside ``private_home``), and the
     per-task runtime root. The provider CLIs' own config homes are deliberately NOT here: denying
@@ -135,7 +135,7 @@ class InternalDenyPolicy:
     on standalone installs — and they are the operator's, not the orchestrator's, to protect.
 
     ``runs_home`` is the parent of every per-task private root: the frozen control snapshot, the
-    frozen agent inputs (canonical task packet, skill packages, root repository instruction files),
+    frozen agent inputs (canonical task packet, root repository instruction files),
     the sealed terminal exchanges, and the quarantined evidence. It lives under ``private_home`` and
     so is already covered by that deny transitively; naming it explicitly makes the adapters'
     projection deny it by name (not by coincidence of location) and keeps it denied if

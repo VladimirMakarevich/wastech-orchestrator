@@ -76,8 +76,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # The frozen control-bundle digest (parent-held identity a continue/resume verifies).
     if "control_bundle_digest" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN control_bundle_digest TEXT")
-    # The frozen agent-input instruction-manifest digest (task packet + skill
-    # packages + root repository instructions + the control digest). Parent-held identity a
+    # The frozen agent-input instruction-manifest digest (task packet + root repository
+    # instructions + the control digest). Parent-held identity a
     # continue/resume verifies; a differing digest is never resumed into the same provider session.
     if "instruction_manifest_digest" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN instruction_manifest_digest TEXT")
@@ -266,7 +266,7 @@ CREATE TABLE IF NOT EXISTS provider_attempts (
     -- the ``node_runs`` id this attempt belongs to (a plain monotonic id, not an FK), or NULL for
     -- the constant supervisor layer, which is not a graph node and has no ``node_runs`` row.
     node_run_id INTEGER,
-    -- which supervisor phase made this call (``observe`` / ``finalize`` / ``handoff`` / ``skill``),
+    -- which supervisor phase made this call (``observe`` / ``finalize`` / ``handoff``),
     -- or NULL for an ordinary graph node. Passed in explicitly by the calling phase: the synthetic
     -- run ids and attempt-dir names that namespace the layer's artifacts are not semantics, and
     -- reading a phase out of them would make a path string load-bearing.

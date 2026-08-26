@@ -1,6 +1,6 @@
-# `telegram`, `skills`, `logging`, `memory`, `tools`, `prompt_audit`
+# `telegram`, `logging`, `memory`, `tools`, `prompt_audit`
 
-**You are an operator (or an agent helping one) configuring wastech-orchestrator.** This page documents the remaining blocks: how a human is asked and notified, which repository skills a run may select, how loud the logs are and how long artifacts live, the optional repo-scoped memory, the custom tool-node timeout, and the prompt audit.
+**You are an operator (or an agent helping one) configuring wastech-orchestrator.** This page documents the remaining blocks: how a human is asked and notified, how loud the logs are and how long artifacts live, the optional repo-scoped memory, the custom tool-node timeout, and the prompt audit.
 
 For the fields not on this page see [reference.md](reference.md), which also carries the cross-field rules that apply across blocks; for the how-to walkthrough see [README.md](README.md) and for safe defaults [best-practices.md](best-practices.md).
 
@@ -14,15 +14,6 @@ For the fields not on this page see [reference.md](reference.md), which also car
 | `telegram.ask_timeout_s` | int | `28800` (8h) | `> 0` | Blocking HITL timeout — fails closed on timeout. |
 | `telegram.trace` | bool | `false` | — | `true` = live per-node progress feed (best-effort; node id + outcome only). |
 
-## `skills` — repo skill selection
-
-At task start the orchestrator discovers every tracked `SKILL.md` in the clone; chosen ones reach a node as read-only reference paths (never executed).
-
-| Field | Type | Default | Meaning / when to use |
-| --- | --- | --- | --- |
-| `skills.dynamic` | bool | `false` (whole block absent) — but **`true` if the `skills:` block is present without this key** | `true` lets the supervisor propose a node→skills map once per task (adds one turn). Note the asymmetry: omitting `skills:` entirely ⇒ `false`; writing `skills:` with no `dynamic:` ⇒ `true`. `install` writes `false`. |
-| `skills.strict` | bool | `false` | Governs operator pins: `false` = warn and skip an unresolved pin; `true` = stop the task (`manual_action_required`). |
-
 ## `logging` — operator verbosity and artifact retention
 
 | Field | Type / values | Default | Meaning |
@@ -32,6 +23,8 @@ At task start the orchestrator discovers every tracked `SKILL.md` in the clone; 
 | `logging.clean_runs_on_success` | boolean | `true` | A task that finishes **successfully** evicts its own per-task state under `.worc/runs/` (frozen control + instruction bundles, sealed exchanges). Failed / parked / manual-action tasks and quarantined exchange evidence are never cleaned automatically. Set `false` to keep every run for analysis and reclaim on demand with `worc runs clean` (available either way). Per-task log dirs are out of scope — those stay with `worc logs clean`. See [footprint.md](../footprint.md). |
 
 ## `memory` — persistent, repo-scoped memory
+
+> **Experimental — not stable.** The subsystem runs, but its store is unaudited and carries no redaction guarantee, and its curation quality is still being reworked. The block's shape, defaults and knobs can change without a migration path, so leave it off (the shipped default) unless you are deliberately experimenting.
 
 Omitting the whole block ⇒ `enabled: false` (no store, empty packets, CLI no-op). All numeric knobs are runtime-clamped — never fatal. Defaults are deliberately small (precision over recall).
 

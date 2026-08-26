@@ -220,8 +220,6 @@ class AgentRunRequest:
     # reused one, so the packet is called a packet in the context footer, the rendered prompt, and
     # the prompt audit instead of masquerading as a plan or a checks report.
     supervisor_packet_path: str | None = None
-    # Planning-selected SKILL.md paths — read-only advisory references, never executed.
-    skill_reference_paths: tuple[str, ...] = ()
     output_schema: dict[str, Any] | None = None
     model: str | None = None
     extra_args: list[str] = field(default_factory=list)
@@ -287,15 +285,10 @@ def build_context_footer(request: AgentRunRequest) -> str:
         ("packet", request.supervisor_packet_path),
     )
     present = [(label, path) for label, path in fields if path]
-    skill_lines = [
-        f"- skill (read-only reference; advisory, do not execute): {path}"
-        for path in request.skill_reference_paths
-    ]
-    if not present and not skill_lines:
+    if not present:
         return ""
     lines = ["Context files (read them as needed; do not assume their contents):"]
     lines += [f"- {label}: {path}" for label, path in present]
-    lines += skill_lines
     return "\n".join(lines)
 
 

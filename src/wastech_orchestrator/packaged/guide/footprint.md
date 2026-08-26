@@ -65,7 +65,7 @@ Each of these is a directory of `<task-id>/` subdirectories. They exist so a tas
 
 ### `runs/instruction-bundles/<task-id>/`
 
-**What writes it:** the orchestrator, at task start. Same idea for the *agent inputs*: the validated task file, the skill packages the task selected, and the repository instruction files (`AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`). The agent receives redacted copies through the exchange; this is the unredacted original the orchestrator verifies against.
+**What writes it:** the orchestrator, at task start. Same idea for the *agent inputs*: the validated task file and the repository instruction files (`AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`). The agent receives redacted copies through the exchange; this is the unredacted original the orchestrator verifies against.
 
 **Normal?** Yes, one per task that ran.
 

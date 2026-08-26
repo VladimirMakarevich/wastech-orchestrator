@@ -63,7 +63,6 @@ from wastech_orchestrator.core.follow_ups import (
     render_follow_ups_section,
     render_gate_digest,
 )
-from wastech_orchestrator.core.skills import SkillInventory
 from wastech_orchestrator.core.supervisor_packet import (
     bound_step_message,
     build_packet_facts,
@@ -121,59 +120,13 @@ _SUPERVISOR_LINEAGE_NODE_ID = "__supervisor__"
 # are trivially comparable.
 _PACKET_FILENAME = "packet.json"
 
-# The ``node_run_id`` namespacing the upfront skill-map proposal's artifact dir
-# (``stages/supervisor/run-NNNNNN/``). Distinct from finalize's ``0`` and from any real (positive,
-# small, autoincrement) node-run id, so the three turn kinds never collide on the same path.
-_PROPOSAL_RUN_ID = 999_999
-
-# Skill descriptions are untrusted ``SKILL.md`` frontmatter, so the inlined proposal
-# metadata is bounded to this many characters (name/path are identifier-sized and pass unbounded);
-# the full skill package is only read from the frozen exchange after the Core accepts the proposal.
-_SKILL_DESCRIPTION_INLINE_CAP = 200
-
-
-def _bounded_description(description: str) -> str:
-    """Truncate an untrusted skill description to the recorded inline cap for the proposal."""
-    text = description.strip()
-    if len(text) <= _SKILL_DESCRIPTION_INLINE_CAP:
-        return text
-    return text[: _SKILL_DESCRIPTION_INLINE_CAP - 1].rstrip() + "…"
-
-
 # Base for the subtask-boundary handoff turns' artifact-dir namespace.
 # Each handoff uses ``_HANDOFF_RUN_ID_BASE + subtask_order`` so multiple handoffs in one task (a
 # chain, or a diamond) write to DISTINCT dirs — ``create_attempt_dir`` forbids overwriting
 # (``exist_ok=False``), so a shared id would make the second boundary's turn raise and silently
-# degrade to the floor alone. The base is distinct from the proposal (999999) and finalize (0), and
-# far above any real (small autoincrement) node-run id.
+# degrade to the floor alone. The base is distinct from finalize's ``0`` and far above any real
+# (small autoincrement) node-run id.
 _HANDOFF_RUN_ID_BASE = 990_000
-
-# The strict provider schema for the once-per-task ``node → skills`` proposal. Array-shaped (not an
-# arbitrary-key object) so it validates under strict JSON-schema: each assignment names one node and
-# its proposed skill tokens. The Core resolves the tokens against the discovered inventory.
-_SKILL_MAP_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "assignments": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "node": {"type": "string", "minLength": 1},
-                    "skills": {
-                        "type": "array",
-                        "items": {"type": "string", "minLength": 1, "maxLength": 512},
-                    },
-                },
-                "required": ["node", "skills"],
-            },
-        }
-    },
-    "required": ["assignments"],
-}
-
 
 # The evidence-gated ``follow_ups`` schema. Hardcoded in code — a flow author reshapes the
 # supervisor's *wording* via its prompt files, but never the machine contract the orchestrator
@@ -414,32 +367,6 @@ class FinalizeResult:
     summary_path: Path | None
     candidate_delta: CandidateDelta | None = None
     follow_ups: tuple[FollowUp, ...] = ()
-
-
-def _parse_skill_map(structured: Mapping[str, Any] | None) -> dict[str, tuple[str, ...]]:
-    """Parse the proposal's structured output into ``{node_id: (token, ...)}`` — defensively.
-
-    Best-effort to match the advisory contract: a malformed payload yields ``{}`` and a malformed
-    assignment is skipped, never raised. The Core still validates every token against the inventory,
-    so a bad proposal can at worst contribute nothing.
-    """
-    if not isinstance(structured, Mapping):
-        return {}
-    assignments = structured.get("assignments")
-    if not isinstance(assignments, list):
-        return {}
-    out: dict[str, tuple[str, ...]] = {}
-    for item in assignments:
-        if not isinstance(item, Mapping):
-            continue
-        node = item.get("node")
-        skills = item.get("skills")
-        if not isinstance(node, str) or not node.strip() or not isinstance(skills, list):
-            continue
-        tokens = tuple(s.strip() for s in skills if isinstance(s, str) and s.strip())
-        if tokens:
-            out[node.strip()] = tokens
-    return out
 
 
 class SupervisorTurnSettings(Protocol):
@@ -894,58 +821,6 @@ class Supervisor:
             return None
         return _render_handoff_brief(result.structured_output)
 
-    # -- upfront skill-map proposal --------------------------------------------
-
-    def propose_skill_map(
-        self,
-        *,
-        task_id: str,
-        agent_node_ids: Sequence[str],
-        inventory: SkillInventory,
-        task_path: str | None = None,
-    ) -> dict[str, tuple[str, ...]]:
-        """Propose a ``node → skills`` map once per task (read-only, propose-only — Core decides).
-
-        The supervisor's first turn, on its own durable session, so later per-step observations and
-        the whole-task summary inherit its reasoning about which skills it chose. Skipped (``{}``)
-        when the inventory is empty — a repo with no skills pays nothing. Best-effort by contract:
-        any failure (no provider, infra error, malformed output) is logged and yields ``{}``, and
-        the run continues on operator pins alone. The supervisor only *proposes* tokens; the
-        orchestrator resolves them against the inventory and merges them with the static pins.
-
-        The task body is **never** inlined here — the proposal reads it from the frozen
-        exchange packet (``task_path``, rendered in the context footer); only bounded, allowlisted
-        skill metadata (name/path + a length-bounded description) reaches the prompt.
-        """
-        if not inventory.skills:
-            return {}
-        prompt = self._proposal_prompt(task_id, agent_node_ids, inventory)
-        result = self._run_result(
-            task_id,
-            prompt,
-            node_run_id=_PROPOSAL_RUN_ID,
-            # The cheap pair: a once-per-task, schema-bound proposal has the observe phase's cost
-            # profile, not the whole-task synthesis's. Independent of ``observe.mode``, which gates
-            # per-step observations only — this turn runs whenever ``skills.dynamic`` is on. Sharing
-            # the settings is exactly why the spend label has to be passed separately.
-            turn=self._settings.observe,
-            function=SupervisorFunction.SKILL,
-            output_schema=_SKILL_MAP_SCHEMA,
-            task_path=task_path,
-        )
-        proposal = _parse_skill_map(result.structured_output) if result is not None else {}
-        self._record(
-            task_id,
-            kind="supervisor_skill_proposal",
-            source_node_run_id=None,
-            subtask_order=None,
-            payload={
-                "assignments": {node: list(skills) for node, skills in proposal.items()},
-                "proposal_failed": result is None,
-            },
-        )
-        return proposal
-
     # -- internals -------------------------------------------------------------
 
     def _run(
@@ -1334,37 +1209,6 @@ class Supervisor:
             observed += f"\nThe step reported:\n{bound_step_message(final_message)}\n"
         return self._base_prompt(task_id) + "\n\n" + observed
 
-    def _proposal_prompt(
-        self,
-        task_id: str,
-        agent_node_ids: Sequence[str],
-        inventory: SkillInventory,
-    ) -> str:
-        nodes = "\n".join(f"- {nid}" for nid in agent_node_ids) or "- (none)"
-        # Skill descriptions come from untrusted repository ``SKILL.md`` frontmatter, so they are
-        # bounded to a recorded cap here (name/path are identifier-sized); the full skill package is
-        # read from the frozen exchange only after the Core accepts the proposal.
-        skills = "\n".join(
-            f"- {s.name} — {_bounded_description(s.description)} [{s.path}]"
-            for s in inventory.skills
-        )
-        return (
-            self._base_prompt(task_id)
-            + "\n\n## Skill map proposal\n"
-            + "Before any step runs, propose which repo skills (if any) each flow node below "
-            + "should receive. This is read-only and propose-only — you do not route or edit; the "
-            + "Core decides which proposals it accepts and resolves each against the real "
-            + "inventory. Address a skill by its name; if a name is shared by more than one skill, "
-            + "use the repo-relative path shown in [brackets]. Propose a skill only when it is "
-            + "clearly relevant to that node's job, and do not propose orchestrator gate skills "
-            + "(run-checks / test / sync-docs and the like). Return assignments only for the nodes "
-            + "that need skills; omit the rest.\n\n"
-            + f"### Flow nodes (agent)\n{nodes}\n\n"
-            + f"### Available skills\n{skills}\n\n"
-            + "### Task\nThe task specification is provided as the task packet referenced in the "
-            + "context below — read it there; it is not inlined here.\n"
-        )
-
     def _finalize_prompt(
         self,
         task_id: str,
@@ -1465,7 +1309,7 @@ class Supervisor:
         """The observe lens: flow ``role_file`` → global ``config.supervisor.role_file`` → built-in.
 
         Best-effort: each candidate that is missing/bad/traversing (``RoleFileError``) falls through
-        to the next, so the supervisor's per-step observation and skill proposal never break."""
+        to the next, so the supervisor's per-step observation never breaks."""
         return self._render_chain(
             task_id, (self._flow_role_file, self._settings.role_file), _BUILTIN_OBSERVE
         )

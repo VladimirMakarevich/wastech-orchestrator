@@ -110,7 +110,7 @@ In `my_flow/build.md`:
 Implement the change.{?analyze_path} Follow the analysis at {analyze_path}.{/analyze_path}{?scan_path} The raw scan is at {scan_path}.{/scan_path}
 ```
 
-One node exposes exactly one output — to publish several results, split into several nodes. A node id (agent or tool — both expose `{<id>_path}`) may not collide with a reserved core-variable prefix (`task`, `plan`, `diff`, `checks`, `review`, `repo`, `skills`, `memory`, `stage`, `subtask*`); that is a fatal load error.
+One node exposes exactly one output — to publish several results, split into several nodes. A node id (agent or tool — both expose `{<id>_path}`) may not collide with a reserved core-variable prefix (`task`, `plan`, `diff`, `checks`, `review`, `repo`, `memory`, `stage`, `subtask*`); that is a fatal load error.
 
 If the node's real product is a **file it writes** rather than what it says at the end, name that file with `output_file:` and the channel carries the file instead of the message — see [roles.md](roles.md#when-the-nodes-product-is-a-file-it-writes-output_file).
 

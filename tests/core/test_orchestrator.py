@@ -4679,126 +4679,6 @@ def test_review_disabled_with_auto_merge_still_merges(
     assert len(_merge_calls(calls)) == 1  # it really did merge without a review gate
 
 
-def test_supervisor_proposed_skills_reach_downstream_stages(
-    git_repo, make_git_config, git_run, tmp_path: Path
-) -> None:
-    # skills-selection-rework: discovery is whole-repo (git ls-files); the supervisor proposes a
-    # node->skills map once per task and the Core accepts it deterministically (an unknown node or
-    # skill is filtered, never an error). Seed a committed repo skill so the inventory is non-empty.
-    skill_dir = git_repo.clone / ".claude" / "skills" / "safe-change"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text(
-        "---\nname: safe-change\ndescription: review your change\n---\n\n# Body\nguidance\n",
-        encoding="utf-8",
-    )
-    git_run(["add", ".claude/skills/safe-change/SKILL.md"], git_repo.clone)
-    git_run(["commit", "-m", "add safe-change skill"], git_repo.clone)
-    proposal = {
-        "assignments": [
-            {"node": "implementation", "skills": ["safe-change", "ghost"]},  # ghost is filtered
-            {"node": "ghost-node", "skills": ["safe-change"]},  # not a flow node → filtered
-        ]
-    }
-    providers = {
-        ProviderId.CLAUDE: FakeProvider("claude", outputs={"supervisor": ("ok", proposal)}),
-        ProviderId.CODEX: FakeProvider("codex"),
-    }
-    orch, store, _, art = _build(
-        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
-    )
-    # This test exercises the dynamic proposal, which is opt-in (default off).
-    from dataclasses import replace
-
-    from wastech_orchestrator.config.schema import SkillsConfig
-
-    orch._config = replace(orch._config, skills=SkillsConfig(dynamic=True))
-
-    result = orch.run_task(_complete_task(tmp_path, "task-skills"))
-    assert result.final_status is Status.DONE
-
-    # The effective per-node map is persisted (resume restores it without re-proposing): only the
-    # known node + known skill survive; the unknown node/skill are filtered.
-    skill_map = json.loads((art / "logs" / "task-skills" / "skill_map.json").read_text("utf-8"))
-    assert [s["name"] for s in skill_map["implementation"]] == ["safe-change"]
-    assert skill_map["implementation"][0]["path"] == ".claude/skills/safe-change/SKILL.md"
-    assert "ghost-node" not in skill_map  # a proposal for a non-flow node is dropped
-
-    # The chosen SKILL.md reaches the implementation node as an absolute read-only reference path,
-    # not its body — and only that node (the proposal was node-scoped).
-    impl = next(r for p in providers.values() for r in p.requests if r.node_id == "implementation")
-    assert any(path.endswith("safe-change/SKILL.md") for path in impl.skill_reference_paths)
-    assert "ghost" not in str(impl.skill_reference_paths)  # unknown name never surfaced
-    assert "# Body" not in impl.prompt  # the skill body is never inlined into the prompt
-
-    # The proposal is recorded as one advisory evaluation row (it proposes, never routes).
-    rows = _evaluations(store, "task-skills")
-    assert any(
-        r["kind"] == "supervisor_skill_proposal" and r["verdict"] == "advisory" for r in rows
-    )
-
-
-def _write_pinned_flow(flows: Path, pins: list[str]) -> None:
-    """A minimal implement→publish flow with operator ``skills:`` pins on the implement node."""
-    (flows / "roles").mkdir(parents=True, exist_ok=True)
-    (flows / "roles" / "implementation.md").write_text("Implement {task_path}.", "utf-8")
-    flow = _MINIMAL_FLOW.replace(
-        "      permission_profile: workspace-write\n",
-        f"      permission_profile: workspace-write\n      skills: {json.dumps(pins)}\n",
-    )
-    (flows / "implementation.yaml").write_text(flow, "utf-8")
-
-
-def test_operator_pinned_skill_reaches_node(
-    git_repo, make_git_config, git_run, tmp_path: Path
-) -> None:
-    # The static layer: a skill pinned on a flow node is always included (deterministic, no LLM).
-    # Here the dynamic proposal contributes nothing, so the pin alone drives the per-node selection.
-    from wastech_orchestrator.core.flow.registry import FlowRegistry
-
-    skill_dir = git_repo.clone / ".claude" / "skills" / "safe-change"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text(
-        "---\nname: safe-change\ndescription: d\n---\n# Body\n", "utf-8"
-    )
-    git_run(["add", ".claude/skills/safe-change/SKILL.md"], git_repo.clone)
-    git_run(["commit", "-m", "add skill"], git_repo.clone)
-    flows = tmp_path / "flows"
-    _write_pinned_flow(flows, ["safe-change"])
-    providers = _both()
-    orch, store, _, art = _build(
-        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
-    )
-    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
-    _patch_impl_edit(providers, git_repo)
-
-    result = orch.run_task(_complete_task(tmp_path, "task-pin"))
-    assert result.final_status is Status.DONE
-    impl = next(r for p in providers.values() for r in p.requests if r.node_id == "implementation")
-    assert any(path.endswith("safe-change/SKILL.md") for path in impl.skill_reference_paths)
-    skill_map = json.loads((art / "logs" / "task-pin" / "skill_map.json").read_text("utf-8"))
-    assert [s["name"] for s in skill_map["implementation"]] == ["safe-change"]
-
-
-def test_strict_unresolved_pin_stops_task(git_repo, make_git_config, tmp_path: Path) -> None:
-    # skills.strict: an operator pin that does not resolve (here: no such skill in the repo) stops
-    # the task in manual_action_required before any node runs — a fixable config/repo error.
-    from wastech_orchestrator.config.schema import SkillsConfig
-    from wastech_orchestrator.core.flow.registry import FlowRegistry
-
-    flows = tmp_path / "flows"
-    _write_pinned_flow(flows, ["ghost-skill"])
-    providers = _both()
-    orch, store, _, _ = _build(
-        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
-    )
-    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
-    orch._config = replace(orch._config, skills=SkillsConfig(dynamic=False, strict=True))
-
-    result = orch.run_task(_complete_task(tmp_path, "task-strict"))
-    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
-    assert "implementation" not in _ran_nodes(store, "task-strict")  # stopped before any node
-
-
 # --- prompt audit (who+prompt per step) -----------------------------------------------------
 
 
@@ -5965,7 +5845,7 @@ def test_disabled_layer_makes_no_calls_and_still_writes_the_pr_body(
     # Not one provider call, not one row, not one artifact belonging to the layer.
     assert _supervisor_attempts(store, "task-nosup") == []
     kinds = {row["kind"] for row in _evaluations(store, "task-nosup")}
-    assert not kinds & {"supervisor_step", "supervisor_final", "supervisor_skill_proposal"}
+    assert not kinds & {"supervisor_step", "supervisor_final"}
     task_dir = task_artifact_dir(art, "task-nosup")
     assert not (task_dir / "packet.json").exists()
 
@@ -6010,46 +5890,6 @@ def test_absent_enabled_key_matches_an_explicit_true(
         )
 
     assert run("task-default") == run("task-explicit", supervisor_enabled=True)
-
-
-def test_disabled_layer_leaves_only_the_operators_skill_pins(
-    git_repo, make_git_config, git_run, tmp_path: Path
-) -> None:
-    # `skills.dynamic: true` with no layer degrades to "only what the flow pins", which is correct
-    # (the dynamic layer is fail-open by design) but silent — hence the config warning. Here: the
-    # inventory is non-empty and dynamic is on, yet nothing is proposed, so the map stays empty.
-    skill_dir = git_repo.clone / ".claude" / "skills" / "safe-change"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text(
-        "---\nname: safe-change\ndescription: review your change\n---\n\n# Body\nguidance\n",
-        encoding="utf-8",
-    )
-    git_run(["add", ".claude/skills/safe-change/SKILL.md"], git_repo.clone)
-    git_run(["commit", "-m", "add safe-change skill"], git_repo.clone)
-
-    providers = _both()
-    orch, store, _, art = _build(
-        git_repo,
-        make_git_config,
-        tmp_path,
-        providers=providers,
-        check_verdicts=[0],
-        config_kwargs={"supervisor_enabled": False, "skills_dynamic": True},
-    )
-    _patch_impl_edit(providers, git_repo)
-
-    assert orch.run_task(_complete_task(tmp_path, "task-nosup-skills")).final_status is Status.DONE
-    skill_map = json.loads(
-        (task_artifact_dir(art, "task-nosup-skills") / "skill_map.json").read_text("utf-8")
-    )
-    # The packaged flow pins nothing, so with no proposal the effective set is empty for every node.
-    assert all(not refs for refs in skill_map.values())
-    assert not any(
-        row["kind"] == "supervisor_skill_proposal"
-        for row in _evaluations(store, "task-nosup-skills")
-    )
-    impl = next(r for p in providers.values() for r in p.requests if r.node_id == "implementation")
-    assert impl.skill_reference_paths == ()
 
 
 def test_disabled_layer_still_writes_the_deterministic_handoff_floor(

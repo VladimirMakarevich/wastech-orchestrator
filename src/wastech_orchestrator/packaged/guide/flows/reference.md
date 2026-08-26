@@ -115,7 +115,6 @@ Every node has an `id` (unique; see reserved ids below) and a `kind`. The six ki
 | `best_effort` | bool | `false` | — | Tolerate an infrastructure failure and continue the task (e.g. the summary node). |
 | `hitl` | `{allow_question, allow_approval}` \| null | `null` | — | Allow the agent to ask a question / request approval mid-node. |
 | `extra_args` | list[str] | `[]` | Forbidden-args scan, which includes the provider full-access selectors — rejected at any value of `strict_isolation`. | Raw CLI flags for this node. |
-| `skills` | list[str] | `[]` | Existence checked at task start (name or repo-relative `SKILL.md` path). | Operator-pinned repo skills for this node. |
 | `when` | `{fact, equals?}` \| null | `null` | `fact` must be namespaced `derived.*` or `config.*`. | Conditionally run the node — see [Conditional nodes](#conditional-nodes-when) below. |
 
 #### Conditional nodes (`when:`)
@@ -205,4 +204,4 @@ Non-fatal: a `budgets` value above a config cap (the engine clamps to the min), 
 
 ## Reserved node ids
 
-An `agent` or `tool` node id (both expose `{<id>_path}`) may **not** equal `task`, `plan`, `diff`, `checks`, `review`, `repo`, `skills`, `memory`, or `stage`, and may not start with `subtask` — a fatal load error, because those `{<name>_path}` variables already mean a core variable.
+An `agent` or `tool` node id (both expose `{<id>_path}`) may **not** equal `task`, `plan`, `diff`, `checks`, `review`, `repo`, `memory`, or `stage`, and may not start with `subtask` — a fatal load error, because those `{<name>_path}` variables already mean a core variable.

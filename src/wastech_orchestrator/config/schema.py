@@ -455,27 +455,6 @@ class TelegramConfig:
 
 
 @dataclass(frozen=True)
-class SkillsConfig:
-    """Repo skill selection (skills-selection-rework): automatic discovery + two attachment layers.
-
-    The orchestrator discovers every tracked ``SKILL.md`` in the clone (``git ls-files``, whole-repo
-    and ignore-aware), then attaches skills to each flow node from two layers the Core merges
-    deterministically: operator ``skills:`` pins on the flow node (static) and — when ``dynamic`` —
-    a once-per-task supervisor proposal of a ``node → skills`` map (skipped when the inventory is
-    empty). ``strict`` governs only operator pins: an unresolved pin (typo, removed skill, ambiguous
-    bare name, missing path) is a warning that is skipped (``False``, fail-open) or stops the task
-    in ``manual_action_required`` (``True``). A dynamic proposal naming a missing skill is always
-    just filtered, never an error.
-    """
-
-    # Off by default: the once-per-task supervisor proposal is opt-in, so an absent ``skills``
-    # block (and a fresh ``worc install``) does not pay for a dynamic layer the repo may not need —
-    # fail-quiet, symmetric to how ``worc install`` now writes ``dynamic: false`` explicitly.
-    dynamic: bool = False
-    strict: bool = False
-
-
-@dataclass(frozen=True)
 class SupervisorTurnConfig:
     """The model + effort for one supervisor phase (``finalize`` or ``handoff``).
 
@@ -527,14 +506,11 @@ class SupervisorConfig:
     Model and effort are **per phase** instead: a cheap ``observe`` note and the whole-task
     ``finalize`` synthesis that writes ``summary.md`` (the pull-request body) have opposite cost
     profiles, and one shared pair could not serve both. ``handoff`` is the subtask brief on a
-    decompose flow. The once-per-task skill proposal (``skills.dynamic``) uses the ``observe`` pair
-    — same cheap, schema-bound shape — independently of ``observe.mode``, which gates observations
-    only.
-    """
+    decompose flow."""
 
     # The whole layer, not a phase: false and it is never built, so there are no per-step notes, no
-    # whole-task synthesis, no subtask handoff brief and no `skills.dynamic` proposal — and every
-    # other key here is then inert (the validator says so in one warning). True by default: the
+    # whole-task synthesis and no subtask handoff brief — and every other key here is then inert
+    # (the validator says so in one warning). True by default: the
     # constant oversight the rest of this docstring describes.
     enabled: bool = True
     role_file: str = "roles/supervisor.md"
@@ -580,8 +556,10 @@ class MemoryConfig:
     memory packets, ``worc memory`` is a no-op, no background cleanup). A fresh ``worc install``
     writes ``enabled: false`` explicitly (both the packaged ``config.example.yaml`` and the
     generated ``config.yaml`` via ``config_writer.build_config_mapping``) so the operator finds the
-    switch rather than the block's absence; off is the shipped posture because the store is
-    unaudited and carries no redaction guarantee, so keeping it is a conscious opt-in. Every numeric
+    switch rather than the block's absence; off is the shipped posture because the subsystem is
+    **experimental and not stable** — the store is unaudited and carries no redaction guarantee, and
+    its curation quality is still being reworked — so keeping it is a conscious opt-in and no
+    install ever turns it on. Every numeric
     knob carries a locked default and is a bounded, runtime-clamped value — none is a fatal config
     error (an odd value is clamped at use, per the "fatal only without a safe fallback" rule).
     """
@@ -645,7 +623,6 @@ class OrchestratorConfig:
     checks: ChecksConfig
     git: GitConfig
     telegram: TelegramConfig
-    skills: SkillsConfig = SkillsConfig()
     supervisor: SupervisorConfig = field(default_factory=SupervisorConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)
     logging: LoggingConfig = field(default_factory=LoggingConfig)

@@ -225,7 +225,6 @@ def build_git_config(
     supervisor_observe: str | None = None,
     supervisor_include_nodes: Sequence[str] = (),
     supervisor_enabled: bool | None = None,
-    skills_dynamic: bool | None = None,
     extra_environment: Mapping[str, str] | None = None,
     allowed_environment_patterns: Sequence[str] = (),
     strict_isolation: bool = True,
@@ -279,9 +278,6 @@ def build_git_config(
     logging_block = (
         "logging:\n  clean_runs_on_success: false\n" if not clean_runs_on_success else ""
     )
-    skills_block = (
-        f"skills:\n  dynamic: {str(skills_dynamic).lower()}\n" if skills_dynamic is not None else ""
-    )
     supervisor_lines = []
     if supervisor_enabled is not None:
         supervisor_lines.append(f"  enabled: {str(supervisor_enabled).lower()}\n")
@@ -329,7 +325,7 @@ git:
     audit_commit_message: "chore(worc): audit trail for {{task_id}}"
     audit_on_branch: {audit_on_branch}
 prompt_audit: {str(prompt_audit).lower()}
-{memory_block}{logging_block}{skills_block}{supervisor_block}"""
+{memory_block}{logging_block}{supervisor_block}"""
     return loads_config(text).config
 
 

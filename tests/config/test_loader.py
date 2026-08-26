@@ -338,6 +338,17 @@ def test_removed_provider_sandbox_key_is_rejected(value: str) -> None:
     assert "upgrade-config" in issue
 
 
+def test_removed_skills_block_is_rejected() -> None:
+    # Repo-skill selection was removed outright, so the whole block is dead: no `dynamic`, no
+    # `strict`, nothing to migrate toward. It is deliberately NOT tolerated and NOT stripped by
+    # `upgrade-config` — a config still carrying it fails to load and the operator deletes it,
+    # rather than keeping a block that silently does nothing.
+    text = _LEGACY + "skills:\n  dynamic: true\n"
+    with pytest.raises(ConfigError) as exc:
+        loads_config(text)
+    assert any("unknown key 'skills'" in issue for issue in exc.value.issues)
+
+
 def test_legacy_routing_block_is_tolerated() -> None:
     # ``agents.routing`` was removed in v11 (routing is node-based now — a node declares its own
     # ``provider``, else the global ``providers.<id>.primary``). An old config still carrying it

@@ -788,7 +788,6 @@ class AgentNodeRunner:
             check_artifacts_path=self._in.checks_path,
             review_artifacts_path=self._in.review_path,
             human_input_path=human_input_path,
-            skill_reference_paths=self._in.skills_for(node.id),
             output_schema=output_schema,
             model=node.model,
             reasoning=node.reasoning,
@@ -814,14 +813,13 @@ class AgentNodeRunner:
 
     def _prompt_variables(self, ctx: NodeContext, node: AgentNode) -> dict[str, object | None]:
         # The allowlisted artifact paths come from the shared collector so the agent
-        # prompt and the tool-node stdin never drift; the rest (ids, skills, memory) is prompt-only.
+        # prompt and the tool-node stdin never drift; the rest (ids, memory) is prompt-only.
         paths = build_path_context(self._in, self._s.repo_dir)
         variables: dict[str, object | None] = {
             "task_id": ctx.task_id,
             "stage": node.id,
             "repo_path": paths["repo"],
             **paths,
-            "skills_path": "\n".join(self._in.skills_for(node.id)) or None,
             "memory_path": self._memory_path(node, ctx),
         }
         if ctx.subtask_order is not None:

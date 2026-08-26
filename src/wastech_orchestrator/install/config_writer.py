@@ -211,12 +211,6 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             # config so the operator sees it without reading the source; off by default.
             "trace": False,
         },
-        "skills": {
-            # Off out of the box — the dynamic layer adds a once-per-task supervisor turn even
-            # when the repo has no skills. The operator opts in with `dynamic: true`.
-            "dynamic": False,
-            "strict": False,
-        },
         # Resolve concrete, visible supervisor model/reasoning/provider rather than an implicit
         # "inherit from primary" (null). The oversight layer writes summary / follow-ups /
         # memory-delta, so its model+effort should be transparent. `reasoning` is deliberately NOT a
@@ -230,8 +224,8 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
         # observations in proportion to what actually went wrong rather than to its length.
         "supervisor": {
             # Written explicitly at the default so an operator finds the whole-layer switch in their
-            # own config rather than in the reference — the same reason `skills.dynamic` and
-            # `observe.mode` are seeded rather than left implicit.
+            # own config rather than in the reference — the same reason `observe.mode` is seeded
+            # rather than left implicit.
             "enabled": True,
             "role_file": "roles/supervisor.md",
             "provider": primary_pid.value,
@@ -249,10 +243,11 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "clean_runs_on_success": True,
         },
         # Persistent repo-scoped memory is off out of the box, matching the dataclass fallback:
-        # its store is unaudited, so it is a conscious opt-in. Set enabled: true for the store, the
-        # candidate
-        # delta and the memory packets. The tunable knobs default per the schema — the annotated
-        # config.example.yaml installed alongside this file documents each one.
+        # the subsystem is EXPERIMENTAL (unaudited store, no redaction guarantee, curation quality
+        # still being reworked), so it is a conscious opt-in and never on by default. Set
+        # enabled: true for the store, the candidate delta and the memory packets. The tunable knobs
+        # default per the schema — the annotated config.example.yaml installed alongside this file
+        # documents each one.
         "memory": {"enabled": False},
         # Custom tool-node default timeout. Written at the schema default for discoverability;
         # a per-node `timeout_seconds` in a flow overrides it. Omit the block for the same 3600s.

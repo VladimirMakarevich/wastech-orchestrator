@@ -396,22 +396,14 @@ telegram:                           # human-in-the-loop + notifications (optiona
 # Prompt templates are not configured here: a flow node's prompt is the content of its `role_file`
 # (each flow owns its prompts under `.worc/flows/<task_type>/*.md`). Edit the role file to
 # customize a node's prompt. Role files render only allowlisted path/metadata variables ({task_id}
-# {stage} {repo_path} {task_path} {plan_path} {diff_path} {checks_path} {review_path} {skills_path}
+# {stage} {repo_path} {task_path} {plan_path} {diff_path} {checks_path} {review_path}
 # {memory_path} {subtask_order} {subtask_count} {subtask_spec_path}) — never task bodies, diffs,
 # env, or secrets.
 
-skills:                             # repo skill selection (optional)
-  dynamic: false                    # supervisor proposes a node->skills map once per task; opt in (adds one turn)
-  strict: false                     # false = warn+skip an unresolved operator pin; true = stop the task
-  # At task start the orchestrator discovers every tracked SKILL.md in the clone (git ls-files,
-  # whole-repo). Each flow node gets the skills the operator pinned on it (flow YAML `skills:`) plus,
-  # when `dynamic`, the supervisor's proposed ones — the Core decides. Chosen SKILL.md files reach the
-  # node as read-only reference paths (never executed, never the Claude Skill tool — Codex has none).
-
 supervisor:                         # oversight layer above any flow (not a node) — on by default
   enabled: true                     # false = the layer is never built: no per-step notes, no whole-task
-                                    #   summary turn, no subtask handoff brief, no `skills.dynamic`
-                                    #   proposal, and every key below is inert (one warning says so).
+                                    #   summary turn, no subtask handoff brief, and every key below
+                                    #   is inert (one warning says so).
                                     #   The PR body is then rendered deterministically from the run's own
                                     #   recorded facts — changed paths, steps, checks, gate verdicts,
                                     #   follow-ups — so no run ships without one. Also forces
@@ -454,8 +446,6 @@ supervisor:                         # oversight layer above any flow (not a node
   # given anywhere.
   # That check does not apply at `enabled: false`: there is no cadence to widen, so a flow declaring
   # any mode still runs. That is why switching the layer off is its own key, not a global `none`.
-  # The once-per-task skill proposal (`skills.dynamic`) uses the `observe` model/effort — same cheap
-  # shape — and runs regardless of `mode`, which gates per-step observations only.
 
 logging:                            # operator log verbosity + on-disk artifact retention (optional)
   level: warning                    # debug | info | warning | error. Persists the structured operator
@@ -476,7 +466,11 @@ logging:                            # operator log verbosity + on-disk artifact 
                                     #   orchestrator also does it itself). Per-task log dirs are separate:
                                     #   they stay with `worc logs clean`. See guide/footprint.md.
 
-memory:                             # persistent, repo-scoped memory (optional)
+memory:                             # persistent, repo-scoped memory (optional) — EXPERIMENTAL
+  # EXPERIMENTAL / NOT STABLE. The subsystem runs, but its store is unaudited and carries no
+  #   redaction guarantee, and its curation quality is still being reworked — the block's shape,
+  #   defaults and knobs can change without a migration path. Leave it off unless you are
+  #   deliberately experimenting, and expect to re-read this block after an upgrade.
   enabled: false                    # SHIPPED DEFAULT false. false / omit the whole block = no store, no
                                     #   candidate delta, empty memory packets, CLI no-op, no cleanup
                                     # Needs `supervisor.enabled: true`: that layer's closing turn is the

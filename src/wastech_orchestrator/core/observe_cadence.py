@@ -101,8 +101,8 @@ def should_observe(
     three modes cost no database read. ``enabled_triggers`` is the operator's subset of
     ``OBSERVE_TRIGGERS``, letting a run narrow to (say) only ``failure``.
 
-    Note what is *not* here: the whole-task ``finalize`` turn, the subtask ``handoff`` brief, and
-    the skill proposal are all unaffected by the cadence. Finalize is seeded by the deterministic
+    Note what is *not* here: the whole-task ``finalize`` turn and the subtask ``handoff`` brief are
+    both unaffected by the cadence. Finalize is seeded by the deterministic
     ``SupervisorPacket``, which is built from ``node_runs`` and each node's own output file — never
     from observations — so a summary stays complete at ``mode: none``.
     """

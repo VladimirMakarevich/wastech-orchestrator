@@ -898,20 +898,6 @@ def test_request_json_prompt_includes_context_footer(
     assert request_json["prompt"] == fake.captured["stdin_text"]
 
 
-def test_request_json_context_paths_includes_skill_reference_paths(
-    codex_config: ProviderConfig,
-    security_config: SecurityConfig,
-    tmp_path: Path,
-    make_request: Callable[..., AgentRunRequest],
-) -> None:
-    fake = FakeRun(stdout=_success_stream(), last_message="done")
-    provider = _provider(codex_config, security_config, tmp_path, fake)
-    provider.run(make_request(skill_reference_paths=("/skills/foo/SKILL.md",)))
-    request_json = json.loads((_attempt_dir(tmp_path) / "request.json").read_text())
-    assert request_json["context_paths"]["skill_reference_paths"] == ["/skills/foo/SKILL.md"]
-    assert "/skills/foo/SKILL.md" in request_json["prompt"]
-
-
 def test_stderr_is_redacted_in_artifact(
     codex_config: ProviderConfig,
     security_config: SecurityConfig,

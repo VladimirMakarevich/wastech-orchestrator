@@ -145,8 +145,6 @@ def build_node_inputs(
         diff_path=p.diff_path,
         checks_path=p.check_log,
         review_path=p.review_findings_path,
-        # ``skill_paths_by_node`` is populated by the orchestrator's task-start skill resolution
-        # (pins ∪ accepted proposal) after this builder runs — see ``_resolve_skill_layers``.
         subtask_count=p.decomposition.n if p.decomposition.accepted else None,
         subtask_spec_path=subtask_spec_path,
         check_sets=check_sets,

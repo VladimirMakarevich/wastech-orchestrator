@@ -838,38 +838,3 @@ def test_disabled_layer_warns_instead_of_refusing_a_config_it_would_reject(
 
     off = replace(on, supervisor=replace(broken, enabled=False))
     assert any("supervisor.enabled: false" in w for w in validate_config(off))  # never raises
-
-
-def test_dynamic_skills_without_the_layer_warns(base_config: OrchestratorConfig) -> None:
-    # Fail-open, not fatal: "only the operator's flow pins" is a correct degradation. But it is
-    # silent, which is what earns the warning.
-    config = replace(
-        base_config,
-        skills=replace(base_config.skills, dynamic=True),
-        supervisor=replace(base_config.supervisor, enabled=False),
-    )
-    warnings = [w for w in validate_config(config) if "skills.dynamic" in w]
-    assert len(warnings) == 1
-    assert "supervisor.enabled is false" in warnings[0]
-    assert "pinned" in warnings[0]
-
-
-def test_dynamic_skills_with_the_layer_on_is_silent(base_config: OrchestratorConfig) -> None:
-    config = replace(base_config, skills=replace(base_config.skills, dynamic=True))
-    assert not [w for w in validate_config(config) if "skills.dynamic" in w]
-
-
-def test_a_bare_skills_block_also_triggers_the_dynamic_warning() -> None:
-    # `dynamic` resolves to TRUE for a present block without the key (the loader's documented
-    # default), so this warning can fire for an operator who never typed the word. Pinned here so a
-    # future change to that default fails loudly rather than silently muting the warning.
-    text = (
-        'repo:\n  url: "git@example.com:o/r.git"\n'
-        "agents:\n  allowed: [claude]\n  providers:\n"
-        '    claude:\n      command: "claude"\n      primary: true\n'
-        "skills:\n  strict: false\n"
-        "supervisor:\n  enabled: false\n"
-    )
-    config = loads_config(text).config
-    assert config.skills.dynamic is True
-    assert any("skills.dynamic" in w for w in validate_config(config))

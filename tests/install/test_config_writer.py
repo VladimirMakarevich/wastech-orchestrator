@@ -91,12 +91,20 @@ def test_generated_config_includes_logging_defaults(tmp_path: Path) -> None:
     assert cfg.logging.artifacts == "standard"
 
 
-def test_generated_config_ships_memory_off(tmp_path: Path) -> None:
-    # A fresh install ships the memory subsystem off, and writes the key rather than relying on
-    # the absent-block fallback: the operator finds the switch in their own file.
-    cfg = loads_config(build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))).config
-    assert cfg.memory.enabled is False
-    assert "enabled: false" in build_and_validate(_spec(tmp_path, (ProviderId.CODEX,)))
+@pytest.mark.parametrize(
+    "providers",
+    [(ProviderId.CODEX,), (ProviderId.CLAUDE,), (ProviderId.CLAUDE, ProviderId.CODEX)],
+)
+def test_generated_config_ships_memory_off(
+    tmp_path: Path, providers: tuple[ProviderId, ...]
+) -> None:
+    # The memory subsystem is experimental (unaudited store, no redaction guarantee), so NO install
+    # ever turns it on — whatever the provider selection. The key is written rather than left to the
+    # absent-block fallback, so the operator finds the switch in their own file; asserted on the
+    # parsed `memory` block, not as a substring (every other block has an `enabled` key too).
+    text = build_and_validate(_spec(tmp_path, providers))
+    assert loads_config(text).config.memory.enabled is False
+    assert yaml.safe_load(text)["memory"] == {"enabled": False}
 
 
 def test_shipped_security_posture_is_written(tmp_path: Path) -> None:
@@ -185,9 +193,6 @@ def test_generated_config_includes_optional_sections(tmp_path: Path) -> None:
     assert cfg.supervisor.observe.mode is ObserveMode.EVENTS
     # Provider is pinned to the primary so it stays aligned with the models (also the primary's).
     assert cfg.supervisor.provider == ProviderId.CLAUDE
-    # The dynamic skill layer is off out of the box (opt-in).
-    assert cfg.skills.dynamic is False
-    assert cfg.skills.strict is False
     # The documented telegram.trace knob is present in the delivered config.
     assert cfg.telegram.trace is False
     assert "trace:" in text
@@ -195,7 +200,7 @@ def test_generated_config_includes_optional_sections(tmp_path: Path) -> None:
     # Fresh install ships trust_level: auto (routine in-repo deletions do not gate) + no floor.
     assert cfg.security.trust_level == "auto"
     assert cfg.security.protected_paths == ()
-    for key in ("supervisor:", "skills:", "prompt_audit:", "trust_level:", "protected_paths:"):
+    for key in ("supervisor:", "prompt_audit:", "trust_level:", "protected_paths:"):
         assert key in text
 
 

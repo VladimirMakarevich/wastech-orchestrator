@@ -1,4 +1,4 @@
-"""Unit tests for the frozen instruction bundle (task / skills / repository instructions).
+"""Unit tests for the frozen instruction bundle (task packet / repository instructions).
 
 Covers the freeze/manifest/verify primitives and their fail-closed identity, cap, collision, and
 secret gates directly (the orchestrator-level wiring is covered separately in
@@ -18,7 +18,6 @@ from wastech_orchestrator.core.flow.instruction_bundle import (
     assert_no_required_secret,
     discover_repository_instructions,
     freeze_repository_instructions,
-    freeze_skill_package,
     freeze_task_packet,
     governance_changed_paths,
     load_instruction_bundle,
@@ -122,89 +121,6 @@ def test_freeze_repository_instructions_empty_when_none(tmp_path: Path) -> None:
     assert freeze_repository_instructions(bundle, []) == []
 
 
-# -- skill packages -------------------------------------------------------------------------------
-
-
-def test_freeze_skill_package_copies_closure_preserving_layout(tmp_path: Path) -> None:
-    bundle = tmp_path / "bundle"
-    bundle.mkdir()
-    _write(tmp_path / ".claude/skills/safe/SKILL.md", "skill body")
-    _write(tmp_path / ".claude/skills/safe/refs/help.md", "resource")
-    package_files = [".claude/skills/safe/SKILL.md", ".claude/skills/safe/refs/help.md"]
-    pkg = freeze_skill_package(bundle, "safe", package_files[0], package_files, tmp_path)
-    assert pkg.skill_md_key == "skills/safe/SKILL.md"
-    assert (bundle / "skills/safe/SKILL.md").read_text() == "skill body"
-    assert (bundle / "skills/safe/refs/help.md").read_text() == "resource"  # layout preserved
-    assert {k for k, _ in pkg.entries} == {"skills/safe/SKILL.md", "skills/safe/refs/help.md"}
-
-
-def test_freeze_skill_package_rejects_root_level(tmp_path: Path) -> None:
-    bundle = tmp_path / "bundle"
-    bundle.mkdir()
-    _write(tmp_path / "SKILL.md", "root skill")
-    with pytest.raises(InstructionBundleError, match="repository root"):
-        freeze_skill_package(bundle, "root", "SKILL.md", ["SKILL.md"], tmp_path)
-
-
-def test_freeze_skill_package_rejects_missing_skill_md(tmp_path: Path) -> None:
-    bundle = tmp_path / "bundle"
-    bundle.mkdir()
-    _write(tmp_path / "pkg/skill/other.md", "x")
-    with pytest.raises(InstructionBundleError, match="not a tracked file"):
-        freeze_skill_package(
-            bundle, "skill", "pkg/skill/SKILL.md", ["pkg/skill/other.md"], tmp_path
-        )
-
-
-def test_freeze_skill_package_enforces_file_count_cap(tmp_path: Path, monkeypatch) -> None:
-    import wastech_orchestrator.core.flow.instruction_bundle as ib
-
-    monkeypatch.setattr(ib, "MAX_SKILL_FILES", 1)
-    bundle = tmp_path / "bundle"
-    bundle.mkdir()
-    _write(tmp_path / "pkg/s/SKILL.md", "s")
-    _write(tmp_path / "pkg/s/extra.md", "e")
-    with pytest.raises(InstructionBundleError, match="cap 1"):
-        freeze_skill_package(
-            bundle, "s", "pkg/s/SKILL.md", ["pkg/s/SKILL.md", "pkg/s/extra.md"], tmp_path
-        )
-
-
-def test_freeze_skill_package_enforces_file_byte_cap(tmp_path: Path, monkeypatch) -> None:
-    import wastech_orchestrator.core.flow.instruction_bundle as ib
-
-    monkeypatch.setattr(ib, "MAX_SKILL_FILE_BYTES", 4)
-    bundle = tmp_path / "bundle"
-    bundle.mkdir()
-    _write(tmp_path / "pkg/s/SKILL.md", "way too many bytes")
-    with pytest.raises(InstructionBundleError, match="bytes"):
-        freeze_skill_package(bundle, "s", "pkg/s/SKILL.md", ["pkg/s/SKILL.md"], tmp_path)
-
-
-@pytest.mark.parametrize(
-    "facts",
-    [
-        FileFacts(True, False, False, 1, (), 1),  # symlink / reparse point
-        FileFacts(False, False, True, 2, (), 1),  # hard-linked
-        FileFacts(False, False, False, 1, (), 1),  # special (non-regular)
-        FileFacts(False, False, True, 1, ("$DATA:x",), 1),  # NTFS alternate data stream
-    ],
-)
-def test_freeze_skill_package_refuses_bad_identity(tmp_path: Path, facts: FileFacts) -> None:
-    bundle = tmp_path / "bundle"
-    bundle.mkdir()
-    _write(tmp_path / "pkg/s/SKILL.md", "s")
-    with pytest.raises(InstructionBundleError):
-        freeze_skill_package(
-            bundle,
-            "s",
-            "pkg/s/SKILL.md",
-            ["pkg/s/SKILL.md"],
-            tmp_path,
-            inspect=_inspector_reporting("SKILL.md", facts),
-        )
-
-
 # -- manifest / digest / verify -------------------------------------------------------------------
 
 
@@ -261,7 +177,7 @@ def test_manifest_verify_detects_content_drift(tmp_path: Path) -> None:
 
 def test_control_digest_is_folded_into_composite(tmp_path: Path) -> None:
     # Two otherwise-identical bundles with different control digests get different composite digests
-    # (In-scope bullet #4: one digest binds task + skills + repo instructions + control plane).
+    # (In-scope bullet #4: one digest binds task + repo instructions + control plane).
     b1, d1 = _frozen_bundle(tmp_path / "a", control="ctrl-A")
     b2, d2 = _frozen_bundle(tmp_path / "b", control="ctrl-B")
     assert d1 != d2
