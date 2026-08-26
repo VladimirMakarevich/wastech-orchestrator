@@ -27,7 +27,7 @@ import re
 import stat
 import tempfile
 import time
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,19 +36,22 @@ from wastech_orchestrator.config.schema import (
     BranchMode,
     MergeStrategy,
     OrchestratorConfig,
+    SecurityConfig,
 )
 from wastech_orchestrator.observability.logging import bind
 from wastech_orchestrator.observability.progress import run_with_heartbeat
 from wastech_orchestrator.providers.artifacts import sha256_file, task_artifact_dir
 from wastech_orchestrator.providers.process import ProcessResult, run_process
-from wastech_orchestrator.providers.redaction import read_denied_secrets, redact_text
+from wastech_orchestrator.providers.redaction import REDACTED, read_denied_secrets, redact_text
 from wastech_orchestrator.routing.snapshots import PartialChange, WorkingTreeSnapshot
 from wastech_orchestrator.runtime_layout import (
     CONTROL_HOME_DIRNAME,
     EXCHANGE_HOME_DIRNAME,
     ProviderWriteGuardPolicy,
 )
-from wastech_orchestrator.security.env import build_child_env
+from wastech_orchestrator.security.env import build_orchestrator_env, default_allowed_environment
+from wastech_orchestrator.security.env_paths import assigned_path_elements, is_inside
+from wastech_orchestrator.security.launchers import pin_launchers, resolve_launcher
 from wastech_orchestrator.state_store import PublishOpRow, StateStore
 from wastech_orchestrator.task.model import BRANCH_NAME_MAX_LEN
 from wastech_orchestrator.task.parser import slugify_bounded
@@ -107,6 +110,13 @@ _RUNTIME_IGNORE_ROOTS: tuple[tuple[str, str], ...] = (
     (f"{EXCHANGE_HOME_DIRNAME}/probe", f"{EXCHANGE_HOME_DIRNAME}/"),
 )
 
+# Header for the exclude lines the orchestrator appends for an assigned toolchain cache living
+# inside the clone. Named after the command that writes it, so an operator reading
+# `.git/info/exclude` knows what put the rule there and what to re-run after changing the path.
+_ASSIGNED_CACHE_IGNORE_COMMENT = (
+    "# wastech-orchestrator: assigned toolchain cache in this clone (added by `worc preflight`)"
+)
+
 # The full ignore block (comment + both roots), kept as the public constant install/docs reference.
 RUNTIME_GITIGNORE_LINES: tuple[str, ...] = (
     _RUNTIME_IGNORE_COMMENT,
@@ -138,22 +148,144 @@ _GIT_HARDENING_CONFIG: tuple[tuple[str, str], ...] = (
 # Orchestrator-injected git environment (unconditional — not agent-influenced, so not gated by the
 # `security.allowed_environment` allowlist). No credential/host prompt, no editor, no GUI credential
 # dialog, no opportunistic index.lock. `GIT_CONFIG_NOSYSTEM` is deliberately NOT set: operator
-# system/global config is trusted and holds the credentials push/fetch/gh need; the agent-writable
-# surface is repo-local config + `.gitattributes`, handled by the fingerprint and the filter gate.
+# system/global config holds the credentials push/fetch/gh need, and clearing it would take those
+# with it. Trusted, then, but not unreachable: under `security.strict_isolation: false` the agent
+# may write outside the clone, `~/.gitconfig` included, so `pushInsteadOf`, `credential.helper` and
+# `core.sshCommand` are agent-writable there too. What answers that is detection rather than a wider
+# ban, because the ban would take the credentials with it: the user git config is fingerprinted by
+# digest around every attempt, every `gh` call names its repository outright, and a push re-reads
+# its own destination immediately before sending. The repo-local half stays the filter gate's
+# business below.
 _GIT_HARDENING_ENV: dict[str, str] = {
     "GIT_TERMINAL_PROMPT": "0",
     "GIT_OPTIONAL_LOCKS": "0",
     "GIT_EDITOR": "false",
     "GIT_SEQUENCE_EDITOR": "false",
     "GCM_INTERACTIVE": "Never",
+    # This module classifies outcomes by reading English strings out of git/gh output — whether a
+    # push failure is transient (`_TRANSIENT_GIT_STDERR_MARKERS`), whether a conflict marker was
+    # left behind, whether a PR was already merged (`_ALREADY_MERGED_MARKERS`). Git is localized, so
+    # an operator setting `LANG` (a legitimate `security.extra_environment` value, and the very
+    # example the design used) would turn a retryable network blip into a final task failure with no
+    # trace of why. Pinned here because this mapping is applied ON TOP of the built environment, so
+    # no config value can override it, and it already covers both `git` and `gh`.
+    "LC_ALL": "C",
 }
+
+# Environment names REMOVED from every orchestrator git/gh process, applied after the build and
+# before `_GIT_HARDENING_ENV`. The allowlist alone does not cover this: `security.extra_environment`
+# *assigns* outright and reaches this path by design (it is how an operator supplies a proxy), and
+# an `allowed_environment` entry — a plain name or a prefix pattern — can forward one of these from
+# the operator's shell. Either way the name would retarget the orchestrator's own publication —
+# the one thing no configuration is allowed to move: `GH_REPO`/`GH_HOST` send the pull request
+# somewhere else, the `GIT_DIR`/`GIT_WORK_TREE`/index/object names move both the commands and
+# `resolve_control_paths` (so the write-guard would protect a different `.git`), the `GIT_CONFIG_*`
+# counters inject config a `-c` cannot outrank, the ssh/askpass names substitute the transport or
+# the credential prompt, and the author/committer names rewrite who a commit says it is from.
+#
+# `GIT_CONFIG_GLOBAL` is deliberately NOT here: unsetting it is what sends git back to the real
+# `~/.gitconfig`, which is trusted on purpose (it holds the credentials push/fetch need — see
+# `_GIT_HARDENING_ENV` above). What covers it is the control-state fingerprint, and covers it
+# honestly: `_user_git_config_paths` digests the file git ACTUALLY reads under this environment, so
+# when the variable is set that file is the one fingerprinted and the two default locations are not.
+# A swap during a run is therefore detected rather than silently honored. The `GIT_*`/`GH_*`
+# namespace is closed by *whitelist*, not by a deny list: a name in it reaches an orchestrator-owned
+# git/gh process only if it is listed here, and a name a future release adds is closed by default. A
+# deny list would have to chase `git` and `gh` releases, and the two names it is easiest to miss are
+# the two worst — `GIT_CONFIG_PARAMETERS` injects config a `-c` cannot outrank (`credential.helper`,
+# `url.*.pushInsteadOf`), and `GH_CONFIG_DIR` is the env twin of a planted `hosts.yml`, i.e. the
+# host and token for every `gh` call.
+#
+# Three entries, each for a reason the security rule itself gives:
+#
+# * `GIT_CONFIG_GLOBAL` — deliberately allowed through. Unsetting it is what sends git back to
+#   the real `~/.gitconfig`, which is trusted on purpose (it holds the credentials push/fetch
+#   need). What
+#   covers it is the control-state fingerprint, honestly: `_user_git_config_paths` digests the file
+#   git ACTUALLY reads under this environment, so when the variable is set that file is the one
+#   fingerprinted and the two default locations are not.
+# * `GH_TOKEN` / `GITHUB_TOKEN` — the credential `gh` authenticates with. These do not retarget
+#   anything: WHERE a call goes is decided by `--repo` (pinned) and by the host/config names, all of
+#   which stay closed. Dropping them would make an operator-supplied token stop working, which is
+#   the "least restrictive solution" rule in [security.md](.agents/rules/security.md) applied
+#   literally — a security mechanism must not take a capability away for nothing.
+_GIT_ENV_NAMESPACE_ALLOWED: frozenset[str] = frozenset(
+    {"GIT_CONFIG_GLOBAL", "GH_TOKEN", "GITHUB_TOKEN"}
+)
+
+#: The `GIT_*`/`GH_*` prefixes the whitelist above governs. Names outside these prefixes are not
+#: touched by it — a proxy (`HTTPS_PROXY`), a locale, a `PATH` are ordinary operator configuration
+#: and this rule is about the two namespaces that retarget publication.
+_GIT_ENV_NAMESPACE_PREFIXES: tuple[str, ...] = ("GIT_", "GH_", "GITHUB_")
+
+_GIT_ENV_SCRUB: frozenset[str] = frozenset(
+    {
+        "GIT_DIR",
+        "GIT_WORK_TREE",
+        "GIT_INDEX_FILE",
+        "GIT_OBJECT_DIRECTORY",
+        "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+        "GIT_CONFIG",
+        "GIT_CONFIG_SYSTEM",
+        "GIT_CONFIG_COUNT",
+        "GIT_SSH",
+        "GIT_SSH_COMMAND",
+        "GIT_ASKPASS",
+        "SSH_ASKPASS",
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_AUTHOR_DATE",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+        "GIT_COMMITTER_DATE",
+        "GH_REPO",
+        "GH_HOST",
+        # Both found by the audit as the same class the list already covers, and both kept here even
+        # though the namespace whitelist below would now catch them: this list is what the
+        # requirement enumerates, and a named entry survives a future widening of the whitelist.
+        "GIT_CONFIG_PARAMETERS",
+        "GH_CONFIG_DIR",
+    }
+)
+
+
+def build_git_env(
+    security: SecurityConfig, parent_env: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """The environment for every orchestrator-owned ``git`` / ``gh`` process.
+
+    The allowlist (never the agent's full pass-through — :func:`build_orchestrator_env` explains
+    why), minus every ``GIT_*``/``GH_*``/``GITHUB_*`` name that is not explicitly whitelisted
+    (:data:`_GIT_ENV_NAMESPACE_ALLOWED`) and minus the named scrub set, plus the unconditional
+    :data:`_GIT_HARDENING_ENV`. One function so the orders — forward, scrub, pin — cannot differ
+    between call sites, and so a removed name cannot come back through the pin or a config value.
+
+    The namespace rule is fail-closed by construction: a variable `git` or `gh` learns in a future
+    release cannot reach this process until someone adds it here on purpose. Names outside those
+    prefixes are untouched — a proxy, a locale, a ``PATH`` are ordinary operator configuration.
+    """
+    env = build_orchestrator_env(security, parent_env)
+    for name in list(env):
+        upper = name.upper()
+        if upper.startswith(_GIT_ENV_NAMESPACE_PREFIXES) and upper not in (
+            _GIT_ENV_NAMESPACE_ALLOWED
+        ):
+            env.pop(name, None)
+    for name in _GIT_ENV_SCRUB:
+        env.pop(name, None)
+    env.update(_GIT_HARDENING_ENV)
+    return env
+
 
 # Repo-local/worktree config keys whose *value is a program* git would execute during a
 # filter (clean/smudge/process), an external/textconv diff, or a fetch/push. A command-line `-c`
-# cannot blanket a filter/diff driver — its name comes from `.gitattributes` — so the agent-writable
+# cannot blanket a filter/diff driver — its name comes from `.gitattributes` — so the repo-local
 # config surface is inventoried and any such key is refused. `git config --list` lowercases the
 # section/name (subsection preserved), so keys are matched lowercased. Operator global/system config
-# is trusted and is not inventoried, so a global `git lfs install` keeps working with zero config.
+# is trusted and is not inventoried, so a global `git lfs install` keeps working with zero config —
+# a deliberate line, not an oversight: in the advanced mode that file is agent-writable as well, and
+# inventorying it would break every legitimate global driver to answer a case detection already
+# covers (see the digest in the per-attempt fingerprint).
 _FILTER_DRIVER_KEY_RE = re.compile(
     r"^(filter|diff)\.[^.]+\.(clean|smudge|process|command|textconv)$"
 )
@@ -179,18 +311,153 @@ def _append_missing_lines(target: Path, lines: Sequence[str]) -> list[str]:
     return additions
 
 
-def _git_path_ignored(repo_root: str | Path, probe: str) -> bool:
+# The environment for a git/gh call site that holds a repo path but no `SecurityConfig` — the two
+# module-level helpers below, plus the installer's own probes, which run before any policy object
+# exists. Still an allowlist, just the built-in one: the cross-platform base plus this host's
+# OS-launch essentials, which is what a read-only `git` needs (`PATH` so it is found, `HOME` for the
+# global config that decides `core.excludesFile`), scrubbed and hardened like every other
+# orchestrator git process. The full `os.environ` must never reach them: a shell `GIT_DIR` would
+# move them off the clone, and the `.git/info/exclude` repair decision rests on their answer.
+def build_helper_git_env(
+    *extra_allowed: str, security: SecurityConfig | None = None
+) -> dict[str, str]:
+    """:func:`build_git_env` for module-level git helpers and pre-config install probes.
+
+    Config-aware callers pass ``security`` so ignore checks and repairs observe the same HOME,
+    global git config, and assigned variables as the GitManager that later computes the diff.
+    Installer probes run before a policy exists and use the built-in allowlist. ``extra_allowed``
+    widens only that install-time fallback for the auth probe; scrubbed retargeting names remain
+    unreachable.
+    """
+    policy = security
+    if policy is None:
+        policy = SecurityConfig(
+            strict_isolation=True,
+            allowed_environment=(*default_allowed_environment(), *extra_allowed),
+            denied_read_paths=(),
+            denied_commands=(),
+        )
+    return build_git_env(policy)
+
+
+#: ``git`` for the two helpers below, pinned once at import for the reason the per-manager pin
+#: exists: a bare name lets a directory earlier on ``PATH`` decide what answers. At import rather
+#: than per call because these are stateless module functions with nothing to hold a pin on, and
+#: ``PATH`` itself is set before this module loads — unlike the *environment*, which the CLI is
+#: still filling from ``.worc/.env`` at that point, and which is therefore built per call above.
+_HELPER_GIT_PATH: str = resolve_launcher("git") or "git"
+
+
+def _git_path_ignored(
+    repo_root: str | Path, probe: str, *, security: SecurityConfig | None = None
+) -> bool:
     """Whether ``git check-ignore`` reports ``probe`` as ignored in ``repo_root`` (exit code 0)."""
     with tempfile.TemporaryDirectory() as scratch:
         stdout_path = Path(scratch) / "stdout"
         result = run_process(
-            ["git", "check-ignore", "-q", probe],
+            [_HELPER_GIT_PATH, "check-ignore", "-q", probe],
             cwd=repo_root,
-            env=dict(os.environ),
+            env=build_helper_git_env(security=security),
             timeout_seconds=30,
             stdout_path=str(stdout_path),
         )
     return result.exit_code == 0
+
+
+def _git_stdout(repo_root: str | Path, *args: str, security: SecurityConfig | None = None) -> str:
+    """Run a read-only ``git`` verb in ``repo_root``, returning its stdout or ``""`` on failure.
+
+    The module-level runner used by ``ensure_path_excluded`` so preflight can ask Git where the
+    worktree-specific exclude file lives without constructing a GitManager.
+    """
+    with tempfile.TemporaryDirectory() as scratch:
+        stdout_path = Path(scratch) / "stdout"
+        result = run_process(
+            [_HELPER_GIT_PATH, *args],
+            cwd=repo_root,
+            env=build_helper_git_env(security=security),
+            timeout_seconds=30,
+            stdout_path=str(stdout_path),
+        )
+        if result.exit_code != 0:
+            return ""
+        return stdout_path.read_text(encoding="utf-8", errors="replace").strip()
+
+
+def gh_repo_pin(
+    repo_url: str, clone: str | Path, *, security: SecurityConfig | None = None
+) -> tuple[str | None, str]:
+    """``(slug, where it came from)`` for the ``--repo`` pin every ``gh`` call carries.
+
+    The same resolution order :meth:`GitManager._gh_repo_slug` uses — the operator's configured
+    ``repo.url`` first (read into memory before any agent starts, which is what makes it an
+    anchor), the clone's ``origin`` second — exposed as a module function so ``worc preflight`` can
+    report the verdict without constructing a Git Manager. ``(None, …)`` means no pin: the URL names
+    no hosted repository (an ssh alias, a ``file://`` URL, a local path), and then ``gh`` infers the
+    repository from the clone — including for the reuse probe that decides which pull request this
+    task appends to. That half of floor 4 quietly switches off there, which is exactly why this is
+    printed rather than inferred.
+    """
+    slug = parse_gh_repo_slug(repo_url)
+    if slug is not None:
+        return slug, "repo.url"
+    root = Path(clone)
+    if not root.exists():
+        return None, "repo.url (the clone is not on disk yet)"
+    origin = _git_stdout(root, "remote", "get-url", "origin", security=security)
+    return (parse_gh_repo_slug(origin) if origin else None), "the clone's origin"
+
+
+def ensure_path_excluded(
+    repo_root: str | Path,
+    target: str | Path,
+    *,
+    security: SecurityConfig | None = None,
+) -> bool:
+    """Idempotently make git ignore ``target`` inside ``repo_root``; report whether it now does.
+
+    The rule goes to the clone-local, untracked ``.git/info/exclude``, never the tracked
+    ``.gitignore``, for three reasons pointing the same way: the tracked file belongs to the target
+    repository, so editing it would put orchestrator bookkeeping into a task's diff and its pull
+    request; a workspace-write agent can rewrite ``.gitignore`` but cannot write inside ``.git``,
+    which both the sandbox and the write-guard deny; and the exclude file is per-clone, the exact
+    scope of a cache path that names one clone.
+
+    The reason to do this at all is the diff, not the write. A toolchain cache redirected into the
+    clone fills it with thousands of untracked files, which turns the next task's ordinary change
+    into a dangerous-looking diff and trips a gate that has nothing to do with caches — after the
+    agent has already done its expensive work.
+
+    The rule is anchored with a leading ``/`` so it matches from the repository root rather than a
+    same-named directory deeper in the tree, and carries no trailing ``/`` so it holds whether the
+    toolchain creates a directory or a file. Returns ``False`` when the target lies outside the
+    clone, when git cannot be asked, or when the path is still not ignored afterwards (a tracked
+    path, or an operator's own negation rule) — a caller reports that instead of assuming.
+    """
+    # Both sides are resolved before they are compared: the caller decides "inside the clone" from
+    # resolved paths, and comparing raw strings here would disagree with it whenever the clone path
+    # and the value are spelled through different but equivalent prefixes — a symlinked repo root,
+    # or anything under `/tmp` on macOS, where `/tmp` is a link to `/private/tmp`. That disagreement
+    # produced a FAIL on a perfectly good config, blamed on ignore rules that were never the cause.
+    root, path = Path(repo_root).expanduser().resolve(), Path(target).expanduser().resolve()
+    try:
+        probe = path.relative_to(root).as_posix()
+    except ValueError:
+        return False
+    if not probe or probe == ".":
+        return False
+    if not _git_path_ignored(root, probe, security=security):
+        rel_exclude = _git_stdout(
+            root, "rev-parse", "--git-path", "info/exclude", security=security
+        )
+        if not rel_exclude:
+            return False
+        exclude = Path(rel_exclude)
+        _append_missing_lines(
+            exclude if exclude.is_absolute() else root / exclude,
+            [_ASSIGNED_CACHE_IGNORE_COMMENT, f"/{probe}"],
+        )
+    return _git_path_ignored(root, probe, security=security)
 
 
 def _missing_runtime_ignore_lines(is_ignored: Callable[[str], bool]) -> list[str]:
@@ -438,9 +705,9 @@ def _compact_pr_section(section: str, *, keep_follow_ups: bool = False) -> str:
 
     The stub points at the task's committed ``<id>.summary.md`` when the section recorded one
     (:data:`_SUMMARY_POINTER_PREFIX`) — that file is in this PR's own diff, so a reader on GitHub
-    can open it. Otherwise it names the run host: the working copy lives under the git-excluded
-    ``.worc/``, and the stub used to spell that as ``logs/<id>/summary.md``, which read as a
-    repository path and was a dead link. Idempotent in both modes: the marker block is carried
+    can open it. Otherwise it names the run host, because the working copy lives under the
+    git-excluded ``.worc/`` — spelling it as a bare ``logs/<id>/summary.md`` would read as a
+    repository path and be a dead link. Idempotent in both modes: the marker block is carried
     through verbatim, so re-compacting a stub is a no-op and a follow-ups-preserving pass can still
     be tightened by a second one.
     """
@@ -484,13 +751,47 @@ class HookFacts:
 
 
 @dataclass(frozen=True)
+class PushOutcome:
+    """What a push actually did — publishing needs more than "it worked".
+
+    ``adopted_commits`` are commits someone else put on the task branch that this push merged in
+    (the fourth publish case). They matter to the caller twice over: the checked combination was
+    "our commits on top of base", not this one, and the task's reported diff — measured from the
+    base — stops describing this task's work once they are in it.
+    """
+
+    pushed: bool
+    adopted_commits: tuple[str, ...]  # foreign commits merged in, oldest first
+
+
+@dataclass(frozen=True)
+class RemoteState:
+    """Where a push would go around a provider attempt — the half a local fingerprint cannot see.
+
+    Only the push *destination* lives here. What ``origin`` holds for the task branch, and whether
+    that branch has an open pull request, deliberately do not: an existing branch or PR is ordinary
+    working state, not evidence that someone else owns it, and publishing already recovers from a
+    diverged remote by merging it in locally before anything goes out (see :meth:`push`). Watching
+    them here only parked tasks over a condition the publish path already handles.
+
+    ``None`` means the probe did not answer (no push URL, an unreadable remote) and is never read
+    as a change — a failed probe is not evidence. The URL is kept as a digest for the same reason
+    config values are: it can carry a token.
+    """
+
+    push_url_digest: str | None  # sha256 of `remote get-url --push origin` (the final URL)
+
+
+@dataclass(frozen=True)
 class GitControlState:
     """Fingerprint of the Git control surfaces a provider attempt must not mutate.
 
     ``config`` maps each repo-local (+worktree) key to the sha256 of each of its values — hashes,
     never raw values, since a value can be secret-bearing (e.g. a remote URL or a signing-key path).
-    ``index`` blob shas and ``hooks`` content shas are already content-derived. Nothing here is a
-    raw secret, so the object is safe to hold in parent memory for the attempt window.
+    ``index`` blob shas and ``hooks`` content shas are already content-derived. ``tool_config``
+    hashes for the same reason, and its keys are logical labels rather than absolute paths, so a
+    drift line never prints an operator's home directory. Nothing here is a raw secret, so the
+    object is safe to hold in parent memory for the attempt window.
     """
 
     head_symref: str | None  # `symbolic-ref HEAD` (None == detached)
@@ -502,13 +803,22 @@ class GitControlState:
     hooks_path: str | None  # `core.hooksPath` (None when unset)
     hooks: dict[str, HookFacts]  # entry name -> facts, for the effective hooks dir
     markers: frozenset[str]  # present operation-control markers
+    #: Label -> content sha256 for the CLI/git configuration the publishing processes read: the
+    #: clone's own agent-CLI config (loaded on purpose by the shipped defaults) and the operator's
+    #: user git config. Both hand out code execution or redirect our own push, and neither shows
+    #: up in a fingerprint of ``origin``.
+    tool_config: dict[str, str]
+    remote: RemoteState
 
 
 @dataclass(frozen=True)
 class GitControlDriftItem:
     """One redacted control-state change (path/key/name level only — never a value or content)."""
 
-    aspect: str  # index | head | task_ref | config | hooks | markers
+    # index | head | task_ref | config | hooks | markers | tool_config | remote | executables.
+    # Nothing branches on this: every aspect carries the same verdict (a warning naming it),
+    # so it exists to be read by a person, not matched by the code.
+    aspect: str
     detail: str
 
 
@@ -552,8 +862,88 @@ class _ActiveTask:
     # ``existing``/``current`` (chain-continuation) modes, where the branch already carries prior
     # tasks' commits; ``None`` for ``new`` (the branch is cut fresh from ``base_branch``, so the
     # config base is exactly the task's start). Diffs use it so review/docs see only this task's
-    # change, not the whole unmerged chain.
+    # change, not the whole unmerged chain. Mirrors the durable ``tasks.base_ref``, which is
+    # authoritative: it is written at the first branch prep and restored, never re-read, at every
+    # later one.
     base_ref: str | None = None
+    # sha256 of the push destination as it stood when this task's branch was prepared — before any
+    # provider ran. Re-read immediately before every push; see `_assert_push_destination_unchanged`.
+    push_url_digest: str | None = None
+
+
+#: Agent-CLI configuration inside the clone that the shipped provider defaults load on purpose.
+_TOOL_CONFIG_FILES = (".claude/settings.json", ".mcp.json")
+_TOOL_CONFIG_TREE = ".codex"
+# Ceiling on a single entry read out of the walked configuration tree. Configuration files are
+# kilobytes; anything past this is not one, and reading it into memory before every provider attempt
+# is a cost the fingerprint has no reason to pay. Such an entry is fingerprinted by size instead —
+# an edit still shows, without the read.
+_TOOL_CONFIG_MAX_BYTES = 1_048_576
+
+#: Userinfo in either URL form: `scheme://user:token@host/…` and scp-like `user@host:path`.
+_URL_USERINFO_RE = re.compile(r"(?:(?<=://)|^)[^/@]*@")
+
+#: `[HOST/]OWNER/REPO` out of a clone URL: `git@host:owner/name.git`, `https://host/owner/name`,
+#: `ssh://git@host/owner/name.git`. A local path has no host and never matches.
+_CLONE_URL_RE = re.compile(
+    r"^(?:[a-z][a-z0-9+.\-]*://)?(?:[^@/]+@)?(?P<host>[^/:]+)[:/](?P<path>.+?)(?:\.git)?/?$",
+    re.IGNORECASE,
+)
+
+
+def _user_git_config_paths(env: Mapping[str, str] | None = None) -> tuple[tuple[str, Path], ...]:
+    """The operator's user-level git configs, as ``(label, path)``.
+
+    The files git itself reads outside the clone — as *this* orchestrator's git reads them, which is
+    why the environment it runs under is the input. ``GIT_CONFIG_GLOBAL`` is deliberately legal in
+    ``extra_environment`` (it retargets nothing about publication), but it *replaces* the global
+    file, so digesting the two default locations while git reads a third would fingerprint files
+    nobody consults and miss the one that decides ``credential.helper``. When it is set, git reads
+    only that file, so only that file is digested (``/dev/null`` is git's own "no global config"
+    idiom and yields no digest by itself).
+
+    The labels are logical, not absolute: they are printed in drift lines, and an operator's home
+    directory is not ours to publish.
+    """
+    environ = env if env is not None else os.environ
+    override = environ.get("GIT_CONFIG_GLOBAL")
+    if override:
+        return (("$GIT_CONFIG_GLOBAL", Path(override)),)
+    home = Path.home()
+    xdg = environ.get("XDG_CONFIG_HOME")
+    xdg_dir = Path(xdg) if xdg else home / ".config"
+    return (
+        ("~/.gitconfig", home / ".gitconfig"),
+        ("~/.config/git/config", xdg_dir / "git" / "config"),
+    )
+
+
+def redact_url_credentials(url: str) -> str:
+    """*url* with any embedded userinfo replaced — a clone URL can carry a token.
+
+    Everything else is kept: an operator asked to look at a rewritten push destination needs to
+    see which host and path it points at, and that half is not a secret.
+    """
+    return _URL_USERINFO_RE.sub(f"{REDACTED}@", url.strip())
+
+
+def parse_gh_repo_slug(url: str) -> str | None:
+    """``[HOST/]OWNER/REPO`` for ``gh --repo``, or ``None`` when *url* names no hosted repository.
+
+    The host is kept for anything other than github.com so a GitHub Enterprise clone stays pinned
+    to its own host. Rejects what is not a two-segment hosted path — a local clone path, a URL with
+    no host — because a wrong pin is worse than none: ``gh`` would then talk to a repository the
+    operator never named.
+    """
+    match = _CLONE_URL_RE.match(url.strip())
+    if match is None:
+        return None
+    host = match.group("host")
+    segments = [seg for seg in match.group("path").split("/") if seg]
+    if "." not in host or len(segments) != 2 or any(" " in seg for seg in segments):
+        return None
+    slug = "/".join(segments)
+    return slug if host.lower() == "github.com" else f"{host}/{slug}"
 
 
 class GitManager:
@@ -577,12 +967,16 @@ class GitManager:
         # from the code commit alongside the gitignored `.worc/` runtime home.
         self._tasks_dir = config.paths.tasks_dir
         self._excluded_dirs = (*RUNTIME_EXCLUDED_DIRS, self._tasks_dir)
-        # Orchestrator-injected no-prompt/no-editor git env on top of the security
-        # allowlist; applies to both `git` (`_run`) and `gh` (`_gh`), which shells out to git.
-        self._env = {
-            **build_child_env(config.security.allowed_environment),
-            **_GIT_HARDENING_ENV,
-        }
+        # The allowlist, scrubbed of the publication-retargeting names and hardened; applies to both
+        # `git` (`_run`) and `gh` (`_gh`), which shells out to git. See `build_git_env`.
+        self._env = build_git_env(config.security)
+        # `git` and `gh` resolved ONCE, here, and used for every later call (see `_pinned_argv`).
+        # Both are launched by bare name throughout this module, which means a directory earlier on
+        # PATH decides what actually commits and pushes; resolving per call would re-decide that at
+        # every invocation, including the ones after the agent has been running. The logical name
+        # stays in the argv the callers build — `_harden_git_argv` keys on it — and the path is
+        # substituted at the point of launch.
+        self._launchers = pin_launchers(config)
         # An empty hooks dir every git command points at (see `_harden_git_argv`), so no
         # target-repo hook runs in an orchestrator git process. Absolute, real, empty.
         self._null_hooks_dir = Path(self._artifacts_root) / GIT_NULL_HOOKS_DIRNAME
@@ -593,6 +987,14 @@ class GitManager:
         self._active: _ActiveTask | None = None
         # Whether the task lifecycle dir is gitignored (cached; drives the code-commit pathspec).
         self._tasks_dir_ignored_cache: bool | None = None
+        # `[HOST/]OWNER/REPO` every `gh` call is pinned to; resolved once per run (see
+        # `_gh_repo_slug`). The sentinel distinguishes "not resolved yet" from "not resolvable".
+        self._gh_repo_slug_cache: str | None = None
+        self._gh_repo_slug_resolved = False
+        # How many commits this run adopted rather than made, per task: an agent's or an operator's
+        # own `git commit` picked up by `commit_code`/`commit_subtask` on a clean tree. Kept so the
+        # pull-request body can declare it to a reviewer, not only the log to an operator.
+        self._adopted_commits: dict[str, int] = {}
         # Injectable backoff for the transient-push retry; real time in production, patched in
         # tests so the bounded retry never actually sleeps.
         self._sleep: Callable[[float], None] = time.sleep
@@ -613,7 +1015,7 @@ class GitManager:
         signing helpers). ``gh`` is less constrained, so it keeps the full quiescence barrier.
         """
         argv = list(argv)
-        hardened = self._harden_git_argv(argv)
+        hardened = self._pinned_argv(self._harden_git_argv(argv))
         trusted = bool(argv) and argv[0] == "git"
         with tempfile.TemporaryDirectory() as scratch:
             stdout_path = Path(scratch) / "stdout"
@@ -644,6 +1046,18 @@ class GitManager:
             timed_out=result.timed_out,
             launch_error=result.launch_error,
         )
+
+    def _pinned_argv(self, argv: list[str]) -> list[str]:
+        """Replace ``argv[0]`` with the path pinned when this manager was built.
+
+        Last thing before launch, after hardening, so everything upstream — the callers, the ``-c``
+        prefix insertion, the ``trusted`` decision — keeps reading the logical name it was written
+        against. A name this host never resolved passes through unchanged, and the process runner
+        reports the launch failure it already reports.
+        """
+        if not argv:
+            return argv
+        return [self._launchers.launch(argv[0]), *argv[1:]]
 
     def _harden_git_argv(self, argv: list[str]) -> list[str]:
         """Insert the hardening prefix into a ``git`` argv (leaves ``gh``/other argv as-is).
@@ -700,33 +1114,43 @@ class GitManager:
         raise AssertionError("unreachable")  # pragma: no cover — the loop always returns or raises
 
     def _gh(self, args: Sequence[str]) -> GitResult:
-        """Run GitHub CLI arguments, adding the ``gh`` executable exactly once."""
-        if self._gh_runner is not None:
-            return self._gh_runner(args)
-        return self._run(["gh", *args])
+        """Run GitHub CLI arguments, adding the ``gh`` executable exactly once.
 
-    def list_tracked_skill_files(self) -> tuple[str, ...]:
-        """Repo-relative POSIX paths of every tracked ``SKILL.md`` (whole-repo skill discovery).
-
-        Enumerates tracked files via ``git ls-files`` (ignore-aware and bounded for free — untracked
-        ``node_modules``/build/vendor trees never appear) and keeps the ``SKILL.md`` basenames,
-        wherever they sit in the tree. ``ls-files`` emits forward-slash paths on every platform.
-        Best-effort: a working copy with no git data (some tests) yields ``()`` so the inventory is
-        simply empty rather than failing the task.
+        Every call is pinned with ``--repo`` when the repository is known: otherwise ``gh`` infers
+        it from the clone, so a planted ``~/.config/gh/hosts.yml`` or ``url.*.insteadOf`` would
+        retarget a PR silently. Calls that already name a PR by URL are unaffected — the URL wins —
+        so the pin is uniform rather than case-by-case.
         """
-        result = self._git("ls-files", "-z")
-        if not result.ok:
-            return ()
-        return tuple(
-            item for item in result.stdout.split("\0") if item and item.split("/")[-1] == "SKILL.md"
-        )
+        slug = self._gh_repo_slug()
+        argv = [*args] if slug is None else [*args, "--repo", slug]
+        if self._gh_runner is not None:
+            return self._gh_runner(argv)
+        return self._run(["gh", *argv])
+
+    def _gh_repo_slug(self) -> str | None:
+        """``[HOST/]OWNER/REPO`` for ``gh --repo``, resolved once per run; ``None`` when unknown.
+
+        Anchored on the operator's configured ``repo.url`` — it is read into memory before any
+        agent starts, which is what makes it an anchor at all. When it names no hosted repository
+        (an operator-written config may omit it) the clone's ``origin`` answers instead, and that
+        answer is taken once and kept: the first caller is the fingerprint captured *before* the
+        provider runs, so what is cached is the destination as it stood before the agent could
+        touch it. Deriving it fresh per call would just re-read the surface being watched.
+        """
+        if not self._gh_repo_slug_resolved:
+            self._gh_repo_slug_resolved = True
+            configured = parse_gh_repo_slug(self._config.repo.url)
+            if configured is None:
+                origin = self._git("remote", "get-url", "origin")
+                configured = parse_gh_repo_slug(origin.stdout) if origin.ok else None
+            self._gh_repo_slug_cache = configured
+        return self._gh_repo_slug_cache
 
     def list_tracked_files(self, *pathspecs: str) -> tuple[str, ...]:
         """Repo-relative POSIX paths of every tracked file, optionally under ``pathspecs``.
 
         Used by the instruction bundle to discover which root repository-instruction files
-        (``AGENTS.md`` etc.) are
-        tracked and to enumerate a selected skill's package closure (``ls-files -- <package-dir>``).
+        (``AGENTS.md`` etc.) are tracked.
         ``ls-files`` is ignore-aware, bounded (untracked build/vendor trees never appear), and emits
         forward-slash paths on every platform. Best-effort: a working copy with no git data yields
         ``()`` so a caller degrades to "nothing tracked" rather than failing the task.
@@ -786,6 +1210,28 @@ class GitManager:
         # staged — a bare ``git commit`` would sweep it into the task's scoped commit. existing/
         # current never reset, so this is a fail-closed refusal; unstaged edits are left untouched.
         self.assert_index_clean_at_start()
+        # Where a push would go, recorded before any provider runs. It is the baseline every later
+        # push is checked against — the one place a rewritten destination reaches a real branch.
+        # Persisted as well as held in memory: ``merge-task`` pushes in a later process that
+        # prepares no branch, so an in-memory-only baseline is always absent exactly where the push
+        # happens after the agent is gone.
+        if self._active is not None:
+            # The task's start commit is stamped once and afterwards only ever restored.
+            # ``_prepare_existing`` / ``_prepare_current`` read it from ``HEAD``, which is the right
+            # answer on the first prep and the wrong one on every later one: a resume re-attaches
+            # the same branch after the run has already committed to it, so re-reading ``HEAD``
+            # walks the base forward and the task's reported change shrinks to whatever is still
+            # uncommitted. Persisted for the same reason the push baseline below is — the in-memory
+            # active-task record does not survive the process, and a resume is a new one.
+            stored_base = self._store.get_base_ref(task_id)
+            if stored_base:
+                self._active.base_ref = stored_base
+            elif self._active.base_ref:
+                self._store.set_base_ref(task_id, self._active.base_ref)
+            digest = self._push_url_digest()
+            self._active.push_url_digest = digest
+            if digest is not None:
+                self._store.set_push_url_digest(task_id, digest)
         return branch
 
     def _prepare_new(self, task_id: str, slug: str, *, epoch: int, branch_name: str | None) -> str:
@@ -846,10 +1292,16 @@ class GitManager:
         """The ref the task's change is diffed against: the per-task chain start when set,
         else the config ``base_branch``. Equal to ``base_branch`` for ``new`` mode, so a
         non-chained run's diffs are unchanged; for ``existing``/``current`` it is the branch tip at
-        task start, so review/docs/PR body see only this task's change, not the whole chain."""
-        if self._active is not None and self._active.base_ref:
-            return self._active.base_ref
-        return self._config.repo.base_branch
+        task start, so review/docs/PR body see only this task's change, not the whole chain.
+
+        The durable column is consulted before the config base, so a process that pushes or reports
+        without preparing a branch first (``merge-task``) measures from the same point the run did
+        rather than from the whole unmerged chain."""
+        if self._active is None:
+            return self._config.repo.base_branch
+        if not self._active.base_ref:
+            self._active.base_ref = self._store.get_base_ref(self._active.task_id)
+        return self._active.base_ref or self._config.repo.base_branch
 
     def current_branch(self) -> str | None:
         """The working tree's symbolic branch name, or ``None`` when HEAD is detached."""
@@ -1045,7 +1497,39 @@ class GitManager:
         if self.merge_in_progress():
             self._git("merge", "--abort")
 
-    def push_branch_update(self, branch: str) -> None:
+    def _assert_push_destination_unchanged(self, task_id: str | None = None) -> None:
+        """Refuse to push when ``origin``'s push URL no longer resolves where it did at branch prep.
+
+        Repo-local config already rides the per-attempt fingerprint, so a rewrite *during* an
+        attempt is detected; this is the unconditional re-read immediately before the push itself,
+        which is the only moment an error reaches a real branch. Skipped when there is nothing to
+        compare (no baseline was ever taken, or the URL cannot be read at all — a repo with no
+        remote fails on the push itself); a missing answer is not evidence of a rewrite.
+
+        The baseline is the in-memory one when this process prepared the branch, and the persisted
+        one (``tasks.push_url_digest``, stamped at that prep) otherwise — which is the case that
+        matters: ``merge-task`` pushes in a later process, after the agent has been and gone, and
+        with no baseline there the gate returned before comparing anything at all.
+        """
+        baseline = self._active.push_url_digest if self._active is not None else None
+        if baseline is None and task_id:
+            baseline = self._store.get_push_url_digest(task_id)
+        if baseline is None:
+            return
+        current = self._git("remote", "get-url", "--push", "origin")
+        if not current.ok:
+            return
+        url = current.stdout.strip()
+        if hashlib.sha256(url.encode("utf-8")).hexdigest() == baseline:
+            return
+        raise ManualActionRequired(
+            "refusing to push: the push destination of 'origin' changed during this task — it now "
+            f"resolves to {redact_url_credentials(url)} (any credentials in it are withheld). A "
+            "rewritten remote URL, 'insteadOf'/'pushInsteadOf' or 'pushurl' sends the branch, with "
+            "this orchestrator's credentials, somewhere the operator did not choose"
+        )
+
+    def push_branch_update(self, task_id: str, branch: str) -> None:
         """Fast-forward the remote task branch with its new local commits (the base-merge commit).
 
         Unlike :meth:`push`, this is NOT gated by the one-shot ``push`` publish op: ``merge-task``
@@ -1053,7 +1537,12 @@ class GitManager:
         the merge commit, so a plain ``git push`` fast-forwards the remote — and a re-run after the
         commit is already pushed is a git no-op. Without this the completed original ``push`` op
         would skip publishing the merge commit and ``gh pr merge`` would merge the pre-merge branch.
+
+        ``task_id`` is what makes the destination gate below work here: this runs in a process that
+        prepared no branch, so the baseline has to come from the task's own record. It is also the
+        push that most needs the gate — it happens after the agent has had its run at the clone.
         """
+        self._assert_push_destination_unchanged(task_id)
         self._git_checked("push", "origin", branch)
 
     def commit_on_branch(self, sha: str, branch: str) -> bool:
@@ -1091,6 +1580,31 @@ class GitManager:
             return
         exclude_path = Path(rel) if Path(rel).is_absolute() else Path(self._clone) / rel
         _append_missing_lines(exclude_path, lines)
+
+    def ensure_assigned_cache_excludes(self) -> None:
+        """Ensure every in-clone path assigned via ``security.extra_environment`` is git-ignored.
+
+        The sibling of :meth:`ensure_runtime_excludes`, and for the same reason: the guarantee has
+        to hold on the path where the damage happens, not only where the operator was asked to look.
+        ``worc preflight`` repairs and verifies these rules too, but nothing forces an operator to
+        run it after editing a cache path — and an unignored toolchain cache puts thousands of
+        untracked files into the task's diff, which trips a review gate that has nothing to do with
+        caches, after the agent's expensive work is already done.
+
+        A path that is still not ignored afterwards is a warning, not a task failure: the run can
+        proceed and the diff gates will speak for themselves, while failing a task over an ignore
+        rule would invent a terminal condition out of a repository's own configuration.
+        """
+        for name, value in self._config.security.extra_environment.items():
+            for element in assigned_path_elements(value, include_unsplit=False):
+                if is_inside(element, Path(self._clone)) and not ensure_path_excluded(
+                    self._clone, Path(element).expanduser(), security=self._config.security
+                ):
+                    _LOG.warning(
+                        "assigned path for %s points into the clone but git does not ignore it — a "
+                        "filled cache will show up in this task's diff",
+                        name,
+                    )
 
     # --- SnapshotHook --------------------------------------------------------------
 
@@ -1158,6 +1672,8 @@ class GitManager:
             hooks_path=self._repo_local_config_value("core.hooksPath"),
             hooks=self._capture_hooks(),
             markers=frozenset(m for m in _CONTROL_MARKERS if self._marker_present(m)),
+            tool_config=self._capture_tool_config(),
+            remote=self.capture_remote_state(),
         )
 
     def compare_git_control_state(self, before: GitControlState) -> GitControlDrift | None:
@@ -1175,9 +1691,20 @@ class GitManager:
         if before.hooks_path != after.hooks_path:
             items.append(GitControlDriftItem("hooks", "core.hooksPath changed"))
         items.extend(self._diff_hooks(before.hooks, after.hooks))
+        items.extend(self._diff_tool_config(before.tool_config, after.tool_config))
+        items.extend(self._diff_remote(before.remote, after.remote))
         if before.markers != after.markers:
             changed = ", ".join(sorted(before.markers ^ after.markers))
             items.append(GitControlDriftItem("markers", f"operation markers changed: {changed}"))
+        # The same question as everything above, asked of the binaries instead of the repository:
+        # would a bare-name launch still reach the file it reached when this run started? Asked here
+        # because this comparison already runs in the one window that matters — after the agent has
+        # finished, before the orchestrator commits and pushes — and its verdict is already
+        # `manual_action_required`. The orchestrator has been using the pinned paths throughout, so
+        # an item here reports an attempt to redirect it, not a redirection that succeeded.
+        items.extend(
+            GitControlDriftItem("executables", detail) for detail in self._launchers.drift()
+        )
         return GitControlDrift(tuple(items)) if items else None
 
     def _capture_local_config(self) -> dict[str, tuple[str, ...]]:
@@ -1259,6 +1786,93 @@ class GitManager:
             tasks_dir=Path(self._clone) / self._tasks_dir,
         )
 
+    def capture_remote_state(self) -> RemoteState:
+        """Read where a push to ``origin`` would actually go.
+
+        One cheap local probe (``git remote get-url --push``), degrading to ``None`` rather than
+        failing the capture: a probe that did not answer is compared against nothing. The branch
+        head and the open-PR list are deliberately not read here — an existing branch or PR is
+        ordinary working state, and the publish path recovers from a diverged remote on its own.
+        """
+        return RemoteState(push_url_digest=self._push_url_digest())
+
+    def _remote_head(self, branch: str) -> str | None:
+        """``origin``'s commit for *branch*.
+
+        ``""`` when the remote has no such head; ``None`` when the probe itself did not answer.
+        """
+        result = self._git("ls-remote", "--heads", "origin", branch)
+        if not result.ok:
+            return None
+        return self._exact_head(result.stdout, branch) or ""
+
+    def _push_url_digest(self) -> str | None:
+        """sha256 of the URL a push actually goes to, or ``None`` when it cannot be read.
+
+        ``remote get-url --push`` is what resolves ``insteadOf`` / ``pushInsteadOf`` / ``pushurl``
+        into the final destination, which is the thing worth watching; the digest is kept instead
+        of the URL because that URL can embed a token.
+        """
+        result = self._git("remote", "get-url", "--push", "origin")
+        if not result.ok:
+            return None
+        return hashlib.sha256(result.stdout.strip().encode("utf-8")).hexdigest()
+
+    def _capture_tool_config(self) -> dict[str, str]:
+        """Content digests of the CLI/git configuration the publishing processes read.
+
+        The shipped defaults load the clone's own agent-CLI configuration on purpose (Claude reads
+        project settings and MCP servers; Codex reads the project config, its hooks included), and
+        the user git config is trusted by this code on the premise that the agent cannot reach it.
+        Full-tool-access retires that premise, so both go into the fingerprint — by digest, never
+        by value, since either can be secret-bearing. An unreadable or absent file simply has no
+        key, so both its appearance and its disappearance read as drift.
+        """
+        digests: dict[str, str] = {}
+        clone = Path(self._clone)
+        for rel in _TOOL_CONFIG_FILES:
+            self._digest_into(digests, rel, clone / rel)
+        tree = clone / _TOOL_CONFIG_TREE
+        # `os.walk` rather than `rglob`: it does not follow directory symlinks, so a planted link
+        # cannot walk the fingerprint out of the clone (or into a cycle).
+        for root, _dirs, files in os.walk(tree):
+            for name in sorted(files):
+                entry = Path(root) / name
+                if entry.is_symlink():
+                    continue
+                self._digest_into(digests, entry.relative_to(clone).as_posix(), entry, bounded=True)
+        # The global config as OUR git resolves it: `_env` is the environment every orchestrator
+        # git command runs under, and `GIT_CONFIG_GLOBAL` in it replaces the default locations.
+        for label, path in _user_git_config_paths(self._env):
+            self._digest_into(digests, label, path)
+        return digests
+
+    @staticmethod
+    def _digest_into(
+        digests: dict[str, str], label: str, path: Path, *, bounded: bool = False
+    ) -> None:
+        """Digest one configuration file into *digests*; skip what cannot be digested safely.
+
+        ``bounded`` is for the entries discovered by walking a directory the agent may write into:
+        anything ``os.walk`` reported as a file is read there, and in the advanced mode that
+        directory is open to the agent on purpose. A FIFO among those entries blocks ``read_bytes``
+        forever — with no timeout on this path and the fingerprint taken before every attempt, the
+        run did not park, it hung holding the processing slot. So only *regular* files are read, and
+        only up to :data:`_TOOL_CONFIG_MAX_BYTES`: an over-large entry is fingerprinted by its size
+        instead, which still moves when it is edited without reading it into memory.
+        """
+        try:
+            if bounded:
+                st = path.stat()
+                if not stat.S_ISREG(st.st_mode):
+                    return
+                if st.st_size > _TOOL_CONFIG_MAX_BYTES:
+                    digests[label] = f"oversize:{st.st_size}"
+                    return
+            digests[label] = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:  # absent or unreadable — no key, so appearing/vanishing both read as drift
+            return
+
     def _capture_hooks(self) -> dict[str, HookFacts]:
         """Identity facts for each entry in the effective hooks dir (empty when absent)."""
         facts: dict[str, HookFacts] = {}
@@ -1323,6 +1937,42 @@ class GitManager:
         ]
 
     @staticmethod
+    def _diff_tool_config(
+        before: dict[str, str], after: dict[str, str]
+    ) -> list[GitControlDriftItem]:
+        # labels only — never the (hashed) contents
+        return [
+            GitControlDriftItem("tool_config", f"agent/git configuration changed: {label}")
+            for label in sorted(set(before) | set(after))
+            if before.get(label) != after.get(label)
+        ]
+
+    @staticmethod
+    def _diff_remote(before: RemoteState, after: RemoteState) -> list[GitControlDriftItem]:
+        """Remote-side changes, skipping the probe if it did not answer on either side.
+
+        Only the push destination is watched: a rewritten ``insteadOf`` / ``pushurl`` sends the
+        branch, with this orchestrator's credentials, somewhere the operator did not choose.
+
+        What is deliberately NOT watched, and why: the task branch moving on ``origin`` and open
+        pull requests appearing or changing. A branch or PR without one of our rows is not evidence
+        that it belongs to someone else — a recreated ``state.db`` loses every row while the branch
+        and its PR remain ours — and the publish path handles a diverged remote properly anyway: it
+        merges the foreign commits in locally, re-runs the checks over the combination, and only
+        then pushes. Parking on either signal would be that same recovery, spent earlier and less
+        usefully. The base branch is not watched either — it moves legitimately whenever someone
+        merges their own PR.
+        """
+        items: list[GitControlDriftItem] = []
+        if (
+            before.push_url_digest is not None
+            and after.push_url_digest is not None
+            and before.push_url_digest != after.push_url_digest
+        ):
+            items.append(GitControlDriftItem("remote", "the push destination changed"))
+        return items
+
+    @staticmethod
     def _diff_hooks(
         before: dict[str, HookFacts], after: dict[str, HookFacts]
     ) -> list[GitControlDriftItem]:
@@ -1365,14 +2015,17 @@ class GitManager:
         return keys
 
     def _assert_no_untrusted_filters(self) -> None:
-        """Refuse (manual action) before staging/checkout if the agent-writable config defines a
+        """Refuse (manual action) before staging/checkout if the repo-local config defines a
         program-launching driver.
 
         An operator-authorized-filter allowlist is a deferred follow-up; under the current
         contract any untrusted repo-local driver stops the run in manual action rather than letting
         an orchestrator git command execute agent-selected code. An agent ``.gitattributes`` edit
         cannot authorize a new process because a *repo-local* driver program is refused outright
-        (binding a trusted operator-global driver is not a new process and is unaffected).
+        (binding a trusted operator-global driver is not a new process and is unaffected). What this
+        gate does not reach is a driver planted in the operator's OWN global config, which the
+        advanced mode's write reach makes possible: that path is watched by the user-git-config
+        digest in the per-attempt fingerprint, not closed here.
         """
         programs = self._untrusted_config_programs()
         if programs:
@@ -1408,10 +2061,38 @@ class GitManager:
             paths.append(path)
         return paths
 
-    def changed_code_entries(self) -> tuple[ChangedPath, ...]:
-        """Return tracked and untracked code changes for deterministic output guardrails."""
+    def gate_reference(self, task_id: str) -> str:
+        """The commit this task's change is measured from by the dangerous-diff gate.
+
+        The last commit the **orchestrator** made for this task, or — until it has made one — the
+        task's diff base, the same point :meth:`write_current_diff` reports from. One definition of
+        "what changed" serves both the gate and the report inside a subtask, and a commit made
+        *inside* the task cannot empty the gate: whoever made it, its content is still on the far
+        side of this reference and the human is still asked. Measuring against ``HEAD`` instead
+        would answer "what is not committed yet" rather than "what this task did".
+
+        The fallback is the task's own start point, not a live branch name, and that direction
+        matters: measured against a *moved* ``origin/<base>`` the gate prints other people's
+        additions as this task's deletions (verified on real git), which is why the base half is
+        the commit the task started from — in ``existing``/``current`` modes literally the
+        recorded start commit, in ``new`` mode the local base branch, which does not move inside a
+        run. Do not "improve" this by resolving the base to its remote-tracking ref; that is the
+        bug this shape avoids. Once the orchestrator commits (per subtask, after adopting someone
+        else's commit, or after merging the moved base in), that commit becomes the reference —
+        which is also what stops a decomposed run from re-asking about the deletions its first
+        subtask already got approved.
+        """
+        return self._store.get_gate_reference(task_id) or self._diff_base()
+
+    def changed_code_entries(self, task_id: str) -> tuple[ChangedPath, ...]:
+        """Return tracked and untracked code changes for deterministic output guardrails.
+
+        Measured from :meth:`gate_reference` — the task's own change, committed or not — rather than
+        from ``HEAD``, which only ever showed what was still uncommitted.
+        """
         entries: list[ChangedPath] = []
-        tracked = self._git("diff", "--name-status", "-z", "HEAD", "--").stdout
+        reference = self.gate_reference(task_id)
+        tracked = self._git("diff", "--name-status", "-z", reference, "--").stdout
         for status, path, previous in _parse_name_status_z(tracked):
             if self._is_artifact_path(path):
                 continue
@@ -1638,20 +2319,84 @@ class GitManager:
     def commit_code(self, task_id: str, message: str) -> str | None:
         """Stage the agent's code paths and make one commit. Idempotent. Returns the commit SHA.
 
-        Returns the current HEAD when there is nothing to commit (e.g. a decomposed task whose code
-        was already committed per subtask).
+        Returns the current HEAD when there is nothing to commit: a decomposed task whose code
+        was already committed per subtask, or a state committed inside the run by someone other than
+        the orchestrator — which is recorded rather than passed over in silence (see
+        :meth:`_adopt_committed_head`).
         """
         paths = self.changed_code_paths()
         if not paths:
-            return self._git("rev-parse", "HEAD").stdout.strip() or None
+            return self._adopt_committed_head(task_id)
         return self._commit(task_id, KIND_CODE_COMMIT, None, message, paths)
 
+    def adopted_commit_count(self, task_id: str) -> int:
+        """How many commits this run adopted rather than made, for the pull-request body.
+
+        Read from the same warnings' source of truth — the counter the adoption path increments —
+        rather than recomputed, so the number a reviewer reads is the number the operator was
+        warned about. Zero in the ordinary case, and then the PR body says nothing.
+        """
+        return self._adopted_commits.get(task_id, 0)
+
+    def _adopt_committed_head(
+        self, task_id: str, *, kind: str = KIND_CODE_COMMIT, subtask: int | None = None
+    ) -> str | None:
+        """Record the already-committed ``HEAD`` as this task's published code state.
+
+        Reached when the working tree has nothing left to commit. Two very different situations
+        look identical from here, and the gate's reference point tells them apart: in a decomposed
+        run the orchestrator's own subtask commits already moved the reference to ``HEAD``, so there
+        is nothing to say. If ``HEAD`` sits **beyond** the reference, commits the orchestrator did
+        not make are part of what is about to be published — an agent's own ``git commit``, or an
+        operator's.
+
+        Publishing is not blocked: their content did go through the dangerous-diff gate, which
+        measures from the reference rather than from ``HEAD``, so a human was asked about every
+        deletion and manifest edit in it. What was missing before was the *record* — the method
+        returned ``HEAD`` and wrote nothing, so the run reported a successful code commit it
+        never made. Now the operator gets a loud line naming how many such commits there are, and
+        ``publish_operations`` gets the code-commit row with the adopted SHA, so the audit trail
+        says what was published instead of nothing at all. Message and authorship stay the
+        committer's — rewriting them is not this phase's decision to make.
+        """
+        head = self._git("rev-parse", "HEAD").stdout.strip()
+        if not head:
+            return None
+        reference = self._git("rev-parse", self.gate_reference(task_id)).stdout.strip()
+        if not reference or head == reference:
+            return head
+        count = self._git("rev-list", "--count", f"{reference}..{head}").stdout.strip() or "?"
+        # Remembered, not just logged: the phase itself rejected "a warning on the shipped default
+        # nobody reads", and a reviewer of the pull request is the one person guaranteed to look.
+        self._adopted_commits[task_id] = self._adopted_commits.get(task_id, 0) + (
+            int(count) if count.isdigit() else 1
+        )
+        bind(_LOG, task_id=task_id, component="commit").warning(
+            "publishing a code state the orchestrator did not commit: %s commit(s) between the "
+            "gate reference and HEAD (%s) were made by the agent or the operator. The change "
+            "itself passed the dangerous-diff gate, but message and authorship are not ours",
+            count,
+            head[:12],
+        )
+        # `_record_completed` also moves the gate's reference point, exactly as a commit of ours
+        # would: the content is published now, so the next node's gate must not re-ask about it.
+        self._record_completed(task_id, kind, head, head, subtask=subtask)
+        return head
+
     def commit_subtask(self, task_id: str, order: int, slug: str, message: str) -> str:
-        """Make the single local commit for a completed subtask on the task branch."""
+        """Make the single local commit for a completed subtask on the task branch.
+
+        A clean tree here means the same thing it means in :meth:`commit_code` — someone else
+        committed this subtask's work — so it takes the same adoption path rather than returning
+        ``HEAD`` in silence. Without that the reference point stayed put and the *next* subtask's
+        gate asked the operator again about deletions already cleared, which is the regression this
+        phase's own rollback note called the main one.
+        """
         paths = self.changed_code_paths()
         sha = self._commit(task_id, KIND_SUBTASK_COMMIT, order, message, paths)
-        if sha is None:  # nothing changed — fall back to HEAD so the marker is always set
-            sha = self._git("rev-parse", "HEAD").stdout.strip()
+        if sha is None:  # nothing changed — someone else committed it; adopt and say so
+            adopted = self._adopt_committed_head(task_id, kind=KIND_SUBTASK_COMMIT, subtask=order)
+            sha = adopted or self._git("rev-parse", "HEAD").stdout.strip()
         return sha
 
     def _commit(
@@ -1698,6 +2443,7 @@ class GitManager:
                 result_ref=sha,
             )
         )
+        self._advance_gate_reference(kind, task_id, sha)
         return sha
 
     def commit_merge_resolution(self, task_id: str, message: str) -> str | None:
@@ -1835,14 +2581,33 @@ class GitManager:
 
     # --- publish (idempotent) --------------------------------------------------------
 
-    def push(self, task_id: str, branch: str, *, mode: BranchMode = BranchMode.NEW) -> bool:
-        """Push the task branch to ``origin``. Idempotent via the publish op + remote check.
+    def push(self, task_id: str, branch: str, *, mode: BranchMode = BranchMode.NEW) -> PushOutcome:
+        """Push the task branch to ``origin``, recovering from a remote that moved under us.
 
         In ``new`` mode the task branch must never be ``base_branch`` — a push targeting the base
         signals a corrupted branch state (publishing is PR-only), so it is refused. In
         ``existing``/``current`` mode the operator chose the branch, so pushing to it — even one
         that happens to be the base — is legitimate (the head==base publish path, where
         ``create_pr`` then skips the PR). Branch protection on the remote, if any, is the real gate.
+
+        Idempotent via the publish op. Beyond that, what the remote holds decides the action, in
+        four cases: it matches us (nothing to send), it is behind us (an ordinary push), it
+        diverged from the commit *we* recorded leaving there (a lease-guarded force-push — the
+        lease is what protects an operator commit: it simply will not match, dropping to the last
+        case), or it diverged from something we never pushed (merge it in, then push). The mere
+        existence of the remote branch is never proof of our own earlier push — the branch name can
+        come from the task file, or the operator can have picked it — so it never short-circuits
+        into a completed publication with nothing sent.
+
+        The fourth case's merge is normally done by the caller BEFORE this
+        (:meth:`adopt_foreign_commits`), so the checks over the combination run before anything is
+        published; by the time this runs the remote is then an ancestor and this takes the ordinary
+        second case. The branch here remains for a caller that pushes without that step — it keeps
+        "never force-push over someone else's work" true whoever calls it.
+
+        Note that ``rerun`` clears the publish rows, so a task re-run onto the *same* branch name
+        lacks the recorded commit the lease needs and takes the merge case instead: one extra merge
+        commit, never a silent overwrite.
         """
         base = self._config.repo.base_branch
         if branch == base and mode is BranchMode.NEW:
@@ -1850,29 +2615,185 @@ class GitManager:
                 f"refusing to push directly to base branch {base!r}; publishing is PR-only"
             )
         existing = self._store.get_publish_op(task_id, KIND_PUSH, None)
-        if existing is not None and existing.status == _STATUS_COMPLETED:
-            return True
-        # The remote-existence shortcut is a ``new``-mode restart optimisation: a fresh unique task
-        # branch is on the remote only if a prior attempt pushed it. In ``existing``/``current`` the
-        # branch pre-exists on the remote regardless of our commit, so its presence proves nothing —
-        # push for real (``git push`` is itself a no-op when already up to date).
-        if mode is BranchMode.NEW and self._remote_branch_exists(branch):
-            self._record_completed(task_id, KIND_PUSH, branch, branch)
-            return True
+        recorded = existing.pushed_sha if existing is not None else None
+        local_sha = self._local_branch_sha(branch)
+        # Already published when the commit we recorded sending is still the branch tip (or the
+        # row predates that record, where the old status-only rule applies). Otherwise the branch
+        # moved since — a resumed run that committed more — so this is a real publication again,
+        # and what the remote holds decides how it goes out.
+        if self._already_published(task_id, branch):
+            return PushOutcome(pushed=False, adopted_commits=())
+        remote_sha = self._remote_head(branch)
+        adopted: tuple[str, ...] = ()
+        lease: str | None = None
+        if remote_sha and local_sha:
+            if remote_sha == local_sha:  # case 1: the remote already holds exactly our commit
+                self._log_pr(task_id).info(
+                    "push skipped: origin already holds this branch's commit",
+                    extra={"branch": branch},
+                )
+                self._record_completed(task_id, KIND_PUSH, branch, branch, pushed_sha=remote_sha)
+                return PushOutcome(pushed=False, adopted_commits=())
+            if not self.commit_on_branch(remote_sha, branch):  # not case 2 (remote behind us)
+                if recorded is not None and recorded == remote_sha:
+                    lease = recorded  # case 3: the remote is our own stale push, and only that
+                else:
+                    adopted = self._adopt_remote_commits(task_id, branch)  # case 4
         self._store.record_publish_op(
             PublishOpRow(
-                task_id=task_id, kind=KIND_PUSH, fingerprint=branch, status=_STATUS_STARTED
+                task_id=task_id,
+                kind=KIND_PUSH,
+                fingerprint=branch,
+                status=_STATUS_STARTED,
+                # Carried over, not dropped: a push that fails here must not erase what the last
+                # successful one left on the remote — that commit is the lease the next attempt
+                # needs to tell its own stale push apart from someone else's work.
+                pushed_sha=recorded,
             )
         )
-        self._git_checked_retryable("push", "--set-upstream", "origin", branch)
-        self._record_completed(task_id, KIND_PUSH, branch, branch)
-        return True
+        self._assert_push_destination_unchanged(task_id)
+        argv = ["push"]
+        if lease is not None:
+            argv.append(f"--force-with-lease={branch}:{lease}")
+        self._git_checked_retryable(*argv, "--set-upstream", "origin", branch)
+        self._record_completed(
+            task_id, KIND_PUSH, branch, branch, pushed_sha=self._local_branch_sha(branch)
+        )
+        return PushOutcome(pushed=True, adopted_commits=adopted)
+
+    def adopt_foreign_commits(
+        self, task_id: str, branch: str, *, mode: BranchMode = BranchMode.NEW
+    ) -> tuple[str, ...]:
+        """Merge in what someone else put on the task branch, BEFORE anything is published.
+
+        The fourth publish case, split out of :meth:`push` so the checks over the combination can
+        run between the merge and the push: the invariant is "publishing happens only when checks
+        succeed", and a push that carried the untested combination to ``origin`` and only then
+        re-ran the gate had already published it. The merge is local and free to undo; the push is
+        not.
+
+        Returns the commits merged in, oldest first (empty when there were none, which is the
+        ordinary case and a no-op). Afterwards ``origin`` is an ancestor of the local branch, so the
+        subsequent :meth:`push` takes the ordinary "remote is behind us" case and merges nothing.
+        Idempotent: on a resume where the merge already landed there is nothing left on the remote
+        only, so the answer is empty and no second merge commit is made.
+        """
+        if self._already_published(task_id, branch):
+            return ()
+        local_sha = self._local_branch_sha(branch)
+        remote_sha = self._remote_head(branch)
+        if not (remote_sha and local_sha) or remote_sha == local_sha:
+            return ()
+        if self.commit_on_branch(remote_sha, branch):
+            return ()  # the remote is behind us: an ordinary push, nothing to adopt
+        recorded = self._recorded_push_sha_for(task_id)
+        if recorded is not None and recorded == remote_sha:
+            return ()  # our own stale push: the lease-guarded force-push case, not an adoption
+        return self._adopt_remote_commits(task_id, branch)
+
+    def _already_published(self, task_id: str, branch: str) -> bool:
+        """Whether the recorded push still describes the branch tip — the idempotency short-circuit.
+
+        Shared by :meth:`push` and :meth:`adopt_foreign_commits` so the two cannot disagree about
+        whether this publication already happened; a row that predates ``pushed_sha`` keeps the old
+        status-only rule.
+        """
+        existing = self._store.get_publish_op(task_id, KIND_PUSH, None)
+        if existing is None or existing.status != _STATUS_COMPLETED:
+            return False
+        return existing.pushed_sha is None or existing.pushed_sha == self._local_branch_sha(branch)
+
+    def _recorded_push_sha_for(self, task_id: str) -> str | None:
+        """The commit we recorded pushing for *task_id*, or ``None`` when we pushed nothing."""
+        existing = self._store.get_publish_op(task_id, KIND_PUSH, None)
+        return existing.pushed_sha if existing is not None else None
+
+    def _adopt_remote_commits(self, task_id: str, branch: str) -> tuple[str, ...]:
+        """Merge what someone else put on the task branch into ours; return their commits.
+
+        Reuses the merge the orchestrator already performs when the base branch moves — a merge
+        commit, never a rebase, so nothing reviewed is rewritten and no force-push is needed. A
+        conflict is where this stops: resolving one needs an agent, and publishing runs after the
+        agent is gone, so the tree is restored and the task is parked for a human rather than left
+        wedged mid-merge (which would block cleanup and the next task).
+        """
+        self._assert_no_untrusted_filters()  # the merge checks out files, running smudge filters
+        self._git("fetch", "origin")
+        foreign = self._commits_only_on_remote(branch)
+        result = self._git("merge", "--no-commit", "--no-edit", f"origin/{branch}")
+        if not result.ok:
+            conflicted = self.merge_in_progress()
+            self.merge_abort()
+            if not conflicted:
+                raise GitCommandError(f"git merge origin/{branch} failed: {result.stderr.strip()}")
+            raise ManualActionRequired(
+                f"the task branch {branch!r} on origin carries {len(foreign)} commit(s) this "
+                f"orchestrator did not make, and merging them conflicts with this task's work: "
+                f"{', '.join(foreign[:_DRIFT_EVIDENCE_CAP]) or 'unknown'}. The working tree was "
+                "restored; resolve the merge yourself (or with `merge-task`) and re-run"
+            )
+        try:
+            self.commit_merge_resolution(task_id, f"merge({task_id}): integrate remote {branch!r}")
+        except Exception:
+            # never leave the tree mid-merge: it blocks cleanup and the next task
+            self.merge_abort()
+            raise
+        if self.merge_in_progress():  # the merge_commit op was spent earlier in this task
+            self.merge_abort()
+            raise ManualActionRequired(
+                f"the commits on origin/{branch} could not be finalized into a merge commit "
+                "(this task already recorded one), so they were not adopted; the working tree was "
+                "restored — publish this branch by hand"
+            )
+        self._log_pr(task_id).warning(
+            "adopted %d commit(s) from origin that this orchestrator did not make: %s",
+            len(foreign),
+            ", ".join(foreign[:_DRIFT_EVIDENCE_CAP]) or "unknown",
+            extra={"branch": branch},
+        )
+        return foreign
+
+    def _commits_only_on_remote(self, branch: str) -> tuple[str, ...]:
+        """Short shas present on ``origin/<branch>`` but not on the local branch, oldest first."""
+        result = self._git("rev-list", "--reverse", "--abbrev-commit", f"{branch}..origin/{branch}")
+        if not result.ok:
+            return ()
+        return tuple(line.strip() for line in result.stdout.splitlines() if line.strip())
 
     def _remote_branch_exists(self, branch: str) -> bool:
-        result = self._git("ls-remote", "--heads", "origin", branch)
-        return result.ok and bool(result.stdout.strip())
+        """Whether ``origin`` has a head for *branch*. An unreachable remote reads as "no"."""
+        return bool(self._remote_head(branch))
 
-    def create_pr(self, task_id: str, branch: str, *, title: str, body_path: str) -> str | None:
+    @staticmethod
+    def _exact_head(stdout: str, branch: str) -> str | None:
+        """The ``ls-remote`` line for exactly ``refs/heads/<branch>``, or ``None``.
+
+        The refname is matched exactly because ``ls-remote``'s own pattern matching is
+        suffix-based: a bare ``foo`` also matches ``refs/heads/bar/foo``, which would report a
+        branch nobody asked about — harmless for an existence check, wrong for a comparison that
+        parks a task.
+        """
+        wanted = f"refs/heads/{branch}"
+        for line in stdout.splitlines():
+            sha, _, ref = line.partition("\t")
+            if ref.strip() == wanted and sha.strip():
+                return sha.strip()
+        return None
+
+    def _local_branch_sha(self, branch: str) -> str | None:
+        """The commit the local *branch* ref holds, or ``None`` when it does not exist."""
+        result = self._git("rev-parse", "--verify", "-q", f"refs/heads/{branch}")
+        return result.stdout.strip() or None if result.ok else None
+
+    def create_pr(
+        self,
+        task_id: str,
+        branch: str,
+        *,
+        title: str,
+        body_path: str,
+        notice: str | None = None,
+    ) -> str | None:
         """Open a PR with ``summary.md`` as the body. Idempotent. None when PRs are disabled.
 
         Two branch-mode short-circuits (both return ``None`` — no PR, auto-merge then no-ops):
@@ -1892,8 +2813,19 @@ class GitManager:
         existing = self._store.get_publish_op(task_id, KIND_PR, None)
         if existing is not None and existing.status == _STATUS_COMPLETED:
             return existing.result_ref
+        if notice:
+            body_path = self._body_with_notice(task_id, body_path, notice)
         reused = self._find_open_pr(task_id, branch, pr_base)
         if reused is not None:
+            # An open PR on this head is reused whether or not one of our rows already names it.
+            # The absence of a row is not evidence that the PR is someone else's: a recreated
+            # ``state.db`` loses every row while the branch and its PR are still ours, and refusing
+            # there would block publishing with no way forward but closing our own PR. Reusing it
+            # records it, so the question is settled from here on. The cost, stated plainly: a PR a
+            # person opened on this same head is retitled and appended to.
+            self._log_pr(task_id).info(
+                "reusing the open pull request for this head", extra={"pr": reused}
+            )
             self._append_reused_pr_body(
                 task_id, reused, branch=branch, title=title, body_path=body_path
             )
@@ -1922,6 +2854,23 @@ class GitManager:
         pr_url = result.stdout.strip().splitlines()[-1] if result.stdout.strip() else ""
         self._record_completed(task_id, KIND_PR, branch, pr_url)
         return pr_url
+
+    def _body_with_notice(self, task_id: str, body_path: str, notice: str) -> str:
+        """A copy of the PR body with *notice* on top, written under the task's artifacts.
+
+        The committed ``summary.md`` is already in a commit, so it is not rewritten; the PR gets
+        the annotated copy instead. Falls back to the original body on any read/write failure — a
+        missing annotation must not cost the task its pull request.
+        """
+        try:
+            original = Path(body_path).read_text(encoding="utf-8") if body_path else ""
+            dest = task_artifact_dir(self._artifacts_root, task_id) / "pr-body.md"
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            with dest.open("w", encoding="utf-8", newline="") as fh:
+                fh.write(f"{notice}\n\n{original}")
+            return str(dest)
+        except OSError:
+            return body_path
 
     def _append_reused_pr_body(
         self, task_id: str, pr_url: str, *, branch: str, title: str, body_path: str
@@ -2104,16 +3053,41 @@ class GitManager:
             return None
         return result.stdout.strip() or None
 
-    def _record_completed(self, task_id: str, kind: str, fingerprint: str, result_ref: str) -> None:
+    def _record_completed(
+        self,
+        task_id: str,
+        kind: str,
+        fingerprint: str,
+        result_ref: str,
+        *,
+        pushed_sha: str | None = None,
+        subtask: int | None = None,
+    ) -> None:
         self._store.record_publish_op(
             PublishOpRow(
                 task_id=task_id,
                 kind=kind,
+                subtask_order=subtask,
                 fingerprint=fingerprint,
                 status=_STATUS_COMPLETED,
                 result_ref=result_ref,
+                pushed_sha=pushed_sha,
             )
         )
+        self._advance_gate_reference(kind, task_id, result_ref)
+
+    def _advance_gate_reference(self, kind: str, task_id: str, sha: str) -> None:
+        """Move the gate's reference to *sha* when the operation was a code-carrying commit.
+
+        Only the three that put this task's code on the task branch qualify. The audit commit does
+        not: its content is the lifecycle/log files the code diff excludes anyway, and under a
+        sibling audit branch its SHA is not even on the branch the gate measures — pointing the
+        reference at it would make the next diff describe the distance between two branches. Push
+        and PR operations carry no commit of ours at all.
+        """
+        if kind not in (KIND_CODE_COMMIT, KIND_SUBTASK_COMMIT, KIND_MERGE_COMMIT):
+            return
+        self._store.set_gate_reference(task_id, sha)
 
     # --- diffs ----------------------------------------------------------------------------
 
@@ -2124,19 +3098,22 @@ class GitManager:
         HEAD``), so it captures the task's net change whether or not it is committed yet — the same
         base-vs-worktree coverage the deterministic report's diff stat is derived from — that stat
         reads *this* artifact rather than running its own ``git diff``, so the report stays a pure
-        function of durable state. ``git diff HEAD`` only showed uncommitted working-tree edits, so
-        in a decomposed run (where each subtask is committed) it collapsed to
-        just the trailing uncommitted hunk and badly understated the change in ``current.diff`` /
-        ``{diff_path}`` / the PR body / the failure report. For ``new`` mode the base is
+        function of durable state. ``git diff HEAD`` would report only uncommitted working-tree
+        edits, so in a decomposed run (where each subtask is committed) it collapses to the trailing
+        uncommitted hunk and badly understates the change in ``current.diff`` / ``{diff_path}`` /
+        the PR body / the failure report. For ``new`` mode the base is
         ``base_branch`` (the branch is cut from it and it does not advance), so a non-decomposed run
         equals ``git diff HEAD``; for a ``existing``/``current`` chain branch the base is the branch
         tip at task start, so review/docs see only this task's change, not the whole unmerged
-        chain (which previously showed every prior task — e.g. 35 files for ~5 changed). The
-        dangerous-diff guard classifies from :meth:`changed_code_entries` (HEAD-relative), not this
-        artifact, so the base here does not change what the guard gates.
+        chain — measuring from the branch tip instead would show every prior task in it. The
+        dangerous-diff guard classifies from :meth:`changed_code_entries`, which measures from
+        :meth:`gate_reference` — the base until the orchestrator commits, its own last commit
+        after — so inside one subtask the guard and this artifact describe the same change, while
+        across a decomposed run this artifact keeps every subtask and the guard asks only about the
+        new one.
 
-        Two completeness fixes: plain ``git diff`` never reports untracked files, so a brand
-        new file was silently missing from the artifact — bracket the diff with a transient
+        Two completeness measures: plain ``git diff`` never reports untracked files, so a brand
+        new file would be silently missing from the artifact — bracket the diff with a transient
         intent-to-add (staged, then immediately reset back to untracked; no persistent index
         change, so :meth:`changed_code_entries`/:meth:`changed_code_paths` still see them as
         ``??``) so their full content is included. ``--text`` forces a textual diff even for a file

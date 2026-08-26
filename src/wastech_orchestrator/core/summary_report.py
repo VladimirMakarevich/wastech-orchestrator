@@ -8,7 +8,7 @@ findings a gate had let past — they reached ``summary.json`` and never the pul
 
 Rendered from the same :class:`~wastech_orchestrator.core.supervisor_packet.PacketFacts` the
 finalize turn is grounded in, so the two bodies cannot disagree about what the run did. Same
-determinism contract as the packet (P0-D2): a pure function of ``state.db`` plus the task's
+determinism contract as the packet: a pure function of ``state.db`` plus the task's
 artifacts, so two renders of one run are byte-identical.
 
 Bounded by the run's shape, not by content volume: no per-step message, no observation digest, and

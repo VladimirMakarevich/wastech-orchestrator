@@ -306,9 +306,9 @@ def _run_codex_sandbox(cli_args: list[str]) -> int:
 
     Faithfully simulates the orchestrator's generated permission profile: a read of the exchange
     (``.worc-io``) is allowed and any write is denied; a read of the private home (``.worc``) is
-    denied under read-isolation but ALLOWED when the profile downgrades it to ``read`` (the
-    ``read_isolation_off`` — the shipped default), so the canary's private-read positive control
-    succeeds under both postures. Deliberately **scenario-independent** — the canary must pass so
+    denied at every read-isolation setting, which is what the profile now emits
+    unconditionally — the canary's positive control is the exchange read, not a private one.
+    Deliberately **scenario-independent** — the canary must pass so
     the real ``exec`` scenario below plays out; genuine OS enforcement is proven by the host smoke,
     not this stand-in. A probe command follows the ``--`` separator (e.g. ``-- /bin/cat <path>`` or
     ``-- /bin/sh -c "printf x >> <path>"``); the effective profile rides in the ``-c`` value.
@@ -316,15 +316,18 @@ def _run_codex_sandbox(cli_args: list[str]) -> int:
     probe = cli_args[cli_args.index("--") + 1 :] if "--" in cli_args else []
     probe_str = " ".join(probe)
     profile = cli_args[cli_args.index("-c") + 1] if "-c" in cli_args else ""
+    if probe and probe[-1] == "--version":
+        # The cli-exec probe: the provider binary itself must execute under the profile.
+        sys.stdout.write("codex-cli 99.9.9\n")
+        return 0
     is_write = ">>" in probe_str
     reads_exchange = ".worc-io" in probe_str  # exchange subtree (not a substring of `.worc/…`)
-    reads_private = ".worc" in probe_str and not reads_exchange  # private-home subtree
-    # With read-isolation OFF the generated profile downgrades the private home from ``deny``
-    # to ``read``, so a private-home read becomes a positive control the canary expects to SUCCEED.
-    # Detect that posture from the profile the canary passed (``.worc" = "read"`` — the quote after
-    # ``.worc`` excludes the ``.worc-io`` exchange entry).
-    private_read_allowed = '.worc" = "read"' in profile
-    if not is_write and (reads_exchange or (reads_private and private_read_allowed)):
+    # Assert the posture rather than branch on it: the generated profile denies the private home
+    # at every read-isolation setting, so a fake that still had a "readable" branch would keep
+    # passing a canary whose whole job is to prove that deny. The quote after ``.worc`` excludes the
+    # ``.worc-io`` exchange entry, whose own grant is ``read``.
+    assert '.worc" = "read"' not in profile, "the profile must never grant the private home a read"
+    if not is_write and reads_exchange:
         return 0
     sys.stderr.write("sandbox: operation not permitted\n")
     return 1

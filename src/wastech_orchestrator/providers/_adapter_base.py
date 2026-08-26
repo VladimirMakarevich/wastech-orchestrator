@@ -65,6 +65,7 @@ from wastech_orchestrator.providers.redaction import (
 )
 from wastech_orchestrator.runtime_layout import InternalDenyPolicy
 from wastech_orchestrator.security.env import build_child_env
+from wastech_orchestrator.security.launchers import resolve_launcher
 
 _PREFLIGHT_TIMEOUT_SECONDS = 10
 _LOG = logging.getLogger(__name__)
@@ -121,9 +122,23 @@ class ParsedEvents:
     rate_limit_resets_at: float | None = None
 
 
+#: Isolation-probe verdicts, shared by both adapters so one vocabulary describes both probes (the
+#: no-model Codex sandbox smoke and the paid Claude one). ``passed`` = the policy was demonstrated
+#: here; ``unsupported`` = it could not be demonstrated (a host gap, or a probe that never ran) —
+#: deliberately NOT a pass, because "no evidence" and "the floor holds" are the two answers a floor
+#: claim must never confuse; ``policy-failed`` = a denied path was actually written, the
+#: non-fallback security result.
+CAPABILITY_PASSED = "passed"
+CAPABILITY_UNSUPPORTED = "unsupported"
+CAPABILITY_POLICY_FAILED = "policy-failed"
+
+
 @dataclass(frozen=True)
 class IsolationCapabilityReport:
-    """A provider's live, no-model isolation capability-probe verdict for ``worc preflight``.
+    """A provider's live isolation capability-probe verdict for ``worc preflight``.
+
+    Shared by both probes — the no-model Codex sandbox smoke and the paid Claude one — so a single
+    vocabulary describes both; see the status constants above.
 
     ``ok`` is pass/fail; ``status`` a short machine label (e.g. ``passed``/``unsupported``/
     ``policy-failed``); ``detail`` a secret-free operator line. ``fatal`` marks a result that must
@@ -230,6 +245,13 @@ class BaseCliProvider:
     ) -> None:
         self._config = config
         self._security = security
+        # The configured ``command`` resolved to an absolute path ONCE, and used for every launch
+        # (see `_pinned_argv`). A CLI launched by bare name is whatever a ``PATH`` directory offers
+        # at that instant, and the agent CLI is the process the whole run is built around. Falls
+        # back to the configured spelling when this host resolves nothing, so the "executable not
+        # found" preflight verdict stays the diagnostic it is instead of turning into a launch
+        # mystery.
+        self._command_path = resolve_launcher(config.command) or config.command
         self._artifacts_root = Path(artifacts_root)
         # The internal read-deny set (private/control homes, secrets, provider auth
         # homes, frozen bundles) the adapter projects into its tool/OS-sandbox deny policy. On the
@@ -294,12 +316,13 @@ class BaseCliProvider:
         return build_effective_prompt(request)
 
     def _augment_child_env(self, env: dict[str, str]) -> dict[str, str]:
-        """Subclass hook: adjust the allowlisted child env just before preflight/probe/run.
+        """Subclass hook: adjust the policy-built child env just before preflight/probe/run.
 
-        The base builds the env purely from the security allowlist (:func:`build_child_env`) and
+        The base builds the env through :func:`build_child_env`: allowlist plus assignments under
+        strict isolation, or the parent environment plus assignments in advanced mode. The base
         knows no CLI syntax; a subclass may need to make its own runtime discoverable — e.g. prepend
         a package directory onto ``PATH`` so the CLI can find a sibling helper binary. It only ever
-        adjusts the *value* of an already-allowlisted key; it never adds a key the allowlist omits.
+        adjusts the *value* of an existing key; it never introduces another environment capability.
         Default: return ``env`` unchanged.
         """
         return env
@@ -348,11 +371,11 @@ class BaseCliProvider:
     def preflight(self) -> ProviderHealth:
         """Detect the executable, parse its version, and ask the CLI about its own credentials."""
         label = self._executable_label()
-        env = self._augment_child_env(build_child_env(self._security.allowed_environment))
+        env = self._augment_child_env(build_child_env(self._security))
         with tempfile.TemporaryDirectory() as scratch:
             stdout_path = str(Path(scratch) / "version.out")
             proc = self._run_process(
-                [self._config.command, "--version"],
+                [self._command_path, "--version"],
                 cwd=scratch,
                 env=env,
                 timeout_seconds=self._preflight_timeout_seconds,
@@ -397,7 +420,8 @@ class BaseCliProvider:
             version=version,
             supports_required_features=version is not None,
             message=f"{label} {version or 'unknown version'} available"
-            f"{self._preflight_healthy_detail(env)}",
+            f"{self._preflight_healthy_detail(env)}"
+            f"{self._preflight_version_note(version)}",
             degraded_reasons=self._preflight_degraded_reasons(env),
             auth=self._preflight_auth_state(env),
         )
@@ -441,6 +465,28 @@ class BaseCliProvider:
         """
         return ""
 
+    def _preflight_version_note(self, version: str | None) -> str:
+        """Subclass hook: a note about the reported version itself (e.g. offline-inventory drift).
+
+        Separate from :meth:`_preflight_degraded_reasons` on purpose: that one is fatal for a sole
+        allowed provider, and "this CLI is newer than the build we inventoried" must never refuse a
+        run — it is a note for whoever maintains the inventory. Secret-free; default: empty.
+        """
+        return ""
+
+    def _pinned_argv(self, argv: Sequence[str]) -> list[str]:
+        """``argv`` with the configured command replaced by the path pinned at construction.
+
+        Substituted at the point of launch, not where the argv is built, so every builder and every
+        test that inspects an argv keeps seeing the configured spelling. Only ``argv[0]``, and only
+        when it IS the configured command: an argv naming some other program is not this adapter's
+        to redirect.
+        """
+        items = list(argv)
+        if items and items[0] == self._config.command:
+            items[0] = self._command_path
+        return items
+
     def _probe(self, argv: list[str], env: Mapping[str, str]) -> tuple[bool, str]:
         """Run a short, read-only probe command (e.g. ``<cli> … --help``) for a capability check.
 
@@ -451,7 +497,7 @@ class BaseCliProvider:
         with tempfile.TemporaryDirectory() as scratch:
             out = str(Path(scratch) / "probe.out")
             proc = self._run_process(
-                argv,
+                self._pinned_argv(argv),
                 cwd=scratch,
                 env=env,
                 timeout_seconds=self._preflight_timeout_seconds,
@@ -482,7 +528,7 @@ class BaseCliProvider:
 
         self._write_request(paths, request, argv=argv)
 
-        env = self._augment_child_env(build_child_env(self._security.allowed_environment))
+        env = self._augment_child_env(build_child_env(self._security))
         # Deterministic no-model pre-launch check on the real launch env (the Codex canary): a
         # ProviderError here fails closed BEFORE any model call. The request artifact is already
         # written; a subclass may record its own evidence under ``paths``.
@@ -496,7 +542,7 @@ class BaseCliProvider:
         )
         proc = run_with_heartbeat(
             lambda: self._run_process(
-                argv,
+                self._pinned_argv(argv),
                 cwd=request.working_directory,
                 env=env,
                 timeout_seconds=request.timeout_seconds,
@@ -515,9 +561,9 @@ class BaseCliProvider:
         # Redact every captured sink before it is written: a leaked secret must never land
         # in stdout.log or events.jsonl. Parsing uses the in-memory raw stream for correctness.
         # Both stdout sinks are JSON-lines streams, so they are redacted per DECODED line
-        # (``redact_jsonl``): scrubbing the serialized characters instead used to consume the
-        # backslash of an escaped quote and leave a line that no longer parses, which silently cost
-        # the audit trail whole tool results. stderr is plain text and stays on ``redact_text``.
+        # (``redact_jsonl``): scrubbing the serialized characters instead consumes the backslash of
+        # an escaped quote and leaves a line that no longer parses, which silently costs the audit
+        # trail whole tool results. stderr is plain text and stays on ``redact_text``.
         extra_secrets = self._extra_secrets(request)
         raw_stdout = read_text(paths.stdout_path)
         redacted_stdout = redact_jsonl(raw_stdout, extra_secrets=extra_secrets)
@@ -539,8 +585,8 @@ class BaseCliProvider:
                 ErrorClass.CONTAINMENT_UNVERIFIED,
                 f"{message_for(ErrorClass.CONTAINMENT_UNVERIFIED)} ({proc.quiescence.detail})",
             )
-            self._finalize_failure(paths, request, started_at, finished_at, proc, error)
-            raise ProviderError(error.error_class, error.message)
+            failed = self._finalize_failure(paths, request, started_at, finished_at, proc, error)
+            raise ProviderError(error.error_class, error.message, result=failed)
 
         # True infrastructure failure (launch / timeout) → no usable stream → classify + raise.
         if proc.launch_error is not None or proc.timed_out:
@@ -551,8 +597,8 @@ class BaseCliProvider:
                 launch_error=proc.launch_error,
                 signatures=self._signatures(),
             )
-            self._finalize_failure(paths, request, started_at, finished_at, proc, error)
-            raise ProviderError(error.error_class, error.message)
+            failed = self._finalize_failure(paths, request, started_at, finished_at, proc, error)
+            raise ProviderError(error.error_class, error.message, result=failed)
 
         # Parse the structured event stream. A CLI emits a terminal ``result`` event even when it
         # stops on an error and exits non-zero (e.g. Claude's ``error_max_turns`` exits 1): a
@@ -570,10 +616,16 @@ class BaseCliProvider:
                     launch_error=proc.launch_error,
                     signatures=self._signatures(),
                 )
-                self._finalize_failure(paths, request, started_at, finished_at, proc, error)
-                raise ProviderError(error.error_class, error.message) from exc
+                failed = self._finalize_failure(
+                    paths, request, started_at, finished_at, proc, error
+                )
+                raise ProviderError(error.error_class, error.message, result=failed) from exc
             error = NormalizedError(exc.error_class, str(exc))
-            self._finalize_failure(paths, request, started_at, finished_at, proc, error)
+            # Re-raised as-is (the parse error already carries the right class), so the result is
+            # attached to the exception in flight rather than handed to a fresh constructor.
+            exc.result = self._finalize_failure(
+                paths, request, started_at, finished_at, proc, error
+            )
             raise
 
         # The raw session id lives ONLY in state.db (durable sessions). The resume id was
@@ -598,11 +650,13 @@ class BaseCliProvider:
                 message_for(ErrorClass.RATE_LIMITED),
                 resets_at=_iso_instant(parsed.rate_limit_resets_at),
             )
-            self._finalize_failure(paths, request, started_at, finished_at, proc, error)
+            failed = self._finalize_failure(paths, request, started_at, finished_at, proc, error)
             # Set on the raised exception too, not only on the recorded error: the Router rebuilds
             # its own normalized error from what was RAISED, so an instant living only here would be
             # dropped before the Core ever saw it.
-            raise ProviderError(error.error_class, error.message, resets_at=error.resets_at)
+            raise ProviderError(
+                error.error_class, error.message, resets_at=error.resets_at, result=failed
+            )
 
         if not parsed.succeeded and _produced_no_work(parsed, request):
             # EXPERIMENTAL(no-work-infra) — trial block; revert this whole `if` to fall back to
@@ -616,8 +670,8 @@ class BaseCliProvider:
             error = NormalizedError(
                 ErrorClass.AGENT_NO_PROGRESS, message_for(ErrorClass.AGENT_NO_PROGRESS)
             )
-            self._finalize_failure(paths, request, started_at, finished_at, proc, error)
-            raise ProviderError(error.error_class, error.message)
+            failed = self._finalize_failure(paths, request, started_at, finished_at, proc, error)
+            raise ProviderError(error.error_class, error.message, result=failed)
 
         if parsed.succeeded:
             infra_error = self._post_success_infra_error(proc.stderr_text)
@@ -628,8 +682,10 @@ class BaseCliProvider:
                 # false success. Because this raises, ``outcome.result`` is None and no resumable
                 # session lineage is persisted for the broken run — the next hop is a fallback, not
                 # a resume of a session that did nothing.
-                self._finalize_failure(paths, request, started_at, finished_at, proc, infra_error)
-                raise ProviderError(infra_error.error_class, infra_error.message)
+                failed = self._finalize_failure(
+                    paths, request, started_at, finished_at, proc, infra_error
+                )
+                raise ProviderError(infra_error.error_class, infra_error.message, result=failed)
 
         if parsed.succeeded:
             status, error_obj = RunStatus.SUCCEEDED, None
@@ -705,7 +761,6 @@ class BaseCliProvider:
             "review_artifacts_path": request.review_artifacts_path,
             "human_input_path": request.human_input_path,
             "supervisor_packet_path": request.supervisor_packet_path,
-            "skill_reference_paths": list(request.skill_reference_paths) or None,
         }
         representation: dict[str, Any] = {
             "provider": self.id,
@@ -734,7 +789,7 @@ class BaseCliProvider:
         finished_at: str,
         proc: ProcessResult,
         error: NormalizedError,
-    ) -> None:
+    ) -> AgentRunResult:
         result = AgentRunResult(
             status=RunStatus.FAILED,
             provider=self.id,
@@ -752,6 +807,7 @@ class BaseCliProvider:
         # ``minimal`` is strict — only result.json survives, even on failure (it records the exit
         # code + normalized error class). ``standard`` keeps stdout/stderr for debuggability.
         prune_attempt_artifacts(paths, self._artifact_level)
+        return result
 
     def _extra_secrets(self, request: AgentRunRequest) -> tuple[str, ...]:
         """Literal secrets to redact: secret-named parent env values + denied-read file contents +
@@ -765,8 +821,16 @@ class BaseCliProvider:
         )
 
     def _secret_env_values(self) -> tuple[str, ...]:
-        """Values of non-allowlisted, secret-named parent env vars, for defensive redaction."""
-        return secret_env_values(self._security.allowed_environment)
+        """Values of secret-named parent env vars, for defensive redaction.
+
+        The allowlist excuses a name only while it is also the gate on what a child receives. In
+        advanced mode it is not (``strict_isolation: false`` forwards the parent environment whole),
+        so nothing is excused and the name policy decides alone — see :func:`secret_env_values`.
+        """
+        return secret_env_values(
+            self._security.allowed_environment,
+            exempt_allowlisted=self._security.strict_isolation,
+        )
 
 
 def _parse_version(text: str) -> str | None:

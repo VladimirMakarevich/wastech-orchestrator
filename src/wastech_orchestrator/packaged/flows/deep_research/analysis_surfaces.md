@@ -20,7 +20,7 @@ Record an exact `path:line` for every observation you intend to make a claim abo
 - **Boundary input.** Every path, glob, pattern, identifier or free text that crosses in from outside: where is it validated, and what happens when it is hostile — a path escaping the intended root, an unbounded read, text interpolated into a command line or a regular expression.
 - **Contract conformance.** A generated or declared schema versus the code producing and consuming it; a documented flag or option versus the parser.
 - **Adapter agreement.** Where two adapters or backends implement the same capability, differences that make behaviour depend on which one runs.
-- **Delivery evidence.** Where the history is reachable **with the tools you were actually granted** (`git log` / `git show` need a shell), a change that did less than it claims is a prime finding. With no shell, say so and drop the claim — do not grep a changelog and present that as history.
+- **Delivery evidence.** Where the history is reachable **with the tools you were actually granted** (`git log` / `git show` need a shell), a change that did less than it claims is a prime finding. Whether you have one depends on how this run is configured, so check rather than assume: if you do not, say so and drop the claim — do not grep a changelog and present that as history.
 
 {?review_path}
 

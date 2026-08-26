@@ -10,7 +10,7 @@ satisfies **both** invariants:
 * ``required`` lists **every** key in ``properties`` (else ``'required' is required to be an array
   including every key in properties``). ``DELTA_OUTPUT_SCHEMA``'s ``scope`` object had no
   ``required`` at all, so the supervisor finalize turn crashed on codex and only survived via
-  the silent claude fallback. Optionality is preserved by making the previously-optional fields
+  the silent claude fallback. Optionality is preserved by making optional fields
   nullable (``["string", "null"]`` etc.), not by dropping them from ``required``.
 
 The original smoke test validated its own simplified example schema, not the real constant, so it
@@ -34,7 +34,6 @@ from wastech_orchestrator.core.hitl import typed_output_schema
 from wastech_orchestrator.core.supervisor import (
     _FOLLOW_UPS_SCHEMA,
     _HANDOFF_SCHEMA,
-    _SKILL_MAP_SCHEMA,
     _finalize_schema,
 )
 from wastech_orchestrator.memory.delta import DELTA_OUTPUT_SCHEMA
@@ -45,7 +44,6 @@ _OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     "evaluator._FINDINGS_SCHEMA": _FINDINGS_SCHEMA,
     "hitl.typed_output_schema('human_input')": typed_output_schema("human_input") or {},
     "hitl.typed_output_schema('planning')": typed_output_schema("planning") or {},
-    "supervisor._SKILL_MAP_SCHEMA": _SKILL_MAP_SCHEMA,
     "supervisor._FOLLOW_UPS_SCHEMA": _FOLLOW_UPS_SCHEMA,
     "supervisor._HANDOFF_SCHEMA": _HANDOFF_SCHEMA,
     # All three shapes: the dynamic ``required`` must list exactly the present keys in each branch.
@@ -196,9 +194,9 @@ def test_no_maxlength_bound_on_authored_prose(name: str) -> None:
     ],
 )
 def test_follow_ups_schema_states_that_the_key_is_mandatory(name: str) -> None:
-    # `follow_ups` is in `required` (strict mode leaves no choice), and the prompt used to say
-    # "leave the array empty when nothing qualifies" — which a model read as permission to omit the
-    # key. The rejection that follows never explains the fix, so the schema has to.
+    # `follow_ups` is in `required` (strict mode leaves no choice), while a prompt saying "leave
+    # the array empty when nothing qualifies" reads to a model as permission to omit the key. The
+    # rejection that follows never explains the fix, so the schema has to.
     schema = _OUTPUT_SCHEMAS[name]
     node = schema if schema.get("type") == ["array", "null"] else schema["properties"]["follow_ups"]
     description = node.get("description", "")

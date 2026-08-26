@@ -23,6 +23,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import os
+import shutil
 import signal
 import subprocess
 import threading
@@ -790,6 +791,17 @@ def kill_agent_subtree(pid: int, pgid: int) -> None:
             os.kill(child_pid, _SIGKILL)
 
 
+#: ``ps`` resolved once at import instead of by bare name at every sweep. This process table is the
+#: quiescence barrier's only witness: a stand-in that prints an empty table makes every attempt look
+#: like it left nothing running, and the barrier would certify silence it never observed. Resolved
+#: here rather than through :mod:`wastech_orchestrator.security.launchers` — which owns the same
+#: policy for the executables the orchestrator launches deliberately — because this module must stay
+#: a leaf the whole tree can import. Falls back to the bare name, so a host without ``ps`` degrades
+#: to "no descendants found" exactly as it did before, which the caller already treats as
+#: inconclusive rather than as proof.
+_PS_PATH: str = shutil.which("ps") or "ps"
+
+
 def _posix_descendants(root: int) -> list[int]:
     """The full descendant pid set of ``root`` (all generations), from one ``ps`` snapshot.
 
@@ -800,7 +812,7 @@ def _posix_descendants(root: int) -> list[int]:
     """
     try:
         completed = subprocess.run(
-            ["ps", "-axo", "pid=,ppid="],
+            [_PS_PATH, "-axo", "pid=,ppid="],
             shell=False,
             capture_output=True,
             text=True,

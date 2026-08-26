@@ -2,13 +2,17 @@
 
 **You are an AI agent helping an operator assemble or tune `config.yaml` for wastech-orchestrator.** Use this folder as the compact, installable reference for configuration work. If you only have a moment, read this file first.
 
-- **[reference.md](reference.md)** — the complete field reference: for the meaning, allowed values, default, and constraints of _every_ `config.yaml` field, read this. This README is the how-to; `reference.md` is the what-each-field-does.
+- **[reference.md](reference.md)** — the entry page of the complete field reference: for the meaning, allowed values, default, and constraints of _every_ `config.yaml` field, start there. It carries the rules that apply everywhere, the core identity blocks and the cross-field gotchas, and links one page per concern ([agents.md](agents.md), [security.md](security.md), [checks.md](checks.md), [supervisor.md](supervisor.md), [runtime.md](runtime.md)). This README is the how-to; the reference is the what-each-field-does.
 - **[best-practices.md](best-practices.md)** — safe defaults, how to structure checks, and what mistakes to avoid.
 - **[../skills/worc-config/SKILL.md](../skills/worc-config/SKILL.md)** — a copy-ready skill that can interview the operator and draft a config.
 
 ## Start from the generated file
 
-Prefer editing the `.worc/config.yaml` that `worc install .` already generated for this repository. It starts from the packaged defaults, uses the detected repo root and base branch, and is already validated to the current schema shape.
+Prefer editing the `.worc/config.yaml` that `worc install .` already generated for this repository. It uses the detected repo root and base branch and is already validated to the current schema shape.
+
+It is also **deliberately small**. `install` writes only what it resolved (`repo`, the selected `agents.providers`, `git`, the `orchestrator.auto_mode` answer), the one block whose values deviate from the fail-closed defaults (`security` — the advanced mode), and three affordances (`paths.tasks_dir`, the empty `checks.command_sets` gate, the `telegram.enabled` switch). Everything else is absent on purpose: an omitted key runs at the default this reference documents, so there is nothing to read and nothing to keep in step. A comment block at the end of the generated file lists what was left out.
+
+That makes the edit loop simple: to change a default, copy the block for it out of the `config.example.yaml` sitting beside your config and set the one value you want. You never need the whole block — write the keys you are changing and leave the siblings absent.
 
 Only build from scratch when there is no installed config yet. In that case, keep the same block order as the packaged example (every block is optional to the loader and takes its defaults when omitted — the one structural requirement is exactly one `agents.providers.<id>.primary: true`; in practice always write `repo` too, since its defaults are placeholders. See [reference.md](reference.md) for the defaults):
 
@@ -22,12 +26,11 @@ Only build from scratch when there is no installed config yet. In that case, kee
 8. `checks`
 9. `git`
 10. `telegram`
-11. `skills`
-12. `supervisor`
-13. `logging`
-14. `memory`
-15. `tools`
-16. `prompt_audit`
+11. `supervisor`
+12. `logging`
+13. `memory`
+14. `tools`
+15. `prompt_audit`
 
 ## Build in this order
 
@@ -51,18 +54,19 @@ Decide which CLIs are actually available and keep the set small:
 - `allowed` — only the providers the operator can really run (`codex`, `claude`).
 - Exactly one provider must be `primary: true`.
 - Leave the shipped `model`, `reasoning`, `timeout_seconds`, `permission_profile`, and `max_turns` defaults unless the operator has a concrete reason to change them.
-- Do not write `sandbox` at all. `install` never emits it, the access level lives in `permission_profile`, and its only surviving value is the Codex full-access escape.
+- There is no `sandbox` key. The access level lives in `permission_profile`; a config that still carries `sandbox:` is rejected on load as an unknown key, and `upgrade-config` does not strip it — delete the line by hand. It is not tolerated on purpose: its one remaining value selected a provider full-access mode, which is now forbidden outright, so keeping the key loadable would only suggest that some value of it still works.
 - Leave `decomposition.enabled: false` until the team is ready for one-task-many-subtasks planning.
 
 ### 3. `security`
 
 Treat this block as a guardrail, not a convenience area:
 
-- Keep `strict_isolation: true` unless the operator consciously accepts full-access runs.
-- Know that `disable_read_isolation` defaults to `true` — read-isolation is **off** out of the box, and `install` does not write the key. Set it `false` to turn read-isolation on; the write side (commit/staging gates, PR control, `denied_read_paths`) is in force either way.
-- Pass only names in `allowed_environment`; secret **values** never belong in the file.
+- Know what `strict_isolation` is set to before you run anything: `install` writes `false`, and `false` **is** the advanced mode — the parent environment goes to the agent whole, read-isolation is forced off, every node gets a shell, the agent writes outside the clone and reaches the whole network. Read [`security.md`](security.md) and decide whether you want it; set `true` for the fail-closed sandbox instead. It unlocks no provider full-access mode either way: those are forbidden outright.
+- Know that `disable_read_isolation` is `true` — read-isolation is **off** out of the box, and `install` writes the key so you can find it. Set it `false` to turn read-isolation on, which takes effect only alongside `strict_isolation: true` (the master switch forces read-isolation off at `false`). The write side (commit/staging gates, PR control, `denied_read_paths`) is in force either way.
+- Pass only names in `allowed_environment`; secret **values** never belong in the file. The list replaces the default wholesale, so keep `PATH` (a config without it is rejected at load) and, on Windows, `SystemRoot` (preflight and `run`/`watch`/`rerun` refuse without it). `install` does not write the key at all — the loader resolves the host OS default at load time, so a config moved between machines picks up the right names; the longer list in `config.example.yaml` is the cross-platform union. Write the key only to narrow or extend it, and then write the whole list. An entry may be a prefix pattern (`DOTNET_*`, `npm_config_*`) instead of an exact name — resolved against your environment, with the same secret-name filter applied to every name it produces, so `NUGET_*` forwards `NUGET_PACKAGES` and refuses `NUGET_API_KEY`. Under strict isolation a pattern alone cannot pull a name loaded from `.worc/.env` into an agent child; name it exactly when that is intentional. In advanced mode the list gates only orchestrator-owned `git`/`gh`.
+- Use `extra_environment` when an agent/check/tool child needs a variable **set**, not forwarded — a toolchain root or a cache path (`NUGET_PACKAGES`, `npm_config_cache`). Forwarding only passes on what your shell exported, so it is unset on the next machine and a forgotten `export` is skipped in silence. Orchestrator-owned `git`/`gh` also sees assignments, except in the `GIT_*`/`GH_*`/`GITHUB_*` namespace, where only `GIT_CONFIG_GLOBAL` and the two token names get through. YAML keys and values must be strings (quote names such as `on` and values such as `1`), and **no credentials** — the value is plaintext in this file, and only secret-looking *names* are refused at load.
 - Keep `denied_commands` complete; it replaces the default list rather than extending it.
-- `allow_git_evidence` (default `false`) is the master switch for the read-only git-evidence grant: only with it on does a flow node's `git_evidence: true` actually give that node the read-only git verbs. It never makes a node writable — the sandbox still denies every write and `denied_commands` still applies — but leave it off unless a flow you run genuinely audits delivery history.
+- `allow_git_evidence` (`install` writes `true`) is the master switch for the read-only git-evidence grant: only with it on does a flow node's `git_evidence: true` actually give that node the read-only git verbs. It never makes a node writable — the sandbox still denies every write, and `denied_commands` still adds its friction (a refusal that shows up in the log). Two things to know: beside the shipped `strict_isolation: false` it does nothing at all — every node already has an unscoped shell there — and it starts mattering the moment you set `strict_isolation: true`, so turn it off then unless a flow you run genuinely audits delivery history.
 - Do not add `extra_args` that disable sandboxing, approvals, or rule enforcement.
 - `trust_level` sets the approval threshold for the mid-task dangerous-diff gate: `auto` (default) lets routine in-repo deletions/edits proceed; `strict` gates every deletion or dependency-manifest edit. It never lowers the hard ceiling — only which diffs raise the gate.
 - `protected_paths` is the always-ask floor: repo-relative globs (same dialect as `checks.command_sets[].paths`) that require approval on **any** change regardless of `trust_level`. Default `[]` (no floor); add sensitive surfaces here (e.g. `.github/workflows/**`, `src/security/**`).
@@ -95,15 +99,14 @@ Keep publishing conservative by default:
 
 ### 6. Optional blocks
 
-Touch these only when the operator asked for them (each field is documented in full in [reference.md](reference.md)). Two are already on after `install` — `supervisor` (`enabled: true`) and `memory` (`enabled: true`) — so for those the question is whether to turn them off, not on:
+Touch these only when the operator asked for them (each field is documented in full in [reference.md](reference.md)). One is already on after `install` — `supervisor` (`enabled: true`) — so for that one the question is whether to turn it off, not on:
 
 - `orchestrator` — the `watch` loop cadence (`poll_interval_seconds`), the instance `queue` selector, and `auto_mode` task chaining.
 - `paths` — `tasks_dir`, the repo-relative home of the task lifecycle (rename only to avoid clashing with an existing `tasks/`).
 - `telegram` — real human-in-the-loop and notifications.
-- `skills` — how discovered skills attach to flow nodes. Discovery itself is automatic and whole-repo (every tracked `**/SKILL.md`, wherever it sits), so this block only carries `dynamic` and `strict`.
 - `supervisor` — the read-only oversight layer, **on by default**. This is where you turn it off (`enabled: false`) or set per-phase model/effort under `observe` / `finalize` / `handoff`.
 - `logging` — operator log `level` and per-attempt artifact retention (`artifacts`).
-- `memory` — persistent, repo-scoped memory (`enabled` plus retrieval/promotion/cleanup caps).
+- `memory` — persistent, repo-scoped memory (`enabled` plus retrieval/promotion/cleanup caps). **Experimental and off out of the box** — turn it on only when the operator explicitly asks to experiment with it.
 - `prompt_audit` — prompt recording for debugging or compliance.
 - `tools` — only its `default_timeout_seconds` (default `3600`), the flow-wide timeout for custom `tool` nodes. The tool feature itself is enabled per-flow (a `kind: tool` node reading `.worc/tools/`), not here — see `flows/README.md`. Set this only to change the default timeout.
 
@@ -131,7 +134,7 @@ If the repo already answers the question (`origin`, current branch, `pyproject.t
 
 After editing the config:
 
-1. If the package was upgraded, run `worc upgrade-config` first so the file has the current schema shape.
+1. If the package was upgraded, run `worc upgrade-config` first so the file has the current schema shape. It adds new keys from the template and strips the ones that were retired with a migration; a key that was removed **without** one — `agents.providers.<provider>.sandbox` — it leaves in place, so that line has to be deleted by hand before the config will load at all. It asks before writing, and the prompt is worth reading: the merge takes _every_ key from the packaged template, so keys your small config deliberately left at their defaults come back written out, and your inline comments do not survive the rewrite (a timestamped backup is kept). Decline it and nothing is touched; `-y` skips the prompt in a script.
 2. Run `worc preflight`. Fix every reported provider, credential, isolation, `gh`, or Telegram issue.
 3. Run `worc validate-flow --all` — preflight does not look at flows, and a config edit can invalidate one (a node pinned to a provider you just removed from `agents.allowed`). It checks the operator flows under `.worc/flows/` only.
 

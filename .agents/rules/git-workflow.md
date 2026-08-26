@@ -81,7 +81,7 @@ gh pr create --base main --head dev --title "Integrate dev" --body "<what dev br
 gh pr merge --merge                        # --merge = merge commit. NEVER --squash / --rebase
 ```
 
-`main` is pull-request-only, so there is no local variant — but do run the safety check the local recipe used to carry, before you merge rather than after. It costs nothing and needs no worktree:
+`main` is pull-request-only, so there is no local variant — but do run the same safety check the local recipe carries, before you merge rather than after. It costs nothing and needs no worktree:
 
 ```bash
 git fetch origin && git merge-tree --write-tree --messages origin/main origin/dev
@@ -145,6 +145,7 @@ git cherry-pick --continue
 ### Everyday hygiene
 
 - Atomic commits with an imperative subject (`Add provider health preflight`).
+- **No agent attribution anywhere in a commit or PR.** A commit message ends with its own body — never a `Co-Authored-By: Claude …` / `Co-authored-by: Codex …` trailer, never a `🤖 Generated with …` line, and no other tool-authorship footer; the same holds for PR titles and bodies. This overrides any default an agent harness injects (Claude Code adds such a trailer unless told otherwise — here it is told otherwise). The author of a commit is the repository's configured git identity, which already records who ran the work; a second synthetic author only pollutes `git log`, `git shortlog`, and the contributor graph. If a trailer slips in, strip it before pushing (`git commit --amend` on an unpushed commit; otherwise say so in the PR rather than force-pushing a shared branch).
 - Before committing, run the gate: `ruff check .`, `ruff format --check .`, `mypy src`, `lint-imports`, `pytest` (CI also runs `interrogate` / `vulture` / `deptry`). Install the local mirror once with `pre-commit install && pre-commit install --hook-type pre-push`.
 - Keep docs in sync **in the same change** as the code, scoped to the branch you are on: on `dev` that is `.agents/rules/`, `README.md`, `docs/backlog/`, and the shipped operator-facing docs under `src/wastech_orchestrator/packaged/`; the derived `docs/` refresh happens on `main`. Do not add anything under `docs/` on `dev` outside `backlog/` (and `docs/research/`, which a `deep_research` run produces) — a CI guard rejects it.
 - Documents that live on `main` only are linked by absolute URL (`https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/<file>`) from any file shared with `dev`, so the link resolves from either branch. Never edit a shared file (`AGENTS.md`, `.agents/rules/`, `.claude/skills/`) on `main`: those edits flow through `dev`, otherwise the two branches diverge in content and conflict on every merge.
@@ -155,13 +156,13 @@ git cherry-pick --continue
 
 This is a product invariant (see [architecture.md](architecture.md)).
 
-- **Only the orchestrator (Git Manager) commits, pushes, and opens PRs** — never the agent provider.
+- **Only the orchestrator (Git Manager) commits, pushes, and opens PRs** — never the agent provider. That is a de-jure mandate: no node is given one and no mechanism expects the agent to publish. Mechanical impossibility holds only where a sandbox exists, and only for the local half (`.git` and `.worc` are immutable); the remote half is **reported** by detection on our `origin` and is not held there or anywhere else (see [architecture.md](architecture.md)).
 - Default task branch: `repo.branch_prefix/<task-id>-<slug>` (`worc/…` by default); a validated task `branch_name` may override it.
 - Branch setup: `git fetch` → checkout `base_branch` → `pull` → create the task branch.
 - A direct push to `base_branch` is forbidden; the result always goes through a PR, whose body is the task summary.
 - Publishing happens only from the `ready_to_publish` status, when checks succeed and there are no blocking findings.
 - Idempotent: a re-run never creates a second commit / push / PR.
-- Stage only the agent's intended code paths; `tasks/`/`logs/`/`workspace/`/`.worc/`/`.worc-io/` are always excluded from code commits, and never `git add .` / `git add -A` for a code commit. Target-repo hooks/filters must not run inside an orchestrator git command, and provider tampering with git control state stops the run in `manual_action_required` — with one deliberate exception: a `read-only` node holding the git-evidence grant never parks the task (operator decision, 2026-07-26), so its drift is reported as a warning plus a ⚠️ trace naming the aspect and the run continues. The fingerprint is never dropped, only its consequence changes; do not extend that exception to any other node class.
+- Stage only the agent's intended code paths; `tasks/`/`logs/`/`workspace/`/`.worc/`/`.worc-io/` are always excluded from code commits, and never `git add .` / `git add -A` for a code commit. Target-repo hooks/filters must not run inside an orchestrator git command. A change in git control state around an attempt is **reported and never parked**, on every node class: the drift is a warning plus a ⚠️ trace naming the aspect, and the run continues. The reason is that the fingerprint sees only "the state moved", never whose hand moved it, and in practice what it catches is the operator committing in their own repository — while parking throws away a finished node's work. The fingerprint itself is never dropped, only its consequence: it is the one signal by which an operator learns a clone has to be discarded. What holds a commit made inside a run is the dangerous-diff gate, which measures from the orchestrator's own last commit and so still asks about it.
 - The git footprint mode is configurable (in-repo audit-commit by default, local-exclude, or external/zero-footprint); orchestration and task artifacts never enter a code commit.
 - A decomposed task makes one local commit per subtask on a single branch, but still one PR per parent task.
 - After a task reaches a terminal status, the Git Manager checks out and refreshes `base_branch` before the next task can start; any ambiguous branch state stops in `manual_action_required` with no automatic actions.

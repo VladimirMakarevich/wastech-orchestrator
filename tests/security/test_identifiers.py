@@ -144,7 +144,7 @@ def test_valid_node_id_is_a_substitutable_prompt_token(node_id: str) -> None:
         "run-000001",
         "1-claude",
         "sub-02",
-        "SKILL.md",  # mixed case is fine for a fixed artifact name (case collisions are dir-level)
+        "Findings.MD",  # mixed case is fine for a fixed name (collisions are dir-level)
         "task.enriched.md",
         "con2",
         "a",

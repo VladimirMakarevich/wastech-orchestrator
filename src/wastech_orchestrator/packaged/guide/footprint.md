@@ -11,14 +11,14 @@ Two rules hold for the whole `.worc/` home:
 
 | Path | What it is | Safe to delete? |
 | --- | --- | --- |
-| `config.yaml` | Your configuration. The one file you edit by hand. | No — it is the install. |
+| `config.yaml` | Your configuration. The one file you edit by hand — deliberately small: it carries what the install resolved plus the few things you author, and everything absent from it runs at its documented default. | No — it is the install. |
 | `config.example.yaml` | Commented reference copy, never read at runtime. | Yes (`worc install --reconfigure` restores it). |
 | `flows/`, `tools/` | Editable copies of the built-in flows, their role prompts, and the executables `tool` nodes resolve against. Yours to edit. | No — a flow a task names must exist here. |
 | `guide/` | This documentation, copied in by `install`. | Yes (`worc upgrade-docs` restores it). |
 | `follow-ups.md` | The accumulating list of what tasks noticed and did not fix — one section per finished task. Yours to curate; see below. | Entry by entry, by hand. |
 | `logs/<task-id>/` | Per-task artifacts: the rendered prompts, per-attempt provider output, `current.diff`, `summary.md`, the local-only `summary.json` (the same summary plus follow-ups and what the supervisor layer spent), check logs, HITL records. The biggest thing here by far — megabytes per task. | Yes — `worc logs clean`. |
 | `logs/daemon.log`, `logs/daemon-startup.log` | The `watch` daemon's operator trace (rotating, 10 MB × 5 backups) and the raw stream of a console-spawned daemon, kept so a startup crash is recoverable. | Yes — `worc logs clean` takes them, once no daemon is running. |
-| `logs/completed.jsonl` | The **ledger**: one append-only JSON record per terminal task. The audit index of everything that has run. | Only with `worc logs clean --all`. See below. |
+| `logs/completed.jsonl` | The **ledger**: one append-only JSON record per terminal task. The audit index of everything that has run. Per-attempt rows in `state.db` carry each attempt's own measured interval, a failed attempt included, so `finished_at - started_at` is a duration rather than two reads of the same clock. | Only with `worc logs clean --all`. See below. |
 | `runs/` | Per-task private runtime state, keyed by task id. Four roots — the section below explains each. | Automatically, or with `worc runs clean`. |
 | `memory/` | The persistent, repo-scoped memory store (when `memory.enabled`). | Curate it with `worc memory compact` / `worc memory clear`, not by hand. |
 | `security-reports/<task-id>/` | Deliverables of a flow whose output policy keeps its report private (`private_control_workspace_report` — the built-in `security_audit`) rather than committing it: one directory per task, each holding at least the `report.md` the policy requires. | Yours — read them first; nothing else reclaims them. |
@@ -65,7 +65,7 @@ Each of these is a directory of `<task-id>/` subdirectories. They exist so a tas
 
 ### `runs/instruction-bundles/<task-id>/`
 
-**What writes it:** the orchestrator, at task start. Same idea for the *agent inputs*: the validated task file, the skill packages the task selected, and the repository instruction files (`AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`). The agent receives redacted copies through the exchange; this is the unredacted original the orchestrator verifies against.
+**What writes it:** the orchestrator, at task start. Same idea for the *agent inputs*: the validated task file and the repository instruction files (`AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`). The agent receives redacted copies through the exchange; this is the unredacted original the orchestrator verifies against.
 
 **Normal?** Yes, one per task that ran.
 

@@ -45,14 +45,14 @@ def test_buckets_sum_to_the_total_and_are_ordered_by_phase() -> None:
     rows = [
         _attempt(function="finalize", usage_input_total=20_000),
         _attempt(usage_input_total=30_000),
-        _attempt(function="skill", usage_input_total=5_000),
+        _attempt(function="handoff", usage_input_total=5_000),
         _attempt(usage_input_total=40_000),
     ]
     report = summarize_spend(rows)
     assert report is not None
     # Phases read in the order a run reaches them, not first-seen or alphabetical, so two runs'
     # reports line up side by side.
-    assert list(report["by_function"]) == ["observe", "finalize", "skill"]
+    assert list(report["by_function"]) == ["observe", "finalize", "handoff"]
     assert report["by_function"]["observe"]["calls"] == 2
     assert report["by_function"]["observe"]["input"] == 70_000
     assert report["total"]["calls"] == 4
@@ -120,4 +120,4 @@ def test_an_unrecognized_label_is_reported_last_rather_than_dropped() -> None:
 
 
 def test_the_four_phase_labels_are_the_values_persisted() -> None:
-    assert [f.value for f in SupervisorFunction] == ["observe", "finalize", "handoff", "skill"]
+    assert [f.value for f in SupervisorFunction] == ["observe", "finalize", "handoff"]

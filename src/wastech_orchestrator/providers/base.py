@@ -220,8 +220,6 @@ class AgentRunRequest:
     # reused one, so the packet is called a packet in the context footer, the rendered prompt, and
     # the prompt audit instead of masquerading as a plan or a checks report.
     supervisor_packet_path: str | None = None
-    # Planning-selected SKILL.md paths — read-only advisory references, never executed.
-    skill_reference_paths: tuple[str, ...] = ()
     output_schema: dict[str, Any] | None = None
     model: str | None = None
     extra_args: list[str] = field(default_factory=list)
@@ -234,9 +232,13 @@ class AgentRunRequest:
     resume_baseline_output_tokens: int | None = None
     # Whether the agent process may reach the network (``network_policy`` enforcement). Default
     # ``False`` — the flow grants network only by declaring ``network_policy``; absent, no network.
-    # The adapter maps it onto its sandbox: Codex enables the workspace-write sandbox's network
-    # access; Claude allows the WebFetch/WebSearch tools. It only toggles the network — never the
-    # filesystem sandbox/approvals (the ceiling stays in force).
+    # The adapter maps it onto its sandbox: Codex's profile network plus the backend-side
+    # ``web_search``; Claude's sandbox ``allowedDomains`` plus the WebFetch/WebSearch tools. It only
+    # toggles the network — never the filesystem sandbox/approvals (the ceiling stays in force).
+    # Under ``security.strict_isolation: false`` each adapter resolves its own effective value and
+    # every node is online whatever this says: the mode is a config-level grant of the whole
+    # network, and a flow cannot take it back (nor could it, since the shell would reach the network
+    # regardless of any tool list).
     network_access: bool = False
     # Whether this attempt may execute the read-only git verbs to inspect delivery history. Set by
     # the node runner from the node's declaration AND the operator's master switch, so a flow alone
@@ -245,15 +247,21 @@ class AgentRunRequest:
     # repository unchangeable, nothing published) by different means: Claude adds a shell scoped to
     # those verbs and write-denies the clone in its OS sandbox, while Codex's ``read-only`` sandbox
     # already permits commands and already forbids every mutation, so it needs nothing from this.
+    # That contract is the shipped default's. Under ``security.strict_isolation: false`` this field
+    # is not consulted at all — every node already has an unscoped shell — and its third clause
+    # holds as a mandate rather than a mechanism, since such a node has the network and picks up
+    # credentials by itself.
     git_evidence: bool = False
-    # The absolute Git-control + lifecycle roots a *workspace-write* attempt must
-    # Write/Edit-deny (exchange root, resolved gitdir/common-dir/hooks-dir, ``tasks/`` tree). Set by
-    # the node runner from ``GitManager.resolve_control_paths`` only for a workspace-write attempt
-    # (the gitdir/common-dir are per-worktree and only final after branch prep); ``None`` for
-    # read-only attempts, which carry no write tools. Provider-neutral — each adapter renders it
-    # into its own tool-deny / OS-sandbox ``denyWrite`` syntax; preserved verbatim across a
-    # fallback. Repository governance/instruction files are intentionally not in this set — editing
-    # them is ordinary work, reported to the operator rather than blocked.
+    # The absolute Git-control + lifecycle roots an attempt must Write/Edit-deny (exchange root,
+    # resolved gitdir/common-dir/hooks-dir, ``tasks/`` tree). Set from
+    # ``GitManager.resolve_control_paths`` for every attempt that has *any* way to mutate the clone
+    # — write tools or a shell — which is every provider attempt with a shell (agent, evaluator,
+    # supervisor) plus a workspace-write one whose shell the host dropped (the gitdir/common-dir are
+    # per-worktree and only final after branch prep). ``None`` only for an attempt that has neither.
+    # Provider-neutral — each adapter renders it into its own tool-deny / OS-sandbox ``denyWrite``
+    # syntax and re-proves it with the pre-launch canary; preserved verbatim across a fallback.
+    # Repository governance/instruction files are intentionally not in this set — editing them is
+    # ordinary work, reported to the operator rather than blocked.
     write_guard: ProviderWriteGuardPolicy | None = None
     # The Core-owned orchestrator security contract prepended to the effective prompt as
     # defense-in-depth (advisory, NOT enforcement — the sandbox + deny projection enforce). Neutral
@@ -277,15 +285,10 @@ def build_context_footer(request: AgentRunRequest) -> str:
         ("packet", request.supervisor_packet_path),
     )
     present = [(label, path) for label, path in fields if path]
-    skill_lines = [
-        f"- skill (read-only reference; advisory, do not execute): {path}"
-        for path in request.skill_reference_paths
-    ]
-    if not present and not skill_lines:
+    if not present:
         return ""
     lines = ["Context files (read them as needed; do not assume their contents):"]
     lines += [f"- {label}: {path}" for label, path in present]
-    lines += skill_lines
     return "\n".join(lines)
 
 
@@ -378,7 +381,12 @@ class ProviderError(Exception):
     """Provider exception carrying a normalized error class."""
 
     def __init__(
-        self, error_class: ErrorClass, message: str, *, resets_at: str | None = None
+        self,
+        error_class: ErrorClass,
+        message: str,
+        *,
+        resets_at: str | None = None,
+        result: AgentRunResult | None = None,
     ) -> None:
         super().__init__(message)
         self.error_class = error_class
@@ -387,6 +395,13 @@ class ProviderError(Exception):
         # dropped before the Core could act on it. Keyword-only so every positional raise site — and
         # there are many — stays untouched.
         self.resets_at = resets_at
+        # The failed attempt's own result, for the same reason and by the same route. The adapter
+        # builds a complete one before every raise (it is what `result.json` on disk is written
+        # from), and without this it would die with the stack frame: the Router would record the
+        # attempt with ``result=None``, the ledger row would fall back to two identical clock reads
+        # at row-write time, and the real interval — the only way to price a failing node — would
+        # exist on disk and nowhere queryable. ``None`` means no attempt result exists.
+        self.result = result
 
     @property
     def is_fallback_eligible(self) -> bool:

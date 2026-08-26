@@ -30,7 +30,9 @@ per-step + final advisory observation (see ``core/supervisor.py``).
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping
+from dataclasses import dataclass, replace
 from typing import Any
 
 from wastech_orchestrator.core.flow.context_paths import (
@@ -64,6 +66,8 @@ from wastech_orchestrator.core.flow.usage_accounting import (
     guard_output_baseline,
     snapshot_for_lineage,
 )
+from wastech_orchestrator.git_manager import ChangedPath, GitControlState
+from wastech_orchestrator.observability.logging import bind
 from wastech_orchestrator.providers.artifacts import (
     exchange_latest_run_file,
     node_run_dir,
@@ -72,6 +76,8 @@ from wastech_orchestrator.providers.artifacts import (
 from wastech_orchestrator.providers.base import AgentRunRequest, build_effective_prompt
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import EvaluationRow, NodeLineageRow, NodeRunRow
+
+_LOG = logging.getLogger(__name__)
 
 #: Raw severity tokens that normalize to ``high`` / ``medium`` on the typed ``Finding`` (the
 #: audit-trail projection in ``_to_finding``). This is the severity-*naming* map, NOT the routing
@@ -128,6 +134,14 @@ _FINDINGS_SCHEMA: dict[str, Any] = {
 }
 
 
+@dataclass(frozen=True, slots=True)
+class _EvaluatorControlBefore:
+    """What a shell-bearing evaluator attempt is judged against: control state + tree change set."""
+
+    control: GitControlState
+    tree: tuple[ChangedPath, ...]
+
+
 class EvaluatorNodeRunner:
     """Run an ``evaluator`` node through the router and map its verdict to accept/rework/done."""
 
@@ -159,10 +173,24 @@ class EvaluatorNodeRunner:
             node, ctx, route, run_id, session_id, guard_output_baseline(baseline)
         )
         assert_request_contained(request, self._s.exchange_root)
+        # A shell is what makes a `.git` mutation reachable, so the Write/Edit-deny roots ride every
+        # attempt that has one — an evaluator included. Without them the provider's pre-launch
+        # canary had no write-deny probe to run here, and the loud floor-1 line's "re-proved before
+        # every provider attempt" held for the agent node alone.
+        has_shell = self._attempt_has_shell(node, route)
+        git = self._s.git
+        if has_shell and git is not None:
+            request = replace(request, write_guard=git.resolve_control_paths(self._s.exchange_root))
         # Detection-in-depth: fingerprint the curated exchange before the (read-only)
         # evaluator attempt so a provider mutation of the immutable surface is caught from
         # parent-held state after quiescence, before its findings are trusted downstream.
         exchange_before = capture_exchange_manifest(self._s.exchange_root, ctx.task_id)
+        # The same bracket the agent runner takes around an attempt that has a shell but no write
+        # access: an evaluator is read-only by construction, yet whether it can run commands is the
+        # provider's answer, not ours — a Codex reviewer has a shell. Reported, never parked, like
+        # every other node class. Skipped when the attempt has no shell, so no node pays for a check
+        # that cannot apply to it.
+        control_before = self._control_before(has_shell, ctx.task_id)
         outcome = self._s.router.run_stage(request, route, snapshot=self._s.snapshot)
         raw_findings = (
             self._findings_or_none(outcome.result.structured_output)
@@ -187,7 +215,9 @@ class EvaluatorNodeRunner:
             usage_baseline=baseline,
             baseline_session_id=session_id,
         )
+        drift, wrote = self._control_drift(control_before, ctx.task_id)
         if outcome.result is None:
+            self._log_lost_drift(node, ctx, drift)
             error_class = outcome.terminal_error.error_class if outcome.terminal_error else None
             err = error_class.value if error_class else "no_provider_available"
             raise EvaluatorInfraError(
@@ -210,6 +240,7 @@ class EvaluatorNodeRunner:
             exchange_before, self._s.exchange_root, ctx.task_id, node_id=node.id
         )
         if raw_findings is None:
+            self._log_lost_drift(node, ctx, drift)
             # Fail closed: the provider did not honor the mandatory findings schema (missing
             # or malformed ``findings`` array) — never silently accept. There is nothing for
             # `fixing` to act on (no parsed findings), so this degrades straight to manual (like
@@ -241,6 +272,8 @@ class EvaluatorNodeRunner:
                 kind,
                 findings=findings,
                 rework_exhausted=rework_exhausted,
+                unexpected_write=wrote,
+                git_control_drift=drift,
                 # Carry the provider's own prose, not just the typed findings. Without it the
                 # supervisor observed a bare `Outcome: accept` and its whole-task summary described
                 # an evaluator that emitted findings as a gate that "passed". The agent runner has
@@ -258,8 +291,8 @@ class EvaluatorNodeRunner:
         findings: list[dict[str, Any]],
         summary: str | None,
     ) -> None:
-        # Per-run dir keyed by node.id + run_id: a second evaluator (e.g. test_quality) no longer
-        # clobbers review, and every pass of a fix→review loop keeps its own findings on disk.
+        # Per-run dir keyed by node.id + run_id, so a second evaluator (e.g. test_quality) cannot
+        # clobber review and every pass of a fix→review loop keeps its own findings on disk.
         run_dir = node_run_dir(self._s.artifacts_root, ctx.task_id, node.id, run_id)
         run_dir.mkdir(parents=True, exist_ok=True)
         findings_path = run_dir / "findings.json"
@@ -279,6 +312,67 @@ class EvaluatorNodeRunner:
             extra_secrets=self._s.prompt_secrets,
             private_path=str(findings_path),
         )
+
+    def _log_lost_drift(self, node: FlowNode, ctx: NodeContext, drift: str | None) -> None:
+        """Say the Git-control drift out loud on the paths that leave this node through a raise.
+
+        The ordinary path carries it on ``NodeOutcome``, where the orchestrator's post-node hook
+        warns and traces it. A node that raised has no outcome, so the comparison — already computed
+        — was simply dropped: a node that planted a hook and then failed to emit parseable findings
+        went to ``manual_action_required`` with no word about the clone. That is the one signal by
+        which an operator knows to discard it rather than read on through the findings.
+        """
+        if drift is None:
+            return
+        bind(_LOG, task_id=ctx.task_id, node_id=node.id).warning(
+            "git control state changed during this evaluator attempt, and the node is stopping "
+            "for another reason — discard the clone before it is committed or pushed: %s",
+            drift,
+        )
+
+    def _attempt_has_shell(self, node: EvaluatorNode, route: ResolvedRoute) -> bool:
+        """Whether this evaluator attempt actually gets a shell on a provider it may land on.
+
+        The answer comes from the adapters through the Router, because it is provider- and
+        host-specific: a Codex evaluator runs commands on its ``read-only`` profile, a Claude one
+        only with the git-evidence grant — and in the advanced mode every attempt has one.
+        Fail-closed (an unclassifiable attempt counts as having a shell), and asked once per run so
+        the detection bracket and the write-guard the request carries can never disagree.
+        """
+        return self._s.router.route_grants_shell(
+            route,
+            permission_profile=node.permission_profile.value,
+            git_evidence=resolve_git_evidence(node.git_evidence, self._s.allow_git_evidence),
+        )
+
+    def _control_before(self, has_shell: bool, task_id: str) -> _EvaluatorControlBefore | None:
+        """The Git-control + working-tree fingerprint taken before a shell-bearing evaluator runs.
+
+        ``None`` when there is no Git Manager or when the attempt gets no shell — the signal to skip
+        both comparisons entirely, so no node pays for a check that cannot apply to it.
+        """
+        git = self._s.git
+        if git is None or not has_shell:
+            return None
+        return _EvaluatorControlBefore(
+            control=git.capture_git_control_state(), tree=git.changed_code_entries(task_id)
+        )
+
+    def _control_drift(
+        self, before: _EvaluatorControlBefore | None, task_id: str
+    ) -> tuple[str | None, bool]:
+        """``(redacted drift summary, wrote to the tree)`` for the attempt that just finished.
+
+        Before-vs-after rather than "is the tree dirty", so an earlier writing node's diff is never
+        blamed on this evaluator. Control state is compared first, so the ``git status`` behind the
+        tree comparison cannot land between the attempt and the fingerprint that judges it.
+        """
+        git = self._s.git
+        if before is None or git is None:
+            return None, False
+        control_drift = git.compare_git_control_state(before.control)
+        summary = control_drift.summary() if control_drift is not None else None
+        return summary, git.changed_code_entries(task_id) != before.tree
 
     def _verdict(
         self,

@@ -584,6 +584,10 @@ def test_cmd_run_happy_path(
             "json",
             "--log-file",
             str(operator_log),
+            # The progress markers asserted below are info records, and the shipped default level
+            # is `warning` — an operator who wants the play-by-play asks for it the same way.
+            "--log-level",
+            "info",
             "--heartbeat-seconds",
             "0",
             "run",

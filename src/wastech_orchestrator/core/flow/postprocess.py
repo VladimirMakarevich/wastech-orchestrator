@@ -48,10 +48,17 @@ class _Slot:
     #: audit-only and ``summary`` is an orchestrator publish input — both stay private.
     exchange: bool = False
     #: whether this slot is written into the flow's private ``output_policy`` report directory
-    #: (redacted) instead of the task artifact dir. The ``report`` slot migrates the security_audit
+    #: instead of the task artifact dir. The ``report`` slot migrates the security_audit
     #: node off any agent-written report contract: the agent now
     #: returns the report as structured output and the orchestrator writes it here privately.
     report: bool = False
+    #: whether the slot file itself is redaction-scrubbed. Deliberately separate from ``report``,
+    #: which only says WHERE the file goes: conflating the two is what left ``summary`` raw — the
+    #: one slot whose content leaves the machine, read verbatim into the pull-request body and
+    #: committed as an audit artifact. The exchange copy a slot may publish is redacted by
+    #: :func:`publish_artifact` regardless, which is why ``plan`` needs no flag here: its private
+    #: file is the audit record and never leaves.
+    redact: bool = False
 
 
 #: Core-fixed slot table: where each node's ``output_artifact`` lands. The set of keys equals the
@@ -59,8 +66,8 @@ class _Slot:
 OUTPUT_SLOTS: dict[str, _Slot] = {
     "enriched_spec": _Slot("task.enriched.md", "enriched", None),
     "plan": _Slot("plan.md", "plan", "plan_path", exchange=True),
-    "summary": _Slot("summary.md", "summary_md", "summary_body_path"),
-    "report": _Slot("report.md", "report", None, report=True),
+    "summary": _Slot("summary.md", "summary_md", "summary_body_path", redact=True),
+    "report": _Slot("report.md", "report", None, report=True, redact=True),
 }
 
 
@@ -82,8 +89,15 @@ def apply_output_artifact(
     ``structured_output["content"]`` (refinement/planning typed output) or, absent that, its
     ``final_message`` (the free-form summary agent), via :func:`_slot_content`. An agent-facing slot
     (``plan``) also publishes a redacted copy to the exchange and points its ``inputs_field`` at it;
-    a ``report`` slot is written (redacted) into the flow's private ``report_dir`` instead of the
-    task artifact dir. The private slot file stays the audit record.
+    a ``report`` slot is written into the flow's private ``report_dir`` instead of the task artifact
+    dir. The private slot file stays the audit record.
+
+    A slot whose :attr:`_Slot.redact` is set is scrubbed on the way to disk — ``report`` and
+    ``summary``. ``summary`` is the one that leaves the machine: it is read verbatim into the
+    pull-request body and committed as an audit artifact. Written raw, it would let an agent place
+    arbitrary text — including a secret that had reached its own output — into a published document
+    without going near anything the sandbox guards. Advanced mode, where the whole parent
+    environment reaches the agent, only widens what could land there.
     """
     slot_name = node.output_artifact
     if slot_name is None:
@@ -95,9 +109,10 @@ def apply_output_artifact(
     if slot.report:
         if report_dir is None:  # defensive: a report slot with no report output_policy
             return None
-        target_dir, body = report_dir, redact_text(content, extra_secrets=extra_secrets)
+        target_dir = report_dir
     else:
-        target_dir, body = task_artifact_dir(artifacts_root, task_id), content
+        target_dir = task_artifact_dir(artifacts_root, task_id)
+    body = redact_text(content, extra_secrets=extra_secrets) if slot.redact else content
     target_dir.mkdir(parents=True, exist_ok=True)
     path = target_dir / slot.filename
     path.write_text(body, encoding="utf-8")
@@ -203,10 +218,10 @@ def _produced_content(
 ) -> str:
     """The declared produced file's text, or ``""`` to fall back to the node's own message.
 
-    A node whose real product is a written document used to publish only its closing summary of it,
-    so the artifact stopped at the node and the next one worked from a pointer thinner than the
-    thing it pointed at. ``output_file`` names that document; here it is read back so the file
-    itself is what crosses the edge.
+    A node whose real product is a written document names it in ``output_file``, and here that file
+    is read back so the document itself is what crosses the edge. Publishing only the node's closing
+    summary of it would strand the artifact at the node and leave the next one working from a
+    pointer thinner than the thing it points at.
 
     Falls back (and says so, once, on the operator log) when the declared file did not appear, is
     not a regular file, is empty, or is not text: losing the channel entirely would be worse than

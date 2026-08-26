@@ -2,7 +2,7 @@
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 # This is the packaged copy used by `wastech-orchestrator init` (the only example config; nothing else to sync).
 
-schema_version: 35                  # config format version; the orchestrator refuses newer configs
+schema_version: 39                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -17,6 +17,11 @@ orchestrator:
 
 repo:
   url: "git@github.com:OWNER/REPO.git"
+                                    #   Also the source of the `gh --repo` pin every GitHub call
+                                    #   carries. An ssh ALIAS (git@myhost:o/n.git), a file:// URL or
+                                    #   a local path names no OWNER/REPO, so nothing can be pinned:
+                                    #   `worc preflight` then prints `gh-repo-pin: FAIL` when
+                                    #   create_pull_request is on, `WARN` otherwise.
   local_path: "./workspace/repo"
   base_branch: "main"               # branch tasks fork from and PRs target by default
   branch_prefix: "worc"             # task branches: worc/<task-id>-<slug>
@@ -69,8 +74,8 @@ agents:
   # primary below). Exactly one configured provider must set `primary: true` — it runs every node
   # with no `provider` field and is the sole infrastructure-fallback target. It must be in `allowed`.
   # `model`/`reasoning` below are explicit defaults; blank either ("" / null) to use the CLI default.
-  # Full access — Codex `sandbox: danger-full-access` or Claude `--permission-mode bypassPermissions`
-  # in `extra_args` — is operator-selectable but rejected at preflight unless `strict_isolation: false`.
+  # Provider full-access modes (Codex `--sandbox danger-full-access`, Claude `--permission-mode
+  # bypassPermissions`) are forbidden outright — no config, key or flag selects them.
   providers:
     claude:
       command: "claude"       # executable name (found on PATH) or an absolute path to the CLI
@@ -80,13 +85,6 @@ agents:
       max_turns: 400           # Claude turn cap (positive int); "none" or "max" = no cap (unlimited)
       max_turns_gate: false    # when true, hitting max_turns pauses for a Telegram continue/stop
                                # prompt (requires telegram); a low cap (~50–100) is then safe
-      # allow_native_memory: false  # OPT-IN RISK — when true, drops the deny that confines Claude
-                               # Code's own auto-memory (~/.claude/projects/<repo>/memory/), letting
-                               # it persist across tasks. That store is OUTSIDE the orchestrator's
-                               # redaction net and audit; leave off unless you accept that. This is
-                               # the ONLY switch that makes it writable (disable_read_isolation
-                               # below lifts only reads), and each run then logs
-                               # "native Claude memory ON". Claude-only.
       permission_profile: "workspace-write"   # read-only | workspace-write (a flow node's ceiling may lower it)
       extra_args: []           # raw CLI flags appended verbatim; forbidden ones fail preflight
       primary: true            # the global primary (exactly one provider; must be in `allowed`)
@@ -97,31 +95,46 @@ agents:
       timeout_seconds: 7200    # per-attempt CLI wall-clock ceiling (seconds)
       permission_profile: "workspace-write"   # read-only | workspace-write — codex's isolation knob:
                                # a generated permission profile grants only this level, denies the
-                               # private/control homes + secrets + CODEX_HOME, and keeps the exchange
-                               # read-only, proven by a no-model `codex sandbox` canary before each run
-      # sandbox: "danger-full-access"   # OPT-OUT: removes codex isolation; loads only under
-                               # `strict_isolation: false` (you own the risk). read-only/workspace-write
-                               # are NOT valid here anymore — use permission_profile above.
+                               # private/control homes + secrets, and keeps the exchange
+                               # read-only, proven by a no-model `codex sandbox` canary before each
+                               # run (which also proves the CLI binary itself executes under it)
       extra_args: []           # raw CLI flags appended verbatim; forbidden ones fail preflight
 
 security:
-  strict_isolation: true              # fail-closed sandbox (default). Full-access provider modes —
-                                      #   Codex `sandbox: danger-full-access`, Claude `--permission-mode
-                                      #   bypassPermissions` in extra_args — are REJECTED at preflight,
-                                      #   and any provider whose required isolation can't be enabled
-                                      #   fails preflight (no silent downgrade). Set false ONLY to
-                                      #   consciously opt into full access (you then own the risk); the
-                                      #   absolutely-forbidden flags (--dangerously-skip-permissions,
-                                      #   --yolo, --ignore-rules) stay banned regardless.
+  strict_isolation: false             # SHIPPED DEFAULT false, and false IS THE ADVANCED MODE —
+                                      #   there is no second key. It means "full freedom for the
+                                      #   agent under YOUR responsibility, except the floor": read
+                                      #   isolation is forced off, the parent environment is
+                                      #   forwarded whole to every process run on the agent's
+                                      #   behalf, every node gets a shell and the network, and the
+                                      #   agent may write anywhere on the workspace's own volume.
+                                      #   true = the fail-closed sandbox instead.
+                                      #   What holds either way: the provider full-access modes
+                                      #   (Codex --sandbox danger-full-access, Claude
+                                      #   --permission-mode bypassPermissions) are forbidden at
+                                      #   BOTH values, together with --dangerously-skip-permissions,
+                                      #   --yolo and --ignore-rules; and no proof is skipped — the
+                                      #   config-legality check and the capability probes run at
+                                      #   either setting.
+                                      #   `worc preflight` and the run log announce the mode in ONE
+                                      #   line. What that line stands for — the four levels of the
+                                      #   floor, what each one is held by, and the two that are held
+                                      #   by nothing — is in guide/config/security.md. Read it once
+                                      #   before you keep this value; levels 3 and 4 are the ones
+                                      #   worth deciding about.
+                                      #   Operator-config ONLY (never a task/flow/extra_args key).
   disable_read_isolation: true        # DEFAULT true — read-isolation is OFF out of the box (set
                                       #   false to KEEP it on). true disables READ-isolation for
                                       #   provider runs: Claude reloads native
                                       #   CLAUDE.md + project settings/hooks/MCP/skills (via
                                       #   --setting-sources project) and Codex reloads the user +
-                                      #   project .codex config/hooks/rules; the PRIVATE read-deny
-                                      #   projection (.worc/env-file/provider homes/frozen bundles)
-                                      #   is lifted. The WRITE side stays (exchange/.git/tasks write-
-                                      #   deny, commit/staging gates, PR control) and the
+                                      #   project .codex config/hooks/rules. It does NOT open the
+                                      #   PRIVATE set (.worc, the env-file, frozen
+                                      #   bundles): that stays read+write-denied at either value —
+                                      #   native discovery never needed it, and opening it handed
+                                      #   the agent .worc/.env through the plain Read tool. The
+                                      #   WRITE side stays too (exchange/.git/tasks write-deny,
+                                      #   commit/staging gates, PR control) and the
                                       #   denied_read_paths blacklist stays enforced. strict_isolation
                                       #   is the master switch: strict_isolation: false forces this on
                                       #   regardless. Operator-config ONLY (never a task/flow/extra_args
@@ -129,23 +142,60 @@ security:
                                       #   effect — never a silent weakening. Native Windows Codex
                                       #   needs the elevated sandbox backend when read-isolation is
                                       #   ON; without it preflight/the pre-launch canary fails closed.
-  allow_git_evidence: false           # DEFAULT false. Master switch for the read-only git-evidence
-                                      #   grant: a flow node that declares `git_evidence: true` may
-                                      #   run the read-only git verbs (log, show, diff, blame,
-                                      #   status, rev-list, rev-parse, ls-files, shortlog, describe,
-                                      #   cat-file, for-each-ref) so an audit node can cite a commit
-                                      #   instead of grepping a changelog for delivery history.
-                                      #   While this is false a declaring flow still loads and
-                                      #   validates — it just runs exactly as it does today, with no
-                                      #   shell. Turning it on does NOT make the node writable: the
-                                      #   sandbox write-denies the whole clone (Claude) / forbids
-                                      #   every mutation outright (Codex), denied_commands stays the
-                                      #   floor, and commit/push/PR remain the orchestrator's alone.
+  allow_git_evidence: true            # SHIPPED DEFAULT true. Master switch for the read-only
+                                      #   git-evidence grant: a flow node that declares
+                                      #   `git_evidence: true` may run the read-only git verbs (log,
+                                      #   show, diff, blame, status, rev-list, rev-parse, ls-files,
+                                      #   shortlog, describe, cat-file, for-each-ref) so an audit
+                                      #   node can cite a commit instead of grepping a changelog for
+                                      #   delivery history. While this is false a declaring flow
+                                      #   still loads and validates — it just runs with no shell.
+                                      #   Beside the shipped strict_isolation: false this key does
+                                      #   nothing at all — every node already has an unscoped shell,
+                                      #   so there is no capability left to grant and the verb list
+                                      #   is not applied; it starts mattering the moment you set
+                                      #   strict_isolation: true. Turning it on does NOT make the
+                                      #   node writable: the sandbox write-denies the whole clone
+                                      #   (Claude) / forbids every mutation outright (Codex),
+                                      #   denied_commands is rendered as friction (it binds tool
+                                      #   calls, not the shell), and publication stays the
+                                      #   orchestrator's by mandate.
                                       #   Operator-config ONLY (never a task/flow/extra_args key).
   allowed_environment:                  # REPLACES (does not extend) the default — keep the OS-launch
                                         # essentials for YOUR OS or the spawned CLI may fail to start.
-                                        # A name absent from the host OS is simply skipped, so this
-                                        # cross-platform list is safe to keep as-is on any OS.
+                                        # A name absent from the host OS is simply skipped, so the
+                                        # cross-platform union below is safe to keep as-is on any OS.
+                                        # This TEMPLATE ships the union (22 names); the config.yaml
+                                        # `worc install` generates carries only the host OS default
+                                        # (9 names on Linux/macOS, 19 on Windows), and
+                                        # `worc upgrade-config` merges from this template. Two names
+                                        # are checked for you: `PATH` is mandatory (a config without
+                                        # it is a load error) and on Windows `SystemRoot` is a
+                                        # preflight AND run/watch/rerun launch gate. The full host
+                                        # failure explanation lives in guide/config/security.md.
+                                        # An entry may also be a PREFIX PATTERN — a name plus one
+                                        # trailing `*` — so a toolchain whose variable names you do
+                                        # not know in advance needs one line, not ten:
+                                        #     - "DOTNET_*"
+                                        #     - "NUGET_*"
+                                        #     - "npm_config_*"
+                                        # Still an allow-list by name: the pattern is resolved
+                                        # against YOUR environment, and every name it produces then
+                                        # passes the same secret-name filter — so `NUGET_*` forwards
+                                        # NUGET_PACKAGES and refuses NUGET_API_KEY. A pattern can
+                                        # never forward what a plain name could not. `*` is allowed
+                                        # ONLY as the single trailing character: a lone `*` (which
+                                        # would invert the allow-list), `A*B` and `**` are load
+                                        # errors, as is a pattern whose own prefix looks secret
+                                        # (`SECRET_*`) — it could only ever match names the filter
+                                        # drops. `worc preflight` prints what each pattern resolved
+                                        # to on this host, including a pattern that matched nothing
+                                        # (usually a typo, or a toolchain that is not installed).
+                                        # In strict mode a pattern does not implicitly forward a
+                                        # name loaded from .worc/.env; name it exactly to grant it.
+                                        # In advanced mode this list gates only orchestrator git/gh;
+                                        # agent/check/tool children get the parent environment minus
+                                        # every name loaded from .worc/.env.
     # Cross-platform base
     - "PATH"
     - "HOME"
@@ -153,8 +203,8 @@ security:
     - "USERPROFILE"
     - "CODEX_HOME"
     - "CLAUDE_CONFIG_DIR"
-    # Windows OS-launch essentials. SystemRoot is load-bearing: without it the Node-based claude.exe
-    # aborts at startup (exit 0xC0000409) before printing anything, and preflight reports it "did not succeed".
+    # Windows OS-launch essentials. SystemRoot is load-bearing for orchestrator-owned git/gh in
+    # both modes and for strict-mode agent children; preflight and task-start gates require it.
     - "SystemRoot"
     - "SystemDrive"
     - "windir"
@@ -172,6 +222,64 @@ security:
     - "TMPDIR"
     - "LD_LIBRARY_PATH"
     - "DYLD_LIBRARY_PATH"
+  extra_environment: {}               # Variables the orchestrator ASSIGNS to agent/check/tool
+                                      #   children and to orchestrator git/gh before its final
+                                      #   publication-retargeting scrub. The complement of
+                                      #   allowed_environment,
+                                      #   which only forwards a name and inherits whatever your shell
+                                      #   exported (unset on the next machine, and a forgotten
+                                      #   `export` is skipped in silence). Use it to pin a toolchain
+                                      #   root or a cache path, e.g.:
+                                      #     extra_environment:
+                                      #       DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+                                      #       NUGET_PACKAGES: "/abs/path/to/repo/.toolcache/nuget"
+                                      #       CARGO_HOME: "/abs/path/to/repo/.toolcache/cargo"
+                                      #       npm_config_cache: "/abs/path/to/repo/.toolcache/npm"
+                                      #       GOMODCACHE: "/abs/path/to/repo/.toolcache/go"
+                                      #   THE CACHE RECIPE. `dotnet build`, `cargo build` and `npm ci`
+                                      #   fail under the sandbox not because the tool is forbidden but
+                                      #   because they write to ~/.nuget, ~/.cargo, ~/.npm — outside the
+                                      #   clone. Redirect those caches INTO the clone and they work: the
+                                      #   clone is writable for a node with a shell, and nothing cleans
+                                      #   it between tasks, so the cache survives. `.toolcache/` is only
+                                      #   this guide's suggested name; any path inside the clone works.
+                                      #   Write the absolute path (there is no `{repo}` substitution) and
+                                      #   match repo.local_path exactly.
+                                      #   Three limits worth knowing before relying on it:
+                                      #     - NOT under .worc (nor .git, .worc-io, the tasks dir, or
+                                      #       anything denied_read_paths covers). Those hold the
+                                      #       orchestrator's own state, so a build writing there corrupts
+                                      #       the run or the repository. A value overlapping one in
+                                      #       either direction is refused at load, and `worc preflight`
+                                      #       also refuses a symlink or a Windows case/UNC alias that
+                                      #       reaches one.
+                                      #     - under strict isolation a `read-only` node cannot write
+                                      #       the clone, even if that provider gives it a shell. In
+                                      #       advanced mode it may write outside the clone, so the
+                                      #       outside-path warning is intentionally suppressed.
+                                      #     - the cache grows without bound. Nothing prunes it — not the
+                                      #       .worc/runs retention, not task cleanup — because deleting a
+                                      #       toolchain's cache is more dangerous than occupying disk.
+                                      #       Look here first for missing gigabytes.
+                                      #   You do NOT have to gitignore it: for a path inside the clone
+                                      #   `worc preflight` adds the rule to .git/info/exclude itself
+                                      #   (untracked, so no diff and no PR noise) and reports FAIL if the
+                                      #   path is still not ignored afterwards. Every task start repairs
+                                      #   the same rule too. A path OUTSIDE the clone gets a WARN only
+                                      #   under strict isolation; advanced mode permits that recipe.
+                                      #   Values MUST be quoted strings (`1` is a YAML int and is
+                                      #   refused, with a hint). An empty string is a valid value.
+                                      #   Applied after forwarding, so a name in both wins here.
+                                      #   Refused: `PATH` in any case (assigning it substitutes every
+                                      #   binary the child runs — forward it instead), a
+                                      #   secret-looking name, a name outside [A-Za-z_][A-Za-z0-9_]*,
+                                      #   and two names differing only in case (Windows environment
+                                      #   names are case-insensitive). YAML keys and values must both
+                                      #   be quoted strings when YAML would coerce them (`on`, `1`, etc.).
+                                      #   NEVER put credentials here: the value sits in this file in
+                                      #   plaintext, and nothing can check a value for secrecy. The
+                                      #   agent CLIs read their own credentials from their own stores.
+                                      #   `worc preflight` prints the NAMES you set, never the values.
   denied_read_paths:                  # REPLACES (does not extend) the default (.env, secrets/**). Globs
                                       #   the agent CLI may never read — enforced as --disallowedTools so
                                       #   a task can't exfiltrate secrets. Same glob dialect as protected_paths.
@@ -187,6 +295,13 @@ security:
                                       #            manifest/lock edit (ask before continuing)
                                       #   auto   = (default) routine in-repo deletions/renames/edits do
                                       #            NOT gate; only a protected_paths match asks
+                                      # The diff it looks at is measured from the last commit the
+                                      # ORCHESTRATOR made for this task (the task's start point until
+                                      # it makes one), not from HEAD — so a commit made inside the run
+                                      # by an agent cannot empty the question. You are asked at the
+                                      # writing node, at that node's `hitl` round-trip, and once more
+                                      # just before the publishing commit (the only ask a flow with no
+                                      # writing node reaches).
                                       # Never lowers the hard ceiling (env-allowlist, bypass ban, cwd
                                       # containment). A task may override with front-matter `trust_level`.
   protected_paths: []                 # repo-relative globs that ALWAYS require approval on ANY change,
@@ -201,7 +316,7 @@ validation:                         # input hardening gate; rejects broken tasks
   max_line_bytes: 8192              # reject any single line longer than this (bytes)
   max_control_ratio: 0.01           # reject if control/binary chars exceed this fraction (0.01 = 1%)
   quarantine_folder: "./.worc/tasks/rejected"   # rejected task files are moved here
-  # NOT configurable (and no longer accepted as keys, config v35): the required front matter
+  # NOT configurable (and not accepted as keys): the required front matter
   # (`id`, a non-blank `title`, a non-empty `Description` section) and the deny on an unrecognized
   # front-matter key are hard-coded in the task gate. `upgrade-config` strips both old keys.
 
@@ -268,7 +383,7 @@ git:
                                     # gitignored <repo>/.worc/ home; only the task file and its
                                     # <id>.summary.md are committed, at the repo root under tasks/.
                                     # This is a separate audit commit, not a second code commit.
-    audit_commit_message: "chore(orchestrator): audit trail for {task_id}"
+    audit_commit_message: "chore(worc): audit trail for {task_id}"
     audit_on_branch: task           # task = same branch as the code; sibling = <branch>-audit
 
 telegram:                           # human-in-the-loop + notifications (optional)
@@ -281,22 +396,14 @@ telegram:                           # human-in-the-loop + notifications (optiona
 # Prompt templates are not configured here: a flow node's prompt is the content of its `role_file`
 # (each flow owns its prompts under `.worc/flows/<task_type>/*.md`). Edit the role file to
 # customize a node's prompt. Role files render only allowlisted path/metadata variables ({task_id}
-# {stage} {repo_path} {task_path} {plan_path} {diff_path} {checks_path} {review_path} {skills_path}
+# {stage} {repo_path} {task_path} {plan_path} {diff_path} {checks_path} {review_path}
 # {memory_path} {subtask_order} {subtask_count} {subtask_spec_path}) — never task bodies, diffs,
 # env, or secrets.
 
-skills:                             # repo skill selection (optional)
-  dynamic: false                    # supervisor proposes a node->skills map once per task; opt in (adds one turn)
-  strict: false                     # false = warn+skip an unresolved operator pin; true = stop the task
-  # At task start the orchestrator discovers every tracked SKILL.md in the clone (git ls-files,
-  # whole-repo). Each flow node gets the skills the operator pinned on it (flow YAML `skills:`) plus,
-  # when `dynamic`, the supervisor's proposed ones — the Core decides. Chosen SKILL.md files reach the
-  # node as read-only reference paths (never executed, never the Claude Skill tool — Codex has none).
-
 supervisor:                         # oversight layer above any flow (not a node) — on by default
   enabled: true                     # false = the layer is never built: no per-step notes, no whole-task
-                                    #   summary turn, no subtask handoff brief, no `skills.dynamic`
-                                    #   proposal, and every key below is inert (one warning says so).
+                                    #   summary turn, no subtask handoff brief, and every key below
+                                    #   is inert (one warning says so).
                                     #   The PR body is then rendered deterministically from the run's own
                                     #   recorded facts — changed paths, steps, checks, gate verdicts,
                                     #   follow-ups — so no run ships without one. Also forces
@@ -333,13 +440,15 @@ supervisor:                         # oversight layer above any flow (not a node
   # is already a durable fact the finalize packet carries verbatim.
   # A flow may NARROW this in its own `supervisor.observe.mode` (a content flow ships `none`) but
   # never widen it — a broader flow mode fails validation. Ranking: none < events < selected < all.
+  # When a flow does narrow yours, the run prints one line at the start naming both modes and, when
+  # the flow lands on `none`, the `triggers` below that stop applying — otherwise the loss is
+  # silent, and an operator asking for fallback notes gets none from a content flow with no reason
+  # given anywhere.
   # That check does not apply at `enabled: false`: there is no cadence to widen, so a flow declaring
   # any mode still runs. That is why switching the layer off is its own key, not a global `none`.
-  # The once-per-task skill proposal (`skills.dynamic`) uses the `observe` model/effort — same cheap
-  # shape — and runs regardless of `mode`, which gates per-step observations only.
 
 logging:                            # operator log verbosity + on-disk artifact retention (optional)
-  level: info                       # debug | info | warning | error. Persists the structured operator
+  level: warning                    # debug | info | warning | error. Persists the structured operator
                                     #   trace level; the --log-level CLI flag overrides it when given.
   artifacts: standard               # per-attempt provider files kept under logs/<id>/stages/.../<attempt>-<provider>/:
                                     #   minimal  = result.json only (even on failure)
@@ -357,8 +466,12 @@ logging:                            # operator log verbosity + on-disk artifact 
                                     #   orchestrator also does it itself). Per-task log dirs are separate:
                                     #   they stay with `worc logs clean`. See guide/footprint.md.
 
-memory:                             # persistent, repo-scoped memory (optional)
-  enabled: true                     # false / omit the whole block = today's behavior: no store, no
+memory:                             # persistent, repo-scoped memory (optional) — EXPERIMENTAL
+  # EXPERIMENTAL / NOT STABLE. The subsystem runs, but its store is unaudited and carries no
+  #   redaction guarantee, and its curation quality is still being reworked — the block's shape,
+  #   defaults and knobs can change without a migration path. Leave it off unless you are
+  #   deliberately experimenting, and expect to re-read this block after an upgrade.
+  enabled: false                    # SHIPPED DEFAULT false. false / omit the whole block = no store, no
                                     #   candidate delta, empty memory packets, CLI no-op, no cleanup
                                     # Needs `supervisor.enabled: true`: that layer's closing turn is the
                                     #   only path that writes anything memory can read back, so with the

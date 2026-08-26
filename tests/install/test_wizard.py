@@ -171,7 +171,7 @@ def test_aborted_final_confirm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_install_does_not_seed_checks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # v15: the wizard no longer detects/seeds checks; the operator authors `command_sets` by hand.
+    # The wizard never detects or seeds checks; the operator authors `command_sets` by hand.
     root = tmp_path / "repo"
     _patch_detect(monkeypatch, root=root)
     spec = _run(monkeypatch, root).spec

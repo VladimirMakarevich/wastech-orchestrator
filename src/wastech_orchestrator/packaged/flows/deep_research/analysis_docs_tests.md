@@ -21,7 +21,7 @@ Record an exact `path:line` for every observation you intend to make a claim abo
 3. **Cross-unit gaps.** Follow whatever dependency chains the project tracks between units, and look for the specific failure mode: an earlier unit that needed something from a later one, was completed with a placeholder or partial seam, and was never revisited once the later unit shipped.
 4. **Test adequacy — both directions.** Compare each unit's stated coverage priorities against what the tests actually exercise, and also look for a load-bearing claim with no test at all. A test that asserts the mock rather than the behaviour counts as absent.
 5. **Documentation drift.** A documented flag, default, path or workflow that the code no longer implements — and the reverse, shipped behaviour the plan never records.
-6. **Delivery evidence.** Where the history is reachable **with the tools you were actually granted** (`git log` / `git show` need a shell), a unit marked complete by a change that did less than it claims is a prime finding. With no shell, say so and drop the claim — do not grep a changelog and present that as history.
+6. **Delivery evidence.** Where the history is reachable **with the tools you were actually granted** (`git log` / `git show` need a shell), a unit marked complete by a change that did less than it claims is a prime finding. Whether you have one depends on how this run is configured, so check rather than assume: if you do not, say so and drop the claim — do not grep a changelog and present that as history.
 
 {?review_path}
 

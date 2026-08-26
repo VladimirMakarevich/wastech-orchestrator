@@ -26,7 +26,8 @@ from wastech_orchestrator.providers.base import AgentProvider, ProviderId
 from wastech_orchestrator.providers.process import AgentHandleRecorder
 from wastech_orchestrator.routing.router import AgentRouter
 from wastech_orchestrator.runtime_layout import InternalDenyPolicy, RuntimeLayout
-from wastech_orchestrator.security.isolation import IsolationCheck
+from wastech_orchestrator.security.isolation import HostFloorCheck, IsolationCheck
+from wastech_orchestrator.security.shell_reach import ShellCheck
 from wastech_orchestrator.state_store import StateStore
 from wastech_orchestrator.task.validation_gate import ValidationGate
 
@@ -37,17 +38,30 @@ ISOLATION_CHECKS: dict[ProviderId, IsolationCheck] = {
     ProviderId.CODEX: codex.isolation_reasons,
 }
 
-# ProviderId → its config/credential home resolver, bound here (the composition root) so the
-# provider-neutral :class:`RuntimeLayout` never learns a provider-specific path. Used to populate
-# the :class:`InternalDenyPolicy` with the operator-owned auth homes to deny.
-_PROVIDER_CONFIG_HOMES: dict[ProviderId, Callable[[], Path]] = {
-    ProviderId.CLAUDE: claude.claude_config_home,
-    ProviderId.CODEX: codex.codex_config_home,
+# ProviderId → offline "what can this host not enforce?" answer, bound here for the same reason.
+# Only Claude is listed: its floor rides an OS sandbox that can be classified offline, while Codex
+# runs its own backend and answers the same question per attempt, from inside it, with a canary.
+# An absent entry is the honest "no answer here" — binding a hardcoded "the floor exists" would be a
+# claim about a host nothing verified.
+HOST_FLOOR_CHECKS: dict[ProviderId, HostFloorCheck] = {
+    ProviderId.CLAUDE: claude.host_floor_gap,
+    # Codex answers a different shape of the same question — its sandbox availability is decided by
+    # its own CLI, not by a platform plus two executables — but the requirement is about the HOST,
+    # so an entry that says "not classifiable offline here" beats no entry at all: without one a
+    # Codex-only park on native Windows printed no floor line and got no preamble paragraph.
+    ProviderId.CODEX: codex.host_floor_gap,
+}
+
+# ProviderId → offline "does this attempt get a shell?" check, bound here for the same reason: the
+# core's per-attempt detection bracket keys on command execution, and only the adapter knows whether
+# its resolved tool set keeps one on this host.
+SHELL_CHECKS: dict[ProviderId, ShellCheck] = {
+    ProviderId.CLAUDE: claude.attempt_has_shell,
+    ProviderId.CODEX: codex.attempt_has_shell,
 }
 
 
 def build_internal_deny_policy(
-    config: OrchestratorConfig,
     layout: RuntimeLayout,
     *,
     env_file: Path | None = None,
@@ -55,24 +69,18 @@ def build_internal_deny_policy(
     """Assemble the internal deny policy at the composition boundary.
 
     Collects the control/private homes from the provider-neutral ``layout``, the resolved
-    default/explicit ``env_file`` (which may live outside ``private_home``), the config or
-    credential homes of the *configured* providers (:data:`_PROVIDER_CONFIG_HOMES`), and the
-    per-task runtime root (``layout.runs_home``) that parents every frozen bundle, seal, and
-    quarantined tree. Resolving the provider homes here — not inside :class:`RuntimeLayout` — keeps
-    the layout provider-neutral.
+    default/explicit ``env_file`` (which may live outside ``private_home``), and the per-task
+    runtime root (``layout.runs_home``) that parents every frozen bundle, seal, and quarantined
+    tree. The provider CLIs' own config homes are deliberately not collected — the deny they would
+    carry is per-file, not per-directory, and a whole-home deny breaks a CLI whose own binary or
+    helpers live inside it (see :class:`InternalDenyPolicy`).
 
     These are representations only; the provider adapters project them into their own policy.
     """
-    provider_homes = tuple(
-        _PROVIDER_CONFIG_HOMES[pid]()
-        for pid in config.agents.providers
-        if pid in _PROVIDER_CONFIG_HOMES
-    )
     return InternalDenyPolicy(
         control_home=layout.control_home,
         private_home=layout.private_home,
         env_file=env_file,
-        provider_homes=provider_homes,
         runs_home=layout.runs_home,
     )
 
@@ -97,7 +105,7 @@ def build_providers(
     """
     root = str(layout.private_home)
     artifact_level = config.logging.artifacts
-    policy = deny_policy if deny_policy is not None else build_internal_deny_policy(config, layout)
+    policy = deny_policy if deny_policy is not None else build_internal_deny_policy(layout)
     providers: dict[ProviderId, AgentProvider] = {}
     for pid, provider_cfg in config.agents.providers.items():
         if pid is ProviderId.CLAUDE:
@@ -158,8 +166,8 @@ def build_orchestrator(
     # it
     # into the providers (read/write-deny projection), the Orchestrator (audit), and — as the
     # offline
-    # isolation-check table — the Router's ``CAPABILITY_UNAVAILABLE`` host-verified fallback gate.
-    deny_policy = build_internal_deny_policy(config, layout, env_file=env_file)
+    # isolation-check table — the Router's ``CAPABILITY_UNAVAILABLE`` fallback-eligibility gate.
+    deny_policy = build_internal_deny_policy(layout, env_file=env_file)
     providers = build_providers(
         config,
         layout=layout,
@@ -171,7 +179,11 @@ def build_orchestrator(
     store = StateStore.open(private_home / "state.db")
     ledger = Ledger(private_home / "logs")
     router = AgentRouter(
-        config, providers, is_cancelled=is_cancelled, isolation_checks=ISOLATION_CHECKS
+        config,
+        providers,
+        is_cancelled=is_cancelled,
+        isolation_checks=ISOLATION_CHECKS,
+        shell_checks=SHELL_CHECKS,
     )
     git = GitManager(
         config,
@@ -205,5 +217,6 @@ def build_orchestrator(
         resolver=resolver,
         heartbeat_seconds=heartbeat_seconds,
         isolation_checks=ISOLATION_CHECKS,
+        host_floor_checks=HOST_FLOOR_CHECKS,
         is_cancelled=is_cancelled,
     )

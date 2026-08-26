@@ -8,11 +8,11 @@ and at whole-task close synthesizes the ``summary`` + advisory caveats.
 
 Two things bound that cost. The deterministic ``tool`` / ``checks`` nodes are **not** observed —
 their result is already a durable fact (``node_runs`` / ``check_runs``), so an LLM note about it
-buys nothing. And the whole-task ``finalize`` no longer depends on the warm session at all: it runs
+buys nothing. And the whole-task ``finalize`` does not depend on the warm session at all: it runs
 on a **fresh** session seeded by the :mod:`~wastech_orchestrator.core.supervisor_packet`
 ``SupervisorPacket`` — a small deterministic artifact built from durable state and handed over as a
-path. So a normal run and a revive follow one reproducible path, and the finalize call's input stops
-growing with the run's rework cycles.
+path. So a normal run and a revive follow one reproducible path, and the finalize call's input does
+not grow with the run's rework cycles.
 
 It is **advisory by construction**: it never reworks, reopens, or routes. Each observation is
 recorded as an immutable ``evaluations`` row (``supervisor_step`` / ``supervisor_final``,
@@ -40,7 +40,7 @@ from typing import Any, Protocol
 
 from wastech_orchestrator.config.schema import SupervisorConfig
 from wastech_orchestrator.core.flow.engine import Finding
-from wastech_orchestrator.core.flow.nodes.base import RegisterArtifact, RouterPort
+from wastech_orchestrator.core.flow.nodes.base import GitPort, RegisterArtifact, RouterPort
 from wastech_orchestrator.core.flow.nodes.exchange_publish import publish_artifact
 from wastech_orchestrator.core.flow.observability import (
     record_provider_attempts,
@@ -63,13 +63,13 @@ from wastech_orchestrator.core.follow_ups import (
     render_follow_ups_section,
     render_gate_digest,
 )
-from wastech_orchestrator.core.skills import SkillInventory
 from wastech_orchestrator.core.supervisor_packet import (
     bound_step_message,
     build_packet_facts,
     render_packet,
 )
 from wastech_orchestrator.core.supervisor_usage import SupervisorFunction, summarize_spend
+from wastech_orchestrator.git_manager import GitControlState
 from wastech_orchestrator.memory.delta import DELTA_OUTPUT_SCHEMA, CandidateDelta, parse_delta
 from wastech_orchestrator.providers.artifacts import (
     node_run_dir,
@@ -84,6 +84,7 @@ from wastech_orchestrator.providers.base import (
 )
 from wastech_orchestrator.providers.exchange import assert_orchestration_paths_contained
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
+from wastech_orchestrator.runtime_layout import ProviderWriteGuardPolicy
 from wastech_orchestrator.state_store import (
     CheckRunRow,
     EvaluationRow,
@@ -104,6 +105,11 @@ def _utc_now_iso() -> str:
 # route label); it is not a graph node, so it records ``evaluations`` rows, never ``node_runs``.
 _SUPERVISOR_IDENTITY = "supervisor"
 
+# The layer's forced permission profile. Named once because two places need the same value: the
+# request it launches with, and the per-attempt "does this turn get a shell" question its detection
+# bracket asks — a bracket keyed on a different profile than the launch would watch the wrong thing.
+_SUPERVISOR_PROFILE = "read-only"
+
 # The reserved ``node_lineage`` key under which the supervisor's own durable session lives. It is a
 # double-underscore sentinel, distinct from the routing identity above, so it can never collide with
 # a real flow node id (an operator could legally name an evaluator node ``supervisor``).
@@ -114,72 +120,26 @@ _SUPERVISOR_LINEAGE_NODE_ID = "__supervisor__"
 # are trivially comparable.
 _PACKET_FILENAME = "packet.json"
 
-# The ``node_run_id`` namespacing the upfront skill-map proposal's artifact dir
-# (``stages/supervisor/run-NNNNNN/``). Distinct from finalize's ``0`` and from any real (positive,
-# small, autoincrement) node-run id, so the three turn kinds never collide on the same path.
-_PROPOSAL_RUN_ID = 999_999
-
-# Skill descriptions are untrusted ``SKILL.md`` frontmatter, so the inlined proposal
-# metadata is bounded to this many characters (name/path are identifier-sized and pass unbounded);
-# the full skill package is only read from the frozen exchange after the Core accepts the proposal.
-_SKILL_DESCRIPTION_INLINE_CAP = 200
-
-
-def _bounded_description(description: str) -> str:
-    """Truncate an untrusted skill description to the recorded inline cap for the proposal."""
-    text = description.strip()
-    if len(text) <= _SKILL_DESCRIPTION_INLINE_CAP:
-        return text
-    return text[: _SKILL_DESCRIPTION_INLINE_CAP - 1].rstrip() + "…"
-
-
 # Base for the subtask-boundary handoff turns' artifact-dir namespace.
 # Each handoff uses ``_HANDOFF_RUN_ID_BASE + subtask_order`` so multiple handoffs in one task (a
 # chain, or a diamond) write to DISTINCT dirs — ``create_attempt_dir`` forbids overwriting
 # (``exist_ok=False``), so a shared id would make the second boundary's turn raise and silently
-# degrade to the floor alone. The base is distinct from the proposal (999999) and finalize (0), and
-# far above any real (small autoincrement) node-run id.
+# degrade to the floor alone. The base is distinct from finalize's ``0`` and far above any real
+# (small autoincrement) node-run id.
 _HANDOFF_RUN_ID_BASE = 990_000
 
-# The strict provider schema for the once-per-task ``node → skills`` proposal. Array-shaped (not an
-# arbitrary-key object) so it validates under strict JSON-schema: each assignment names one node and
-# its proposed skill tokens. The Core resolves the tokens against the discovered inventory.
-_SKILL_MAP_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "properties": {
-        "assignments": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "properties": {
-                    "node": {"type": "string", "minLength": 1},
-                    "skills": {
-                        "type": "array",
-                        "items": {"type": "string", "minLength": 1, "maxLength": 512},
-                    },
-                },
-                "required": ["node", "skills"],
-            },
-        }
-    },
-    "required": ["assignments"],
-}
-
-
-# The evidence-gated ``follow_ups`` schema (task 1). Hardcoded in code — a flow author reshapes the
+# The evidence-gated ``follow_ups`` schema. Hardcoded in code — a flow author reshapes the
 # supervisor's *wording* via its prompt files, but never the machine contract the orchestrator
 # parses. Each record is minimal and grounded: an unsupported "refactor idea" carries no evidence
 # and is dropped by :func:`parse_follow_ups`.
 # Nullable array root (``["array", "null"]``) + full ``required`` so this validates under OpenAI
 # strict mode when nested as the finalize turn's ``follow_ups``: no follow-ups → ``null``.
-# Formerly-optional ``paths``/``action_hint`` are nullable so the model may still omit them;
-# :func:`parse_follow_ups` treats ``null`` identically to an absent key.
-# The root ``description`` is load-bearing, not decoration: without it a model that had nothing to
-# report OMITTED the key (following the prose "leave the array empty"), was rejected three times for
-# a missing required property, and collapsed to a four-byte probe summary that shipped as a PR body.
-# The schema now states the contract the prompt states, so the two cannot disagree.
+# ``paths``/``action_hint`` are nullable rather than optional so the model may still omit them under
+# that same strict mode; :func:`parse_follow_ups` treats ``null`` identically to an absent key.
+# The root ``description`` is load-bearing, not decoration: without it a model with nothing to
+# report omits the key (following the prose "leave the array empty"), is rejected for a missing
+# required property, and collapses to a few-byte summary that then ships as a PR body. It states in
+# the schema what the prompt states in prose, so the two cannot disagree.
 _FOLLOW_UPS_SCHEMA: dict[str, Any] = {
     "type": ["array", "null"],
     "description": (
@@ -409,32 +369,6 @@ class FinalizeResult:
     follow_ups: tuple[FollowUp, ...] = ()
 
 
-def _parse_skill_map(structured: Mapping[str, Any] | None) -> dict[str, tuple[str, ...]]:
-    """Parse the proposal's structured output into ``{node_id: (token, ...)}`` — defensively.
-
-    Best-effort to match the advisory contract: a malformed payload yields ``{}`` and a malformed
-    assignment is skipped, never raised. The Core still validates every token against the inventory,
-    so a bad proposal can at worst contribute nothing.
-    """
-    if not isinstance(structured, Mapping):
-        return {}
-    assignments = structured.get("assignments")
-    if not isinstance(assignments, list):
-        return {}
-    out: dict[str, tuple[str, ...]] = {}
-    for item in assignments:
-        if not isinstance(item, Mapping):
-            continue
-        node = item.get("node")
-        skills = item.get("skills")
-        if not isinstance(node, str) or not node.strip() or not isinstance(skills, list):
-            continue
-        tokens = tuple(s.strip() for s in skills if isinstance(s, str) and s.strip())
-        if tokens:
-            out[node.strip()] = tokens
-    return out
-
-
 class SupervisorTurnSettings(Protocol):
     """The model + effort of one supervisor phase, structurally.
 
@@ -486,6 +420,7 @@ class Supervisor:
         router: RouterPort,
         store: SupervisorStorePort,
         repo_dir: str,
+        git: GitPort | None = None,
         artifacts_root: str | Path,
         flow_dir: Path,
         exchange_root: str | Path = "",
@@ -506,6 +441,11 @@ class Supervisor:
         # threads its own so a run's audit timestamps share one source.
         self._clock = clock
         self._repo_dir = repo_dir
+        # The Git Manager slice the layer's own provider attempt is bracketed with. The supervisor
+        # turn is read-only by mandate, but on Codex — and on every provider in the advanced mode —
+        # it still gets a shell, and a shell is what makes a ``.git`` mutation reachable. ``None``
+        # (a harness without a clone) skips both the write guard and the comparison.
+        self._git = git
         self._artifacts_root = artifacts_root
         # The provider-readable exchange root ``<repo>/.worc-io``; the supervisor's own
         # provider call passes the same pre-launch containment gate as agent/evaluator (Part C).
@@ -615,12 +555,12 @@ class Supervisor:
         ``summary.json`` is always written. Returns the summary path + the delta + the follow-ups.
 
         The turn **always** runs on a fresh session seeded by the ``SupervisorPacket``, on a normal
-        run exactly as on a revive: the warm session it used to resume was the reason a revived
-        task got a thinner summary and the reason this call's input grew with every rework cycle.
-        There is no warm auto-fallback if the packet cannot be built — that would put
-        non-determinism back into the one path this makes reproducible and hide the build failure;
-        the fallback stays what it was, the orchestrator's deterministic minimal summary after a
-        turn that produced nothing.
+        run exactly as on a revive: resuming a warm session instead would give a revived task a
+        thinner summary and grow this call's input with every rework cycle. There is no warm
+        auto-fallback if the packet cannot be built — that would put non-determinism back into the
+        one path this makes reproducible and hide the build failure. The fallback is the
+        orchestrator's deterministic minimal summary, the same one a turn that produced nothing
+        gets.
         """
         # ``node_run_id=0`` is the once-per-task finalize sentinel; per-step observations use the
         # observed step's id, so each supervisor turn writes a distinct artifact dir (no collision).
@@ -881,58 +821,6 @@ class Supervisor:
             return None
         return _render_handoff_brief(result.structured_output)
 
-    # -- upfront skill-map proposal --------------------------------------------
-
-    def propose_skill_map(
-        self,
-        *,
-        task_id: str,
-        agent_node_ids: Sequence[str],
-        inventory: SkillInventory,
-        task_path: str | None = None,
-    ) -> dict[str, tuple[str, ...]]:
-        """Propose a ``node → skills`` map once per task (read-only, propose-only — Core decides).
-
-        The supervisor's first turn, on its own durable session, so later per-step observations and
-        the whole-task summary inherit its reasoning about which skills it chose. Skipped (``{}``)
-        when the inventory is empty — a repo with no skills pays nothing. Best-effort by contract:
-        any failure (no provider, infra error, malformed output) is logged and yields ``{}``, and
-        the run continues on operator pins alone. The supervisor only *proposes* tokens; the
-        orchestrator resolves them against the inventory and merges them with the static pins.
-
-        The task body is **never** inlined here — the proposal reads it from the frozen
-        exchange packet (``task_path``, rendered in the context footer); only bounded, allowlisted
-        skill metadata (name/path + a length-bounded description) reaches the prompt.
-        """
-        if not inventory.skills:
-            return {}
-        prompt = self._proposal_prompt(task_id, agent_node_ids, inventory)
-        result = self._run_result(
-            task_id,
-            prompt,
-            node_run_id=_PROPOSAL_RUN_ID,
-            # The cheap pair: a once-per-task, schema-bound proposal has the observe phase's cost
-            # profile, not the whole-task synthesis's. Independent of ``observe.mode``, which gates
-            # per-step observations only — this turn runs whenever ``skills.dynamic`` is on. Sharing
-            # the settings is exactly why the spend label has to be passed separately.
-            turn=self._settings.observe,
-            function=SupervisorFunction.SKILL,
-            output_schema=_SKILL_MAP_SCHEMA,
-            task_path=task_path,
-        )
-        proposal = _parse_skill_map(result.structured_output) if result is not None else {}
-        self._record(
-            task_id,
-            kind="supervisor_skill_proposal",
-            source_node_run_id=None,
-            subtask_order=None,
-            payload={
-                "assignments": {node: list(skills) for node, skills in proposal.items()},
-                "proposal_failed": result is None,
-            },
-        )
-        return proposal
-
     # -- internals -------------------------------------------------------------
 
     def _run(
@@ -1004,6 +892,7 @@ class Supervisor:
         readable per job. It cannot be inferred from ``turn``: two different jobs deliberately share
         the observe phase's cheap model + effort, so the settings object does not identify either.
         """
+        control_before: GitControlState | None = None
         try:
             route = self._router.resolve_route(_SUPERVISOR_IDENTITY, self._settings.provider)
             # Cap to `high` for a schema turn (fragile at max) OR an advisory observe turn
@@ -1018,12 +907,20 @@ class Supervisor:
             resume_id, usage_baseline, baseline_session_id = (
                 self._resume_context(task_id, route) if resume_session else (None, None, None)
             )
+            # The same per-attempt bracket the graph nodes take, keyed on the same question: does
+            # this attempt get a shell? The layer is read-only by mandate, but the mandate is not a
+            # mechanism — Codex runs commands on ``read-only``, and in the advanced mode so does
+            # Claude. With the write guard on the request the provider's pre-launch canary re-proves
+            # the ``.git``/``.worc`` denies here too, which is what makes floor 1's "before every
+            # provider attempt" literally true; drift after the turn is reported, never parked,
+            # because an advisory layer must not be able to stop a reviewed, passing change.
+            write_guard, control_before = self._control_bracket(route)
             request = AgentRunRequest(
                 task_id=task_id,
                 node_id=_SUPERVISOR_IDENTITY,
                 working_directory=self._repo_dir,
                 prompt=prompt,
-                permission_profile="read-only",  # forced — the supervisor never writes
+                permission_profile=_SUPERVISOR_PROFILE,  # forced — the supervisor never writes
                 timeout_seconds=self._default_timeout_seconds,
                 attempt=1,
                 node_run_id=node_run_id,  # not a graph node; audit lives in ``evaluations``
@@ -1040,6 +937,10 @@ class Supervisor:
                 supervisor_packet_path=supervisor_packet_path,
                 # Defense-in-depth: the Core-owned orchestrator security contract (advisory).
                 security_preamble=self._security_preamble,
+                # The Git-control / lifecycle roots this attempt must not be able to write. Resolved
+                # only when the attempt has a shell — a profile that can run nothing needs no
+                # carve-out from it.
+                write_guard=write_guard,
             )
             # Same pre-launch containment invariant as agent/evaluator: the supervisor
             # carries the frozen exchange ``task_path``, so this asserts it resolves under the
@@ -1060,6 +961,7 @@ class Supervisor:
         self._record_provider_attempts(
             task_id, outcome, function, usage_baseline, baseline_session_id
         )
+        self._report_control_drift(task_id, control_before)
         result = outcome.result
         if result is None:
             return None
@@ -1078,6 +980,48 @@ class Supervisor:
             reasoning=reasoning,
         )
         return result
+
+    def _control_bracket(
+        self, route: ResolvedRoute
+    ) -> tuple[ProviderWriteGuardPolicy | None, GitControlState | None]:
+        """``(write guard, control fingerprint)`` for a supervisor turn that gets a shell.
+
+        ``(None, None)`` when there is no Git Manager or when neither end of the route would give
+        this turn a shell — the signal to skip both, so a turn that can run nothing pays for
+        neither. The shell answer comes from the adapters through the Router (the layer's profile is
+        forced ``read-only``, and it declares no git-evidence grant), fail-closed like everywhere
+        else: an unclassifiable attempt is bracketed rather than left unwatched.
+        """
+        if self._git is None:
+            return None, None
+        if not self._router.route_grants_shell(
+            route, permission_profile=_SUPERVISOR_PROFILE, git_evidence=False
+        ):
+            return None, None
+        exchange_root = str(self._exchange_root) if self._exchange_root else None
+        return (
+            self._git.resolve_control_paths(exchange_root),
+            self._git.capture_git_control_state(),
+        )
+
+    def _report_control_drift(self, task_id: str, before: GitControlState | None) -> None:
+        """Warn when the Git control state moved across a supervisor turn; never park.
+
+        The layer is advisory by contract — it can flag but cannot rework, and a reviewed, passing
+        change is never blocked by it — so this is the same verdict every non-writing node class
+        gets: a loud line carrying the drift's aspect-level summary, and the run continues. The
+        summary comes from the redacted formatter, so no configuration value reaches the log.
+        """
+        if before is None or self._git is None:
+            return
+        drift = self._git.compare_git_control_state(before)
+        if drift is None:
+            return
+        _LOG.warning(
+            "git control state changed during a supervisor turn (advisory, run continues): %s",
+            drift.summary(),
+            extra={"task_id": task_id},
+        )
 
     def _record_turn_observability(
         self,
@@ -1265,37 +1209,6 @@ class Supervisor:
             observed += f"\nThe step reported:\n{bound_step_message(final_message)}\n"
         return self._base_prompt(task_id) + "\n\n" + observed
 
-    def _proposal_prompt(
-        self,
-        task_id: str,
-        agent_node_ids: Sequence[str],
-        inventory: SkillInventory,
-    ) -> str:
-        nodes = "\n".join(f"- {nid}" for nid in agent_node_ids) or "- (none)"
-        # Skill descriptions come from untrusted repository ``SKILL.md`` frontmatter, so they are
-        # bounded to a recorded cap here (name/path are identifier-sized); the full skill package is
-        # read from the frozen exchange only after the Core accepts the proposal.
-        skills = "\n".join(
-            f"- {s.name} — {_bounded_description(s.description)} [{s.path}]"
-            for s in inventory.skills
-        )
-        return (
-            self._base_prompt(task_id)
-            + "\n\n## Skill map proposal\n"
-            + "Before any step runs, propose which repo skills (if any) each flow node below "
-            + "should receive. This is read-only and propose-only — you do not route or edit; the "
-            + "Core decides which proposals it accepts and resolves each against the real "
-            + "inventory. Address a skill by its name; if a name is shared by more than one skill, "
-            + "use the repo-relative path shown in [brackets]. Propose a skill only when it is "
-            + "clearly relevant to that node's job, and do not propose orchestrator gate skills "
-            + "(run-checks / test / sync-docs and the like). Return assignments only for the nodes "
-            + "that need skills; omit the rest.\n\n"
-            + f"### Flow nodes (agent)\n{nodes}\n\n"
-            + f"### Available skills\n{skills}\n\n"
-            + "### Task\nThe task specification is provided as the task packet referenced in the "
-            + "context below — read it there; it is not inlined here.\n"
-        )
-
     def _finalize_prompt(
         self,
         task_id: str,
@@ -1396,7 +1309,7 @@ class Supervisor:
         """The observe lens: flow ``role_file`` → global ``config.supervisor.role_file`` → built-in.
 
         Best-effort: each candidate that is missing/bad/traversing (``RoleFileError``) falls through
-        to the next, so the supervisor's per-step observation and skill proposal never break."""
+        to the next, so the supervisor's per-step observation never breaks."""
         return self._render_chain(
             task_id, (self._flow_role_file, self._settings.role_file), _BUILTIN_OBSERVE
         )

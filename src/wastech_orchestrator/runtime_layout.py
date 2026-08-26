@@ -1,8 +1,8 @@
 """Canonical runtime directory layout — the one seam that names the orchestrator's roots.
 
-The orchestrator writes to three distinct on-disk surfaces that historically all lived under a
-single ``<repo>/.worc`` literal reconstructed independently across the CLI, Core, memory, Git,
-output-policy, and process-control paths:
+The orchestrator writes to three distinct on-disk surfaces, all under ``<repo>/.worc``. They are
+named here once so the CLI, Core, memory, Git, output-policy, and process-control paths resolve them
+from a single seam instead of each reconstructing the literal:
 
 * **control_home** — the discoverable operator control plane (``config.yaml``, ``guide/``,
   ``flows/``, ``tools/``, install metadata). Editable by the operator, resolved by config discovery.
@@ -54,8 +54,8 @@ RUNS_DIRNAME = "runs"
 # out of tree together with the rest of the private runtime state.
 CONTROL_BUNDLE_DIRNAME = "control-bundles"
 
-# The per-task frozen instruction bundles: the canonical (unredacted) task packet, selected skill
-# packages, and root repository instruction files, plus the composite manifest. Each task's snapshot
+# The per-task frozen instruction bundles: the canonical (unredacted) task packet and the root
+# repository instruction files, plus the composite manifest. Each task's snapshot
 # is ``<runs>/<INSTRUCTION_BUNDLE_DIRNAME>/<task-id>/``. The redacted, agent-readable *injection*
 # copies go to the exchange, never here.
 INSTRUCTION_BUNDLE_DIRNAME = "instruction-bundles"
@@ -127,14 +127,15 @@ class InternalDenyPolicy:
     """The orchestrator's internal set of paths a provider must never read.
 
     This is **internal provider policy**, deliberately kept separate from the overloaded public
-    ``security.denied_read_paths`` config list (which also drives redaction and skill scanning). It
+    ``security.denied_read_paths`` config list (which also drives redaction). It
     names the roots and secret sources the agent must not read: the control home, the private home,
-    the resolved default/explicit ``--env-file`` (which may live outside ``private_home``), the
-    provider-owned auth/config homes (``~/.claude`` / ``$CLAUDE_CONFIG_DIR``, ``$CODEX_HOME``), and
-    the per-task runtime root.
+    the resolved default/explicit ``--env-file`` (which may live outside ``private_home``), and the
+    per-task runtime root. The provider CLIs' own config homes are deliberately NOT here: denying
+    them breaks the providers' own machinery — Codex re-execs its binary from inside ``$CODEX_HOME``
+    on standalone installs — and they are the operator's, not the orchestrator's, to protect.
 
     ``runs_home`` is the parent of every per-task private root: the frozen control snapshot, the
-    frozen agent inputs (canonical task packet, skill packages, root repository instruction files),
+    frozen agent inputs (canonical task packet, root repository instruction files),
     the sealed terminal exchanges, and the quarantined evidence. It lives under ``private_home`` and
     so is already covered by that deny transitively; naming it explicitly makes the adapters'
     projection deny it by name (not by coincidence of location) and keeps it denied if
@@ -148,16 +149,14 @@ class InternalDenyPolicy:
     control_home: Path
     private_home: Path
     env_file: Path | None
-    provider_homes: tuple[Path, ...]
     runs_home: Path | None = None
 
     @property
     def denied_paths(self) -> tuple[Path, ...]:
-        """The full deny set, ordered + de-duplicated (homes, env-file, provider homes, runs)."""
+        """The full deny set, ordered + de-duplicated (homes, env-file, runs)."""
         ordered: list[Path] = [self.control_home, self.private_home]
         if self.env_file is not None:
             ordered.append(self.env_file)
-        ordered.extend(self.provider_homes)
         if self.runs_home is not None:
             ordered.append(self.runs_home)
         return _dedupe(ordered)
@@ -165,13 +164,16 @@ class InternalDenyPolicy:
 
 @dataclass(frozen=True)
 class ProviderWriteGuardPolicy:
-    """Absolute roots a provider Write/Edit-denies during a workspace-write attempt.
+    """Absolute roots a provider Write/Edit-denies during an attempt that can reach the clone.
 
     Provider-neutral (paths only): the adapter renders these into its own tool-deny / OS-sandbox
-    ``denyWrite`` syntax; the Core never learns that syntax. Resolved *per workspace-write attempt*
-    by :meth:`~wastech_orchestrator.git_manager.GitManager.resolve_control_paths` — the gitdir and
+    ``denyWrite`` syntax; the Core never learns that syntax. Resolved *per attempt* by
+    :meth:`~wastech_orchestrator.git_manager.GitManager.resolve_control_paths` — the gitdir and
     common dir are only final after branch preparation and differ for a linked worktree — then
-    carried on :attr:`~wastech_orchestrator.providers.base.AgentRunRequest.write_guard`.
+    carried on :attr:`~wastech_orchestrator.providers.base.AgentRunRequest.write_guard`. Keyed on
+    reach, not on the profile: an attempt gets this set when it has write tools **or** a shell, so a
+    read-only node that can run commands (Codex always, every provider in the advanced mode) and the
+    supervisor's own read-only turn carry it too.
 
     ``exchange_root`` stays *readable* (it is the curated agent-facing surface) but must be
     Write/Edit-denied so the agent cannot mutate the curated projection. ``git_dir`` and

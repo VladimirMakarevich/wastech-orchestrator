@@ -16,10 +16,7 @@ one pass:
 :func:`validate_flow_against_config` is the **config-aware** third layer: it needs the
 ``OrchestratorConfig`` (node providers ∈ ``agents.allowed``; node reasoning is valid for the
 resolved provider; Codex never receives a write-enabled node with network access;
-``permission_ceiling`` ≤ a configured provider's capability; and — under
-``security.strict_isolation`` — no node selects a provider full-access mode in ``extra_args`` via
-:func:`~wastech_orchestrator.security.forbidden_args.find_full_access_args`, the flow-side half of
-the global isolation gate). It is kept separate so
+``permission_ceiling`` ≤ a configured provider's capability). It is kept separate so
 :func:`validate_flow` stays unit-testable without a config, and so the layers (graph / ceiling /
 config) never mix in one signature. The :class:`~.registry.FlowRegistry` calls it after
 :func:`validate_flow`; both raise :class:`FlowValidationError`.
@@ -70,10 +67,7 @@ from wastech_orchestrator.providers.capabilities import (
     is_reasoning_supported,
     reasoning_levels_for,
 )
-from wastech_orchestrator.security.forbidden_args import (
-    find_forbidden_args,
-    find_full_access_args,
-)
+from wastech_orchestrator.security.forbidden_args import find_forbidden_args
 from wastech_orchestrator.security.profiles import is_same_or_stricter
 
 
@@ -121,10 +115,9 @@ def validate_flow_against_config(
     configured provider can reach, a flow-local ``supervisor.observe.mode`` broader than the
     operator's global cadence (unless ``supervisor.enabled`` is false — there is then no cadence to
     widen), a ``tool`` node naming an unregistered executable (when a
-    :class:`~.tools_registry.ToolRegistry` is supplied), or — under
-    ``security.strict_isolation`` — a node whose ``extra_args`` select a provider full-access mode
-    (the flow-side half of the isolation gate; the operator opts in via ``strict_isolation:
-    false``). Security can only ever *narrow* here.
+    :class:`~.tools_registry.ToolRegistry` is supplied), or a node whose ``extra_args`` select a
+    provider full-access mode — refused at **every** value of ``security.strict_isolation``, since
+    there is no opt-in to it and never was one at this layer. Security can only ever *narrow* here.
     (Flow ``budgets`` and ``publishing`` are handled by graceful runtime degradation, not here — see
     the module docstring.)
 
@@ -530,8 +523,16 @@ def _check_config_consistency(
                         f"{sorted(reasoning_levels_for(resolved_provider))}"
                     )
                 )
+        # The class ban on "Codex workspace-write + network", and why it is conditional. It exists
+        # because that combination is the one Codex profile that both writes the clone and reaches
+        # the network, i.e. the shape a publishing attempt needs. Under
+        # ``security.strict_isolation: false`` the operator has already granted every node both, by
+        # the mode's own definition, so refusing the flow would refuse a configuration the run
+        # itself accepts — the same false verdict this campaign removed from ``isolation:`` — while
+        # protecting nothing. Outside the mode it is unchanged.
         if (
-            isinstance(node, AgentNode)
+            config.security.strict_isolation
+            and isinstance(node, AgentNode)
             and resolved_provider is ProviderId.CODEX
             and (node.permission_profile or doc.permission_ceiling)
             is PermissionProfile.WORKSPACE_WRITE
@@ -583,26 +584,7 @@ def _check_config_consistency(
                 )
             )
 
-    # 3. strict_isolation gate (provider-config-cleanup Risk #2): under security.strict_isolation a
-    #    flow node must not select a provider full-access mode in extra_args (Codex
-    #    ``--sandbox danger-full-access`` / Claude ``--permission-mode bypassPermissions``). This
-    #    mirrors the provider-config isolation preflight so the gate is global — the operator opts
-    #    in by setting strict_isolation: false (and owns the risk). The absolutely-forbidden
-    #    ``--dangerously*`` / ``--yolo`` / ``--ignore-rules`` flags are already rejected (config-
-    #    free) by _check_ceiling regardless of strict_isolation.
-    if config.security.strict_isolation:
-        for node in doc.nodes:
-            if not isinstance(node, AgentNode):
-                continue
-            errs.extend(
-                cfg(
-                    f"node {node.id!r}: extra_args {reason} — not permitted under "
-                    "security.strict_isolation (set strict_isolation: false to opt in)"
-                )
-                for reason in find_full_access_args(node.extra_args)
-            )
-
-    # 4. Every ``tool`` node names a registered, contained, executable operator tool. The name
+    # 3. Every ``tool`` node names a registered, contained, executable operator tool. The name
     #    is a free operator string (like a flow name), so — like the provider check — it is resolved
     #    here, fail-closed, before any launch. Skipped when no registry is wired (config-free unit
     #    path); the fatal install/preflight gate always supplies one.
@@ -712,7 +694,7 @@ def lint_prompt_variables(snapshot: FlowSnapshot) -> list[PromptVarWarning]:
 def global_primary(config: OrchestratorConfig) -> ProviderId | None:
     """The single global-primary provider, or ``None`` when zero or several are marked primary.
 
-    A node with no declared provider runs under this provider (PRE.1). Shared by the config-aware
+    A node with no declared provider runs under this provider. Shared by the config-aware
     flow validator and the task node-override resolver (``core.node_overrides``) so both resolve the
     same effective provider when a node/override leaves it implicit.
     """

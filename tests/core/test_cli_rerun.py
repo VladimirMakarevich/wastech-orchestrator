@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -194,7 +195,7 @@ def _seed(
     row: TaskRow,
     *,
     checkpoint_node: str | None = None,
-    node_run: tuple[str, str] | None = None,
+    node_runs: Sequence[tuple[str, str]] = (),
     counters_json: str = "{}",
     flow_fingerprint: str | None = None,
 ) -> Path:
@@ -203,10 +204,9 @@ def _seed(
     db.parent.mkdir(parents=True, exist_ok=True)
     store = StateStore.open(db)
     store.insert_task(row)
-    if node_run is not None:  # (node_id, node_kind) for the interrupted node
+    for node_id, node_kind in node_runs:  # the recorded walk, in execution order
         from wastech_orchestrator.state_store import NodeRunRow
 
-        node_id, node_kind = node_run
         store.record_node_run(
             NodeRunRow(
                 task_id=row.task_id,
@@ -235,13 +235,32 @@ def _seed(
     return config
 
 
-def _seed_manifest(clone: Path, task_id: str, *, task_type: str | None = None) -> None:
-    """Write the persisted normalized manifest a ``--from`` rerun reads to resolve the flow."""
+def _seed_manifest(
+    clone: Path,
+    task_id: str,
+    *,
+    task_type: str | None = None,
+    branch_mode: str | None = None,
+    branch_ref: str | None = None,
+) -> None:
+    """Write the persisted normalized manifest a ``--from`` rerun reads to resolve the flow.
+
+    ``branch_mode``/``branch_ref`` are what a chain task carries: the resume has to read them from
+    here, because the live ``NormalizedTask`` is not in hand on that path.
+    """
+    from wastech_orchestrator.config.schema import BranchMode
     from wastech_orchestrator.task.model import NormalizedTask
     from wastech_orchestrator.task.parser import write_normalized
 
     write_normalized(
-        NormalizedTask(id=task_id, title="T", description="x", task_type=task_type),
+        NormalizedTask(
+            id=task_id,
+            title="T",
+            description="x",
+            task_type=task_type,
+            branch_mode=BranchMode(branch_mode) if branch_mode else None,
+            branch_ref=branch_ref,
+        ),
         clone / ".worc",
     )
 
@@ -299,7 +318,7 @@ def test_rerun_recovers_stale_running_task(
         git_repo.clone,
         TaskRow("task-1", "T", Status.RUNNING, source_path=str(source), branch="worc/task-1-t"),
         checkpoint_node="review",
-        node_run=("review", "evaluator"),
+        node_runs=[("review", "evaluator")],
     )
     _seed_manifest(git_repo.clone, "task-1")
     code = cli.main(["--config", str(config), "rerun", "task-1", "--continue", "--dry-run"])
@@ -674,7 +693,7 @@ def test_rerun_continue_in_publish_allows_uncommitted_code(
             finished_at="2026-01-01T00:00:00+00:00",
         ),
         checkpoint_node="publish",
-        node_run=("publish", "publish"),
+        node_runs=[("publish", "publish")],
     )
     _seed_manifest(git_repo.clone, "task-1")  # --continue resolves the live flow to adopt it
     # Leave uncommitted code in the working tree (the failed publish's staged-but-uncommitted work).
@@ -711,7 +730,7 @@ def test_rerun_continue_at_review_tolerates_task_wip(
             branch="worc/task-1-t",
         ),
         checkpoint_node="review",
-        node_run=("review", "evaluator"),
+        node_runs=[("review", "evaluator")],
     )
     _seed_manifest(git_repo.clone, "task-1")  # --continue resolves the live flow to adopt it
     (git_repo.clone / "feature.py").write_text("print('wip')\n", encoding="utf-8")
@@ -731,9 +750,9 @@ def test_rerun_continue_at_review_survives_real_resume_with_dirty_tree(
 ) -> None:
     """Regression (RERUN-BUG-REPORT): resuming ``--continue`` at review on a task branch with
     legitimate uncommitted WIP must not detour through ``base_branch`` — ``git checkout main``
-    refuses over a dirty tree, which used to crash the resume with a raw git error. Only
-    ``_engine_run`` is stubbed (past the point that used to crash); ``prepare_branch`` runs for
-    real against the repo, so this exercises the exact path the mocked-``resume`` tests above skip.
+    refuses over a dirty tree, so the detour crashes the resume with a raw git error. Only
+    ``_engine_run`` is stubbed (past the point where that crash happens); ``prepare_branch`` runs
+    for real against the repo, so this exercises the path the mocked-``resume`` tests above skip.
     """
     project = tmp_path / "project"
     project.mkdir()
@@ -753,7 +772,7 @@ def test_rerun_continue_at_review_survives_real_resume_with_dirty_tree(
         git_repo.clone,
         TaskRow("task-1", "T", Status.FAILED, source_path=str(source), branch=branch),
         checkpoint_node="review",
-        node_run=("review", "evaluator"),
+        node_runs=[("review", "evaluator")],
     )
     # The real resume path loads the normalized manifest (unlike the mocked-``resume`` tests above,
     # which never reach that code): without it, `load_normalized` fails and the task degrades to
@@ -782,6 +801,60 @@ def test_rerun_continue_at_review_survives_real_resume_with_dirty_tree(
     ) == "# project\n\nimplemented and reviewed.\n"
 
 
+def test_a_resume_carries_the_branch_mode_so_the_gate_measures_from_the_task(
+    git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, git_run
+) -> None:
+    """The resume called ``prepare_branch`` without a mode, so an ``existing``/``current``
+    task re-entered through the ``new`` path — which never restores the task's own start commit.
+    The dangerous-diff gate then measured from ``base_branch``, i.e. from the whole unmerged chain,
+    and ``rerun --continue`` on a chain task asked the operator about previous tasks' deletions.
+    """
+    from wastech_orchestrator.config.schema import BranchMode
+    from wastech_orchestrator.git_manager import GitManager
+
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "failed" / "task-1.md"
+    _complete_task_file(source, "task-1")
+    branch = "chain/feature"
+    git_run(["checkout", "-b", branch], git_repo.clone)
+    (git_repo.clone / "README.md").write_text("# project\n\nprior task\n", encoding="utf-8")
+    git_run(["commit", "-am", "feat: an earlier task in the chain"], git_repo.clone)
+    config = _seed(
+        project,
+        git_repo.clone,
+        TaskRow("task-1", "T", Status.FAILED, source_path=str(source), branch=branch),
+        checkpoint_node="review",
+        node_runs=[("review", "evaluator")],
+    )
+    _seed_manifest(git_repo.clone, "task-1", branch_mode="existing", branch_ref=branch)
+
+    seen: list[tuple[object, object]] = []
+    original = GitManager.prepare_branch
+
+    def spy(self: GitManager, task_id: str, slug: str, **kwargs: object) -> str:
+        seen.append((kwargs.get("mode"), kwargs.get("branch_ref")))
+        return original(self, task_id, slug, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(GitManager, "prepare_branch", spy)
+
+    def fake_engine_run(
+        self: Orchestrator,
+        p: object,
+        completeness: object,
+        *,
+        resume: bool,
+        run_state: object = None,
+    ) -> PipelineResult:
+        return PipelineResult(task_id="task-1", final_status=Status.DONE)
+
+    monkeypatch.setattr(Orchestrator, "_engine_run", fake_engine_run)
+    code = cli.main(["--config", str(config), "rerun", "task-1", "--continue", "--yes"])
+
+    assert code == 0
+    assert seen == [(BranchMode.EXISTING, branch)]
+
+
 def test_rerun_continue_confirm_names_the_branch_not_base(
     git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -797,7 +870,7 @@ def test_rerun_continue_confirm_names_the_branch_not_base(
         git_repo.clone,
         TaskRow("task-1", "T", Status.FAILED, source_path=str(source), branch="feat/p6-init"),
         checkpoint_node="review",
-        node_run=("review", "evaluator"),
+        node_runs=[("review", "evaluator")],
     )
     _seed_manifest(git_repo.clone, "task-1")  # --continue resolves the live flow to adopt it
     prompts: list[str] = []
@@ -842,12 +915,16 @@ def test_rerun_fresh_confirm_still_names_base(
     assert prompts == ["Rerun task-1 [fresh] from base 'main'? [y/N] "]
 
 
-def test_rerun_continue_pre_edit_node_still_refuses_dirty_tree(
-    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_rerun_continue_at_writing_node_tolerates_task_wip(
+    git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Regression: before the task has produced code (only a pre-edit agent node ran; no
-    evaluator/checks/publish), a dirty tree is almost certainly foreign and is still refused — the
-    WIP tolerance does not blanket-accept every ``--continue``.
+    """Parked ON the writing node — before any critic ran — the tree is still the task's own work.
+
+    The blind window every flow has between its first writing node and its first
+    evaluator/checks/publish: here the ``implementation`` node wrote the change and the task parked
+    there, so ``node_runs`` holds nothing but agent rows. That must be tolerated (and reported as
+    preserved WIP), not refused as "unaccounted changes" — refusing it tells the operator to throw
+    away finished work that is on disk and nowhere else.
     """
     project = tmp_path / "project"
     project.mkdir()
@@ -863,13 +940,107 @@ def test_rerun_continue_pre_edit_node_still_refuses_dirty_tree(
             source_path=str(source),
             branch="worc/task-1-t",
         ),
-        checkpoint_node="planning",
-        node_run=("planning", "agent"),
+        checkpoint_node="implementation",
+        node_runs=[("planning", "agent"), ("implementation", "agent")],
+    )
+    _seed_manifest(git_repo.clone, "task-1")  # --continue resolves the live flow to adopt it
+    (git_repo.clone / "feature.py").write_text("print('unreviewed')\n", encoding="utf-8")
+
+    def fake_resume(self: Orchestrator) -> PipelineResult:
+        return PipelineResult(task_id="task-1", final_status=Status.DONE)
+
+    monkeypatch.setattr(Orchestrator, "resume", fake_resume)
+    code = cli.main(["--config", str(config), "rerun", "task-1", "--continue", "--yes"])
+    out = capsys.readouterr().out
+    assert code == 0  # not refused for a dirty tree; --continue re-enters implementation
+    assert "will be committed into the task" in out
+
+
+@pytest.mark.parametrize(
+    "checkpoint_node,node_runs",
+    [
+        ("refinement", []),  # killed before the first node opened its row
+        ("planning", [("lint", "tool")]),  # only a non-writing kind ran (tool / hitl)
+    ],
+)
+def test_rerun_continue_before_any_writing_node_still_refuses_dirty_tree(
+    git_repo,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    checkpoint_node: str,
+    node_runs: list[tuple[str, str]],
+) -> None:
+    """The reverse property: with no node that writes to the tree yet run, a dirty tree is foreign.
+
+    This is the WIP the guard was built for — it must stay refused, so the tolerance never
+    blanket-accepts a ``--continue``. Note where the line now sits: an ``agent`` node counts as a
+    writer regardless of its permission profile, so a ``read-only`` planning node is on the
+    tolerating side of it. Telling profiles apart needs a ``permission_profile`` column on
+    ``node_runs``; until then the refusal covers the walks where no agent/evaluator/checks/publish
+    node has run at all.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "failed" / "task-1.md"
+    _complete_task_file(source, "task-1")
+    config = _seed(
+        project,
+        git_repo.clone,
+        TaskRow(
+            "task-1",
+            "T",
+            Status.FAILED,
+            source_path=str(source),
+            branch="worc/task-1-t",
+        ),
+        checkpoint_node=checkpoint_node,
+        node_runs=node_runs,
     )
     (git_repo.clone / "stray.py").write_text("x = 1\n", encoding="utf-8")
     code = cli.main(["--config", str(config), "rerun", "task-1", "--continue", "--yes"])
     assert code == 1
     assert "unaccounted changes" in capsys.readouterr().out
+
+
+def test_rerun_continue_wip_verdict_is_sticky_across_attempts_known_limitation(
+    git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Known limitation, pinned: the verdict is read off the WHOLE task history, not this attempt.
+
+    Here a prior walk reached ``review`` and the operator then re-entered upstream of every writer
+    (checkpoint ``refinement``), so *this* attempt has written nothing — a dirty tree is as foreign
+    as in the reverse-property test above. It is tolerated anyway, because ``get_node_runs``
+    returns every row the task ever recorded. Bounding the scan to the current attempt needs a
+    per-attempt marker on ``node_runs``, which is an additive column and rides with the schema
+    fix; this test flips to ``code == 1`` when that lands, deliberately.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "failed" / "task-1.md"
+    _complete_task_file(source, "task-1")
+    config = _seed(
+        project,
+        git_repo.clone,
+        TaskRow(
+            "task-1",
+            "T",
+            Status.FAILED,
+            source_path=str(source),
+            branch="worc/task-1-t",
+        ),
+        checkpoint_node="refinement",
+        node_runs=[("implementation", "agent"), ("review", "evaluator")],  # the previous attempt
+    )
+    _seed_manifest(git_repo.clone, "task-1")  # --continue resolves the live flow to adopt it
+    (git_repo.clone / "stray.py").write_text("x = 1\n", encoding="utf-8")
+
+    def fake_resume(self: Orchestrator) -> PipelineResult:
+        return PipelineResult(task_id="task-1", final_status=Status.DONE)
+
+    monkeypatch.setattr(Orchestrator, "resume", fake_resume)
+    code = cli.main(["--config", str(config), "rerun", "task-1", "--continue", "--yes"])
+    assert code == 0  # sticky: the old walk still vouches for a tree this attempt never touched
+    assert "will be committed into the task" in capsys.readouterr().out
 
 
 def test_rerun_continue_revives_then_delegates_to_resume(
@@ -965,7 +1136,7 @@ def test_reset_fix_budget_resets_consecutive_keeps_global(
             review_fix_cycles=15,
         ),
         checkpoint_node="review",
-        node_run=("review", "evaluator"),
+        node_runs=[("review", "evaluator")],
         counters_json=counters,
     )
     _seed_manifest(git_repo.clone, "task-1")  # --continue resolves the live flow to adopt it
@@ -1015,7 +1186,7 @@ def test_reset_fix_budget_warns_when_global_backstop_exhausted(
             fix_iterations=30,
         ),
         checkpoint_node="review",
-        node_run=("review", "evaluator"),
+        node_runs=[("review", "evaluator")],
         counters_json=counters,
     )
     _seed_manifest(git_repo.clone, "task-1")
@@ -1069,7 +1240,7 @@ def test_rerun_from_unknown_node_refuses(
         git_repo.clone,
         TaskRow("task-1", "T", Status.FAILED, source_path=str(source), branch="worc/task-1-t"),
         checkpoint_node="review",
-        node_run=("review", "evaluator"),
+        node_runs=[("review", "evaluator")],
     )
     _seed_manifest(git_repo.clone, "task-1")
     code = cli.main(
@@ -1104,7 +1275,7 @@ def test_rerun_from_drift_note_surfaced_in_dry_run(
         git_repo.clone,
         TaskRow("task-1", "T", Status.FAILED, source_path=str(source), branch="worc/task-1-t"),
         checkpoint_node="review",
-        node_run=("review", "evaluator"),
+        node_runs=[("review", "evaluator")],
         flow_fingerprint="stale-fingerprint",
     )
     _seed_manifest(git_repo.clone, "task-1")
@@ -1143,7 +1314,7 @@ def test_rerun_from_drift_actually_resumes_at_node_and_rebaselines_fingerprint(
         git_repo.clone,
         TaskRow("task-1", "T", Status.FAILED, source_path=str(source), branch="worc/task-1-t"),
         checkpoint_node="review",
-        node_run=("review", "evaluator"),
+        node_runs=[("review", "evaluator")],
         flow_fingerprint="stale-fingerprint",
     )
     _seed_manifest(git_repo.clone, "task-1")
@@ -1193,7 +1364,7 @@ def test_rerun_from_valid_node_overrides_checkpoint(
         git_repo.clone,
         TaskRow("task-1", "T", Status.FAILED, source_path=str(source), branch="worc/task-1-t"),
         checkpoint_node="review",
-        node_run=("review", "evaluator"),
+        node_runs=[("review", "evaluator")],
     )
     _seed_manifest(git_repo.clone, "task-1")
 
@@ -1244,7 +1415,7 @@ def _seed_exhausted_task(
             review_fix_cycles=review_fix,
         ),
         checkpoint_node="review",
-        node_run=("review", "evaluator"),
+        node_runs=[("review", "evaluator")],
         counters_json=counters,
     )
     _seed_manifest(clone, "task-1")

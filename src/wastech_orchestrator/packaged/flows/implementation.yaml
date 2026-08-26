@@ -136,11 +136,13 @@ flow:
       # reasoning regardless of the flow-wide default — no quality loss, less wall-time on the tail.
       reasoning: medium
       # Explicit offline stance: doc-writing needs no network, and pinning it here keeps the node
-      # offline even if this flow later gains a flow-wide network_policy. This is a hard guarantee
-      # only under Codex (OS-sandbox blocks Bash network); under Claude it only disables
-      # WebFetch/WebSearch, so it is defense-in-depth (the role prompt also forbids installs/builds)
-      # — pin `provider: codex` on this node when you need the hard "no dependency installs"
-      # guarantee.
+      # offline even if this flow later gains a flow-wide network_policy. On the shipped default
+      # this is a hard guarantee under Codex (OS-sandbox blocks Bash network); under Claude it only
+      # disables WebFetch/WebSearch, so it is defense-in-depth (the role prompt also forbids
+      # installs/builds). Under security.strict_isolation: false (advanced mode) it is neither:
+      # every node is online there whatever this key says, and only the role prompt still asks.
+      # Pin `provider: codex` on this node when you need the hard "no dependency installs"
+      # guarantee — and keep strict_isolation on, because the mode removes it.
       network_access: false
       # other optional overrides (uncomment to pin this node):
       # provider: claude

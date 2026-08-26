@@ -36,7 +36,7 @@ def _write(tmp_path: Path, text: str) -> Path:
 
 def test_upgrade_adds_new_keys_and_bumps_version(tmp_path: Path) -> None:
     cfg = _write(tmp_path, _old_config_text())
-    rc = cli.main(["--config", str(cfg), "upgrade-config"])
+    rc = cli.main(["--config", str(cfg), "upgrade-config", "--yes"])
     assert rc == 0
 
     data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
@@ -50,7 +50,7 @@ def test_upgrade_adds_new_keys_and_bumps_version(tmp_path: Path) -> None:
 
 def test_upgrade_preserves_operator_values(tmp_path: Path) -> None:
     cfg = _write(tmp_path, _old_config_text(max_fix_cycles=5))
-    assert cli.main(["--config", str(cfg), "upgrade-config"]) == 0
+    assert cli.main(["--config", str(cfg), "upgrade-config", "--yes"]) == 0
     data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
     assert data["agents"]["max_fix_cycles"] == 5  # operator's tuned value survives
 
@@ -102,16 +102,16 @@ def test_newer_schema_version_is_refused(
 def test_upgrade_migrates_a_config_whose_removed_key_the_loader_now_rejects(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    # The command's whole purpose. v33 removed the flat `supervisor.model`/`reasoning`, and the
-    # loader rejects them fail-closed — so the fail-closed read-back of the operator's own file has
-    # to look past exactly the keys being stripped, or `upgrade-config` would refuse every config it
+    # The command's whole purpose. The flat `supervisor.model`/`reasoning` are dead keys the loader
+    # rejects fail-closed — so the fail-closed read-back of the operator's own file has to look past
+    # exactly the keys being stripped, or `upgrade-config` would refuse every config it
     # exists to migrate and the operator would have no automated path off the old schema.
     m = packaged_template_mapping()
     m["schema_version"] = 32
     m["supervisor"] = {"role_file": "roles/supervisor.md", "model": "opus", "reasoning": "xhigh"}
     cfg = _write(tmp_path, yaml.safe_dump(m, sort_keys=False))
 
-    assert cli.main(["--config", str(cfg), "upgrade-config"]) == 0
+    assert cli.main(["--config", str(cfg), "upgrade-config", "--yes"]) == 0
     out = capsys.readouterr().out
     assert "- supervisor.model (removed in this schema version)" in out
     assert "- supervisor.reasoning (removed in this schema version)" in out
@@ -140,3 +140,32 @@ def test_upgrade_still_refuses_a_config_it_cannot_read(
     assert "not_a_real_key" in capsys.readouterr().out
     assert cfg.read_text(encoding="utf-8") == original  # untouched
     assert list(tmp_path.glob("config.yaml.bak-*")) == []
+
+
+def test_write_is_confirmed_and_declining_changes_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `install` ships a deliberately small config; this command's add-missing-only merge takes every
+    # omitted key back from the template and re-emits the file without its comments. That is a
+    # surprise worth a prompt, so the write is confirmed and a decline leaves the file alone.
+    original = _old_config_text()
+    cfg = _write(tmp_path, original)
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "n")
+
+    assert cli.main(["--config", str(cfg), "upgrade-config"]) == 0
+    out = capsys.readouterr().out
+    assert "would update" in out
+    assert "comments in it are not preserved" in out
+    assert "aborted" in out
+    assert cfg.read_text(encoding="utf-8") == original
+    assert list(tmp_path.glob("config.yaml.bak-*")) == []
+
+
+def test_confirming_the_prompt_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    cfg = _write(tmp_path, _old_config_text())
+    monkeypatch.setattr("builtins.input", lambda _prompt="": "y")
+
+    assert cli.main(["--config", str(cfg), "upgrade-config"]) == 0
+    data = yaml.safe_load(cfg.read_text(encoding="utf-8"))
+    assert data["schema_version"] == CONFIG_SCHEMA_VERSION
+    assert len(list(tmp_path.glob("config.yaml.bak-*"))) == 1

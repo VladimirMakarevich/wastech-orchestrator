@@ -1,6 +1,6 @@
 """What the supervisor layer spent, per phase — the vocabulary and the roll-up.
 
-The layer makes provider calls for four different reasons, and until they were labelled the only
+The layer makes provider calls for three different reasons, and until they were labelled the only
 question the audit table could answer was "how much did the supervisor cost in total" (its rows are
 the ``node_run_id IS NULL`` ones). That is the wrong grain for the decision an operator actually
 makes: whether the per-step notes are worth their share against the turn that writes the summary.
@@ -24,7 +24,7 @@ from wastech_orchestrator.state_store import ProviderAttemptRow
 
 
 class SupervisorFunction(StrEnum):
-    """Which of the supervisor layer's four jobs a provider call belongs to.
+    """Which of the supervisor layer's three jobs a provider call belongs to.
 
     Passed explicitly by the calling phase and persisted on the attempt row. It is deliberately not
     derived from the synthetic run ids or attempt-dir names that namespace the layer's artifacts:
@@ -35,7 +35,6 @@ class SupervisorFunction(StrEnum):
     OBSERVE = "observe"
     FINALIZE = "finalize"
     HANDOFF = "handoff"
-    SKILL = "skill"
 
 
 # Report the phases in the order a run reaches them, not in first-seen or alphabetical order, so two

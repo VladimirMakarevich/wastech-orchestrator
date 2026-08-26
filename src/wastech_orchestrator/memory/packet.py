@@ -64,8 +64,7 @@ class PacketContext:
     ``node_id`` is the flow node about to run; ``touched_paths`` / ``touched_symbols`` are POSIX
     repo-relative and drive path-scoped retrieval (empty when nothing is touched yet, e.g. at
     planning before any edit). ``task_type`` is the flow dispatch key, carried as a retrieval signal
-    (not a ranking input today — the episodic tier it ranked is no longer injected; reserved for a
-    future semantic rerank).
+    (not a ranking input: the episodic tier it would rank is not injected).
     """
 
     node_id: str

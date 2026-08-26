@@ -36,10 +36,11 @@ flow:
       { session_scope: fresh_disposable, permission_profile: read-only, gate_severity: medium }
 
   nodes:
-    # Runs on every task. It used to be gated on `derived.needs_refinement`, which is true only for
-    # an ill-formed task file — a non-empty description plus an `## Acceptance criteria` section
-    # already counts as complete — so on any well-formed task the scoping pass never ran. A complete
-    # task file and a *scoped* task are different things: this node decomposes the question into
+    # Runs on every task, deliberately ungated. `derived.needs_refinement` would be the obvious
+    # gate and is the wrong one: it is true only for an ill-formed task file — a non-empty
+    # description plus an `## Acceptance criteria` section already counts as complete — so on any
+    # well-formed task the scoping pass would never run. A complete task file and a *scoped* task
+    # are different things: this node decomposes the question into
     # sub-questions and anchors each one to where its evidence lives, and the analysis passes
     # downstream consume that brief. Skip it PER TASK (`nodes.refinement.enabled: false`) when the
     # question is narrow enough not to need scoping.
@@ -74,7 +75,9 @@ flow:
       # Delivery history is prime evidence for a plan-versus-implementation audit, so these
       # three ask for the read-only git verbs. Inert unless the operator sets
       # security.allow_git_evidence — and the node stays read-only when they do: the verbs only
-      # report and the sandbox denies every write.
+      # report and the sandbox denies every write. Also inert under
+      # security.strict_isolation: false (advanced mode), where every node already has an
+      # unscoped shell and there is no capability left for this key to hand out.
       git_evidence: true
       # optional overrides (uncomment to pin this node):
       # provider: claude
@@ -92,7 +95,9 @@ flow:
       # Delivery history is prime evidence for a plan-versus-implementation audit, so these
       # three ask for the read-only git verbs. Inert unless the operator sets
       # security.allow_git_evidence — and the node stays read-only when they do: the verbs only
-      # report and the sandbox denies every write.
+      # report and the sandbox denies every write. Also inert under
+      # security.strict_isolation: false (advanced mode), where every node already has an
+      # unscoped shell and there is no capability left for this key to hand out.
       git_evidence: true
       # optional overrides (uncomment to pin this node):
       # provider: claude
@@ -110,7 +115,9 @@ flow:
       # Delivery history is prime evidence for a plan-versus-implementation audit, so these
       # three ask for the read-only git verbs. Inert unless the operator sets
       # security.allow_git_evidence — and the node stays read-only when they do: the verbs only
-      # report and the sandbox denies every write.
+      # report and the sandbox denies every write. Also inert under
+      # security.strict_isolation: false (advanced mode), where every node already has an
+      # unscoped shell and there is no capability left for this key to hand out.
       git_evidence: true
       # optional overrides (uncomment to pin this node):
       # provider: claude
@@ -164,7 +171,9 @@ flow:
     # request next to the deliverable, and the run that proved it shipped two documents that
     # disagreed about coverage. Its `workspace-write` profile is kept for the shell, not for writes:
     # this is the one pass that can settle a claim by running something (a test, an entry point, a
-    # one-liner) instead of arguing it from a citation, and `read-only` executes nothing on Claude.
+    # one-liner) instead of arguing it from a citation, and on the shipped default `read-only`
+    # executes nothing on Claude. (Under security.strict_isolation: false every node has a shell,
+    # so the profile buys only the write there — the reason for keeping it is the shipped default.)
     - id: architecture_design
       kind: agent
       role_file: deep_research/architecture_design.md
