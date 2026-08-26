@@ -10,20 +10,22 @@ A read-only layer above every flow that observes completed nodes and writes the 
 
 Three keys are one-per-layer and stay at the top; model and effort are **per phase**, under `observe` / `finalize` / `handoff`.
 
-| Field | Type / values | Default (dataclass / install) | Constraint | When to use |
+`worc install` writes no `supervisor` block at all, so every default below is what a fresh install runs. The layer follows the global primary by construction: `provider` unset means the primary, and an unset phase `model` means that provider's own model — flip the primary and the layer stays consistent instead of leaving a stale pin behind.
+
+| Field | Type / values | Default | Constraint | When to use |
 | --- | --- | --- | --- | --- |
-| `supervisor.enabled` | bool | `true` / install: `true` | — | `false` removes the layer: no per-step notes, no summary turn, no subtask handoff brief, and every key below inert (one warning says so). The PR body is then written deterministically. Also forces `memory.enabled` to `false` for the run — see [`memory`](runtime.md#memory--persistent-repo-scoped-memory). |
+| `supervisor.enabled` | bool | `true` | — | `false` removes the layer: no per-step notes, no summary turn, no subtask handoff brief, and every key below inert (one warning says so). The PR body is then written deterministically. Also forces `memory.enabled` to `false` for the run — see [`memory`](runtime.md#memory--persistent-repo-scoped-memory). |
 | `supervisor.role_file` | string | `"roles/supervisor.md"` | No path traversal (`..`/absolute). | The observe-lens prompt. Never loaded when the cadence resolves to `none`. |
-| `supervisor.provider` | `codex` \| `claude` \| null | `null` / install: pinned to the primary | Must be in `agents.allowed` when set. | `null` inherits the global primary; pin it so the phase models reach a provider that accepts them. |
-| `supervisor.observe.mode` | `all` \| `selected` \| `events` \| `none` | `events` / install: `events` | A flow may only narrow it (see below). | How often a completed step is worth an LLM note. See the table under it. |
+| `supervisor.provider` | `codex` \| `claude` \| null | `null` | Must be in `agents.allowed` when set. | `null` inherits the global primary; pin it so the phase models reach a provider that accepts them. |
+| `supervisor.observe.mode` | `all` \| `selected` \| `events` \| `none` | `events` | A flow may only narrow it (see below). | How often a completed step is worth an LLM note. See the table under it. |
 | `supervisor.observe.triggers` | list of `rework` \| `failure` \| `fallback` | all three | Closed set; an unknown name is rejected. | Narrows which deviations count under `events` — e.g. `[failure]` to be notified of failures only. |
 | `supervisor.observe.include_nodes` | list of node ids | `[]` | — | The nodes observed under `mode: selected`; ignored in every other mode. |
-| `supervisor.observe.model` | string \| null | `null` / install: the primary's model | Passed through unverified; a vendor/primary mismatch warns. | `null` = the resolved provider's default. The **cheap** one: this phase is advisory and can fire on every step of a deep fix loop. |
-| `supervisor.observe.reasoning` | string \| null | `null` / install: `low` | Per-provider set (as providers, above). | `null` = the resolved provider's default. Capped to `high` in code even if you set a max tier. |
-| `supervisor.finalize.model` | string \| null | `null` / install: the primary's model | As above. | The turn that writes `summary.md` — the pull-request body, and the only part of a long run most readers see. Worth more than `observe`. |
-| `supervisor.finalize.reasoning` | string \| null | `null` / install: `high` | Per-provider set. | `null` = the resolved provider's default. A max tier (`xhigh`/`max`) is capped to `high` when the turn is structured. |
-| `supervisor.handoff.model` | string \| null | `null` / install: the primary's model | As above. | The subtask brief between regions of a decomposed task. Unused by a flow that never decomposes. |
-| `supervisor.handoff.reasoning` | string \| null | `null` / install: `high` | Per-provider set. | `null` = the resolved provider's default. |
+| `supervisor.observe.model` | string \| null | `null` | Passed through unverified; a vendor/primary mismatch warns. | `null` = the resolved provider's default. The **cheap** one: this phase is advisory and can fire on every step of a deep fix loop. |
+| `supervisor.observe.reasoning` | string \| null | `low` | Per-provider set (as providers, above). | Defaults to the cheap tier because this phase is advisory and can fire on every step of a deep fix loop. An explicit `null` opts back into the resolved provider's own effort — absent and `null` differ here. Capped to `high` in code even if you set a max tier. |
+| `supervisor.finalize.model` | string \| null | `null` | As above. | The turn that writes `summary.md` — the pull-request body, and the only part of a long run most readers see. Worth more than `observe`. |
+| `supervisor.finalize.reasoning` | string \| null | `null` | Per-provider set. | `null` = the resolved provider's default. A max tier (`xhigh`/`max`) is capped to `high` when the turn is structured. |
+| `supervisor.handoff.model` | string \| null | `null` | As above. | The subtask brief between regions of a decomposed task. Unused by a flow that never decomposes. |
+| `supervisor.handoff.reasoning` | string \| null | `null` | Per-provider set. | `null` = the resolved provider's default. |
 
 Keep every phase **at or below** the producer nodes' tier. This layer is advisory — it never routes, reworks, or blocks — so a model stronger than `agents.providers` inverts the budget: the reasoning that decides the deliverable gets the weaker one.
 

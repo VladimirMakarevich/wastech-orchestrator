@@ -65,7 +65,16 @@ def test_task_entry_points_reject_a_config_without_path(
         )
     )
     config = tmp_path / "config.yaml"
-    config.write_text(text.replace("  - PATH\n", "", 1), encoding="utf-8")
+    # The generated config leaves `allowed_environment` to the OS-aware loader default, so the
+    # broken value has to be added rather than edited out: an explicit allowlist without PATH.
+    config.write_text(
+        text.replace(
+            "  strict_isolation: false\n",
+            "  strict_isolation: false\n  allowed_environment: [HOME]\n",
+            1,
+        ),
+        encoding="utf-8",
+    )
 
     assert cli.main(["--config", str(config), *command]) == 2
     output = capsys.readouterr().out

@@ -94,7 +94,7 @@ When you deviate from the shipped defaults, keep the reason easy to recover:
 - keep command-set names descriptive;
 - group related settings together instead of scattering overrides.
 
-That matters because `upgrade-config` preserves values but re-emits the file and strips inline comments when it rewrites it.
+That matters because `upgrade-config` preserves values but re-emits the file and strips inline comments when it rewrites it — it asks before doing so, and keeps a backup, but the comments in the rewritten file are gone.
 
 ## 8. Re-run preflight after every meaningful config edit
 
