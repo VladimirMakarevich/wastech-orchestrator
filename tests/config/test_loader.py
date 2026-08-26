@@ -64,9 +64,18 @@ def test_unknown_paths_subkey_is_rejected() -> None:
 
 
 def test_logging_defaults_when_block_absent() -> None:
+    # `warning` is the shipped posture: `install` writes no `logging` block, so the absent-block
+    # fallback IS what an operator runs at (the packaged example documents the same value).
     cfg = loads_config(_LEGACY).config
-    assert cfg.logging.level == "info"
+    assert cfg.logging.level == "warning"
     assert cfg.logging.artifacts == "standard"
+
+
+def test_logging_partial_block_falls_back_to_the_dataclass_defaults() -> None:
+    # A block that names only one key must not resurrect a different default for its siblings.
+    cfg = loads_config(_LEGACY + "logging:\n  artifacts: minimal\n").config
+    assert cfg.logging.level == "warning"
+    assert cfg.logging.artifacts == "minimal"
 
 
 def test_logging_block_is_read_when_present() -> None:

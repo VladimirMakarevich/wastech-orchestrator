@@ -18,7 +18,7 @@ For the fields not on this page see [reference.md](reference.md), which also car
 
 | Field | Type / values | Default | Meaning |
 | --- | --- | --- | --- |
-| `logging.level` | `debug` \| `info` \| `warning` \| `error` | `info` / install: `warning` | Operator trace verbosity. The `--log-level` CLI flag overrides it. A fresh install ships the quiet level; an omitted key still means `info`. |
+| `logging.level` | `debug` \| `info` \| `warning` \| `error` | `warning` | Operator trace verbosity. The `--log-level` CLI flag overrides it for one run. `warning` is the shipped posture, so an omitted `logging` block is already the quiet level; set `info` for the per-stage play-by-play. |
 | `logging.artifacts` | `minimal` \| `standard` \| `full` | `standard` | Per-attempt provider files kept: `minimal` = `result.json` only; `standard` = + stdout/stderr; `full` = everything. Reclaim disk with `worc logs clean`. |
 | `logging.clean_runs_on_success` | boolean | `true` | A task that finishes **successfully** evicts its own per-task state under `.worc/runs/` (frozen control + instruction bundles, sealed exchanges). Failed / parked / manual-action tasks and quarantined exchange evidence are never cleaned automatically. Set `false` to keep every run for analysis and reclaim on demand with `worc runs clean` (available either way). Per-task log dirs are out of scope — those stay with `worc logs clean`. See [footprint.md](../footprint.md). |
 
@@ -30,9 +30,9 @@ Omitting the whole block ⇒ `enabled: false` (no store, empty packets, CLI no-o
 
 Memory also requires `supervisor.enabled: true`. That layer's closing turn is the only path that writes anything memory can later read back, so with the layer off memory would keep adding a packet to every prompt without ever learning — `supervisor.enabled: false` therefore resolves `memory.enabled` to `false` for the run and prints a warning naming both keys. Set `memory.enabled: false` yourself to make the file say what runs.
 
-| Field | Type | Default (dataclass / install) | Meaning |
+| Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `memory.enabled` | bool | `false` (install writes the key at `false` too) | Global memory toggle. Forced to `false` for the run when `supervisor.enabled` is `false`. Set it `true` for the store, the candidate delta and the per-node packets. |
+| `memory.enabled` | bool | `false` (`install` writes no `memory` block — the absence *is* off) | Global memory toggle. Forced to `false` for the run when `supervisor.enabled` is `false`. Set it `true` for the store, the candidate delta and the per-node packets. |
 | `memory.short_term_ttl_days` | int | `30` | Episodic entries expire after N days (long-term has no TTL). |
 | `memory.packet_max_lines` | int | `120` | Hard line backstop for a per-node memory brief. |
 | `memory.packet_max_long_term` | int | `3` | Max long-term lessons per packet. |

@@ -4581,11 +4581,19 @@ class Orchestrator:
         )
 
     def _quarantine(self, task_file: str) -> str | None:
-        """Move the task file into ``.worc/tasks/rejected/`` (the quarantine) when it exists."""
+        """Move the task file into ``.worc/tasks/rejected/`` (the quarantine) when it exists.
+
+        A relative ``validation.quarantine_folder`` (the default ``./.worc/tasks/rejected``) is
+        resolved against the repository root, not the process working directory: the operator runs
+        ``worc`` from anywhere inside the clone, so a cwd-relative quarantine would scatter rejected
+        task files into whichever subdirectory they happened to be standing in.
+        """
         src = Path(task_file)
         if not src.exists():
             return None
         quarantine_dir = Path(self._config.validation.quarantine_folder)
+        if not quarantine_dir.is_absolute():
+            quarantine_dir = Path(self._config.repo.local_path) / quarantine_dir
         try:
             quarantine_dir.mkdir(parents=True, exist_ok=True)
             dest = quarantine_dir / src.name

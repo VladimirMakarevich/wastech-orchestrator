@@ -115,7 +115,7 @@ The orchestrator creates a branch, runs the pipeline and your checks, commits th
 
 ## Configuration
 
-`worc install` writes a validated `config.yaml` for you. The knobs you'll touch most:
+`worc install` writes a validated `config.yaml` for you. It is deliberately small — only what the install resolved, the security posture, and the few things you author yourself; everything else is absent and runs at its documented default, listed in a comment at the end of the file. To change a default, copy the block for it out of the `config.example.yaml` installed beside it. The knobs you'll touch most:
 
 | Setting | What it controls |
 | --- | --- |
@@ -123,7 +123,7 @@ The orchestrator creates a branch, runs the pipeline and your checks, commits th
 | `agents.allowed` / providers | Which agents are enabled and which is the default. |
 | `checks.command_sets` | Your test/lint commands, run as the testing stage. `install` leaves this empty — you author it. |
 | `orchestrator.auto_mode.enabled` | Whether the next pending task starts automatically (default off). |
-| `security.allowed_environment` / `security.extra_environment` | Which parent names are forwarded and which non-secret toolchain/cache values are assigned. `PATH` is mandatory; Windows also requires `SystemRoot`. |
+| `security.allowed_environment` / `security.extra_environment` | Which parent names are forwarded and which non-secret toolchain/cache values are assigned. Left unwritten by `install` (the host OS default is resolved at load); `PATH` is mandatory if you do write it, and Windows also requires `SystemRoot`. |
 | `git.create_pull_request` | Open a PR after push (needs `gh`). |
 | `telegram.*` | Optional notifications and human-in-the-loop approvals. |
 

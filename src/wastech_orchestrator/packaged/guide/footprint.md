@@ -11,7 +11,7 @@ Two rules hold for the whole `.worc/` home:
 
 | Path | What it is | Safe to delete? |
 | --- | --- | --- |
-| `config.yaml` | Your configuration. The one file you edit by hand. | No — it is the install. |
+| `config.yaml` | Your configuration. The one file you edit by hand — deliberately small: it carries what the install resolved plus the few things you author, and everything absent from it runs at its documented default. | No — it is the install. |
 | `config.example.yaml` | Commented reference copy, never read at runtime. | Yes (`worc install --reconfigure` restores it). |
 | `flows/`, `tools/` | Editable copies of the built-in flows, their role prompts, and the executables `tool` nodes resolve against. Yours to edit. | No — a flow a task names must exist here. |
 | `guide/` | This documentation, copied in by `install`. | Yes (`worc upgrade-docs` restores it). |

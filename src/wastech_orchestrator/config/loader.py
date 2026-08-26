@@ -778,12 +778,17 @@ def _build_supervisor_observe(raw: Any, issues: list[str]) -> SupervisorObserveC
             f"expected a subset of {sorted(OBSERVE_TRIGGERS)}"
         )
         triggers = default.triggers
+    # Absent `reasoning` => the dataclass default (`low`, the cheap advisory tier); an explicit
+    # `reasoning: null` => None, i.e. the resolved provider's own effort. The two must not collapse
+    # into one, so the key's presence is tested rather than the parsed value's truthiness — the
+    # same absent-vs-null distinction `agents.providers.<id>.max_turns` makes.
+    reasoning = _reasoning(m, where, issues) if "reasoning" in m else default.reasoning
     return SupervisorObserveConfig(
         mode=_enum(m.get("mode"), ObserveMode, f"{where}.mode", issues, default.mode),
         triggers=triggers,
         include_nodes=_str_tuple(m, "include_nodes", (), where, issues),
         model=_opt_str(m, "model", where, issues),
-        reasoning=_reasoning(m, where, issues),
+        reasoning=reasoning,
     )
 
 
@@ -855,19 +860,20 @@ def _build_logging(raw: Any, issues: list[str]) -> LoggingConfig:
         return LoggingConfig()
     m = _mapping(raw, where, issues)
     _check_keys(m, {"level", "artifacts", "clean_runs_on_success"}, where, issues)
-    level = _str(m, "level", "info", where, issues)
+    default = LoggingConfig()
+    level = _str(m, "level", default.level, where, issues)
     if level not in _LOG_LEVELS:
         issues.append(
             f"{where}.level: invalid value {level!r}, expected one of {sorted(_LOG_LEVELS)}"
         )
-        level = "info"
-    artifacts = _str(m, "artifacts", "standard", where, issues)
+        level = default.level
+    artifacts = _str(m, "artifacts", default.artifacts, where, issues)
     if artifacts not in _ARTIFACT_LEVELS:
         issues.append(
             f"{where}.artifacts: invalid value {artifacts!r}, "
             f"expected one of {sorted(_ARTIFACT_LEVELS)}"
         )
-        artifacts = "standard"
+        artifacts = default.artifacts
     return LoggingConfig(
         level=level,
         artifacts=artifacts,

@@ -27,6 +27,7 @@ from wastech_orchestrator.providers.codex_canary import (
     run_codex_capability_smoke,
     write_guard_probe_paths,
 )
+from wastech_orchestrator.providers.codex_profile import toml_basic_string
 from wastech_orchestrator.runtime_layout import ProviderWriteGuardPolicy
 
 # Probe order: private-read, private-shell-read, exchange-read, exchange-write, cli-exec.
@@ -439,7 +440,11 @@ def test_capability_smoke_proves_the_profile_the_advanced_mode_will_actually_lau
     assert report.status == CAPABILITY_PASSED  # the carve-outs still hold under the wide grant
     profiles = {token for argv in seen for token in argv if token.startswith("permissions.worc=")}
     assert profiles, seen
-    assert all('"/" = "write"' in profile for profile in profiles)
+    # The advanced-mode grant is the workspace VOLUME's root, which is "/" on POSIX and a drive
+    # root on native Windows. The smoke builds its workspace under `home_dir`, so that volume is
+    # this tmp_path's — rendered through the same TOML escaper the profile uses.
+    volume_root = toml_basic_string(str(Path(tmp_path.anchor)))
+    assert all(f'{volume_root} = "write"' in profile for profile in profiles)
     assert all('"network" = { "enabled" = true }' in profile for profile in profiles)
 
 
@@ -597,7 +602,9 @@ def test_a_linked_worktree_gets_distinguishable_gitdir_and_common_dir_probes(
     paths = [path for _, path in targets.probes]
     assert len(set(labels)) == len(labels)  # no two probes share a label
     assert any("worktrees-wt" in label for label in labels)
-    assert any(path.endswith(f"wt/{WRITE_GUARD_SENTINEL}") for path in paths)
+    # Probe paths keep the host's own separators (they are handed to a real command), so compare
+    # the structure rather than the spelling.
+    assert any(Path(path).as_posix().endswith(f"wt/{WRITE_GUARD_SENTINEL}") for path in paths)
     assert any(str(guard.git_common_dir / WRITE_GUARD_SENTINEL) == path for path in paths)
 
 

@@ -475,13 +475,19 @@ class SupervisorObserveConfig:
     count under ``events`` (⊆ :data:`OBSERVE_TRIGGERS`); ``include_nodes`` lists the node ids
     observed under ``selected``. The pair is the cheap one — this phase is advisory and can fire on
     every step of a deep fix loop, so keep it at or below the producers' tier.
+
+    Which is why ``reasoning`` defaults to ``low`` rather than to the provider's own effort: an
+    absent key means "the cheap tier", not "whatever the producers run at". ``model`` still defaults
+    to the provider's (one model per layer is the point); an explicit ``reasoning: null`` in the
+    config opts back into the provider's effort, the same absent-vs-null distinction
+    ``agents.providers.<id>.max_turns`` already uses.
     """
 
     mode: ObserveMode = ObserveMode.EVENTS
     triggers: tuple[str, ...] = ("rework", "failure", "fallback")
     include_nodes: tuple[str, ...] = ()
     model: str | None = None
-    reasoning: str | None = None
+    reasoning: str | None = "low"
 
 
 @dataclass(frozen=True)
@@ -527,8 +533,9 @@ class LoggingConfig:
     """Operator log verbosity + on-disk artifact retention (log-management).
 
     ``level`` (``debug|info|warning|error``) persists the structured operator trace verbosity; the
-    ``--log-level`` CLI flag overrides it when given. ``artifacts`` (``minimal|standard|full``)
-    governs which per-attempt provider files survive under
+    ``--log-level`` CLI flag overrides it when given. It defaults to ``warning`` — the shipped
+    posture, so an absent ``logging`` block is as quiet as the one ``install`` used to write out.
+    ``artifacts`` (``minimal|standard|full``) governs which per-attempt provider files survive under
     ``logs/<task-id>/stages/.../<attempt>-<provider>/``: ``minimal`` keeps only ``result.json``
     (even on failure — ``result.json`` records the exit code + error class), ``standard`` adds
     ``stdout.log``/``stderr.log``, ``full`` keeps everything. Prompt-audit is independent (governed
@@ -543,7 +550,7 @@ class LoggingConfig:
     dirs are not in scope here (they belong to ``worc logs clean``).
     """
 
-    level: str = "info"
+    level: str = "warning"
     artifacts: str = "standard"
     clean_runs_on_success: bool = True
 
@@ -554,12 +561,11 @@ class MemoryConfig:
 
     Absent block => ``enabled=False`` — the pre-memory behavior (no store, no candidate delta, empty
     memory packets, ``worc memory`` is a no-op, no background cleanup). A fresh ``worc install``
-    writes ``enabled: false`` explicitly (both the packaged ``config.example.yaml`` and the
-    generated ``config.yaml`` via ``config_writer.build_config_mapping``) so the operator finds the
-    switch rather than the block's absence; off is the shipped posture because the subsystem is
+    writes no ``memory`` block at all, so that absence *is* the shipped posture: the subsystem is
     **experimental and not stable** — the store is unaudited and carries no redaction guarantee, and
-    its curation quality is still being reworked — so keeping it is a conscious opt-in and no
-    install ever turns it on. Every numeric
+    its curation quality is still being reworked — so turning it on is a conscious opt-in the
+    operator makes by adding the block from the annotated ``config.example.yaml``, and no install
+    ever turns it on. Every numeric
     knob carries a locked default and is a bounded, runtime-clamped value — none is a fatal config
     error (an odd value is clamped at use, per the "fatal only without a safe fallback" rule).
     """

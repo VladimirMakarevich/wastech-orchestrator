@@ -501,10 +501,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     upgrade_cfg_cmd = sub.add_parser(
         "upgrade-config",
-        help="add config keys introduced by the current version, preserving existing values",
+        help="add config keys introduced by the current version, preserving existing values "
+        "(confirms first — it also re-adds every key you left at its default)",
     )
     upgrade_cfg_cmd.add_argument(
         "--dry-run", action="store_true", help="print what would change; write nothing"
+    )
+    upgrade_cfg_cmd.add_argument(
+        "-y", "--yes", action="store_true", help="skip the confirmation prompt"
     )
 
     upgrade_docs_cmd = sub.add_parser(
@@ -1064,6 +1068,12 @@ def cmd_upgrade_config(args: argparse.Namespace) -> int:
     config (add-missing-only), stamp the current ``schema_version``, back up the original, and write
     atomically. Idempotent — a config that is already current is left untouched (no rewrite, so its
     comments survive). Refuses a config that is unparsable or already newer than this orchestrator.
+
+    Confirms before writing (``-y/--yes`` skips it, ``--dry-run`` never asks). The prompt is not
+    ceremony: ``install`` delivers a deliberately small ``config.yaml`` that omits every key it
+    would only have written at its default, and this command's add-missing-only merge takes those
+    keys back from the packaged template — so the file grows, and hand-written comments in it are
+    lost, even when nothing about the run changes. The operator should see that before it happens.
     """
     path_str = resolve_config_path(args)
     if path_str is None or not Path(path_str).is_file():
@@ -1115,6 +1125,17 @@ def cmd_upgrade_config(args: argparse.Namespace) -> int:
     if args.dry_run:
         _report("upgrade-config (dry-run): would update")
         return 0
+
+    if not args.yes:
+        _report("upgrade-config: would update")
+        print(
+            "  note: every key above is written at the packaged template's value, and the file is "
+            "re-emitted from parsed YAML — your own comments in it are not preserved (a backup is "
+            "written first). A key you deliberately left out to keep the config small comes back."
+        )
+        if not _confirm("Proceed? [y/N] "):
+            print("upgrade-config: aborted (nothing written); re-run with --yes to skip this")
+            return 0
 
     backup = _install_backup_config(path)
     _install_atomic_write(path, rendered)

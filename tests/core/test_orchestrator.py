@@ -2750,6 +2750,12 @@ def test_clean_environment_pattern_expansion_is_announced_at_info(
     git_repo, make_git_config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The ordinary, no-secret pattern branch is observable in the run log."""
+    # A prefix pattern resolves against the LIVE environment, so a test asserting an exact
+    # expansion has to own the namespace first — a GitHub Ubuntu runner ships DOTNET_NOLOGO,
+    # DOTNET_MULTILEVEL_LOOKUP and DOTNET_SKIP_FIRST_TIME_EXPERIENCE of its own, and the
+    # assertion below would then read four names instead of one.
+    for name in [k for k in os.environ if k.startswith("DOTNET_")]:
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("DOTNET_ROOT", "/opt/dotnet")
     orch, _store, _ledger, _art = _build(
         git_repo,
@@ -3394,6 +3400,31 @@ def test_rejected_task_no_branch(git_repo, make_git_config, git_run, tmp_path: P
             "details": None,  # a validation reject has no tasks row → no enrichment
         }
     ]
+
+
+def test_relative_quarantine_resolves_under_the_repo_not_the_cwd(
+    git_repo, make_git_config, monkeypatch, tmp_path: Path
+) -> None:
+    # `install` leaves `validation.quarantine_folder` at its repo-relative default instead of
+    # freezing an absolute path, so the resolution must not depend on where `worc` was launched:
+    # the operator runs it from any subdirectory of the clone.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    orch, _store, _ledger, _art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        config_kwargs={"quarantine": "./.worc/tasks/rejected"},
+    )
+    bad = tmp_path / "task-010.md"
+    bad.write_text("no front matter at all\n", encoding="utf-8")
+
+    assert orch.run_task(str(bad)).final_status is Status.FAILED
+    assert (git_repo.clone / ".worc" / "tasks" / "rejected" / "task-010.md").exists()
+    assert not (elsewhere / ".worc").exists()
 
 
 def test_notifier_exception_does_not_change_terminal_outcome(
