@@ -70,6 +70,14 @@ Credentials are configured outside the orchestrator:
 
 For all configuration fields, see [configuration.md](configuration.md).
 
+### Two things `install` wrote that are worth knowing before you edit anything else
+
+**The generated `config.yaml` is deliberately small.** It carries what the install resolved (`repo`, the selected providers, `git`, the `auto_mode` answer), the `security` posture, and three affordances at their default so you can find them (`paths.tasks_dir`, an empty `checks.command_sets`, `telegram.enabled`). Every other block is **absent and running at its documented default** — the file's own footer lists them block by block. Add a block only to change something; the annotated `config.example.yaml` installed beside it is the complete reference.
+
+**It wrote `security.strict_isolation: false`, and that value _is_ the advanced mode.** Not a slightly relaxed sandbox: it forwards your shell's environment whole to every process run on the agent's behalf, hands every node a shell and the full tool surface, lets the agent write anywhere on the workspace volume rather than only in the clone, and puts every node online whatever its flow granted. What remains is a four-level floor, and only the first level is mechanical. **Read [configuration.md → The advanced mode](configuration.md#the-advanced-mode-strict_isolation-false) before your first real run** and decide deliberately; setting `strict_isolation: true` (or deleting the key — an omitted key means `true`) is the fail-closed posture.
+
+Two things the mode does **not** do, because they are the usual misreading: it unlocks no provider full-access mode (both selectors are refused at every value of the key), and it skips no proof — the per-provider capability probes run either way, and under `false` most of all, since there the generated permission profile is the whole local floor.
+
 ### Self-host the orchestrator repository
 
 Do not point `repo.local_path` at the source checkout open in your IDE. Use one checkout to run a known-good orchestrator build and a separate clone as the target repository:
@@ -108,9 +116,14 @@ Preflight checks each allowed provider (executable, version, and what its CLI sa
 ```text
 env: OK — loaded 2 variable(s) from .worc/.env
 claude: OK — claude 2.1.210 available (version=2.1.210, auth=logged_in (claude.ai))
+claude-binary: /opt/homebrew/bin/claude -> /opt/homebrew/Cellar/claude/2.1.210/bin/claude
 codex: OK — codex 0.144.4 available (version=0.144.4, auth=logged_in)
+codex-binary: /Users/me/.codex/bin/codex (inside CODEX_HOME)
 codex: isolation smoke OK — codex workspace-write sandbox: OS-enforced (empty MCP inventory)
-isolation: OK (enforced)
+isolation: OK (advanced mode)
+isolation-floor: OK — sandbox enforceable on this host
+allowed-environment: OK — 9 name(s) after expansion (git/gh scope)
+gh-repo-pin: OK — every gh call pinned to OWNER/REPO (from repo.url)
 checks: 1 command set(s):
   repo (paths: always): ruff check .; mypy src; .venv/bin/python -m pytest
 gh: OK
@@ -118,7 +131,17 @@ telegram: SKIP (disabled)
 preflight: ready
 ```
 
-`worc preflight` is the only caller that opts into the live no-model **isolation capability smoke** (the `isolation smoke` line above): Codex runs a real `codex sandbox` probe of the generated permission profile, so an old CLI, a missing sandbox helper, or a mis-generated policy surfaces here instead of mid-run. The installer's own post-write preflight stays offline and prints no such line. A proven policy leak fails preflight unconditionally; an undemonstrable sandbox is fatal only when there is no fallback provider.
+Three of those lines are new enough to call out. **`isolation: OK (advanced mode)`** is what a fresh install produces, because it wrote `strict_isolation: false` — see section 2. **`isolation-floor:`** answers a different question: whether _this host_ can enforce an OS sandbox at all, and it is **advisory at either setting** — on native Windows, or Linux/WSL2 without `bubblewrap` + `socat`, it says loudly that `.git` and `.worc` are writable here and the run continues. **`gh-repo-pin:`** says whether every `gh` call is pinned to a repository; when `repo.url` names no hosted repo and the clone's `origin` cannot be parsed either, nothing is pinned and this fails (with `create_pull_request` on) rather than switching the guarantee off quietly.
+
+`worc preflight` is the only caller that opts into the live no-model **isolation capability smoke** (the `isolation smoke` line above): Codex runs a real `codex sandbox` probe of the generated permission profile, so an old CLI, a missing sandbox helper, or a mis-generated policy surfaces here instead of mid-run. It runs at either value of `strict_isolation` — under `false` most of all, since there the profile is the whole local floor. The installer's own post-write preflight stays offline and prints no such line. A proven policy leak fails preflight unconditionally; an undemonstrable sandbox is fatal only when there is no fallback provider — and **"nothing was written" is never a pass**: a probe that cannot tell an enforced sandbox from a model that never tried reports `NOT DEMONSTRATED`.
+
+One probe is deliberately not part of this and costs money:
+
+```bash
+worc preflight --paid-isolation-probe
+```
+
+Claude offers no way to run a command under its sandbox without the model, so this spends **one real (billed) call** per supporting provider, letting an agent try to write into `.git` and the control home; the verdict is read from the filesystem afterwards, never from what the model said it did. Nothing implies it — no run, and no plain `preflight`, spends it. The evidence lands at `.worc/preflight/claude-paid-isolation-probe.json`.
 
 Preflight deliberately does **not** validate flows — that is `worc validate-flow <name>` (or `--all`), a separate read-only check over your `.worc/flows/`. Every dispatched flow is validated fatally at task time anyway, so a broken flow fails that task rather than the whole gate.
 
@@ -357,7 +380,7 @@ Review for security first. Reject the change unless:
 
 Notes:
 
-- Variables are metadata/paths only — e.g. `{repo_path}`, `{diff_path}`, `{plan_path}`. Large content stays in the artifact files the agent reads by path. The set is a fixed allowlist (`task_id`, `stage`, `repo_path`/`repo`, `task_path`, `plan_path`, `diff_path`, `checks_path`, `review_path`, `subtask_order`, `subtask_count`, `subtask_spec_path`, `skills_path`, `memory_path`, `predecessor_context`) **plus** one `{<node-id>_path}` per node in your flow, so a downstream node can name an upstream node's output — a node `static-scan` publishes `{static-scan_path}`. Unknown `{...}` and literal braces pass through unchanged, so a prompt containing JSON or code never breaks.
+- Variables are metadata/paths only — e.g. `{repo_path}`, `{diff_path}`, `{plan_path}`. Large content stays in the artifact files the agent reads by path. The set is a fixed allowlist (`task_id`, `stage`, `repo_path`/`repo`, `task_path`, `plan_path`, `diff_path`, `checks_path`, `review_path`, `subtask_order`, `subtask_count`, `subtask_spec_path`, `memory_path`, `predecessor_context`) **plus** one `{<node-id>_path}` per node in your flow, so a downstream node can name an upstream node's output — a node `static-scan` publishes `{static-scan_path}`. Unknown `{...}` and literal braces pass through unchanged, so a prompt containing JSON or code never breaks.
 - Wrap optional prose in `{?name}…{/name}`: the block survives only when `name` is an allowlisted variable with a non-empty value, otherwise the whole block (markers included) is dropped — no dangling empty placeholder when, say, there is no subtask.
 - The exact text sent each run is saved (redacted) to `.worc/logs/<task-id>/stages/<node-id>/run-<node-run-id>/rendered-prompt.md` — one per node run, so a re-running node keeps every pass.
 - A template is prompt text only: it cannot change the provider, sandbox/approvals, denied commands, or enable `git`/`gh` publishing.
@@ -465,7 +488,7 @@ There is one canonical layout: the orchestrator's runtime home is the gitignored
 ```yaml
 git:
   footprint:
-    audit_commit_message: "chore(orchestrator): audit trail for {task_id}" # the default
+    audit_commit_message: "chore(worc): audit trail for {task_id}" # the default
     audit_on_branch: task # task (default) | sibling
 ```
 
@@ -487,7 +510,7 @@ Typical history for a successful task:
 
 ```text
 feat(task-123): add rate limiting
-chore(orchestrator): audit trail for task-123
+chore(worc): audit trail for task-123
 ```
 
 The first commit carries the source diff. The second carries only the task trail under `tasks/`: the moved `task-123.md` plus `task-123.summary.md`. Everything under `.worc/` stays local and is never committed.
