@@ -189,7 +189,12 @@ trust_level: strict # ask before continuing on any deletion / dependency-manifes
 | `strict` | Gate on **any** tracked-file deletion/rename or dependency-manifest/lock edit. |
 | `auto` (default) | Routine in-repo deletions/renames/edits do **not** gate; only a `security.protected_paths` match asks. |
 
-The per-task value **wins** over the global default (there is no operator gate, mirroring [`auto_merge`](#auto_merge)). It changes only _which_ diffs raise the gate — it **never lowers the hard security ceiling** (the environment allowlist, the `bypassPermissions`/`--dangerously-*` ban, and `cwd` containment hold at every level). A raised gate is fail-closed: a denial, timeout, or missing notifier stops the task in `manual_action_required`. `trust_level` cannot touch `security.protected_paths` — that always-ask floor is `config.yaml`-only and asks at every level (see [configuration.md](configuration.md#trust_level-approval-policy)).
+The per-task value **wins** over the global default (there is no operator gate, mirroring [`auto_merge`](#auto_merge)). It changes only _which_ diffs raise the gate — it **never lowers the hard security ceiling** (the environment allowlist, the `bypassPermissions` / `danger-full-access` / `--dangerously-*` ban, and `cwd` containment hold at every level and at every value of `security.strict_isolation`). A raised gate is fail-closed: a denial, timeout, or missing notifier stops the task in `manual_action_required`. `trust_level` cannot touch `security.protected_paths` — that always-ask floor is `config.yaml`-only and asks at every level (see [configuration.md](configuration.md#trust_level-approval-policy)).
+
+Two things about _where_ and _from what_ the gate measures are worth knowing when you set this on a task, because neither is a per-task choice:
+
+- **It asks in three places**, not one: after a writing node's edit, at that node's own `hitl` round-trip, and once more immediately before the publishing commit. That last one is why a `security_audit`-shaped flow — no writing node at all — can still put a question to you: any node with a shell can commit. A denial there is a **stop, not a rework**, since the agent is gone by then.
+- **It measures from the last commit the orchestrator itself made** for the task (the task's base until there is one), never from `HEAD` — so if an agent commits its own work mid-run, that content still reaches the gate. In a decomposed task the reference advances with each subtask commit, so an approval you gave on one subtask is not put to you again on the next, while the run's reported diff and the PR body still describe the whole task.
 
 ## Refinement (automatic)
 
