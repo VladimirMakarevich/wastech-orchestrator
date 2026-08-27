@@ -22,7 +22,7 @@ How this maps onto the orchestrator:
 | Component | **functional blocks B01–B32**, plus the post-taxonomy components below | `components` |
 | Code | — | (skipped; see the source under `src/`) |
 
-`B01`–`B32` is a **closed** taxonomy — it exists only in this model. Components added after it was closed carry descriptive names instead of invented numbers: `Summary Report` (the deterministic PR body), `Exchange Publisher` (the redaction + path-safety boundary onto `.worc-io/`), `Frozen Bundles` (the per-task immutable control and instruction snapshots under `runs/`), and `Memory`. Follow that convention rather than extending the numbering. One number is **retired** rather than pending: `B04` (config discovery) describes a config block removed in schema v15 and only tolerated as a legacy key today.
+`B01`–`B32` is a **closed** taxonomy — it exists only in this model. Components added after it was closed carry descriptive names instead of invented numbers: `Summary Report` (the deterministic PR body), `Exchange Publisher` (the redaction + path-safety boundary onto `.worc-io/`), `Frozen Bundles` (the per-task immutable control and instruction snapshots under `runs/`), `Memory`, and `Pinned Launchers` (the absolute paths for what the orchestrator launches as itself). Follow that convention rather than extending the numbering. Two numbers are **retired** rather than pending, and neither will ever get a component: `B04` (config discovery) describes a config block removed in schema v15 and only tolerated as a legacy key today, and `B13` (skills) described repo-skill selection, which was removed outright — the module is deleted and the `skills` config block is now an unknown key that fails the load.
 
 L2 is intentionally thin here: the orchestrator is a **single process**, so "containers" means the process itself plus the storage it owns; child CLIs are external systems launched as subprocesses.
 
@@ -82,10 +82,10 @@ Other export formats: `jpg`, `json` (the whole model as data), and `drawio`. Not
 | `landscape` | view | Context (C4 L1): system + people + external systems |
 | `containers` | view of `orchestrator` | Containers (C4 L2): process + the five stores (`state.db`, `.worc/`, `.worc-io/`, the working tree, `tasks/`) |
 | `components` | view of `proc` | Components (C4 L3) = functional blocks |
-| `crosscutting` | view | Cross-cutting concerns: security, redaction, the dangerous-diff gate, isolation boundaries, observability |
-| `isolation` | view | What the agent may read, what it may **write** (and where writes are denied), and what is frozen per task |
+| `crosscutting` | view | Cross-cutting concerns: security, redaction, the dangerous-diff gate, isolation boundaries, the pinned launchers, observability |
+| `isolation` | view | What the agent may read, what it may **write** (and where writes are denied), what is frozen per task, and what advanced mode (`security.strict_isolation: false`) gives up |
 | `happyPath` | **dynamic view** | Step-by-step run of a single task: `run` → … → PR |
-| `failurePath` | **dynamic view** | The same run going wrong: provider fallback, quality fix loops, the resumable park, and the three terminals |
+| `failurePath` | **dynamic view** | The same run going wrong: provider fallback, quality fix loops, the resumable park, drift that only reports, a publish that parks over an adopted remote, and the three terminals |
 | `implementationFlow` | **dynamic view** | The default flow's node graph with its bounded fix loop |
 
 A `dynamic view` is analogous to a sequence diagram: it shows the order of interactions over time.
@@ -99,7 +99,7 @@ To extend further:
 - **Icons** (looks "production-ready"): in an element's `style { … }` block add `icon tech:python`, `icon tech:sqlite`, etc. — see the icon catalog on the LikeC4 website. (Not added by default to avoid coupling to specific icon names without local verification.)
 - **Split into files**: `spec.likec4` / `model.likec4` / `views.likec4` (LikeC4 merges all `*.likec4` files in the directory) — convenient as the model grows.
 - **Typed relationships**: declare relationship kinds (`relationship async`, `relationship spawns`) with their own line style.
-- **All 32 blocks**: the model currently holds **29 components** — 25 of the numbered blocks (including the B28 flow engine, the B31 supervisor, and the B32 checkers/tools) plus the four descriptive ones (`Summary Report`, `Exchange Publisher`, `Frozen Bundles`, `Memory`). The remaining six (`B10` recovery, `B13` skills, `B15` prompts, `B20` artifact layout, `B29` flow definition/validation, `B30` flow node runners) are listed as comments in `workspace.likec4` and can be added following the same pattern; `B04` is retired, not pending.
+- **All 32 blocks**: the model currently holds **30 components** — 25 of the numbered blocks (including the B28 flow engine, the B31 supervisor, and the B32 checkers/tools) plus the five descriptive ones (`Summary Report`, `Exchange Publisher`, `Frozen Bundles`, `Memory`, `Pinned Launchers`). The remaining five (`B10` recovery, `B15` prompts, `B20` artifact layout, `B29` flow definition/validation, `B30` flow node runners) are listed as comments in `workspace.likec4` and can be added following the same pattern; `B04` and `B13` are retired, not pending.
 - **CI**: run `likec4 validate` (fails on a broken model) and `likec4 build`/`export` in the pipeline to catch drift and publish the site. Nothing runs LikeC4 in CI today — the model is checked by hand.
 - **MCP**: `npx likec4@latest mcp docs/likec4` serves the model to an MCP client, the same way [.mcp.json](../../.mcp.json) already registers the Markdown linter. Not registered here yet.
 
