@@ -106,12 +106,12 @@ model {
       }
       hitl = component 'B12 HITL' 'Typed human_input / planning signals: strict validation, ask through the Notifier, redacted answer back as {human_input_path} on a fresh run' {
       }
-      dangerous = component 'B14 Dangerous-diff Guard' 'Deterministic gate over the uncommitted diff (trust_level + protected paths) — deletions / dependency / protected changes need human approval' {
+      dangerous = component 'B14 Dangerous-diff Guard' 'Deterministic gate over the diff since the last orchestrator commit (gate_reference_sha, never HEAD): trust_level + protected paths. Shared by the agent node (denial = send back) and the publish node (denial = manual stop); asks at the edit, at that node hitl round-trip, and once before commit_code' {
         #crosscutting
       }
       gate = component 'B16 Task Gate' 'Parsing and §19 validation before slot and branch' {
       }
-      router = component 'B17 Router' 'Provider selection + fallback (infrastructure failures only)' {
+      router = component 'B17 Router' 'Provider selection + fallback (infrastructure failures only); owns the injected does-this-attempt-get-a-shell table and the config-legality (host-independent) rule for a capability_unavailable hop' {
       }
       providers = component 'B18 Providers' 'Codex/Claude adapters: argv, parsing, classification' {
       }
@@ -129,11 +129,11 @@ model {
       frozen = component 'Frozen Bundles' 'Per-task immutable control + instruction snapshots under runs/ (WRI-010/011); post-attempt digest re-check' {
         #crosscutting
       }
-      memory = component 'Memory' 'Persistent repo-scoped store: packet build (read), supervisor-proposed delta (write), bounded idle curation' {
+      memory = component 'Memory' 'EXPERIMENTAL, off by default (and forced off without the supervisor): persistent repo-scoped store — packet build (read), supervisor-proposed delta (write), bounded idle curation' {
       }
-      gitmgr = component 'B22 Git Manager' 'The only component that does commit/push/PR (idempotent)' {
+      gitmgr = component 'B22 Git Manager' 'The only component that does commit/push/PR (idempotent). Structured PushOutcome / RemoteState: publishing recovers from a diverged remote (adopt locally, re-check, then push) and never infers provenance; re-reads the push destination immediately before sending' {
       }
-      security = component 'B25 Security' 'Non-weakening policy: env, forbidden, injections, isolation' {
+      security = component 'B25 Security' 'Non-weakening policy: env allowlist + prefix patterns + assigned extra_environment (env, env_paths), absolutely-forbidden argv incl. both full-access selectors (forbidden_args), injections, isolation legality (isolation), and the provider-neutral shell-reach seam (shell_reach). strict_isolation false = advanced mode' {
         #crosscutting
       }
       redaction = component 'B21 Redaction' 'Strip secrets from streams/logs/artifacts' {
@@ -144,17 +144,25 @@ model {
       observ = component 'B27 Observability' 'Secret-free logging + heartbeat' {
         #crosscutting
       }
+      launchers = component 'Pinned Launchers' 'Absolute paths for what the orchestrator launches AS ITSELF, resolved once per run and reused for the rest of the process: git / gh / worc everywhere, plus ps (POSIX) and bwrap + socat (Linux), plus every CONFIGURED provider command. Reports drift. Closes the in-run PATH-substitution window — not a stand-in already in place before the run, and not an edit to the installed package' {
+        #crosscutting
+      }
 
       // Remaining blocks — components of the same proc; added by the same pattern:
-      // B10 Recovery, B13 Skills, B15 Prompts, B20 Artifact-layout,
+      // B10 Recovery, B15 Prompts, B20 Artifact-layout,
       // B29 Flow-definition/validation, B30 Flow-node-runners.
-      // B04 (Config-discovery) is RETIRED, not pending: the config `discovery` block was removed in
-      // config schema v15 and is only tolerated as a legacy key today (see config/loader.py).
+      // Two numbers are RETIRED rather than pending, and neither will ever get a component:
+      // B04 (Config-discovery) — the config `discovery` block was removed in config schema v15 and
+      // is only tolerated as a legacy key today (see config/loader.py); B13 (Skills) — repo-skill
+      // selection was removed outright (core/skills.py deleted): no discovery, no operator pins, no
+      // supervisor proposal, no {skills_path}, no skill_map.json, and the `skills` config block is
+      // now an unknown key that fails the load.
       // Components added after the B01–B32 taxonomy was closed carry descriptive names rather than
-      // invented numbers: Summary Report, Exchange Publisher, Frozen Bundles, Memory.
+      // invented numbers: Summary Report, Exchange Publisher, Frozen Bundles, Memory,
+      // Pinned Launchers.
     }
 
-    db = store 'State Store (state.db)' 'tasks, node_runs, provider_attempts, check_runs, evaluations, artifacts, subtasks, editing_lineage, node_lineage, publish_operations (schema v21)' {
+    db = store 'State Store (state.db)' 'tasks (+ base_ref, gate_reference_sha, push_url_digest), node_runs, provider_attempts, check_runs, evaluations, artifacts, subtasks, editing_lineage, node_lineage, publish_operations (+ pushed_sha) — schema v25' {
       #datastore
       technology 'SQLite'
     }
@@ -166,7 +174,7 @@ model {
       #datastore
       technology 'Filesystem'
     }
-    workspace = store 'Repository working tree' 'The code the agents actually edit; it carries .worc/ and .worc-io/. Write-denied for the agent: .git, the effective hooks dir, tasks/, and the exchange projection' {
+    workspace = store 'Repository working tree' 'The code the agents actually edit; it carries .worc/ and .worc-io/. Write-denied for the agent: .git, the effective hooks dir, tasks/, the exchange projection, the resolved env-file and runs/. Under advanced mode the agent writes across the workspace volume and those denies are carve-outs inside the grant; the agent CLI config homes (~/.claude, $CODEX_HOME) are in no deny projection at any setting' {
       #datastore
       technology 'Git worktree'
     }
@@ -187,6 +195,7 @@ model {
 
   cli -> installer 'install (writes .worc/ before anything else can run)'
   cli -> config 'Load + validate (discovered from .worc/)'
+  config -> security 'Lexical gates at load: allowed_environment covers PATH, extra_environment points nowhere near .git / .worc / the exchange'
   cli -> watch 'Dispatch watch / stop / restart'
   cli -> pipeline 'run / rerun / finalize'
   cli -> queue 'promote: preparing/ -> pending/ (atomic move)'
@@ -216,18 +225,22 @@ model {
   engine -> loops 'Charge every rework / fail edge against the counters'
   loops -> db 'Counters on the tasks row'
   engine -> hitl 'Nodes with a human_input / planning contract'
-  engine -> dangerous 'Workspace-write nodes: classify the uncommitted diff'
+  engine -> dangerous 'Writing nodes and their hitl round-trip, then once more in the publish node right before commit_code — three asking points over the diff since the last orchestrator commit'
   dangerous -> hitl 'Approval request for the classified change set'
   hitl -> notifier 'Notifier.ask (transport-agnostic), correlated'
   hitl -> artifacts 'Durable interaction records (resumable across restarts)'
   hitl -> engine 'Redacted answer -> {human_input_path} on a fresh run'
+  router -> security 'attempt_has_shell table (injected): does THIS attempt get a shell?'
   router -> providers 'AgentProvider.run'
   providers -> subprocess 'run_process (containment + quiescence barrier)'
+  providers -> launchers 'Pinned agent-CLI path'
+  subprocess -> launchers 'Pinned ps for the quiescence barrier'
+  cli -> launchers 'Resolve once at startup; report drift'
   providers -> codex 'Launch (argv, no shell)'
   providers -> claude 'Launch (argv, no shell)'
   providers -> security 'Profile / env / forbidden / git-evidence grant'
   providers -> redaction 'Stream redaction'
-  security -> workspace 'Write-guard deny set per workspace-write attempt'
+  security -> workspace 'Write-guard deny set per attempt THAT GETS A SHELL; drift is reported, never parks'
   codex -> workspace 'Edit code (Write/Edit inside the tree)'
   claude -> workspace 'Edit code (Write/Edit inside the tree)'
   engine -> checks 'Checks nodes (testing)'
@@ -242,9 +255,10 @@ model {
   pipeline -> gitmgr 'Branch prep / terminal cleanup / git control-state fingerprint'
   engine -> gitmgr 'Publish node (commit / push / PR)'
   gitmgr -> subprocess 'run_process'
+  gitmgr -> launchers 'Pinned git / gh path for every call'
   gitmgr -> workspace 'Branch, stage and commit from the working tree'
-  gitmgr -> github 'git / gh'
-  gitmgr -> db 'publish_operations (idempotency)'
+  gitmgr -> github 'git / gh (--repo pinned); adopt a diverged remote locally, re-check, then push — or refuse when the push destination moved'
+  gitmgr -> db 'publish_operations + pushed_sha (idempotency); base_ref / gate_reference_sha / push_url_digest'
   pipeline -> ledger 'Terminal transition record (done / failed / manual_action_required)'
   ledger -> artifacts 'completed.jsonl · failure_report.json · stuck.md'
   pipeline -> notifier 'HITL / notifications / ⚠️ traces'
@@ -277,14 +291,14 @@ views {
   }
 
   view crosscutting {
-    title 'Cross-cutting: security, redaction, isolation boundaries, observability'
-    include security, redaction, observ, exchange, frozen, dangerous, providers, gitmgr, checks, subprocess, gate, db, artifacts, exchangeRoot, workspace
+    title 'Cross-cutting: security, redaction, isolation boundaries, pinned launchers, observability'
+    include security, redaction, observ, launchers, exchange, frozen, dangerous, providers, gitmgr, checks, subprocess, gate, router, db, artifacts, exchangeRoot, workspace
     autoLayout TopBottom
   }
 
   view isolation {
-    title 'Isolation boundaries: what the agent may read, what it may write, and what is frozen'
-    include frozen, exchange, security, providers, codex, claude, artifacts, exchangeRoot, workspace, queue
+    title 'Isolation boundaries: what the agent may read and write, what is frozen, and what advanced mode gives up'
+    include frozen, exchange, security, launchers, providers, codex, claude, artifacts, exchangeRoot, workspace, queue
     autoLayout LeftRight
   }
 
@@ -308,6 +322,7 @@ views {
     engine -> router 'documentation (docs follow the code)'
     supervisor -> report 'summary.md, else the deterministic body'
     engine -> gitmgr 'commit / push / PR'
+    engine -> dangerous 'last ask, in the publish node right before commit_code (nothing new to approve on a clean run)'
     gitmgr -> github 'gh pr create'
     exchange -> artifacts 'seal the terminal exchange under runs/'
     pipeline -> notifier 'outcome notification'
@@ -330,9 +345,12 @@ views {
     engine -> router 'review: blocking findings -> fixing'
     engine -> loops 'Charge the rework edge'
     loops -> state 'Budget exhausted -> manual_action_required with a failure report'
-    engine -> dangerous 'Uncommitted diff hits the approval gate'
+    engine -> dangerous 'Diff since the last orchestrator commit hits the approval gate'
     dangerous -> hitl 'Ask the human to approve'
-    hitl -> state 'Denied, and the changes were retained -> manual_action_required'
+    hitl -> state 'Denied at a writing node -> send back; denied before commit_code -> manual_action_required (the agent is gone)'
+    security -> notifier 'Git-control / workspace drift: WARNING + ⚠️ trace, and the run CONTINUES — no node class parks on it'
+    gitmgr -> state 'Publish over an adopted remote: failing checks or a merge conflict -> parked, nothing pushed (worc merge-task is the way through)'
+    gitmgr -> notifier 'Push destination moved -> refused outright; commits adopted -> ⚠️ trace when there is no PR body to say it'
     pipeline -> ledger 'Terminal record + failure_report.json / stuck.md'
     pipeline -> notifier 'Outcome notification'
   }
