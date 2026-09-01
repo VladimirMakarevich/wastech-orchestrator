@@ -1670,7 +1670,7 @@ def test_supervisor_observe_mode_defaults_to_events(packaged_config_text: str) -
 
 
 def test_supervisor_config_provider_parsed(packaged_config_text: str) -> None:
-    block = "supervisor:\n  provider: codex\n  finalize:\n    model: gpt-5.4\n"
+    block = "supervisor:\n  provider: codex\n  finalize:\n    model: gpt-5.5\n"
     config = _config_with_supervisor(packaged_config_text, block)
     assert config.supervisor.provider == ProviderId.CODEX
 

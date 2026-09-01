@@ -212,7 +212,7 @@ def test_cross_provider_fallback_drops_provider_specific_request_fields(
     outcome = router.run_stage(
         make_request(
             node_id="review",
-            model="gpt-5.4",
+            model="gpt-5.5",
             reasoning="high",
             extra_args=["-c", 'model_reasoning_effort="high"'],
             session_id="codex-session-123",
@@ -225,7 +225,7 @@ def test_cross_provider_fallback_drops_provider_specific_request_fields(
 
     assert outcome.provider_used is ProviderId.CLAUDE
     # The primary saw the pins; the cross-provider fallback saw provider-specific fields cleared.
-    assert primary.requests[0].model == "gpt-5.4"  # type: ignore[attr-defined]
+    assert primary.requests[0].model == "gpt-5.5"  # type: ignore[attr-defined]
     assert primary.requests[0].reasoning == "high"  # type: ignore[attr-defined]
     assert primary.requests[0].extra_args == [  # type: ignore[attr-defined]
         "-c",

@@ -2,23 +2,21 @@
 
 You are working on **wastech-orchestrator** — an orchestrator that launches coding agents (Claude Code / Codex) to carry out development — or any other — tasks and (optionally) publish the result to Git.
 
-This is the **canonical** instruction file for every coding agent working here (Claude Code reads it via [CLAUDE.md](CLAUDE.md)). The full set of rules lives in **[.agents/rules/](.agents/rules/)**; the design rationale is in [worc_architecture.md](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/worc_architecture.md). Below is the gist — the rules and the code are the source of truth.
+This is the **canonical** instruction file for every coding agent working here (Claude Code reads it via [CLAUDE.md](CLAUDE.md)). The full set of rules lives in **[.agents/rules/](.agents/rules/)**. Below is the gist — the rules and the code are the source of truth.
 
 ## Branches you will be working on
 
 Development happens on **`dev`**, which deliberately carries **no derived documentation** — `docs/` there holds only `backlog/` (the task queue you implement from). The descriptive documents (`worc_architecture.md`, `configuration.md`, `cookbook.md`, `glossary.md`, `operations.md`, the site) live on **`main`** and are reconstructed there from the merged `dev` diff as a separate task; `release` carries the published versions. Flow: `feat/… → dev → main → release`. Two rules that must never be broken: **never merge `main` (or `release`) into `dev`**, and **`dev → main` is always a merge commit, never a squash**. See [git-workflow.md](.agents/rules/git-workflow.md) §A.
 
-Practical consequence: a `main`-only document is linked by absolute URL, so if you cannot find it in your checkout you are on `dev` and it is not supposed to be there — read it at that URL and never recreate it locally.
-
 ## Before writing code
 
-1. Read [worc_architecture.md](https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/worc_architecture.md) for the design rationale. It lives on `main` only — on `dev` there is no local copy, so read it at that URL rather than looking for it in the tree.
-2. Check against the rules in **[.agents/rules/](.agents/rules/)** — they are mandatory:
-   - [architecture.md](.agents/rules/architecture.md) — invariants that must not be violated
-   - [coding-style.md](.agents/rules/coding-style.md) — Python style
-   - [security.md](.agents/rules/security.md) — security policy
-   - [git-workflow.md](.agents/rules/git-workflow.md) — branches, commits, PRs
-   - [testing.md](.agents/rules/testing.md) — what to test and how
+Check against the rules in **[.agents/rules/](.agents/rules/)** — they are mandatory:
+
+- [architecture.md](.agents/rules/architecture.md) — invariants that must not be violated
+- [coding-style.md](.agents/rules/coding-style.md) — Python style
+- [security.md](.agents/rules/security.md) — security policy
+- [git-workflow.md](.agents/rules/git-workflow.md) — branches, commits, PRs
+- [testing.md](.agents/rules/testing.md) — what to test and how
 
 ## Hard invariants (must not be violated)
 
