@@ -68,7 +68,7 @@ flow:
       network_access: false
       # The from-scratch authorial draft benefits from a high reasoning effort (uncomment to pin):
       # provider: codex
-      # model: gpt-5.4
+      # model: gpt-5.5
       # reasoning: xhigh
     - id: length
       kind: tool
@@ -99,7 +99,7 @@ flow:
       # editing lineage, so it MUST carry the same model/provider if you pin one on draft above.
       reasoning: medium
       # provider: codex
-      # model: gpt-5.4
+      # model: gpt-5.5
     - id: fixing
       kind: agent
       role_file: blog_article/fixing.md
@@ -109,7 +109,7 @@ flow:
       network_access: false
       # Same lineage-affinity note as polish above (uncomment to match draft's pin):
       # provider: codex
-      # model: gpt-5.4
+      # model: gpt-5.5
     - id: publish
       kind: publish
       policy: documentation_pull_request
