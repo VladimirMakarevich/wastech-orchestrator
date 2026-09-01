@@ -1,29 +1,20 @@
 name: site
 
-# Build the Markdown documentation site on the branches that carry documentation, but publish it only
-# when a release/pre-release tag is pushed. The output is plain static files and can move off Pages
-# later.
+# Build and publish the Markdown documentation site. This workflow, `mkdocs.yml`, and
+# `tools/stage_site_docs.py` exist on the `site` branch alone — it is the only branch that carries
+# the derived docs/ tree they read (see .agents/rules/git-workflow.md §A), and `mkdocs.yml` sets
+# `strict: true`, so a run anywhere else would fail on missing files.
 #
-# Restricted to `main` / `release` on purpose: `dev` carries no derived docs/ tree (see
-# .agents/rules/git-workflow.md §A), while `tools/stage_site_docs.py` copies a fixed list of
-# docs/*.md and mkdocs.yml sets `strict: true` — so a run against a `dev` ref, or a `feat/… -> dev`
-# pull request, would fail on missing files.
-#
-# `tags: ["v*"]` is required, not decorative: a `push` trigger that specifies `branches` does not fire
-# on tag pushes at all, so without it the tag-gated deploy job below is unreachable and only
-# workflow_dispatch can publish. Release tags are cut on `release`.
+# Publication is a push to `site`: merging `main → site` republishes, and so does landing a
+# `docs/…` pull request. A pull request into `site` builds without deploying, so a broken link or a
+# nav entry with no page is caught before it is published. The output is plain static files and can
+# move off Pages later.
 on:
-  pull_request:
-    branches: ["main", "release"]
   push:
-    branches: ["main", "release"]
-    tags: ["v*"]
+    branches: ["site"]
+  pull_request:
+    branches: ["site"]
   workflow_dispatch:
-    inputs:
-      deploy:
-        description: "Deploy to GitHub Pages"
-        type: boolean
-        default: false
 
 permissions:
   contents: read
@@ -51,20 +42,23 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[docs]"
 
+      # `--ref site` is pinned rather than taken from GITHUB_REF_NAME: on a pull_request the ref name
+      # is `<n>/merge`, which would bake nonsense blob URLs into every link that points outside the
+      # published page set. The site only ever publishes from this branch, so the ref is a constant.
       - name: Stage Markdown docs
-        run: python tools/stage_site_docs.py --ref "${GITHUB_REF_NAME:-main}"
+        run: python tools/stage_site_docs.py --ref site
 
       - name: Build static site
         run: mkdocs build --strict --site-dir site
 
       - name: Upload Pages artifact
-        if: startsWith(github.ref, 'refs/tags/v') || inputs.deploy
+        if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:
           path: site
 
   deploy:
-    if: startsWith(github.ref, 'refs/tags/v') || inputs.deploy
+    if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
     permissions:

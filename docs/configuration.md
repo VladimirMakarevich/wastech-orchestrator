@@ -243,7 +243,7 @@ agents:
       extra_args: []
     codex:
       command: "codex"
-      model: "gpt-5.4" # "" = use the Codex CLI/account default
+      model: "gpt-5.5" # "" = use the Codex CLI/account default
       reasoning: high # minimal | low | medium | high | xhigh | max→xhigh
       timeout_seconds: 7200
       permission_profile: "workspace-write" # codex's isolation knob (a generated permission profile)
@@ -256,7 +256,7 @@ Common fields:
 | --- | --- | --- | --- |
 | `command` | string | provider id (`"claude"` or `"codex"`) | Executable name or path. On Windows, pin an absolute native `.exe` when npm, the Codex app, or an IDE expose conflicting installations; see [How-To §5](how-to.md#5-fix-conflicting-codex-installations-on-windows). |
 | `primary` | boolean | `false` | Marks the **global primary**. Exactly one configured provider must set it; that provider runs any flow node with no explicit `provider` and is the sole infrastructure-fallback target. It must also be in `agents.allowed`. |
-| `model` | string | `claude-sonnet-5` (claude), `gpt-5.4` (codex) | Provider model setting. The packaged template ships an explicit default per provider; set `""` to fall back to the CLI/account default. (A flow node may override it per node.) |
+| `model` | string | `claude-sonnet-5` (claude), `gpt-5.5` (codex) | Provider model setting. The packaged template ships an explicit default per provider; set `""` to fall back to the CLI/account default. (A flow node may override it per node.) |
 | `reasoning` | string or null | `high` (both, in the packaged template) | Provider-specific reasoning effort level. Claude accepts `low`, `medium`, `high`, `xhigh`, `max` and maps it to `--effort`. Codex accepts `minimal`, `low`, `medium`, `high`, `xhigh`, plus legacy `max` mapped to `xhigh`, and passes it as `-c model_reasoning_effort="..."`. Set `null` to omit the override and use the CLI/account default. (A flow node may override it per node.) |
 | `timeout_seconds` | integer | `7200` | Timeout for a stage run. |
 | `permission_profile` | string (`read-only` \| `workspace-write`) | `"workspace-write"` | Orchestrator access level for this provider's runs (a flow node may lower it, never raise it). Claude maps it to a permission mode + tool set (+ OS Bash sandbox on macOS/Linux/WSL2). **Codex** generates a per-attempt permission profile at this level that denies the private/control home + secrets, keeps the exchange and the resolved Git dirs read-only, disables network, and is re-proven by a no-model `codex sandbox` canary before **every** attempt that gets a shell — at either value of `strict_isolation`, since under `false` the generated profile _is_ the whole local floor. A write that lands is a security violation and fails the attempt before the model is called; a probe that cannot run at all is reported as a host capability gap, never as a pass. See [Proving the isolation claim](#whether-the-policy-is-enforced-here-and-what-reports-it). |
