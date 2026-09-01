@@ -31,7 +31,7 @@ jobs:
           fetch-depth: 0   # full history + tags so hatch-vcs can resolve the version
 
       # Releases are cut from `release` only (see .agents/rules/git-workflow.md §A). A tag pushed
-      # from `dev` or a feature branch would ship a tree whose docs were never reconstructed, so
+      # from `dev` or a feature branch would ship a tree that never went through integration, so
       # refuse it rather than publish it. `fetch-depth: 0` above makes the ref data available.
       - name: Assert the tag is on the release branch
         run: |
