@@ -85,6 +85,46 @@ That is the same class of defect in the same function: a channel the agent runne
 not. Worth fixing as a pair (publish the subtask variables **and** re-check the generic channels for further drift)
 rather than one variable at a time.
 
+#### Proven in production, on the first subtask of the first task
+
+The `review` request for **subtask 1 of 5** (`stages/review/run-000005/1-codex/request.json`) carries
+`context_paths = {task_path, plan_path, diff_path}` and its 10,620-character prompt contains the word "subtask"
+**zero times**. It returned four findings, **three of them `blocking`**, and every one demands work belonging to a
+later subtask that had not run. Their `fix:` fields are those subtasks verbatim:
+
+| Finding | `fix:` says | Actually is |
+| --- | --- | --- |
+| `blocking feedback.scss:14` | add `ion-action-sheet, ion-toast { --ion-safe-area-bottom: var(--safe-area-bottom); }` | subtask **02** step 1 |
+| `blocking ionic-overrides.scss:10` | add `ion-modal ion-footer { … }` in `modals.scss` | subtask **03** step 1 |
+| `blocking utilities.scss:109` | add `ion-content.default-bottom-space { --padding-bottom: 6rem; }` + the page sweep | subtask **04** steps 1-2 |
+| `low ionic-overrides.scss:9` | rationale comments | subtask **02** steps 2-3 |
+
+Subtask 01's own materialized spec ends:
+
+> **Out of scope for this subtask.** Nothing consumes the token yet — that is subtasks 02 … 04. **Do not add an
+> overlay, modal or page rule here.**
+
+So the gate blocked the subtask for not doing what the subtask forbade. Meanwhile the `fixing` node's prompt for the
+same subtask reads *"You are fixing subtask 1 of 5; keep your change scoped to that subtask's spec: …"* — two nodes
+in one run, holding contradictory instructions, purely because of the `agent.py` / `evaluator.py` asymmetry.
+
+#### It is bounded, and that bound is worth stating precisely
+
+`fixing` refused, changed nothing, and diagnosed the defect unaided — *"The reviewer graded subtask 01's diff against
+the whole task's acceptance criteria rather than the subtask's … A human should re-route these four findings to
+subtasks 02-04."* Review round 2 then received `prior_fix: …/fixing/run-000006/fixing.out.md`, read that account, and
+**accepted with zero findings**. [`review.md:5`](../../src/wastech_orchestrator/packaged/flows/implementation/review.md)'s
+`prior_fix` rule is what recovered it.
+
+So this is **not** an unsatisfiable loop — an earlier draft of this entry called it a blocker and that was wrong. It
+costs **one wasted review+fixing cycle per subtask**: on subtask 1 that measured review 204.5s + fixing 303.6s
+($2.41) + re-check + review 2, roughly **11-12 minutes** of pure waste, repeated for every subtask of every
+operator-authored decomposition — about an hour on this five-subtask task, for a defect whose fix is four lines.
+
+The residual risk is the part that does not show up as wasted time: **recovery depends on the fixing agent being good
+enough to refuse.** A model that simply complied would have implemented subtasks 02-04 inside subtask 01, and nothing
+in the machinery would have caught it — the only node holding the boundary is the one being overruled.
+
 ### F2 — `review.md` tells the reviewer to ignore documentation on tasks whose deliverable *is* documentation
 
 **Severity: minor.** **Lever: role prompt — `<target>/.worc/flows/implementation/review.md`** (and the packaged
@@ -235,6 +275,61 @@ Worth noting the sibling asymmetry: `_untrusted_config_programs`
 *refuses* — is filtered to program-launching keys (`_FILTER_DRIVER_KEY_RE`, `_PROGRAM_CONFIG_KEYS`). Only the
 reporting path is unfiltered.
 
+### F7 — the agent cannot run `npm run build` inside its sandbox; the Check Runner can
+
+**Severity: major.** **Lever: orchestrator source —
+[`providers/claude.py`](../../src/wastech_orchestrator/providers/claude.py), sandbox-policy generation.**
+
+`fixing` reported the project's own build command aborting under it:
+
+```
+npm run build → exit 134
+fatal error: all goroutines are asleep - deadlock!
+goroutine 1 [chan receive]:
+  github.com/evanw/esbuild/.../ThreadSafeWaitGroup.Wait
+  main.runService ... esbuild/cmd/esbuild/service.go:160
+```
+
+It bisected carefully — restored the three changed files from `HEAD`, reproduced the abort, restored its change — and
+concluded *"It is a pre-existing host-toolchain failure"*.
+
+**That conclusion is false, and the run's own ledger disproves it.** The Check Runner executed `npm run build`
+successfully **twice** in the same task:
+
+```
+21:38:09  check=build passed=true exit_code=0 duration_seconds=11.436
+21:47:29  check=build passed=true exit_code=0 duration_seconds=11.533
+```
+
+with 200+ files freshly written into `www/`. The variable is not the tree — it is the **sandbox**. The node's
+generated `claude-sandbox-settings.json` is
+
+```json
+{"sandbox": {"enabled": true, "failIfUnavailable": true,
+             "allowUnsandboxedCommands": false, "excludedCommands": [],
+             "autoAllowBashIfSandboxed": true, …}}
+```
+
+so every agent `Bash` runs under Claude's macOS seatbelt sandbox, where esbuild's Go service deadlocks against its
+Node plugin host. `grep -rn "sandbox|seatbelt|bwrap" src/wastech_orchestrator/checks/` returns nothing — the Check
+Runner runs the command directly. Same command, two environments, two outcomes.
+
+Why it matters beyond the noise:
+
+1. `implementation.md`'s **Verify** section *mandates* the agent run `npm run lint` **and** `npm run build` before
+   finishing. Half of the required self-check is impossible for every `implementation`/`fixing` node in this repo.
+2. It burns a fix round diagnosing a phantom.
+3. It writes a false conclusion — "pre-existing host-toolchain failure" — into the durable run record, where an
+   operator would act on it.
+4. The latent risk is the interesting one: only `fixing.md`'s "do not work around a missing or incompatible host
+   toolchain" rule stopped the agent from "repairing" a build that was never broken. Defense-in-depth held, but by
+   rule rather than by a correct environment.
+
+This is **not** the deliberate `test:ci` / Chrome gap: `npm run build` is *in* the check set and is what the role
+prompts tell the agent to run. There is no config-level lever today — `excludedCommands` is emitted empty and nothing
+can populate it. That makes this a direct, evidenced argument for
+[`full-tool-access`](full-tool-access/README.md) step 4 (`unsandboxed_commands`), which is still only proposed.
+
 ## Not defects — verified and cleared
 
 Recorded so a later reader does not re-open them.
@@ -288,7 +383,7 @@ Filled in per task as the trial proceeds. Baseline tripwires on the pre-run tree
 
 | Task | Shape | Status | PR | Notes |
 | --- | --- | --- | --- | --- |
-| `001-edge-to-edge-bottom-insets` | operator decomposition, 5 subtasks | running | — | `refinement` skipped by `when: derived.needs_refinement`; `planning` on `claude/claude-opus-5`; decomposition accepted (`subtask=1/5`) |
+| `001-edge-to-edge-bottom-insets` | operator decomposition, 5 subtasks | running (subtask 2/5) | — | `refinement` skipped by `when`. `planning` claude/claude-opus-5/xhigh, 516s, **$5.10**, `decompose:false` (honored the operator split). Subtask 1: `implementation` ~8m14s → lint 10.2s + build 11.4s pass → `review` codex/gpt-5.5 204.5s **3 false blocking (F1)** → `fixing` 303.6s **$2.41** refused, changed nothing, diagnosed F1 → lint+build pass → `review` round 2 **accepted, 0 findings** via `prior_fix`. No provider fallback, no retry, no HITL prompt. One IDE drift warning (F6). |
 | `002a-back-button-ladder-docs` | plain, docs only | queued | — | blocked until `001` merges |
 | `002b-back-button-reference-guards` | plain, code + specs + i18n | queued | — | blocked until `002a` merges |
 | `002c-back-button-exit-confirm` | plain, service + spec + i18n | queued | — | blocked until `002b` merges |
