@@ -146,6 +146,13 @@ reviewer that might have caught it is the one described in **F1**.
 The skill should say plainly: a constraint that must bind one subtask belongs in that subtask's body, because the
 root arrives as an optional footer path and (today) is invisible to `review` under decomposition.
 
+**Confirmed at runtime.** The rendered `planning` prompt (7,959 chars,
+`stages/planning/run-000002/rendered-prompt.md`) ends with exactly those two footer lines and contains no other
+reference to the task; the `{?memory_path}` block dropped as expected (memory is disabled). The exchange copy at
+`.worc-io/001-edge-to-edge-bottom-insets/task.md` **is** the full 98-line root task and does carry the
+`.safe-padding-bottom` ban at line 87 — so the constraint is *reachable*, merely weakly signposted. The finding is
+about signposting, not about the constraint being dropped.
+
 ### F4 — `worc-config` enumerates two of the three install-written security keys
 
 **Severity: minor.** **Lever: skill —
@@ -185,6 +192,49 @@ and the acceptance criterion is only `Both new specs exist`. The colocated `*.sp
 this is a nit, not a defect. Recorded because a greppable acceptance criterion is what makes the rest of this batch
 auditable, and this one is not greppable.
 
+### F6 — git control-state drift fires a false positive from the operator's own IDE
+
+**Severity: minor** (noise on a security signal, not a breach). **Lever: orchestrator source —
+[`git_manager.py`](../../src/wastech_orchestrator/git_manager.py), `_capture_local_config` / `_diff_config`.**
+
+At the close of the `planning` node the run logged:
+
+```
+level=warning stage=planning drift="config: repo config key changed:
+branch.feat/001-edge-to-edge-bottom-insets.vscode-merge-base"
+msg="git control state changed during this node — continuing per policy; if you did not do this yourself,
+stop the run and discard the clone before it is committed or pushed"
+```
+
+The key is VS Code's. `git config --local --get-regexp vscode` in the target repo returns one per branch —
+`branch.main.vscode-merge-base`, `branch.fix/ios-no-firebase-local-mode.vscode-merge-base`, and the new
+`branch.feat/001-edge-to-edge-bottom-insets.vscode-merge-base` — so the IDE writes one as it notices each
+branch. The node that supposedly drifted was `read-only` with `Write`/`Edit`/`MultiEdit`/`NotebookEdit` denied
+and `Bash(git commit:*)` / `Bash(git push:*)` denied in its own argv; it had no way to write a config key.
+
+[`git_manager.py:1710-1727`](../../src/wastech_orchestrator/git_manager.py) fingerprints **every**
+`--local`/`--worktree` key with no exclusions, and `_diff_config`
+([`git_manager.py:1929-1936`](../../src/wastech_orchestrator/git_manager.py)) reports any delta. The capture's
+docstring states its scope is
+
+> exactly the agent-writable config surface
+
+which holds only when the orchestrator owns the checkout. It does not here: `repo.local_path` is the
+operator's real working checkout — what `install` writes — and the `planning` request's
+`working_directory` confirms there is no clone at all. That surface is therefore also operator- and
+IDE-writable.
+
+So the warning fires on **every** task, at whichever node runs while the IDE first sees the new branch, and
+tells the operator to abort and discard. The cost is not the noise itself but the desensitization: the
+`full-tool-access` backlog entry argues that on the shipped default this warn line is the *only* trace of a
+real isolation failure, which "makes that trace part of the mitigation, not a nicety". A signal that cries
+wolf once per task is not that. The run continued correctly per policy and nothing was compromised.
+
+Worth noting the sibling asymmetry: `_untrusted_config_programs`
+([`git_manager.py:1997-2015`](../../src/wastech_orchestrator/git_manager.py)) — the gate that actually
+*refuses* — is filtered to program-launching keys (`_FILTER_DRIVER_KEY_RE`, `_PROGRAM_CONFIG_KEYS`). Only the
+reporting path is unfiltered.
+
 ## Not defects — verified and cleared
 
 Recorded so a later reader does not re-open them.
@@ -212,6 +262,15 @@ Recorded so a later reader does not re-open them.
   `_validate_operator_subtasks` gates on `task.subtasks` alone
   ([`core/orchestrator.py:787`](../../src/wastech_orchestrator/core/orchestrator.py)) and only requires the flow to
   carry a `decomposition:` block. `001` decomposes correctly; the run confirmed `subtask=1/5`.
+- **`--allowedTools` in the argv is not a contradiction of advanced mode.** The observed `planning` argv carries
+  `--allowedTools Read,Glob,Grep,Bash,PowerShell,TodoWrite,BashOutput,KillShell,WebFetch,WebSearch` while
+  `SecurityConfig.strict_isolation` says "no tool allowlist reaches the agent CLI". The adapter is precise where
+  the schema docstring is loose: `--tools` is the *hard existence gate* and is correctly **not** emitted
+  ([`providers/claude.py:1004-1015`](../../src/wastech_orchestrator/providers/claude.py)), while `--allowedTools`
+  is only the auto-approve baseline, "and the boundary has moved to `--disallowedTools`"
+  ([`claude.py:318`](../../src/wastech_orchestrator/providers/claude.py)). Filed here because a shallower audit
+  reports this as a breach. The only residue is a **nit**: the `config/schema.py` wording invites exactly that
+  misreading.
 
 ## Cosmetic drift (no lever worth spending)
 
