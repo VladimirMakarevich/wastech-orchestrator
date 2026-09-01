@@ -702,6 +702,184 @@ and bodies", that is exactly how a forbidden trailer reaches `main`.
 "-> update branch w/ base, then merge via 'squash'". It did not print the message policy, which was the one
 thing that mattered. Reporting that in the dry-run would be the cheapest fix.
 
+### F19 — `worc top --help` documents an argv form that argparse rejects
+Severity: nit. Lever: CLI help text (`cli.py`, `top` parser `--log-file` help).
+`worc top --log-file PATH` is described as "the daemon log file to tail (the path passed to
+'watch --log-file')". `worc watch` has no `--log-file` option: its parser carries only
+`--poll-seconds` and `--queue`. `--log-file` is a **parent-parser** flag, so the working form is
+`worc --log-file PATH watch`.
+Verified: `worc watch --log-file /tmp/x.log --poll-seconds 0` prints the top-level usage error;
+`worc --log-file /tmp/x.log watch --help` parses.
+Notable because the codebase already knows this: `cli_shell.start_watch`'s docstring says the parent
+flags go "**before** the `watch` subcommand (they are parent-parser options — appending them after
+`watch` is why the old auto-spawn died on an argparse error)". The lesson was learned in the spawn
+path and not carried into the help text an operator reads.
+`worc shell --log-file` is correct — it is a real option on `shell`, which spawns the daemon itself.
+
+### F20 — every `worc run` task reads as "parked (no daemon)", and `rerun --continue` will start a second engine on it
+Severity: **major**. Lever: orchestrator source — `cli.py` `_display_status` / `cmd_rerun`'s guard,
+`core/orchestrator.py` `RERUN_ELIGIBLE_STATUSES` + `plan_rerun`.
+
+Observed live, 00:38, while `002a` was executing its `planning` node (heartbeats every 30s in the
+run log):
+
+```
+$ worc status
+task_id=002a-back-button-ladder-docs
+status=parked (no daemon)
+node=planning
+$ worc list
+active:
+  parked (no daemon)     002a-back-button-ladder-docs  ...
+```
+
+The chain, all verified in source:
+1. `cmd_run` (cli.py:1846+) writes **no** PID file and installs no stop wiring — only `cmd_watch`'s
+   daemon branch does (cli.py:1762-1810).
+2. `_display_status` (cli.py:1301-1312) renders any RUNNING row as `parked (no daemon)` whenever no
+   *watch-daemon* PID file is alive. `worc run` therefore reports "parked" for its entire duration,
+   in `status`, `list` and `top` alike — the docstring's claim is that such a row is "parked at its
+   checkpoint, awaiting resume — **not executing**", which is false for the whole `run` path.
+3. `cmd_rerun`'s only concurrency guard is that same watch-daemon PID (cli.py:2022-2028) — it passes.
+4. `RERUN_ELIGIBLE_STATUSES` = {FAILED, MANUAL_ACTION_REQUIRED, **RUNNING**}
+   (core/orchestrator.py:284-286), and `plan_rerun`'s own comment (orchestrator.py:1147-1150) states
+   the assumption outright: "a `running` row reaching here is daemon-less (the 'parked (no daemon)'
+   state)". The active-slot check at :1156 excludes the task's own id, so it does not self-block.
+
+So `worc rerun <id> --continue` against a task that is live under `worc run` passes **every** refusal
+and drives a second engine over the same branch in the same clone. The mislabel is not cosmetic: it
+is the exact prompt that sends an operator to that command.
+
+`run` is a documented first-class entry point — it is how this whole trial and all of task 001 were
+executed — so the state is routine, not exotic.
+
+NOT tested live, deliberately: proving step 4 needs a real `rerun --continue` against the running
+002a, which risks corrupting the trial's own branch. Proven statically instead; a safe live proof
+would need a throwaway repo.
+
+Cheapest fix: have `cmd_run` write the same PID file (or a run-scoped liveness marker) so the
+liveness probe covers both executors; failing that, stop equating "RUNNING + no daemon" with stale.
+
+
+### F21 — `review` is never given the check results on a pass, so it re-runs the gate inside the sandbox and blocks on F7's phantom
+Severity: **major** (it composes F7 + F10 into a review->fixing loop that can park a task).
+Lever: orchestrator source — `core/flow/nodes/checks.py` `_publish_first_failure_log`; with a
+supporting line owed in `review.md`.
+
+The command-profile checks node sets `{checks_path}` **only on failure**
+(checks.py:121-135 — "Publish the redacted first-failure log and set `{checks_path}` before the fail
+edge"). On a pass it stays `None`, so nothing about the checks reaches the next node.
+
+Confirmed empirically. `stages/review/run-000045/1-codex/request.json` `context_paths`:
+```
+task_path, plan_path, diff_path, review_artifacts_path      <- no checks_path
+```
+while `state.db` had already recorded `npm run lint` and `npm run build` green for that very tree.
+
+The codebase already argues the other way for the *other* profile. `_publish_citation_report`
+(checks.py:171-186) sets `{checks_path}` "on **BOTH** outcomes", and its docstring gives the reason:
+> "Leaving it to the command-profile failure path alone would deliver the report to nobody exactly
+> when the check passed."
+The command profile — the one `implementation.yaml` uses — was never given the same treatment.
+
+Why it bites here rather than being merely tidy: task 002a's acceptance criteria end with
+"`npm run lint` and `npm run build` pass". The reviewer is asked to judge that criterion, is handed
+no evidence of it, and under advanced mode has a Bash tool. So it verifies the only way left to it —
+by running the build itself, inside the agent sandbox, where **F7** kills it. Review round 2:
+```
+severity: blocking | path: null
+what: "`npm run build` does not currently satisfy the task gate: it exits 139 after printing
+       `Building...`. This appears environment-bound rather than caused by the markdown-only diff,
+       but the acceptance criterion is still blocked on this host."
+fix:  "Human/operator needs to repair or rerun the build toolchain on a working host; no repo source
+       change is indicated by this failure."
+```
+Note the signal differs by provider — codex/gpt-5.5 gets exit **139** (SIGSEGV), claude/opus gets
+exit **134** (SIGABRT) — which is itself evidence the cause is the sandbox, not the tree.
+
+That finding is `blocking`, carries `path: null`, and its own `fix:` states no repo change is
+indicated — **F10** exactly, second instance in this task. It routes to `fixing`, which cannot act.
+Task 001 never showed this because its reviewer did not run the build; 002a's does, and the result
+is a loop over a failure that does not exist, bounded only by `budgets.review_fix: 15`.
+
+`review.md` reinforces it by omission: line 64 already carves out `test:ci` ("Karma cannot execute in
+this environment ... Do not raise a finding that the implementer failed to run the test suite") —
+the exact carve-out the check gate itself lacks. Nothing tells the reviewer that the Check Runner
+owns lint/build, that its verdict is authoritative, or that the reviewer's own sandboxed attempt is
+not evidence.
+
+Cheapest fix: publish `{checks_path}` on a pass too (the citation profile's own argument), and add
+one line to `review.md` pointing the reviewer at it instead of the shell.
+
+## Reproducibility on chain 002 (task `002a`)
+
+The second task re-ran the same pipeline on a different shape of deliverable — documentation only,
+no decomposition. Every defect that could apply did apply, and two of them composed into something
+task 001 never showed.
+
+### F6 (IDE-driven git control-state drift) — REPRODUCED, first node of 002a
+00:40:59, closing the `planning` node, verbatim shape of the 001 occurrence:
+```
+level=warning stage=planning drift="config: repo config key changed:
+branch.feat/002a-back-button-ladder-docs.vscode-merge-base"
+msg="git control state changed during this node — continuing per policy; if you did not do this
+yourself, stop the run and discard the clone before it is committed or pushed"
+```
+Second task, second branch, same key family, same node position. Confirms F6's prediction that this
+fires **once per task** at whichever node runs while the IDE first notices the new branch. Run
+continued correctly per policy.
+
+### F9 — REPRODUCED on 002a, and no longer "intermittent" in the reassuring direction
+Review round 1 (`stages/review/run-000042`, codex, 32.7s) returned exactly one blocking finding:
+```
+severity: blocking | path: null
+what: "I cannot perform the requested diff review under the provided constraints because the task,
+       plan, and diff are only available under `.worc-io/`, while the same instructions explicitly
+       say not to read `.worc-io/`. Git state is also prohibited, so there is no allowed source for
+       the current diff."
+fix:  "Provide the task, plan, and diff content directly in the prompt, or explicitly allow reading
+       only the three listed `.worc-io/002a-back-button-ladder-docs/*` files for this review."
+```
+On task 001 this hit 1 review in 6. On 002a it hit the **first** review of the task. The sample is
+still small, but the defect is clearly not rare, and it now has a second, independent occurrence
+with the same misreading: the reviewer folds `.worc-io/` into the `.worc/` prohibition.
+
+### F10 — REPRODUCED, and it is the dominant cost of 002a
+The refusal was accepted as an ordinary `rework` verdict and routed to `fixing`, which spent
+**426.4s** establishing that there was nothing to fix ("Its own `fix:` hint asks for
+orchestrator-side action ... not a repo edit"). Same shape as 001's 474.4s round. The evaluator
+contract still cannot say "I could not review", so an infrastructure fault is still spent as a fix
+round.
+
+### F7 — REPRODUCED, with harder proof and a new escalation
+`fixing` again reported `npm run build` dying under it (exit 134, SIGABRT), and again wrote a
+confident false conclusion into the durable record:
+> "**aborts on this host, environment-bound, not caused by this change** ... It reproduced
+> identically across five runs, including with an 8 GB heap and single-threaded settings ...
+> **a human needs to look at this host's Node/build toolchain.**"
+
+`state.db` `check_runs` for this task refutes it outright — the Check Runner ran the same command
+successfully **twice**, the second time minutes *after* that text was written:
+```
+npm run lint   exit 0 passed 2026-09-01T22:53:32Z
+npm run build  exit 0 passed 2026-09-01T22:53:42Z
+npm run lint   exit 0 passed 2026-09-01T23:01:55Z
+npm run build  exit 0 passed 2026-09-01T23:02:03Z   <- after fixing's "aborts on this host"
+```
+The diagnosis is *more* elaborate than 001's (five runs, an 8 GB heap, a macOS crash report,
+`tsc --noEmit` as a control) — the agent spends more effort the more carefully it investigates,
+because every observation inside the sandbox is consistent.
+
+**New this run — the phantom caused destructive action in the operator's live checkout.** The same
+report states:
+> "While isolating the build abort **I removed `www/`**, which held output from an earlier build."
+
+`www/` is git-ignored with no tracked files, and the next Check Runner build repopulated it (199
+files present now), so nothing was lost. But F7's cost is no longer only a wasted round plus a false
+record: chasing the phantom moved an agent to delete a directory in `repo.local_path`, which is the
+operator's real working checkout, not a clone. That is the concrete argument that F7 is a sandbox
+*correctness* bug, not noise — and it raises F7 above a pure-waste finding.
+
 ## What the review-path defects cost, measured
 
 The defects above cost nothing in delivered quality — every tripwire on the shipped code passed. What they
