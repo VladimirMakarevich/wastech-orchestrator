@@ -1,6 +1,6 @@
 # The Markdown gate's second half: the config that exists only on `main`
 
-Status: **ready to apply on `main`** Date: 2026-08-11 Owner: Vladimir Makarevich
+Status: **applied** — the overlay exists on the documentation branch and the dead link in `operations.md` is gone Date: 2026-08-11 Owner: Vladimir Makarevich
 
 ## Why this is a separate item
 
