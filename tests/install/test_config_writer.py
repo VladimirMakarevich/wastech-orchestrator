@@ -245,7 +245,7 @@ def test_explicit_model_and_reasoning_defaults_are_written(tmp_path: Path) -> No
     # provider-config-cleanup #3: fresh installs ship explicit model/reasoning, not "" / null —
     # the loader's fallback for both is empty, so these two are genuine decisions, not defaults.
     assert (claude.model, claude.reasoning) == ("claude-sonnet-5", "high")
-    assert (codex.model, codex.reasoning) == ("gpt-5.4", "high")
+    assert (codex.model, codex.reasoning) == ("gpt-5.5", "high")
     assert "max_budget_usd" not in text
 
 

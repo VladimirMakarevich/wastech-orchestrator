@@ -496,7 +496,7 @@ def test_session_id_builds_exec_resume_with_isolation_before_resume(
     # (model_reasoning_effort) follow it. This keeps fresh/resume isolation identical.
     argv = _argv(
         codex_config,
-        make_request(session_id="sess-123", model="gpt-5.4", reasoning="high"),
+        make_request(session_id="sess-123", model="gpt-5.5", reasoning="high"),
         schema="/logs/schema.json",
     )
     resume = argv.index("resume")
