@@ -27,6 +27,10 @@ Everything an agent needs in order to _do_ work stays on `dev`. Everything that 
 
 Three things can never leave the code branches, whatever the split rule says: `README.md` (declared by `pyproject.toml`, so `pip install -e .` fails without it), the Markdown under `src/wastech_orchestrator/packaged/` (runtime assets — flows, role prompts, the shipped operator guide — not documentation), and `AGENTS.md` / `CLAUDE.md` / `.agents/rules/` / `.claude/skills/` (inputs that govern how agents work).
 
+## Why `site` and not `docs`
+
+`docs` is the obvious name and it is unavailable. Git stores branches as files under `refs/heads/`, so a branch named `docs` and a branch named `docs/refresh-glossary` cannot both exist — one is a file where the other needs a directory. This repository already uses `docs/<slug>` for documentation work, and `site` collides with nothing, so the topic-branch convention survives untouched and now points at `site` instead of `main`. Renaming the long-lived branch to `docs` later would mean giving up that convention, not just moving a ref.
+
 ## Why the seal exists
 
 Git merges three-way, and it reads a one-sided deletion as a decision. Branch `site` off `main`, delete `docs/` on `main`, then merge `main → site`:
@@ -40,6 +44,14 @@ Git applies the deletion, with `exit=0`, no conflict and no warning. The documen
 So the divergence has to be recorded in history once, deliberately. `git merge -s ours main`, run on `site`, records both parents while keeping `site`'s tree byte-for-byte unchanged. From then on the merge base of the two branches is already a docs-less tree, so on every later merge the documentation reads as _added on the `site` side_ — and an addition on one side with no counterpart on the other never conflicts.
 
 The seal is a one-time operation. It must be done **locally with the real `git` CLI and pushed**: a GitHub pull request cannot perform an `-s ours` merge. It is already in history.
+
+## How the site is published
+
+A push to `site` publishes it. Merging `main → site` republishes, and so does landing a `docs/…` pull request; a pull request _into_ `site` builds without deploying, so a broken link or a nav entry with no page is caught before it ships. Nothing else publishes: the workflow, `mkdocs.yml`, and `tools/stage_site_docs.py` exist on this branch alone, and the tag triggers the old arrangement used are gone.
+
+That is a deliberate trade: **the published site tracks `main`, not `release`.** Readers get documentation for the latest integrated code, which may describe something no released version does. Tying publication back to a version tag would mean carrying the documentation on `release` too, which is the coupling this model exists to remove.
+
+One operational trap, because it fails silently. The `github-pages` environment has a **deployment branch policy**, and a branch that is not in it cannot deploy: the build job succeeds, the deploy job is rejected before its first step, and there are no step logs to read — only a failed job with an empty step list. `site` was added to that policy when this model landed (repository settings → Environments → `github-pages`). Any future branch expected to publish needs the same entry, and the stale `main` / `v*` entries there are inert, since neither ref carries the workflow any more.
 
 ## The properties that must keep holding
 
@@ -59,4 +71,4 @@ That is a deliberate current state, not an oversight, and §A says so plainly ra
 
 ## History
 
-The first version of this model, in effect from 2026-07-25, had three branches and put the documentation on `main`. That made `main` both the integration branch and the documentation branch, so the seal sat on `dev → main` — the busiest edge in the repository — and every rule about it had to be obeyed on every integration. Moving the documentation to `site` on 2026-09-01 left `dev`, `main`, and `release` shape-identical, so `dev → main` became an ordinary merge and the seal moved to `main → site`, which is touched only when documentation is published. The mechanism is unchanged; only the edge it sits on moved.
+The first version of this model, in effect from 2026-07-25, had three branches and put the documentation on `main`. That made `main` both the integration branch and the documentation branch, so the seal sat on `dev → main` — the busiest edge in the repository — and every rule about it had to be obeyed on every integration. Moving the documentation to `site` on 2026-09-01 left `dev`, `main`, and `release` shape-identical, so `dev → main` became an ordinary merge and the seal moved to `main → site`, which is touched only when documentation is published. One rule was dropped rather than moved: the old model forbade merging `main → dev`, because that would have copied the documentation back onto `dev`. `main` no longer carries any, so the merge is now ordinary and permitted, and only `site` remains a sink. The mechanism is unchanged; only the edge it sits on moved.
