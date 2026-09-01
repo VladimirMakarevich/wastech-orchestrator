@@ -661,6 +661,47 @@ exclusion by property too and added the class.
 Same class as **F8** — a paraphrase that loses fidelity — but this one cost a delivery gap rather than a style
 violation.
 
+### F17 — a task cannot contribute to its own commit message (second instance of the same gap)
+
+**Severity: minor.** **Lever: orchestrator source — subtask commit-message assembly; or task-authoring guidance
+in `worc-task` / `worc-deco-task`.**
+
+Subtask 04's acceptance criterion: *"The pages that got the class and the pages deliberately left alone are
+both named, with reasons, in the summary **and the commit message**."* The run summary carries both lists. The
+commit message does not — `git log -1 --format=%B 9b69db0` is one line, and all five subtask commits are
+title-only, because the message is generated from the subtask title with no channel for an agent to add to it.
+
+This is the same structural gap as task `001`'s "put the `grep` output in the PR description" criterion: a task
+can ask for content in a publication surface that no node is able to write. **Two instances in one task.**
+Either give an agent's summary a way in, or have the task-authoring skills warn that these surfaces are not
+addressable.
+
+### F18 — `worc merge-task` cannot control the squash commit message
+
+**Severity: minor.** **Lever: orchestrator source —
+[`git_manager.py`](../../src/wastech_orchestrator/git_manager.py), `merge_pull_request`.**
+
+```python
+args = ["pr", "merge", pr_url, f"--{strategy.value}"]   # git_manager.py:3021
+```
+
+No `--subject`, no `--body`. With `git.auto_merge_strategy: squash` the squash commit's content is therefore
+whatever the **repository** setting dictates. On this repo:
+
+```
+squash_merge_commit_title:   "COMMIT_OR_PR_TITLE"
+squash_merge_commit_message: "COMMIT_MESSAGES"
+```
+
+so GitHub concatenates every commit message into the squash body. An operator squash-merging through
+`worc merge-task` inherits that silently and learns the outcome only afterwards — and on a repo whose
+`.rules/git-workflow.md` forbids agent-attribution trailers "in merge commits, squash commits, and PR titles
+and bodies", that is exactly how a forbidden trailer reaches `main`.
+
+`merge-task --dry-run` is otherwise good — it printed status, branch, base, PR, PR state and
+"-> update branch w/ base, then merge via 'squash'". It did not print the message policy, which was the one
+thing that mattered. Reporting that in the dry-run would be the cheapest fix.
+
 ## What the review-path defects cost, measured
 
 The defects above cost nothing in delivered quality — every tripwire on the shipped code passed. What they
@@ -729,7 +770,7 @@ Filled in per task as the trial proceeds. Baseline tripwires on the pre-run tree
 
 | Task | Shape | Status | PR | Notes |
 | --- | --- | --- | --- | --- |
-| `001-edge-to-edge-bottom-insets` | operator decomposition, 5 subtasks | running (subtask 2/5) | — | `refinement` skipped by `when`. `planning` claude/claude-opus-5/xhigh, 516s, **$5.10**, `decompose:false` (honored the operator split). Subtask 1: `implementation` ~8m14s → lint 10.2s + build 11.4s pass → `review` codex/gpt-5.5 204.5s **3 false blocking (F1)** → `fixing` 303.6s **$2.41** refused, changed nothing, diagnosed F1 → lint+build pass → `review` round 2 **accepted, 0 findings** via `prior_fix`. No provider fallback, no retry, no HITL prompt. One IDE drift warning (F6). |
+| `001-edge-to-edge-bottom-insets` | operator decomposition, 5 subtasks | **done, merged** | [#2](https://github.com/VladimirMakarevich/wastechlab-mobile-template/pull/2) → `main` `5c19180` | 2h23m31s, **$55.86** (Claude only; 11 codex review turns report no cost). `refinement` skipped by `when`. Nodes: planning 1 · implementation 5 · testing 11 (**11/11 passed, zero check failures**) · review 11 · fixing 6 · documentation 1 · publish 1 · supervisor 11. `fix_iterations` 6, **all review-driven**. Review rounds per subtask 2/5/2/2/1. No provider fallback, no retry, no HITL prompt, nothing parked. Every task tripwire passed on the merged result, and `npm run lint` + `npm run build` pass on `main`. |
 | `002a-back-button-ladder-docs` | plain, docs only | queued | — | blocked until `001` merges |
 | `002b-back-button-reference-guards` | plain, code + specs + i18n | queued | — | blocked until `002a` merges |
 | `002c-back-button-exit-confirm` | plain, service + spec + i18n | queued | — | blocked until `002b` merges |
