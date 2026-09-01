@@ -590,6 +590,77 @@ actually named "prompt-audit" carries only the flow-node override, and the two d
 An operator auditing "did the reviewer really run at `xhigh`?" reads `None` and cannot answer from the audit
 record. Recording the resolved value — or both, as `configured` and `effective` — closes it.
 
+### F14 — the subtask handoff's factual floor is built from `depends_on`, not from what actually landed
+
+**Severity: minor.** **Lever: orchestrator source —
+[`core/orchestrator.py`](../../src/wastech_orchestrator/core/orchestrator.py), the handoff floor assembly.**
+
+```python
+if not unit.depends_on:
+    return None                    # orchestrator.py:3178
+...
+for dep in unit.depends_on:        # orchestrator.py:3183
+```
+
+In an operator-authored decomposition every subtask commits to the **same branch, sequentially**, so every
+earlier subtask is a predecessor in fact. The floor names only the *declared* ones. Subtask 04 declares
+`depends_on: ["inset-source-and-token"]`, so its brief's factual section named subtask 01 alone while 02
+(`38b97c3`) and 03 (`61648c6`) were committed and were the closer precedents. The supervisor's interpretive
+half caught the gap and said so in the artifact:
+
+> **Three predecessors are committed on this branch, not one.** The handoff names only subtask 01;
+> `38b97c3` (subtask 02) and `61648c6` (subtask 03) also landed and are closer precedents for your work.
+
+Worse edge case: a subtask with **no** `depends_on` gets `None` — no handoff at all — even with three
+subtasks already committed to its branch. As with F1, the compensation came from model quality, not mechanism.
+
+This also adds a clause to **F3**: `worc-deco-task` describes `depends_on` purely as ordering ("a list of
+**slugs of EARLIER subtasks only**", "dependencies are linear and backward-only") and never says it *also*
+decides what the next subtask is told. An author who declares only the true logical dependency — exactly what
+the skill's wording invites — silently narrows the brief.
+
+### F15 — a correct finding with an invented authority
+
+**Severity: minor.** **Lever: role prompt — `review.md`.**
+
+Reviewing subtask 04, the evaluator filed one blocking finding:
+
+> **Phase 04 explicitly includes the user-login sandbox** in the page-bottom-space sweep, but its
+> `<ion-content class="ion-padding">` was left without `default-bottom-space`.
+
+The finding is **right**, and it is the first real delivery defect the review layer caught in this run. The
+citation is **fabricated**: `plan/04-page-bottom-spacing.md` mentions the user-login sandbox zero times and
+says the opposite — "Leave full-bleed screens alone — onboarding, auth". The claim is true of the *plan*
+(`plan.md:184`), not of Phase 04.
+
+Findings feed a fixing agent, and `fixing.md`'s guard ("treat the `fix:` hint as a lead, not ground truth …
+re-open the source and confirm the corrected claim there") is precisely what absorbed this — the fixer cited
+`plan.md` instead and moved on. But a misattributed citation sends the fixer to the wrong document first, and
+an operator reading the finding would believe Phase 04 says something it does not. A finding that cites a
+document should quote it and name which artifact it is quoting.
+
+### F16 — subtask 04 restates a property rule as a path list, and the path list over-excludes
+
+**Severity: minor.** **Lever: task file — `<target>/tasks/pending/subtasks/04-page-bottom-spacing.md`.**
+
+Step 3 reads:
+
+> **Leave full-bleed screens alone** — `src/app/pages/onboarding/`, `src/app/pages/auth/`, and anything that
+> deliberately draws to the edge or fills the viewport without scrolling.
+
+The headline is a **property**; the enumeration is two **paths**. `auth/components/user-login-sandbox/` sits
+under one of those paths and is not full-bleed — it has an `<ion-header>` toolbar and an
+`<ion-content class="ion-padding">` of cards. The literal reading therefore drops a page the rule intends to
+include, and the implementation agent took the literal reading.
+
+`planning` did not: `plan.md:184` lists the page for the sweep with a reason — *"normal header + scrolling
+content ending in two buttons — a sandbox screen, not a full-bleed auth screen"* — and `plan.md:190` names the
+genuinely full-bleed auth screens as `auth/components/{login,signup,forgot-password}`. `fixing` then read the
+exclusion by property too and added the class.
+
+Same class as **F8** — a paraphrase that loses fidelity — but this one cost a delivery gap rather than a style
+violation.
+
 ## What the review-path defects cost, measured
 
 The defects above cost nothing in delivered quality — every tripwire on the shipped code passed. What they
@@ -630,8 +701,25 @@ counts with no price — so the six review turns (1,061s of `gpt-5.5` at `xhigh`
 blockers) are absent from the total. `worc`'s per-task cost is in practice the Claude half of the bill. A
 small finding of its own; lever, the codex adapter's usage normalization.
 
-The shape worth internalizing: three separate `fixing` runs were billed at full rate for the work of
-explaining to the orchestrator, correctly and at length, that it was wrong.
+### The cost asymmetry runs the wrong way
+
+Subtask 04's review produced the run's first **real** delivery finding. Fixing it took `fixing` **130.2s and
+$1.23** — the cheapest round of the whole task. Refusing the four false ones took:
+
+| Round | Wall-clock | Cost | Verdict |
+| --- | ---: | ---: | --- |
+| `fixing` 000006 | 303.6s | $2.41 | refused (F1) |
+| `fixing` 000015 | 474.4s | $2.87 | refused (F9/F10) |
+| `fixing` 000018 | 369.1s | $2.72 | refused (F1) |
+| `fixing` 000024 | 217.5s | $1.72 | refused (F1) |
+| **total** | **1,364.6s** | **$9.72** | |
+| `fixing` 000030 | 130.2s | $1.23 | **fixed a real defect** |
+
+**7.9× the cost and 10.5× the wall-clock to reject false findings versus to fix a true one.** The reason is
+structural: a true finding is just work, while a false one obliges the fixer to research it, disprove it, and
+write a defensible negative. The system is cheapest when it is right and most expensive when it is wrong,
+which is exactly backwards — and it is the strongest single argument for putting F1, F9 and F10 ahead of
+everything else.
 
 ## Run log
 
