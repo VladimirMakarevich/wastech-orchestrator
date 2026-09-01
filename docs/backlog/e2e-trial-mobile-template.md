@@ -466,25 +466,118 @@ Recorded so a later reader does not re-open them.
   deliberately re-includes `!.worc/config.yaml` with its own rationale ("Track the orchestrator config so its
   changes are reviewable in history"). The generated header text is stale against the generated ignore rules.
 
-## The cost of F1 + F9 + F10, measured
+### F11 — the supervisor's observe turn is blind to the node whose behavior it is explaining
 
-The three defects above cost nothing in delivered quality — every tripwire on the shipped code passed. What
-they cost is time and money, quietly, with no red flag anywhere in the run.
+**Severity: major.** **Lever: orchestrator source —
+[`core/supervisor.py`](../../src/wastech_orchestrator/core/supervisor.py), `observe()` / `_step_prompt`.**
 
-Task `001`, first 55 minutes (`21:20:43` → `22:15:33`), two of five subtasks, the second still not accepted:
+After review returned rework on subtask 2 for the fourth time, the supervisor wrote a genuinely sharp note. It
+named the loop shape cycle by cycle, and concluded:
 
-| Subtask | Burned on nothing | Cause |
-| --- | --- | --- |
-| 1 | `review` 204.5s (3 false `blocking`) + `fixing` 303.6s / **$2.41** (refused) + `review` r2 ~165s | F1 |
-| 2 | `review` 258.9s (2 false `blocking` + 1 real) + `review` r2 21.9s (refusal) + `fixing` 474.4s / **$2.87** (refused) | F1, then F9/F10 |
+> That trajectory — real work, then cosmetic work, then nothing — is the signature of a step that has
+> exhausted its budget or is failing silently, not one converging on a fix. **It will not converge on its own.
+> Rework cycles spent from here are wasted unless someone changes the inputs.**
 
-**Roughly 32 of those 55 minutes** went to cycles caused by F1, F9 and F10 — none of them a defect in the
-delivered code. Direct agent spend on findings that were afterwards refuted: **$5.28**, excluding every
-`review` turn that produced them. Actual productive work in subtask 2 was about six minutes.
+and observed, correctly and usefully, that *"lint and build have presumably stayed green across all four
+cycles precisely because nothing changed; green here carries no information."*
 
-Nothing parked and nothing warned: `budgets.global_fix_iterations` is 30 (shared across subtasks via
-`decomposition.shared_budget`) and only about three iterations were consumed, so the waste stays well under
-every cap. That is the point — these defects do not fail loudly, they bill quietly.
+Then it got the cause exactly backwards:
+
+> Between cycle three and cycle four, **the implementer produced nothing at all** … the signature of a step
+> that … is **failing silently**.
+> **Recommended human action:** check whether the implementation node is **erroring or timing out** before it
+> writes.
+
+`fixing` had not failed. It ran 474.4s, exited 0, cost $2.87, and wrote a detailed report explaining exactly
+why it changed nothing. Worse, the supervisor wrote *"I verified all three findings; all are accurate"* —
+endorsing the **false** blockers, never noticing that subtask 02's spec forbids touching `modals.scss` and
+`utilities.scss`. It reads "Fourth consecutive cycle untouched" as failure when it is compliance. An operator
+following its recommendation would have gone hunting a timeout that does not exist.
+
+The cause is a wiring gap, and it is one line —
+[`core/supervisor.py:506`](../../src/wastech_orchestrator/core/supervisor.py):
+
+```python
+prompt = self._step_prompt(task_id, node_id, outcome_kind, final_message, findings)
+```
+
+The observe turn receives only the **observed** node's own `final_message` plus its `findings`, and its `_run`
+call passes no `supervisor_packet_path` — unlike the finalize turn
+([`supervisor.py:670,688`](../../src/wastech_orchestrator/core/supervisor.py)), which *is* grounded in the
+packet. So when observing an **evaluator** step, the supervisor sees the reviewer's message and the reviewer's
+findings and is structurally blind to what `fixing` said in the round before — precisely the evidence needed
+to judge whether a rework loop is productive.
+
+Size is not the obstacle: `_STEP_MESSAGE_MAX` is 500 and the fixing report's whole rationale sits in its first
+500 characters, so the packet's `steps[].message` channel
+([`supervisor_packet.py:318-319`](../../src/wastech_orchestrator/core/supervisor_packet.py)) would have
+carried it — the observe turn simply is not given the packet. The method's own docstring already records a
+sibling starvation: *"without them the observation is a bare outcome label with nothing to react to, which is
+why the observer made no tool calls on any evaluator step of the run this came from."*
+
+### F12 — `worc status` names the wrong node inside a decompose region
+
+**Severity: minor** (operator surface only). **Lever: orchestrator source — the `current_node` bookkeeping the
+status renderer reads.**
+
+Twice, about a minute apart, immediately after review accepted subtask 2:
+
+```
+node=documentation   subtask=3/5   fix_iterations=4
+```
+
+`documentation` is not in `decomposition.sub_flow` (`implementation.yaml:207`) and the flow states it "runs
+once per task (after the last subtask)" (`implementation.yaml:143-145`). It did not run. The node that
+actually started, at `22:30:52`, was `implementation` for subtask 3. The status surface appears to name
+`review`'s successor in the **main** graph without accounting for the decompose region looping back.
+
+Functionally nothing is wrong — `subtasks/index.json` correctly showed orders 1 and 2 `committed` and 3-5
+`pending`, and the graph routed correctly. But an operator watching `worc status` would believe a five-subtask
+task had reached its documentation stage while it was in fact starting subtask 3. The lever is named
+tentatively: the symptom is precisely located, the exact write site is not isolated.
+
+## What the review-path defects cost, measured
+
+The defects above cost nothing in delivered quality — every tripwire on the shipped code passed. What they
+cost is time and money, quietly, under every budget cap and with no warning emitted.
+
+Node timeline for task `001` through subtask 2 (times local; `sec` and `cost` from each node's `result.json`):
+
+| started | node | run | provider | sec | cost | findings |
+| --- | --- | --- | --- | ---: | ---: | --- |
+| 21:20:53 | `planning` | 000002 | claude | 515.7 | $5.10 | — |
+| 21:29:31 | `implementation` | 000003 | claude | 494.7 | $4.26 | subtask 1, productive |
+| 21:38:10 | `review` | 000005 | codex | 204.5 | — | **3 false blocking** (F1) |
+| 21:41:35 | `supervisor` | 000005 | claude | 27.7 | $0.49 | — |
+| 21:42:04 | `fixing` | 000006 | claude | 303.6 | $2.41 | refused — **wasted** |
+| 21:47:30 | `review` | 000008 | codex | 164.1 | — | 0 — accepted via `prior_fix` |
+| 21:50:16 | `supervisor` | 990002 | claude | 74.0 | $0.75 | — |
+| 21:51:30 | `implementation` | 000009 | claude | 343.4 | $2.80 | subtask 2, productive |
+| 21:57:38 | `review` | 000011 | codex | 258.9 | — | 2 false + **1 real** (F8) |
+| 22:01:58 | `supervisor` | 000011 | claude | 30.6 | $0.78 | — |
+| 22:02:30 | `fixing` | 000012 | claude | 221.9 | $1.87 | fixed the real one, productive |
+| 22:06:34 | `review` | 000014 | codex | 21.9 | — | **1 false blocking** (F9 refusal) |
+| 22:06:57 | `supervisor` | 000014 | claude | 29.3 | $0.83 | — |
+| 22:07:27 | `fixing` | 000015 | claude | 474.4 | $2.87 | refused — **wasted** |
+| 22:15:46 | `review` | 000017 | codex | 204.1 | — | **3 false blocking** |
+| 22:19:11 | `supervisor` | 000017 | claude | 27.0 | $0.83 | the misdiagnosing note (F11) |
+| 22:19:40 | `fixing` | 000018 | claude | 369.1 | $2.72 | refused — **wasted** |
+| 22:26:11 | `review` | 000020 | codex | 207.6 | — | 0 — accepted, subtask 2 committed |
+
+**$25.72 for two of five subtasks.** Split:
+
+- **productive — $14.03**: `planning` $5.10, the two `implementation` runs $7.06, the one `fixing` that fixed
+  a real finding $1.87;
+- **wasted — $11.68 (45%)**: three `fixing` runs that correctly refused false findings ($2.41 + $2.87 +
+  $2.72) and five `supervisor` turns ($3.68), the last of which actively misdirected.
+
+And that understates it: **every `codex` node reports `cost: None`** — its `normalized_usage` carries token
+counts with no price — so the six review turns (1,061s of `gpt-5.5` at `xhigh`, four of them producing false
+blockers) are absent from the total. `worc`'s per-task cost is in practice the Claude half of the bill. A
+small finding of its own; lever, the codex adapter's usage normalization.
+
+The shape worth internalizing: three separate `fixing` runs were billed at full rate for the work of
+explaining to the orchestrator, correctly and at length, that it was wrong.
 
 ## Run log
 
