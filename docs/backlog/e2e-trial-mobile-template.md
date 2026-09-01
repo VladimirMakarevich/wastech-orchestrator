@@ -330,6 +330,97 @@ prompts tell the agent to run. There is no config-level lever today — `exclude
 can populate it. That makes this a direct, evidenced argument for
 [`full-tool-access`](full-tool-access/README.md) step 4 (`unsandboxed_commands`), which is still only proposed.
 
+### F9 — the security preamble's `.worc-io/` wording makes a reviewer refuse to review
+
+**Severity: major.** **Lever: orchestrator source — `core/flow/security_preamble`.**
+
+Review `run-000014` finished in 21.9s with `exit 0`, status `succeeded`, and a single finding:
+
+```
+severity: blocking | path: null
+what: "Could not review the diff because the requested context files are under `.worc-io/`, and the
+       orchestrator security contract in the prompt explicitly says not to read `.worc-io/`. The same
+       prompt also lists those files as needed for review, so the request is internally contradictory."
+fix:  "Run the review with a context path that is not under `.worc-io/`, or clarify that these exact
+       `.worc-io/001-.../` files are permitted despite the later blanket prohibition."
+```
+
+The preamble does permit it. Verbatim from the rendered prompt:
+
+```
+- `.worc/` is the orchestrator's private runtime (state, logs, database, secrets, frozen bundles):
+  do not read it and do not write it.
+- `.worc-io/` is read-only input context: read only the paths you are given; never create, modify,
+  move, or delete anything under it.
+Read-isolation is relaxed for this run, so the filesystem sandbox may not block the paths above. Honor
+these rules by choice: in particular do not read `.worc/`, `.env`, or any orchestrator-private file even
+though you may be technically able to.
+```
+
+Three things make the misreading easy: the preceding bullet about the three-characters-different `.worc/`
+says "do not read it"; "read only the paths you are given" reads as a restriction rather than a grant; and the
+trailing sentence says the sandbox may not block "the paths above" before re-forbidding "any
+orchestrator-private file", which a reader can take to include `.worc-io/`.
+
+It is **intermittent**, which is worse than deterministic: reviews `run-000005`, `run-000008` and `run-000011`
+in the *same task* read the same `.worc-io/` paths without complaint. Same prompt, same provider, different
+outcome. The fix is to make the bullet an explicit grant and scope the trailing sentence to `.worc/`.
+
+### F10 — the evaluator contract cannot express "I could not review"
+
+**Severity: major.** **Lever: orchestrator source —
+[`core/flow/nodes/evaluator.py`](../../src/wastech_orchestrator/core/flow/nodes/evaluator.py)**, with a
+supporting line in `review.md`.
+
+The F9 refusal above was accepted as an ordinary verdict — `succeeded`, `exit 0`, a structurally valid
+`findings` array — and routed to `fixing` as rework. Nothing in the contract distinguishes *"the diff is
+defective"* from *"I was unable to look at the diff"*. `review.md:9` guards the adjacent failure ("**No
+findings means the diff is clean** — return an empty `findings` array, not prose. A prose 'looks good'
+hard-stops the task") but there is no guard for a structurally valid refusal, and `path` is explicitly
+nullable.
+
+So an infrastructure complaint was handed to the one node that cannot act on it. `fixing` spent **474.4s and
+$2.87** correctly concluding there was nothing to fix:
+
+> The reviewer never examined the change and named no file, line, or defect — it reported a contradiction in
+> its own instructions. There is nothing in the diff for it to fix… It needs a human to hand the review stage
+> a context path it is permitted to read.
+
+With a less careful fixer the loop could consume `budgets.review_fix` and park the task on a defect that was
+never in the code. A blocking finding carrying no `path` and citing no source line is not rework; it is an
+infrastructure failure of the node, and the graph should treat it as one.
+
+### F8 — task `001` paraphrases a repo rule more narrowly than the rule
+
+**Severity: minor.** **Lever: task file — `<target>/tasks/pending/001-edge-to-edge-bottom-insets.md`.**
+
+The task states the constraint as (lines 91-93):
+
+> **Comments state their reason in their own words** — no links and no pointers into `docs/` or `.rules/`
+> from shipped TypeScript or SCSS.
+
+The rule it is paraphrasing, `.rules/coding-style.md:88-92`, is broader:
+
+> **Comments must be self-contained.** A comment must be understandable on its own… It must not depend on any
+> other file, document, or system continuing to exist.
+> **Links and documentation references of any kind are forbidden anywhere in the codebase**… This covers URLs,
+> tickets, issues, PRs, and paths or section anchors into `docs/**`, `.rules/**`, `AGENTS.md`, **or any other
+> file in the repo**.
+
+The agent complied with the narrower paraphrase and shipped a comment referencing `runtime.scss` and
+`see feedback.scss`. **The reviewer caught it** — a `medium` finding citing `.rules/coding-style.md` — because
+`review.md:1` tells the evaluator to read the rule for the area the diff touches rather than trust the task.
+That is the flow design working as intended, and it is worth recording as a positive alongside the defect.
+
+Two honest qualifications. The same finding's second clause (that the comment misdescribes page breathing
+space) conflates design decisions **D-5** and **D-6** and is weak — the comment matched D-5. And the repo is
+not consistent about its own rule: `src/theme/dark-mode.scss:26`, untouched by this run, carries a shipped
+comment referencing `variables.scss`. So this is a drafting slip in a codebase that is itself loose here, not
+carelessness — hence `minor`.
+
+The transferable lesson for task authoring: **cite a repo rule by name and let the agent read it** rather than
+restating it, because a restatement can only lose fidelity.
+
 ## Not defects — verified and cleared
 
 Recorded so a later reader does not re-open them.
@@ -374,6 +465,26 @@ Recorded so a later reader does not re-open them.
 - `.worc/config.yaml:4-7` describes the `.worc/` home as gitignored "(this config included)", but `.gitignore:76-78`
   deliberately re-includes `!.worc/config.yaml` with its own rationale ("Track the orchestrator config so its
   changes are reviewable in history"). The generated header text is stale against the generated ignore rules.
+
+## The cost of F1 + F9 + F10, measured
+
+The three defects above cost nothing in delivered quality — every tripwire on the shipped code passed. What
+they cost is time and money, quietly, with no red flag anywhere in the run.
+
+Task `001`, first 55 minutes (`21:20:43` → `22:15:33`), two of five subtasks, the second still not accepted:
+
+| Subtask | Burned on nothing | Cause |
+| --- | --- | --- |
+| 1 | `review` 204.5s (3 false `blocking`) + `fixing` 303.6s / **$2.41** (refused) + `review` r2 ~165s | F1 |
+| 2 | `review` 258.9s (2 false `blocking` + 1 real) + `review` r2 21.9s (refusal) + `fixing` 474.4s / **$2.87** (refused) | F1, then F9/F10 |
+
+**Roughly 32 of those 55 minutes** went to cycles caused by F1, F9 and F10 — none of them a defect in the
+delivered code. Direct agent spend on findings that were afterwards refuted: **$5.28**, excluding every
+`review` turn that produced them. Actual productive work in subtask 2 was about six minutes.
+
+Nothing parked and nothing warned: `budgets.global_fix_iterations` is 30 (shared across subtasks via
+`decomposition.shared_budget`) and only about three iterations were consumed, so the waste stays well under
+every cap. That is the point — these defects do not fail loudly, they bill quietly.
 
 ## Run log
 
