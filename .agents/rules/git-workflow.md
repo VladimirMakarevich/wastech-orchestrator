@@ -4,22 +4,22 @@ There are two levels of git here: (A) how the orchestrator **itself** is develop
 
 ## A. Developing the orchestrator itself
 
-### Three long-lived branches
+### Four long-lived branches
 
-`feat/… → dev → main → release`.
+`feat/… → dev → main → release` for code; `main → site` for the documentation.
 
-- **`dev`** — the working branch. Cut every `feat/…`, `fix/…`, `chore/…` branch off `dev` and merge it back into `dev` (squash is fine, and preferred). It carries **no derived documentation**: under `docs/` it holds only `backlog/` (the task queue work is implemented from). Never push to `dev` directly — land changes through a PR, merged only after checks pass.
-- **`main`** — integration plus documentation. It receives `dev` through merge commits and is the **only** branch where the derived `docs/` tree is written; that refresh is its own task (branch `docs/…` off `main`, PR back into `main`), driven by the merged `dev` diff. Never commit code directly on `main`.
-- **`release`** — published stable versions. `main → release` by merge commit, then `git tag vX.Y.Z` here; the package release and the documentation site publish from this branch.
+- **`dev`** — the working branch. Cut every `feat/…`, `fix/…`, `chore/…` branch off `dev` and merge it back into `dev` (squash is fine, and preferred). It carries the code plus `docs/backlog/` (the task queue work is implemented from) and nothing else under `docs/`. Never push to `dev` directly — land changes through a PR, merged only after checks pass.
+- **`main`** — integration. It receives `dev` through merge commits. Its tree has the same shape as `dev`'s: no derived documentation, no site machinery. Never commit code directly on `main`.
+- **`release`** — published stable versions. `main → release` by merge commit, then `git tag vX.Y.Z` here; the package release publishes from this branch.
+- **`site`** — the documentation and the published site. It receives `main` through merge commits and is the **only** branch that carries the derived `docs/` tree, `mkdocs.yml`, `tools/stage_site_docs.py`, and `.github/workflows/site.yml`. Documentation is reconstructed by reverse engineering from the diff arriving from `main`, as its own task: branch `docs/<slug>` off `site`, PR back into `site`. Every push to `site` republishes the site.
 
-### Two hard rules
+### The one hard rule
 
-1. **Never merge `main → dev`** (nor `release → dev`). It puts the derived documentation back on `dev` and the whole arrangement has to be rebuilt. If a fix ever lands on `main` or `release` first, port it to `dev` with `git cherry-pick`, never with a merge. A CI guard rejects any PR into `dev` whose source is `main` or `release`.
-2. **`dev → main` must be a real merge commit.** A squash merge creates no merge commit, so the merge base never advances and every later merge re-proposes deleting the documentation; rebase-merge is likewise wrong for a long-lived branch pair. On GitHub choose "Create a merge commit" — a ruleset on `main` allows no other method, so the squash and rebase buttons are absent by design.
+**`site` is a sink: nothing is ever merged out of it, and `main → site` is always a real merge commit.**
 
-Both rules exist because the two branches diverge by one recorded seal commit (`git merge -s ours dev` on `main`); anything that resets the merge base or copies docs back into `dev` destroys it. The seal is already in history — `dev` is an ancestor of `main`, so an ordinary `dev → main` merge proposes no deletions. Do not create a second seal. The design record behind the model — the migration that produced the seal and the merge matrix verified against it — is [BRANCHING_MODEL.md](../../BRANCHING_MODEL.md); read it as history, not as an operating manual, and never re-run its migration commands.
+Both halves protect the same thing. `site` and `main` diverge by one recorded seal commit (`git merge -s ours main`, made on `site` when the documentation moved there). The seal is what makes `main`'s missing `docs/` tree read as _added on the `site` side_ rather than _deleted on the `main` side_ — and an addition on one side with no counterpart on the other never conflicts. A squash merge records no merge commit, so the merge base never advances and every later merge re-proposes deleting the whole documentation set; rebase-merge is likewise wrong for a long-lived branch pair. A merge in the other direction copies the documentation onto a branch that must not carry it, and the arrangement has to be rebuilt. The seal is already in history — **do not create a second one.** If a fix ever lands on `site` first, port it to `dev` with `git cherry-pick`.
 
-Neither rule is self-announcing when broken, which is why both are machine-enforced. Breaking rule 2 is worse than it looks: the squashed content still lands, the merge is clean, and the only symptom is that `dev` quietly falls behind `main` while the merge base stays put — every later `dev → main` merge then re-proposes the same content forever. If it happens anyway, the repair is to land the same change on `dev` through its normal PR and then merge `dev → main` with a merge commit; verify with `git merge-tree --write-tree origin/main origin/dev` first, and expect `git diff origin/main <result-tree>` to be empty (that merge is a content no-op whose only job is to re-advance the merge base).
+`main → dev` is ordinary and allowed: `main` carries nothing `dev` must not have. The design record behind the model is [BRANCHING_MODEL.md](../../BRANCHING_MODEL.md).
 
 ### Where the branches touch
 
@@ -27,35 +27,35 @@ Every legal transition, and the two illegal ones. The mechanism column is the pa
 
 | From → To | Mechanism | Why this one |
 | --- | --- | --- |
-| `feat/…` → `dev` | **squash** merge (PR) | Keeps `dev` history one commit per change; the merge base of `dev`/`main` is unaffected. |
-| `dev` → `main` | **merge commit**, never squash/rebase | Advances the merge base. A squash leaves it behind and every later merge re-proposes deleting `docs/`. |
-| `docs/…` → `main` | squash or merge (PR) | The docs refresh is ordinary work on `main`; it never touches `dev`. |
-| `main` → `release` | merge commit | Both branches carry docs, so this is an ordinary merge with no special handling. |
+| `feat/…` → `dev` | **squash** merge (PR) | Keeps `dev` history one commit per change. |
+| `dev` → `main` | **merge commit**, never squash/rebase | Advances the merge base. A squash leaves `dev` quietly behind `main` and every later merge re-proposes the same content. |
+| `main` → `release` | merge commit | Ordinary — both branches are code-only. |
 | `hotfix/…` → `release` | squash or merge (PR) | Published-version fix; tag afterwards. |
-| `release` → `main` | merge commit | Safe — both have docs. This is how a hotfix gets back into integration. |
-| `main`/`release` → `dev` | **FORBIDDEN** — use `git cherry-pick` | A merge restores the derived docs on `dev`. The CI guard rejects it on PRs; a local push would not be caught, so do not do it. |
-| `feat/…`/`fix/…`/`chore/…` → `main` | **FORBIDDEN** — retarget at `dev` | Bypasses `dev`, so `dev` falls behind `main`. It merges cleanly and raises no conflict, so only the `main-guard` check catches it. |
+| `release` → `main` | merge commit | How a hotfix gets back into integration. |
+| `main` → `dev` | merge (PR) | Allowed. Rarely needed, never harmful. |
+| `main` → `site` | **merge commit**, never squash/rebase | Advances the merge base past the seal. A squash re-proposes deleting all of `docs/` on every later merge. |
+| `docs/…` → `site` | squash or merge (PR) | The documentation refresh is ordinary work on `site`; it never touches the code branches. |
+| `site` → anywhere | **FORBIDDEN** — use `git cherry-pick` | Copies the documentation onto a branch that must not carry it. |
+| `feat/…`/`fix/…`/`chore/…` → `main` | **FORBIDDEN** — retarget at `dev` | Bypasses `dev`, so `dev` falls behind `main`. It merges cleanly and raises no conflict, so only `branch-guard` catches it. |
 
 Three more contact surfaces that are not merges:
 
-- **Shared files** — `AGENTS.md`, `CLAUDE.md`, `README.md`, `.agents/rules/`, `.claude/`, everything under `src/`, and `docs/backlog/` exist on **both** branches. Edit them **only on `dev`**. Editing one on `main` makes the content diverge, and a divergent shared file conflicts on every subsequent merge — the seal only makes _deletions_ conflict-free, never divergent content.
-- **No links out to documents that are not in the checkout** — an instruction file (`AGENTS.md`, `.agents/rules/`, `.claude/skills/`) must never send an agent off to read a document it does not have. Do not paper over a `main`-only document with an absolute URL either: name the file in plain text if you have to refer to it at all, and put anything an agent actually needs into the instruction itself.
-- **New paths under `docs/` on `dev`** — only `backlog/` and `research/` (the latter produced by a `deep_research` run). A CI guard rejects anything else, so the partition cannot erode one file at a time.
-- **The Markdown gate** — [wastech-mdlint.config.json](../../wastech-mdlint.config.json) is a shared file and therefore lives on `dev` like the rest of them, but it has to describe two corpora at once. It does so without a branch switch: a glob that selects nothing is an empty set, so `docs/**` means the queue here and the queue plus the guide there, and a rule scoped at `docs/*.md` is simply inert on `dev`. The handful of rules that cannot work that way — the ones asserting the derived documentation **exists** — live in an additive second config, `wastech-mdlint.docs.config.json`, present **only on `main`**. That file's absence from `dev` is what keeps it conflict-free: a merge cannot conflict on a path the incoming branch does not have. `python tools/mdlint.py` runs the shared config plus every overlay it finds, so the same command is correct on either branch and nothing has to know which branch it is on. The content to create on `main` is in [docs/backlog/mdlint-main-overlay.md](../../docs/backlog/mdlint-main-overlay.md). The gate is a local pre-commit hook, not a CI job — the linter is not published yet — so on either branch it is only as strong as the hook being installed.
+- **Shared files** — everything except the derived documentation and the site machinery exists on **all four** branches. Edit them **only on `dev`**. Editing one on `main` or `site` makes the content diverge, and a divergent shared file conflicts on every subsequent merge — the seal only makes _deletions_ conflict-free, never divergent content.
+- **No links out to documents that are not in the checkout** — an instruction file (`AGENTS.md`, `.agents/rules/`, `.claude/skills/`) must never send an agent off to read a document it does not have. Do not paper over a `site`-only document with an absolute URL either: name the file in plain text if you have to refer to it at all, and put anything an agent actually needs into the instruction itself.
+- **Paths that must not come back to `dev`/`main`** — under `docs/`, only `backlog/` and `research/` (the latter produced by a `deep_research` run); and none of `mkdocs.yml`, `tools/stage_site_docs.py`, `.github/workflows/site.yml`, which belong to `site` alone. `branch-guard` rejects both, so the partition cannot erode one file at a time.
+- **The Markdown gate** — [wastech-mdlint.config.json](../../wastech-mdlint.config.json) is a shared file and therefore lives on `dev` like the rest of them, but it has to describe two corpora at once. It does so without a branch switch: a glob that selects nothing is an empty set, so `docs/**` means the queue here and the queue plus the guide there, and a rule scoped at `docs/*.md` is simply inert here. The handful of rules that cannot work that way — the ones asserting the derived documentation **exists** — live in an additive second config, `wastech-mdlint.docs.config.json`, present **only on `site`**. That file's absence everywhere else is what keeps it conflict-free: a merge cannot conflict on a path the incoming branch does not have. `python tools/mdlint.py` runs the shared config plus every overlay it finds, so the same command is correct on either branch shape and nothing has to know which branch it is on. The gate is a local pre-commit hook, not a CI job — the linter is not published yet — so it is only as strong as the hook being installed.
 
 ### What is machine-enforced
 
-Everything above that a mistake would break silently is checked. Know which half catches what, because the two halves fail differently.
+One workflow, and nothing else.
 
 | Mechanism | Catches | Where |
 | --- | --- | --- |
-| `dev-guard` — job `dev branch invariants` | a PR into `dev` sourced from `main`/`release`; any new path under `docs/` outside `backlog/`/`research/` | [.github/workflows/dev-guard.yml](../../.github/workflows/dev-guard.yml) |
-| `main-guard` — job `main branch invariants` | a PR into `main` sourced from anything but `dev`, `release`, or `docs/…` | [.github/workflows/main-guard.yml](../../.github/workflows/main-guard.yml) |
-| Ruleset on `main` | the merge _method_ — only "Create a merge commit" is offered; `main` is pull-request-only | repository settings → Rules |
+| `branch-guard` — job `branch invariants` | a PR sourced from `site`; a PR into `main` not sourced from `dev`/`release`; a PR into `site` not sourced from `main`/`docs/…`; derived docs or site machinery added on a PR into `dev`/`main` | [.github/workflows/branch-guard.yml](../../.github/workflows/branch-guard.yml) |
 
-The ruleset is the one that cannot be a workflow: the merge method is chosen after every check has reported, so no pull-request check can observe it. Conversely the guards cannot be settings — GitHub has no notion of a legal source branch.
+**Everything else rests on discipline, and you should know exactly how much.** This repository has no branch protection and no active ruleset: `main` and `site` accept a direct push, and the GitHub UI offers squash and rebase on every pull request. The merge _method_ is the one thing no workflow can ever check — it is chosen after every check has already reported — so "`dev → main` and `main → site` are merge commits" is enforced by the person clicking the button. `branch-guard` runs on pull requests only, so a local push bypasses it too.
 
-Two limits worth knowing. A **local push** bypasses both guards (they run on pull requests), which is why `main` is pull-request-only in the ruleset — the ruleset does cover pushes. And the ruleset has **no bypass actors on purpose**: the mistake it prevents is an admin clicking the wrong merge button, so an admin exemption would defeat it. If you genuinely need a direct push to `main`, set that ruleset to `Disabled` in repository settings, do the push, and switch it back — a deliberate two-step act, not a silent default.
+To make it real, in repository settings → Rules: a ruleset on `main` and on `site` requiring a pull request and allowing **only** "Create a merge commit". Give it no bypass actors — the mistake it prevents is an admin clicking the wrong merge button.
 
 ### Command recipes
 
@@ -73,32 +73,35 @@ gh pr create --base dev --title "<subject>" --body "<what and why>"
 gh pr merge --squash --delete-branch      # squash is correct here
 ```
 
-**Integrate `dev` into `main`.** The merge method is the one thing you cannot get wrong.
+**Integrate `dev` into `main`.** Dry-run first — it costs nothing and needs no worktree:
 
 ```bash
-git checkout dev && git pull
+git fetch origin && git merge-tree --write-tree --messages origin/main origin/dev
 gh pr create --base main --head dev --title "Integrate dev" --body "<what dev brings in>"
 gh pr merge --merge                        # --merge = merge commit. NEVER --squash / --rebase
 ```
 
-`main` is pull-request-only, so there is no local variant — but do run the same safety check the local recipe carries, before you merge rather than after. It costs nothing and needs no worktree:
+The first line of `merge-tree` output is the resulting tree; anything after it is a conflict. `git diff --stat origin/main <that-tree>` shows exactly what the merge will do.
+
+**Publish the documentation (`main → site`).** The push is what republishes the site.
 
 ```bash
-git fetch origin && git merge-tree --write-tree --messages origin/main origin/dev
+git fetch origin && git merge-tree --write-tree --messages origin/site origin/main
+git diff --stat origin/site <that-tree>    # MUST show no deletions under docs/ and no loss of mkdocs.yml
+git checkout site && git pull
+git merge --no-ff --no-edit main
+git push origin site
 ```
 
-The first line of output is the resulting tree; anything after it is a conflict. `git diff --stat origin/main <that-tree>` shows exactly what the merge will do to `main` — no doc deletions may appear, and if it is empty the merge is a pure merge-base advance.
-
-**Refresh the derived docs on `main`** (its own task, after an integration merge).
+**Refresh the derived docs** (its own task on `site`, after a publish merge).
 
 ```bash
-git checkout main && git pull
-git log --merges --oneline -5                  # find the integration merge commit
-git show --stat <merge-sha>                    # what dev brought in
+git checkout site && git pull
+git log --merges --oneline -5                  # find the merge that came from main
 git diff <merge-sha>^1 <merge-sha>             # the diff to reverse-engineer the docs from
 git checkout -b docs/<slug>
-# … regenerate the affected docs (see the /sync-docs skill, main scope) …
-git push -u origin docs/<slug> && gh pr create --base main
+# … regenerate the affected docs (see the /sync-docs skill, site scope) …
+git push -u origin docs/<slug> && gh pr create --base site
 ```
 
 **Cut a release.** Push the branch **before** the tag — `release.yml` refuses a tag that `origin/release` does not contain.
@@ -111,8 +114,6 @@ git tag vX.Y.Z                             # aN / bN / rcN suffix ⇒ GitHub pre
 git push origin vX.Y.Z                     # then: the tag
 ```
 
-The tag push runs `release.yml` (full quality gate → sdist + wheel → GitHub release, version derived by `hatch-vcs`) and the Pages deploy in `site.yml`.
-
 **Hotfix a published version.**
 
 ```bash
@@ -121,34 +122,31 @@ git checkout -b hotfix/<slug>
 # … fix + the gate … then PR into release and tag:
 gh pr create --base release && gh pr merge --squash --delete-branch
 git checkout release && git pull && git tag vX.Y.Z+1 && git push origin vX.Y.Z+1
-# then propagate release → main, which is pull-request-only:
 gh pr create --base main --head release --title "Propagate hotfix vX.Y.Z+1" --body "<the fix>"
 gh pr merge --merge                        # merge commit, as for dev → main
 ```
 
-**Port a fix from `main`/`release` into `dev`** — cherry-pick, never a merge.
+**Port a fix out of `site` into `dev`** — cherry-pick, never a merge.
 
 ```bash
 git checkout dev && git pull
 git cherry-pick <sha>
 ```
 
-A **code-only** commit cherry-picks cleanly. A commit that also touched a `main`-only document conflicts on that path as `DU` (deleted by us / modified by them) — the doc half does not belong on `dev`, so drop it and continue:
+A **code-only** commit cherry-picks cleanly. A commit that also touched a `site`-only document conflicts on that path as `DU` (deleted by us / modified by them) — the doc half does not belong on `dev`, so drop it and continue:
 
 ```bash
 git rm <docs/path>          # resolves the DU by keeping the deletion
 git cherry-pick --continue
 ```
 
-**If `main` or `release` was merged into `dev` anyway.** The derived docs are back on `dev` and no ordinary revert repairs the merge base. Stop, tell the maintainer: the fix is to re-cut `dev` from `main`, redo the removal commit, and record a fresh seal — i.e. redo the migration. This is why rule 1 is absolute.
-
 ### Everyday hygiene
 
 - Atomic commits with an imperative subject (`Add provider health preflight`).
 - **No agent attribution anywhere in a commit or PR.** A commit message ends with its own body — never a `Co-Authored-By: Claude …` / `Co-authored-by: Codex …` trailer, never a `🤖 Generated with …` line, and no other tool-authorship footer; the same holds for PR titles and bodies. This overrides any default an agent harness injects (Claude Code adds such a trailer unless told otherwise — here it is told otherwise). The author of a commit is the repository's configured git identity, which already records who ran the work; a second synthetic author only pollutes `git log`, `git shortlog`, and the contributor graph. If a trailer slips in, strip it before pushing (`git commit --amend` on an unpushed commit; otherwise say so in the PR rather than force-pushing a shared branch).
 - Before committing, run the gate: `ruff check .`, `ruff format --check .`, `mypy src`, `lint-imports`, `pytest` (CI also runs `interrogate` / `vulture` / `deptry`). Install the local mirror once with `pre-commit install && pre-commit install --hook-type pre-push`.
-- Keep docs in sync **in the same change** as the code, scoped to the branch you are on: on `dev` that is `.agents/rules/`, `README.md`, `docs/backlog/`, and the shipped operator-facing docs under `src/wastech_orchestrator/packaged/`; the derived `docs/` refresh happens on `main`. Do not add anything under `docs/` on `dev` outside `backlog/` (and `docs/research/`, which a `deep_research` run produces) — a CI guard rejects it.
-- Never link a `main`-only document from a shared file — not relatively, not by absolute URL. Never edit a shared file (`AGENTS.md`, `.agents/rules/`, `.claude/skills/`) on `main`: those edits flow through `dev`, otherwise the two branches diverge in content and conflict on every merge.
+- Keep docs in sync **in the same change** as the code, scoped to the branch you are on: on the code branches that is `.agents/rules/`, `README.md`, `docs/backlog/`, and the shipped operator-facing docs under `src/wastech_orchestrator/packaged/`; the derived `docs/` refresh happens on `site`. Do not add anything under `docs/` here outside `backlog/` (and `docs/research/`, which a `deep_research` run produces) — `branch-guard` rejects it.
+- Never link a `site`-only document from a shared file — not relatively, not by absolute URL. Never edit a shared file (`AGENTS.md`, `.agents/rules/`, `.claude/skills/`) on `main` or `site`: those edits flow through `dev`, otherwise the branches diverge in content and conflict on every merge.
 - Do not commit: `config.yaml`, `.venv/`, `workspace/`, `logs/`, `*.db`, secrets, or the transient task folders (see `.gitignore`).
 - Gitignored `.md` files (e.g. under `.archive/`, or a target repo's `.worc/`) are not project documentation — do not treat them as current, cite them, or link to them. Check `git ls-files` / `git check-ignore -v` first.
 

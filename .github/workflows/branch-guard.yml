@@ -1,0 +1,93 @@
+name: branch-guard
+
+# Machine checks for the branch model (see .agents/rules/git-workflow.md §A). It replaces the two
+# per-branch guards that came before it: the rules are per-transition, not per-branch, so one
+# workflow that reads the pull request's base and head is both shorter and harder to leave a hole in.
+#
+# What it protects, and why each half needs enforcing rather than trusting:
+#
+#  1. `site` is a sink. A merge out of it copies the derived documentation onto a branch that must
+#     not carry it, and the seal arrangement has to be rebuilt. Port such commits with
+#     `git cherry-pick` instead.
+#  2. Only some sources may reach `main`, `site`, and `release`. The failure is invisible: a `feat/…`
+#     branch pointed straight at `main` merges *cleanly* — no conflict, no deletion — and the only
+#     symptom is that `dev` silently falls behind. That is exactly how PR #48 once landed on `main`.
+#  3. The derived documentation and the site machinery stay off `dev` and `main`. Without this they
+#     creep back one file at a time and the partition erodes.
+#
+# What it CANNOT check: the merge method. That is chosen after every check has already reported, so
+# no pull-request workflow can ever see it — see §A "What is machine-enforced" for what that leaves
+# resting on discipline.
+on:
+  pull_request:
+    branches: ["dev", "main", "site", "release"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: branch-guard-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  guard:
+    name: branch invariants
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # need the merge base to diff the PR
+
+      # Branch names are attacker-influenced strings: they reach the shell through `env`, never
+      # through `${{ }}` interpolation inside `run`.
+      - name: Reject a source branch that is not a legal transition
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          die() { echo "::error::$1 (see .agents/rules/git-workflow.md §A)"; exit 1; }
+
+          if [ "$HEAD_REF" = "site" ]; then
+            die "'site' is a sink and is never merged out of — it would copy the derived documentation onto '$BASE_REF'. Port the commits with 'git cherry-pick' instead."
+          fi
+
+          case "$BASE_REF" in
+            dev) ;; # dev takes work from any topic branch
+            main)
+              case "$HEAD_REF" in
+                dev | release) ;;
+                *) die "'$HEAD_REF' may not be merged into main. Code reaches main only through 'dev' (merge commit), a published hotfix through 'release'. Retarget this PR at 'dev'." ;;
+              esac
+              ;;
+            site)
+              case "$HEAD_REF" in
+                main | docs/*) ;;
+                *) die "'$HEAD_REF' may not be merged into site. Code reaches site only through 'main' (merge commit), documentation work through a 'docs/…' branch cut from site. Anything else diverges site from main and conflicts on every later publish." ;;
+              esac
+              ;;
+            release)
+              case "$HEAD_REF" in
+                main | hotfix/*) ;;
+                *) die "'$HEAD_REF' may not be merged into release. Releases are cut from 'main' (merge commit); a published-version fix comes through a 'hotfix/…' branch." ;;
+              esac
+              ;;
+          esac
+          echo "PR '$HEAD_REF' -> '$BASE_REF' is a legal transition."
+
+      - name: Reject derived docs and site machinery
+        if: github.base_ref == 'dev' || github.base_ref == 'main'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          offenders=$(
+            git diff --name-only --diff-filter=ACMR "$BASE_SHA...$HEAD_SHA" \
+              | { grep -E '^docs/|^mkdocs\.yml$|^tools/stage_site_docs\.py$|^\.github/workflows/site\.yml$' || true; } \
+              | { grep -v -E '^docs/(backlog|research)/' || true; }
+          )
+          if [ -n "$offenders" ]; then
+            echo "::error::the derived documentation and the site machinery live on the 'site' branch; under docs/ this branch keeps only backlog/ and research/ (see .agents/rules/git-workflow.md §A). Offending paths:"
+            echo "$offenders"
+            exit 1
+          fi
+          echo "No derived docs or site machinery added."
