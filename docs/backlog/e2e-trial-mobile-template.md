@@ -125,6 +125,31 @@ The residual risk is the part that does not show up as wasted time: **recovery d
 enough to refuse.** A model that simply complied would have implemented subtasks 02-04 inside subtask 01, and nothing
 in the machinery would have caught it — the only node holding the boundary is the one being overruled.
 
+#### The mechanism, confirmed quantitatively
+
+The number of false blocking findings tracks the volume of later-subtask work still absent from the tree:
+
+| Review | False blockers | Demanded |
+| --- | ---: | --- |
+| subtask 1, round 1 | 3 | subtasks 02, 03, 04 |
+| subtask 2, round 1 | 2 | 03, 04 (02 had landed) |
+| subtask 2, round 3 | 3 | 03, 04 (04 split into two findings) |
+| subtask 3, round 1 | 2 | 04 only — the `modals.scss` blocker vanished the moment subtask 03 landed |
+
+That is the defect stated exactly: the reviewer holds the **root** task's whole-task acceptance criteria and
+charges every unfinished part of them against whichever subtask is under review. It is not occasional
+misjudgement; it is a systematic accounting error, and it decays only as the remaining subtasks land.
+
+**F1 and F2 partially cancel, by luck.** After subtask 04 lands the only outstanding subtask is `05-docs`, and
+`review.md:18` tells the reviewer not to flag missing documentation — so F2 will suppress F1's last false
+blocker. Neither defect is excused by that. The practical consequence is that **they must be fixed together**:
+repair F2 alone (so the reviewer does judge docs-only deliverables) and subtask 4 immediately acquires a fresh
+false blocker about the unwritten documentation.
+
+Convergence, finally, is **high-variance rather than bounded**: subtask 1 needed 2 review rounds, subtask 2
+needed 5. The reviewer does talk itself out of the false blockers, but nothing bounds how long that takes
+except `budgets.review_fix`.
+
 ### F2 — `review.md` tells the reviewer to ignore documentation on tasks whose deliverable *is* documentation
 
 **Severity: minor.** **Lever: role prompt — `<target>/.worc/flows/implementation/review.md`** (and the packaged
@@ -425,6 +450,14 @@ restating it, because a restatement can only lose fidelity.
 
 Recorded so a later reader does not re-open them.
 
+- **The audit trail itself is complete, well-structured and clean.** 21 `prompt-audit` records, one per node
+  run, named `<run>-<node>[-sub<NN>].json`, each carrying the full rendered prompt plus route, provider,
+  per-attempt status and timings; `state.db` carries 60 artifacts, 14 check runs, 10 evaluations, 23 node runs,
+  20 provider attempts and 5 subtasks; `publish_operations` records each subtask commit with a fingerprint, the
+  resulting SHA and `pushed_sha: None` (nothing published yet — correct). A scan of every prompt-audit record
+  for `sk-`, `ghp_`, `bot<digits>:`, `PRIVATE KEY` and `TELEGRAM_BOT_TOKEN=` returned **no matches**; redaction
+  holds. F13 above is a fidelity gap in one field of an otherwise strong surface.
+
 - **`allow_git_evidence: true` is inert here and that is documented, not hidden.** No node in the `implementation`
   flow declares `git_evidence` (only `deep_research.yaml:81,101,121` does), and under advanced mode the grant has no
   capability left to add. `worc preflight` prints `git-evidence: ON (security.allow_git_evidence=true) — inert under
@@ -535,6 +568,27 @@ Functionally nothing is wrong — `subtasks/index.json` correctly showed orders 
 `pending`, and the graph routed correctly. But an operator watching `worc status` would believe a five-subtask
 task had reached its documentation stage while it was in fact starting subtask 3. The lever is named
 tentatively: the symptom is precisely located, the exact write site is not isolated.
+
+### F13 — `prompt-audit` records the per-node override, not the effective model/reasoning
+
+**Severity: minor.** **Lever: orchestrator source — the prompt-audit writer.**
+
+`prompt_audit: true` exists so a run can be reconstructed. Across all 21 records of this task the `reasoning`
+field is `None` for every node but one supervisor turn, and `model` is `None` for the supervisor:
+
+```
+fixing / implementation / planning   claude   model=claude-opus-5   reasoning=None
+review                               codex    model=gpt-5.5         reasoning=None
+supervisor                           claude   model=None            reasoning=None | low
+```
+
+None of those nodes ran at a provider default. The same runs' `request.json` and argv show `planning` at
+`reasoning: "xhigh"` / `--effort xhigh`, and `review` at `-c model_reasoning_effort="xhigh"` inherited from
+`agents.providers.codex.reasoning`. So the **effective** value lives in `request.json` while the artifact
+actually named "prompt-audit" carries only the flow-node override, and the two disagree.
+
+An operator auditing "did the reviewer really run at `xhigh`?" reads `None` and cannot answer from the audit
+record. Recording the resolved value — or both, as `configured` and `effective` — closes it.
 
 ## What the review-path defects cost, measured
 
