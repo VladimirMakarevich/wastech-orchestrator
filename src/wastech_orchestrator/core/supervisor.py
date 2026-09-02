@@ -1080,10 +1080,11 @@ class Supervisor:
                     prompt=effective_prompt,
                     route=route,
                     outcome=outcome,
-                    # The phase's model as actually sent — read off the request rather than
-                    # re-resolving it, so the audit cannot disagree with the launch.
-                    model=request.model,
-                    reasoning=reasoning,
+                    # The phase's own overrides. What the turn actually ran on is stamped on the
+                    # attempt rows by the Router and read from there, so this pair being ``None``
+                    # (a phase that pins nothing) no longer empties the record's model field.
+                    configured_model=request.model,
+                    configured_reasoning=reasoning,
                     started_at=outcome.result.started_at,
                     secrets=self._prompt_secrets,
                     register=self._register_artifact,

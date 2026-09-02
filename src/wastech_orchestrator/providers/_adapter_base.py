@@ -771,7 +771,7 @@ class BaseCliProvider:
             "working_directory": request.working_directory,
             "permission_profile": request.permission_profile,
             "timeout_seconds": request.timeout_seconds,
-            "model": request.model or self._config.model or None,
+            "model": self._config.effective_model(request.model),
             "prompt": build_effective_prompt(request),
             "context_paths": {k: v for k, v in context_paths.items() if v},
             "extra_args": list(request.extra_args),

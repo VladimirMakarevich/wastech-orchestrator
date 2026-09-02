@@ -194,6 +194,24 @@ class ProviderConfig:
     # (preflight). With this on, a low ``max_turns`` (~50–100) is safe — extendable on demand.
     max_turns_gate: bool = False
 
+    def effective_model(self, override: str | None) -> str | None:
+        """The model an attempt actually runs on: a flow node's ``model``, else this default.
+
+        One place for the override rule, because it is asked from three: each adapter's argv
+        builder, the request representation on disk, and the Router's audit row. ``None`` when
+        neither is set — the provider then picks its own default and no ``--model`` is passed.
+        """
+        return override or self.model or None
+
+    def effective_reasoning(self, override: str | None) -> str | None:
+        """The reasoning/effort an attempt runs at, resolved like :meth:`effective_model`.
+
+        The *configured* level, which is what an operator pins and audits. An adapter may still
+        translate it for its CLI (Codex maps ``max`` onto its ``xhigh`` ceiling); the translated
+        value is the one in the attempt's recorded ``argv``.
+        """
+        return override or self.reasoning or None
+
 
 @dataclass(frozen=True)
 class AgentsConfig:

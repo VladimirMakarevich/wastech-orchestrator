@@ -120,7 +120,7 @@ nodes:
 
 The resolution chain is task node override → flow node declaration → provider config default. The overrides are deliberately **best-effort**: the validation gate checks only that each is a non-empty string, and one the resolved flow or config cannot honor (a `provider` outside `agents.allowed`, a `reasoning` the provider does not support) is warned and skipped at run time, falling back to the flow's value — the task is never aborted for it. `model` is passed through unchecked, because model names have no reliable tier ordering. Use this to run one task at a different effort or on the other agent; when a stage needs a stronger model _every_ time, change the flow YAML instead — that is the durable fix.
 
-With the operator's `prompt_audit` flag on, the effective post-override provider, model, and reasoning are recorded per node under `logs/<task-id>/prompt-audit/` — that is where you confirm an overlay was honored rather than warned and skipped.
+With the operator's `prompt_audit` flag on, the effective post-override provider, model, and reasoning are recorded per node under `logs/<task-id>/prompt-audit/` — that is where you confirm an overlay was honored rather than warned and skipped. The record's `model` / `reasoning` are what the settled attempt actually ran with, whether the value came from your override or from the provider default; the override itself is beside them as `model_configured` / `reasoning_configured`, and each attempt row carries its own pair, so an overlay that was skipped is visible as the difference between the two.
 
 ## `auto_merge` — danger
 

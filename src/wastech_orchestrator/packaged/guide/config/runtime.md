@@ -56,5 +56,5 @@ Memory also requires `supervisor.enabled: true`. That layer's closing turn is th
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `prompt_audit` | bool | `false` | Record each step's rendered prompt + who-metadata (provider/model/attempt/fallback/status) under `logs/<task-id>/prompt-audit/`. A per-task `prompt_audit` always overrides this. |
+| `prompt_audit` | bool | `false` | Record each step's rendered prompt + who-metadata under `logs/<task-id>/prompt-audit/`. `model` / `reasoning` are the **effective** values the settled attempt ran with (a node that overrides neither still names what it ran on); `model_configured` / `reasoning_configured` beside them are the flow node's own overrides, `null` when it declares none. Each row in `agents` carries its own provider/attempt/fallback/status plus the model and reasoning **that** attempt ran at, so a stage that failed over to the other provider does not report one model for two CLIs. A per-task `prompt_audit` always overrides this. |
 

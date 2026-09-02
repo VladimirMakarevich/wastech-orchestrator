@@ -389,6 +389,8 @@ None of those nodes ran at a provider default. The same runs' `request.json` and
 
 An operator auditing "did the reviewer really run at `xhigh`?" reads `None` and cannot answer from the audit record. Recording the resolved value — or both, as `configured` and `effective` — closes it.
 
+**FIXED** as both values, and per attempt rather than per stage — resolving once against the route's primary would have reported `gpt-5.5` for this very node's Claude fallback. See [what was fixed](e2e-trial-mobile-template.fixes.md#f13--the-audit-record-that-could-not-answer-the-question-it-exists-for).
+
 ### F14 — the subtask handoff's factual floor is built from `depends_on`, not from what actually landed
 
 **Severity: minor.** **Lever: orchestrator source — [`core/orchestrator.py`](../../../src/wastech_orchestrator/core/orchestrator.py), the handoff floor assembly.**

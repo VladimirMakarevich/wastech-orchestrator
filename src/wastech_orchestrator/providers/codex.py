@@ -531,10 +531,10 @@ def build_codex_argv(
     # subcommand; on the fresh path (no subcommand) they follow the exec options.
     if request.session_id:
         argv += ["resume", request.session_id]
-    model = request.model or config.model
+    model = config.effective_model(request.model)
     if model:
         argv += ["--model", model]
-    reasoning = request.reasoning or config.reasoning
+    reasoning = config.effective_reasoning(request.reasoning)
     if reasoning:
         effort = normalize_codex_reasoning(reasoning)
         if effort is None:
