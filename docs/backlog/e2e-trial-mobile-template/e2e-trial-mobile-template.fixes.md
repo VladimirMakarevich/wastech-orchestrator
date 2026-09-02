@@ -28,6 +28,7 @@ The table below covers what this document records: the findings that were repair
 | F19 — `top --help` documents an argv argparse rejects | nit | **fixed** | `cli.py` |
 | F6 — control-state drift fires on the operator's own IDE | minor | **fixed** | `git_manager.py` |
 | F23 — `finalize` leaves the task-file move uncommitted | (one line, no section) | **fixed as visibility** | `cli.py`, `orchestrator.py` |
+| F14 — the subtask handoff's factual floor is built from `depends_on` | minor | **fixed** | `core/orchestrator.py`, `core/supervisor.py`, `implementation.md` |
 
 ## F1 + F2 — the reviewer under decomposition
 
@@ -278,3 +279,17 @@ This finding has no section in the trial document: it exists as eleven words ins
 **My guess, refuted by the code.** I expected the leftover to make the _next_ `finalize` refuse, since `plan_finalize` rejects an unaccounted-dirty tree. It does not: `_unaccounted_dirty_paths` filters through `_is_artifact_path`, and `_excluded_dirs` carries the task lifecycle dir, so a moved task file is expected dirt. Recorded because it is the kind of "obvious" second-order consequence that is worth checking rather than asserting.
 
 **The consequence the eleven words do not mention, deliberately left open.** The leftover _does_ ride into the next task's review diff: `write_current_diff` excludes only the runtime home, while the code commit's `changed_code_paths` also drops the lifecycle dir — and that docstring claimed the two "cover the same set", which was false. This is F24's mechanism on a path the agent may write, and F24's own evidence says what a stray unfixable path costs a reviewer (escalating to a blocking finding by the third task). It is **not** excluded here: nothing else reports an agent editing its own task file, so hiding `tasks/` from review would remove the only surface that would show it. The false claim is corrected in place and the trade-off named there; the exclusion is a decision with a security side, not a cleanup to fold into a nit.
+
+## F14 — the handoff floor built from a declaration instead of from the branch
+
+Reproduced by inverting the trial's own decomposition inside the existing handoff test: subtask 2 declares no dependency at all and subtask 3 declares one of the two subtasks committed before it. Against the previous code subtask 2's prompt carries no `{predecessor_context}` — `_assemble_predecessor_context` returns `None` on the first line for an empty `depends_on` — and subtask 3's brief names subtask 01 only. That is the trial's artifact exactly, and the second half is the worse one: the depless subtask is not under-informed, it is uninformed.
+
+**The floor now comes from what landed.** `_assemble_predecessor_context` reads the store's subtask rows, keeps every one before this subtask that carries a commit, and orders them oldest-first; `depends_on` is no longer consulted for _which_ predecessors exist. The rows come from the same table `_commit_subtask` writes, so "committed" means a verified SHA rather than a position in the manifest — a resumed run that skipped an already-committed subtask still names it, because the row is what is read.
+
+**`depends_on` keeps a job, and it is the smaller one.** The predecessors a subtask declares are marked `(declared dependency)` in the floor heading, so the author's "build on this one" signal survives instead of being flattened into a list. The distinction is worth one string because the two facts differ: a declared predecessor is what the author says this subtask stands on, an undeclared one is what happens to be underneath it. The supervisor's handoff prompt says which is which, so its interpretive brief can weight them.
+
+**Nothing grows in the prompt.** `{predecessor_context}` is a path, not the content — the floor is written to `logs/<task-id>/subtasks/NN-slug.handoff.md` and read by the agent from there — so a five-subtask decomposition's last brief naming four predecessors costs the node prompt nothing. The one place the floor is inlined is the supervisor's own handoff turn, which is a single read-only turn on a warm session.
+
+The three documentation surfaces that described the old selection are corrected with it: `prompt-variables.md` (the "no `depends_on` predecessor" absence condition, now "the subtask is the first one to run"), the `handoff_role_file` paragraph in `guide/flows/README.md`, and the packaged `implementation.md` prompt block, which told the agent the brief covered "the subtask(s) this one depends on" — the sentence an agent reads, and the one that would have made it distrust the extra predecessors as noise.
+
+**What this does not fix.** The finding's last paragraph is a clause on **F3**, and it stays open with it: `worc-deco-task` still describes `depends_on` as pure ordering. The narrowing it invited no longer costs the successor its facts, so the clause is now about emphasis rather than starvation — but an author still cannot tell from the skill that the field is read by anything but the scheduler.

@@ -408,6 +408,8 @@ Worse edge case: a subtask with **no** `depends_on` gets `None` — no handoff a
 
 This also adds a clause to **F3**: `worc-deco-task` describes `depends_on` purely as ordering ("a list of **slugs of EARLIER subtasks only**", "dependencies are linear and backward-only") and never says it _also_ decides what the next subtask is told. An author who declares only the true logical dependency — exactly what the skill's wording invites — silently narrows the brief.
 
+**FIXED** — the floor is built from the subtask rows that carry a commit, oldest first, and `depends_on` now only _marks_ the predecessors it names instead of selecting them. The clause this entry adds to **F3** is not fixed and stays open with F3. See [what was fixed](e2e-trial-mobile-template.fixes.md#f14--the-handoff-floor-built-from-a-declaration-instead-of-from-the-branch).
+
 ### F15 — a correct finding with an invented authority
 
 **Severity: minor.** **Lever: role prompt — `review.md`.**

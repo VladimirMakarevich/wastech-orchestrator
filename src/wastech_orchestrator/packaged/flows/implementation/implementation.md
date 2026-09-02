@@ -44,4 +44,4 @@ The task is decomposed and you must implement ONLY this subtask — subtask {sub
 
 ## Predecessor Handoff
 
-A handoff brief covering the subtask(s) this one depends on — their changed files, locked decisions, and open edges — is at {predecessor_context}. Read it first: build on what they established, do not re-explore or duplicate it, and do not break the contracts it marks as locked. It is ground truth for facts (files, commits) and advisory for interpretation — verify interpretive claims against the current code.{/predecessor_context}
+A handoff brief covering every subtask already committed on this branch — their changed files, locked decisions, and open edges, with the ones this subtask declares as dependencies marked — is at {predecessor_context}. Read it first: build on what they established, do not re-explore or duplicate it, and do not break the contracts it marks as locked. It is ground truth for facts (files, commits) and advisory for interpretation — verify interpretive claims against the current code.{/predecessor_context}

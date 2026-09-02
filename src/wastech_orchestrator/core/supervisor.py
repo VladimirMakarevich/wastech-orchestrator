@@ -1384,7 +1384,9 @@ class Supervisor:
         return (
             self._handoff_base(task_id)
             + f"\n\n## Handoff to subtask {subtask_order}\n"
-            + "The predecessor subtask(s) it depends on just completed and committed:\n\n"
+            + "Every subtask already committed on this branch, oldest first — the ones this "
+            "subtask declares as dependencies are marked, the rest landed before it and are "
+            "facts it still has to live with:\n\n"
             + floor_context
             + "\n\nWrite a focused brief for the agent implementing this next subtask, as the "
             "structured output's three sections: `new_surface_area` (what the predecessor(s) built "

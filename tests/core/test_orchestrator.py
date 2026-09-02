@@ -3106,9 +3106,12 @@ def test_subtask_handoff_context_reaches_successor_implementation(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
     # subtask-context-handoff: each successor subtask's implementation prompt receives
-    # {predecessor_context} pointing at a handoff brief assembled from its depends_on predecessors
-    # (the deterministic factual floor). A diamond (3 <- [1,2]) selects BOTH predecessors; subtask 1
-    # (no deps) gets no brief. The briefs live under logs/ — never in the memory tiers.
+    # {predecessor_context} pointing at a handoff brief whose deterministic factual floor is
+    # assembled from what LANDED on the branch — every subtask committed before it, oldest first —
+    # and not from its declared ``depends_on``. Subtask 2 declares nothing and still gets subtask 1
+    # (the edge case that used to yield no brief at all); subtask 3 declares only 1 and gets both 1
+    # and 2, with 1 marked as the declared dependency. Subtask 1 is first, so nothing is committed
+    # before it and it gets no brief. The briefs live under logs/ — never in the memory tiers.
     subtasks = {
         "decompose": True,
         "subtasks": [
@@ -3124,14 +3127,14 @@ def test_subtask_handoff_context_reaches_successor_implementation(
                 "title": "Second",
                 "slug": "second",
                 "acceptance_criteria": ["crit-two"],
-                "depends_on": [1],
+                "depends_on": [],  # declares nothing; subtask 1 is still a predecessor in fact
             },
             {
                 "order": 3,
                 "title": "Third",
                 "slug": "third",
                 "acceptance_criteria": ["crit-three"],
-                "depends_on": [1, 2],
+                "depends_on": [1],  # declares one of the two subtasks committed before it
             },
         ],
     }
@@ -3175,22 +3178,26 @@ def test_subtask_handoff_context_reaches_successor_implementation(
         r.prompt for r in providers[ProviderId.CLAUDE].requests if r.node_id == "implementation"
     ]
     assert len(impl_prompts) == 3
-    assert ".handoff.md" not in impl_prompts[0]  # subtask 1 has no predecessors → no brief injected
+    assert ".handoff.md" not in impl_prompts[0]  # subtask 1 runs first → nothing committed → none
     assert "02-second.handoff.md" in impl_prompts[1]  # subtask 2 reads its brief
     assert "03-third.handoff.md" in impl_prompts[2]  # subtask 3 reads its brief
 
     subtasks_dir = task_artifact_dir(art, "task-hnd") / "subtasks"
     # The floor is assembled from existing artifacts: predecessor spec pointer + acceptance criteria
-    # + changed files. Subtask 2's brief names predecessor 1.
+    # + changed files. Subtask 2 declares no dependency and is still handed subtask 1, unmarked.
     h2 = (subtasks_dir / "02-second.handoff.md").read_text("utf-8")
     assert "01-first.md" in h2 and "crit-one" in h2 and "Changed files" in h2
-    # The diamond: subtask 3's brief names BOTH predecessors 1 and 2.
+    assert "Subtask 01: First\n" in h2  # named as a fact, not as a declared dependency
+    # Subtask 3 declares only subtask 1, so the floor names both committed predecessors and marks
+    # which one the author declared.
     h3 = (subtasks_dir / "03-third.handoff.md").read_text("utf-8")
     assert "01-first.md" in h3 and "02-second.md" in h3
     assert "crit-one" in h3 and "crit-two" in h3
+    assert "Subtask 01: First (declared dependency)" in h3
+    assert "Subtask 02: Second\n" in h3
     # Reading the briefs from logs/<task>/subtasks/ IS the memory-tier isolation: they are written
     # to the transient task-scoped dir, never to the .worc/memory/ store.
-    assert not (subtasks_dir / "01-first.handoff.md").exists()  # no brief for the depless subtask
+    assert not (subtasks_dir / "01-first.handoff.md").exists()  # no brief for the first subtask
 
 
 # --- operator-authored decomposition (``subtasks:`` manifest) ------------------------------

@@ -441,18 +441,28 @@ def _ledger_attempt_count(ledger: Ledger, task_id: str) -> int:
 
 
 def _format_predecessor_floor(
-    spec: SubtaskSpec, commit_sha: str, changed_files: list[str], spec_path: str
+    spec: SubtaskSpec,
+    commit_sha: str,
+    changed_files: list[str],
+    spec_path: str,
+    *,
+    declared: bool,
 ) -> str:
     """One predecessor subtask's deterministic factual floor for the handoff brief (ground truth).
 
     Assembled purely from artifacts that already exist — the subtask's spec (title / acceptance
     criteria / spec pointer), its committed SHA, and the files that commit changed — so it is
     present even when the supervisor (the interpretive layer) is unavailable.
+
+    ``declared`` marks a predecessor the successor's ``depends_on`` names, which is the author's
+    "build on this one" signal; the unmarked ones landed on the same branch first and are facts the
+    successor still has to live with (see :meth:`Orchestrator._assemble_predecessor_context`).
     """
     criteria = "\n".join(f"  - {c}" for c in spec.acceptance_criteria) or "  - (none recorded)"
     files = "\n".join(f"  - {p}" for p in changed_files) or "  - (none)"
+    marker = " (declared dependency)" if declared else ""
     return (
-        f"### Subtask {spec.order:02d}: {spec.title}\n"
+        f"### Subtask {spec.order:02d}: {spec.title}{marker}\n"
         f"- Commit: {commit_sha}\n"
         f"- Spec: {spec_path}\n"
         f"- Acceptance criteria:\n{criteria}\n"
@@ -3251,8 +3261,8 @@ class Orchestrator:
                 str(private_spec),
                 extra_secrets=self._memory_extra_secrets(),
             )
-            # Two-layer handoff brief for this subtask's committed ``depends_on`` predecessors
-            # ``None`` when the subtask has no predecessors.
+            # Two-layer handoff brief over every subtask already committed on this branch
+            # (``None`` for the first one, which has no predecessors).
             inputs.predecessor_context_path = self._assemble_predecessor_context(p, unit)
             sub = phase(regions.region_entry, regions.region, subtask=unit.order)
             if sub.status is not Status.DONE:
@@ -3269,27 +3279,49 @@ class Orchestrator:
         """Assemble the subtask handoff brief for *unit* and return its path (or ``None``).
 
         Two layers: a **deterministic factual floor** (always, zero
-        LLM) — each ``depends_on`` predecessor's changed files, commit, acceptance criteria, and
-        spec pointer, from artifacts that already exist — plus an **interpretive supervisor brief**
+        LLM) — each predecessor's changed files, commit, acceptance criteria, and spec pointer,
+        from artifacts that already exist — plus an **interpretive supervisor brief**
         when the supervisor is available (it resumes its warm session; no new turn budget). The
         combined content is redaction-scrubbed and written to ``logs/<task-id>/subtasks/
-        NN-slug.handoff.md`` (local, uncommitted, never in the memory tiers). Best-effort: a subtask
-        with no ``depends_on`` gets ``None``; a failed/empty brief still ships the floor.
+        NN-slug.handoff.md`` (local, uncommitted, never in the memory tiers). Best-effort: the
+        first subtask (nothing committed yet) gets ``None``; a failed/empty brief still ships the
+        floor.
+
+        The floor is built from **what landed on the branch** — every subtask before this one
+        carrying a commit, oldest first — and not from ``depends_on``. Subtasks run sequentially on
+        one branch, so an earlier commit is a predecessor in fact whether or not it was declared:
+        reading ``depends_on`` instead hid two committed subtasks from a successor that declared
+        only one, and gave a subtask with no declared dependency no brief at all next to three
+        committed siblings. ``depends_on`` stays the author's emphasis signal — the predecessors it
+        names are marked as declared — never the source of the facts.
         """
-        if not unit.depends_on:
-            return None
         specs = {s.order: s for s in p.decomposition.subtasks}
-        rows = {s.order: s for s in self._store.get_subtasks(p.task.id) if s.commit_sha}
+        landed = sorted(
+            (
+                row
+                for row in self._store.get_subtasks(p.task.id)
+                if row.commit_sha and row.order < unit.order
+            ),
+            key=lambda row: row.order,
+        )
         floors: list[str] = []
-        for dep in unit.depends_on:
-            spec, row = specs.get(dep), rows.get(dep)
-            if spec is None or row is None or row.commit_sha is None:
-                continue  # predecessor not committed yet (should not happen in a sequential run)
+        for row in landed:
+            spec = specs.get(row.order)
+            if spec is None or row.commit_sha is None:
+                continue  # not part of this run's accepted decomposition (should not happen)
             spec_path = subtask_spec_path(
-                self._artifacts_root, p.task.id, dep, spec.slug
+                self._artifacts_root, p.task.id, row.order, spec.slug
             ).as_posix()
             files = self._git.files_in_commit(row.commit_sha) if self._git is not None else []
-            floors.append(_format_predecessor_floor(spec, row.commit_sha, files, spec_path))
+            floors.append(
+                _format_predecessor_floor(
+                    spec,
+                    row.commit_sha,
+                    files,
+                    spec_path,
+                    declared=row.order in unit.depends_on,
+                )
+            )
         if not floors:
             return None
         floor = "\n\n".join(floors)
