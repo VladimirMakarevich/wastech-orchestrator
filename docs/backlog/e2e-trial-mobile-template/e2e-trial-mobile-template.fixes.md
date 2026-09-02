@@ -35,6 +35,7 @@ The table below covers what this document records: the findings that were repair
 | F3 — the root task arrives as a footer path | minor | **fixed** | `worc-deco-task/SKILL.md` |
 | F4 — two of three install-written security keys | minor | **fixed** | `worc-config/SKILL.md` |
 | F5 + F8 + F16 — the three authoring lessons | nit / minor | **fixed as guidance** | `worc-task/SKILL.md`, `worc-deco-task/SKILL.md` |
+| F15 — a correct finding with an invented authority | minor | **fixed, paid for** | `review.md` |
 
 ## F1 + F2 — the reviewer under decomposition
 
@@ -372,3 +373,16 @@ All three are task-authoring defects in task files that ran months of work ago, 
 - **F5 — make a criterion greppable.** Prefer a command or a named symbol over a description, so the review step and the operator reach the same verdict.
 
 `worc-deco-task` gets a pointer rather than a copy, with the two that bit inside a subtask body named explicitly (F16 was subtask 04's step 3, F8 was task `001`) — a subtask body is authored under the same rules, and duplicating them into a second skill is how two files start disagreeing.
+
+## F15 — the citation, and the 32 characters it had to be bought with
+
+One sentence, in the bullet that already defines a finding's shape: **a finding that cites a document quotes the sentence and names the file it is in, so its claim is checked where it was read.** That is the trial's failure exactly — the reviewer wrote "Phase 04 explicitly includes the user-login sandbox", which is true of `plan.md` and false of the phase file it named, and a fixer sent to the phase file finds nothing there.
+
+**What it cost, since that was the whole blocker.** `review.md` is paid for on every node run of every task and `mdlint` ratchets it at 1,800 estimated tokens; it stood at 1,792, about 32 characters of room, against a sentence that needs about 125. The threshold was not raised — the config says it is never raised to silence a finding — so the sentence was bought from two restatements:
+
+- "(ordering only — it does not mean report the top finding alone)" was deleted from the same bullet. The bullet directly above it already says report every finding in one response, do not stop after the first blocking issue, do not defer the rest — so the parenthetical restated its neighbour.
+- The Test Coverage header's parenthetical named the invariant it points at (`"zero coverage for new core behavior" invariant above`) while that invariant's own bullet already points forward to this section. One direction is enough; the header now says "the invariant above".
+
+Net 1,795 tokens — still inside the ratchet, with the same rules and one more. **The next reviewer rule has about 20 characters of room**, and there is no obvious restatement left to sell: the file has now been paid down twice (F1's section did the same thing), so the third time is a real decision about the threshold rather than an edit.
+
+One wording detail worth recording because it is the kind of thing that survives into a prompt unnoticed: the new sentence sits between the path requirement and "Never invent a path to satisfy **that**", which left "that" pointing at the wrong sentence. It reads "those" now.

@@ -434,6 +434,8 @@ The finding is **right**, and it is the first real delivery defect the review la
 
 Findings feed a fixing agent, and `fixing.md`'s guard ("treat the `fix:` hint as a lead, not ground truth … re-open the source and confirm the corrected claim there") is precisely what absorbed this — the fixer cited `plan.md` instead and moved on. But a misattributed citation sends the fixer to the wrong document first, and an operator reading the finding would believe Phase 04 says something it does not. A finding that cites a document should quote it and name which artifact it is quoting.
 
+**FIXED** — that sentence is in `review.md`'s finding-shape bullet, bought from two restatements rather than by raising the size ratchet. The file now sits at 1,795 of 1,800 with the same rules and one more. See [what was fixed](e2e-trial-mobile-template.fixes.md#f15--the-citation-and-the-32-characters-it-had-to-be-bought-with).
+
 ### F16 — subtask 04 restates a property rule as a path list, and the path list over-excludes
 
 **Severity: minor.** **Lever: task file — `<target>/tasks/pending/subtasks/04-page-bottom-spacing.md`.**

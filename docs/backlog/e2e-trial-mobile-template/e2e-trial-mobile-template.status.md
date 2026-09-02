@@ -8,11 +8,11 @@ The index for the campaign. [The findings document](e2e-trial-mobile-template.md
 
 | State | Count | Findings |
 | --- | --- | --- |
-| Fixed | 25 | F1, F2, F3, F4, F5 (as guidance), F6, F8 (as guidance), F9, F10 (as a warning), F11, F12, F13, F14, F16 (as guidance), F17, F18, F19, F20, F21, F23 (as visibility), F24, F25, F26, F28, F29 |
-| Open — this campaign's lane | 1 | F15 |
+| Fixed | 26 | F1, F2, F3, F4, F5 (as guidance), F6, F8 (as guidance), F9, F10 (as a warning), F11, F12, F13, F14, F15, F16 (as guidance), F17, F18, F19, F20, F21, F23 (as visibility), F24, F25, F26, F28, F29 |
+| Open — this campaign's lane | 0 | — |
 | Open — owned elsewhere | 3 | F7 (own ADR: `docs/backlog/full-tool-access/`), F22 (the target repo's task authoring), F27 (environment / codex version pin) |
 
-**Everything this campaign owns has landed except one line.** F15 is the last entry, and it is not blocked by analysis: it is one sentence in `review.md` against a size ratchet with about 32 characters of room, so taking it means paying for it (see the budget below).
+**Everything this campaign owns has landed.** What is left in the table below is what was never this campaign's to spend on, plus the three verification gaps no code can close and the two halves deliberately left inside fixed findings.
 
 The three in the second row are open work, not closed findings — they are simply not this campaign's to spend on: F7 is step 4 of its own ADR, F22 is task authoring in the target repository, and F27 is a provider CLI defect with an environment fix. F7 is the one open `major` anywhere in the trial; nothing left in this campaign's own lane is rated above `minor`.
 
@@ -36,7 +36,7 @@ The three in the second row are open work, not closed findings — they are simp
 | **F12** — `status` names the wrong node in a decompose region | minor | **fixed** | `worc status` reported `documentation` twice while subtask 3's `implementation` was starting, so an operator would believe a five-subtask task had reached its last stage. The write site is the engine's region exit, where the write is load-bearing for a resumed `pre` phase — so the driver re-points the checkpoint at the region entry between subtasks instead. | `1ac554e` — [record](e2e-trial-mobile-template.fixes.md#f12--the-checkpoint-that-named-the-stage-after-the-one-still-running) |
 | **F13** — `prompt-audit` records the override, not the effective value | minor | **fixed** | The audit artifact carried the per-node override (`None` for every node but one) while the effective model/reasoning lived in `request.json`, so the two disagreed. The record now carries both, and the effective half is stamped **per attempt** — one value per stage would have named the primary's model for a run that fell over to the other provider. | `3f3741e` — [record](e2e-trial-mobile-template.fixes.md#f13--the-audit-record-that-could-not-answer-the-question-it-exists-for) |
 | **F14** — the handoff floor is built from `depends_on` | minor | **fixed** | The subtask brief's factual floor named only declared dependencies, though every earlier subtask committed to the same branch is a predecessor in fact — and a subtask with no `depends_on` got no handoff at all. The floor is built from the committed rows now; `depends_on` marks them instead of selecting them. | `1e1f501` — [record](e2e-trial-mobile-template.fixes.md#f14--the-handoff-floor-built-from-a-declaration-instead-of-from-the-branch) |
-| **F15** — a correct finding with an invented authority | minor | **open, blocked** | A blocking finding was right about the defect and cited a document that says the opposite, which sends the fixer to the wrong file first. Needs a `review.md` line: a finding citing a document quotes it and names the artifact. | Role prompt `review.md` — **blocked by its size ratchet** (below) |
+| **F15** — a correct finding with an invented authority | minor | **fixed** | A blocking finding was right about the defect and cited a document that says the opposite, which sends the fixer to the wrong file first. `review.md`'s finding-shape bullet now requires a citation to quote its sentence and name its file — bought from two restatements, not by raising the ratchet. | `review.md` — [record](e2e-trial-mobile-template.fixes.md#f15--the-citation-and-the-32-characters-it-had-to-be-bought-with) |
 | **F16** — a property rule restated as a path list | minor | **fixed as guidance** | Subtask 04 wrote "leave full-bleed screens alone" and then enumerated two directories; a non-full-bleed page under one of them was dropped, which cost a real delivery gap. "A property is not a path list" is a rule in `worc-task`, pointed at from `worc-deco-task`. | `worc-task/SKILL.md` — [record](e2e-trial-mobile-template.fixes.md#f5--f8--f16--three-lessons-with-no-artifact-left-to-repair) |
 | **F17** — a task cannot contribute to its own commit message | minor | **fixed** | Two acceptance criteria asked for content in publication surfaces no node can write — though one of the two, the PR description, turned out to be writable (it is the run summary). A `commit_type` front-matter key now sets the type for all three commits a task lands, and both authoring skills say which surfaces a criterion may ask for. | `7be670f` — [record](e2e-trial-mobile-template.fixes.md#f17--the-commit-message-a-task-could-not-reach-and-the-half-of-it-that-was-never-true) |
 | **F18** — the squash message the tool did not write | minor | **fixed** | With no `--subject`/`--body` the target repository's settings chose the message: the PR title (no Conventional Commits type) and every branch commit concatenated, audit-trail commit included, on a real `main`. The orchestrator writes both now, and the dry run prints them. | `cf06ac5` — [record](e2e-trial-mobile-template.fixes.md#f18--the-merge-message-the-tool-did-not-write) |
@@ -52,11 +52,13 @@ The three in the second row are open work, not closed findings — they are simp
 | **F28** — the unbounded Telegram call | major | **fixed** | A terminal notification with no deadline wedged the daemon for ~10 minutes, past the stop ladder and into a forced kill. Every call is bounded now except the HITL poll, which carries its own deadline. | `67600b9` — [record](e2e-trial-mobile-template.fixes.md#f28--the-unbounded-telegram-call) |
 | **F29** — a declined tick summarised as an empty queue | nit | **fixed** | The gate said it was not claiming a named pending task and the summary directly under it said "no pending tasks". Withheld ids are collected and named, and an unmerged dependency's skip is reported the same way. | `6a860cf` — [record](e2e-trial-mobile-template.fixes.md#f29--no-pending-tasks-printed-under-the-name-of-a-pending-task) |
 
-## What the one open finding actually needs
+## What is left, and who owns it
 
-| Finding | Lever | What it takes | Blocked by |
-| --- | --- | --- | --- |
-| F15 | role prompt `review.md` | One line: a finding that cites a document quotes it and names the artifact it is quoting. | **The file's size ratchet.** It sits at 1,792 estimated tokens against a `SIZE-001` warn of 1,800 — about 32 characters. `mdlint` exits 0 on a warning, so this is a deliberate choice, not a wall: remove something, or accept a new warning. The config says the threshold is never raised to silence a finding. |
+| Finding | Owner | What it takes |
+| --- | --- | --- |
+| F7 | this repository, another entry | Step 4 of the [`full-tool-access`](../full-tool-access/) ADR. The one open `major` in the trial, deliberately out of this campaign because the fix is a posture decision, not a repair. |
+| F22 | the target repository | A task spec there claimed nothing documented the back-button ladder while two files already did. Task authoring in the target, not orchestrator behavior. |
+| F27 | the environment | Codex died on its own model-cache schema at ~33% of its runs on this host; the orchestrator classified it, fell back, and the fallback produced the better review both times. A provider CLI defect with an environment fix — pin or upgrade the version. |
 
 ## Left open inside findings that are otherwise fixed
 
@@ -82,6 +84,6 @@ The target's installed `.worc/config.example.yaml` names an older model than the
 
 ## Budgets a taker will meet
 
-- **`review.md`**: 1,792 of a 1,800 warn / 2,600 error `SIZE-001` budget. This is what blocks F15 and what any future reviewer guidance has to pay for.
-- **The findings document**: 27,412 of a 26,000 warn / 32,000 error budget — already over warn, which is why fixes are recorded in the companion file and the finding keeps only a marker line. About 4,600 tokens of room before the gate turns red.
+- **`review.md`**: 1,795 of a 1,800 warn / 2,600 error `SIZE-001` budget — **about 20 characters of room.** F15's sentence was bought from two restatements; the file has now been paid down twice (F1 did the same), so there is no obvious restatement left to sell. The next reviewer rule is a decision about the threshold, not an edit.
+- **The findings document**: 28,330 of a 26,000 warn / 32,000 error budget — over warn, which is why fixes are recorded in the companion file and each finding keeps only a marker line. About 3,600 tokens of room before the gate turns red.
 - **The gates are manual here**: `.git/hooks/pre-commit` is not installed and `WASTECH_MDLINT_HOME` is unset, so `python tools/mdlint.py` and `npx prettier@3 --check` have to be run by hand. That is how the corpus drifted twice.

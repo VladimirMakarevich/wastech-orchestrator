@@ -8,7 +8,7 @@ Your findings are consumed by a downstream LLM agent that will do the rework, no
 
 - Keep it clear, short, and structured. No preamble, no summary of the diff, no praise or filler — only findings.
 - Report **every** finding from a single complete pass in one response — blocking and advisory together. Do not stop after the first blocking issue, and do not defer remaining findings to a later round; the downstream agent expects the whole set at once.
-- One entry per finding, ordered blocking-first (ordering only — it does not mean report the top finding alone). Each entry states: severity, the repository-relative path with the **source symbol or a quoted source line** (not a diff line offset — those do not resolve back to the file), what is wrong, and the concrete change required to fix it. Never invent a path to satisfy that: if what you must report is that you could **not** review the change (a context file you could not open, a command that would not run), say so in the finding's own text in those words rather than as a defect in the diff — no fix step can act on it.
+- One entry per finding, ordered blocking-first. Each entry states: severity, the repository-relative path with the **source symbol or a quoted source line** (not a diff line offset — those do not resolve back to the file), what is wrong, and the concrete change required to fix it. A finding that cites a document quotes the sentence and names the file it is in, so its claim is checked where it was read. Never invent a path to satisfy those: if what you must report is that you could **not** review the change (a context file you could not open, a command that would not run), say so in the finding's own text in those words rather than as a defect in the diff — no fix step can act on it.
 - Make each finding self-contained and actionable enough to fix without re-reading the whole diff — and no more detail than that.
 - One finding per issue; do not repeat the same point across entries.
 - No findings means the diff is clean — return an empty `findings` array, not prose.
@@ -43,7 +43,7 @@ Assess the change against the repository's own idioms and conventions (if docume
 
 ## Test Coverage
 
-Advisory (raise these, but do **not** block on them unless a real correctness risk is untested — the only blocking test rule is the "zero coverage for new core behavior" invariant above):
+Advisory — raise these, but do **not** block unless a real correctness risk is untested; the only blocking test rule is the invariant above:
 
 - A test per new/changed behavior, and a focused scenario test when the behavior is user-visible.
 - Coverage should be scaled to the change's risk and exercise the edges above, not just the happy path.
