@@ -8,11 +8,13 @@ The index for the campaign. [The findings document](e2e-trial-mobile-template.md
 
 | State | Count | Findings |
 | --- | --- | --- |
-| Fixed | 19 | F1, F2, F6, F9, F10 (as a warning), F11, F13, F14, F17, F18, F19, F20, F21, F23 (as visibility), F24, F25, F26, F28, F29 |
-| Open | 7 | F3, F4, F5, F8, F12, F15, F16 |
-| Not ours to fix | 3 | F7 (own ADR), F22 (target's task authoring), F27 (codex CLI) |
+| Fixed | 20 | F1, F2, F6, F9, F10 (as a warning), F11, F12, F13, F14, F17, F18, F19, F20, F21, F23 (as visibility), F24, F25, F26, F28, F29 |
+| Open — this campaign's lane | 6 | F3, F4, F5, F8, F15, F16 |
+| Open — owned elsewhere | 3 | F7 (own ADR: `docs/backlog/full-tool-access/`), F22 (the target repo's task authoring), F27 (environment / codex version pin) |
 
-Nothing open is rated `major`. Every `major` in the trial is either fixed or is F7, which has its own backlog entry.
+**Every orchestrator-source repair this campaign owns has landed.** What is left is two skill edits, three lessons folded into them, and one prompt line held by a size budget.
+
+The three in the second row are open work, not closed findings — they are simply not this campaign's to spend on: F7 is step 4 of its own ADR, F22 is task authoring in the target repository, and F27 is a provider CLI defect with an environment fix. F7 is the one open `major` anywhere in the trial; nothing left in this campaign's own lane is rated above `minor`.
 
 ## Every finding
 
@@ -31,7 +33,7 @@ Nothing open is rated `major`. Every `major` in the trial is either fixed or is 
 | **F9** — the preamble forbids the reads it grants | major | **fixed** | Under advanced mode the security preamble both granted and banned reading `.worc-io/`, and a reviewer resolved the contradiction by refusing to review. All three sentences fixed; the write ban is untouched in every configuration. | `6b9e349` — [record](e2e-trial-mobile-template.fixes.md#f9--the-security-preamble) |
 | **F10** — a gating verdict that names no path | major | **fixed as a warning** | A blocking verdict whose findings name no path routes to a node whose job is to open a named location, so the round can only end in a refusal. The operator chose to announce the wasted round rather than prevent it — the cost is kept, not removed. | `702add5` — [record](e2e-trial-mobile-template.fixes.md#f10--a-gating-verdict-that-names-no-path) |
 | **F11** — the observe turn judged a loop from one side | major | **fixed** | The supervisor diagnosed a rework loop backwards and sent the operator hunting a timeout that never happened, because under the shipped cadence the clean `fixing` round it was reasoning about was never observed. The preceding steps' own reports now reach the prompt. | `dedaff9` — [record](e2e-trial-mobile-template.fixes.md#f11--the-observation-that-judged-a-loop-from-one-side-of-it) |
-| **F12** — `status` names the wrong node in a decompose region | minor | **open** | `worc status` reported `documentation` twice while subtask 3's `implementation` was starting, so an operator would believe a five-subtask task had reached its last stage. Functionally nothing was wrong; the symptom is located and the write site is not. | Orchestrator source — needs investigation first |
+| **F12** — `status` names the wrong node in a decompose region | minor | **fixed** | `worc status` reported `documentation` twice while subtask 3's `implementation` was starting, so an operator would believe a five-subtask task had reached its last stage. The write site is the engine's region exit, where the write is load-bearing for a resumed `pre` phase — so the driver re-points the checkpoint at the region entry between subtasks instead. | `1ac554e` — [record](e2e-trial-mobile-template.fixes.md#f12--the-checkpoint-that-named-the-stage-after-the-one-still-running) |
 | **F13** — `prompt-audit` records the override, not the effective value | minor | **fixed** | The audit artifact carried the per-node override (`None` for every node but one) while the effective model/reasoning lived in `request.json`, so the two disagreed. The record now carries both, and the effective half is stamped **per attempt** — one value per stage would have named the primary's model for a run that fell over to the other provider. | `3f3741e` — [record](e2e-trial-mobile-template.fixes.md#f13--the-audit-record-that-could-not-answer-the-question-it-exists-for) |
 | **F14** — the handoff floor is built from `depends_on` | minor | **fixed** | The subtask brief's factual floor named only declared dependencies, though every earlier subtask committed to the same branch is a predecessor in fact — and a subtask with no `depends_on` got no handoff at all. The floor is built from the committed rows now; `depends_on` marks them instead of selecting them. | `1e1f501` — [record](e2e-trial-mobile-template.fixes.md#f14--the-handoff-floor-built-from-a-declaration-instead-of-from-the-branch) |
 | **F15** — a correct finding with an invented authority | minor | **open, blocked** | A blocking finding was right about the defect and cited a document that says the opposite, which sends the fixer to the wrong file first. Needs a `review.md` line: a finding citing a document quotes it and names the artifact. | Role prompt `review.md` — **blocked by its size ratchet** (below) |
@@ -50,13 +52,12 @@ Nothing open is rated `major`. Every `major` in the trial is either fixed or is 
 | **F28** — the unbounded Telegram call | major | **fixed** | A terminal notification with no deadline wedged the daemon for ~10 minutes, past the stop ladder and into a forced kill. Every call is bounded now except the HITL poll, which carries its own deadline. | `67600b9` — [record](e2e-trial-mobile-template.fixes.md#f28--the-unbounded-telegram-call) |
 | **F29** — a declined tick summarised as an empty queue | nit | **fixed** | The gate said it was not claiming a named pending task and the summary directly under it said "no pending tasks". Withheld ids are collected and named, and an unmerged dependency's skip is reported the same way. | `6a860cf` — [record](e2e-trial-mobile-template.fixes.md#f29--no-pending-tasks-printed-under-the-name-of-a-pending-task) |
 
-## What the ten open findings actually need
+## What the six open findings actually need
 
-They collapse into one repair, two skill edits and one blocked prompt line — three of the seven have no artifact left to repair.
+They collapse into two skill edits and one blocked prompt line — three of the six have no artifact left to repair, and no orchestrator source is involved in any of them.
 
 | Finding | Lever | What it takes | Blocked by |
 | --- | --- | --- | --- |
-| F12 | orchestrator source | Find the write site that leaves `current_node` naming the main graph's successor inside a decompose region, then fix the bookkeeping. | Needs investigation — the finding names the lever tentatively. **The last open orchestrator-source repair.** |
 | F3 | skill `worc-deco-task` | State that a constraint binding one subtask belongs in that subtask's body, and that `depends_on` also decides which predecessors the next subtask is told to build on (F14 made the field an emphasis signal rather than the source of the handoff's facts, so what is left is emphasis, not starvation). | — |
 | F4 | skill `worc-config` | Add `disable_read_isolation` to the security-key step. | — |
 | F5, F8, F16 | authoring skills | Nothing to repair: the task files ran months of work ago. The transferable rules are "cite a repo rule, do not restate it" (F8), "a property rule is not a path list" (F16) and "make acceptance criteria greppable" (F5). | — (fold into the F3/F4 pass) |
