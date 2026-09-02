@@ -8,8 +8,8 @@ The index for the campaign. [The findings document](e2e-trial-mobile-template.md
 
 | State | Count | Findings |
 | --- | --- | --- |
-| Fixed | 16 | F1, F2, F6, F9, F10 (as a warning), F11, F18, F19, F20, F21, F23 (as visibility), F24, F25, F26, F28, F29 |
-| Open | 10 | F3, F4, F5, F8, F12, F13, F14, F15, F16, F17 |
+| Fixed | 17 | F1, F2, F6, F9, F10 (as a warning), F11, F14, F18, F19, F20, F21, F23 (as visibility), F24, F25, F26, F28, F29 |
+| Open | 9 | F3, F4, F5, F8, F12, F13, F15, F16, F17 |
 | Not ours to fix | 3 | F7 (own ADR), F22 (target's task authoring), F27 (codex CLI) |
 
 Nothing open is rated `major`. Every `major` in the trial is either fixed or is F7, which has its own backlog entry.
@@ -33,7 +33,7 @@ Nothing open is rated `major`. Every `major` in the trial is either fixed or is 
 | **F11** — the observe turn judged a loop from one side | major | **fixed** | The supervisor diagnosed a rework loop backwards and sent the operator hunting a timeout that never happened, because under the shipped cadence the clean `fixing` round it was reasoning about was never observed. The preceding steps' own reports now reach the prompt. | `dedaff9` — [record](e2e-trial-mobile-template.fixes.md#f11--the-observation-that-judged-a-loop-from-one-side-of-it) |
 | **F12** — `status` names the wrong node in a decompose region | minor | **open** | `worc status` reported `documentation` twice while subtask 3's `implementation` was starting, so an operator would believe a five-subtask task had reached its last stage. Functionally nothing was wrong; the symptom is located and the write site is not. | Orchestrator source — needs investigation first |
 | **F13** — `prompt-audit` records the override, not the effective value | minor | **open** | The audit artifact carries the per-node override (`None` for every node but one) while the effective model/reasoning lives in `request.json`, so the two disagree. An operator auditing "did the reviewer run at `xhigh`?" cannot answer from the record named for auditing. | Orchestrator source — record the resolved value, or both |
-| **F14** — the handoff floor is built from `depends_on` | minor | **open** | The subtask brief's factual floor names only declared dependencies, though every earlier subtask committed to the same branch is a predecessor in fact. A subtask with no `depends_on` gets no handoff at all, even with three already committed. | Orchestrator source — `core/orchestrator.py`, handoff floor |
+| **F14** — the handoff floor is built from `depends_on` | minor | **fixed** | The subtask brief's factual floor named only declared dependencies, though every earlier subtask committed to the same branch is a predecessor in fact — and a subtask with no `depends_on` got no handoff at all. The floor is built from the committed rows now; `depends_on` marks them instead of selecting them. | `1e1f501` — [record](e2e-trial-mobile-template.fixes.md#f14--the-handoff-floor-built-from-a-declaration-instead-of-from-the-branch) |
 | **F15** — a correct finding with an invented authority | minor | **open, blocked** | A blocking finding was right about the defect and cited a document that says the opposite, which sends the fixer to the wrong file first. Needs a `review.md` line: a finding citing a document quotes it and names the artifact. | Role prompt `review.md` — **blocked by its size ratchet** (below) |
 | **F16** — a property rule restated as a path list | minor | **open (lesson only)** | Subtask 04 wrote "leave full-bleed screens alone" and then enumerated two directories; a non-full-bleed page under one of them was dropped, which cost a real delivery gap. Task already ran; same class as F8. | Fold into the authoring skills (see F3/F4) |
 | **F17** — a task cannot contribute to its own commit message | minor | **open** | Two acceptance criteria in one task asked for content in publication surfaces no node can write. It also blocks F18's remaining half: with no channel, every task's commit type is `feat`. | Orchestrator source **or** authoring guidance — needs a shape decision |
@@ -52,15 +52,14 @@ Nothing open is rated `major`. Every `major` in the trial is either fixed or is 
 
 ## What the ten open findings actually need
 
-They collapse into four repairs, two skill edits and one blocked prompt line — three of the ten have no artifact left to repair.
+They collapse into three repairs, two skill edits and one blocked prompt line — three of the nine have no artifact left to repair.
 
 | Finding | Lever | What it takes | Blocked by |
 | --- | --- | --- | --- |
-| F14 | orchestrator source | Build the factual floor from the subtasks actually committed to the branch rather than from declared `depends_on`, and give a subtask with no declared dependency a floor at all. | — (site located, ready) |
-| F13 | orchestrator source | Write the resolved model/reasoning into the prompt-audit record, or both the configured and the effective value. | — (cheapest of the four) |
+| F13 | orchestrator source | Write the resolved model/reasoning into the prompt-audit record, or both the configured and the effective value. | — (cheapest of the three) |
 | F17 | orchestrator source **or** skills | Either give an agent's summary a way into the commit message, or have the authoring skills say these surfaces are not addressable. | A shape decision by the owner; it also gates F18's per-task commit type |
 | F12 | orchestrator source | Find the write site that leaves `current_node` naming the main graph's successor inside a decompose region, then fix the bookkeeping. | Needs investigation — the finding names the lever tentatively |
-| F3 | skill `worc-deco-task` | State that a constraint binding one subtask belongs in that subtask's body, and that `depends_on` also decides what the next subtask is told. | — |
+| F3 | skill `worc-deco-task` | State that a constraint binding one subtask belongs in that subtask's body, and that `depends_on` also decides which predecessors the next subtask is told to build on (F14 made the field an emphasis signal rather than the source of the handoff's facts, so what is left is emphasis, not starvation). | — |
 | F4 | skill `worc-config` | Add `disable_read_isolation` to the security-key step. | — |
 | F5, F8, F16 | authoring skills | Nothing to repair: the task files ran months of work ago. The transferable rules are "cite a repo rule, do not restate it" (F8), "a property rule is not a path list" (F16) and "make acceptance criteria greppable" (F5). | — (fold into the F3/F4 pass) |
 | F15 | role prompt `review.md` | One line: a finding that cites a document quotes it and names the artifact it is quoting. | **The file's size ratchet.** It sits at 1,792 estimated tokens against a `SIZE-001` warn of 1,800 — about 32 characters. `mdlint` exits 0 on a warning, so this is a deliberate choice, not a wall: remove something, or accept a new warning. The config says the threshold is never raised to silence a finding. |
