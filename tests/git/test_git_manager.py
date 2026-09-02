@@ -1142,6 +1142,30 @@ def test_write_current_diff_renders_nul_content_as_text(
     assert "after" in diff
 
 
+def test_write_current_diff_excludes_the_tracked_runtime_home(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # `worc install` appends `.worc/` to .gitignore but repos re-include the config deliberately
+    # (`!.worc/config.yaml`, so its changes are reviewable in history), which makes that one file
+    # TRACKED. An operator editing it mid-run then appears in the review diff of every task that
+    # follows — a file no agent may read or write, so a finding against it can never be fixed.
+    # The runtime home is excluded here the way the commit pathspec already excludes it.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    worc_home = git_repo.clone / RUNTIME_EXCLUDED_DIRS[0]
+    worc_home.mkdir()
+    (worc_home / "config.yaml").write_text("poll_interval_seconds: 60\n", encoding="utf-8")
+    git_run(["add", "-f", f"{RUNTIME_EXCLUDED_DIRS[0]}/config.yaml"], git_repo.clone)
+    git_run(["commit", "-m", "track the orchestrator config"], git_repo.clone)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    (worc_home / "config.yaml").write_text("poll_interval_seconds: 30\n", encoding="utf-8")
+    (git_repo.clone / "feature.py").write_text("value = 42\n", encoding="utf-8")
+    diff = Path(gm.write_current_diff("task-001")).read_text(encoding="utf-8")
+    assert "feature.py" in diff and "value = 42" in diff  # the task's own change is still there
+    assert RUNTIME_EXCLUDED_DIRS[0] not in diff
+    assert "poll_interval_seconds" not in diff
+
+
 def test_control_byte_paths_flags_only_nul_files(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:

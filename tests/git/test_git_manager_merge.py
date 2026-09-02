@@ -161,6 +161,71 @@ def test_commit_merge_resolution_commits_and_is_idempotent(
     assert gm.commit_merge_resolution("task-001", "merge(task-001): resolve") == sha
 
 
+def test_commit_merge_resolution_leaves_a_tracked_runtime_file_out_of_the_merge(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # The base merge is the one publishing path that stages the whole tree (`git add -A`), and an
+    # installed repo re-includes part of `.worc/` on purpose (`.worc/*` + `!.worc/config.yaml`, so
+    # config changes are reviewable in history) — which makes that file TRACKED. Nothing leaked
+    # without the exclusion: `assert_exchange_never_staged` refuses the commit. But it refused on an
+    # ordinary operator edit, so a routine config change hard-blocked the base merge as a
+    # runtime-artifact violation. Excluded, the merge just proceeds without it.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    _task(store)
+    (git_repo.clone / ".gitignore").write_text(".worc/*\n!.worc/config.yaml\n", encoding="utf-8")
+    worc_home = git_repo.clone / ".worc"
+    worc_home.mkdir()
+    (worc_home / "config.yaml").write_text("poll_interval_seconds: 60\n", encoding="utf-8")
+    (worc_home / "state.db").write_text("ignored runtime state\n", encoding="utf-8")
+    git_run(["add", ".gitignore", ".worc/config.yaml"], git_repo.clone)
+    git_run(["commit", "-m", "track the orchestrator config"], git_repo.clone)
+    git_run(["push", "origin", "main"], git_repo.clone)
+    _branch_with_change(git_run, git_repo.clone, "worc/t1", "README.md", "branch side\n")
+    _advance_base(git_run, git_repo.clone, "README.md", "base side\n")
+    assert gm.update_branch_with_base("worc/t1", "main") is True
+    (git_repo.clone / "README.md").write_text("resolved\n", encoding="utf-8")
+    # The operator edits the orchestrator config while the task is in flight.
+    (worc_home / "config.yaml").write_text("poll_interval_seconds: 30\n", encoding="utf-8")
+
+    sha = gm.commit_merge_resolution("task-001", "merge(task-001): resolve")
+
+    assert sha
+    committed = git_run(["show", "--pretty=format:", "--name-only", sha], git_repo.clone).split()
+    assert "README.md" in committed
+    assert not [path for path in committed if path.startswith(".worc/")]
+    # The edit is untouched in the working tree — excluded from the commit, not reverted.
+    assert (worc_home / "config.yaml").read_text(encoding="utf-8") == "poll_interval_seconds: 30\n"
+
+
+def test_commit_merge_resolution_still_commits_when_the_runtime_home_is_fully_ignored(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # The default `worc install` shape ignores the whole `.worc/` dir. `git add` refuses (exit 1,
+    # "The following paths are ignored … use -f") when a pathspec names a root that exists on disk
+    # and is entirely ignored, so a blanket `:(exclude)` would break every base merge on a default
+    # install — the same trap `staged_pathspec` documents for the task lifecycle dir.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    _task(store)
+    (git_repo.clone / ".gitignore").write_text(".worc/\n.worc-io/\n", encoding="utf-8")
+    for dirname in (".worc", ".worc-io"):
+        (git_repo.clone / dirname).mkdir()
+        (git_repo.clone / dirname / "runtime.txt").write_text("ignored\n", encoding="utf-8")
+    git_run(["add", ".gitignore"], git_repo.clone)
+    git_run(["commit", "-m", "ignore the runtime home"], git_repo.clone)
+    git_run(["push", "origin", "main"], git_repo.clone)
+    _branch_with_change(git_run, git_repo.clone, "worc/t1", "README.md", "branch side\n")
+    _advance_base(git_run, git_repo.clone, "README.md", "base side\n")
+    assert gm.update_branch_with_base("worc/t1", "main") is True
+    (git_repo.clone / "README.md").write_text("resolved\n", encoding="utf-8")
+
+    sha = gm.commit_merge_resolution("task-001", "merge(task-001): resolve")
+
+    assert sha
+    committed = git_run(["show", "--pretty=format:", "--name-only", sha], git_repo.clone).split()
+    assert "README.md" in committed
+    assert not [path for path in committed if path.startswith((".worc/", ".worc-io/"))]
+
+
 def test_commit_merge_resolution_refuses_leftover_markers(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
 ) -> None:
