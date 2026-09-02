@@ -21,6 +21,7 @@ Kept separate from the findings document for a mechanical reason too: that docum
 | F20 — `run` reads as parked, and `rerun --continue` starts a second engine | major | **fixed** | `process_control.py`, `cli.py` |
 | F25 — the merge gate cannot be operated under a live daemon | major | **fixed** | `cli.py` |
 | F18 — `merge-task` cannot control the squash commit message | minor | **fixed** | `git_manager.py`, `orchestrator.py`, `cli.py` |
+| F11 — the observe turn is blind to the step it is explaining | major | **fixed** | `core/supervisor.py` |
 
 ## F1 + F2 — the reviewer under decomposition
 
@@ -209,3 +210,19 @@ The body is deliberately **empty**. Every commit this orchestrator makes on a br
 One consequence worth recording, because it showed up as two failing tests: the **auto-merge** path takes the same message (`git.auto_merge: true`, which this trial deliberately never ran). Two `test_orchestrator` cases pin `gh pr merge`'s argv exactly and had to be updated — which is the intended reading of them: the argv is a security-relevant surface (no `--admin`, no `--dangerously*`), so anything added to it is meant to break a test and be looked at.
 
 **And the dry run says it.** The finding's "cheapest fix" — `merge-task --dry-run` reporting the message policy — is what makes this checkable without merging: the plan carries the subject the merge would write (`MergePlan.commit_subject`) and prints it under the strategy line, with the empty body named. It is the one thing a merge leaves in the base branch forever and the one thing the plan omitted. Reachable under a live daemon as of F25, which is the configuration an operator running the human merge gate is actually in.
+
+## F11 — the observation that judged a loop from one side of it
+
+The wrong diagnosis is reproduced exactly as filed, and so is the wiring gap. But the finding's proposed lever — "its `_run` call passes no `supervisor_packet_path`, unlike the finalize turn" — is treatment of a symptom, and taking it literally would have cost a published packet per observation (a full build plus an exchange copy on every deviation of a deep fix loop) to deliver one field of it.
+
+**The mechanism is the cadence, and the finding stops one step short of it.** The entry says the observe turn "receives only the observed node's own `final_message` plus its `findings`", which is true but leaves the obvious rebuttal standing: the observe session is warm (`resume_own_lineage`), so why had it not seen `fixing`'s report when `fixing` ran? Because it never observed that step. The shipped cadence is `events` with triggers `rework`/`failure`/`fallback` ([`observe_cadence.py`](../../../src/wastech_orchestrator/core/observe_cadence.py)), and a `fixing` round that finishes `done` is not a deviation — so no turn is spent on it and its report never enters the session at all. The observation of the evaluator that reworked afterwards was therefore judging a loop from the only side of it that had ever been shown. "The implementer produced nothing at all" was an inference from an absence in its own context, not a misreading of evidence it had.
+
+That is worth correcting in the record because it changes what a sufficient fix is: not "give the observe turn the whole run", but "give it the rounds it was never shown".
+
+**What landed.** `_step_history` prepends what the preceding steps reported — one line per step, `- <node> (<outcome>): <message>` — read from the same durable sources the finalize packet is built from (the `node_runs` rows plus each run's own `<node_id>.out.md`), so the two surfaces cannot disagree about what a step said. Bounded twice, because this is a per-observation cost: the last **6** runs, each message folded to one line and capped at the packet's existing per-step cap (500 characters — which the finding itself establishes is enough, having checked that the fixing report's whole rationale sits in its first 500). Best-effort like the rest of the layer: a store or filesystem error costs the section, not the observation.
+
+The section's own text carries the instruction that the trial's failure needed: judge a loop from the sequence rather than from an absence of visible work in it, because a step that deliberately changed nothing says so there. That is the sentence the observer was missing, and it is worth more than the data alone — the supervisor had the loop's shape right ("real work, then cosmetic work, then nothing") and drew the opposite conclusion from it.
+
+Five tests. The positive one is built as the trial's exact situation — an unobserved `fixing` round followed by an observed `rework` — and two negatives pin the traps: the observed step is not repeated as its own history (a single step rendered twice looks like the loop the observer is asked to judge), and the first step of a run gets no section at all.
+
+**Not fixed, and it is the more expensive half of the entry:** the supervisor also wrote "I verified all three findings; all are accurate" about blockers that were false, having never read the subtask spec that forbade the changes they demanded. That is the same starvation as F1 on a different surface, and it needs the subtask spec in the observe turn's reach, not more of the run's own output. Left for its own change rather than folded in here.
