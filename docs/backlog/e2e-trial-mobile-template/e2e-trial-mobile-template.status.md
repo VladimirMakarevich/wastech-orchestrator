@@ -8,8 +8,8 @@ The index for the campaign. [The findings document](e2e-trial-mobile-template.md
 
 | State | Count | Findings |
 | --- | --- | --- |
-| Fixed | 18 | F1, F2, F6, F9, F10 (as a warning), F11, F13, F14, F18, F19, F20, F21, F23 (as visibility), F24, F25, F26, F28, F29 |
-| Open | 8 | F3, F4, F5, F8, F12, F15, F16, F17 |
+| Fixed | 19 | F1, F2, F6, F9, F10 (as a warning), F11, F13, F14, F17, F18, F19, F20, F21, F23 (as visibility), F24, F25, F26, F28, F29 |
+| Open | 7 | F3, F4, F5, F8, F12, F15, F16 |
 | Not ours to fix | 3 | F7 (own ADR), F22 (target's task authoring), F27 (codex CLI) |
 
 Nothing open is rated `major`. Every `major` in the trial is either fixed or is F7, which has its own backlog entry.
@@ -36,7 +36,7 @@ Nothing open is rated `major`. Every `major` in the trial is either fixed or is 
 | **F14** — the handoff floor is built from `depends_on` | minor | **fixed** | The subtask brief's factual floor named only declared dependencies, though every earlier subtask committed to the same branch is a predecessor in fact — and a subtask with no `depends_on` got no handoff at all. The floor is built from the committed rows now; `depends_on` marks them instead of selecting them. | `1e1f501` — [record](e2e-trial-mobile-template.fixes.md#f14--the-handoff-floor-built-from-a-declaration-instead-of-from-the-branch) |
 | **F15** — a correct finding with an invented authority | minor | **open, blocked** | A blocking finding was right about the defect and cited a document that says the opposite, which sends the fixer to the wrong file first. Needs a `review.md` line: a finding citing a document quotes it and names the artifact. | Role prompt `review.md` — **blocked by its size ratchet** (below) |
 | **F16** — a property rule restated as a path list | minor | **open (lesson only)** | Subtask 04 wrote "leave full-bleed screens alone" and then enumerated two directories; a non-full-bleed page under one of them was dropped, which cost a real delivery gap. Task already ran; same class as F8. | Fold into the authoring skills (see F3/F4) |
-| **F17** — a task cannot contribute to its own commit message | minor | **open** | Two acceptance criteria in one task asked for content in publication surfaces no node can write. It also blocks F18's remaining half: with no channel, every task's commit type is `feat`. | Orchestrator source **or** authoring guidance — needs a shape decision |
+| **F17** — a task cannot contribute to its own commit message | minor | **fixed** | Two acceptance criteria asked for content in publication surfaces no node can write — though one of the two, the PR description, turned out to be writable (it is the run summary). A `commit_type` front-matter key now sets the type for all three commits a task lands, and both authoring skills say which surfaces a criterion may ask for. | `7be670f` — [record](e2e-trial-mobile-template.fixes.md#f17--the-commit-message-a-task-could-not-reach-and-the-half-of-it-that-was-never-true) |
 | **F18** — the squash message the tool did not write | minor | **fixed** | With no `--subject`/`--body` the target repository's settings chose the message: the PR title (no Conventional Commits type) and every branch commit concatenated, audit-trail commit included, on a real `main`. The orchestrator writes both now, and the dry run prints them. | `cf06ac5` — [record](e2e-trial-mobile-template.fixes.md#f18--the-merge-message-the-tool-did-not-write) |
 | **F19** — help for a flag that is not there | nit | **fixed** | `top --log-file`'s help described the path as "passed to `watch --log-file`", an argv argparse rejects. It now names the parent-flag form, and the test pins both forms rather than the prose. | `8c8841d` — [record](e2e-trial-mobile-template.fixes.md#f19--the-help-text-for-a-flag-that-is-not-there) |
 | **F20** — `run` reads as parked, and `rerun` would start a second engine | major | **fixed** | `worc run` recorded nothing about itself, so its task read as `parked (no daemon)` for the whole run and `rerun --continue` passed every refusal. `run` now writes its own liveness marker and every probe and guard reads it. | `32ebf2a` — [record](e2e-trial-mobile-template.fixes.md#f20--the-executor-that-recorded-nothing-about-itself) |
@@ -52,12 +52,11 @@ Nothing open is rated `major`. Every `major` in the trial is either fixed or is 
 
 ## What the ten open findings actually need
 
-They collapse into two repairs, two skill edits and one blocked prompt line — three of the eight have no artifact left to repair.
+They collapse into one repair, two skill edits and one blocked prompt line — three of the seven have no artifact left to repair.
 
 | Finding | Lever | What it takes | Blocked by |
 | --- | --- | --- | --- |
-| F17 | orchestrator source **or** skills | Either give an agent's summary a way into the commit message, or have the authoring skills say these surfaces are not addressable. | A shape decision by the owner; it also gates F18's per-task commit type |
-| F12 | orchestrator source | Find the write site that leaves `current_node` naming the main graph's successor inside a decompose region, then fix the bookkeeping. | Needs investigation — the finding names the lever tentatively |
+| F12 | orchestrator source | Find the write site that leaves `current_node` naming the main graph's successor inside a decompose region, then fix the bookkeeping. | Needs investigation — the finding names the lever tentatively. **The last open orchestrator-source repair.** |
 | F3 | skill `worc-deco-task` | State that a constraint binding one subtask belongs in that subtask's body, and that `depends_on` also decides which predecessors the next subtask is told to build on (F14 made the field an emphasis signal rather than the source of the handoff's facts, so what is left is emphasis, not starvation). | — |
 | F4 | skill `worc-config` | Add `disable_read_isolation` to the security-key step. | — |
 | F5, F8, F16 | authoring skills | Nothing to repair: the task files ran months of work ago. The transferable rules are "cite a repo rule, do not restate it" (F8), "a property rule is not a path list" (F16) and "make acceptance criteria greppable" (F5). | — (fold into the F3/F4 pass) |
@@ -70,7 +69,7 @@ They collapse into two repairs, two skill edits and one blocked prompt line — 
 | F10 | The wasted fix round is announced, never prevented. On the trial that was 426s and 474s (~$2.9 each) establishing there was nothing to fix. | The operator chose the narrower half deliberately. |
 | F11 | The same turn endorsed three false blockers ("I verified all three findings; all are accurate") having never read the subtask spec that forbade the changes they demanded. | F1's starvation on another surface: it needs the spec in the observe turn's reach, not more of the run's own output. |
 | F23 | An uncommitted task-file move still rides into the next task's review diff — F24's mechanism on a path the agent may write. The false docstring claim ("covers the same set the code commit does") is corrected in place. | Excluding `tasks/` from the review diff would remove the only surface that shows an agent editing its own task file. A decision with a security side. |
-| F18 | Every task's commit subject is `feat(<id>): <title>`; the type cannot be chosen per task. | That is F17. |
+| F18 | ~~Every task's commit subject is `feat(<id>): <title>`; the type cannot be chosen per task.~~ **Closed with F17**: a task's `commit_type` sets the type for the code commit, every subtask commit and the squash commit. | Was F17. |
 | F2 | Fixed as a static defect with no evidence it has ever bitten — the trial's own prediction about it was falsified. | Nothing to do; recorded so the entry is not re-opened as unproven. |
 
 ## Verification gaps — not defects, and not fixable by code
