@@ -19,7 +19,7 @@ from wastech_orchestrator.providers.base import ProviderId
 # lower value loads, since every removed key is either tolerated-and-ignored or reported by name.
 # There is no migration runner: an installation that has drifted is repaired by ``upgrade-config``,
 # which merges the packaged template over the operator's file and stamps this value.
-CONFIG_SCHEMA_VERSION = 39
+CONFIG_SCHEMA_VERSION = 40
 
 
 class AuditBranch(StrEnum):
@@ -88,6 +88,12 @@ class AutoModeConfig:
     # stays pending. Requires `telegram.enabled` (preflight). Gates new claims only — resuming an
     # in-flight task on daemon restart is never gated.
     confirm_next_task: bool = False
+    # How long the claim gate waits for that approval. Deliberately NOT `telegram.ask_timeout_s`:
+    # that is the ceiling for a node asking a human to decide something mid-run (8h shipped, and
+    # sensibly so), while this one holds the processing slot idle and re-asks on a later tick, so
+    # it is a different question with a different right answer. A refusal — deny, silence, or no
+    # transport — is remembered for an hour rather than re-asked every tick.
+    confirm_timeout_s: int = 900
 
 
 @dataclass(frozen=True)

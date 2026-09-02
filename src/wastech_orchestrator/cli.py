@@ -1591,6 +1591,14 @@ def promote_tasks(
     return moved, errors
 
 
+# How long a refused claim is left alone before the gate asks about that task again. A refusal
+# ("not now") must not become "never" — a daemon runs for days and the operator would have no way
+# back other than a restart — but re-asking on the next tick is worse: `break` ends only the
+# current cycle, so a poll interval of 60s means a Telegram prompt every 60s, forever, with no
+# backoff. An hour is long enough to be quiet and short enough that a change of mind is cheap.
+_DECLINE_COOLOFF_S = 3600.0
+
+
 def _confirm_next_task(
     orchestrator: Orchestrator,
     config: OrchestratorConfig,
@@ -1599,10 +1607,16 @@ def _confirm_next_task(
 ) -> bool:
     """Ask the operator (Telegram) to approve claiming the next pending task.
 
-    Returns ``True`` only on an explicit approval; deny / timeout / no transport → ``False``
-    (fail-closed STOP — the task stays pending, the operator decides later). Non-durable by design:
-    a daemon restart mid-prompt simply re-asks next tick. Carries the task id + title only — never
-    diff or prompt content. Preflight guarantees ``telegram.enabled`` when this gate is on.
+    Returns ``True`` only on an explicit approval; deny / timeout / no transport / a stop arriving
+    mid-wait → ``False`` (fail-closed STOP — the task stays pending, the operator decides later).
+    Non-durable by design: a daemon restart mid-prompt simply re-asks next tick. Carries the task id
+    + title only — never diff or prompt content. Preflight guarantees ``telegram.enabled`` when this
+    gate is on.
+
+    The wait is bounded by ``auto_mode.confirm_timeout_s``, this gate's own key. Borrowing
+    ``telegram.ask_timeout_s`` (8h on the shipped-style value) conflated two different questions:
+    that one is the ceiling for a node asking a human to decide something mid-run, while this one
+    holds the processing slot idle and gets another chance on the next tick.
     """
     label = task_id or "(unknown id)"
     context = f"Task {label}" + (f" — {title}" if title else "")
@@ -1611,7 +1625,7 @@ def _confirm_next_task(
         context=context,
         task_id=task_id or "next-task",
         kind="approval",
-        timeout_s=config.telegram.ask_timeout_s,
+        timeout_s=config.orchestrator.auto_mode.confirm_timeout_s,
         interaction_id="next-task-" + uuid.uuid4().hex[:16],
     )
     approved = result.failure is None and result.answered and result.approved is True
@@ -1622,6 +1636,32 @@ def _confirm_next_task(
             result.failure or ("denied" if result.answered else "no answer"),
         )
     return approved
+
+
+def _claim_allowed(
+    orchestrator: Orchestrator,
+    config: OrchestratorConfig,
+    task_id: str | None,
+    title: str | None,
+    gate_memory: dict[str, float] | None,
+) -> bool:
+    """The claim gate with its memory: ask, unless this task was refused inside the cool-off.
+
+    ``gate_memory`` maps a task id to the monotonic instant its cool-off ends; the daemon owns one
+    for its lifetime and a single-pass caller passes ``None`` (one tick has nothing to remember).
+    A refusal for an unidentified task is not remembered — there is no key to remember it under,
+    and such a file is rejected loudly by the gate it never reaches.
+    """
+    if gate_memory is not None and task_id is not None:
+        until = gate_memory.get(task_id)
+        if until is not None and time.monotonic() < until:
+            _LOG.debug("next-task gate: %s was refused recently; not asking again yet", task_id)
+            return False
+    if _confirm_next_task(orchestrator, config, task_id, title):
+        return True
+    if gate_memory is not None and task_id is not None:
+        gate_memory[task_id] = time.monotonic() + _DECLINE_COOLOFF_S
+    return False
 
 
 def _already_settled(orchestrator: Orchestrator, task_id: str, task_file: Path) -> bool:
@@ -1648,6 +1688,7 @@ def watch_once(
     folder: Path,
     *,
     queue: str | None = None,
+    gate_memory: dict[str, float] | None = None,
 ) -> list[PipelineResult]:
     """Resume any in-flight task, then process pending tasks per the auto-mode rule.
 
@@ -1665,6 +1706,9 @@ def watch_once(
     task can run instead — the slot never idles on CI; a dependency-broken task (cycle / unknown /
     self-ref) is terminally rejected. The skip does **not** consume the auto-mode-off "one task"
     budget, so the slot still runs one real eligible task per tick.
+
+    ``gate_memory`` carries the claim gate's per-task refusals across ticks (see
+    :func:`_claim_allowed`); ``None`` disables that memory, which is what a single pass wants.
 
     A pending file whose id already reached a terminal status and is that task's own leftover is
     also skipped (:func:`_already_settled`): a ``manual_action_required`` task keeps its file in
@@ -1711,10 +1755,10 @@ def watch_once(
             if verdict.state is Eligibility.BROKEN:
                 results.append(orchestrator.reject_dependency(str(task_file), verdict.detail))
                 continue  # fail-closed terminal reject; the slot stays free
-        if config.orchestrator.auto_mode.confirm_next_task and not _confirm_next_task(
-            orchestrator, config, task_id, scan.title
+        if config.orchestrator.auto_mode.confirm_next_task and not _claim_allowed(
+            orchestrator, config, task_id, scan.title, gate_memory
         ):
-            break  # operator denied / silent → leave pending, stop chaining this cycle
+            break  # operator denied / silent / refused recently → leave pending, stop this cycle
         result = orchestrator.run_task(str(task_file))
         results.append(result)
         if result.final_status is Status.MANUAL_ACTION_REQUIRED:
@@ -1808,11 +1852,18 @@ def watch_loop(
 
     results: list[PipelineResult] = []
     iteration = 0
+    # The claim gate's refusal memory, owned here so it lives exactly as long as this daemon: a
+    # restart is the operator's own "ask me again". Deliberately not persisted — a decline is about
+    # this moment, and a durable one would need its own expiry story and an operator command to
+    # clear it.
+    gate_memory: dict[str, float] = {}
     while True:
         if _stop_requested():
             break
         orchestrator.refresh_repo()
-        results.extend(watch_once(orchestrator, config, folder, queue=queue))
+        results.extend(
+            watch_once(orchestrator, config, folder, queue=queue, gate_memory=gate_memory)
+        )
         iteration += 1
         # Idle-gap memory cleanup: the single-slot invariant guarantees no active task here, but
         # double-check (a RUNNING soft-pause still holds the slot) so cleanup never races a task or

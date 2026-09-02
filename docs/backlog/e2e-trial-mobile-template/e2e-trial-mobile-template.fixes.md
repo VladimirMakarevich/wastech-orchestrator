@@ -143,3 +143,21 @@ Two decisions in it worth stating, because neither is forced by the finding:
 **The long poll is capped at 5s (was Telegram's 50).** The predicate is only read between requests, so the chunk — not the predicate — is what decides how fast a stop is noticed. At 50s a `stop` still misses its own 30s patience and still escalates to a tree kill, which would have made the rest of the fix decorative. The cost is a request every 5s while a prompt is pending, and only while one is pending. A test asserts the value passed to `getUpdates` stays inside the ladder's patience rather than asserting the constant, so the property is what is pinned.
 
 An incidental refactor came with it: `wait_for_answer` crossed the `PLR0911` return ratchet at 7, so the two duplicated transport-error results became `_transport_error(handle)` and the reply-mapping tail became `_answer(handle, reply)`. The ratchet is a burn-down backlog; adding a per-file ignore to it would have been the wrong direction.
+
+### The gate has its own timeout
+
+Reproduced by construction: `dataclasses.replace(auto_mode, confirm_timeout_s=900)` raised `TypeError` because the key did not exist, and the gate read `config.telegram.ask_timeout_s` — the finding's point exactly. What landed is `orchestrator.auto_mode.confirm_timeout_s`, default **900s (15 minutes)**, validated `> 0`, `CONFIG_SCHEMA_VERSION` 39 → 40, and the packaged `config.example.yaml` + operator reference carry it.
+
+The two timeouts are answers to different questions, which is why one key could not serve both: `telegram.ask_timeout_s` bounds a node asking a human to decide something **mid-run**, where the alternative to waiting is parking a half-finished task, so eight hours is right. The claim gate holds an **idle slot** and gets another chance on the next tick, so the same eight hours buys nothing and costs a daemon that (before the fix above) could only be killed. Zero is rejected rather than treated as "off": it would fail closed on every tick with no chance to answer, which reads as a broken auto mode; off is `confirm_next_task: false`.
+
+### A refusal is remembered
+
+The finding's second horn — "an operator who says no once is asked again 60 seconds later, forever, with no backoff and no 'asked N times' state" — reproduced as a test that drives three ticks and counts prompts: **3 before, 1 after**.
+
+`watch_loop` now owns a `{task_id: cool-off end}` map for the daemon's lifetime and passes it into `watch_once`; a refusal — deny, silence, or no transport alike — is remembered for **an hour**, after which the gate asks again. Four properties are pinned by tests, and three of them are the ones easy to get wrong: a refusal is not permanent (a decline means "not now", and a daemon runs for days), an approval remembers nothing, and a caller that passes no map behaves exactly as before (a single pass has nothing to remember).
+
+Three deliberate non-changes, each of which would have been scope creep:
+
+- **The memory is not persisted.** A durable decline would need its own expiry story and an operator command to clear it, and a restart is already the operator's own "ask me again".
+- **A remembered refusal still ends the cycle** rather than falling through to the next pending task. That is exactly today's behavior — a fresh decline `break`s too — so a lower-priority task was never reached in this state either. Changing it is a queue-semantics decision, not this finding.
+- **The skip is logged at `debug`, not `info`.** An hour of info lines saying "still refused" is the noise the finding complains about in another form. The consequence is that the operator-facing summary for such a tick says "nothing to do", which is **F29** — the same sentence, reached by a second route.

@@ -11,7 +11,7 @@ For the fields not on this page see [reference.md](reference.md), which also car
 | `telegram.enabled` | bool | `false` | — | Enable HITL prompts + notifications. Required by `auto_mode.confirm_next_task` and provider `max_turns_gate`. |
 | `telegram.bot_token_env` | string | `"TELEGRAM_BOT_TOKEN"` | Must be a valid env-var name (`^[A-Za-z_][A-Za-z0-9_]*$`). | The env var _name_ holding the bot token (never the token value). |
 | `telegram.chat_id_env` | string | `"TELEGRAM_CHAT_ID"` | Same env-name rule; must resolve to a non-zero numeric chat id. | The env var name holding the chat id. |
-| `telegram.ask_timeout_s` | int | `28800` (8h) | `> 0` | Blocking HITL timeout — fails closed on timeout. |
+| `telegram.ask_timeout_s` | int | `28800` (8h) | `> 0` | Blocking HITL timeout for a node asking a human mid-run — fails closed on timeout. Not the auto-mode claim gate's, which has its own `orchestrator.auto_mode.confirm_timeout_s` ([reference.md](reference.md)). |
 | `telegram.trace` | bool | `false` | — | `true` = live per-node progress feed (best-effort; node id + outcome only). |
 
 ## `logging` — operator verbosity and artifact retention

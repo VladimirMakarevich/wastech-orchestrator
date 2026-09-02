@@ -31,6 +31,7 @@ The reference is split by concern, so a page you open to answer one question is 
 | --- | --- | --- | --- | --- |
 | `orchestrator.auto_mode.enabled` | bool | `false` | — | `true` lets `watch` pick the next pending task automatically after one finishes (task chaining). Leave off for one-task-at-a-time. |
 | `orchestrator.auto_mode.confirm_next_task` | bool | `false` | **Requires `telegram.enabled: true`.** | `true` asks approve/deny in Telegram before claiming _each_ next task; deny/timeout/no-transport stops chaining (fail-closed). Gates new claims only — never a resume. |
+| `orchestrator.auto_mode.confirm_timeout_s` | int | `900` (15m) | `> 0` | How long that gate waits for the answer — its own key, not `telegram.ask_timeout_s` (which is the mid-run HITL ceiling). A refusal — deny, silence, or no transport — is remembered for an hour instead of being re-asked every tick; `stop` abandons a wait in flight. |
 | `orchestrator.poll_interval_seconds` | int | `300` | `>= 0` | Seconds between `watch` ticks (each tick fetch/pulls `base_branch`, then processes pending). `0` = single pass, no loop, no periodic sync. |
 | `orchestrator.queue` | string | `"default"` | Non-empty / non-whitespace. | This instance's selector: `watch` only claims a pending task whose `queue` equals this (string equality). Set it when several worc instances share one task pool. Override per launch with `--queue`. |
 
