@@ -974,7 +974,7 @@ class CodexProvider(BaseCliProvider):
         documentation, rework, fixing). Probe ``codex exec resume --help`` and flag the drift so
         preflight surfaces it — fatal only when codex has no fallback provider (decided upstream),
         else a warning. Light grep contract (like the ``-c/--config`` probe): empty output is
-        inconclusive (no flag); passes on the current 0.142.x grammar.
+        inconclusive (no flag); passes on the 0.152.1 grammar this adapter is verified against.
         """
         ok, help_text = self._probe([self._config.command, "exec", "resume", "--help"], env)
         if not help_text.strip():

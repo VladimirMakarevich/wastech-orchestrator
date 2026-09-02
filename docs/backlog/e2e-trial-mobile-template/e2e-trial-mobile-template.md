@@ -788,6 +788,8 @@ ERROR codex_models_manager::manager: failed to renew cache TTL:  (same, repeated
 
 i.e. codex 0.144.4's own model-cache schema is out of step with the cache file on disk. Not an orchestrator defect — and the orchestrator's handling is a **positive**: classified as `process_crashed`, routed to the `claude` fallback, flow continued, and on both occasions the fallback produced the better review. Recorded because (a) the rate rose through the trial (0/3 on 002a, then 1/2, then 1/1), and (b) an operator seeing `exit 1` with no final message has no way to know it is a provider-side cache problem unless someone tells them this signature.
 
+**FIXED in the environment, and the rate in the heading above is already wrong:** the ~33% was a one-way transition, not flakiness. The cache on disk today carries no `base_instructions` anywhere and closes its first model object at exactly `line 97 column 5` — the coordinates in the stderr above — so the field is gone from the server payload rather than intermittently absent, and 0.144.4 fails every run now, not one in three. Upgraded 0.144.4 -> **0.152.1** and re-verified; the README's supported floor named the broken version and now names the verified one. See [what was fixed](e2e-trial-mobile-template.fixes.md#f27--the-provider-cli-that-could-not-read-its-own-cache).
+
 ### F28 — the "best-effort" terminal Telegram notification has no timeout, and wedged the daemon live
 
 Severity: **major**. Lever: orchestrator source — `notify/telegram.py` `_safe_send` / `_run_sync`. **Observed, not inferred.**

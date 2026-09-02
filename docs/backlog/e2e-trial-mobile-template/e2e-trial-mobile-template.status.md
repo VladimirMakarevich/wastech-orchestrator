@@ -8,11 +8,11 @@ The index for the campaign. [The findings document](e2e-trial-mobile-template.md
 
 | State | Count | Findings |
 | --- | --- | --- |
-| Fixed | 26 | F1, F2, F3, F4, F5 (as guidance), F6, F8 (as guidance), F9, F10 (as a warning), F11, F12, F13, F14, F15, F16 (as guidance), F17, F18, F19, F20, F21, F23 (as visibility), F24, F25, F26, F28, F29 |
+| Fixed | 27 | F1, F2, F3, F4, F5 (as guidance), F6, F8 (as guidance), F9, F10 (as a warning), F11, F12, F13, F14, F15, F16 (as guidance), F17, F18, F19, F20, F21, F23 (as visibility), F24, F25, F26, F27 (in the environment), F28, F29 |
 | Open — this campaign's lane | 0 | — |
-| Open — owned elsewhere | 3 | F7 (own ADR: `docs/backlog/full-tool-access/`), F22 (the target repo's task authoring), F27 (environment / codex version pin) |
+| Open — owned elsewhere | 2 | F7 (own ADR: `docs/backlog/full-tool-access/`), F22 (the target repo's task authoring) |
 
-**Everything this campaign owns has landed.** The three in the last row are open work, not closed findings — they were never this campaign's to spend on: F7 is step 4 of its own ADR, F22 is task authoring in the target repository, and F27 is a provider CLI defect with an environment fix. F7 is the one open `major` anywhere in the trial. What else remains is below and is not repairable by code: three verification gaps that need a human or a throwaway repo, and the halves deliberately left inside findings that are otherwise fixed.
+**Everything this campaign owns has landed.** The two in the last row are open work, not closed findings — they were never this campaign's to spend on: F7 is step 4 of its own ADR, and F22 is task authoring in the target repository. F7 is the one open `major` anywhere in the trial. F27 was the third of them and is now closed: its lever was outside the repository (the host's `codex` install), and taking it turned up that this repository's own supported-version floor named the broken release. What else remains is below and is not repairable by code: three verification gaps that need a human or a throwaway repo, and the halves deliberately left inside findings that are otherwise fixed.
 
 ## Every finding
 
@@ -46,7 +46,7 @@ The index for the campaign. [The findings document](e2e-trial-mobile-template.md
 | **F24** — the runtime home in the review diff | minor→major | **fixed** | An operator config edit rode into the review diff of every following task, with severity escalating from ignored to `blocking` — a finding no agent is permitted to fix. `.worc/` and `.worc-io/` are excluded from the review diff and from the base merge. | `c1d4355` — [record](e2e-trial-mobile-template.fixes.md#f24--the-runtime-home-in-the-review-diff) |
 | **F25** — the merge gate cannot be operated under a live daemon | major | **fixed** | `merge-task --dry-run` exited 1 while the daemon ran, which is exactly the state an operator using the human merge gate is in. The guard moved below the flag on three commands, each dry run naming the executor that owns the clone. | `39dc2a9` — [record](e2e-trial-mobile-template.fixes.md#f25--a-plan-is-not-a-mutation) |
 | **F26** — `confirm_next_task` makes the daemon unkillable | major | **fixed** | The claim gate waited inside a tick with no cancellation, borrowed the 8-hour HITL timeout, and forgot a refusal — so the daemon could only be killed and the operator was re-asked every tick. All three halves fixed. | `774f02a` + `cfac207` — [record](e2e-trial-mobile-template.fixes.md#f26--the-claim-gate-the-stop-ladder-could-not-reach) |
-| **F27** — codex `process_crashed` at ~33% on this host | minor here | **open** | Codex died on its own model-cache schema; the orchestrator classified it, fell back, and the fallback produced the better review both times. A provider CLI defect with an environment fix, recorded so the signature is recognisable. | Environment / codex version pin |
+| **F27** — codex `process_crashed` on this host | minor here | **fixed in the environment** | Codex died on its own model-cache schema; the orchestrator classified it, fell back, and the fallback produced the better review both times. Reproducing it corrected the rate: not ~33% but every run past the point the server payload dropped the field, and `README.md`'s supported floor named the broken release. Upgraded `0.144.4` → `0.152.1`, verified against the adapter's argv and both preflight probes, floor raised. | `README.md`, the host's `codex` install — [record](e2e-trial-mobile-template.fixes.md#f27--the-provider-cli-that-could-not-read-its-own-cache) |
 | **F28** — the unbounded Telegram call | major | **fixed** | A terminal notification with no deadline wedged the daemon for ~10 minutes, past the stop ladder and into a forced kill. Every call is bounded now except the HITL poll, which carries its own deadline. | `67600b9` — [record](e2e-trial-mobile-template.fixes.md#f28--the-unbounded-telegram-call) |
 | **F29** — a declined tick summarised as an empty queue | nit | **fixed** | The gate said it was not claiming a named pending task and the summary directly under it said "no pending tasks". Withheld ids are collected and named, and an unmerged dependency's skip is reported the same way. | `6a860cf` — [record](e2e-trial-mobile-template.fixes.md#f29--no-pending-tasks-printed-under-the-name-of-a-pending-task) |
 
@@ -56,7 +56,6 @@ The index for the campaign. [The findings document](e2e-trial-mobile-template.md
 | --- | --- | --- |
 | F7 | this repository, another entry | Step 4 of the [`full-tool-access`](../full-tool-access/) ADR. The one open `major` in the trial, deliberately out of this campaign because the fix is a posture decision, not a repair. |
 | F22 | the target repository | A task spec there claimed nothing documented the back-button ladder while two files already did. Task authoring in the target, not orchestrator behavior. |
-| F27 | the environment | Codex died on its own model-cache schema at ~33% of its runs on this host; the orchestrator classified it, fell back, and the fallback produced the better review both times. A provider CLI defect with an environment fix — pin or upgrade the version. |
 
 ## Left open inside findings that are otherwise fixed
 
