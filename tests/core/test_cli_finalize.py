@@ -14,6 +14,7 @@ from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import GitManager
 from wastech_orchestrator.ledger import Ledger, LedgerRecord
 from wastech_orchestrator.state_store import NodeRunRow, PublishOpRow, StateStore, TaskRow
+from wastech_orchestrator.task.parser import read_subtask_refs
 
 # Every test here is a slow integration test (real git / subprocess / process tree).
 pytestmark = pytest.mark.slow
@@ -453,6 +454,127 @@ def _seed_tracked_task_file(git_repo, git_run, project: Path) -> Path:
     git_run(["add", "tasks/pending/task-1.md"], git_repo.clone)
     git_run(["commit", "-m", "chore: queue task-1"], git_repo.clone)
     return source
+
+
+def _seed_decomposition_root(git_repo, git_run, project: Path, *, n: int = 2) -> Path:
+    """Commit a ``subtasks:`` root plus its spec files, the shape ``promote`` puts in ``pending/``.
+
+    Mirrors the promote contract deliberately: the specs live in a ``subtasks/`` subfolder (never
+    beside the root, where the queue scan would claim them as standalone tasks) and the refs are
+    relative to the root file's own directory, which is what the relocation has to preserve.
+    """
+    pending = git_repo.clone / "tasks" / "pending"
+    (pending / "subtasks").mkdir(parents=True, exist_ok=True)
+    refs = [f"subtasks/{i:02d}-step.md" for i in range(1, n + 1)]
+    root = pending / "epic.md"
+    manifest = "".join(f"  - {ref}\n" for ref in refs)
+    root.write_text(
+        f"---\nid: epic\ntitle: Epic\nsubtasks:\n{manifest}---\n\nbody\n", encoding="utf-8"
+    )
+    for i, ref in enumerate(refs, start=1):
+        (pending / ref).write_text(
+            f"---\ntitle: Step {i}\nslug: step-{i}\n---\n\nAcceptance criteria\n\n- ok\n",
+            encoding="utf-8",
+        )
+    git_run(["add", "tasks/pending"], git_repo.clone)
+    git_run(["commit", "-m", "chore: queue epic"], git_repo.clone)
+    return root
+
+
+def test_finalize_carries_the_subtask_specs_with_the_root(
+    git_repo, git_run, tmp_path: Path
+) -> None:
+    # The defect this pins: the root reached `done/` and its specs stayed in `pending/subtasks/`,
+    # so the finished root could no longer resolve its own manifest — every `subtasks:` ref is
+    # relative to the root file's directory. `promote` carries the pair in together and states the
+    # invariant ("a root never appears in pending/ without its specs"); the terminal move has to be
+    # the same operation in reverse, or the orchestrator separates a set its own code calls
+    # inseparable. Fails against the previous relocation, which moved exactly one file.
+    project = tmp_path / "p"
+    project.mkdir()
+    root = _seed_decomposition_root(git_repo, git_run, project)
+    config = _seed(project, git_repo.clone, status=Status.MANUAL_ACTION_REQUIRED)
+    store = StateStore.open(git_repo.clone / ".worc" / "state.db")
+    store.update_task("task-1", source_path=str(root))
+    store.close()
+
+    assert cli.main(["--config", str(config), "finalize", "task-1", "--as", "failed", "-y"]) == 1
+
+    failed = git_repo.clone / "tasks" / "failed"
+    assert (failed / "epic.md").is_file()
+    # Beside the root in its new home, under the same relative path the manifest names…
+    assert (failed / "subtasks" / "01-step.md").is_file()
+    assert (failed / "subtasks" / "02-step.md").is_file()
+    # …and gone from the queue, which is what "pending" is supposed to mean.
+    assert not (git_repo.clone / "tasks" / "pending" / "subtasks" / "01-step.md").exists()
+    # The point of the move, not a side effect: the manifest resolves from where the root now is.
+    for ref in read_subtask_refs(failed / "epic.md"):
+        assert (failed / ref).is_file(), ref
+
+
+def test_finalize_does_not_nest_a_lifecycle_folder_inside_the_queue(
+    git_repo, git_run, tmp_path: Path
+) -> None:
+    # The trap in the obvious implementation: `lifecycle_destination` is single-file and derives the
+    # tasks root from the file's parent, so asking it where a spec belongs answers
+    # `tasks/pending/subtasks/failed/01-step.md` — a lifecycle folder nested inside the queue. The
+    # destination has to come from the root's move instead.
+    project = tmp_path / "p"
+    project.mkdir()
+    root = _seed_decomposition_root(git_repo, git_run, project, n=1)
+    config = _seed(project, git_repo.clone, status=Status.MANUAL_ACTION_REQUIRED)
+    store = StateStore.open(git_repo.clone / ".worc" / "state.db")
+    store.update_task("task-1", source_path=str(root))
+    store.close()
+
+    assert cli.main(["--config", str(config), "finalize", "task-1", "--as", "failed", "-y"]) == 1
+
+    pending = git_repo.clone / "tasks" / "pending"
+    assert not (pending / "subtasks" / "failed").exists()
+    assert not (pending / "subtasks" / "done").exists()
+
+
+def test_finalize_announces_the_specs_that_travel_with_the_root(
+    git_repo, git_run, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Same reason the root's own move is announced: these are tracked files the finalize dirties
+    # and deliberately does not commit, and several of them appearing in `git status` unannounced
+    # is worse than one. The dry run must predict the same count it will move.
+    project = tmp_path / "p"
+    project.mkdir()
+    root = _seed_decomposition_root(git_repo, git_run, project, n=3)
+    config = _seed(project, git_repo.clone, status=Status.MANUAL_ACTION_REQUIRED)
+    store = StateStore.open(git_repo.clone / ".worc" / "state.db")
+    store.update_task("task-1", source_path=str(root))
+    store.close()
+
+    assert (
+        cli.main(["--config", str(config), "finalize", "task-1", "--as", "failed", "--dry-run"])
+        == 0
+    )
+    assert "+3 subtask specs" in capsys.readouterr().out
+
+    assert cli.main(["--config", str(config), "finalize", "task-1", "--as", "failed", "-y"]) == 1
+    assert "+3 subtask specs" in capsys.readouterr().out
+
+
+def test_finalize_of_an_ordinary_task_announces_no_specs(
+    git_repo, git_run, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A task with no `subtasks:` manifest must read exactly as it did before: one file, no suffix.
+    project = tmp_path / "p"
+    project.mkdir()
+    source = _seed_tracked_task_file(git_repo, git_run, project)
+    config = _seed(project, git_repo.clone, status=Status.MANUAL_ACTION_REQUIRED)
+    store = StateStore.open(git_repo.clone / ".worc" / "state.db")
+    store.update_task("task-1", source_path=str(source))
+    store.close()
+
+    assert cli.main(["--config", str(config), "finalize", "task-1", "--as", "failed", "-y"]) == 1
+
+    out = capsys.readouterr().out
+    assert "tasks/failed/task-1.md" in out
+    assert "subtask spec" not in out
 
 
 def test_finalize_leaves_the_task_file_move_uncommitted(git_repo, git_run, tmp_path: Path) -> None:

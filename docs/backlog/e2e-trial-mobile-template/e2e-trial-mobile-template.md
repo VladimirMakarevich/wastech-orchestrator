@@ -1069,6 +1069,36 @@ The notifier degrades to disabled with a named reason, the gate fails closed wit
 
 One nuance worth recording rather than filing: `AutoModeConfig`'s comment says the gate "Requires `telegram.enabled` (**preflight**)", but `worc watch` **started anyway** with preflight reporting NOT ready — preflight is a check the operator runs, not a launch gate. The behavior is safe (fail-closed), but the consequence is that an operator whose Telegram credentials break mid-flight gets a daemon that never claims anything again and says so only in one INFO line per tick. With auto mode on, that is indistinguishable at a glance from an idle queue — the same visibility gap as the WAITING lines.
 
+### F30 — a finished decomposition leaves its subtask specs in `pending/`, and cannot resolve them afterwards
+
+Severity: **minor** as observed, **major** on the one path that reaches it. Lever: orchestrator source — `core/orchestrator.py` `_relocate_task_file`. **Found after the trial closed, by the operator, on the trial's own leftovers.**
+
+Task `001` finished `done` with all five subtasks committed. The root moved; its specs did not:
+
+```
+tasks/done/001-edge-to-edge-bottom-insets.md            <- root
+tasks/pending/subtasks/01-inset-source-and-token.md     <- five specs, still queued
+                       …05-docs.md
+state.db: status=done  source_path=tasks/done/001-…md  subtask_count=5  subtasks_completed=5
+```
+
+All five are git-tracked, so the repository permanently claims work is pending that is finished.
+
+**The code calls the set inseparable and then separates it.** `promote_tasks` carries a root's specs in with it and says why: "subtask specs move _before_ their root, so **a root never appears in `pending/` without its specs**". The outbound half is `_relocate_task_file`, which moves exactly one file and knows nothing about a manifest.
+
+**Which is not only untidy, because the refs are relative to the root file's own directory** (`root_dir = Path(task_file).resolve().parent`). Resolved against the real repository:
+
+```
+BEFORE the move (tasks/pending): 5/5 resolve, 0 MISSING
+AFTER  the move (tasks/done)   : 0/5 resolve, 5 MISSING
+```
+
+A missing ref is a hard reject (`subtask_file_missing`), `_reject` quarantines the task file into `.worc/tasks/rejected/`, and `rerun_task` reaches that validation only **after** archiving artifacts, clearing the exchange, resetting the branch to base and clearing the row. So rerunning a finished decomposition resets its branch and then files the finished root into quarantine — over a manifest the orchestrator broke itself.
+
+Not affected, checked: the queue never claims the stranded specs (`select_pending` is `iterdir()` plus a suffix filter, so a subfolder is invisible to it) — the subfolder rule works exactly as intended.
+
+**FIXED, symmetric with the promote that brought them in:** the root now travels with the specs it references, subfolder preserved, and both `finalize` surfaces name them (`+N subtask specs`) for the same reason they name the root's move — tracked files dirtied and deliberately not committed. See [what was fixed](e2e-trial-mobile-template.fixes.md#f30--the-half-of-the-task-lifecycle-that-only-runs-inbound).
+
 ## Auto-mode scorecard (all probes)
 
 | Capability | Result | Evidence |

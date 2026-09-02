@@ -326,6 +326,40 @@ class SubtaskSpecFile:
     body: str
 
 
+def read_subtask_refs(task_file: str | Path) -> list[str]:
+    """Repo-relative ``subtasks:`` spec paths declared in a root task's front matter (else empty).
+
+    Shared by both halves of the task-file lifecycle, which is the point: ``promote`` carries a
+    decomposition root's spec files into ``pending/`` with it, and the terminal relocation carries
+    them out to ``done``/``failed`` with it. Reading the manifest from one place is what keeps the
+    two symmetric — a root that arrives with its specs and leaves without them cannot resolve its
+    own manifest afterwards, because the refs are relative to the root file's own directory.
+
+    Best-effort: a read/parse problem or a non-list value yields no refs, so the caller simply moves
+    the one file (the validation gate rejects a genuinely broken file if it later lands in
+    ``pending/``). Refs that escape the task directory (absolute or containing ``..``) are dropped.
+    """
+    try:
+        source = read_task_source(task_file)
+        parse = split_frontmatter(source.raw_bytes.decode("utf-8"), source.suffix)
+    except (OSError, UnicodeDecodeError):
+        return []
+    if not parse.present or parse.malformed:
+        return []
+    raw = parse.frontmatter.get("subtasks", [])
+    if not isinstance(raw, (list, tuple)):
+        return []
+    refs: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str) or not entry.strip():
+            continue
+        ref = entry.strip()
+        if Path(ref).is_absolute() or ".." in Path(ref).parts:
+            continue
+        refs.append(ref)
+    return refs
+
+
 def read_subtask_spec(text: str) -> SubtaskSpecFile | None:
     """Parse an operator subtask spec file; ``None`` when malformed.
 

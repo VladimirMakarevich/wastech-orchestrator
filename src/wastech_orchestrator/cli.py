@@ -108,7 +108,11 @@ from wastech_orchestrator.security.isolation import (
 from wastech_orchestrator.security.launchers import Which, resolve_launcher
 from wastech_orchestrator.state_store import IncompatibleStateError, StateStore, TaskRow
 from wastech_orchestrator.task.model import DEFAULT_QUEUE, priority_rank
-from wastech_orchestrator.task.parser import read_task_source, split_frontmatter
+from wastech_orchestrator.task.parser import (
+    read_subtask_refs,
+    read_task_source,
+    split_frontmatter,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -1573,34 +1577,6 @@ def _atomic_copy(src: Path, dest: Path) -> None:
         raise
 
 
-def _read_subtask_refs(task_file: Path) -> list[str]:
-    """Repo-relative ``subtasks:`` spec paths declared in a root task's front matter (else empty).
-
-    Best-effort: a read/parse problem or a non-list value yields no refs, so a single-file promote
-    simply moves the one file (the validation gate rejects a genuinely broken file if it later lands
-    in ``pending/``). Refs that escape the staging dir (absolute or containing ``..``) are dropped.
-    """
-    try:
-        source = read_task_source(task_file)
-        parse = split_frontmatter(source.raw_bytes.decode("utf-8"), source.suffix)
-    except (OSError, UnicodeDecodeError):
-        return []
-    if not parse.present or parse.malformed:
-        return []
-    raw = parse.frontmatter.get("subtasks", [])
-    if not isinstance(raw, (list, tuple)):
-        return []
-    refs: list[str] = []
-    for entry in raw:
-        if not isinstance(entry, str) or not entry.strip():
-            continue
-        ref = entry.strip()
-        if Path(ref).is_absolute() or ".." in Path(ref).parts:
-            continue
-        refs.append(ref)
-    return refs
-
-
 def _promote_one(src: Path, dest: Path, moved: list[str], errors: list[str]) -> None:
     """Atomically move one staged file into ``dest``; record the outcome in ``moved``/``errors``.
 
@@ -1652,7 +1628,7 @@ def promote_tasks(
     if match is None:
         errors.append(f"{target!r} is not a staged file in {preparing.name}/")
         return moved, errors
-    for ref in _read_subtask_refs(match):  # deco root: specs first, then the root
+    for ref in read_subtask_refs(match):  # deco root: specs first, then the root
         _promote_one(preparing / ref, pending / Path(ref), moved, errors)
     _promote_one(match, pending / match.name, moved, errors)
     return moved, errors
@@ -2314,6 +2290,13 @@ def _move_line(config: OrchestratorConfig, move: tuple[str, str]) -> str:
     return f"{show(move[0])} -> {show(move[1])}"
 
 
+def _spec_suffix(moves: tuple[tuple[str, str], ...]) -> str:
+    """`` (+N subtask specs)`` when a decomposition root takes its specs along, else empty."""
+    if not moves:
+        return ""
+    return f" (+{len(moves)} subtask spec{'s' if len(moves) != 1 else ''})"
+
+
 def _report_finalize_plan(plan: FinalizePlan, config: OrchestratorConfig, *, as_: str) -> None:
     """Print the planned reconciliation for ``finalize --dry-run``; writes nothing."""
     print(f"finalize (dry-run): would finalize {plan.task_id} as {as_}")
@@ -2333,7 +2316,10 @@ def _report_finalize_plan(plan: FinalizePlan, config: OrchestratorConfig, *, as_
     abandoned = ", outcome=abandoned" if plan.declared is Status.MANUAL_ACTION_REQUIRED else ""
     print(f"  ledger:    append a manual record{abandoned}")
     if plan.task_file_move is not None:
-        print(f"  file:      {_move_line(config, plan.task_file_move)} (not committed)")
+        print(
+            f"  file:      {_move_line(config, plan.task_file_move)}"
+            f"{_spec_suffix(plan.subtask_spec_moves)} (not committed)"
+        )
     for warning in plan.warnings:
         print(f"  WARNING:   {warning}")
 
@@ -2401,7 +2387,10 @@ def cmd_finalize(args: argparse.Namespace) -> int:
     # tree. Unannounced it was found later in `git status` — or not found, and carried into the next
     # task's review diff, where a stray path costs a rework round that can do nothing about it.
     if plan.task_file_move is not None and Path(plan.task_file_move[1]).exists():
-        print(f"finalize: moved {_move_line(config, plan.task_file_move)} (not committed)")
+        print(
+            f"finalize: moved {_move_line(config, plan.task_file_move)}"
+            f"{_spec_suffix(plan.subtask_spec_moves)} (not committed)"
+        )
     return _EXIT_BY_STATUS.get(result.final_status, 1)
 
 

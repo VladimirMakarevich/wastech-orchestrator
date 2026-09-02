@@ -250,6 +250,7 @@ from wastech_orchestrator.task.model import DEFAULT_COMMIT_TYPE, NormalizedTask
 from wastech_orchestrator.task.parser import (
     SubtaskSpecFile,
     load_normalized,
+    read_subtask_refs,
     read_subtask_spec,
     read_task_source,
     slugify,
@@ -430,6 +431,12 @@ class FinalizePlan:
     #: operator's working tree that ``finalize`` deliberately does not commit, so both the plan and
     #: the result say it happened rather than leaving it to be discovered in ``git status``.
     task_file_move: tuple[str, str] | None = None
+    #: The spec files a decomposition root takes with it (``from``, ``to`` each), empty for an
+    #: ordinary task. They ride along because a ``subtasks:`` ref is relative to the root file's
+    #: directory, so a root separated from its specs cannot resolve its own manifest. Named for the
+    #: same reason as the move above: they are tracked files this dirties and does not commit, and
+    #: five of them appearing in ``git status`` unannounced is worse than one.
+    subtask_spec_moves: tuple[tuple[str, str], ...] = ()
     warnings: tuple[str, ...] = ()  # non-fatal; require confirmation (no URL / not merged)
     refusals: tuple[str, ...] = ()  # fatal; abort with exit 1
 
@@ -1641,6 +1648,16 @@ class Orchestrator:
                 verify_state = self._git.verify_pr_state(resolved_url)
                 if verify_state is not None and verify_state != "MERGED":
                     warnings.append(f"the PR is {verify_state}, not merged; recording done anyway")
+        task_move: tuple[str, str] | None = None
+        spec_moves: tuple[tuple[str, str], ...] = ()
+        if row.source_path and (dest := lifecycle_destination(row.source_path, declared)):
+            task_move = (row.source_path, str(dest))
+            root = Path(row.source_path)
+            spec_moves = tuple(
+                (str(root.parent / ref), str(dest.parent / ref))
+                for ref in read_subtask_refs(root)
+                if (root.parent / ref).is_file()
+            )
         return FinalizePlan(
             task_id=task_id,
             declared=declared,
@@ -1654,12 +1671,8 @@ class Orchestrator:
             pr_url_source=source,
             verify_state=verify_state,
             dirty_paths=tuple(sorted(dirty)),
-            task_file_move=(
-                (row.source_path, str(destination))
-                if row.source_path
-                and (destination := lifecycle_destination(row.source_path, declared)) is not None
-                else None
-            ),
+            task_file_move=task_move,
+            subtask_spec_moves=spec_moves,
             warnings=tuple(warnings),
             refusals=tuple(refusals),
         )
@@ -4718,6 +4731,13 @@ class Orchestrator:
         resolve — so a finalize `--as abandoned` leaves the file where it is. A gate
         reject is quarantined separately. Idempotent: returns the destination whether it
         moved now or was already in place; returns ``None`` when there is nothing to do.
+
+        A decomposition root travels **with the spec files it references**, mirroring the promote
+        that brought them in together. That symmetry is load-bearing rather than tidy: the refs in
+        a ``subtasks:`` manifest are relative to the root file's own directory, so a root that
+        lands in ``done/`` while its specs stay in ``pending/subtasks/`` can no longer resolve its
+        own manifest — every ref reads as missing, which is a hard reject, and a reject quarantines
+        the very file this move just filed as finished.
         """
         dest = lifecycle_destination(task_file, final)
         if dest is None:
@@ -4727,6 +4747,9 @@ class Orchestrator:
             return dest  # already in its lifecycle folder (idempotent restart)
         if not src.exists():
             return dest if dest.exists() else None  # already moved
+        # Read the manifest while the root is still beside its specs — afterwards the refs no
+        # longer resolve from anywhere, which is the defect this move exists to avoid creating.
+        refs = read_subtask_refs(src)
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
             src.replace(dest)
@@ -4734,7 +4757,33 @@ class Orchestrator:
         except OSError:
             # Never let a file-move failure mask the terminal outcome; the ledger still records it.
             return None
+        self._relocate_subtask_specs(refs, src.parent, dest.parent)
         return dest
+
+    @staticmethod
+    def _relocate_subtask_specs(refs: Sequence[str], src_dir: Path, dest_dir: Path) -> None:
+        """Carry a decomposition root's spec files to the folder the root just moved into.
+
+        Each destination is the ref re-anchored on the root's **new** directory, never a per-file
+        ``lifecycle_destination``: a spec lives one level down, so asking that function where
+        ``tasks/pending/subtasks/01-a.md`` belongs answers ``tasks/pending/subtasks/done/01-a.md``
+        — a lifecycle folder nested inside the queue rather than beside it.
+
+        Best-effort and idempotent, for the same reason the root's own move is: the task has
+        already reached a terminal status and nothing here may mask it. A ref that has gone missing,
+        one already at its destination, and an occupied destination are all skipped rather than
+        forced, so a re-entered relocation finishes what an interrupted one started.
+        """
+        for ref in refs:
+            source = src_dir / ref
+            target = dest_dir / ref
+            if not source.is_file() or target.exists():
+                continue
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source.replace(target)
+            except OSError:
+                continue
 
     def _reject(self, task_file: str, result: ValidationResult) -> PipelineResult:
         """Handle a Phase-A reject: failed, quarantine, report, ledger — no branch."""
