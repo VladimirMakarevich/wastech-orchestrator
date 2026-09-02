@@ -400,10 +400,10 @@ def _log_fields() -> Iterator[list[dict[str, object]]]:
         logger.removeHandler(handler)
 
 
-def _complete_task(tmp_path: Path, task_id: str = "task-001") -> str:
+def _complete_task(tmp_path: Path, task_id: str = "task-001", *, front_extra: str = "") -> str:
     path = tmp_path / f"{task_id}.md"
     path.write_text(
-        f'---\nid: {task_id}\ntitle: "Add a thing"\n---\n\n'
+        f'---\nid: {task_id}\ntitle: "Add a thing"\n{front_extra}---\n\n'
         "## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
         encoding="utf-8",
     )
@@ -3018,7 +3018,7 @@ def test_decomposed_task_commits_each_subtask(
         check_verdicts=[0],
         config_kwargs={"decomposition": True},
     )
-    result = orch.run_task(_complete_task(tmp_path, "task-007"))
+    result = orch.run_task(_complete_task(tmp_path, "task-007", front_extra="commit_type: fix\n"))
     assert result.final_status is Status.DONE
     row = store.get_task("task-007")
     assert row is not None
@@ -3031,6 +3031,13 @@ def test_decomposed_task_commits_each_subtask(
     assert int(count) >= 2
     subs = store.get_subtasks("task-007")
     assert all(s.commit_sha for s in subs)
+    # Every commit a task lands carries the task's own Conventional-Commits type, subtask commits
+    # included — they were hardcoded `feat` while the code commit beside them could be anything.
+    subjects = [
+        git_run(["log", "-1", "--format=%s", str(s.commit_sha)], git_repo.clone).strip()
+        for s in subs
+    ]
+    assert subjects == ["fix(task-007): subtask 01 First", "fix(task-007): subtask 02 Second"]
 
 
 def test_decomposed_subtask_spec_path_reaches_implementation_prompt(
@@ -4528,6 +4535,45 @@ def test_global_auto_merge_merges_pr(git_repo, make_git_config, tmp_path: Path) 
     assert rec["auto_merged"] is True and rec["merge_outcome"] == "deadbeef"
     op = store.get_publish_op("task-001", "pr_merge")
     assert op is not None and op.status == "completed"
+
+
+def test_task_commit_type_reaches_every_commit_it_produces(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # The commit message is orchestrator-owned: no node can write into it, so an acceptance
+    # criterion asking an agent to put something there names a surface nothing can reach. The
+    # task's own ``commit_type`` is the channel that does exist, and it has to reach BOTH commits a
+    # task lands — the code commit on the branch and the squash commit on the base branch — or the
+    # history disagrees with itself about what kind of change this was.
+    task_path = tmp_path / "task-001.md"
+    task_path.write_text(
+        '---\nid: task-001\ntitle: "Add a thing"\ncommit_type: fix\n---\n\n'
+        "## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
+        encoding="utf-8",
+    )
+    providers = _both()
+    calls: list[list[str]] = []
+    orch, store, _ledger, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"auto_merge": True},
+        gh=_merge_gh(calls),
+    )
+    _patch_impl_edit(providers, git_repo)
+    result = orch.run_task(str(task_path))
+    assert result.final_status is Status.DONE
+
+    code_commit = store.get_publish_op("task-001", "code_commit", None)
+    assert code_commit is not None and code_commit.result_ref
+    subject = git_run(
+        ["log", "-1", "--format=%s", str(code_commit.result_ref)], git_repo.clone
+    ).strip()
+    assert subject == "fix(task-001): Add a thing"  # not the hardcoded `feat`
+    assert "--subject" in _merge_calls(calls)[0]
+    assert "fix(task-001): Add a thing (#1)" in _merge_calls(calls)[0]
 
 
 def test_no_auto_merge_leaves_pr_open(git_repo, make_git_config, tmp_path: Path) -> None:

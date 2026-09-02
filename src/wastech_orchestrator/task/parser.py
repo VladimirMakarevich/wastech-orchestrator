@@ -233,6 +233,12 @@ def write_normalized(task: NormalizedTask, artifacts_root: str | Path) -> str:
         "auto_merge": task.auto_merge,
         "prompt_audit": task.prompt_audit,
         "decomposition": task.decomposition,
+        "commit_type": task.commit_type,
+        # Persisted for the same reason as every gate above: a resume rebuilds the task from this
+        # file alone, and an absent key defers to the global. For ``trust_level`` that would
+        # silently DOWNGRADE a task-level ``strict`` to the instance default across a resume — an
+        # approval threshold relaxed by a restart, the one direction it must never move.
+        "trust_level": task.trust_level,
         "contacts": list(task.contacts),
         "depends_on": list(task.depends_on),
         "priority": task.priority,
@@ -293,6 +299,8 @@ def load_normalized(artifacts_root: str | Path, task_id: str) -> NormalizedTask:
         auto_merge=data.get("auto_merge"),
         prompt_audit=data.get("prompt_audit"),
         decomposition=data.get("decomposition"),
+        commit_type=data.get("commit_type"),
+        trust_level=data.get("trust_level"),
         contacts=list(data.get("contacts", [])),
         depends_on=tuple(data.get("depends_on", [])),
         priority=normalize_priority(data.get("priority")),

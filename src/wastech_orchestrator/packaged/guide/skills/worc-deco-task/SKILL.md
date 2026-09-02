@@ -23,8 +23,9 @@ Speak in the user's language (default to the language they wrote in).
    - Front matter: `title` (**required**); `slug` (optional — defaults to `slugify(title)`; it names the `NN-<slug>.md` file); `depends_on` (optional — a list of **slugs of EARLIER subtasks only**).
    - **No `id`.** A spec file is a reduced spec, not a standalone task — that is what keeps it from ever running on its own.
    - Body: `## Acceptance criteria` (and any per-step instructions). **Required — an empty body is a reject.** The body is materialized **verbatim** into an immutable `NN-<slug>.md` spec read as `{subtask_spec_path}` by every step in the per-subtask region — the edit steps (`implementation`, `fixing`) **and** the review step, which measures the diff against this body's acceptance criteria and its out-of-scope boundary rather than against the root task. So this is where a constraint that must bind one subtask belongs, including one that says what the subtask must **not** do.
-5. **Promote the batch** when it is complete: `worc promote <root-id>` moves the root **and the subtask specs it references** together into `tasks/pending/` (subfolder preserved), atomically — so the root never reaches the queue without its specs. (`worc promote --all` promotes everything staged, including the whole `subtasks/` subfolder.) The subtask paths are relative to the root, so they stay valid after the move; no rewriting.
-6. **Self-check** against the hard rules below before finishing.
+5. **Set the commit type once, on the root.** Every commit the batch lands — one per subtask, plus the squash commit on the base branch — takes its Conventional-Commits type from the root task's `commit_type` (omit ⇒ `feat`), with the root task's id as the scope: `fix(epic-checkout): subtask 02 Add the payment step`. A subtask spec cannot set its own type, and nothing else can write a commit message: an acceptance criterion asking a step to name its files in the commit message is a criterion the run can only fail. The pull-request description **is** reachable — it is the run summary for the whole task — so put that content there.
+6. **Promote the batch** when it is complete: `worc promote <root-id>` moves the root **and the subtask specs it references** together into `tasks/pending/` (subfolder preserved), atomically — so the root never reaches the queue without its specs. (`worc promote --all` promotes everything staged, including the whole `subtasks/` subfolder.) The subtask paths are relative to the root, so they stay valid after the move; no rewriting.
+7. **Self-check** against the hard rules below before finishing.
 
 ## The decomposition contract
 
@@ -83,3 +84,4 @@ The root task itself must still obey every single-task rule (valid `id`, only al
 - Don't place spec files at the top level of `tasks/preparing/` or `tasks/pending/` — keep them in a `subtasks/` subfolder.
 - Don't exceed `max_subtasks` (default 8) — group steps or split into separate tasks.
 - Don't use decomposition for independent changes that each deserve their own PR — those are **separate tasks** (`worc-task`), optionally chained with `depends_on`.
+- Don't ask a subtask for content in a commit message, and don't give a subtask spec its own `commit_type` — the type is the root's, for the whole batch.

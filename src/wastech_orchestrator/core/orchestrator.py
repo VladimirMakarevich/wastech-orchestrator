@@ -246,7 +246,7 @@ from wastech_orchestrator.state_store import (
     SubtaskRow,
     TaskRow,
 )
-from wastech_orchestrator.task.model import NormalizedTask
+from wastech_orchestrator.task.model import DEFAULT_COMMIT_TYPE, NormalizedTask
 from wastech_orchestrator.task.parser import (
     SubtaskSpecFile,
     load_normalized,
@@ -288,23 +288,27 @@ RERUN_ELIGIBLE_STATUSES: frozenset[Status] = frozenset(
 )
 
 
-def task_commit_subject(task_id: str, title: str) -> str:
+def task_commit_subject(task_id: str, title: str, commit_type: str | None = None) -> str:
     """The Conventional-Commits subject for this task's own commit.
 
-    One place, because two commits carry it: the code commit on the task branch and the squash/merge
-    commit that lands it on the base branch. They disagreed before — the squash subject was left to
-    the target repository, which took the bare pull-request title — and the target's own first git
-    rule was "Conventional Commits", so the tool's merge path violated it.
+    One place, because every commit a task produces carries it: the code commit on the task branch,
+    each subtask commit of a decomposition, and the squash/merge commit that lands them on the base
+    branch. They disagreed before — the squash subject was left to the target repository, which took
+    the bare pull-request title — and the target's own first git rule was "Conventional Commits", so
+    the tool's merge path violated it.
 
-    The type is ``feat`` for every task, inherited from the code commit this has always produced.
-    Choosing it per task needs the task file to be able to say so, which it cannot yet: that is the
-    ``full-tool-access`` backlog's "a task cannot contribute to its own commit message", untouched
-    here.
+    ``commit_type`` is the task's own front-matter key, defaulting to ``feat`` (what every task
+    produced before the key existed). The scope is always the task id: it is the one thing that
+    makes a subject greppable back to the task that produced it, and unlike the type it is never
+    the author's to choose. The task file is the whole channel into this subject — no node can
+    write a commit message — which is why the type is an operator field rather than an agent's.
     """
-    return f"feat({task_id}): {title}"
+    return f"{commit_type or DEFAULT_COMMIT_TYPE}({task_id}): {title}"
 
 
-def merge_commit_subject(task_id: str, title: str, pr_url: str | None) -> str:
+def merge_commit_subject(
+    task_id: str, title: str, pr_url: str | None, commit_type: str | None = None
+) -> str:
     """:func:`task_commit_subject` plus the pull-request number, for the squash/merge commit.
 
     The ``(#N)`` suffix is what GitHub appends itself when it is left to compose the subject, and
@@ -313,7 +317,7 @@ def merge_commit_subject(task_id: str, title: str, pr_url: str | None) -> str:
     """
     number = _pr_number(pr_url)
     suffix = f" (#{number})" if number else ""
-    return f"{task_commit_subject(task_id, title)}{suffix}"
+    return f"{task_commit_subject(task_id, title, commit_type)}{suffix}"
 
 
 def _pr_number(pr_url: str | None) -> str | None:
@@ -1780,7 +1784,9 @@ class Orchestrator:
             pr_url=pr_url,
             verify_state=verify_state,
             already_merged=already_merged,
-            commit_subject=merge_commit_subject(task_id, row.title, pr_url),
+            commit_subject=merge_commit_subject(
+                task_id, row.title, pr_url, self._persisted_commit_type(task_id)
+            ),
             warnings=tuple(warnings),
             refusals=tuple(refusals),
         )
@@ -1853,7 +1859,9 @@ class Orchestrator:
                 pr_url,
                 strategy=strategy,
                 wait_for_checks=wait_for_checks,
-                subject=merge_commit_subject(task_id, row.title, pr_url),
+                subject=merge_commit_subject(
+                    task_id, row.title, pr_url, self._persisted_commit_type(task_id)
+                ),
                 # No body: every commit this orchestrator makes on the branch is a single line, so
                 # a body assembled from them can only be a list of internal subjects — which is how
                 # `chore(orchestrator): audit trail` reached a real `main`. The readable account of
@@ -2873,7 +2881,7 @@ class Orchestrator:
             flow_dir=bundle.flow_dir,
             check_sets=self._check_sets(p),  # normalized command_sets; () = no gate
             pull_request_title=p.task.title,
-            commit_message=task_commit_subject(p.task.id, p.task.title),
+            commit_message=task_commit_subject(p.task.id, p.task.title, p.task.commit_type),
             summary_body_path=self._fallback_summary_path(p),
             branch_mode=self._branch_mode(p.task),
             publish_scope=p.task.publish,
@@ -3350,7 +3358,9 @@ class Orchestrator:
 
     def _commit_subtask(self, p: _Pipeline, unit: SubtaskSpec) -> None:
         """Commit one completed subtask + persist its SHA."""
-        message = f"feat({p.task.id}): subtask {unit.order:02d} {unit.title}"
+        message = task_commit_subject(
+            p.task.id, f"subtask {unit.order:02d} {unit.title}", p.task.commit_type
+        )
         sha = self._git.commit_subtask(p.task.id, unit.order, unit.slug, message)
         update_subtask_index(
             self._artifacts_root, p.task.id, unit.order, status="committed", commit_sha=sha
@@ -4058,7 +4068,9 @@ class Orchestrator:
                     pr_url,
                     strategy=git.auto_merge_strategy,
                     wait_for_checks=git.auto_merge_wait_for_checks,
-                    subject=merge_commit_subject(p.task.id, p.task.title, pr_url),
+                    subject=merge_commit_subject(
+                        p.task.id, p.task.title, pr_url, p.task.commit_type
+                    ),
                     body="",  # see merge_task: the branch's own commits are not a merge body
                 ),
             )
@@ -4891,6 +4903,17 @@ class Orchestrator:
         except (json.JSONDecodeError, OSError, KeyError, ValueError):
             return self._config.repo.branch_mode
         return self._branch_mode(task)
+
+    def _persisted_commit_type(self, task_id: str) -> str | None:
+        """The task's ``commit_type`` read from its persisted normalized manifest — the merge path,
+        where the live :class:`NormalizedTask` isn't in hand (``merge-task`` runs against a stored
+        row long after the run). ``None`` when the manifest can't be read, which
+        :func:`task_commit_subject` renders as the default type: a merge subject must never fail to
+        exist because a log directory was cleaned."""
+        try:
+            return load_normalized(self._artifacts_root, task_id).commit_type
+        except (json.JSONDecodeError, OSError, KeyError, ValueError):
+            return None
 
     def _restart_display_branch(self, task_id: str, mode: BranchMode) -> str | None:
         """Best-effort name of the operator-owned branch a restart-in-place will run on, for the

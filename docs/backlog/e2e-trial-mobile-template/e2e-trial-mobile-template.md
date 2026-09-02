@@ -446,6 +446,8 @@ Subtask 04's acceptance criterion: _"The pages that got the class and the pages 
 
 This is the same structural gap as task `001`'s "put the `grep` output in the PR description" criterion: a task can ask for content in a publication surface that no node is able to write. **Two instances in one task.** Either give an agent's summary a way in, or have the task-authoring skills warn that these surfaces are not addressable.
 
+**FIXED as a task-file channel, and one of the two instances above is wrong:** the PR description **is** writable — it is the run summary — so only the commit message had no channel. A `commit_type` front-matter key now sets the Conventional-Commits type for all three commits a task lands (this closes F18's remaining half), the scope stays the task id, and both authoring skills say which publication surfaces a criterion may ask for. See [what was fixed](e2e-trial-mobile-template.fixes.md#f17--the-commit-message-a-task-could-not-reach-and-the-half-of-it-that-was-never-true).
+
 ### F18 — `worc merge-task` cannot control the squash commit message
 
 **Severity: minor.** **Lever: orchestrator source — [`git_manager.py`](../../../src/wastech_orchestrator/git_manager.py), `merge_pull_request`.**

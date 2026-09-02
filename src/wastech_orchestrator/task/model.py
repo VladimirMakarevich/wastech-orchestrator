@@ -55,6 +55,7 @@ ALLOWED_TASK_KEYS: frozenset[str] = frozenset(
         "prompt_audit",
         "decomposition",
         "trust_level",
+        "commit_type",
         "contacts",
         "depends_on",
         "subtasks",
@@ -68,6 +69,29 @@ ALLOWED_TASK_KEYS: frozenset[str] = frozenset(
 # becomes a branch fragment, a run directory, and a state-store key, so a config able to drop it
 # would break identity rather than relax a policy (config v35 removed the key that pretended to).
 REQUIRED_TASK_FIELDS: frozenset[str] = frozenset({"id", "title"})
+
+# The Conventional-Commits types a task may choose for its own commits (``commit_type``), and the
+# default when it chooses none. The commit message is orchestrator-owned — no node can write into
+# it — so this front-matter key is the one channel by which a task says what KIND of change it is;
+# an acceptance criterion asking an agent to put anything in the commit message names a surface
+# nothing can reach. Fail-closed (an unknown type rejects the task) because the value goes into
+# permanent history on the target's base branch, where a typo is not fixable by a re-run.
+COMMIT_TYPES: frozenset[str] = frozenset(
+    {
+        "feat",
+        "fix",
+        "docs",
+        "style",
+        "refactor",
+        "perf",
+        "test",
+        "build",
+        "ci",
+        "chore",
+        "revert",
+    }
+)
+DEFAULT_COMMIT_TYPE = "feat"
 
 # The queue tag partitions a git-distributed task pool across several worc instances: an instance
 # only picks a pending task when ``task.queue == instance.queue`` (config ``orchestrator.queue``).
@@ -200,6 +224,12 @@ class NormalizedTask:
     # defers to the global ``config.security.trust_level``. The task value wins (no operator gate).
     # Does not affect the ``security.protected_paths`` floor (global-only).
     trust_level: str | None = None
+    # The Conventional-Commits type for this task's own commits — the code commit on the task
+    # branch, each subtask commit, and the squash/merge commit that lands them. ``None`` means
+    # ``DEFAULT_COMMIT_TYPE`` (``feat``), which is what every task produced before the key existed.
+    # One of :data:`COMMIT_TYPES`, fail-closed at the gate. It carries no scope: the scope is always
+    # the task id, so the subject stays greppable back to the task that produced it.
+    commit_type: str | None = None
     contacts: list[str] = field(default_factory=list)
     # Other task ids this task needs **merged** before it may start (non-blocking merge-gated
     # scheduling): the scheduler skips a dependent while a dependency is unmerged and runs other
