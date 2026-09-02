@@ -254,6 +254,8 @@ Why it matters beyond the noise:
 
 This is **not** the deliberate `test:ci` / Chrome gap: `npm run build` is _in_ the check set and is what the role prompts tell the agent to run. There is no config-level lever today — `excludedCommands` is emitted empty and nothing can populate it. That makes this a direct, evidenced argument for [`full-tool-access`](../full-tool-access/README.md) step 4 (`unsandboxed_commands`), which is still only proposed.
 
+**FIXED as a contract, and this entry's own lever is half wrong.** Two of the three claims here hold: there is no config-level lever, and the role prompts do tell the agent to run the build. The third — that this is an evidenced argument for step 4 — does not survive being taken up. `npm run build`'s body lives in `package.json`, which the agent may write, so putting it in `unsandboxed_commands` buys agent-authored execution outside the sandbox; that is a worse trade than the `gh` case the ADR bans outright, and the ADR now carries the rule that excludes the whole script-runner class by construction. What actually caused every cost recorded above is that `implementation.md` mandated the build and `fixing.md` offered "incompatible host toolchain" as the category for a sandbox failure, while `review.md` had already been fixed to say the opposite. Both prompts now carry the reviewer's rule. The sandbox question itself is real but separate, and is now a named investigation in the backlog rather than a step nobody opened. See [what was fixed](e2e-trial-mobile-template.fixes.md#f7--the-build-the-agent-was-told-to-run-and-could-not).
+
 ### F9 — the security preamble's `.worc-io/` wording makes a reviewer refuse to review
 
 **Severity: major.** **Lever: orchestrator source — `core/flow/security_preamble`.**

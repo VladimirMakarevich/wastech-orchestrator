@@ -17,7 +17,7 @@ fatal error: all goroutines are asleep - deadlock!
   main.runService ... esbuild/cmd/esbuild/service.go:160
 ```
 
-Check Runner ту же команду на том же дереве выполнял успешно — дважды за ту же задачу, `exit 0`, ~11.5s. Подробности, доказательства и цена — F7 в [findings трейла](e2e-trial-mobile-template/e2e-trial-mobile-template.md), включая эскалацию: агент дважды записал в durable record уверенно ложный вывод «сломан хост оператора», один раз этот вывод дошёл до продукта, и один раз погоня за фантомом привела к удалению каталога в `repo.local_path` — живом чекауте оператора.
+Check Runner ту же команду на том же дереве выполнял успешно — дважды за ту же задачу, `exit 0`, ~11.5s. Подробности, доказательства и цена — F7 в findings трейла, `e2e-trial-mobile-template/` рядом в этой же папке (назван текстом: ссылка отсюда туда замыкает цикл, который гейт отклоняет — та же причина, по которой fix-record кампании назван текстом в индексе бэклога). Включая эскалацию: агент дважды записал в durable record уверенно ложный вывод «сломан хост оператора», один раз этот вывод дошёл до продукта, и один раз погоня за фантомом привела к удалению каталога в `repo.local_path` — живом чекауте оператора.
 
 ## Откуда песочница берётся, если режим включён
 
@@ -27,10 +27,12 @@ Check Runner ту же команду на том же дереве выполн
 needs_sandbox = False
 if "Bash" in tools:
     if capability is SandboxCapability.NATIVE_WINDOWS:
-        if strict_isolation: ...          # только здесь режим что-то меняет
-    elif capability is SandboxCapability.LINUX_MISSING_DEPS and strict_isolation: ...
+        if strict_isolation:
+            ...  # только здесь режим что-то меняет
+    elif capability is SandboxCapability.LINUX_MISSING_DEPS and strict_isolation:
+        ...
     elif _bash_sandbox_available(capability):
-        needs_sandbox = True              # <- флагом режима НЕ закрыто
+        needs_sandbox = True  # <- флагом режима НЕ закрыто
 ```
 
 ([`claude.py:389-415`](../../src/wastech_orchestrator/providers/claude.py)). А `_host_sandbox_capability` на macOS возвращает `SandboxCapability.MACOS` безусловно — «macOS uses Seatbelt (always available)» ([`claude.py:257-296`](../../src/wastech_orchestrator/providers/claude.py)). Итог: **на macOS и на Linux с `bwrap`+`socat` ОС-песочница включена при обоих значениях `strict_isolation`.** Единственные хосты, где режим действительно отдаёт несендбоксенный шелл, — те, где песочницы нет вовсе: нативная Windows и Linux без зависимостей.

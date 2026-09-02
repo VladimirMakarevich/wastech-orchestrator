@@ -14,7 +14,7 @@ Add or extend tests alongside the change, scaled to its risk, following the proj
 
 ## Verify
 
-Before finishing, run whatever check commands this project defines for the code you touched (build, type-check, lint, test) and confirm they pass — catching a failure now saves a full review/fix round trip later.
+Before finishing, run whatever check commands this project defines for the code you touched (build, type-check, lint, test) — catching a failure now saves a full review/fix round trip later. The verdict is not yours to reach, though: a Check Runner outside your sandbox runs the repository's configured checks and its exit codes are the gate. So a command that fails under you is not yet a fact about the project or the machine — your sandbox is not the gate's environment, so a failure there is evidence about the sandbox. Report such a command in one sentence as one you could not run and finish the work: do not diagnose the machine, and do not delete or regenerate build output, caches or directories to narrow it down.
 
 ## Authoring And Documentation Deliverables
 
