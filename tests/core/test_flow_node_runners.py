@@ -2140,6 +2140,126 @@ def test_a_clean_verdict_is_not_flagged(tmp_path: Path) -> None:
     assert result.outcome.gating_findings_name_no_path is False
 
 
+def _subtask_ctx(node: FlowNode, order: int = 1) -> NodeContext:
+    """A NodeContext inside an active decompose region (``subtask_order`` set)."""
+    return NodeContext(
+        snapshot=_snapshot(node),
+        run_state=FlowRunState(flow_fingerprint="fp"),
+        node=node,
+        task_id="task-1",
+        subtask_order=order,
+    )
+
+
+def test_evaluator_in_a_decompose_region_receives_the_subtask_variables(tmp_path: Path) -> None:
+    """F1: the reviewer judged each subtask against the ROOT task, because it never saw the spec.
+
+    The agent runner publishes the three decomposition variables; the evaluator runner did not, so
+    a `review` node inside `decomposition.sub_flow` — running once per subtask, with
+    `ctx.subtask_order` live and already used for its own artifact namespacing — held only the root
+    task file and the shared plan. It could enforce neither the subtask's own acceptance criteria
+    nor its "out of scope for this subtask" boundary, because it never saw the file they live in.
+
+    Measured consequence on the trial: the reviewer charged every not-yet-implemented part of the
+    whole task against whichever subtask was under review — 3 false blocking findings on subtask 1
+    of 5, each demanding work the subtask's own spec explicitly forbade, and the count tracked the
+    volume of later-subtask work still absent from the tree. Meanwhile `fixing`, for the same
+    subtask, was being told "you are fixing subtask 1 of 5; keep your change scoped to that
+    subtask's spec" — two nodes in one run holding contradictory instructions.
+    """
+    (tmp_path / "r.md").write_text(
+        "Review.{?subtask_spec_path} Subtask {subtask_order} of {subtask_count}; "
+        "its spec is {subtask_spec_path}.{/subtask_spec_path}",
+        "utf-8",
+    )
+    node = _evaluator("review")
+    router = FakeRouter(_result(structured={"findings": []}))
+    services = _services(router, FakeStore(), None, artifacts_root=str(tmp_path))
+    inputs = _inputs(
+        tmp_path, subtask_count=5, subtask_spec_path=".worc-io/task-1/subtasks/01-tokens.md"
+    )
+
+    EvaluatorNodeRunner(services, inputs).run(node, _subtask_ctx(node, order=1))
+
+    assert (
+        "Subtask 1 of 5; its spec is .worc-io/task-1/subtasks/01-tokens.md."
+        in router.requests[0].prompt
+    )
+
+
+def test_evaluator_subtask_variables_drop_outside_a_decompose_region(tmp_path: Path) -> None:
+    # A whole-task run has no subtask, so the block drops rather than rendering "Subtask None of
+    # None" — the same rule the agent runner follows.
+    (tmp_path / "r.md").write_text(
+        "Review.{?subtask_spec_path} Subtask {subtask_order} of "
+        "{subtask_count}.{/subtask_spec_path}",
+        "utf-8",
+    )
+    node = _evaluator("review")
+    router = FakeRouter(_result(structured={"findings": []}))
+    services = _services(router, FakeStore(), None, artifacts_root=str(tmp_path))
+    inputs = _inputs(tmp_path, subtask_count=5, subtask_spec_path="ignored-without-an-order.md")
+
+    EvaluatorNodeRunner(services, inputs).run(node, _ctx(node))  # _ctx has subtask_order=None
+
+    assert router.requests[0].prompt == "Review."
+
+
+def test_the_agent_and_evaluator_runners_publish_the_same_variable_names(tmp_path: Path) -> None:
+    """Anti-drift, because this is the third time the two runners diverged on one channel.
+
+    `_memory_path`'s own docstring records the first (the memory packet was wired for agents only,
+    leaving `review.md`'s `{?memory_path}` block dead); F1 was the second, on the decomposition
+    variables. Comparing the published key sets directly means the next channel added to one runner
+    and forgotten in the other fails here instead of in a run.
+
+    `predecessor_context` is deliberately excluded: it is the *author's* handoff brief, assembled
+    for the node that writes the subtask, and an evaluator is not its reader.
+    """
+    (tmp_path / "impl.md").write_text("Build.", "utf-8")
+    (tmp_path / "r.md").write_text("Review.", "utf-8")
+    agent_node = AgentNode(id="implementation", kind="agent", role_file="impl.md")
+    review_node = _evaluator("review")
+    services = _services(FakeRouter(_result()), FakeStore(), None, artifacts_root=str(tmp_path))
+    inputs = _inputs(tmp_path, subtask_count=5, subtask_spec_path="spec.md")
+
+    # One snapshot holding both nodes, so the flow-derived `{<node_id>_path}` channel contributes
+    # the same names to each side and only the runner-owned difference is left to compare.
+    doc = FlowDoc(
+        name="t",
+        task_type="t",
+        permission_ceiling=PermissionProfile.WORKSPACE_WRITE,
+        output_policy=OutputPolicy.CODE_CHANGE,
+        publishing=PublishingPolicy.PULL_REQUEST,
+        nodes=(agent_node, review_node),
+        edges=(),
+        budgets=MappingProxyType({}),
+    )
+    snapshot = FlowSnapshot(
+        doc=doc,
+        nodes_by_id=MappingProxyType({agent_node.id: agent_node, review_node.id: review_node}),
+        adjacency=MappingProxyType({}),
+        flow_fingerprint="fp",
+    )
+
+    def ctx(node: FlowNode) -> NodeContext:
+        return NodeContext(
+            snapshot=snapshot,
+            run_state=FlowRunState(flow_fingerprint="fp"),
+            node=node,
+            task_id="task-1",
+            subtask_order=1,
+        )
+
+    agent_vars = AgentNodeRunner(services, inputs)._prompt_variables(ctx(agent_node), agent_node)
+    review_vars = EvaluatorNodeRunner(services, inputs)._prompt_variables(
+        ctx(review_node), review_node
+    )
+
+    assert set(agent_vars) - set(review_vars) == {"predecessor_context"}
+    assert set(review_vars) - set(agent_vars) == set()
+
+
 @pytest.mark.parametrize(
     ("gate_severity", "severity", "expected"),
     [

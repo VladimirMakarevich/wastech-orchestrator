@@ -3148,9 +3148,12 @@ class Orchestrator:
         the post-region phase. A subtask with a verified commit is never re-run (recovery).
 
         Before each subtask's region runs, the active immutable spec is injected as
-        ``inputs.subtask_spec_path`` so the edit nodes' ``{subtask_spec_path}`` (plus
-        ``{subtask_order}`` / ``{subtask_count}``) scopes them to that one subtask. The post-region
-        phase is whole-task again, so the spec path is cleared first."""
+        ``inputs.subtask_spec_path`` so ``{subtask_spec_path}`` (plus ``{subtask_order}`` /
+        ``{subtask_count}``) scopes the region's nodes to that one subtask. **Every** node kind in
+        the region reads it, not only the ones that edit: an evaluator in the region judges one
+        subtask's diff, and while it saw only the root task file and the shared plan it charged the
+        task's unfinished parts against whichever subtask was under review. The post-region phase is
+        whole-task again, so the spec path is cleared first."""
         units = list(p.decomposition.subtasks)
         # Decomposition is decided during planning (after `inputs` was built), so the count was None
         # at build time; surface it now for the edit nodes' "subtask N of M" context.
@@ -3160,7 +3163,7 @@ class Orchestrator:
             if unit.order in committed:
                 continue
             # Private spec stays the audit/immutable record; the redacted exchange copy is the
-            # {subtask_spec_path} the edit nodes read.
+            # {subtask_spec_path} the region's nodes read.
             private_spec = subtask_spec_path(self._artifacts_root, p.task.id, unit.order, unit.slug)
             inputs.subtask_spec_path = publish_file(
                 str(self._exchange_root),

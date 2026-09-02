@@ -84,6 +84,8 @@ Applied to any evaluator node that omits the field. Keys: `session_scope` (defau
 
 Only meaningful together with the config gate (`agents.decomposition.enabled` / a task's `decomposition` field) — the flow declares the _capability_; the gate decides whether it fires.
 
+**Put an evaluator in `sub_flow` only if its prompt is written for a subtask.** Every node in the region runs once per subtask, so an evaluator there is judging one subtask's diff — but the root task file and the shared plan are what it is handed by default, and those describe the *whole* task. Unless its prompt reads `{?subtask_spec_path}` and measures the diff against that spec, it charges every not-yet-implemented part of the task against whichever subtask is under review, and the count only decays as the remaining subtasks land. The packaged `review` prompt does read it; a custom evaluator you add to a region has to as well.
+
 ## Node kinds
 
 Every node has an `id` (unique; see reserved ids below) and a `kind`. The six kinds:

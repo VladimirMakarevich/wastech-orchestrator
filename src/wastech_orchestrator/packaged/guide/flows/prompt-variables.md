@@ -19,10 +19,12 @@ Each variable names **which runner populates it** and **when it may be empty**. 
 | `{checks_path}` | agent, evaluator | the `checks` node has not run yet (it publishes on both outcomes — see `reference.md`) |
 | `{review_path}` | agent, evaluator | the `evaluator` (review) node has not run yet |
 | `{memory_path}` | agent, evaluator | memory is disabled, or nothing relevant was retrieved |
-| `{subtask_order}` | agent | the task is **not** decomposed (whole-task run) |
-| `{subtask_count}` | agent | the task is **not** decomposed |
-| `{subtask_spec_path}` | agent | the task is **not** decomposed |
+| `{subtask_order}` | agent, evaluator | the task is **not** decomposed (whole-task run) |
+| `{subtask_count}` | agent, evaluator | the task is **not** decomposed |
+| `{subtask_spec_path}` | agent, evaluator | the task is **not** decomposed |
 | `{predecessor_context}` | agent | not a decompose subtask, the subtask has no `depends_on` predecessor, or the node does not reference it |
+
+The three subtask variables reach an **evaluator** as well as an agent, and that matters for any evaluator a flow puts inside `decomposition.sub_flow`: it runs once per subtask, so without them it judges each subtask's diff against the root task file and the shared plan — the only two things it has — and can hold neither the subtask's own acceptance criteria nor its out-of-scope boundary. The packaged `review` node reads all three. `{predecessor_context}` is deliberately **not** among them: it is the author's handoff brief, assembled for the node that writes the subtask.
 
 `{predecessor_context}` is the path to the intra-task **subtask handoff brief** — a deterministic factual floor (each predecessor subtask's changed files, commit, acceptance criteria, spec pointer) plus, when the supervisor is available, a three-section interpretive brief (new surface area / locked decisions / open edges). It is available to any agent node running inside a decompose region for a subtask that has `depends_on` predecessors — and, like `{memory_path}`, only when that node's own role prompt references it (the packaged `implementation` flow reads it from its `implementation` node); wrap it in `{?predecessor_context}…{/predecessor_context}`.
 

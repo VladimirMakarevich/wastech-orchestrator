@@ -102,6 +102,8 @@ That is the defect stated exactly: the reviewer holds the **root** task's whole-
 
 Convergence, finally, is **high-variance rather than bounded**: subtask 1 needed 2 review rounds, subtask 2 needed 5. The reviewer does talk itself out of the false blockers, but nothing bounds how long that takes except `budgets.review_fix`.
 
+**FIXED**, together with F2 as this entry requires. See [what was fixed](e2e-trial-mobile-template.fixes.md#f1--f2--the-reviewer-under-decomposition).
+
 ### F2 — `review.md` tells the reviewer to ignore documentation on tasks whose deliverable _is_ documentation
 
 **Severity: minor.** **Lever: role prompt — `<target>/.worc/flows/implementation/review.md`** (and the packaged [`packaged/flows/implementation/review.md`](../../../src/wastech_orchestrator/packaged/flows/implementation/review.md) it was tuned from).
@@ -113,6 +115,8 @@ Convergence, finally, is **high-variance rather than bounded**: subtask 1 needed
 The last clause is correct for a code task — the `documentation` node runs after `review` and would make the finding moot. It is wrong for a **docs-only** deliverable, and this trial queues two: task `002a` (documentation only, "Do not touch code") and subtask `05-docs` of `001`. For those the docs are the entire product, and the sentence invites the reviewer to stand down on the only thing worth reviewing.
 
 The fix is a condition, not a deletion: the instruction should hold only where the diff contains non-documentation changes. Runtime confirmation of whether the reviewer actually under-reviews `002a` is pending and will be recorded in the run log section below.
+
+**FIXED** as a condition rather than a deletion — and recorded as unproven at runtime: the prediction that it would make the reviewer under-review `002a` was falsified. See [what was fixed](e2e-trial-mobile-template.fixes.md#f1--f2--the-reviewer-under-decomposition).
 
 ### F3 — `worc-deco-task` never says the root task reaches the edit node only as a footer path
 

@@ -2,7 +2,7 @@
 
 Companion to [e2e-trial-mobile-template.md](e2e-trial-mobile-template.md), which records the findings and does not change as they are repaired. This document is the other half: for each finding taken up, what was reproduced, what landed, and — where reproducing it showed the finding itself to be wrong — what the correction is.
 
-Two rules it follows. **Reproduce before repairing:** every entry below names the probe that showed the defect, and a fix whose test does not fail against the previous code is not recorded as one. **Correct the finding, do not quietly work around it:** three of the four entries here revise a claim the trial made, and those revisions are the most useful thing in the document, because the trial's own numbers were argued from them.
+Two rules it follows. **Reproduce before repairing:** every entry below names the probe that showed the defect, and a fix whose test does not fail against the previous code is not recorded as one. **Correct the finding, do not quietly work around it:** most entries here revise a claim the trial made — a wrong diagnosis, a wrong scope, an exposure that turned out not to exist, a prediction the trial itself falsified — and those revisions are the most useful thing in the document, because the trial's own numbers and its ranking were argued from them.
 
 Kept separate from the findings document for a mechanical reason too: that document is already over its `mdlint` `SIZE-001` warn budget (26,000 estimated tokens for `docs/backlog/**`, error at 32,000), and appending a fix record per finding would have pushed it past the error threshold. The budget is a ratchet that is never raised to silence a finding.
 
@@ -10,10 +10,40 @@ Kept separate from the findings document for a mechanical reason too: that docum
 
 | Finding | Severity as filed | State | Where |
 | --- | --- | --- | --- |
+| F1 — the reviewer is blind to the subtask spec | major | **fixed** | `core/flow/nodes/evaluator.py`, `review.md` |
+| F2 — "do not flag missing docs" on a docs-only deliverable | minor | **fixed** | `review.md` |
 | F24 — `.worc/` in the review diff | minor→major (variance was the finding) | **fixed** | `git_manager.py` |
 | F9 — the preamble forbids the reads it hands the node | major | **fixed** | `core/flow/security_preamble.py` |
 | F21 — no check verdict on a pass | major | **fixed** | `core/flow/nodes/checks.py`, `review.md` |
 | F10 — the contract cannot say "I could not review" | major | **addressed as a warning** (operator's call) | `core/flow/nodes/evaluator.py`, `orchestrator.py`, `review.md` |
+
+## F1 + F2 — the reviewer under decomposition
+
+Fixed as a pair, which the finding requires: F2 currently _suppresses_ F1's last false blocker, so repairing F2 alone would have given subtask 04 a fresh false blocker about documentation nobody had written yet.
+
+### F1, reproduced
+
+Two tests, both red against the previous code. The first renders a `review` role prompt inside an active decompose region and asserts the subtask clause appears; it rendered as the bare word `Review.`, the whole `{?subtask_spec_path}` block dropped, because `_prompt_variables` never published the variable the block is keyed on. The second compares the agent runner's published variable names against the evaluator runner's directly.
+
+### F1, what landed
+
+`evaluator.py::_prompt_variables` publishes `subtask_order`, `subtask_count` and `subtask_spec_path` when `ctx.subtask_order` is set — the same three the agent runner has always published, guarded the same way, so a whole-task run renders nothing rather than "subtask None of None". The runner already used `ctx.subtask_order` for its own artifact namespacing; it simply never passed it on.
+
+`predecessor_context` is deliberately **not** published to an evaluator: it is the author's handoff brief, assembled for the node that writes the subtask. The anti-drift test asserts that this is the _only_ difference between the two runners' key sets, so the next channel wired into one and forgotten in the other fails a test instead of a run. That test exists because this is the second time these two diverged on one channel — `_memory_path`'s own docstring records the first, where the memory packet was wired for agent nodes only and left `review.md`'s `{?memory_path}` block dead.
+
+Publishing the variable is only half a fix: a variable nobody references changes nothing. The packaged `review.md` gains a `## Subtask Scope` block, delimited and placed exactly like the sibling blocks in `implementation.md` and `fixing.md`, telling the reviewer which subtask it is looking at, that the spec — not the root task — is what the diff is measured against, that later-subtask work is not missing from this one at any severity, and that a change the spec forbids is a finding rather than something to ask for. That last clause is the trial's exact failure: subtask 01's spec ended "**Do not** add an overlay, modal or page rule here", and the reviewer blocked it for not adding them.
+
+### F2, and an honest downgrade
+
+The clause ("Documentation, changelog, and status-doc updates run in a later step of this flow, so do not flag those as missing") is correct for a code task and wrong for a docs-only deliverable, where the docs are the entire product. It is now conditional — "unless the diff is **only** documentation, which makes it this task's deliverable and its gaps the review" — which is the shape the finding asks for: a condition, not a deletion.
+
+**The runtime risk is unproven, and the trial's own author said so.** The prediction that the clause would make the reviewer under-review the docs-only subtask was **falsified**: that review ran 383.8s, its longest turn of the run, and found a real documentation defect. The reason is precise rather than reassuring — the clause speaks to _missing_ doc changes, and that finding was about an inconsistency _inside_ doc changes that had been made, so the instruction was never engaged. F2 therefore stands as a static defect (the sentence is unconditional and would still misfire where the gap really is missing documentation) with no evidence that it has ever bitten. Fixed because it is one clause and the condition is free, not because it was measured.
+
+### The budget this cost
+
+`review.md` is the most cost-sensitive Markdown in the repository — paid for on every node run of every task — and `mdlint` ratchets it at 1,800 estimated tokens, a threshold calibrated when this same file was the largest role prompt at 1,458. The F21 and F10 lines took it to 1,749, leaving 206 characters. F1's section did not fit.
+
+It was paid for rather than waived: the F10 bullet was folded into the existing "each entry states…" rule, which already mandated the path and so overlapped with it, and the F21 and F2 clauses were tightened. Net result 1,792 tokens — inside the ratchet, one rule about finding shape instead of two bullets restating each other. Worth stating for whoever takes the next finding: **the review prompt has about 30 characters of headroom left.** Further prompt guidance needs either something removed or a deliberate decision about that threshold, which the config says is never raised to silence a finding.
 
 ## F24 — the runtime home in the review diff
 
