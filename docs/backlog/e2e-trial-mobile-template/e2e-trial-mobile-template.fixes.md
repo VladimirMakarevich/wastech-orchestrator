@@ -24,6 +24,7 @@ Kept separate from the findings document for a mechanical reason too: that docum
 | F11 — the observe turn is blind to the step it is explaining | major | **fixed** | `core/supervisor.py` |
 | F29 — the summary of a declined tick reads as an empty queue | nit | **fixed** | `cli.py` |
 | F19 — `top --help` documents an argv argparse rejects | nit | **fixed** | `cli.py` |
+| F6 — control-state drift fires on the operator's own IDE | minor | **fixed** | `git_manager.py` |
 
 ## F1 + F2 — the reviewer under decomposition
 
@@ -247,3 +248,18 @@ One sentence, and the entry has it exactly right, down to the observation that m
 `top --log-file`'s help now names the working form (`worc --log-file PATH watch`). The test does two things rather than one: it asserts the text no longer names `watch --log-file`, and it pins **both argv forms** — the parent-flag form parses, the appended form raises. A help string is a claim about the parser, so the test that guards it should fail when either half stops being true, not only when someone edits the prose.
 
 Checked while there: no operator-facing document repeats the wrong form (`grep` over the tracked corpus finds it only in this trial's own notes and in the new test's comment), so nothing else needed the same repair.
+
+## F6 — the drift signal that cried wolf once per task
+
+Reproduced directly: a `branch.<name>.vscode-merge-base` written between the two captures produces `config: repo config key changed: …` and a warning telling the operator to stop the run and discard the clone.
+
+The finding's own reasoning is what makes this worth fixing rather than shrugging at, and it is a security argument, not an ergonomic one: on the shipped default this warn line is the **only** trace a real isolation failure leaves, which the `full-tool-access` entry argues makes it part of the mitigation rather than a nicety. A line that fires on almost every task is not that line.
+
+`_capture_local_config` now drops exactly one key pattern. Two things bound the exclusion:
+
+- **What it costs.** Nothing that git can act on. `branch.<name>.vscode-merge-base` is read by an editor and by no part of git — it cannot launch a program, move a ref, bind a hook or redirect a remote — so the report loses no signal by not carrying it. A test pins the neighbour (`branch.<name>.merge`, which git very much does read) as still reported.
+- **Where it is not applied.** Only the reporting path. `_untrusted_config_programs`, the gate that actually _refuses_, is filtered to program-launching keys and never saw this one.
+
+The alternative the finding hints at — filtering the report the way the refusal path is filtered, to program-launching keys only — was **rejected**. That would silence a planted `core.hooksPath`, a moved ref's config, a rewritten `pushurl`: everything the fingerprint exists for, in exchange for the same result on this one key.
+
+Two docstring claims were false and are corrected in the same change: the capture called `--local`/`--worktree` "exactly the agent-writable config surface", which holds only where the orchestrator owns the checkout — on the default it is the operator's own working copy, written by them and by their editor too. And [`.agents/rules/git-workflow.md`](../../../.agents/rules/git-workflow.md) said "the fingerprint itself is never dropped, only its consequence"; it now names the one exclusion and why, because an unqualified never is what a later reader would have trusted.

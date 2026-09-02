@@ -304,6 +304,21 @@ _FILTER_DRIVER_KEY_RE = re.compile(
 )
 _PROGRAM_CONFIG_KEYS = frozenset({"core.sshcommand", "credential.helper"})
 
+# Config keys an IDE writes as bookkeeping, excluded from the control-state REPORT (never from
+# anything that refuses). `repo.local_path` is the operator's own working checkout — what `install`
+# writes, and what a node's `working_directory` points at — so `--local` config there is operator-
+# and editor-writable as well as agent-writable. VS Code writes one
+# `branch.<name>.vscode-merge-base` per branch it notices, and this orchestrator creates a branch
+# per task: the drift line therefore fired on ~every task, at whichever node happened to be running
+# when the editor caught up, and told the operator to stop the run and discard the clone. The cost
+# is not the noise. On the shipped default that warn line is the only trace a real isolation failure
+# leaves, which is what makes it part of the mitigation rather than a nicety — and a signal that
+# cries wolf once per task is not that.
+# Narrow on purpose: this key is read by an editor and by nothing in git. It cannot launch a
+# program, move a ref, bind a hook or redirect a remote, so dropping it from the report gives up no
+# signal. Every other key — `branch.<name>.merge` next door included — still reports.
+_IDE_CONFIG_KEY_RE = re.compile(r"^branch\..*\.vscode-merge-base$")
+
 
 def _append_missing_lines(target: Path, lines: Sequence[str]) -> list[str]:
     """Idempotently append the ``lines`` not already present in ``target`` (one entry per line).
@@ -1723,9 +1738,15 @@ class GitManager:
     def _capture_local_config(self) -> dict[str, tuple[str, ...]]:
         """Repo-local (+worktree) config as ``{key: (value-sha256, ...)}`` — hashes, never values.
 
-        Scoped to ``--local``/``--worktree`` deliberately: it is exactly the agent-writable config
+        Scoped to ``--local``/``--worktree`` deliberately: that is the agent-writable config
         surface, and it excludes the command-line ``-c`` hardening prefix (never written to a config
         file), so neutralization is never seen as drift.
+
+        Agent-writable, not *only* agent-writable — the qualifier this docstring used to omit.
+        Where the orchestrator does not own the checkout (the default: ``repo.local_path`` is the
+        operator's real working copy) the same file is written by the operator and by their editor,
+        so :data:`_IDE_CONFIG_KEY_RE` is dropped here. It is the one exclusion, and it is a key git
+        itself never reads.
         """
         config: dict[str, list[str]] = {}
         for scope in ("--local", "--worktree"):
@@ -1736,6 +1757,8 @@ class GitManager:
                 if not record:
                     continue
                 key, _, value = record.partition("\n")
+                if _IDE_CONFIG_KEY_RE.match(key):
+                    continue
                 config.setdefault(key, []).append(hashlib.sha256(value.encode("utf-8")).hexdigest())
         return {key: tuple(values) for key, values in config.items()}
 

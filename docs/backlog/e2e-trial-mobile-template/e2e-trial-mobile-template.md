@@ -200,6 +200,8 @@ which holds only when the orchestrator owns the checkout. It does not here: `rep
 
 So the warning fires on **every** task, at whichever node runs while the IDE first sees the new branch, and tells the operator to abort and discard. The cost is not the noise itself but the desensitization: the `full-tool-access` backlog entry argues that on the shipped default this warn line is the _only_ trace of a real isolation failure, which "makes that trace part of the mitigation, not a nicety". A signal that cries wolf once per task is not that. The run continued correctly per policy and nothing was compromised.
 
+**FIXED** by excluding that one key from the reporting capture — not by adopting the sibling's program-key filter, which would silence a planted `core.hooksPath` or a rewritten `pushurl` to solve this. The capture's "exactly the agent-writable config surface" claim and the rules file's "the fingerprint itself is never dropped" were both corrected with it. See [what was fixed](e2e-trial-mobile-template.fixes.md#f6--the-drift-signal-that-cried-wolf-once-per-task).
+
 Worth noting the sibling asymmetry: `_untrusted_config_programs` ([`git_manager.py:1997-2015`](../../../src/wastech_orchestrator/git_manager.py)) — the gate that actually _refuses_ — is filtered to program-launching keys (`_FILTER_DRIVER_KEY_RE`, `_PROGRAM_CONFIG_KEYS`). Only the reporting path is unfiltered.
 
 ### F7 — the agent cannot run `npm run build` inside its sandbox; the Check Runner can

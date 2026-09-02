@@ -2173,6 +2173,38 @@ def test_control_state_detects_config_change_without_leaking_value(
     )  # the value never is (redaction / hash-only fingerprint)
 
 
+def test_control_state_ignores_the_key_an_ide_writes_per_branch(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # `repo.local_path` is the operator's own working checkout, so `--local` config is IDE-writable
+    # as well as agent-writable. VS Code writes one `branch.<name>.vscode-merge-base` per branch it
+    # notices, and the orchestrator makes a branch per task — so this fired on ~every task, at
+    # whichever node happened to be running, and told the operator to stop the run and discard the
+    # clone. On the shipped default that warn line is the only trace a real isolation failure
+    # leaves, which makes a per-task false positive a cost to the signal, not just noise.
+    gm = _armed(git_repo, store, tmp_path / "art", make_git_config)
+    before = gm.capture_git_control_state()
+    git_run(
+        ["config", "branch.feat/001-x.vscode-merge-base", "refs/remotes/origin/main"],
+        git_repo.clone,
+    )
+
+    assert gm.compare_git_control_state(before) is None
+
+
+def test_control_state_still_reports_any_other_new_key(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # The exclusion is one key an editor reads and git ignores — it cannot launch a program, move a
+    # ref, bind a hook or redirect a remote. Everything else still reports, this neighbour included.
+    gm = _armed(git_repo, store, tmp_path / "art", make_git_config)
+    before = gm.capture_git_control_state()
+    git_run(["config", "branch.feat/001-x.merge", "refs/heads/main"], git_repo.clone)
+
+    drift = gm.compare_git_control_state(before)
+    assert drift is not None and "branch.feat/001-x.merge" in drift.summary()
+
+
 def test_control_state_detects_head_and_ref_move(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
 ) -> None:
