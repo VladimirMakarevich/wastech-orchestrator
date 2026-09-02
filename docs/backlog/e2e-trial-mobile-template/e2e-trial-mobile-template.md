@@ -13,6 +13,8 @@ Four things are under test, and each finding below is attributed to exactly one 
 
 This document records **findings only**. Nothing was repaired during the trial: no skill, flow, role prompt, `config.yaml`, task file or source file was edited to make a run succeed.
 
+Two companions: [what was fixed](e2e-trial-mobile-template.fixes.md) records the repairs and the corrections reproducing them forced on the findings themselves, and [the status index](e2e-trial-mobile-template.status.md) is the one place that answers what is left — every finding, its state, and what blocks the ones still open.
+
 ## Environment under test (pinned)
 
 | Thing | Value |

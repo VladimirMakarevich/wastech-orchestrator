@@ -6,6 +6,8 @@ Two rules it follows. **Reproduce before repairing:** every entry below names th
 
 Kept separate from the findings document for a mechanical reason too: that document is already over its `mdlint` `SIZE-001` warn budget (26,000 estimated tokens for `docs/backlog/**`, error at 32,000), and appending a fix record per finding would have pushed it past the error threshold. The budget is a ratchet that is never raised to silence a finding.
 
+The table below covers what this document records: the findings that were repaired. For every finding — open, fixed, declined, and what blocks the rest — see [the status index](e2e-trial-mobile-template.status.md).
+
 ## Status at a glance
 
 | Finding | Severity as filed | State | Where |
