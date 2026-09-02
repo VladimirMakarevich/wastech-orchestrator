@@ -12,9 +12,7 @@ The index for the campaign. [The findings document](e2e-trial-mobile-template.md
 | Open — this campaign's lane | 0 | — |
 | Open — owned elsewhere | 3 | F7 (own ADR: `docs/backlog/full-tool-access/`), F22 (the target repo's task authoring), F27 (environment / codex version pin) |
 
-**Everything this campaign owns has landed.** What is left in the table below is what was never this campaign's to spend on, plus the three verification gaps no code can close and the two halves deliberately left inside fixed findings.
-
-The three in the second row are open work, not closed findings — they are simply not this campaign's to spend on: F7 is step 4 of its own ADR, F22 is task authoring in the target repository, and F27 is a provider CLI defect with an environment fix. F7 is the one open `major` anywhere in the trial; nothing left in this campaign's own lane is rated above `minor`.
+**Everything this campaign owns has landed.** The three in the last row are open work, not closed findings — they were never this campaign's to spend on: F7 is step 4 of its own ADR, F22 is task authoring in the target repository, and F27 is a provider CLI defect with an environment fix. F7 is the one open `major` anywhere in the trial. What else remains is below and is not repairable by code: three verification gaps that need a human or a throwaway repo, and the halves deliberately left inside findings that are otherwise fixed.
 
 ## Every finding
 

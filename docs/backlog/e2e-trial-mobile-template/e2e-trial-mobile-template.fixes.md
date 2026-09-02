@@ -336,7 +336,7 @@ The finding located the symptom precisely and said so: "the write site is not is
 **The mechanism.** A region run ends when a forward edge leaves the region, and the engine writes and persists `current_node = edge.to` _before_ it notices that the edge left:
 
 ```python
-self._run_state.current_node = edge.to        # 'documentation'
+self._run_state.current_node = edge.to  # 'documentation'
 self._recorder.save_checkpoint(self._run_state)
 if self._region is not None and edge.to not in self._region:
     return FlowRunResult(status=Status.DONE, final_node=node.id)
