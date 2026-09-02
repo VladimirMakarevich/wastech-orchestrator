@@ -40,11 +40,11 @@ every `file:line` below resolves on all three.
 ### F1 — the `review` evaluator is blind to the subtask spec in a decomposed run
 
 **Severity: major.** **Lever: orchestrator source —
-[`core/flow/nodes/evaluator.py`](../../src/wastech_orchestrator/core/flow/nodes/evaluator.py).**
+[`core/flow/nodes/evaluator.py`](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py).**
 
 The agent runner publishes the decomposition variables; the evaluator runner does not.
 
-[`core/flow/nodes/agent.py:825-828`](../../src/wastech_orchestrator/core/flow/nodes/agent.py):
+[`core/flow/nodes/agent.py:825-828`](../../../src/wastech_orchestrator/core/flow/nodes/agent.py):
 
 ```python
 if ctx.subtask_order is not None:
@@ -53,11 +53,11 @@ if ctx.subtask_order is not None:
     variables["subtask_spec_path"] = self._in.subtask_spec_path
 ```
 
-[`core/flow/nodes/evaluator.py:551-572`](../../src/wastech_orchestrator/core/flow/nodes/evaluator.py) —
+[`core/flow/nodes/evaluator.py:551-572`](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py) —
 `_prompt_variables` — sets `task_id`, `stage`, `repo_path`, the `build_path_context` set
 (`repo`/`task_path`/`plan_path`/`diff_path`/`checks_path`/`review_path`), `memory_path`, and the generic
 `{<node_id>_path}` channel. **None of the three subtask variables.** `build_context_footer`
-([`providers/base.py:272-289`](../../src/wastech_orchestrator/providers/base.py)) does not carry them either — its
+([`providers/base.py:272-289`](../../../src/wastech_orchestrator/providers/base.py)) does not carry them either — its
 field list is `task / plan / diff / checks / review / prior_fix / human_input / packet`.
 
 `implementation.yaml` puts `review` in the sub-flow:
@@ -113,7 +113,7 @@ in one run, holding contradictory instructions, purely because of the `agent.py`
 `fixing` refused, changed nothing, and diagnosed the defect unaided — *"The reviewer graded subtask 01's diff against
 the whole task's acceptance criteria rather than the subtask's … A human should re-route these four findings to
 subtasks 02-04."* Review round 2 then received `prior_fix: …/fixing/run-000006/fixing.out.md`, read that account, and
-**accepted with zero findings**. [`review.md:5`](../../src/wastech_orchestrator/packaged/flows/implementation/review.md)'s
+**accepted with zero findings**. [`review.md:5`](../../../src/wastech_orchestrator/packaged/flows/implementation/review.md)'s
 `prior_fix` rule is what recovered it.
 
 So this is **not** an unsatisfiable loop — an earlier draft of this entry called it a blocker and that was wrong. It
@@ -153,7 +153,7 @@ except `budgets.review_fix`.
 ### F2 — `review.md` tells the reviewer to ignore documentation on tasks whose deliverable *is* documentation
 
 **Severity: minor.** **Lever: role prompt — `<target>/.worc/flows/implementation/review.md`** (and the packaged
-[`packaged/flows/implementation/review.md`](../../src/wastech_orchestrator/packaged/flows/implementation/review.md)
+[`packaged/flows/implementation/review.md`](../../../src/wastech_orchestrator/packaged/flows/implementation/review.md)
 it was tuned from).
 
 `review.md:18`:
@@ -174,7 +174,7 @@ in the run log section below.
 ### F3 — `worc-deco-task` never says the root task reaches the edit node only as a footer path
 
 **Severity: minor.** **Lever: skill —
-[`packaged/guide/skills/worc-deco-task/SKILL.md`](../../src/wastech_orchestrator/packaged/guide/skills/worc-deco-task/SKILL.md)**
+[`packaged/guide/skills/worc-deco-task/SKILL.md`](../../../src/wastech_orchestrator/packaged/guide/skills/worc-deco-task/SKILL.md)**
 (mirrored into the target's `.claude/skills/worc-deco-task/`; the two are byte-identical).
 
 The skill frames the split as root-context plus steps:
@@ -187,7 +187,7 @@ and is precise about the subtask side:
 > `fixing`) read as `{subtask_spec_path}`, so write it however the step needs.
 
 What it never states is the asymmetry. The prompt renderer substitutes **paths only, never bodies**
-([`core/prompts.py:1-38`](../../src/wastech_orchestrator/core/prompts.py)), and none of the installed
+([`core/prompts.py:1-38`](../../../src/wastech_orchestrator/core/prompts.py)), and none of the installed
 `implementation` role prompts reference `{task_path}` at all. The root task therefore reaches the executing node as
 one line of `build_context_footer`:
 
@@ -221,7 +221,7 @@ about signposting, not about the constraint being dropped.
 ### F4 — `worc-config` enumerates two of the three install-written security keys
 
 **Severity: minor.** **Lever: skill —
-[`packaged/guide/skills/worc-config/SKILL.md`](../../src/wastech_orchestrator/packaged/guide/skills/worc-config/SKILL.md).**
+[`packaged/guide/skills/worc-config/SKILL.md`](../../../src/wastech_orchestrator/packaged/guide/skills/worc-config/SKILL.md).**
 
 `SKILL.md:34-37`:
 
@@ -233,7 +233,7 @@ about signposting, not about the constraint being dropped.
 
 `disable_read_isolation` is missing from the list, and it is the third key `install` writes into the `security`
 block — the installed config carries all three. It is default-unsafe in exactly the sense the step is about:
-[`config/schema.py`](../../src/wastech_orchestrator/config/schema.py) defaults it to `True`, and `configuration.md`
+[`config/schema.py`](../../../src/wastech_orchestrator/config/schema.py) defaults it to `True`, and `configuration.md`
 calls that
 
 > a deliberate deployment-posture choice that departs from the project's own default-safe rule for isolation.
@@ -260,7 +260,7 @@ auditable, and this one is not greppable.
 ### F6 — git control-state drift fires a false positive from the operator's own IDE
 
 **Severity: minor** (noise on a security signal, not a breach). **Lever: orchestrator source —
-[`git_manager.py`](../../src/wastech_orchestrator/git_manager.py), `_capture_local_config` / `_diff_config`.**
+[`git_manager.py`](../../../src/wastech_orchestrator/git_manager.py), `_capture_local_config` / `_diff_config`.**
 
 At the close of the `planning` node the run logged:
 
@@ -277,9 +277,9 @@ The key is VS Code's. `git config --local --get-regexp vscode` in the target rep
 branch. The node that supposedly drifted was `read-only` with `Write`/`Edit`/`MultiEdit`/`NotebookEdit` denied
 and `Bash(git commit:*)` / `Bash(git push:*)` denied in its own argv; it had no way to write a config key.
 
-[`git_manager.py:1710-1727`](../../src/wastech_orchestrator/git_manager.py) fingerprints **every**
+[`git_manager.py:1710-1727`](../../../src/wastech_orchestrator/git_manager.py) fingerprints **every**
 `--local`/`--worktree` key with no exclusions, and `_diff_config`
-([`git_manager.py:1929-1936`](../../src/wastech_orchestrator/git_manager.py)) reports any delta. The capture's
+([`git_manager.py:1929-1936`](../../../src/wastech_orchestrator/git_manager.py)) reports any delta. The capture's
 docstring states its scope is
 
 > exactly the agent-writable config surface
@@ -296,14 +296,14 @@ real isolation failure, which "makes that trace part of the mitigation, not a ni
 wolf once per task is not that. The run continued correctly per policy and nothing was compromised.
 
 Worth noting the sibling asymmetry: `_untrusted_config_programs`
-([`git_manager.py:1997-2015`](../../src/wastech_orchestrator/git_manager.py)) — the gate that actually
+([`git_manager.py:1997-2015`](../../../src/wastech_orchestrator/git_manager.py)) — the gate that actually
 *refuses* — is filtered to program-launching keys (`_FILTER_DRIVER_KEY_RE`, `_PROGRAM_CONFIG_KEYS`). Only the
 reporting path is unfiltered.
 
 ### F7 — the agent cannot run `npm run build` inside its sandbox; the Check Runner can
 
 **Severity: major.** **Lever: orchestrator source —
-[`providers/claude.py`](../../src/wastech_orchestrator/providers/claude.py), sandbox-policy generation.**
+[`providers/claude.py`](../../../src/wastech_orchestrator/providers/claude.py), sandbox-policy generation.**
 
 `fixing` reported the project's own build command aborting under it:
 
@@ -353,7 +353,7 @@ Why it matters beyond the noise:
 This is **not** the deliberate `test:ci` / Chrome gap: `npm run build` is *in* the check set and is what the role
 prompts tell the agent to run. There is no config-level lever today — `excludedCommands` is emitted empty and nothing
 can populate it. That makes this a direct, evidenced argument for
-[`full-tool-access`](full-tool-access/README.md) step 4 (`unsandboxed_commands`), which is still only proposed.
+[`full-tool-access`](../full-tool-access/README.md) step 4 (`unsandboxed_commands`), which is still only proposed.
 
 ### F9 — the security preamble's `.worc-io/` wording makes a reviewer refuse to review
 
@@ -394,7 +394,7 @@ outcome. The fix is to make the bullet an explicit grant and scope the trailing 
 ### F10 — the evaluator contract cannot express "I could not review"
 
 **Severity: major.** **Lever: orchestrator source —
-[`core/flow/nodes/evaluator.py`](../../src/wastech_orchestrator/core/flow/nodes/evaluator.py)**, with a
+[`core/flow/nodes/evaluator.py`](../../../src/wastech_orchestrator/core/flow/nodes/evaluator.py)**, with a
 supporting line in `review.md`.
 
 The F9 refusal above was accepted as an ordinary verdict — `succeeded`, `exit 0`, a structurally valid
@@ -464,7 +464,7 @@ Recorded so a later reader does not re-open them.
   strict_isolation=false` and the run log repeats it. The product says the true thing out loud.
 - **Dropping `npm run test:ci` from the check set is the correct call, not a dodge.** `skip_if_unavailable` is a
   **per-set** flag keyed on the *toolchain binary* being absent
-  ([`config/schema.py:380-394`](../../src/wastech_orchestrator/config/schema.py)); `npm` is present and Chrome is
+  ([`config/schema.py:380-394`](../../../src/wastech_orchestrator/config/schema.py)); `npm` is present and Chrome is
   not, so the set would fail rather than skip. Declaring the command with `skip_if_unavailable: true` would have
   been worse than omitting it with the comment the config actually carries, which also gives the restore recipe.
 - **`implementation.yaml` is honest about its own voided key.** Lines 158-161 state that `network_access: false` on
@@ -472,22 +472,22 @@ Recorded so a later reader does not re-open them.
   online there whatever this key says" — and advise pinning `provider: codex`. The operator did not take that
   advice, so the doc node is online; that is a config-level choice the flow warned about, not a flow defect.
 - **`hitl:` on an agent node is a permission, not a gate.** `HitlPolicy`
-  ([`core/flow/schema.py:45-48`](../../src/wastech_orchestrator/core/flow/schema.py)) lets the agent *optionally*
+  ([`core/flow/schema.py:45-48`](../../../src/wastech_orchestrator/core/flow/schema.py)) lets the agent *optionally*
   emit a `human_input` signal in its typed output; it is not a forced round-trip. Only the bare `hitl` **node kind**
   pauses unconditionally. So `planning`'s `allow_approval: true` does not mean five Telegram approvals across five
   tasks.
 - **The operator decomposition path does not consult `agents.decomposition.enabled`.** That key defaults to `False`
-  ([`config/loader.py:515`](../../src/wastech_orchestrator/config/loader.py)) and the config omits it, but
+  ([`config/loader.py:515`](../../../src/wastech_orchestrator/config/loader.py)) and the config omits it, but
   `_validate_operator_subtasks` gates on `task.subtasks` alone
-  ([`core/orchestrator.py:787`](../../src/wastech_orchestrator/core/orchestrator.py)) and only requires the flow to
+  ([`core/orchestrator.py:787`](../../../src/wastech_orchestrator/core/orchestrator.py)) and only requires the flow to
   carry a `decomposition:` block. `001` decomposes correctly; the run confirmed `subtask=1/5`.
 - **`--allowedTools` in the argv is not a contradiction of advanced mode.** The observed `planning` argv carries
   `--allowedTools Read,Glob,Grep,Bash,PowerShell,TodoWrite,BashOutput,KillShell,WebFetch,WebSearch` while
   `SecurityConfig.strict_isolation` says "no tool allowlist reaches the agent CLI". The adapter is precise where
   the schema docstring is loose: `--tools` is the *hard existence gate* and is correctly **not** emitted
-  ([`providers/claude.py:1004-1015`](../../src/wastech_orchestrator/providers/claude.py)), while `--allowedTools`
+  ([`providers/claude.py:1004-1015`](../../../src/wastech_orchestrator/providers/claude.py)), while `--allowedTools`
   is only the auto-approve baseline, "and the boundary has moved to `--disallowedTools`"
-  ([`claude.py:318`](../../src/wastech_orchestrator/providers/claude.py)). Filed here because a shallower audit
+  ([`claude.py:318`](../../../src/wastech_orchestrator/providers/claude.py)). Filed here because a shallower audit
   reports this as a breach. The only residue is a **nit**: the `config/schema.py` wording invites exactly that
   misreading.
 
@@ -502,7 +502,7 @@ Recorded so a later reader does not re-open them.
 ### F11 — the supervisor's observe turn is blind to the node whose behavior it is explaining
 
 **Severity: major.** **Lever: orchestrator source —
-[`core/supervisor.py`](../../src/wastech_orchestrator/core/supervisor.py), `observe()` / `_step_prompt`.**
+[`core/supervisor.py`](../../../src/wastech_orchestrator/core/supervisor.py), `observe()` / `_step_prompt`.**
 
 After review returned rework on subtask 2 for the fourth time, the supervisor wrote a genuinely sharp note. It
 named the loop shape cycle by cycle, and concluded:
@@ -528,7 +528,7 @@ endorsing the **false** blockers, never noticing that subtask 02's spec forbids 
 following its recommendation would have gone hunting a timeout that does not exist.
 
 The cause is a wiring gap, and it is one line —
-[`core/supervisor.py:506`](../../src/wastech_orchestrator/core/supervisor.py):
+[`core/supervisor.py:506`](../../../src/wastech_orchestrator/core/supervisor.py):
 
 ```python
 prompt = self._step_prompt(task_id, node_id, outcome_kind, final_message, findings)
@@ -536,14 +536,14 @@ prompt = self._step_prompt(task_id, node_id, outcome_kind, final_message, findin
 
 The observe turn receives only the **observed** node's own `final_message` plus its `findings`, and its `_run`
 call passes no `supervisor_packet_path` — unlike the finalize turn
-([`supervisor.py:670,688`](../../src/wastech_orchestrator/core/supervisor.py)), which *is* grounded in the
+([`supervisor.py:670,688`](../../../src/wastech_orchestrator/core/supervisor.py)), which *is* grounded in the
 packet. So when observing an **evaluator** step, the supervisor sees the reviewer's message and the reviewer's
 findings and is structurally blind to what `fixing` said in the round before — precisely the evidence needed
 to judge whether a rework loop is productive.
 
 Size is not the obstacle: `_STEP_MESSAGE_MAX` is 500 and the fixing report's whole rationale sits in its first
 500 characters, so the packet's `steps[].message` channel
-([`supervisor_packet.py:318-319`](../../src/wastech_orchestrator/core/supervisor_packet.py)) would have
+([`supervisor_packet.py:318-319`](../../../src/wastech_orchestrator/core/supervisor_packet.py)) would have
 carried it — the observe turn simply is not given the packet. The method's own docstring already records a
 sibling starvation: *"without them the observation is a bare outcome label with nothing to react to, which is
 why the observer made no tool calls on any evaluator step of the run this came from."*
@@ -593,7 +593,7 @@ record. Recording the resolved value — or both, as `configured` and `effective
 ### F14 — the subtask handoff's factual floor is built from `depends_on`, not from what actually landed
 
 **Severity: minor.** **Lever: orchestrator source —
-[`core/orchestrator.py`](../../src/wastech_orchestrator/core/orchestrator.py), the handoff floor assembly.**
+[`core/orchestrator.py`](../../../src/wastech_orchestrator/core/orchestrator.py), the handoff floor assembly.**
 
 ```python
 if not unit.depends_on:
@@ -679,7 +679,7 @@ addressable.
 ### F18 — `worc merge-task` cannot control the squash commit message
 
 **Severity: minor.** **Lever: orchestrator source —
-[`git_manager.py`](../../src/wastech_orchestrator/git_manager.py), `merge_pull_request`.**
+[`git_manager.py`](../../../src/wastech_orchestrator/git_manager.py), `merge_pull_request`.**
 
 ```python
 args = ["pr", "merge", pr_url, f"--{strategy.value}"]   # git_manager.py:3021
