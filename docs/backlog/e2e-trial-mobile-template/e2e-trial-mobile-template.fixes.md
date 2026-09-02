@@ -16,6 +16,7 @@ Kept separate from the findings document for a mechanical reason too: that docum
 | F9 — the preamble forbids the reads it hands the node | major | **fixed** | `core/flow/security_preamble.py` |
 | F21 — no check verdict on a pass | major | **fixed** | `core/flow/nodes/checks.py`, `review.md` |
 | F10 — the contract cannot say "I could not review" | major | **addressed as a warning** (operator's call) | `core/flow/nodes/evaluator.py`, `orchestrator.py`, `review.md` |
+| F28 — the terminal Telegram notification has no timeout | major | **fixed** | `notify/telegram.py` |
 
 ## F1 + F2 — the reviewer under decomposition
 
@@ -109,3 +110,17 @@ The trigger is deliberately narrow: **all** gating findings pathless, not any. O
 `review.md` gains the matching line, and its first draft had to be thrown out: telling the reviewer to report an inability-to-review by returning an empty `findings` array would have made it **accept** — an empty array is the well-formed clean verdict, so the flow would have published an unreviewed diff. What it says instead is that a blocking finding names a path, never an invented one, and that an inability to review belongs in the finding's own text in those words.
 
 Incidental, found in the same dict: `TRACE_ADOPTED_COMMITS` was missing from the emoji map, so the one publish case whose own docstring calls its ⚠️ "the only place it is said" rendered as a neutral ▶️. Fixed with a test.
+
+## F28 — the unbounded Telegram call
+
+Reproduced as a defect of the _caller_, which is where the finding lands after the code is read properly. Six tests, all red against the previous code and none of them slow: the helper that owns the synchronous contract, `_run_sync` ([telegram.py](../../../src/wastech_orchestrator/notify/telegram.py)), took no deadline argument at all, so the two tests that pass one failed with a `TypeError` rather than by hanging, and the two notifier-level tests failed on the absent `_CALL_TIMEOUT_S`. `grep -c "is_cancelled" notify/telegram.py` still returns **0** — that half is F26's and lands with it.
+
+**One half of the proposed fix is a no-op, and it is the half the entry leads with.** "Pass an explicit timeout into `send_message`" restates a default: `python-telegram-bot` 22.8's `HTTPXRequest` already ships `connect_timeout`, `read_timeout` and `write_timeout` at 5.0s and `pool_timeout` at 1.0s, so every HTTP phase of every call was **already** bounded when the daemon wedged for ten minutes. Whatever stalled was therefore not an HTTP phase, and no per-request timeout would have reached it. What was missing is a bound on the _caller_ — and that is the only thing "best-effort" was ever short of, because the code delivers "never raises" exactly as documented.
+
+**A second unbounded stretch, which the finding does not mention and which no `wait_for` covers.** `asyncio.run` closes its runner by calling `loop.shutdown_default_executor(asyncio.constants.THREAD_JOIN_TIMEOUT)`, and that constant is **300 seconds** (verified against the running interpreter's own `asyncio.runners.Runner.close`). So a blocking call already handed to the default executor keeps the send parked for up to five minutes _after_ its await is cancelled. Two such calls sit inside the observed ten-minute window; recorded as consistent with the observation rather than as its proven cause, since the live wedge left a `sample` and not a stack of the executor.
+
+**What landed.** `_run_sync` takes `timeout` and enforces it in two layers, because either alone is a half-fix: `asyncio.wait_for` cancels the await (the clean path, which lets the coroutine unwind), and the thread it runs on is abandoned when that does not return within a two-second grace (the hard path, which covers an await that swallows cancellation and the executor join above). Abandoning is safe by construction — the thread is a daemon, it shares no state with the caller, and every caller already treats the failure as a transport error: `_safe_send` logs one redacted warning, and `start_ask` returns an undelivered handle that `wait_for_answer` maps to `transport_error`, which is fail-closed.
+
+The `timeout` is passed by **every** client method except `poll_reply`, which carries the operator's own hours-long deadline; a test pins that policy per method, because clipping the HITL poll to 20s is the obvious way to "fix" this and would silently break the human gate.
+
+Incidental simplification, not a separate change: the helper's two branches collapsed into one. The `asyncio.get_running_loop()` probe and the `ThreadPoolExecutor` fallback existed only to answer "does the caller already own a loop?", and running every call on its own thread makes the question moot. The regression test still covers the case that branch was for — a `_run_sync` call made from inside a running loop.

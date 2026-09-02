@@ -4936,7 +4936,10 @@ class Orchestrator:
         contacts: tuple[str, ...] = (),
         governance_changed: tuple[str, ...] = (),
     ) -> None:
-        """Best-effort terminal notification. Never raises and never alters the outcome."""
+        """Best-effort terminal notification. Never raises, never hangs, never alters the
+        outcome. The "never hangs" half is the transport's: every notifier call carries its own
+        wall-clock deadline, because this runs inside a watch tick and the stop ladder cannot
+        reach a call in flight."""
         try:
             self._notifier.send_notification(
                 task_id=task_id,

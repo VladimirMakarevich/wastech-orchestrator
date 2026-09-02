@@ -792,6 +792,8 @@ and the call runs through `_run_sync` (`telegram.py:585-598`) = `asyncio.run(fac
 
 Fixes: pass an explicit timeout into `send_message` and wrap `_run_sync` in `asyncio.wait_for`; and give the notifier the `is_cancelled` predicate `cmd_watch` already builds for the FlowEngine, so the stop ladder can reach a call in flight.
 
+**FIXED** (the bound; the cancellation half rides with F26), and one half of the fix proposed above is a no-op: `python-telegram-bot`'s own request defaults already bound every HTTP phase at 5s, so an explicit per-call timeout restates a default — what was missing is a bound on the _caller_. See [what was fixed](e2e-trial-mobile-template.fixes.md#f28--the-unbounded-telegram-call).
+
 **Positive, in the same breath:** `stop --force-full` did exactly what it advertises — "The rung for a wedged or suspended watcher a soft stop cannot reach" — killed the process group, cleared the PID file, and reported "it resumes from its checkpoint on next start". The ladder's design anticipated this state; nothing was lost (002c was already terminal, PR #6 created).
 
 ### F18 — now demonstrated with the artifact, and the damage is not the trailer

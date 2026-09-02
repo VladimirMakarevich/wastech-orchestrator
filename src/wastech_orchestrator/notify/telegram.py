@@ -6,6 +6,10 @@ The Core does not import this module directly — it talks to a :class:`Notifier
 silent :class:`NullNotifier`. Terminal notifications are best-effort. Blocking HITL returns typed
 timeout/transport/invalid-response failures to the Core, which applies fail-closed task semantics.
 Transport exceptions are logged with token + chat id redacted and are never re-raised.
+
+Every call is bounded (``_CALL_TIMEOUT_S``), the one exception being the HITL reply poll, which
+carries the operator's own deadline. These calls run from inside a watch tick, so an unbounded one
+would hold the daemon past the stop ladder's patience: best-effort has to mean "never hangs" too.
 """
 
 from __future__ import annotations
@@ -17,7 +21,6 @@ import re
 import threading
 import time
 from collections.abc import Callable, Coroutine, Iterator, Mapping
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -46,6 +49,18 @@ _TRANSPORT_SILENT_LEVEL = logging.CRITICAL + 1
 _TELEGRAM_TEXT_LIMIT = 4096
 _TRUNCATION_SUFFIX = "\n\n[message truncated by wastech-orchestrator]"
 _ALLOWED_UPDATES = ("message", "callback_query")
+
+# Wall-clock bound on ONE Telegram API call. Every call here is made from inside a watch tick, and
+# the loop checks its stop channels only *around* ticks — so a call that never returns takes the
+# daemon's answer to `stop`/`restart` with it, all the way up to the ladder's tree kill. The bound
+# is the notifier's own: "best effort" must mean "never hangs", not only "never raises". Sized for
+# two round trips, because `Bot` as an async context manager initializes (one `getMe`) before the
+# call itself runs. `poll_reply` is the one exception — it carries its own operator-scale deadline.
+_CALL_TIMEOUT_S = 20.0
+# Grace between the in-loop deadline and abandoning the thread, so the clean path (`wait_for`
+# cancels the await and the coroutine unwinds) normally wins the race and the hard path stays the
+# backstop for a call that cannot be cancelled.
+_ABANDON_GRACE_S = 2.0
 
 # Feedback shown on the button itself when a callback is pressed. Every press in our chat is
 # acknowledged so the operator never sees "nothing happened"; a stale/duplicate press gets an alert.
@@ -589,19 +604,47 @@ def _default_client_factory(secrets: _Secrets, _cfg: TelegramConfig) -> _Telegra
     return _HttpTelegramClient(bot_token=secrets.bot_token)
 
 
-def _run_sync[T](factory: Callable[[], Coroutine[Any, Any, T]]) -> T:
-    """Run one fresh coroutine behind the synchronous notifier contract.
+def _run_sync[T](
+    factory: Callable[[], Coroutine[Any, Any, T]], *, timeout: float | None = None
+) -> T:
+    """Run one fresh coroutine behind the synchronous notifier contract, optionally bounded.
 
-    A caller that already owns an asyncio loop cannot use :func:`asyncio.run` on that thread. In
-    that case the coroutine is constructed and run on a dedicated worker; otherwise the direct path
-    avoids the thread. A factory is required so no coroutine object crosses event-loop boundaries.
+    Always on its own daemon thread with its own event loop: a caller that already owns a loop
+    cannot use :func:`asyncio.run` on that thread, and running every call on a fresh thread makes
+    the question moot. A factory is required so no coroutine object crosses event-loop boundaries.
+
+    ``timeout`` bounds the **caller**, in two layers because one is not enough. ``asyncio.wait_for``
+    cancels the await; when that does not return the thread is abandoned and :class:`TimeoutError`
+    raised. The second layer is not theoretical — a blocking call already handed to the default
+    executor keeps running after its await is cancelled, and :func:`asyncio.run`'s own close then
+    joins that executor for up to ``asyncio.constants.THREAD_JOIN_TIMEOUT`` (300s). Abandoning is
+    safe here: the thread is a daemon, it shares no state with the caller, and every caller treats
+    the failure as a transport error. ``None`` waits forever — only for a coroutine that carries a
+    deadline of its own (:meth:`_HttpTelegramClient.poll_reply`).
     """
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(factory())
-    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="worc-telegram") as pool:
-        return pool.submit(lambda: asyncio.run(factory())).result()
+    outcome: list[T] = []
+    failure: list[BaseException] = []
+
+    def run() -> None:
+        async def bounded() -> T:
+            coro = factory()
+            if timeout is None:
+                return await coro
+            return await asyncio.wait_for(coro, timeout)
+
+        try:
+            outcome.append(asyncio.run(bounded()))
+        except BaseException as exc:
+            failure.append(exc)  # re-raised on the calling thread, where the caller can see it
+
+    thread = threading.Thread(target=run, name="worc-telegram", daemon=True)
+    thread.start()
+    thread.join(None if timeout is None else timeout + _ABANDON_GRACE_S)
+    if thread.is_alive():
+        raise TimeoutError(f"telegram call did not return within {timeout:.0f}s")
+    if failure:
+        raise failure[0]
+    return outcome[0]
 
 
 class _HttpTelegramClient:
@@ -624,7 +667,7 @@ class _HttpTelegramClient:
                 await bot.send_message(chat_id=chat_id, text=text)
 
         with _suppress_transport_request_logs():
-            _run_sync(send)
+            _run_sync(send, timeout=_CALL_TIMEOUT_S)
 
     def get_me(self) -> str:
         from telegram import Bot
@@ -635,7 +678,7 @@ class _HttpTelegramClient:
                 return me.username or me.first_name
 
         with _suppress_transport_request_logs():
-            return _run_sync(fetch)
+            return _run_sync(fetch, timeout=_CALL_TIMEOUT_S)
 
     def get_chat(self, *, chat_id: str) -> str:
         from telegram import Bot
@@ -646,7 +689,7 @@ class _HttpTelegramClient:
                 return chat.title or chat.full_name or chat.type
 
         with _suppress_transport_request_logs():
-            return _run_sync(fetch)
+            return _run_sync(fetch, timeout=_CALL_TIMEOUT_S)
 
     def get_webhook_url(self) -> str:
         from telegram import Bot
@@ -657,7 +700,7 @@ class _HttpTelegramClient:
                 return info.url or ""
 
         with _suppress_transport_request_logs():
-            return _run_sync(fetch)
+            return _run_sync(fetch, timeout=_CALL_TIMEOUT_S)
 
     def check_polling(self) -> None:
         from telegram import Bot
@@ -676,7 +719,7 @@ class _HttpTelegramClient:
                     ) from exc
 
         with _suppress_transport_request_logs():
-            _run_sync(check)
+            _run_sync(check, timeout=_CALL_TIMEOUT_S)
 
     def send_prompt(
         self,
@@ -720,7 +763,7 @@ class _HttpTelegramClient:
                 return _SentPrompt(message_id=message.message_id, update_offset=offset)
 
         with _suppress_transport_request_logs():
-            return _run_sync(send)
+            return _run_sync(send, timeout=_CALL_TIMEOUT_S)
 
     async def _drain_pending(self, bot: Any) -> int | None:
         offset: int | None = None
