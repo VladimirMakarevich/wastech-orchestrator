@@ -823,6 +823,8 @@ The trailer risk did **not** materialise here, only because the orchestrator's o
 
 `merge-task --dry-run` remains the cheapest fix and still does not report the one thing that mattered: it printed status / branch / base / pr / pr state / "-> update branch w/ base, then merge via 'squash'" and said nothing about what the squash message would be.
 
+**FIXED**, including the dry-run report this entry calls the cheapest fix — and with one correction to the diagnosis: the lost Conventional Commits type was not merely an unset flag. Without `--subject` the repository's `COMMIT_OR_PR_TITLE` setting takes the **pull-request title**, which the orchestrator itself sets to the bare task title, so the subject was assembled from an orchestrator input by a GitHub setting. Both commits a task produces now come from one place. See [what was fixed](e2e-trial-mobile-template.fixes.md#f18--the-merge-message-the-tool-did-not-write).
+
 **Cost accepted deliberately:** I used `merge-task` here _knowing_ F18, to convert a code-read into an observation. The price is one non-conventional subject line on `main` (`58f16c2`). I am not rewriting published history to tidy it; it stands as the evidence.
 
 ## Auto-mode probes — results so far

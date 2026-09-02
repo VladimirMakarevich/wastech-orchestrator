@@ -2449,6 +2449,11 @@ def _report_merge_plan(
         wait = " (wait for checks)" if wait_for_checks else ""
         resolve_note = "" if resolve else "; --no-resolve: abort on conflict"
         print(f"  -> update branch w/ base, then merge via '{strategy.value}'{wait}{resolve_note}")
+        # The one thing this leaves in the base branch's history forever, and the one thing the
+        # plan used to omit. A rebase writes no commit, so there is nothing to report for it.
+        if plan.commit_subject and strategy is not MergeStrategy.REBASE:
+            print(f"  message:  {plan.commit_subject}")
+            print("            (empty body — the branch's own commits are not the merge message)")
     for warning in plan.warnings:
         print(f"  WARNING — {warning}")
 

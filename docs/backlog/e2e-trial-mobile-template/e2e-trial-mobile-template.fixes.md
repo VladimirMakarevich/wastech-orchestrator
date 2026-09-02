@@ -20,6 +20,7 @@ Kept separate from the findings document for a mechanical reason too: that docum
 | F26 — `confirm_next_task` makes the daemon unkillable | major | **fixed** | `notify/`, `composition.py`, `cli.py`, config |
 | F20 — `run` reads as parked, and `rerun --continue` starts a second engine | major | **fixed** | `process_control.py`, `cli.py` |
 | F25 — the merge gate cannot be operated under a live daemon | major | **fixed** | `cli.py` |
+| F18 — `merge-task` cannot control the squash commit message | minor | **fixed** | `git_manager.py`, `orchestrator.py`, `cli.py` |
 
 ## F1 + F2 — the reviewer under decomposition
 
@@ -192,3 +193,19 @@ Reproduced exactly as filed (`merge-task --dry-run` exits 1 under a live daemon)
 The message therefore stopped carrying its own verb (`_executor_refusal(config, verb)` → `_executor_owner(config)`): the same sentence is now needed as a refusal (`merge-task: <owner>`) and as a note (`merge-task: note: <owner>`), and composing it at the call site is what makes both read like the command that printed them.
 
 **Residual, stated because it is real:** a dry run under a live daemon builds a full `Orchestrator`, which opens `state.db` read-write and runs its `CREATE TABLE IF NOT EXISTS` schema pass — a brief write lock, not a mutation of task state. This is not new (`prs --sync`'s dry run has always done it, and every `plan_*` is documented "read-only; mutates nothing" about the _task_, not about the connection), and WAL keeps it clear of the daemon's own short transactions. A genuinely read-only plan path would need `build_orchestrator` to accept a read-only store, which is a larger change than this finding earns.
+
+## F18 — the merge message the tool did not write
+
+The evidence is already in the finding — a real merge, a real subject on a real `main` (`58f16c2`) — so reproduction here is of the code path: two argv tests, red because `merge_pr` took no `subject`/`body` at all.
+
+**The subject was never the orchestrator's to lose; it was GitHub's to invent.** Worth stating precisely, because the entry's framing ("`merge_pull_request` without `--subject`/`--body`") makes it sound like a missing flag on an otherwise-correct message. Without the flags the target repository's settings decide, and this one is set to `COMMIT_OR_PR_TITLE` + `COMMIT_MESSAGES`: with two commits on the branch that resolves to the **pull-request title**, which the orchestrator sets to `p.task.title` — the bare task title, no Conventional Commits type. So the subject that violated the target's first git rule was assembled from an orchestrator input by a GitHub setting, and no flag was going to fix one half without the other.
+
+**What landed.** A single `task_commit_subject(task_id, title)` in the core, used for both commits a task produces: the code commit on the task branch (which already had this shape, inline) and now the squash/merge commit, which adds the `(#N)` suffix GitHub would have appended itself. One place, because the two disagreeing was the defect. `merge_pr` gains `subject`/`body`, emitted only for `merge`/`squash` — a `rebase` writes no commit and `gh` takes no message for it, which is its own test.
+
+The body is deliberately **empty**. Every commit this orchestrator makes on a branch is a single line, so a body assembled from them can only be a list of internal subjects — which is exactly how `chore(orchestrator): audit trail` reached `main`. The readable account of the change is the pull-request body, and it stays on the pull request rather than being copied into the base branch's permanent history.
+
+**The type is still `feat` for every task**, inherited from the code commit this has always produced. That is not a fix, it is the pre-existing convention, and choosing it per task requires the task file to be able to say so — which is the `full-tool-access` backlog's "a task cannot contribute to its own commit message" (F17), untouched. Stated here so the `docs:`-shaped task that lands as `feat:` is a known limit rather than a new surprise.
+
+One consequence worth recording, because it showed up as two failing tests: the **auto-merge** path takes the same message (`git.auto_merge: true`, which this trial deliberately never ran). Two `test_orchestrator` cases pin `gh pr merge`'s argv exactly and had to be updated — which is the intended reading of them: the argv is a security-relevant surface (no `--admin`, no `--dangerously*`), so anything added to it is meant to break a test and be looked at.
+
+**And the dry run says it.** The finding's "cheapest fix" — `merge-task --dry-run` reporting the message policy — is what makes this checkable without merging: the plan carries the subject the merge would write (`MergePlan.commit_subject`) and prints it under the strategy line, with the empty body named. It is the one thing a merge leaves in the base branch forever and the one thing the plan omitted. Reachable under a live daemon as of F25, which is the configuration an operator running the human merge gate is actually in.

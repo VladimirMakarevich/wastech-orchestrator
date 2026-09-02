@@ -4501,7 +4501,22 @@ def test_global_auto_merge_merges_pr(git_repo, make_git_config, tmp_path: Path) 
     _patch_impl_edit(providers, git_repo)
     result = orch.run_task(_complete_task(tmp_path))
     assert result.final_status is Status.DONE
-    assert _merge_calls(calls) == [["pr", "merge", "https://example/pr/1", "--squash", *_GH_PIN]]
+    # The message is the orchestrator's, not the target repository's settings' (see merge_pr):
+    # `feat(<id>): <title> (#N)` and an empty body, on the auto-merge path exactly as on
+    # `merge-task`.
+    assert _merge_calls(calls) == [
+        [
+            "pr",
+            "merge",
+            "https://example/pr/1",
+            "--squash",
+            "--subject",
+            "feat(task-001): Add a thing (#1)",
+            "--body",
+            "",
+            *_GH_PIN,
+        ]
+    ]
     rec = ledger.records()[0]
     assert rec["auto_merged"] is True and rec["merge_outcome"] == "deadbeef"
     op = store.get_publish_op("task-001", "pr_merge")
@@ -4605,7 +4620,18 @@ def test_auto_merge_wait_for_checks_arms_native_auto(
     result = orch.run_task(_complete_task(tmp_path))
     assert result.final_status is Status.DONE
     assert _merge_calls(calls) == [
-        ["pr", "merge", "https://example/pr/1", "--squash", "--auto", *_GH_PIN]
+        [
+            "pr",
+            "merge",
+            "https://example/pr/1",
+            "--squash",
+            "--subject",
+            "feat(task-001): Add a thing (#1)",
+            "--body",
+            "",
+            "--auto",
+            *_GH_PIN,
+        ]
     ]
     assert ledger.records()[0]["merge_outcome"] == "armed"
 

@@ -155,6 +155,22 @@ def _pretend_daemon_running(clone: Path, monkeypatch: pytest.MonkeyPatch, pid: i
     monkeypatch.setattr(process_control, "is_running", lambda pid, **kw: True)
 
 
+def test_merge_task_dry_run_reports_the_squash_message(
+    project, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The dry run printed status / branch / base / pr / state and "-> merge via 'squash'" — and
+    # said nothing about the one thing that lands in the base branch's history forever.
+    proj, clone = project
+    config = _write_config(proj, clone)
+    _seed_open_pr(clone)
+    monkeypatch.setattr(GitManager, "verify_pr_state", lambda self, url: "OPEN")
+
+    code = cli.main(["--config", str(config), "merge-task", "task-1", "--dry-run"])
+
+    assert code == 0
+    assert "feat(task-1): task-1 (#1)" in capsys.readouterr().out
+
+
 def test_merge_task_dry_run_is_allowed_while_the_daemon_runs(
     project, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:

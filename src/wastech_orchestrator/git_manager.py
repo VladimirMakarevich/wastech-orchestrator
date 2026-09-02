@@ -3039,13 +3039,28 @@ class GitManager:
         return bind(_LOG, task_id=task_id, component="gh")
 
     def merge_pr(
-        self, task_id: str, pr_url: str, *, strategy: MergeStrategy, wait_for_checks: bool
+        self,
+        task_id: str,
+        pr_url: str,
+        *,
+        strategy: MergeStrategy,
+        wait_for_checks: bool,
+        subject: str | None = None,
+        body: str | None = None,
     ) -> str | None:
         """Merge an open PR via ``gh pr merge``. Idempotent via the publish op.
 
         Returns a merge-outcome marker: the merge commit SHA (immediate mode), ``"merged"`` when the
         SHA is unreadable, or ``"armed"`` when GitHub-native auto-merge was armed (``--auto``);
         ``None`` when there is no PR. Reached only when ``git.auto_merge`` resolves true.
+
+        ``subject``/``body`` write the merge commit's message. Omitting them hands it to the
+        **target repository's** merge settings, which is not a neutral default: on a repo set to
+        ``COMMIT_OR_PR_TITLE`` + ``COMMIT_MESSAGES`` a squash then takes its subject from the pull
+        request title (no Conventional Commits type, because the title is the task's own) and its
+        body from every commit on the branch — this orchestrator's private audit-trail commit
+        included. Both were observed landing on a real ``main``. Passed only for the two strategies
+        that produce a commit: a ``rebase`` has none, and ``gh`` takes no message for it.
 
         DANGER: this bypasses the human review gate. It never weakens safety — **no** ``--admin``
         (branch protection is respected), no force-push, exactly one attempt (no retry). A blocked
@@ -3065,6 +3080,8 @@ class GitManager:
         # Fixed argv (no shell, no interpolation); strategy comes from the validated MergeStrategy
         # enum. ``--admin`` is never emitted, so a protected branch's checks remain the real gate.
         args = ["pr", "merge", pr_url, f"--{strategy.value}"]
+        if subject is not None and strategy is not MergeStrategy.REBASE:
+            args += ["--subject", subject, "--body", body or ""]
         if wait_for_checks:
             args.append("--auto")
         result = self._gh(args)

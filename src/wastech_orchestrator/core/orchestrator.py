@@ -288,6 +288,42 @@ RERUN_ELIGIBLE_STATUSES: frozenset[Status] = frozenset(
 )
 
 
+def task_commit_subject(task_id: str, title: str) -> str:
+    """The Conventional-Commits subject for this task's own commit.
+
+    One place, because two commits carry it: the code commit on the task branch and the squash/merge
+    commit that lands it on the base branch. They disagreed before — the squash subject was left to
+    the target repository, which took the bare pull-request title — and the target's own first git
+    rule was "Conventional Commits", so the tool's merge path violated it.
+
+    The type is ``feat`` for every task, inherited from the code commit this has always produced.
+    Choosing it per task needs the task file to be able to say so, which it cannot yet: that is the
+    ``full-tool-access`` backlog's "a task cannot contribute to its own commit message", untouched
+    here.
+    """
+    return f"feat({task_id}): {title}"
+
+
+def merge_commit_subject(task_id: str, title: str, pr_url: str | None) -> str:
+    """:func:`task_commit_subject` plus the pull-request number, for the squash/merge commit.
+
+    The ``(#N)`` suffix is what GitHub appends itself when it is left to compose the subject, and
+    the target repository's history is full of it — so keeping it means the explicit subject reads
+    like every neighbouring commit rather than announcing that a tool wrote it.
+    """
+    number = _pr_number(pr_url)
+    suffix = f" (#{number})" if number else ""
+    return f"{task_commit_subject(task_id, title)}{suffix}"
+
+
+def _pr_number(pr_url: str | None) -> str | None:
+    """The trailing number of a pull-request URL, or ``None`` when it does not end in one."""
+    if not pr_url:
+        return None
+    tail = pr_url.rstrip("/").rsplit("/", 1)[-1]
+    return tail if tail.isdigit() else None
+
+
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -333,6 +369,10 @@ class MergePlan:
     pr_url: str | None = None
     verify_state: str | None = None  # gh PR state when checked (MERGED/OPEN/CLOSED)
     already_merged: bool = False  # PR is MERGED on GitHub → merge-task is an idempotent no-op
+    #: The subject the squash/merge commit would carry (``None`` for a rebase, which makes none).
+    #: In the plan because it is the one thing a merge leaves in the base branch's history forever,
+    #: and the dry run used to be silent about it.
+    commit_subject: str | None = None
     warnings: tuple[str, ...] = ()  # non-fatal (e.g. PR state unverifiable; will still attempt)
     refusals: tuple[str, ...] = ()  # fatal; abort with exit 1
 
@@ -1702,6 +1742,7 @@ class Orchestrator:
             pr_url=pr_url,
             verify_state=verify_state,
             already_merged=already_merged,
+            commit_subject=merge_commit_subject(task_id, row.title, pr_url),
             warnings=tuple(warnings),
             refusals=tuple(refusals),
         )
@@ -1770,7 +1811,16 @@ class Orchestrator:
             )
             self._git.push_branch_update(task_id, branch)
             outcome = self._git.merge_pr(
-                task_id, pr_url, strategy=strategy, wait_for_checks=wait_for_checks
+                task_id,
+                pr_url,
+                strategy=strategy,
+                wait_for_checks=wait_for_checks,
+                subject=merge_commit_subject(task_id, row.title, pr_url),
+                # No body: every commit this orchestrator makes on the branch is a single line, so
+                # a body assembled from them can only be a list of internal subjects — which is how
+                # `chore(orchestrator): audit trail` reached a real `main`. The readable account of
+                # the change is the pull request body, which stays on the pull request.
+                body="",
             )
             log.info("[MERGE-TASK] merged", extra={"pr_url": pr_url, "outcome": outcome})
         except (GitCommandError, PipelineFailed) as exc:
@@ -2785,7 +2835,7 @@ class Orchestrator:
             flow_dir=bundle.flow_dir,
             check_sets=self._check_sets(p),  # normalized command_sets; () = no gate
             pull_request_title=p.task.title,
-            commit_message=f"feat({p.task.id}): {p.task.title}",
+            commit_message=task_commit_subject(p.task.id, p.task.title),
             summary_body_path=self._fallback_summary_path(p),
             branch_mode=self._branch_mode(p.task),
             publish_scope=p.task.publish,
@@ -3948,6 +3998,8 @@ class Orchestrator:
                     pr_url,
                     strategy=git.auto_merge_strategy,
                     wait_for_checks=git.auto_merge_wait_for_checks,
+                    subject=merge_commit_subject(p.task.id, p.task.title, pr_url),
+                    body="",  # see merge_task: the branch's own commits are not a merge body
                 ),
             )
         except GitCommandError as exc:

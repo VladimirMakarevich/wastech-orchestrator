@@ -983,6 +983,60 @@ def test_merge_pr_immediate_argv_sha_and_no_admin(
     assert op is not None and op.status == "completed" and op.result_ref == "deadbeef"
 
 
+def test_merge_pr_squash_carries_the_subject_and_an_empty_body(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # Without these flags the squash message is whatever the TARGET repository's settings dictate:
+    # on a `COMMIT_OR_PR_TITLE` / `COMMIT_MESSAGES` repo that means a subject with no Conventional
+    # Commits type and a body holding every branch commit — the orchestrator's own audit-trail
+    # commit included. Both were observed on a real merge.
+    _task(store)
+    calls: list[list[str]] = []
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=_merge_gh(calls))
+
+    gm.merge_pr(
+        "task-001",
+        _PR_URL,
+        strategy=MergeStrategy.SQUASH,
+        wait_for_checks=False,
+        subject="feat(task-001): T (#1)",
+        body="",
+    )
+
+    assert calls[0] == [
+        "pr",
+        "merge",
+        _PR_URL,
+        "--squash",
+        "--subject",
+        "feat(task-001): T (#1)",
+        "--body",
+        "",
+        "--repo",
+        _GH_SLUG,
+    ]
+
+
+def test_merge_pr_rebase_carries_no_message(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # A rebase produces no merge commit, so there is no message to set and gh takes no such flags.
+    _task(store)
+    calls: list[list[str]] = []
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=_merge_gh(calls))
+
+    gm.merge_pr(
+        "task-001",
+        _PR_URL,
+        strategy=MergeStrategy.REBASE,
+        wait_for_checks=False,
+        subject="feat(task-001): T (#1)",
+        body="",
+    )
+
+    assert calls[0] == ["pr", "merge", _PR_URL, "--rebase", "--repo", _GH_SLUG]
+
+
 def test_merge_pr_wait_for_checks_arms_auto(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
