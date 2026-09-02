@@ -2300,7 +2300,21 @@ _FINALIZE_STATUS: dict[str, Status] = {
 }
 
 
-def _report_finalize_plan(plan: FinalizePlan, *, as_: str) -> None:
+def _move_line(config: OrchestratorConfig, move: tuple[str, str]) -> str:
+    """``<from> -> <to>`` for a task-file move, repo-relative when the paths are in the repo."""
+
+    def show(path: str) -> str:
+        try:
+            return (
+                Path(path).resolve().relative_to(Path(config.repo.local_path).resolve()).as_posix()
+            )
+        except (OSError, ValueError):
+            return path
+
+    return f"{show(move[0])} -> {show(move[1])}"
+
+
+def _report_finalize_plan(plan: FinalizePlan, config: OrchestratorConfig, *, as_: str) -> None:
     """Print the planned reconciliation for ``finalize --dry-run``; writes nothing."""
     print(f"finalize (dry-run): would finalize {plan.task_id} as {as_}")
     print(
@@ -2318,6 +2332,8 @@ def _report_finalize_plan(plan: FinalizePlan, *, as_: str) -> None:
     print(f"  branch:    {plan.branch or '(none)'}")
     abandoned = ", outcome=abandoned" if plan.declared is Status.MANUAL_ACTION_REQUIRED else ""
     print(f"  ledger:    append a manual record{abandoned}")
+    if plan.task_file_move is not None:
+        print(f"  file:      {_move_line(config, plan.task_file_move)} (not committed)")
     for warning in plan.warnings:
         print(f"  WARNING:   {warning}")
 
@@ -2358,7 +2374,7 @@ def cmd_finalize(args: argparse.Namespace) -> int:
         return 1
 
     if args.dry_run:
-        _report_finalize_plan(plan, as_=args.as_)
+        _report_finalize_plan(plan, config, as_=args.as_)
         if owner is not None:
             print(f"finalize: note: {owner}")
         return 0
@@ -2381,6 +2397,11 @@ def cmd_finalize(args: argparse.Namespace) -> int:
     )
     suffix = f" → {result.pr_url}" if result.pr_url else ""
     print(f"{result.task_id}: {result.final_status.value}{suffix} (finalized)")
+    # `finalize` makes no commit, so the move it just made is sitting in the operator's working
+    # tree. Unannounced it was found later in `git status` — or not found, and carried into the next
+    # task's review diff, where a stray path costs a rework round that can do nothing about it.
+    if plan.task_file_move is not None and Path(plan.task_file_move[1]).exists():
+        print(f"finalize: moved {_move_line(config, plan.task_file_move)} (not committed)")
     return _EXIT_BY_STATUS.get(result.final_status, 1)
 
 

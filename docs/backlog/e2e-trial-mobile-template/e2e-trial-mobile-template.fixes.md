@@ -25,6 +25,7 @@ Kept separate from the findings document for a mechanical reason too: that docum
 | F29 — the summary of a declined tick reads as an empty queue | nit | **fixed** | `cli.py` |
 | F19 — `top --help` documents an argv argparse rejects | nit | **fixed** | `cli.py` |
 | F6 — control-state drift fires on the operator's own IDE | minor | **fixed** | `git_manager.py` |
+| F23 — `finalize` leaves the task-file move uncommitted | (one line, no section) | **fixed as visibility** | `cli.py`, `orchestrator.py` |
 
 ## F1 + F2 — the reviewer under decomposition
 
@@ -263,3 +264,15 @@ The finding's own reasoning is what makes this worth fixing rather than shruggin
 The alternative the finding hints at — filtering the report the way the refusal path is filtered, to program-launching keys only — was **rejected**. That would silence a planted `core.hooksPath`, a moved ref's config, a rewritten `pushurl`: everything the fingerprint exists for, in exchange for the same result on this one key.
 
 Two docstring claims were false and are corrected in the same change: the capture called `--local`/`--worktree` "exactly the agent-writable config surface", which holds only where the orchestrator owns the checkout — on the default it is the operator's own working copy, written by them and by their editor too. And [`.agents/rules/git-workflow.md`](../../../.agents/rules/git-workflow.md) said "the fingerprint itself is never dropped, only its consequence"; it now names the one exclusion and why, because an unqualified never is what a later reader would have trusted.
+
+## F23 — the move nobody was told about
+
+This finding has no section in the trial document: it exists as eleven words inside the `analyze-task-run` list ("`finalize` leaves the task-file move uncommitted"). So it was reproduced from the code and from a real repository rather than confirmed, and what came back is one true claim, one consequence the words do not mention, and one guess of mine that the code refuted.
+
+**True, and by contract.** `finalize_task` calls `_relocate_task_file` and makes no commit — its docstring says so ("Runs no pipeline and never commits/pushes/PRs"). With the task file tracked in `tasks/pending/` (the shape a git-distributed task actually has, and the shape the trial ran), `git status` after a finalize shows ` D tasks/pending/task-1.md` plus an untracked `tasks/failed/`. A test pins exactly that.
+
+**The contract is right, so the fix is not "commit it".** The operator may be on `main` — `finalize`'s own cleanup checks out the base branch — and committing there behind their back is worse than a change they can see. What was wrong is that they could not see it: the plan reported status, PR url, cleanup, branch and ledger, the result reported the status, and neither mentioned a file move that had just dirtied their tree. Both surfaces now name it (`file: tasks/pending/task-1.md -> tasks/failed/task-1.md (not committed)`), the destination comes from one pure `lifecycle_destination` so the plan cannot predict a different move than the one that happens, and an `--as abandoned` finalize — which leaves the file in `pending/` — prints nothing.
+
+**My guess, refuted by the code.** I expected the leftover to make the _next_ `finalize` refuse, since `plan_finalize` rejects an unaccounted-dirty tree. It does not: `_unaccounted_dirty_paths` filters through `_is_artifact_path`, and `_excluded_dirs` carries the task lifecycle dir, so a moved task file is expected dirt. Recorded because it is the kind of "obvious" second-order consequence that is worth checking rather than asserting.
+
+**The consequence the eleven words do not mention, deliberately left open.** The leftover _does_ ride into the next task's review diff: `write_current_diff` excludes only the runtime home, while the code commit's `changed_code_paths` also drops the lifecycle dir — and that docstring claimed the two "cover the same set", which was false. This is F24's mechanism on a path the agent may write, and F24's own evidence says what a stray unfixable path costs a reviewer (escalating to a blocking finding by the third task). It is **not** excluded here: nothing else reports an agent editing its own task file, so hiding `tasks/` from review would remove the only surface that would show it. The false claim is corrected in place and the trade-off named there; the exclusion is a decision with a security side, not a cleanup to fold into a nit.

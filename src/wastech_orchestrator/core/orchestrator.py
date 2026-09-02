@@ -324,6 +324,23 @@ def _pr_number(pr_url: str | None) -> str | None:
     return tail if tail.isdigit() else None
 
 
+def lifecycle_destination(task_file: str | None, final: Status) -> Path | None:
+    """Where ``final`` sends a task file, or ``None`` when it sends it nowhere.
+
+    Pure, so a plan can state the move before it happens: ``finalize`` moves a tracked file in the
+    operator's own working tree and commits nothing (by contract — it may be on ``main``, and
+    committing there behind their back is worse than a change they can see), which left the move
+    both unannounced and uncommitted. Naming it is what the two surfaces owe.
+    """
+    folder_name = {Status.DONE: "done", Status.FAILED: "failed"}.get(final)
+    if folder_name is None or not task_file:
+        return None
+    src = Path(task_file)
+    parent = src.parent
+    tasks_root = parent.parent if parent.name in _LIFECYCLE_FOLDERS else parent
+    return tasks_root / folder_name / src.name
+
+
 def _utc_now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -404,6 +421,11 @@ class FinalizePlan:
     pr_url_source: str = "none"  # explicit | recorded | none
     verify_state: str | None = None  # gh PR state when checked (MERGED/OPEN/CLOSED)
     dirty_paths: tuple[str, ...] = ()
+    #: Where the task file will move (``from``, ``to``), or ``None`` when it stays put (an
+    #: ``abandoned`` finalize, or a task with no on-disk file). The move is a tracked change in the
+    #: operator's working tree that ``finalize`` deliberately does not commit, so both the plan and
+    #: the result say it happened rather than leaving it to be discovered in ``git status``.
+    task_file_move: tuple[str, str] | None = None
     warnings: tuple[str, ...] = ()  # non-fatal; require confirmation (no URL / not merged)
     refusals: tuple[str, ...] = ()  # fatal; abort with exit 1
 
@@ -1618,6 +1640,12 @@ class Orchestrator:
             pr_url_source=source,
             verify_state=verify_state,
             dirty_paths=tuple(sorted(dirty)),
+            task_file_move=(
+                (row.source_path, str(destination))
+                if row.source_path
+                and (destination := lifecycle_destination(row.source_path, declared)) is not None
+                else None
+            ),
             warnings=tuple(warnings),
             refusals=tuple(refusals),
         )
@@ -4632,13 +4660,10 @@ class Orchestrator:
         reject is quarantined separately. Idempotent: returns the destination whether it
         moved now or was already in place; returns ``None`` when there is nothing to do.
         """
-        folder_name = {Status.DONE: "done", Status.FAILED: "failed"}.get(final)
-        if folder_name is None or not task_file:
+        dest = lifecycle_destination(task_file, final)
+        if dest is None:
             return None
-        src = Path(task_file)
-        parent = src.parent
-        tasks_root = parent.parent if parent.name in _LIFECYCLE_FOLDERS else parent
-        dest = tasks_root / folder_name / src.name
+        src = Path(task_file or "")
         if src.resolve() == dest.resolve():
             return dest  # already in its lifecycle folder (idempotent restart)
         if not src.exists():

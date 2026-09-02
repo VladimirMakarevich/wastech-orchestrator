@@ -3206,7 +3206,13 @@ class GitManager:
         Git's heuristic misclassifies as binary (e.g. a NUL-delimited fixture) — without it such a
         file rendered as an opaque "Binary files differ", hiding the actual change.
 
-        The runtime home is excluded, so this artifact covers the same set the code commit does. It
+        The runtime home is excluded. That is **not** the same set the code commit covers, which
+        this docstring used to claim: ``changed_code_paths`` also drops the task lifecycle dir
+        (``_excluded_dirs``), and this diff keeps it — so a task-file move an operator ``finalize``
+        left uncommitted rides into the review diff of the next task, which is the ``.worc/``
+        mechanism on a path the agent may write. Not excluded here on purpose: nothing else reports
+        an agent editing its own task file, and hiding it from review would remove the only surface
+        that would show it. It
         is not empty of tracked files: an installed repo ignores the home's *contents* (``.worc/*``)
         so it can re-include ``!.worc/flows/``, ``!.worc/tools/`` and ``!.worc/config.yaml``, which
         makes every flow YAML, every role prompt and the config **tracked** — reviewable in history,
