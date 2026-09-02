@@ -135,10 +135,10 @@ def test_a_declined_task_is_not_asked_about_again_on_the_next_tick(
     (folder / "task-301.md").write_text(_TASK_BODY.format(tid="task-301"), encoding="utf-8")
     notifier = _RecordingNotifier()  # denies
     orch = _GateOrch(notifier)
-    memory: dict[str, float] = {}
+    notes = cli.WatchNotes()
 
     for _tick in range(3):
-        cli.watch_once(orch, config, folder, gate_memory=memory)  # type: ignore[arg-type]
+        cli.watch_once(orch, config, folder, notes=notes)  # type: ignore[arg-type]
 
     assert len(notifier.asks) == 1, notifier.asks  # asked once across three ticks
     assert orch.ran == []  # and never claimed — the decline is still fail-closed
@@ -154,13 +154,13 @@ def test_the_decline_is_forgotten_once_its_cool_off_expires(
     (folder / "task-302.md").write_text(_TASK_BODY.format(tid="task-302"), encoding="utf-8")
     notifier = _RecordingNotifier()
     orch = _GateOrch(notifier)
-    memory: dict[str, float] = {}
+    notes = cli.WatchNotes()
     clock = {"now": 1_000.0}
     monkeypatch.setattr(cli.time, "monotonic", lambda: clock["now"])
 
-    cli.watch_once(orch, config, folder, gate_memory=memory)  # type: ignore[arg-type]
+    cli.watch_once(orch, config, folder, notes=notes)  # type: ignore[arg-type]
     clock["now"] += cli._DECLINE_COOLOFF_S + 1
-    cli.watch_once(orch, config, folder, gate_memory=memory)  # type: ignore[arg-type]
+    cli.watch_once(orch, config, folder, notes=notes)  # type: ignore[arg-type]
 
     assert len(notifier.asks) == 2
 
@@ -191,9 +191,39 @@ def test_an_approved_task_is_claimed_and_nothing_is_remembered(
     (folder / "task-304.md").write_text(_TASK_BODY.format(tid="task-304"), encoding="utf-8")
     notifier = _RecordingNotifier(approved=True)
     orch = _GateOrch(notifier)
-    memory: dict[str, float] = {}
+    notes = cli.WatchNotes()
 
-    cli.watch_once(orch, config, folder, gate_memory=memory)  # type: ignore[arg-type]
+    cli.watch_once(orch, config, folder, notes=notes)  # type: ignore[arg-type]
 
     assert len(orch.ran) == 1
-    assert memory == {}  # only a refusal is remembered
+    assert notes.declined == {}  # only a refusal is remembered
+
+
+def test_a_withheld_task_is_not_summarised_as_an_empty_queue(
+    in_repo_config: OrchestratorConfig, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The two lines were adjacent and disagreed: the gate said it was not claiming a named pending
+    # task, then the summary said "no pending tasks". A gate-declined task produces no
+    # `PipelineResult`, and an empty result list was read as an empty queue.
+    config = _gate_config(in_repo_config, confirm_timeout_s=60)
+    folder = tmp_path / "pending"
+    folder.mkdir()
+    (folder / "task-305.md").write_text(_TASK_BODY.format(tid="task-305"), encoding="utf-8")
+    orch = _GateOrch(_RecordingNotifier())
+    notes = cli.WatchNotes()
+
+    results = cli.watch_once(orch, config, folder, notes=notes)  # type: ignore[arg-type]
+    code = cli._summarize_watch(results, withheld=notes.withheld)
+
+    out = capsys.readouterr().out
+    assert code == 0  # fail-closed, not an error
+    assert notes.withheld == ["task-305"]
+    assert "no pending tasks" not in out
+    assert "task-305" in out
+
+
+def test_an_empty_queue_still_reads_as_an_empty_queue(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert cli._summarize_watch([]) == 0
+    assert "no pending tasks" in capsys.readouterr().out

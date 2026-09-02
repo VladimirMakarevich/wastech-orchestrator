@@ -22,6 +22,7 @@ Kept separate from the findings document for a mechanical reason too: that docum
 | F25 — the merge gate cannot be operated under a live daemon | major | **fixed** | `cli.py` |
 | F18 — `merge-task` cannot control the squash commit message | minor | **fixed** | `git_manager.py`, `orchestrator.py`, `cli.py` |
 | F11 — the observe turn is blind to the step it is explaining | major | **fixed** | `core/supervisor.py` |
+| F29 — the summary of a declined tick reads as an empty queue | nit | **fixed** | `cli.py` |
 
 ## F1 + F2 — the reviewer under decomposition
 
@@ -226,3 +227,14 @@ The section's own text carries the instruction that the trial's failure needed: 
 Five tests. The positive one is built as the trial's exact situation — an unobserved `fixing` round followed by an observed `rework` — and two negatives pin the traps: the observed step is not repeated as its own history (a single step rendered twice looks like the loop the observer is asked to judge), and the first step of a run gets no section at all.
 
 **Not fixed, and it is the more expensive half of the entry:** the supervisor also wrote "I verified all three findings; all are accurate" about blockers that were false, having never read the subtask spec that forbade the changes they demanded. That is the same starvation as F1 on a different surface, and it needs the subtask spec in the observe turn's reach, not more of the run's own output. Left for its own change rather than folded in here.
+
+## F29 — "no pending tasks", printed under the name of a pending task
+
+Reproduced as filed: two adjacent lines disagreeing, because a gate-declined task produces no `PipelineResult` and `_summarize_watch` reads an empty result list as an empty queue.
+
+The fix needed a channel that did not exist — nothing carried "we looked and deliberately did not take it" out of a tick — so a pass now collects the ids it withheld and the summary names them (`nothing claimed (1 pending task(s) held back: 002d) — the log says why`). Exit code stays **0**: a fail-closed decline is the gate working, and the trial verified that exit code as correct.
+
+Two things beyond the entry:
+
+- **An unmerged dependency is withheld too.** A `WAITING` skip has the identical shape — a named pending task, no result, and the same "no pending tasks" summary — and it is a non-blocking skip, so it is the case an operator meets most often. Fixing only the gate would have left the sentence lying in the more common half.
+- **The parameter budget was full, and the ratchet is not for widening.** Threading the collector took `watch_loop` to 11 arguments against a `PLR0913` limit of 10. Rather than add the code to `cli.py`'s per-file ignores — the burn-down list, which is only ever meant to shrink — two merges paid for it, and both are things the code already treated as one: the gate's cool-off map and the withheld list became one `WatchNotes` ("what the pass decided about tasks it did not run"), and `stop_event`/`stop_file` became one `StopChannels`, which is how the loop's own docstring had described them all along ("Two stop channels are checked around ticks and during idle sleep"). Net: 10 arguments, two fewer loose parameters than before the finding.

@@ -1005,6 +1005,8 @@ Single-pass `worc watch --poll-seconds 0` with `ask_timeout_s: 90`, 002c merged 
 
 Severity: nit. Lever: `cli.py` `_summarize_watch`. The two lines above are adjacent and disagree: the gate says it is **not claiming a specific pending task**, then the summary says **"no pending tasks"**. `_summarize_watch` (cli.py:3558-3562) prints that sentence whenever `results` is empty, and a gate-declined task produces no `PipelineResult`. So the operator-facing summary of a deliberate decline reads as an empty queue. It should distinguish "nothing pending" from "pending, but not claimed".
 
+**FIXED**, and an unmerged dependency's `WAITING` skip — the same shape, and the commoner half — is reported the same way. See [what was fixed](e2e-trial-mobile-template.fixes.md#f29--no-pending-tasks-printed-under-the-name-of-a-pending-task).
+
 ### Approve / deny: NOT tested, and why I did not fake them
 
 Both branches require a human pressing a button in the operator's Telegram chat. The operator is asleep; I have no legitimate way to answer. I did **not** reach for the bot token in `.worc/.env` to post a synthetic approval: impersonating the operator's approval would destroy the only thing the gate is for, and it is an outward action on a third-party service that was not authorised.

@@ -20,6 +20,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from importlib import resources
 from importlib.resources.abc import Traversable
@@ -1653,6 +1654,24 @@ def promote_tasks(
     return moved, errors
 
 
+@dataclass
+class WatchNotes:
+    """The bookkeeping one ``watch`` pass carries in and hands back out.
+
+    ``declined`` is the claim gate's per-task cool-off, owned by :func:`watch_loop` for the
+    daemon's lifetime so a refusal is not re-asked on every tick. ``withheld`` is what a pass
+    deliberately did not claim — a gate refusal, or a dependency that is not merged yet — which no
+    ``PipelineResult`` records, so without it the operator-facing summary cannot tell an empty queue
+    from one nobody was allowed to take from, and says the former.
+
+    One object rather than two keyword arguments because they are one thing: what the pass decided
+    about tasks it did not run, kept for the next tick and for the operator.
+    """
+
+    declined: dict[str, float] = field(default_factory=dict)
+    withheld: list[str] = field(default_factory=list)
+
+
 # How long a refused claim is left alone before the gate asks about that task again. A refusal
 # ("not now") must not become "never" — a daemon runs for days and the operator would have no way
 # back other than a restart — but re-asking on the next tick is worse: `break` ends only the
@@ -1705,24 +1724,24 @@ def _claim_allowed(
     config: OrchestratorConfig,
     task_id: str | None,
     title: str | None,
-    gate_memory: dict[str, float] | None,
+    notes: WatchNotes | None,
 ) -> bool:
     """The claim gate with its memory: ask, unless this task was refused inside the cool-off.
 
-    ``gate_memory`` maps a task id to the monotonic instant its cool-off ends; the daemon owns one
-    for its lifetime and a single-pass caller passes ``None`` (one tick has nothing to remember).
-    A refusal for an unidentified task is not remembered — there is no key to remember it under,
-    and such a file is rejected loudly by the gate it never reaches.
+    ``notes.declined`` maps a task id to the monotonic instant its cool-off ends; the daemon owns
+    the notes for its lifetime and a single-pass caller may pass ``None`` (one tick has nothing to
+    remember). A refusal for an unidentified task is not remembered — there is no key to remember it
+    under, and such a file is rejected loudly by the gate it never reaches.
     """
-    if gate_memory is not None and task_id is not None:
-        until = gate_memory.get(task_id)
+    if notes is not None and task_id is not None:
+        until = notes.declined.get(task_id)
         if until is not None and time.monotonic() < until:
             _LOG.debug("next-task gate: %s was refused recently; not asking again yet", task_id)
             return False
     if _confirm_next_task(orchestrator, config, task_id, title):
         return True
-    if gate_memory is not None and task_id is not None:
-        gate_memory[task_id] = time.monotonic() + _DECLINE_COOLOFF_S
+    if notes is not None and task_id is not None:
+        notes.declined[task_id] = time.monotonic() + _DECLINE_COOLOFF_S
     return False
 
 
@@ -1750,7 +1769,7 @@ def watch_once(
     folder: Path,
     *,
     queue: str | None = None,
-    gate_memory: dict[str, float] | None = None,
+    notes: WatchNotes | None = None,
 ) -> list[PipelineResult]:
     """Resume any in-flight task, then process pending tasks per the auto-mode rule.
 
@@ -1769,8 +1788,9 @@ def watch_once(
     self-ref) is terminally rejected. The skip does **not** consume the auto-mode-off "one task"
     budget, so the slot still runs one real eligible task per tick.
 
-    ``gate_memory`` carries the claim gate's per-task refusals across ticks (see
-    :func:`_claim_allowed`); ``None`` disables that memory, which is what a single pass wants.
+    ``notes`` carries the claim gate's per-task refusals across ticks and collects what this pass
+    deliberately did not claim (see :class:`WatchNotes`); ``None`` means neither is kept, which is
+    all a single pass with no operator summary needs.
 
     A pending file whose id already reached a terminal status and is that task's own leftover is
     also skipped (:func:`_already_settled`): a ``manual_action_required`` task keeps its file in
@@ -1813,13 +1833,17 @@ def watch_once(
             verdict = orchestrator.dependency_eligibility(task_id, depends_on, pending=pending_map)
             if verdict.state is Eligibility.WAITING:
                 _LOG.info("task %s waiting: %s", task_id, verdict.detail)
+                if notes is not None:
+                    notes.withheld.append(task_id)
                 continue  # non-blocking skip — try the next eligible task
             if verdict.state is Eligibility.BROKEN:
                 results.append(orchestrator.reject_dependency(str(task_file), verdict.detail))
                 continue  # fail-closed terminal reject; the slot stays free
         if config.orchestrator.auto_mode.confirm_next_task and not _claim_allowed(
-            orchestrator, config, task_id, scan.title, gate_memory
+            orchestrator, config, task_id, scan.title, notes
         ):
+            if notes is not None and task_id is not None:
+                notes.withheld.append(task_id)
             break  # operator denied / silent / refused recently → leave pending, stop this cycle
         result = orchestrator.run_task(str(task_file))
         results.append(result)
@@ -1873,6 +1897,25 @@ def _build_cleanup_hook(config: OrchestratorConfig) -> Callable[[], None] | None
     return _run
 
 
+class StopChannels(NamedTuple):
+    """How a graceful stop reaches :func:`watch_loop` — one concept, two carriers.
+
+    ``event`` is set by the POSIX ``SIGTERM`` handler; ``file`` is the cross-platform sentinel
+    ``stop`` writes, and on Windows (where a signal cannot cross processes) it is the only one that
+    ever fires. They are checked together everywhere, and the interruptible poll sleep needs the
+    event's own ``wait`` — which is why this is a pair rather than one predicate.
+    """
+
+    event: threading.Event | None = None
+    file: Path | None = None
+
+
+#: No stop wiring at all — the default for a caller that runs the loop without a stop ladder
+#: (a single pass, or a test). A module-level singleton because it is immutable and a call in an
+#: argument default is its own hazard.
+NO_STOP_CHANNELS = StopChannels()
+
+
 # Granularity for noticing a stop request during the between-tick poll sleep. Bounds how long a
 # stop takes to be seen on Windows, where the SIGTERM event never fires cross-process and the
 # stop-file is the only channel (see watch_loop's poll-sleep loop). Kept small so shutdown lands
@@ -1889,9 +1932,9 @@ def watch_loop(
     queue: str | None = None,
     max_iterations: int | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
-    stop_event: threading.Event | None = None,
-    stop_file: Path | None = None,
+    stop: StopChannels = NO_STOP_CHANNELS,
     cleanup_hook: Callable[[], None] | None = None,
+    notes: WatchNotes | None = None,
 ) -> list[PipelineResult]:
     """Run ``watch_once`` on a loop, refreshing the repo each tick (periodic discovery).
 
@@ -1900,32 +1943,29 @@ def watch_loop(
     ``poll_interval <= 0`` runs exactly one tick (single pass, no sleep). ``max_iterations`` bounds
     the loop for tests; in production the loop runs until interrupted.
 
-    Two stop channels are checked around ticks and during idle sleep: a ``stop_event`` (set by a
-    POSIX ``SIGTERM`` handler) and the cross-platform ``stop_file`` sentinel. During an active tick,
-    ``cmd_watch`` injects the same predicate into the FlowEngine, which parks before the next node;
-    this loop then sees the still-present channel and exits. The ``sleep_fn`` path is kept for
+    Both :class:`StopChannels` are checked around ticks and during idle sleep. During an active
+    tick, ``cmd_watch`` injects the same predicate into the FlowEngine, which parks before the next
+    node; this loop then sees the still-present channel and exits. The ``sleep_fn`` path is kept for
     callers without an event (existing tests).
     """
 
     def _stop_requested() -> bool:
-        if stop_event is not None and stop_event.is_set():
+        if stop.event is not None and stop.event.is_set():
             return True
-        return stop_file is not None and process_control.stop_file_requested(stop_file)
+        return stop.file is not None and process_control.stop_file_requested(stop.file)
 
     results: list[PipelineResult] = []
     iteration = 0
-    # The claim gate's refusal memory, owned here so it lives exactly as long as this daemon: a
-    # restart is the operator's own "ask me again". Deliberately not persisted — a decline is about
-    # this moment, and a durable one would need its own expiry story and an operator command to
-    # clear it.
-    gate_memory: dict[str, float] = {}
+    # The gate's refusal memory lives exactly as long as this loop: a restart is the operator's own
+    # "ask me again". Deliberately not persisted — a decline is about this moment, and a durable one
+    # would need its own expiry story and an operator command to clear it. A caller that wants to
+    # report what was withheld passes its own notes in.
+    notes = notes if notes is not None else WatchNotes()
     while True:
         if _stop_requested():
             break
         orchestrator.refresh_repo()
-        results.extend(
-            watch_once(orchestrator, config, folder, queue=queue, gate_memory=gate_memory)
-        )
+        results.extend(watch_once(orchestrator, config, folder, queue=queue, notes=notes))
         iteration += 1
         # Idle-gap memory cleanup: the single-slot invariant guarantees no active task here, but
         # double-check (a RUNNING soft-pause still holds the slot) so cleanup never races a task or
@@ -1936,9 +1976,9 @@ def watch_loop(
             break
         if max_iterations is not None and iteration >= max_iterations:
             break
-        if stop_event is not None:
+        if stop.event is not None:
             # Interruptible poll sleep: wait in _STOP_POLL_SECONDS chunks, re-checking both stop
-            # channels each chunk. On POSIX stop_event.wait wakes the instant SIGTERM fires; on
+            # channels each chunk. On POSIX the event's wait wakes the instant SIGTERM fires; on
             # Windows the event never fires cross-process, so the stop-file (checked by
             # _stop_requested) is the only channel — a monolithic wait(poll_interval) would delay
             # shutdown by up to poll_interval (300s), far past `stop --timeout` (30s), orphaning the
@@ -1946,7 +1986,7 @@ def watch_loop(
             remaining = float(poll_interval)
             while remaining > 0 and not _stop_requested():
                 chunk = min(_STOP_POLL_SECONDS, remaining)
-                if stop_event.wait(chunk):  # returns True the instant SIGTERM fires (POSIX)
+                if stop.event.wait(chunk):  # returns True the instant SIGTERM fires (POSIX)
                     break
                 remaining -= chunk
         else:
@@ -3691,9 +3731,23 @@ def cmd_telegram_test(args: argparse.Namespace) -> int:
     return 0
 
 
-def _summarize_watch(results: list[PipelineResult]) -> int:
-    """Print one line per processed task and return the worst exit code (0 when nothing ran)."""
+def _summarize_watch(results: list[PipelineResult], *, withheld: Sequence[str] = ()) -> int:
+    """Print one line per processed task and return the worst exit code (0 when nothing ran).
+
+    ``withheld`` are pending tasks the tick deliberately did not claim (see :func:`watch_once`).
+    They produce no result, so an empty result list alone cannot tell an empty queue from a queue
+    nobody was allowed to take from — and the summary used to print "no pending tasks" directly
+    under a gate line naming the pending task it had just declined. Still exit 0: a fail-closed
+    decline is the gate working, not a failure.
+    """
     if not results:
+        held = sorted(set(withheld))
+        if held:
+            print(
+                f"watch: nothing claimed ({len(held)} pending task(s) held back: "
+                f"{', '.join(held)}) — the log says why"
+            )
+            return 0
         print("watch: nothing to do (slot free, no pending tasks)")
         return 0
     for result in results:
@@ -3755,6 +3809,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
             env_file=resolve_env_file_path(args)[0],
             heartbeat_seconds=args.heartbeat_seconds,
         )
+        notes = WatchNotes()
         return _summarize_watch(
             watch_loop(
                 orchestrator,
@@ -3763,7 +3818,9 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 poll_interval=poll,
                 queue=args.queue,
                 cleanup_hook=cleanup_hook,
-            )
+                notes=notes,
+            ),
+            withheld=notes.withheld,
         )
 
     # Daemon: refuse a second watcher for the same artifact root. A stale PID file (process gone) is
@@ -3809,6 +3866,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
     print(f"watch: polling every {poll}s for git-pushed tasks (Ctrl-C or 'stop' to exit)")
     results: list[PipelineResult] = []
+    daemon_notes = WatchNotes()
     stopped = False
     try:
         with controller:
@@ -3825,9 +3883,9 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 folder,
                 poll_interval=poll,
                 queue=args.queue,
-                stop_event=controller.event,
-                stop_file=stop_path,
+                stop=StopChannels(controller.event, stop_path),
                 cleanup_hook=cleanup_hook,
+                notes=daemon_notes,
             )
             # Graceful stop arrived via SIGTERM (event) or the stop-file (Windows / cross-shell).
             stopped = controller.event.is_set() or process_control.stop_file_requested(stop_path)
@@ -3848,7 +3906,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     if stopped:
         print("watch: stopped")  # graceful shutdown (SIGTERM or stop-file)
         return 0
-    return _summarize_watch(results)
+    return _summarize_watch(results, withheld=daemon_notes.withheld)
 
 
 class _StopDecision(NamedTuple):
