@@ -279,6 +279,7 @@ class EvaluatorNodeRunner:
                 # an evaluator that emitted findings as a gate that "passed". The agent runner has
                 # always passed this; the evaluator runner dropped it one layer up.
                 final_message=outcome.result.final_message,
+                gating_findings_name_no_path=_no_gating_finding_names_a_path(findings, gating),
             ),
             node_run_id=run_id,
         )
@@ -670,6 +671,27 @@ class EvaluatorNodeRunner:
             return ()
         gate_rank = _severity_rank(node.gate_severity)
         return tuple(self._is_blocking(f, gate_rank) for f in raw_findings)
+
+
+def _no_gating_finding_names_a_path(
+    findings: tuple[Finding, ...], gating: tuple[bool, ...]
+) -> bool:
+    """Whether the verdict gates and yet no gating finding says where.
+
+    The rework edge leads to ``fixing``, whose whole job is to open a named source location and
+    change it; a gating finding carrying no path gives it nothing to open. Observed twice on the
+    same trial, both times the same shape: the evaluator did not find a defect, it reported that it
+    *could not review* — a contradiction in its own instructions once, a build that died in its
+    sandbox the other time — and the findings contract, whose ``path`` is nullable by design, had no
+    way to say so. Each refusal was accepted as an ordinary verdict and spent a full fix round (426s
+    and 474s) establishing there was nothing to fix.
+
+    Judged over the **gating** findings only, and only when they are all pathless. One pathless
+    blocker beside a located one still leaves ``fixing`` real work, so that is not this signal; and
+    an advisory finding without a path routes nowhere and costs nothing.
+    """
+    gated = [f for f, gates in zip(findings, gating, strict=True) if gates]
+    return bool(gated) and not any(f.paths for f in gated)
 
 
 def _to_finding(raw: Mapping[str, Any]) -> Finding:

@@ -24,6 +24,8 @@ from typing import Any, Protocol
 
 from wastech_orchestrator.config.schema import TelegramConfig
 from wastech_orchestrator.notify.interface import (
+    TRACE_ADOPTED_COMMITS,
+    TRACE_FINDINGS_WITHOUT_A_PATH,
     TRACE_GIT_CONTROL_DRIFT,
     TRACE_REWORK_EXHAUSTED,
     TRACE_UNEXPECTED_WRITE,
@@ -532,11 +534,13 @@ def _one_line(text: str, *, limit: int = _FINDING_REASON_LIMIT) -> str:
 
 # Maps a node's edge-selecting outcome (NodeOutcome.kind) to a glanceable emoji. The distinct
 # leading glyph also keeps a trace line visually separable from HITL gate prompts in the same chat.
-# Three labels here are synthetic (not raw NodeOutcome.kinds), all rendered ⚠️ so they read as
+# Five labels here are synthetic (not raw NodeOutcome.kinds), all rendered ⚠️ so they read as
 # "moved on, may need follow-up" rather than a clean pass: TRACE_REWORK_EXHAUSTED is a non-blocking
 # evaluator that accepted only because its max_rework_per_stage budget ran out,
 # TRACE_UNEXPECTED_WRITE is a node with a shell but no write access that changed the working tree,
-# and TRACE_GIT_CONTROL_DRIFT is such a node changing git control state.
+# TRACE_GIT_CONTROL_DRIFT is such a node changing git control state, TRACE_ADOPTED_COMMITS is a
+# publish that merged in commits this run did not make, and TRACE_FINDINGS_WITHOUT_A_PATH is a
+# gating verdict none of whose gating findings names a source path.
 _TRACE_EMOJI: dict[str, str] = {
     "done": "✅",
     "accept": "✅",
@@ -546,6 +550,8 @@ _TRACE_EMOJI: dict[str, str] = {
     TRACE_REWORK_EXHAUSTED: "⚠️",
     TRACE_UNEXPECTED_WRITE: "⚠️",
     TRACE_GIT_CONTROL_DRIFT: "⚠️",
+    TRACE_ADOPTED_COMMITS: "⚠️",
+    TRACE_FINDINGS_WITHOUT_A_PATH: "⚠️",
 }
 
 

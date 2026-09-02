@@ -51,6 +51,7 @@ from wastech_orchestrator.core.flow.control_bundle import (
     load_control_bundle,
 )
 from wastech_orchestrator.core.flow.engine import (
+    Finding,
     FlowCancelled,
     FlowRunResult,
     NodeOutcome,
@@ -186,6 +187,7 @@ from wastech_orchestrator.memory import (
 )
 from wastech_orchestrator.notify import (
     TRACE_ADOPTED_COMMITS,
+    TRACE_FINDINGS_WITHOUT_A_PATH,
     TRACE_GIT_CONTROL_DRIFT,
     TRACE_REWORK_EXHAUSTED,
     TRACE_UNEXPECTED_WRITE,
@@ -463,6 +465,22 @@ def _top_blocking_finding(findings: object) -> TerminalFinding | None:
         reason=str(best.get("reason") or ""),
         paths=paths,
     )
+
+
+#: Longest finding text carried into the pathless-gating-verdict warning. The operator needs enough
+#: to tell "I could not review the diff" from a real defect written without a path; the whole
+#: finding is already on disk in ``findings.json``, which the log line's node id points at.
+_WARNED_FINDING_MAX = 200
+
+
+def _first_finding_reason(findings: Sequence[Finding]) -> str:
+    """The first finding's text, bounded, for a log line — ``""`` when there is none."""
+    if not findings:
+        return ""
+    reason = " ".join(findings[0].reason.split())
+    if len(reason) <= _WARNED_FINDING_MAX:
+        return reason
+    return reason[: _WARNED_FINDING_MAX - 1].rstrip() + "…"
 
 
 def _stuck_report_path(failure_report_path: str | None) -> str | None:
@@ -3667,6 +3685,28 @@ class Orchestrator:
                     ", ".join(outcome.adopted_commits[:5]),
                     extra={"stage": node.id},
                 )
+            # A gating verdict none of whose gating findings names a source path. The rework edge
+            # leads to `fixing`, whose job is to open a named location and change it, so this round
+            # can only end in a refusal — which is what an evaluator reporting it *could not
+            # review* produces, and the findings contract (nullable `path` by design) has no way to
+            # say that instead. Deliberately a warning and not a park: the loop keeps its named
+            # budget, and a verdict that gates for a real reason but was written without a path
+            # must not be discarded. This line is what lets an operator tell a wasted round from a
+            # productive one while it is still running, instead of reading it out of the ledger
+            # afterwards.
+            findings_without_a_path = False
+            if outcome.gating_findings_name_no_path:
+                findings_without_a_path = True
+                self._log(p.task.id).warning(
+                    "the gating findings name no source path, so the fix step has nothing to open "
+                    "— continuing per policy; if the evaluator was reporting that it could not "
+                    "review rather than a defect, this round will change nothing",
+                    extra={
+                        "stage": node.id,
+                        "findings": len(outcome.findings),
+                        "first_finding": _first_finding_reason(outcome.findings),
+                    },
+                )
             # Best-effort live progress trace: one message per executed node finish (never on a
             # skip). Gated on the flag alone — when Telegram is off the notifier is a NullNotifier
             # and this is a no-op. Carries only node id + outcome (no secrets); never raises. A
@@ -3684,6 +3724,10 @@ class Orchestrator:
                     trace_outcome = TRACE_UNEXPECTED_WRITE
                 elif outcome.adopted_commits:
                     trace_outcome = TRACE_ADOPTED_COMMITS
+                elif findings_without_a_path:
+                    # Last of the five: a wasted rework round is worth saying, but never at the
+                    # cost of the single label slot when git control state also moved.
+                    trace_outcome = TRACE_FINDINGS_WITHOUT_A_PATH
                 self._notifier.send_trace(task_id=p.task.id, node_id=node.id, outcome=trace_outcome)
             # Chronological per-run index: one line per executed node run of every kind, so an
             # operator can read a re-running node's sequence without listing run-*/ dirs. Runs that

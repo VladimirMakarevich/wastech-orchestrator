@@ -2065,6 +2065,81 @@ def test_evaluator_maps_blocking_findings(
     assert result.outcome.kind == expected
 
 
+def _review_verdict(tmp_path: Path, findings: list[dict[str, Any]]) -> Any:
+    """Run a default `review` evaluator over *findings* and return its NodeResult."""
+    (tmp_path / "r.md").write_text("review {diff_path}", "utf-8")
+    node = _evaluator("review")
+    services = _services(
+        FakeRouter(_result({"findings": findings})),
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    return EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+
+def test_a_gating_verdict_with_no_path_anywhere_is_flagged_for_the_operator(
+    tmp_path: Path,
+) -> None:
+    """F10: the contract cannot say "I could not review", so at least say it out loud.
+
+    Verbatim shape of both occurrences on the trial — one blocking finding, `path: null`, whose
+    text is a refusal rather than a defect. Routing is unchanged (the loop keeps its named budget,
+    and a real blocker written without a path must not be discarded), but the outcome now carries
+    the flag the orchestrator turns into an operator warning and a ⚠️ trace, so a round that cannot
+    end in a fix is visible while it runs instead of afterwards in the ledger.
+    """
+    result = _review_verdict(
+        tmp_path,
+        [
+            {
+                "severity": "blocking",
+                "path": None,
+                "what": (
+                    "I cannot perform the requested diff review under the provided constraints "
+                    "because the task, plan, and diff are only available under `.worc-io/`."
+                ),
+                "fix": "Provide the task, plan, and diff content directly in the prompt.",
+            }
+        ],
+    )
+    assert result.outcome.kind == "rework"  # a warning, not a gate
+    assert result.outcome.gating_findings_name_no_path is True
+
+
+def test_a_located_blocker_beside_a_pathless_one_is_not_flagged(tmp_path: Path) -> None:
+    # `fixing` has real work whenever one gating finding names a location, so a mixed verdict is
+    # not this signal — flagging it would cry wolf on every review that also made a whole-diff
+    # observation.
+    result = _review_verdict(
+        tmp_path,
+        [
+            {"severity": "blocking", "path": None, "what": "no tests at all", "fix": "add some"},
+            {"severity": "blocking", "path": "src/x.py", "what": "off by one", "fix": "use <="},
+        ],
+    )
+    assert result.outcome.kind == "rework"
+    assert result.outcome.gating_findings_name_no_path is False
+
+
+def test_a_pathless_advisory_finding_is_not_flagged(tmp_path: Path) -> None:
+    # An advisory finding routes nowhere and costs no round, so it never warns — only a finding
+    # the gate actually sent back does.
+    result = _review_verdict(
+        tmp_path,
+        [{"severity": "low", "path": None, "what": "consider a comment", "fix": None}],
+    )
+    assert result.outcome.kind == "accept"
+    assert result.outcome.gating_findings_name_no_path is False
+
+
+def test_a_clean_verdict_is_not_flagged(tmp_path: Path) -> None:
+    # Nothing gated, so there is nothing to warn about.
+    result = _review_verdict(tmp_path, [])
+    assert result.outcome.kind == "accept"
+    assert result.outcome.gating_findings_name_no_path is False
+
+
 @pytest.mark.parametrize(
     ("gate_severity", "severity", "expected"),
     [

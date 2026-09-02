@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from wastech_orchestrator.notify.interface import (
     TRACE_ADOPTED_COMMITS,
+    TRACE_FINDINGS_WITHOUT_A_PATH,
     TRACE_GIT_CONTROL_DRIFT,
     TRACE_REWORK_EXHAUSTED,
     TRACE_UNEXPECTED_WRITE,
@@ -27,6 +28,7 @@ from wastech_orchestrator.notify.telegram import TelegramNotifier, build_notifie
 
 __all__ = [
     "TRACE_ADOPTED_COMMITS",
+    "TRACE_FINDINGS_WITHOUT_A_PATH",
     "TRACE_GIT_CONTROL_DRIFT",
     "TRACE_REWORK_EXHAUSTED",
     "TRACE_UNEXPECTED_WRITE",

@@ -678,7 +678,10 @@ def test_rework_budget_exhausted_warns_operator_and_marks_trace(
     (flows / "roles" / "fixing.md").write_text("Fix the issue.", "utf-8")
     (flows / "implementation.yaml").write_text(_NON_BLOCKING_REVIEW_FLOW, "utf-8")
 
-    gating = {"findings": [{"severity": "high", "path": None, "what": "boom", "fix": None}]}
+    # The finding names a path on purpose: a gating verdict whose gating findings are ALL
+    # pathless takes the `rework (no gating finding names a path)` trace label instead of the
+    # plain `rework` this test asserts for the pre-exhaustion pass. That label has its own test.
+    gating = {"findings": [{"severity": "high", "path": "feature.py", "what": "boom", "fix": None}]}
     providers = _both(outputs={"review": ("needs work", gating)})
     notifier = RecordingNotifier()
     orch, store, _, art = _build(
@@ -738,6 +741,73 @@ def test_rework_budget_exhausted_warns_operator_and_marks_trace(
     assert follow_ups[0]["evidence"] == [
         "review evaluator finding still open — rework budget exhausted"
     ]
+
+
+def test_a_gating_verdict_with_no_path_warns_the_operator_and_marks_the_trace(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    """F10, end to end: a rework round that cannot end in a fix says so while it is running.
+
+    The rework edge leads to a node whose job is to open a named location and change it, so a
+    gating verdict whose gating findings are all pathless spends a full round and changes nothing.
+    On the trial that shape was an evaluator reporting it *could not review* — twice, 426s and
+    474s — and the findings contract had no way to say that instead of "here is a defect".
+
+    Routing is deliberately unchanged: the verdict still reworks, the loop keeps its named budget,
+    and a blocker that gates for a real reason but was written without a path is not discarded.
+    What is new is that the operator is told, on the console and in the live trace.
+    """
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+    from wastech_orchestrator.notify import TRACE_FINDINGS_WITHOUT_A_PATH
+
+    flows = tmp_path / "flows"
+    (flows / "roles").mkdir(parents=True)
+    (flows / "roles" / "implementation.md").write_text("Implement {task_path}.", "utf-8")
+    (flows / "roles" / "review.md").write_text("Review the change.", "utf-8")
+    (flows / "roles" / "fixing.md").write_text("Fix the issue.", "utf-8")
+    (flows / "implementation.yaml").write_text(_NON_BLOCKING_REVIEW_FLOW, "utf-8")
+
+    refusal = {
+        "findings": [
+            {
+                "severity": "high",
+                "path": None,
+                "what": "I cannot review the diff: the context files are ones I may not read.",
+                "fix": "Run the review with a context path that is permitted.",
+            }
+        ]
+    }
+    providers = _both(outputs={"review": ("needs work", refusal)})
+    notifier = RecordingNotifier()
+    orch, _, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+        config_kwargs={"telegram_trace": True},
+    )
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
+
+    messages: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    logger = logging.getLogger("wastech_orchestrator")
+    handler = _Collect()
+    logger.addHandler(handler)
+    try:
+        result = orch.run_task(_complete_task(tmp_path, "task-nopath"))
+    finally:
+        logger.removeHandler(handler)
+
+    assert result.final_status is Status.DONE  # a warning, never a park or a manual terminal
+    review_traces = [c["outcome"] for c in notifier.trace_calls if c["node_id"] == "review"]
+    assert TRACE_FINDINGS_WITHOUT_A_PATH in review_traces
+    assert any("the gating findings name no source path" in m for m in messages)
 
 
 def _run_complete_task_store_dir(

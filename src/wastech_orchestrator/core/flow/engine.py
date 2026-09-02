@@ -159,6 +159,15 @@ class NodeOutcome:
     would inspect the working tree, while the aspect that matters ("hooks: hook 'post-commit'
     added") is the one that makes the next orchestrator git command execute provider-supplied
     code.
+
+    ``gating_findings_name_no_path`` is the evaluator runner's report that its verdict gates but
+    not one of the gating findings says **where**. The node this routes to is ``fixing``, and a
+    path is what ``fixing`` acts on, so such a round can only end in a refusal — which is what a
+    reviewer reporting it *could not review* produces, an infrastructure fault the findings
+    contract has no way to express. Warned rather than parked, through the same console + ⚠️ trace
+    surface: the loop is still bounded by its named budget, and a verdict that gates for a real
+    reason but was written without a path must not be discarded. What the operator gets is the one
+    signal that tells a wasted round from a productive one while it is still running.
     """
 
     kind: str
@@ -169,6 +178,7 @@ class NodeOutcome:
     unexpected_write: bool = False
     git_control_drift: str | None = None
     adopted_commits: tuple[str, ...] = ()
+    gating_findings_name_no_path: bool = False
 
 
 def skip_outcome(node: FlowNode) -> NodeOutcome:

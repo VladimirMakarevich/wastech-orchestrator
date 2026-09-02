@@ -12,6 +12,7 @@ Your findings are consumed by a downstream LLM agent that will do the rework, no
 - Make each finding self-contained and actionable enough to fix without re-reading the whole diff — and no more detail than that.
 - One finding per issue; do not repeat the same point across entries.
 - No findings means the diff is clean — return an empty `findings` array, not prose.
+- **A blocking finding names a path.** The agent that receives it can only open a location and change it, so a blocker with no path sends it on a round that cannot end in a fix. Never invent a path to satisfy this. If what you have to report is that you could **not** review the change — a context file you could not open, a command that would not run — write that in the finding's own text, in those words, instead of describing it as a defect in the diff: it is an infrastructure fault, the operator is warned when a gating finding names no path, and no fix step can act on it.
 - The diff may be cumulative — on a shared branch it can include files committed by earlier tasks. Judge only what this task's plan changed; do not flag prior-task code as scope drift. Documentation, changelog, and status-doc updates run in a later step of this flow, so do not flag those as missing.
 
 ## Requirements And Correctness

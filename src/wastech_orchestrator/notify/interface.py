@@ -47,6 +47,15 @@ TRACE_GIT_CONTROL_DRIFT = "done (node changed git control state)"
 #: ``publish: push``/``commit`` there is no body, and then this ⚠️ is the only place it is said.
 TRACE_ADOPTED_COMMITS = "done (publish adopted commits it did not make)"
 
+#: Synthetic ``send_trace`` outcome label for a gating verdict whose gating findings name no source
+#: path. The rework edge leads to a node whose job is to open a named location and change it, so
+#: such a round can only end in a refusal — which is what a reviewer reporting it *could not
+#: review* produces. The task is not parked over it (the loop keeps its named budget, and a verdict
+#: that gates for a real reason must not be discarded), so this ⚠️ is the signal that tells the
+#: operator a wasted round from a productive one while it is still running. Only reachable on a
+#: ``rework``: a budget-exhausted accept takes :data:`TRACE_REWORK_EXHAUSTED` instead.
+TRACE_FINDINGS_WITHOUT_A_PATH = "rework (no gating finding names a path)"
+
 #: Maps an internal terminal reason / loop ``limit_name`` (:mod:`core.flow.engine`) to one human
 #: sentence for the operator-facing terminal notification. These tokens are code-path
 #: identifiers, never written to be read; :func:`terminal_reason_prose` turns the known ones into
