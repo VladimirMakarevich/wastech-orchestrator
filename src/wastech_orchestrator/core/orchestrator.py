@@ -1163,8 +1163,9 @@ class Orchestrator:
             )
         refusals: list[str] = []
         # A stale ``running`` row is a killed/crashed task, directly recoverable: ``cmd_rerun``
-        # already refused if a live watch daemon owned the slot, so a ``running`` row reaching here
-        # is daemon-less (the "parked (no daemon)" state) — no ``finalize --as failed`` dance. The
+        # already refused if any executor owned the slot — the watch daemon or a ``worc run``, each
+        # with its own liveness marker — so a ``running`` row reaching here belongs to no live
+        # process (the "parked (no daemon)" state) and needs no ``finalize --as failed`` dance. The
         # active-slot check below excludes this task's own id, so it never self-blocks.
         if row.status not in RERUN_ELIGIBLE_STATUSES:
             refusals.append(

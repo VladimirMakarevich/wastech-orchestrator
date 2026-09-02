@@ -490,6 +490,8 @@ NOT tested live, deliberately: proving step 4 needs a real `rerun --continue` ag
 
 Cheapest fix: have `cmd_run` write the same PID file (or a run-scoped liveness marker) so the liveness probe covers both executors; failing that, stop equating "RUNNING + no daemon" with stale.
 
+**FIXED** — with the marker, not the shared PID file: writing the daemon's own `orchestrator.pid` would let `worc stop` believe it can ask a `run` to finish, and `run` has no stop wiring, so the ladder would escalate to a kill on a healthy process. Two surfaces this entry does not name were fixed with it: `stop`'s parked-slot note (which hands the operator `rerun --continue` in a sentence) and `run`'s own missing refusal against a second `run`. See [what was fixed](e2e-trial-mobile-template.fixes.md#f20--the-executor-that-recorded-nothing-about-itself).
+
 ### F21 — `review` is never given the check results on a pass, so it re-runs the gate inside the sandbox and blocks on F7's phantom
 
 Severity: **major** (it composes F7 + F10 into a review->fixing loop that can park a task). Lever: orchestrator source — `core/flow/nodes/checks.py` `_publish_first_failure_log`; with a supporting line owed in `review.md`.

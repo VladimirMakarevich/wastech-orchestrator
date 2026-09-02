@@ -1298,17 +1298,61 @@ def _daemon_alive(config: OrchestratorConfig) -> bool:
     )
 
 
-def _display_status(row: TaskRow, *, daemon_alive: bool) -> str:
+def _runner_alive(config: OrchestratorConfig) -> bool:
+    """Read-only: is a ``worc run`` executor working in this worc home (marker present + alive)?"""
+    return (
+        process_control.running_daemon_pid(process_control.runner_file_path(worc_home_for(config)))
+        is not None
+    )
+
+
+def _executor_alive(config: OrchestratorConfig) -> bool:
+    """Read-only: is ANY executor live for this worc home — the watch daemon **or** a ``worc run``?
+
+    The question every liveness probe actually means, and for a long time only half of it was
+    asked: ``run`` is a first-class entry point that recorded nothing about itself, so a task it was
+    executing read as ``parked (no daemon)`` for its whole duration — which is not merely a wrong
+    label but the exact prompt that sends an operator to ``rerun --continue``.
+    """
+    return _daemon_alive(config) or _runner_alive(config)
+
+
+def _executor_refusal(config: OrchestratorConfig, verb: str) -> str | None:
+    """The refusal line when an executor owns this worc home, or ``None`` when it is free.
+
+    Every command that drives the pipeline or git in the shared clone needs the slot idle, and two
+    processes can hold it. The advice differs: the daemon is stoppable, while a ``run`` is not — it
+    installs no stop wiring, so the only honest instruction is to wait for it or interrupt it where
+    it runs.
+    """
+    root = worc_home_for(config)
+    daemon = process_control.running_daemon_pid(process_control.pid_file_path(root))
+    if daemon is not None:
+        return (
+            f"{verb}: the watch daemon is running (pid {daemon}); stop it first with "
+            "'wastech-orchestrator stop'"
+        )
+    runner = process_control.running_daemon_pid(process_control.runner_file_path(root))
+    if runner is not None:
+        return (
+            f"{verb}: a 'run' is executing a task in this clone (pid {runner}); wait for it to "
+            "finish, or interrupt it where it runs"
+        )
+    return None
+
+
+def _display_status(row: TaskRow, *, executor_alive: bool) -> str:
     """The human status label for a task row (the single source of truth for all read-only views).
 
-    A ``running`` row with no live daemon is parked at its checkpoint, awaiting resume — not
-    executing — so it reads as ``parked (no daemon)``. This dominates the B-lite ``(paused)``
-    marker, which only makes sense while the daemon is alive and waiting out a provider outage.
+    A ``running`` row with no live executor — neither the watch daemon nor a ``run`` — is parked at
+    its checkpoint, awaiting resume, not executing, so it reads as ``parked (no daemon)``. This
+    dominates the B-lite ``(paused)`` marker, which only makes sense while the daemon is alive and
+    waiting out a provider outage.
 
     A pause carrying a provider-reported wake instant names it, because otherwise a daemon correctly
     waiting out a limit is indistinguishable from a hung one.
     """
-    if row.status is Status.RUNNING and not daemon_alive:
+    if row.status is Status.RUNNING and not executor_alive:
         return "parked (no daemon)"
     if row.status is Status.RUNNING and row.blocked_since:
         if row.blocked_until:
@@ -1323,7 +1367,19 @@ def _parked_slot_note(config: OrchestratorConfig) -> str | None:
     Read-only, reopening ``state.db`` like :func:`has_active_task`. The task is parked at its
     checkpoint (the recovery invariant), not executing — so point the operator at the levers that
     actually clear or continue it, rather than leaving a silent, queue-blocking ``running`` row.
+
+    Unless it *is* executing: a ``worc run`` in another terminal holds the same slot, and there the
+    advice inverts — ``rerun --continue`` is precisely what must not be run — so the note says who
+    owns it and that ``stop`` does not reach that process.
     """
+    runner = process_control.running_daemon_pid(
+        process_control.runner_file_path(worc_home_for(config))
+    )
+    if runner is not None:
+        return (
+            f"stop: note: a 'run' is executing a task in this clone (pid {runner}); the stop "
+            "ladder does not reach it — wait for it to finish, or interrupt it where it runs"
+        )
     db_path = Path(worc_home_for(config)) / "state.db"
     if not db_path.is_file():
         return None
@@ -1910,6 +1966,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     # A node may route to ANY allowed provider, so one that cannot start is refused up front
     # rather than discovered at the first fallback with a stage's work already spent.
     require_provider_auth(config)
+    # The single slot is per worc home, not per process: a second `run` (or one beside a daemon)
+    # would drive two engines over the same branch in the same clone.
+    refusal = _executor_refusal(config, "run")
+    if refusal is not None:
+        print(refusal)
+        return 1
     orchestrator = build_orchestrator(
         config,
         layout=layout_for(config),
@@ -1926,7 +1988,16 @@ def cmd_run(args: argparse.Namespace) -> int:
         if verdict.state is not Eligibility.ELIGIBLE:
             print(f"error: refusing to run {task_id}: {verdict.detail}", file=sys.stderr)
             return 2
-    result = orchestrator.run_task(args.task_file)
+    # Record this executor for the duration, the way the daemon records itself: `status`/`list`/
+    # `top` need it to tell "executing now" from "parked at a checkpoint", and every command that
+    # needs the clone idle needs it to refuse. Reaped in `finally` — a marker left behind by a
+    # crash would refuse those commands forever.
+    runner_path = process_control.runner_file_path(worc_home_for(config))
+    process_control.write_pid_file(runner_path)
+    try:
+        result = orchestrator.run_task(args.task_file)
+    finally:
+        runner_path.unlink(missing_ok=True)
     if result.final_status is Status.RUNNING:
         # B-lite soft pause: every provider was transiently unavailable. The task is left resumable;
         # the next `run`/`watch`/restart continues it from the checkpoint (until max_blocked_s).
@@ -2069,13 +2140,10 @@ def cmd_rerun(args: argparse.Namespace) -> int:
         return 2
     root = worc_home_for(config)
 
-    # Rerun drives the pipeline in the shared clone; refuse while a live watch daemon owns it.
-    pid = process_control.running_daemon_pid(process_control.pid_file_path(root))
-    if pid is not None:
-        print(
-            f"rerun: the watch daemon is running (pid {pid}); stop it first with "
-            "'wastech-orchestrator stop'"
-        )
+    # Rerun drives the pipeline in the shared clone; refuse while any executor owns it.
+    refusal = _executor_refusal(config, "rerun")
+    if refusal is not None:
+        print(refusal)
         return 1
 
     if not (Path(root) / "state.db").is_file():
@@ -2207,14 +2275,11 @@ def cmd_finalize(args: argparse.Namespace) -> int:
         return 2
     root = worc_home_for(config)
 
-    # Finalize runs terminal cleanup (`git checkout base`) in the shared clone; refuse while a live
-    # watch daemon owns it. An orphaned-active task (dead PID) is exactly what finalize reconciles.
-    pid = process_control.running_daemon_pid(process_control.pid_file_path(root))
-    if pid is not None:
-        print(
-            f"finalize: the watch daemon is running (pid {pid}); stop it first with "
-            "'wastech-orchestrator stop'"
-        )
+    # Finalize runs terminal cleanup (`git checkout base`) in the shared clone; refuse while any
+    # executor owns it. An orphaned-active task (dead PID) is exactly what finalize reconciles.
+    refusal = _executor_refusal(config, "finalize")
+    if refusal is not None:
+        print(refusal)
         return 1
 
     if not (Path(root) / "state.db").is_file():
@@ -2319,12 +2384,12 @@ def cmd_prs(args: argparse.Namespace) -> int:
 
 def _cmd_prs_sync(args: argparse.Namespace, config: OrchestratorConfig, root: Path) -> int:
     """The ``prs --sync`` reconcile path: dry-run by default, writes only with ``-y/--yes``."""
-    # A write run touches the shared clone/DB; refuse while a live watch daemon owns it (like
-    # finalize). The read-only dry-run is always safe.
+    # A write run touches the shared clone/DB; refuse while any executor owns it (like finalize).
+    # The read-only dry-run is always safe.
     if args.yes:
-        pid = process_control.running_daemon_pid(process_control.pid_file_path(root))
-        if pid is not None:
-            print(f"prs --sync: the watch daemon is running (pid {pid}); stop it first")
+        refusal = _executor_refusal(config, "prs --sync")
+        if refusal is not None:
+            print(refusal)
             return 1
     orchestrator = build_orchestrator(
         config,
@@ -2381,14 +2446,11 @@ def cmd_merge_task(args: argparse.Namespace) -> int:
     if config is None:
         return 2
     root = worc_home_for(config)
-    # merge-task updates the branch + runs gh/merge in the shared clone; refuse while the daemon
+    # merge-task updates the branch + runs gh/merge in the shared clone; refuse while any executor
     # owns it (like finalize). The merge flow + git ops need the idle slot.
-    pid = process_control.running_daemon_pid(process_control.pid_file_path(root))
-    if pid is not None:
-        print(
-            f"merge-task: the watch daemon is running (pid {pid}); stop it first with "
-            "'wastech-orchestrator stop'"
-        )
+    refusal = _executor_refusal(config, "merge-task")
+    if refusal is not None:
+        print(refusal)
         return 1
     if not (Path(root) / "state.db").is_file():
         print(f"merge-task: no state database at {Path(root) / 'state.db'}")
@@ -3690,6 +3752,17 @@ def cmd_watch(args: argparse.Namespace) -> int:
             f"'wastech-orchestrator stop', or use 'restart' ({pid_path})"
         )
         return 1
+    # A `run` holds the same single slot in the same clone, and it is not a watcher — so it is not
+    # covered by the PID file above and cannot be stopped by the advice that goes with it.
+    runner = process_control.running_daemon_pid(
+        process_control.runner_file_path(worc_home_for(config))
+    )
+    if runner is not None:
+        print(
+            f"watch: a 'run' is executing a task in this clone (pid {runner}); wait for it to "
+            "finish, or interrupt it where it runs"
+        )
+        return 1
 
     controller = process_control.StopController()  # SIGTERM -> event, restored on exit
     # Record each launched agent's (pid, pgid) so a hard stop can reap its whole subtree, and tell
@@ -4038,13 +4111,13 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 1 if args.task_id else 0
 
     now = datetime.now(UTC)
-    daemon_alive = _daemon_alive(config)
+    executor_alive = _executor_alive(config)
     for index, task in enumerate(tasks):
         if index:
             print()
         print(f"task_id={task.task_id}")
         print(f"title={task.title}")
-        print(f"status={_display_status(task, daemon_alive=daemon_alive)}")
+        print(f"status={_display_status(task, executor_alive=executor_alive)}")
         node = current_nodes.get(task.task_id)
         if node:
             print(f"node={node}")  # the flow checkpoint: where the engine will resume
@@ -4068,13 +4141,13 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def _task_entry(row: TaskRow, *, daemon_alive: bool = True) -> dict[str, str | None]:
-    # Status label via the shared renderer: a RUNNING row shows "parked (no daemon)" with no live
-    # daemon, else "(paused)" on a B-lite provider-outage park, else the plain status. The
-    # daemon_alive default keeps terminal rows (recent/all) and any direct caller unchanged.
+def _task_entry(row: TaskRow, *, executor_alive: bool = True) -> dict[str, str | None]:
+    # Status label via the shared renderer: a RUNNING row shows "parked (no daemon)" when neither
+    # the daemon nor a `run` is alive, else "(paused)" on a B-lite provider-outage park, else the
+    # plain status. The default keeps terminal rows (recent/all) and any direct caller unchanged.
     return {
         "task_id": row.task_id,
-        "status": _display_status(row, daemon_alive=daemon_alive),
+        "status": _display_status(row, executor_alive=executor_alive),
         "title": row.title,
         "branch": row.branch,
     }
@@ -4212,7 +4285,7 @@ def build_top_snapshot(
     ``store`` is ``None`` when no database exists yet (fresh install), yielding empty task sections.
     """
     worc_home = worc_home_for(config)
-    daemon_alive = _daemon_alive(config)
+    executor_alive = _executor_alive(config)
     active: list[_ActiveView] = []
     for row in store.find_active_tasks() if store is not None else []:
         try:
@@ -4229,7 +4302,7 @@ def build_top_snapshot(
         active.append(
             _ActiveView(
                 task_id=row.task_id,
-                status_label=_task_entry(row, daemon_alive=daemon_alive)["status"]
+                status_label=_task_entry(row, executor_alive=executor_alive)["status"]
                 or row.status.value,
                 title=row.title,
                 branch=row.branch,
@@ -4474,12 +4547,12 @@ def _list_sections(
             scan_pending_sorted(pending_dir(config), config.orchestrator.queue), start=1
         )
     ]
-    # Only RUNNING rows are relabelled by daemon liveness; probe once and pass it to the sections
+    # Only RUNNING rows are relabelled by executor liveness; probe once and pass it to the sections
     # that can contain a RUNNING row (active/all). recent/pending are terminal/file-only.
-    daemon_alive = _daemon_alive(config)
+    executor_alive = _executor_alive(config)
     if args.all:
         rows = store.all_tasks() if store else []
-        return [("all", [_task_entry(r, daemon_alive=daemon_alive) for r in rows])]
+        return [("all", [_task_entry(r, executor_alive=executor_alive) for r in rows])]
     if args.pending:
         return [("pending", pending)]
     if args.recent is not None:
@@ -4488,7 +4561,7 @@ def _list_sections(
     active = store.find_active_tasks() if store else []
     recent = store.recent_tasks(_LIST_RECENT_DEFAULT) if store else []
     return [
-        ("active", [_task_entry(r, daemon_alive=daemon_alive) for r in active]),
+        ("active", [_task_entry(r, executor_alive=executor_alive) for r in active]),
         ("pending", pending),
         ("recent", [_task_entry(r) for r in recent]),
     ]

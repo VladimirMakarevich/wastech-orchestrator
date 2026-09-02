@@ -409,14 +409,14 @@ def test_display_status_names_the_wake_instant() -> None:
     # which is the diagnosis cost this work exists to remove.
     row = TaskRow(task_id="t1", title="T", status=Status.RUNNING)
     parked = replace(row, blocked_since="2026-06-28T00:00:00+00:00")
-    assert cli._display_status(parked, daemon_alive=True) == "running (paused)"
+    assert cli._display_status(parked, executor_alive=True) == "running (paused)"
     with_instant = replace(parked, blocked_until="2026-06-28T01:30:00+00:00")
     assert (
-        cli._display_status(with_instant, daemon_alive=True)
+        cli._display_status(with_instant, executor_alive=True)
         == "running (paused until 2026-06-28T01:30:00+00:00)"
     )
     # A dead daemon still dominates: the task is parked at its checkpoint, not waiting on a window.
-    assert cli._display_status(with_instant, daemon_alive=False) == "parked (no daemon)"
+    assert cli._display_status(with_instant, executor_alive=False) == "parked (no daemon)"
 
 
 def test_build_top_snapshot_carries_the_wake_instant(

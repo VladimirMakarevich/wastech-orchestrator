@@ -18,6 +18,7 @@ Kept separate from the findings document for a mechanical reason too: that docum
 | F10 — the contract cannot say "I could not review" | major | **addressed as a warning** (operator's call) | `core/flow/nodes/evaluator.py`, `orchestrator.py`, `review.md` |
 | F28 — the terminal Telegram notification has no timeout | major | **fixed** | `notify/telegram.py` |
 | F26 — `confirm_next_task` makes the daemon unkillable | major | **fixed** | `notify/`, `composition.py`, `cli.py`, config |
+| F20 — `run` reads as parked, and `rerun --continue` starts a second engine | major | **fixed** | `process_control.py`, `cli.py` |
 
 ## F1 + F2 — the reviewer under decomposition
 
@@ -161,3 +162,20 @@ Three deliberate non-changes, each of which would have been scope creep:
 - **The memory is not persisted.** A durable decline would need its own expiry story and an operator command to clear it, and a restart is already the operator's own "ask me again".
 - **A remembered refusal still ends the cycle** rather than falling through to the next pending task. That is exactly today's behavior — a fresh decline `break`s too — so a lower-priority task was never reached in this state either. Changing it is a queue-semantics decision, not this finding.
 - **The skip is logged at `debug`, not `info`.** An hour of info lines saying "still refused" is the noise the finding complains about in another form. The consequence is that the operator-facing summary for such a tick says "nothing to do", which is **F29** — the same sentence, reached by a second route.
+
+## F20 — the executor that recorded nothing about itself
+
+Every step of the chain reproduced exactly as filed, and the fix is the one the finding calls cheapest — with one substitution it warns against taking literally.
+
+**Not the same PID file.** The finding offers "have `cmd_run` write the same PID file (or a run-scoped liveness marker)". The first option would have created a worse bug than it fixed: `worc stop` reads that file and asks the recorded process to finish, and `run` installs **no** stop wiring — no `SIGTERM` handler, no stop-file poll — so a `stop` against it would wait out its 30s timeout, get no confirmation and escalate to a kill, on a process that was working correctly. That is the same shape as the F28 wedge and it would have been reachable from a single keystroke. So `run` writes its own `orchestrator.run` beside the daemon's `orchestrator.pid`: every "is anything executing in this clone?" probe now answers yes, while the stop ladder keeps addressing only the process that can answer it.
+
+What the two markers feed:
+
+- **The label.** `_display_status`'s parameter is now `executor_alive` rather than `daemon_alive`, fed by a probe that reads both files. The rename is the point rather than tidiness: the old name is what made "no daemon" and "nothing is executing" look like the same question. `parked (no daemon)` still means what its docstring says — parked at a checkpoint, awaiting resume — and now it is only printed when that is true.
+- **The guards.** `rerun`, `finalize`, `merge-task` and `prs --sync` carried four copies of the same daemon check; they now share one `_executor_refusal`, which names either owner and gives the advice that fits it (the daemon is stoppable; a `run` is not, so the only honest instruction is to wait or interrupt it where it runs). `watch` gains the same refusal, and so does `run` itself — a second `run` in another terminal was never refused either, which the finding does not mention.
+- **A prompt nobody noticed.** `stop`'s parked-slot note recommends `rerun <id> --continue`, and it is printed after any `stop`. Against a live `run` that is the one command that must not be issued, so the note now names the executor holding the slot and says the stop ladder does not reach it. The finding traces the mislabel through `status`/`list`/`top`; this fourth surface is the one that hands the operator the dangerous command in a sentence.
+- **A comment that was load-bearing.** `plan_rerun`'s own comment justified accepting a `running` row by asserting "`cmd_rerun` already refused if a live watch daemon owned the slot, so a `running` row reaching here is daemon-less". It now says "any executor", which is what the guard finally checks; before the fix that sentence was the false premise the whole hazard rested on.
+
+Eight tests, all red against the previous code: the marker is written for the duration and reaped in a `finally` (a leaked marker would refuse those commands forever), the probe and the label agree, the stop note no longer offers `rerun`, and `rerun`/`watch`/`finalize`/`prs --sync` each refuse before building an engine.
+
+**Two things deliberately left alone.** `logs clean` still waits on `_daemon_alive`, not the new probe: it is about the daemon's own rotating log handle under `.worc/logs/`, and a `run --log-file` writes wherever the operator points it — a real but different question, unobserved and not this finding. And the console's `up` does not pre-check the marker; it spawns a daemon that now refuses on its own, and `start_watch` already surfaces a verified-failed spawn with the real error.
