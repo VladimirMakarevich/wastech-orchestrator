@@ -17,6 +17,7 @@ Kept separate from the findings document for a mechanical reason too: that docum
 | F21 — no check verdict on a pass | major | **fixed** | `core/flow/nodes/checks.py`, `review.md` |
 | F10 — the contract cannot say "I could not review" | major | **addressed as a warning** (operator's call) | `core/flow/nodes/evaluator.py`, `orchestrator.py`, `review.md` |
 | F28 — the terminal Telegram notification has no timeout | major | **fixed** | `notify/telegram.py` |
+| F26 — `confirm_next_task` makes the daemon unkillable | major | **fixed** | `notify/`, `composition.py`, `cli.py`, config |
 
 ## F1 + F2 — the reviewer under decomposition
 
@@ -124,3 +125,21 @@ Reproduced as a defect of the _caller_, which is where the finding lands after t
 The `timeout` is passed by **every** client method except `poll_reply`, which carries the operator's own hours-long deadline; a test pins that policy per method, because clipping the HITL poll to 20s is the obvious way to "fix" this and would silently break the human gate.
 
 Incidental simplification, not a separate change: the helper's two branches collapsed into one. The `asyncio.get_running_loop()` probe and the `ThreadPoolExecutor` fallback existed only to answer "does the caller already own a loop?", and running every call on its own thread makes the question moot. The regression test still covers the case that branch was for — a `_run_sync` call made from inside a running loop.
+
+## F26 — the claim gate the stop ladder could not reach
+
+Three defects under one finding, and they are independent enough that each landed with its own test and its own commit: the wait could not be interrupted, the gate borrowed the HITL timeout, and a decline was forgotten between ticks. The first is the safety one — it is the reason the ladder's hardest rung was reached on a healthy daemon.
+
+### The wait is abandonable
+
+Reproduced at both ends of the wiring. `grep -c "is_cancelled" notify/telegram.py` returned **0**, exactly as filed. The proof that it was a _wiring_ gap rather than a missing feature is the composition test: reverting one line (`build_notifier(config.telegram)`) turns it red, because the predicate the daemon already builds — the same object the flow engine and the router receive — simply stopped at their two constructors.
+
+What landed, in one line of `composition.py` and the path it opens: the notifier holds the predicate, `wait_for_answer` consults it before entering the wait, and the poll loop consults it between requests, raising rather than returning so a stop is never mistaken for a timeout. The Core-facing vocabulary gains a fourth `AskFailure`, `cancelled`, which `core/hitl.py`'s `_RESETTABLE_STATUSES` picks up for free — that set is derived from `get_args(AskFailure)` precisely so a new failure mode is never silently skipped, and this is the first time that seam has been used.
+
+Two decisions in it worth stating, because neither is forced by the finding:
+
+**`start_ask` withholds the prompt when a stop is already pending.** Sending it would leave the operator a button nothing reads: the wait is abandoned immediately and the answer arrives after the process is gone. `wait_for_answer` therefore checks cancellation _before_ its undelivered-handle branch, so a withheld prompt reports `cancelled` and not `transport_error` — otherwise the fix would manufacture a diagnosis pointing at a network problem that never happened. A test pins that ordering.
+
+**The long poll is capped at 5s (was Telegram's 50).** The predicate is only read between requests, so the chunk — not the predicate — is what decides how fast a stop is noticed. At 50s a `stop` still misses its own 30s patience and still escalates to a tree kill, which would have made the rest of the fix decorative. The cost is a request every 5s while a prompt is pending, and only while one is pending. A test asserts the value passed to `getUpdates` stays inside the ladder's patience rather than asserting the constant, so the property is what is pinned.
+
+An incidental refactor came with it: `wait_for_answer` crossed the `PLR0911` return ratchet at 7, so the two duplicated transport-error results became `_transport_error(handle)` and the reply-mapping tail became `_answer(handle, reply)`. The ratchet is a burn-down backlog; adding a per-file ignore to it would have been the wrong direction.

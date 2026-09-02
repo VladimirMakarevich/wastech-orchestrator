@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -85,6 +85,7 @@ class FakeTelegramClient:
         interaction_id: str,
         kind: AskKind,
         deadline_monotonic: float,
+        is_cancelled: Callable[[], bool] = lambda: False,
     ) -> _ClientReply | None:
         if self.poll_error is not None:
             raise self.poll_error

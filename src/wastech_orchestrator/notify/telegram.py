@@ -61,12 +61,30 @@ _CALL_TIMEOUT_S = 20.0
 # cancels the await and the coroutine unwinds) normally wins the race and the hard path stays the
 # backstop for a call that cannot be cancelled.
 _ABANDON_GRACE_S = 2.0
+# Longest single `getUpdates` long poll while waiting for a human answer. Telegram allows 50s and a
+# longer poll is cheaper, but the cancellation predicate is only consulted BETWEEN requests — so
+# this is also how long a `stop` waits for a pending question to notice it. Kept well inside the
+# soft stop's own 30s patience, because the rung above it is a tree kill.
+_ASK_POLL_CHUNK_S = 5
 
 # Feedback shown on the button itself when a callback is pressed. Every press in our chat is
 # acknowledged so the operator never sees "nothing happened"; a stale/duplicate press gets an alert.
 _ACK_APPROVED = "Approved — continuing."
 _ACK_DENIED = "Denied — will reconsider."
 _ACK_STALE = "This approval is no longer active — check the latest message for the current request."
+
+
+def _never_cancelled() -> bool:
+    """The default cancellation predicate: nothing outside is asking this process to stop.
+
+    Every non-daemon caller (`run`, `rerun`, the operator commands) runs without a stop channel,
+    so this keeps the wait exactly as long as its deadline says.
+    """
+    return False
+
+
+class _AskCancelled(Exception):
+    """The wait for a human answer was abandoned: this process was asked to stop."""
 
 
 @dataclass(frozen=True)
@@ -109,6 +127,7 @@ class _TelegramClient(Protocol):
         interaction_id: str,
         kind: AskKind,
         deadline_monotonic: float,
+        is_cancelled: Callable[[], bool] = _never_cancelled,
     ) -> _ClientReply | None: ...
 
     def get_me(self) -> str: ...  # bare username (first_name fallback); the caller prepends '@'
@@ -142,12 +161,18 @@ class TelegramNotifier:
         ask_timeout_s: int,
         monotonic: Callable[[], float] = time.monotonic,
         wall_clock: Callable[[], float] = time.time,
+        is_cancelled: Callable[[], bool] = _never_cancelled,
     ) -> None:
         self._client = client
         self._secrets = secrets
         self._ask_timeout_s = max(0, int(ask_timeout_s))
         self._monotonic = monotonic
         self._wall_clock = wall_clock
+        # The same stop predicate the flow engine and the router get, so the stop ladder reaches a
+        # blocking ask the way it reaches a running node. Without it a daemon waiting out
+        # `ask_timeout_s` (8h on the shipped-style value) can only be killed, and the claim gate
+        # waits inside a tick, where the loop's own stop channels are not consulted.
+        self._is_cancelled = is_cancelled
 
     def send_notification(
         self,
@@ -217,6 +242,15 @@ class TelegramNotifier:
             contacts=contacts,
         )
         safe_prompt = self._outgoing(prompt)
+        if self._is_cancelled():
+            # Asking now would leave the operator a button no one reads: the wait below is
+            # abandoned immediately, and the answer would arrive after this process is gone.
+            return AskHandle(
+                interaction_id=interaction_id,
+                kind=kind,
+                expires_at=self._wall_clock(),
+                delivered=False,
+            )
         try:
             sent = self._client.send_prompt(
                 chat_id=self._secrets.chat_id,
@@ -241,13 +275,12 @@ class TelegramNotifier:
         )
 
     def wait_for_answer(self, handle: AskHandle) -> AskResult:
+        if self._is_cancelled():
+            # Before the undelivered branch on purpose: a prompt `start_ask` withheld because a
+            # stop was already pending must read as `cancelled`, not as a transport failure.
+            return self._cancelled(handle)
         if not handle.delivered or handle.message_id is None:
-            return AskResult(
-                answered=False,
-                failure="transport_error",
-                interaction_id=handle.interaction_id,
-                message_id=handle.message_id,
-            )
+            return self._transport_error(handle)
         remaining = max(0.0, handle.expires_at - self._wall_clock())
         deadline = self._monotonic() + remaining
         try:
@@ -258,19 +291,23 @@ class TelegramNotifier:
                 interaction_id=handle.interaction_id,
                 kind=handle.kind,
                 deadline_monotonic=deadline,
+                is_cancelled=self._is_cancelled,
             )
+        except _AskCancelled:
+            # Ahead of the generic handler: a stop is not a transport fault, and reporting it as
+            # one would send an operator looking for a network problem that never happened.
+            return self._cancelled(handle)
         except Exception as exc:
             self._warn(
                 "ask_human poll failed",
                 interaction_id=handle.interaction_id,
                 error=str(exc),
             )
-            return AskResult(
-                answered=False,
-                failure="transport_error",
-                interaction_id=handle.interaction_id,
-                message_id=handle.message_id,
-            )
+            return self._transport_error(handle)
+        return self._answer(handle, reply)
+
+    def _answer(self, handle: AskHandle, reply: _ClientReply | None) -> AskResult:
+        """Map what the poll came back with onto the Core-facing result (no transport concerns)."""
         if reply is None:
             return AskResult(
                 answered=False,
@@ -291,6 +328,28 @@ class TelegramNotifier:
             answered=True,
             text=self._redact(reply.text),
             approved=reply.approved,
+            interaction_id=handle.interaction_id,
+            message_id=handle.message_id,
+        )
+
+    def _transport_error(self, handle: AskHandle) -> AskResult:
+        """The fail-closed outcome for a prompt that never reached the chat, or a broken poll."""
+        return AskResult(
+            answered=False,
+            failure="transport_error",
+            interaction_id=handle.interaction_id,
+            message_id=handle.message_id,
+        )
+
+    def _cancelled(self, handle: AskHandle) -> AskResult:
+        """The fail-closed outcome for a wait this process was asked to stop (never an approval)."""
+        self._warn(
+            "ask_human abandoned: shutting down",
+            interaction_id=handle.interaction_id,
+        )
+        return AskResult(
+            answered=False,
+            failure="cancelled",
             interaction_id=handle.interaction_id,
             message_id=handle.message_id,
         )
@@ -334,6 +393,7 @@ def build_notifier(
     env: Mapping[str, str] | None = None,
     *,
     client_factory: Callable[[_Secrets, TelegramConfig], _TelegramClient] | None = None,
+    is_cancelled: Callable[[], bool] = _never_cancelled,
 ) -> Notifier:
     """Resolve the transport from config + env.
 
@@ -345,6 +405,10 @@ def build_notifier(
     Otherwise builds a :class:`TelegramNotifier` backed by a real Telegram HTTP client (or the
     ``client_factory`` override, useful for adapters/tests). A single ``debug`` line is logged to
     record the chosen path; secret *values* are never logged.
+
+    ``is_cancelled`` is the ``watch`` daemon's stop predicate — the same one the flow engine and
+    the router are given — so a blocking ask in flight is abandoned when the daemon is asked to
+    stop. A :class:`NullNotifier` has nothing to abandon and ignores it.
     """
     environ = env if env is not None else os.environ
     if not cfg.enabled:
@@ -374,6 +438,7 @@ def build_notifier(
         client=factory(secrets, cfg),
         secrets=secrets,
         ask_timeout_s=cfg.ask_timeout_s,
+        is_cancelled=is_cancelled,
     )
 
 
@@ -799,6 +864,7 @@ class _HttpTelegramClient:
         interaction_id: str,
         kind: AskKind,
         deadline_monotonic: float,
+        is_cancelled: Callable[[], bool] = _never_cancelled,
     ) -> _ClientReply | None:
         from telegram import Bot
 
@@ -812,10 +878,15 @@ class _HttpTelegramClient:
             offset = update_offset
             async with Bot(self._bot_token) as bot:
                 while True:
+                    if is_cancelled():
+                        # Checked here rather than only at the deadline: this wait can be hours
+                        # long and it runs inside a watch tick, so it is the stop ladder's only
+                        # way in. Raised, not returned as `None`, because a stop is not a timeout.
+                        raise _AskCancelled
                     remaining = deadline_monotonic - time.monotonic()
                     if remaining <= 0:
                         return None
-                    poll_timeout = max(1, min(50, int(remaining)))
+                    poll_timeout = max(1, min(_ASK_POLL_CHUNK_S, int(remaining)))
                     try:
                         updates = await asyncio.wait_for(
                             bot.get_updates(

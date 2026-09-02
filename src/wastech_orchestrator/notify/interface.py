@@ -12,7 +12,12 @@ from dataclasses import dataclass
 from typing import Literal, Protocol, runtime_checkable
 
 AskKind = Literal["question", "approval"]
-AskFailure = Literal["timeout", "transport_error", "invalid_response"]
+#: Why a human interaction produced no usable answer. ``cancelled`` is the one that is nobody's
+#: fault: something outside asked this process to stop while the wait was in flight, so the wait
+#: was abandoned rather than waited out. It is kept distinct from ``timeout`` because the operator
+#: was never late — and, for the daemon, distinct from an approval by the same fail-closed rule as
+#: every other failure.
+AskFailure = Literal["timeout", "transport_error", "invalid_response", "cancelled"]
 
 #: Synthetic ``send_trace`` outcome label for a non-blocking evaluator that accepted only because
 #: its whole ``max_rework_per_stage`` budget was spent (findings still open). Distinct from a clean
@@ -202,7 +207,11 @@ class Notifier(Protocol):
         """Send one correlated prompt and return a durable handle without waiting."""
 
     def wait_for_answer(self, handle: AskHandle) -> AskResult:
-        """Wait for the correlated answer until the handle's persisted deadline."""
+        """Wait for the correlated answer until the handle's persisted deadline.
+
+        A transport may also abandon the wait early when something outside asks the process to
+        stop, reporting ``cancelled``; the deadline is the only other way out.
+        """
 
     def ask_human(
         self,

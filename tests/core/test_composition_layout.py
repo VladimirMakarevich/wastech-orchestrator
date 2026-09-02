@@ -10,7 +10,9 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
-from wastech_orchestrator import cli
+import pytest
+
+from wastech_orchestrator import cli, composition
 from wastech_orchestrator.composition import (
     build_internal_deny_policy,
     build_orchestrator,
@@ -21,6 +23,7 @@ from wastech_orchestrator.core.flow.exchange_seal import (
     exchange_seal_root,
 )
 from wastech_orchestrator.core.flow.instruction_bundle import instruction_bundle_dir
+from wastech_orchestrator.notify import NullNotifier
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.runtime_layout import RuntimeLayout
 
@@ -167,3 +170,29 @@ def test_cli_layout_for_reproduces_default_paths(git_repo, make_git_config) -> N
     assert layout.control_home == Path(config.repo.local_path) / ".worc"
     assert layout.private_home == Path(config.repo.local_path) / ".worc"
     assert layout.exchange_root == Path(config.repo.local_path) / ".worc-io"
+
+
+def test_the_notifier_gets_the_same_stop_predicate_as_the_router(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # Anti-drift, and the reason this test exists rather than a docstring: the daemon's stop
+    # predicate reaches the flow engine and the router, and for a long time reached nothing else —
+    # so a blocking Telegram ask made from inside a tick (the claim gate's, up to
+    # `telegram.ask_timeout_s`) could not be stopped, only killed. One predicate, every waiter.
+    recorded: dict[str, object] = {}
+
+    def spy(cfg: object, env: object = None, **kwargs: object) -> NullNotifier:
+        recorded.update(kwargs)
+        return NullNotifier()
+
+    monkeypatch.setattr(composition, "build_notifier", spy)
+    config = make_git_config(git_repo.clone, checks=["pytest"])
+    layout = _distinct_layout(git_repo.clone, tmp_path)
+
+    def stopping() -> bool:
+        return True
+
+    orch = build_orchestrator(config, layout=layout, is_cancelled=stopping)
+
+    assert recorded.get("is_cancelled") is stopping
+    assert orch._router._is_cancelled is stopping  # the same object, not merely an equal default

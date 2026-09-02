@@ -731,6 +731,8 @@ Both ends of the tuning range are awkward, which is what makes it a design findi
 
 Fixes, either or both: give the ask loop the same `is_cancelled` predicate the FlowEngine gets; and give the claim gate its own timeout key rather than borrowing the HITL one, plus a per-task "declined, do not re-ask until X" memory.
 
+**FIXED**, all three fixes this entry proposes rather than "either or both" — they turned out to be independent, and the interruptible wait alone would have left the gate re-asking every tick. One correction: the predicate was never missing from the product, only from this constructor; reverting the single `composition.py` line that now passes it is what makes the new wiring test red. See [what was fixed](e2e-trial-mobile-template.fixes.md#f26--the-claim-gate-the-stop-ladder-could-not-reach).
+
 **This shaped the trial's own test plan**: I lowered `ask_timeout_s` before letting the gate fire, precisely to avoid wedging the daemon for eight hours overnight.
 
 ### F27 — codex `process_crashed` at ~33% on this host, with a diagnosable signature
