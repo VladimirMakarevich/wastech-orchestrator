@@ -32,6 +32,9 @@ The table below covers what this document records: the findings that were repair
 | F13 — `prompt-audit` records the override, not the effective value | minor | **fixed** | `routing/router.py`, `core/flow/observability.py`, `config/schema.py` |
 | F17 — a task cannot contribute to its own commit message | minor | **fixed** (shape chosen by the operator) | `task/model.py`, `task/validation_gate.py`, `core/orchestrator.py`, `worc-task`, `worc-deco-task` |
 | F12 — `status` names the wrong node in a decompose region | minor | **fixed** | `core/orchestrator.py` (`_fan_out_subtasks`) |
+| F3 — the root task arrives as a footer path | minor | **fixed** | `worc-deco-task/SKILL.md` |
+| F4 — two of three install-written security keys | minor | **fixed** | `worc-config/SKILL.md` |
+| F5 + F8 + F16 — the three authoring lessons | nit / minor | **fixed as guidance** | `worc-task/SKILL.md`, `worc-deco-task/SKILL.md` |
 
 ## F1 + F2 — the reviewer under decomposition
 
@@ -345,3 +348,27 @@ So after subtask 2's `review` passes, the checkpoint names `documentation` — t
 **The fix, in the driver rather than the engine.** `_fan_out_subtasks` re-points the checkpoint at the region entry before committing a subtask that has a successor. The last subtask deliberately keeps the engine's value — for it the post-region node _is_ what runs next, so the previous behavior was right exactly once out of five. Resume is untouched: the fan-out path re-enters from the committed subtask rows and never reads `current_node` (only the `pre` exit does), and a `rerun --continue` on an interrupted decomposition now names the node it will actually re-enter.
 
 The test probes inside the window — a spy on the subtask commit reads the persisted checkpoint — and asserts `["implementation", "implementation", "documentation"]` across three subtasks. Against the previous code it returns `documentation` three times, which is the trial's screenshot.
+
+## F3 — the asymmetry between a root task and a subtask spec
+
+Re-verified before writing, because part of this finding had already been repaired by something else. The sentence it quotes ("so write it however the step needs") is gone: the F1 fix rewrote that bullet, and it now says the review step reads the spec too and that a binding constraint belongs in the subtask body. What was still missing is the half the finding is actually named for — **why** that is so.
+
+The mechanism holds today. `build_context_footer` renders paths only, the root task arrives as `- task: <path>` under "read them as needed", and no role prompt of the packaged `implementation` flow references `{task_path}` at all (`blog_article`, `blog_article_revise`, `content_chapter` and `deep_research` do — which is why the renderer's behavior reads as normal until you look for it here). So the skill now states the asymmetry where the author is deciding what to put in the root: the shared _why_ goes in the root, every binding _must_ goes in the step it binds, restated even when the root already says it.
+
+**F14's clause landed with it.** `depends_on` was described as pure ordering, and the finding's addendum said it also decides what the successor is told. After F14 that is no longer starvation — the floor names every subtask committed on the branch — so the skill says what is left and only that: the field marks the predecessors the brief labels as declared, and declaring the narrow truth costs the successor emphasis, not facts. Writing "it decides what the next subtask is told" would have been the old, now-false version of the same warning.
+
+## F4 — the third key `install` writes
+
+Verified against both sides: `config_writer.py` writes `strict_isolation: False`, `disable_read_isolation: True` and `allow_git_evidence: True` into the `security` block, and `SecurityConfig.disable_read_isolation` defaults to `True` in code as well — read-isolation is off out of the box, which is the same class of default-unsafe the step exists to name. The step said "two of them" and listed two.
+
+The bullet does not merely add the key: it names the trap the finding is about. Because the effective state is `disable_read_isolation OR NOT strict_isolation`, an operator who follows this skill's advice to harden `strict_isolation` and leaves the other key as installed **still runs with read-isolation off**, and no surface says so. That is a two-line edit presented as one, so the skill now says to make both in the same change.
+
+## F5 + F8 + F16 — three lessons with no artifact left to repair
+
+All three are task-authoring defects in task files that ran months of work ago, so there is nothing to fix and something to transfer. They are now rules in `worc-task`, beside the acceptance-criteria guidance where an author is in the middle of the mistake:
+
+- **F8 — cite a rule, do not restate it.** A paraphrase replaces the rule: the agent complies with the paraphrase and the reviewer, which reads the rule itself, files the violation. The rule extends to spec files a task depends on — name every one with its path, which is **F5**'s first half (one named, one left to inference, and the inferred one may never be opened).
+- **F16 — a property is not a path list.** "Leave full-bleed screens alone — `onboarding/`, `auth/`" is read as a definition, so a non-full-bleed page under those directories is skipped and a full-bleed page elsewhere is changed. State the property; mark paths as examples of it, never as its extent.
+- **F5 — make a criterion greppable.** Prefer a command or a named symbol over a description, so the review step and the operator reach the same verdict.
+
+`worc-deco-task` gets a pointer rather than a copy, with the two that bit inside a subtask body named explicitly (F16 was subtask 04's step 3, F8 was task `001`) — a subtask body is authored under the same rules, and duplicating them into a second skill is how two files start disagreeing.

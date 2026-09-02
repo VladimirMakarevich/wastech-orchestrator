@@ -151,6 +151,8 @@ The skill should say plainly: a constraint that must bind one subtask belongs in
 
 **Confirmed at runtime.** The rendered `planning` prompt (7,959 chars, `stages/planning/run-000002/rendered-prompt.md`) ends with exactly those two footer lines and contains no other reference to the task; the `{?memory_path}` block dropped as expected (memory is disabled). The exchange copy at `.worc-io/001-edge-to-edge-bottom-insets/task.md` **is** the full 98-line root task and does carry the `.safe-padding-bottom` ban at line 87 — so the constraint is _reachable_, merely weakly signposted. The finding is about signposting, not about the constraint being dropped.
 
+**FIXED**, with one correction: the sentence this entry quotes was already replaced by the F1 fix, which added the "a binding constraint belongs in the subtask body" rule. What was missing is the _why_, and that is what landed — plus F14's clause in its post-F14 form (the field marks predecessors, it no longer decides which facts the successor gets). See [what was fixed](e2e-trial-mobile-template.fixes.md#f3--the-asymmetry-between-a-root-task-and-a-subtask-spec).
+
 ### F4 — `worc-config` enumerates two of the three install-written security keys
 
 **Severity: minor.** **Lever: skill — [`packaged/guide/skills/worc-config/SKILL.md`](../../../src/wastech_orchestrator/packaged/guide/skills/worc-config/SKILL.md).**
@@ -168,6 +170,8 @@ The skill should say plainly: a constraint that must bind one subtask belongs in
 
 It is redundant _today_ (`strict_isolation: false` forces read-isolation off via `SecurityConfig.read_isolation_off`, so the explicit `true` changes nothing) — but that is the case for `allow_git_evidence` too, which the skill does cover, and for the same reason: it becomes load-bearing the moment `strict_isolation` goes back to `true`. An operator who hardens the master switch on this skill's advice still silently keeps read-isolation off.
 
+**FIXED** — the step says "three of them" and the new bullet names the trap rather than only the key: hardening `strict_isolation` and leaving this one as installed keeps read-isolation off, so both lines are one edit. See [what was fixed](e2e-trial-mobile-template.fixes.md#f4--the-third-key-install-writes).
+
 ### F5 — task `002b` does not name the path of one of the two specs it requires
 
 **Severity: nit.** **Lever: task file — `<target>/tasks/pending/002b-back-button-reference-guards.md`.**
@@ -178,6 +182,8 @@ Step 3 names one spec path explicitly and leaves the other implicit:
 > - **Create a spec for the modal guard**: registers at `backButtonPriority.overlayGuard`, …
 
 and the acceptance criterion is only `Both new specs exist`. The colocated `*.spec.ts` convention makes `database-risk-confirmation.component.spec.ts` the obvious inference, and the sibling bullet sets the pattern — so this is a nit, not a defect. Recorded because a greppable acceptance criterion is what makes the rest of this batch auditable, and this one is not greppable.
+
+**FIXED as guidance** — "make a criterion greppable", and "name every spec file the task requires", are rules in `worc-task` now. Nothing to repair: the task ran. See [what was fixed](e2e-trial-mobile-template.fixes.md#f5--f8--f16--three-lessons-with-no-artifact-left-to-repair).
 
 ### F6 — git control-state drift fires a false positive from the operator's own IDE
 
@@ -313,6 +319,8 @@ Two honest qualifications. The same finding's second clause (that the comment mi
 
 The transferable lesson for task authoring: **cite a repo rule by name and let the agent read it** rather than restating it, because a restatement can only lose fidelity.
 
+**FIXED as guidance** — that lesson is a rule in `worc-task` now, extended to the spec files a task depends on (F5). Nothing to repair: the task ran. See [what was fixed](e2e-trial-mobile-template.fixes.md#f5--f8--f16--three-lessons-with-no-artifact-left-to-repair).
+
 ## Not defects — verified and cleared
 
 Recorded so a later reader does not re-open them.
@@ -439,6 +447,8 @@ The headline is a **property**; the enumeration is two **paths**. `auth/componen
 `planning` did not: `plan.md:184` lists the page for the sweep with a reason — _"normal header + scrolling content ending in two buttons — a sandbox screen, not a full-bleed auth screen"_ — and `plan.md:190` names the genuinely full-bleed auth screens as `auth/components/{login,signup,forgot-password}`. `fixing` then read the exclusion by property too and added the class.
 
 Same class as **F8** — a paraphrase that loses fidelity — but this one cost a delivery gap rather than a style violation.
+
+**FIXED as guidance** — "a property is not a path list: state the property, mark paths as examples" is a rule in `worc-task`, with a pointer from `worc-deco-task` where it bit. See [what was fixed](e2e-trial-mobile-template.fixes.md#f5--f8--f16--three-lessons-with-no-artifact-left-to-repair).
 
 ### F17 — a task cannot contribute to its own commit message (second instance of the same gap)
 

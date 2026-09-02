@@ -41,6 +41,12 @@ Good:
 
 Avoid (vague, untestable): "Make pagination better.", "Clean up the API."
 
+**Cite a repository rule, never restate it.** A task that paraphrases a rule ("keep comments short") replaces the rule with the paraphrase: the agent complies with what the task said, and the reviewer — which reads the rule itself — files the violation. Name the file and the rule (`.rules/coding-style.md`, the comment-density rule) and let the agent read it. The same holds for a spec or design doc a task builds on: **name every file the task requires**, with its path. One named and one left to inference is one the agent may never open.
+
+**A property is not a path list.** "Leave full-bleed screens alone — `src/app/pages/onboarding/`, `src/app/pages/auth/`" reads as a definition and is used as one: a page under those directories that is _not_ full-bleed gets skipped, and a full-bleed page elsewhere gets changed. State the property, and if paths help, mark them as examples of it — never as its extent. Whichever way the two disagree, it is a delivery gap.
+
+**Make a criterion greppable.** A criterion is checked by someone who has to find its evidence: prefer "`grep -r 'safe-padding-bottom' src/` returns nothing" over "the utility class is not shipped", and a named file or symbol over a description of one. This is what lets the review step and the operator reach the same verdict.
+
 **Never write a criterion about a surface no node can write.** The commit message and the squash commit's subject are assembled by the orchestrator from the task's `title` and `commit_type`; no agent can add to them, so "name the affected files in the commit message" is a criterion the run can only fail. The pull-request description **is** reachable — it is the run summary — so ask for content there instead, and use `commit_type` for the one thing the commit message takes from you.
 
 If acceptance criteria are present **and** the Description is non-empty, the orchestrator skips refinement automatically. Omit them only when you want the refinement stage to enrich an under-specified task (missing criteria never rejects the task — there is no flag).
@@ -139,5 +145,7 @@ Webhook delivery should stop retrying after a bounded number of failed attempts.
 - Don't add any front-matter key outside the allowed table.
 - Don't embed secrets, and don't put CLI-flag-shaped or shell-punctuation values in **any** front-matter field (including `title`/`contacts`) — a leading `-` or a `` ` ``/`;`/`|`/`$(` gets the task rejected. Put such content in the body.
 - Don't try to add, replace, or relax checks, or weaken the sandbox — those are operator config, not task fields.
+- Don't restate a repository rule in the task body — cite it by file and name; the agent obeys the restatement and the reviewer reads the rule.
+- Don't define a property by listing paths — state the property and mark any paths as examples, or the list becomes its extent.
 - Don't write an acceptance criterion asking for content in the commit message or the squash subject — the orchestrator writes both, and `commit_type` is the only part a task supplies. The PR description is the run summary, so that one can be asked for.
 - Don't cram several unrelated changes into one task — split into separate tasks. To split **one** change into ordered steps that land as a single PR, use **worc-deco-task**.
