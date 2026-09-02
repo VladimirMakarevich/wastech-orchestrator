@@ -1,6 +1,6 @@
 # E2E trial on `wastechlab-mobile-template` — findings
 
-Status: **in progress** Date: 2026-09-01 Owner: Vladimir Makarevich
+Status: **chain 002 complete** Date: 2026-09-01 → 2026-09-02 Owner: Vladimir Makarevich
 
 A supervised end-to-end trial of the whole operator surface against a real target repo:
 **`wastechlab-mobile-template`** (Ionic 8 + Angular 21 + Capacitor 8, offline-first template), five queued tasks —
@@ -23,7 +23,7 @@ This document records **findings only**. Nothing was repaired during the trial: 
 
 | Thing | Value |
 | --- | --- |
-| Target repo | `wastechlab-mobile-template` @ `9098ccb7`, `main`, clean |
+| Target repo | `wastechlab-mobile-template` @ `9098ccb7` at the start; `08aff09` after the trial's five merges |
 | Orchestrator repo | `6ef994cf` (`main`) |
 | Installed `worc` | `0.10.3a2.dev155+g3e472b699` — pipx **copy**, not an editable link |
 | Providers | `codex 0.144.4` (`logged_in`), `claude 2.1.234` (`logged_in`) |
@@ -1575,7 +1575,7 @@ Filled in per task as the trial proceeds. Baseline tripwires on the pre-run tree
 | Task | Shape | Status | PR | Notes |
 | --- | --- | --- | --- | --- |
 | `001-edge-to-edge-bottom-insets` | operator decomposition, 5 subtasks | **done, merged** | [#2](https://github.com/VladimirMakarevich/wastechlab-mobile-template/pull/2) → `main` `5c19180` | 2h23m31s, **$55.86** (Claude only; 11 codex review turns report no cost). `refinement` skipped by `when`. Nodes: planning 1 · implementation 5 · testing 11 (**11/11 passed, zero check failures**) · review 11 · fixing 6 · documentation 1 · publish 1 · supervisor 11. `fix_iterations` 6, **all review-driven**. Review rounds per subtask 2/5/2/2/1. No provider fallback, no retry, no HITL prompt, nothing parked. Every task tripwire passed on the merged result, and `npm run lint` + `npm run build` pass on `main`. |
-| `002a-back-button-ladder-docs` | plain, docs only | queued | — | blocked until `001` merges |
-| `002b-back-button-reference-guards` | plain, code + specs + i18n | queued | — | blocked until `002a` merges |
-| `002c-back-button-exit-confirm` | plain, service + spec + i18n | queued | — | blocked until `002b` merges |
-| `002d-back-button-audit` | plain, audit + bookkeeping | queued | — | blocked until `002c` merges |
+| `002a-back-button-ladder-docs` | plain, docs only | **parked, then closed by hand** | [#3](https://github.com/VladimirMakarevich/wastechlab-mobile-template/pull/3) → `7155cf3` (+ [#4](https://github.com/VladimirMakarevich/wastechlab-mobile-template/pull/4) `baa24b4` for the task-file move) | 39m23s, **$14.45** Claude (3 codex review turns report no cost). Terminal `manual_action_required`, `reason=no_file_change`, `pr_url=None`, **nothing committed**. 3 review rounds, all rework: F9 refusal, then F21's phantom build twice. Both `fixing` rounds correctly changed nothing. 41% of spend wasted. The one real review finding (unsafe copy-this-shape advice) was applied by hand at the gate. |
+| `002b-back-button-reference-guards` | plain, code + specs + i18n | **done** | [#5](https://github.com/VladimirMakarevich/wastechlab-mobile-template/pull/5) → `5e6b624` | 43m, **$20.69** Claude. First auto-mode task: claimed 9s after the daemon started. 2 review rounds (F9 refusal, then accept). **First provider fallback of the trial** — codex `process_crashed`, claude took over and produced the trial's best review (a mutation-coverage gap with a designed test). `documentation` then triaged the two `low` findings by remit. |
+| `002c-back-button-exit-confirm` | plain, service + spec + i18n | **done** | [#6](https://github.com/VladimirMakarevich/wastechlab-mobile-template/pull/6) → `58f16c2` via `worc merge-task` | 24m, **$12.42** Claude. Accepted on the **first** review round — the only task in the trial with zero rework. Restart-mid-task probe ran here: soft stop waited out a 410s node, resumed 7s later, ungated. The merge produced F18's artifact: a squash subject with no Conventional Commits prefix. |
+| `002d-back-button-audit` | plain, audit + bookkeeping | **done** | [#7](https://github.com/VladimirMakarevich/wastechlab-mobile-template/pull/7) → `08aff09` | 34m, **$13.20** Claude. Two `blocking` rounds on **my** `.worc/config.yaml` edit (F24), then accept with **zero findings** once I reverted it. Found a real ladder defect: `page` (99) collides with Ionic's `MENU_BACK_BUTTON_PRIORITY = 99`, verified independently. Wrote F7's phantom into a repo document; corrected at the merge gate. |
