@@ -1317,26 +1317,32 @@ def _executor_alive(config: OrchestratorConfig) -> bool:
     return _daemon_alive(config) or _runner_alive(config)
 
 
-def _executor_refusal(config: OrchestratorConfig, verb: str) -> str | None:
-    """The refusal line when an executor owns this worc home, or ``None`` when it is free.
+def _executor_owner(config: OrchestratorConfig) -> str | None:
+    """Who owns this worc home right now and what to do about it, or ``None`` when it is free.
 
     Every command that drives the pipeline or git in the shared clone needs the slot idle, and two
     processes can hold it. The advice differs: the daemon is stoppable, while a ``run`` is not — it
     installs no stop wiring, so the only honest instruction is to wait for it or interrupt it where
     it runs.
+
+    Verb-free because the sentence is needed in two moods: a refusal (`<verb>: <owner>`) from a
+    command that would mutate the clone, and a note (`<verb>: note: <owner>`) beside a plan that
+    would not. A read-only plan is never refused for a busy clone — inspecting it is exactly what
+    an operator wants before deciding whether to stop the daemon at all — but it says who owns the
+    clone, so the plan is not read as executable right now.
     """
     root = worc_home_for(config)
     daemon = process_control.running_daemon_pid(process_control.pid_file_path(root))
     if daemon is not None:
         return (
-            f"{verb}: the watch daemon is running (pid {daemon}); stop it first with "
+            f"the watch daemon is running (pid {daemon}); stop it first with "
             "'wastech-orchestrator stop'"
         )
     runner = process_control.running_daemon_pid(process_control.runner_file_path(root))
     if runner is not None:
         return (
-            f"{verb}: a 'run' is executing a task in this clone (pid {runner}); wait for it to "
-            "finish, or interrupt it where it runs"
+            f"a 'run' is executing a task in this clone (pid {runner}); wait for it to finish, "
+            "or interrupt it where it runs"
         )
     return None
 
@@ -1968,9 +1974,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     require_provider_auth(config)
     # The single slot is per worc home, not per process: a second `run` (or one beside a daemon)
     # would drive two engines over the same branch in the same clone.
-    refusal = _executor_refusal(config, "run")
-    if refusal is not None:
-        print(refusal)
+    owner = _executor_owner(config)
+    if owner is not None:
+        print(f"run: {owner}")
         return 1
     orchestrator = build_orchestrator(
         config,
@@ -2140,10 +2146,13 @@ def cmd_rerun(args: argparse.Namespace) -> int:
         return 2
     root = worc_home_for(config)
 
-    # Rerun drives the pipeline in the shared clone; refuse while any executor owns it.
-    refusal = _executor_refusal(config, "rerun")
-    if refusal is not None:
-        print(refusal)
+    # Rerun drives the pipeline in the shared clone; refuse while any executor owns it. The
+    # ``--dry-run`` plan is read-only and passes, carrying the owner as a note below —
+    # ``plan_rerun`` treats a ``running`` row as recoverable *because* this guard refused a live
+    # executor, so a plan printed past it must say who is holding the clone.
+    owner = _executor_owner(config)
+    if owner is not None and not args.dry_run:
+        print(f"rerun: {owner}")
         return 1
 
     if not (Path(root) / "state.db").is_file():
@@ -2172,6 +2181,8 @@ def cmd_rerun(args: argparse.Namespace) -> int:
 
     if args.dry_run:
         _report_rerun_plan(plan)
+        if owner is not None:
+            print(f"rerun: note: {owner}")
         return 0
 
     require_launch_environment(config, env_file=resolve_env_file_path(args)[0])
@@ -2277,9 +2288,10 @@ def cmd_finalize(args: argparse.Namespace) -> int:
 
     # Finalize runs terminal cleanup (`git checkout base`) in the shared clone; refuse while any
     # executor owns it. An orphaned-active task (dead PID) is exactly what finalize reconciles.
-    refusal = _executor_refusal(config, "finalize")
-    if refusal is not None:
-        print(refusal)
+    # ``--dry-run`` is read-only (``plan_finalize`` mutates nothing) and passes with a note.
+    owner = _executor_owner(config)
+    if owner is not None and not args.dry_run:
+        print(f"finalize: {owner}")
         return 1
 
     if not (Path(root) / "state.db").is_file():
@@ -2303,6 +2315,8 @@ def cmd_finalize(args: argparse.Namespace) -> int:
 
     if args.dry_run:
         _report_finalize_plan(plan, as_=args.as_)
+        if owner is not None:
+            print(f"finalize: note: {owner}")
         return 0
 
     if not args.yes:
@@ -2387,9 +2401,9 @@ def _cmd_prs_sync(args: argparse.Namespace, config: OrchestratorConfig, root: Pa
     # A write run touches the shared clone/DB; refuse while any executor owns it (like finalize).
     # The read-only dry-run is always safe.
     if args.yes:
-        refusal = _executor_refusal(config, "prs --sync")
-        if refusal is not None:
-            print(refusal)
+        owner = _executor_owner(config)
+        if owner is not None:
+            print(f"prs --sync: {owner}")
             return 1
     orchestrator = build_orchestrator(
         config,
@@ -2447,10 +2461,12 @@ def cmd_merge_task(args: argparse.Namespace) -> int:
         return 2
     root = worc_home_for(config)
     # merge-task updates the branch + runs gh/merge in the shared clone; refuse while any executor
-    # owns it (like finalize). The merge flow + git ops need the idle slot.
-    refusal = _executor_refusal(config, "merge-task")
-    if refusal is not None:
-        print(refusal)
+    # owns it (like finalize). The merge flow + git ops need the idle slot — a ``--dry-run`` needs
+    # neither, and under auto mode with `git.auto_merge: false` reading the plan is the operator's
+    # normal move between two linked tasks, which is precisely when the daemon is up.
+    owner = _executor_owner(config)
+    if owner is not None and not args.dry_run:
+        print(f"merge-task: {owner}")
         return 1
     if not (Path(root) / "state.db").is_file():
         print(f"merge-task: no state database at {Path(root) / 'state.db'}")
@@ -2478,6 +2494,8 @@ def cmd_merge_task(args: argparse.Namespace) -> int:
         _report_merge_plan(
             plan, strategy=strategy, wait_for_checks=wait_for_checks, resolve=args.resolve
         )
+        if owner is not None:
+            print(f"merge-task: note: {owner}")
         return 0
 
     if not args.yes:

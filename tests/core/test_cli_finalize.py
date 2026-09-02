@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from wastech_orchestrator import cli
+from wastech_orchestrator import cli, process_control
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.loop_control import LoopCounters
 from wastech_orchestrator.core.state_machine import Status
@@ -401,3 +401,35 @@ def test_finalize_dry_run_stays_on_branch_when_disabled(
     assert code == 0
     out = capsys.readouterr().out
     assert "stay on branch" in out and "checkout base" not in out
+
+
+def test_finalize_dry_run_is_allowed_while_the_daemon_runs(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `plan_finalize` is read-only ("mutates nothing"), so the guard that protects the shared clone
+    # has nothing to protect here — the same line `prs --sync` already draws for its dry run.
+    project = tmp_path / "p"
+    project.mkdir()
+    config = _seed(project, git_repo.clone, pr_url="https://example/pull/9")
+    process_control.write_pid_file(
+        process_control.pid_file_path(git_repo.clone / ".worc"), pid=4242
+    )
+    monkeypatch.setattr(process_control, "is_running", lambda pid, **kw: True)
+
+    code = cli.main(
+        [
+            "--config",
+            str(config),
+            "finalize",
+            "task-1",
+            "--as",
+            "done",
+            "--dry-run",
+            "--no-verify-pr",
+        ]
+    )
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "dry-run" in out
+    assert "watch daemon is running" in out  # a note, so the plan is not read as executable now

@@ -711,6 +711,8 @@ Two fixes, independent and both cheap:
 - Let `--dry-run` past the guard (it is read-only, and inspecting the plan is exactly what an operator wants while the daemon runs).
 - Give the console the verb it already implies: `worc shell`'s help lists `merge-task <id>` as "merge a reviewed PR (refuses while the daemon is up)" — the console is _attached to_ the daemon and could stop it, merge, and restart it as one operation, which is the actual operator intent.
 
+**FIXED** — the first bullet, for `merge-task` and for `finalize` and `rerun`, which have the identical guard-above-the-flag shape this entry does not mention. The second bullet (a console verb that stops, merges and restarts) is **declined**, and each dry run now names the executor holding the clone rather than passing silently. See [what was fixed](e2e-trial-mobile-template.fixes.md#f25--a-plan-is-not-a-mutation).
+
 Reported as major not because any single command is broken, but because it is the seam where auto mode's value proposition ("the chain advances without me") meets the safety choice most operators will make (`auto_merge: false`), and the two do not compose.
 
 ### F26 — turning on `confirm_next_task` can make the daemon unstoppable for up to `ask_timeout_s`

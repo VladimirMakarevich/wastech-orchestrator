@@ -19,6 +19,7 @@ Kept separate from the findings document for a mechanical reason too: that docum
 | F28 — the terminal Telegram notification has no timeout | major | **fixed** | `notify/telegram.py` |
 | F26 — `confirm_next_task` makes the daemon unkillable | major | **fixed** | `notify/`, `composition.py`, `cli.py`, config |
 | F20 — `run` reads as parked, and `rerun --continue` starts a second engine | major | **fixed** | `process_control.py`, `cli.py` |
+| F25 — the merge gate cannot be operated under a live daemon | major | **fixed** | `cli.py` |
 
 ## F1 + F2 — the reviewer under decomposition
 
@@ -179,3 +180,15 @@ What the two markers feed:
 Eight tests, all red against the previous code: the marker is written for the duration and reaped in a `finally` (a leaked marker would refuse those commands forever), the probe and the label agree, the stop note no longer offers `rerun`, and `rerun`/`watch`/`finalize`/`prs --sync` each refuse before building an engine.
 
 **Two things deliberately left alone.** `logs clean` still waits on `_daemon_alive`, not the new probe: it is about the daemon's own rotating log handle under `.worc/logs/`, and a `run --log-file` writes wherever the operator points it — a real but different question, unobserved and not this finding. And the console's `up` does not pre-check the marker; it spawns a daemon that now refuses on its own, and `start_watch` already surfaces a verified-failed spawn with the real error.
+
+## F25 — a plan is not a mutation
+
+Reproduced exactly as filed (`merge-task --dry-run` exits 1 under a live daemon), and the fix is the finding's first bullet. The second — teaching `worc shell` to stop, merge and restart as one operation — is **not** taken: it is a new console verb with its own failure modes (a merge that fails after the daemon is down leaves the operator somewhere neither command promised), and the composition problem it exists to solve is smaller once the plan is readable without stopping anything. Recorded as declined rather than deferred, so nobody looks for it.
+
+**The rule already existed one function away.** `_cmd_prs_sync` guards only its write path and says so in a comment: "The read-only dry-run is always safe." So this was not a policy question but three commands that had not been brought to the policy — `merge-task`, `finalize` and `rerun` all placed the guard above the flag. The finding names only `merge-task`; fixing that one and leaving the other two would have left the inconsistency that made this defect possible in the first place, so all three are fixed, each with its own test pair (the dry run passes; the real thing still refuses).
+
+**The exemption is not silent.** Each dry run prints the owner as a note beside the plan, for a reason that is load-bearing on the `rerun` path specifically: `plan_rerun` accepts a `running` row as directly recoverable, and its own comment justifies that by "`cmd_rerun` already refused if any executor owned the slot". Past the guard that premise no longer holds, so a plan printed there must say who is holding the clone — otherwise the fix would have replaced a refusal with a confidently wrong plan. The note is what keeps `plan_rerun`'s premise visible instead of merely true-most-of-the-time.
+
+The message therefore stopped carrying its own verb (`_executor_refusal(config, verb)` → `_executor_owner(config)`): the same sentence is now needed as a refusal (`merge-task: <owner>`) and as a note (`merge-task: note: <owner>`), and composing it at the call site is what makes both read like the command that printed them.
+
+**Residual, stated because it is real:** a dry run under a live daemon builds a full `Orchestrator`, which opens `state.db` read-write and runs its `CREATE TABLE IF NOT EXISTS` schema pass — a brief write lock, not a mutation of task state. This is not new (`prs --sync`'s dry run has always done it, and every `plan_*` is documented "read-only; mutates nothing" about the _task_, not about the connection), and WAL keeps it clear of the daemon's own short transactions. A genuinely read-only plan path would need `build_orchestrator` to accept a read-only store, which is a larger change than this finding earns.

@@ -328,6 +328,32 @@ def test_rerun_recovers_stale_running_task(
     assert "is running" not in out
 
 
+def test_rerun_dry_run_is_allowed_while_the_daemon_runs(
+    git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Reading the plan mutates nothing, and it is what an operator wants before deciding whether to
+    # stop the daemon at all. The note matters as much as the exemption: `plan_rerun` treats a
+    # `running` row as recoverable *because* the guard already refused a live executor, so a plan
+    # printed past that guard must say who owns the clone.
+    project = tmp_path / "project"
+    project.mkdir()
+    source = project / "failed" / "task-1.md"
+    _complete_task_file(source, "task-1")
+    config = _seed(
+        project,
+        git_repo.clone,
+        TaskRow("task-1", "T", Status.FAILED, source_path=str(source)),
+    )
+    monkeypatch.setattr(cli.process_control, "running_daemon_pid", lambda _p: 4321)
+
+    code = cli.main(["--config", str(config), "rerun", "task-1", "--dry-run"])
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "would re-attempt task-1" in out
+    assert "watch daemon is running" in out
+
+
 def test_rerun_refuses_when_daemon_running(
     git_repo, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
