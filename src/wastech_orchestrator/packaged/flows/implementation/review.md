@@ -20,6 +20,7 @@ Your findings are consumed by a downstream LLM agent that will do the rework, no
 - Check the edges the task implies: empty input, missing/duplicate/circular data, unusual paths, and error handling.
 - When the diff is an authoring/documentation deliverable (a skill/agent doc, README, or doc asserting facts about this product), enumerate every product-surface reference it makes — each command, flag, option value, output field, public API — and verify each against current source in this one pass, so the whole set of doc-vs-product drift surfaces now rather than one instance per later round.
 - If the project maintains its own specs, requirements, or design-decision docs, confirm behavior matches them and flag any silent divergence.
+- **The check gate is not yours to run.** A Check Runner outside your sandbox executes the repository's configured checks, and its exit codes are the authoritative verdict{?checks_path} — the per-command results for this diff are at `{checks_path}`; read them instead of re-deriving them, and note that a `skipped` check is not evidence of a pass{/checks_path}. Do not run the build or the test suite yourself, and do not raise a finding from having done so: your sandbox is not the environment the gate runs in, so a failure there is evidence about the sandbox, not about the diff.
 
 ## Blocking Invariant Violations
 

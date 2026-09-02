@@ -537,6 +537,18 @@ That finding is `blocking`, carries `path: null`, and its own `fix:` states no r
 
 Cheapest fix: publish `{checks_path}` on a pass too (the citation profile's own argument), and add one line to `review.md` pointing the reviewer at it instead of the shell.
 
+#### F21 — FIXED
+
+Both halves, exactly as this entry proposed.
+
+`checks.py` publishes `{checks_path}` on the pass edge too, with a payload chosen for its reader rather than copied from the failure path: the failure edge still hands `fixing` the first failing command's log, because that is the text it acts on, while a pass writes `checks.json` — one entry per command with `command`, `exit_code`, `passed`, `skipped` and `timed_out`. `skipped` is carried explicitly so a reader cannot count a check whose toolchain was absent as a pass; that distinction is what a reviewer asked to confirm "the checks pass" actually needs, and a log tail does not carry it.
+
+`review.md` gains the line the entry says it is missing: the check gate belongs to a Check Runner outside the reviewer's sandbox, its exit codes are the authoritative verdict, the per-command results are at `{?checks_path}`, and the reviewer neither runs the build itself nor raises a finding from having done so — its sandbox is not the environment the gate runs in, so a failure there is evidence about the sandbox.
+
+Note this does not fix **F7**; it removes F7's reach into the review path. The reviewer no longer has a reason to run the build, so F7 stops manufacturing blocking findings there. An `implementation`/`fixing` node is still told by `implementation.md` to run `npm run build` and still cannot, which remains step 4 of the `full-tool-access` ADR.
+
+One consequence worth recording, because it showed up as four broken tests: a passing `command_profile` node now creates its per-run artifact directory, which it previously did only on the citation and dependency-scan paths. Four unit tests were passing the shared `/art` placeholder as their artifacts root and had to be given a real one, the way the citation tests already did.
+
 ## Reproducibility on chain 002 (task `002a`)
 
 The second task re-ran the same pipeline on a different shape of deliverable — documentation only, no decomposition. Every defect that could apply did apply, and two of them composed into something task 001 never showed.

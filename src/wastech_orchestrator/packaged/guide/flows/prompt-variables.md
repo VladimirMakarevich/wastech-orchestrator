@@ -16,7 +16,7 @@ Each variable names **which runner populates it** and **when it may be empty**. 
 | `{task_path}` | agent, evaluator | no on-disk task file exists (rare) |
 | `{plan_path}` | agent, evaluator | planning has not run yet, or the node that fills the `plan` output slot is disabled |
 | `{diff_path}` | agent, evaluator | no workspace-write edit has happened yet |
-| `{checks_path}` | agent, evaluator | the `checks` node has not run yet |
+| `{checks_path}` | agent, evaluator | the `checks` node has not run yet (it publishes on both outcomes — see `reference.md`) |
 | `{review_path}` | agent, evaluator | the `evaluator` (review) node has not run yet |
 | `{memory_path}` | agent, evaluator | memory is disabled, or nothing relevant was retrieved |
 | `{subtask_order}` | agent | the task is **not** decomposed (whole-task run) |

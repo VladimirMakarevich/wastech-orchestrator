@@ -2712,6 +2712,7 @@ def test_checks_pass_outcome(tmp_path: Path) -> None:
         FakeRouter(_result()),
         store,
         FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),))),
+        artifacts_root=str(tmp_path),
     )
     result = ChecksNodeRunner(services, _checks_inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "pass"
@@ -2732,6 +2733,83 @@ def test_checks_fail_outcome(tmp_path: Path) -> None:
     )
     result = ChecksNodeRunner(services, _checks_inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "fail"
+
+
+def test_checks_pass_publishes_the_command_verdicts_as_checks_path(tmp_path: Path) -> None:
+    """A passing gate reaches the next node; F21 had it reach nobody.
+
+    `{checks_path}` was set only on the fail edge, so on a pass the next node was told nothing
+    about the gate. An evaluator asked to judge an acceptance criterion like "lint and build pass"
+    then had no evidence of it and, holding a shell, verified the only way left to it — by running
+    the build inside the agent sandbox, which is not the environment the gate runs in. Observed on
+    the trial: its own attempt died there, and it filed that as a blocking finding with no path,
+    about a failure that had not happened, into a fix loop that could not act on it.
+    """
+    node = _checks_node()
+    store = FakeStore()
+    outcome = CheckOutcome(passed=True, runs=(_run(True), _skipped_run()), any_skipped=True)
+    services = _services(
+        FakeRouter(_result()), store, FakeCheckRunner(outcome), artifacts_root=str(tmp_path)
+    )
+    inputs = _checks_inputs(tmp_path)
+
+    result = ChecksNodeRunner(services, inputs).run(node, _ctx(node))
+
+    assert result.outcome.kind == "pass"
+    assert inputs.checks_path is not None
+    published = json.loads(Path(inputs.checks_path).read_text(encoding="utf-8"))
+    assert published["passed"] is True
+    by_command = {entry["command"]: entry for entry in published["checks"]}
+    assert by_command["pytest"]["passed"] is True
+    assert by_command["pytest"]["exit_code"] == 0
+    # A skip is not evidence of a pass, so the reader must be able to tell the two apart.
+    assert by_command["xcodebuild test"]["skipped"] is True
+    assert by_command["xcodebuild test"]["passed"] is False
+
+
+def test_checks_failure_still_publishes_the_first_failure_log(tmp_path: Path) -> None:
+    # The pass path gained a summary; the fail path must still hand `fixing` the failing log
+    # itself, which is the text it acts on — a summary would have told it nothing it can fix.
+    log = tmp_path / "first-failure.log"
+    log.write_text("E   assert 1 == 2\n", encoding="utf-8")
+    node = _checks_node()
+    store = FakeStore()
+    outcome = CheckOutcome(
+        passed=False, runs=(_run(False),), any_quality_failed=True, first_failure_log=str(log)
+    )
+    services = _services(
+        FakeRouter(_result()), store, FakeCheckRunner(outcome), artifacts_root=str(tmp_path)
+    )
+    inputs = _checks_inputs(tmp_path)
+
+    result = ChecksNodeRunner(services, inputs).run(node, _ctx(node))
+
+    assert result.outcome.kind == "fail"
+    assert inputs.checks_path == str(log)  # no exchange wired → the private log path
+    assert not (tmp_path / "checks.json").exists()
+
+
+def test_a_dirtying_check_publishes_nothing_before_it_goes_manual(tmp_path: Path) -> None:
+    # The green-but-dirtying guard fails closed to manual review, so the run does not continue to
+    # a next node — publishing a "the gate passed" report from that state would be a claim about a
+    # tree nobody has accepted yet.
+    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
+
+    node = _checks_node()
+    store = FakeStore()
+    services = _services(
+        FakeRouter(_result()),
+        store,
+        FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),))),
+        snapshot=FakeSnapshot(["before", "after"]),  # checksum changed → mutated
+        artifacts_root=str(tmp_path),
+    )
+    inputs = _checks_inputs(tmp_path)
+
+    with pytest.raises(NodeManualRequired):
+        ChecksNodeRunner(services, inputs).run(node, _ctx(node))
+
+    assert inputs.checks_path is None
 
 
 def test_checks_launch_failure_is_manual(tmp_path: Path) -> None:
@@ -2773,7 +2851,9 @@ def test_checks_partial_skip_still_passes(tmp_path: Path) -> None:
     node = _checks_node()
     store = FakeStore()
     outcome = CheckOutcome(passed=True, runs=(_run(True), _skipped_run()), any_skipped=True)
-    services = _services(FakeRouter(_result()), store, FakeCheckRunner(outcome))
+    services = _services(
+        FakeRouter(_result()), store, FakeCheckRunner(outcome), artifacts_root=str(tmp_path)
+    )
     result = ChecksNodeRunner(services, _checks_inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "pass"
     assert len(store.check_runs) == 2  # both the run and the skip are recorded
@@ -2806,7 +2886,13 @@ def test_checks_selects_from_committed_change_when_tree_clean(tmp_path: Path) ->
     node = _checks_node()
     store = FakeStore()
     check_runner = FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),)))
-    services = _services(FakeRouter(_result()), store, check_runner, git=CleanTreeGit())
+    services = _services(
+        FakeRouter(_result()),
+        store,
+        check_runner,
+        git=CleanTreeGit(),
+        artifacts_root=str(tmp_path),
+    )
     result = ChecksNodeRunner(services, _checks_inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "pass"
     assert len(store.check_runs) == 1  # the set ran — not a vacuous pass
@@ -2862,6 +2948,7 @@ def test_mutation_guard_clean_check_still_passes(tmp_path: Path) -> None:
         FakeStore(),
         FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),))),
         snapshot=FakeSnapshot(["same"]),
+        artifacts_root=str(tmp_path),
     )  # capture() returns "same" both times
     result = ChecksNodeRunner(services, _checks_inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "pass"
