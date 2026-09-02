@@ -37,7 +37,7 @@ The table below covers what this document records: the findings that were repair
 | F5 + F8 + F16 — the three authoring lessons | nit / minor | **fixed as guidance** | `worc-task/SKILL.md`, `worc-deco-task/SKILL.md` |
 | F15 — a correct finding with an invented authority | minor | **fixed, paid for** | `review.md` |
 | F27 — codex crashes on its own model cache | minor here, major for a codex-primary route | **fixed in the environment** | the host's `codex` install, `README.md` |
-| F22 — a task spec contradicted by a page it never mentioned | minor | **fixed in the target, not landed** | the target's `docs/tasks/002-android-hardware-back-button.md` |
+| F22 — a task spec contradicted by a page it never mentioned | minor | **fixed in the target** | the target's `docs/tasks/002-android-hardware-back-button.md` (`18dc882`) |
 | F7 — the agent cannot run `npm run build`; the Check Runner can | major | **fixed as a contract** (the sandbox half is a named investigation) | `implementation.md`, `fixing.md`, `full-tool-access-for-agents.md`, `docs/backlog/advanced-mode-sandbox-scope.md` |
 
 ## F1 + F2 — the reviewer under decomposition
@@ -435,7 +435,7 @@ Both were dated "added 2026-08-26" in the finding, which is true of one of them 
 - The "Missing" row keeps its target (`AGENTS.md` / `docs/architecture.md`, correctly missing then) and loses "or why `100` is skipped", which the page already explained.
 - Phase 1 gains the step that actually happened: reconcile that page, because two documents describing one contract is how a developer follows the wrong one. `7155cf3` did exactly this — it replaced the `ngOnDestroy` bullet with the three subscription shapes — so the plan now matches what landed.
 
-**Not landed, deliberately.** The change sits in the target's working tree. That repository's own `.rules/git-workflow.md` forbids committing directly to `main` and forbids creating a working branch unless the operator explicitly asks for one, so both routes need a decision this campaign does not own. The operator chose to keep it uncommitted; the residual item is in [the status index](e2e-trial-mobile-template.status.md).
+**Landed by the operator, not by this campaign.** That repository's own `.rules/git-workflow.md` forbids committing directly to `main` and forbids creating a working branch unless the operator explicitly asks, so both routes needed a decision this campaign does not own; the change was left in the target's working tree and the operator committed it there as `18dc882`.
 
 **What this says about the trial's tooling, which is why it is worth a section.** The finding's own point was that `analyze-task-run` cannot see this class of defect because it judges the diff against `task.normalized.json` rather than against the upstream spec. Reproducing it adds the sharper version: nothing in the pipeline reads the spec against the repository it describes. Four runs of agents each read this spec as their statement of the world, and its first substantive sentence was false about a tracked file two directories away — while one of them was editing that very file to fix the bullet the spec had not noticed was wrong.
 
