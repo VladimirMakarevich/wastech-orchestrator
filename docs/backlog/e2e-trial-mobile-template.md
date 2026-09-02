@@ -940,6 +940,632 @@ write a defensible negative. The system is cheapest when it is right and most ex
 which is exactly backwards — and it is the strongest single argument for putting F1, F9 and F10 ahead of
 everything else.
 
+## Session 2 — chain 002 under `worc watch`, and the first test of auto mode
+
+Findings from the supervised continuation on 2026-09-02: tasks `002a`-`002d`, the watch daemon, and
+the auto-mode surface that had never been exercised before.
+
+### F24 — the publish path assumes `.worc/` is ignored; the installer's own `.gitignore` re-includes `config.yaml`
+Severity: minor. Lever: orchestrator source — `git_manager.py` staging (and/or the installed
+`.gitignore` rationale).
+
+`git_manager.py:2450-2456` states the assumption in its own docstring:
+> "it stages the whole tree (``git add -A``; **`.worc/` stays ignored**)"
+
+but the installed `.gitignore:74-78` deliberately does the opposite for one file:
+```
+# Track the orchestrator config so its changes are reviewable in history. It holds env-var
+# NAMES only (never values) — the secrets live in the gitignored .worc/.env.
+!.worc/config.yaml
+```
+and `git ls-files --error-unmatch .worc/config.yaml` confirms **TRACKED**.
+
+Consequence: **an operator config change made while a task is in flight is swept into that task's
+commit and PR.** I reproduced it by accident — my own `auto_mode.enabled: false -> true` edit (made
+between 002a and 002b) shows up in 002b's working tree:
+```
+$ git diff --stat HEAD
+ .worc/config.yaml   | 2 +-        <- orchestrator runtime config
+ docs/architecture.md | 6 +-       <- the actual task
+ ...
+```
+The previous session filed the config-header/`.gitignore` mismatch under "cosmetic drift (no lever
+worth spending)". It is not purely cosmetic: it has a publishing consequence, and the two halves of
+the product disagree in code, not just in prose. Either exclude `.worc/**` from the candidate
+pathspec explicitly, or drop the docstring's claim and say that a tracked config change rides along.
+
+Natural experiment this creates, worth watching: `review.md` tells the evaluator to "judge only what
+this task's plan changed; do not flag prior-task code as scope drift". `.worc/config.yaml` is
+neither the task's nor a prior task's — it is the operator's. Whether review flags it is a free test
+of the scope-drift instruction. Recorded here so the outcome is judged against a prediction made
+before it was known.
+
+Disclosure for the trial's own honesty: this file's change is **mine**, not the pipeline's. If it
+lands in 002b's PR I will say so in the PR body rather than quietly stripping it, since the repo's
+own `.gitignore` rationale is that config changes should be reviewable in history.
+
+### F24 — CORRECTED after testing it
+My first statement of this finding predicted that a tracked `.worc/config.yaml` change would land in
+the task's PR. **It did not.** PR #5's two commits contain no `.worc/` path at all
+(`git diff --name-only origin/main...origin/feat/002b-back-button-guards | grep '^\.worc/'` -> empty).
+Correcting the finding rather than leaving the prediction standing:
+
+What is actually true:
+1. **The premise is false in two docstrings.** `git_manager.py:2185` — "``.worc/`` is gitignored, so
+   ``git add`` skips it without a guard" — and `:2453` — "(``git add -A``; ``.worc/`` stays
+   ignored)". The installed `.gitignore:74-78` re-includes `!.worc/config.yaml` deliberately, and
+   `git ls-files` confirms it is TRACKED. So the stated reason is wrong on any installed repo.
+2. **The code-commit path is safe anyway, for a different reason than the docstring gives.**
+   `_scoped_pathspec` (git_manager.py:2182-2205) stages an **explicit list of changed code paths**,
+   never `git add .`/`-A`. `.worc/config.yaml` is not in that list, so it cannot enter the code
+   commit. The safety is real; the explanation attached to it is not.
+3. **The residual exposure is the base-merge path**, which genuinely does use `git add -A`
+   (`finalize_base_merge`, :2453) and justifies it with the false premise. A modified tracked
+   `.worc/config.yaml` would be swept into that merge commit. **Untested here** — no base merge
+   occurred in this run — so this is a code-read risk, not an observation.
+4. **The review diff does include it**: `current.diff` opens with the `.worc/config.yaml` hunk, so
+   the reviewer spends attention on a file that can never be part of the change. Harmless in
+   practice (the agents identified and ignored it correctly, see above), but it is an inconsistency
+   between the two diff-producing paths — publish excludes `.worc/`, review does not.
+
+Severity drops to **nit** for what was observed, with a minor untested risk on the base-merge path.
+Lever: correct the two docstrings, and decide whether `current.diff` should exclude `.worc/` the way
+the commit pathspec effectively does.
+
+### F25 — in auto mode the human merge gate cannot be operated with worc's own commands
+Severity: **major** (workflow-level; it is the friction the whole auto-mode feature runs into).
+Lever: orchestrator source — `cli.py` `cmd_merge_task`'s daemon guard placement.
+
+```
+$ worc merge-task 002b-back-button-reference-guards --dry-run
+merge-task: the watch daemon is running (pid 47040); stop it first with 'wastech-orchestrator stop'
+exit 1
+```
+The guard sits at `cli.py:2335-2341`, **before** `--dry-run` is considered. Its stated reason —
+"merge-task updates the branch + runs gh/merge in the shared clone ... The merge flow + git ops need
+the idle slot" — is right for a real merge and wrong for a dry run, which mutates nothing.
+
+The composition is what matters. With `auto_mode.enabled: true` and `git.auto_merge: false` (the
+configuration an operator picks when they want a human merge gate), a `depends_on` chain needs a
+merge between every pair of tasks; the merge needs the daemon stopped; and stopping the daemon is
+precisely what auto mode exists to avoid. So the supported path per link is
+**stop -> merge-task -> watch again**, three commands and a lost idle slot, or else merge outside
+worc entirely with `gh` — which is what this trial did, and what the previous session did for 001.
+
+Two fixes, independent and both cheap:
+- Let `--dry-run` past the guard (it is read-only, and inspecting the plan is exactly what an
+  operator wants while the daemon runs).
+- Give the console the verb it already implies: `worc shell`'s help lists `merge-task <id>` as
+  "merge a reviewed PR (refuses while the daemon is up)" — the console is *attached to* the daemon
+  and could stop it, merge, and restart it as one operation, which is the actual operator intent.
+
+Reported as major not because any single command is broken, but because it is the seam where auto
+mode's value proposition ("the chain advances without me") meets the safety choice most operators
+will make (`auto_merge: false`), and the two do not compose.
+
+### F26 — turning on `confirm_next_task` can make the daemon unstoppable for up to `ask_timeout_s`
+Severity: **major** (it degrades the stop ladder, which is a safety surface). Lever: orchestrator
+source — `notify/telegram.py`'s wait loop and/or `cli.py` `_confirm_next_task`.
+
+The chain, all read from source:
+1. `_confirm_next_task` (cli.py:1607-1614) passes `config.telegram.ask_timeout_s` straight into
+   `notifier.ask_human`. This config carries `ask_timeout_s: 28800` — eight hours, a sensible value
+   for a HITL question, inherited here without a second thought.
+2. The Telegram wait loop (`notify/telegram.py:760-775`) polls `get_updates` until
+   `deadline_monotonic` with **no cancellation hook**: `grep -c "is_cancelled" notify/telegram.py`
+   returns **0**.
+3. `_confirm_next_task` is called from inside `watch_once` (cli.py:1714), while `watch_loop` checks
+   its stop channels only **around** ticks and during the poll sleep — never inside one.
+4. `cmd_watch` does inject an `is_cancelled` predicate, but into the **FlowEngine**, which the claim
+   gate sits outside of.
+
+So a daemon that fires the gate and gets no reply is wedged inside a single tick for up to 8 hours.
+`worc stop` writes its sentinel, waits `--timeout` (default 30s), gets no confirmation, and
+escalates to a **tree kill** — the ladder's hardest rung reached not because anything is wrong but
+because the daemon is politely waiting for a Telegram reply. `worc restart` inherits the same.
+
+Both ends of the tuning range are awkward, which is what makes it a design finding rather than a
+config mistake:
+- **long `ask_timeout_s`** (the shipped-style value): one prompt, but a daemon that can only be killed;
+- **short `ask_timeout_s`**: responsive, but the gate re-asks **every tick** — `break` only ends the
+  current cycle, and nothing records that this task was already declined — so an operator who says
+  no once is asked again 60 seconds later, forever, with no backoff and no "asked N times" state.
+
+Fixes, either or both: give the ask loop the same `is_cancelled` predicate the FlowEngine gets; and
+give the claim gate its own timeout key rather than borrowing the HITL one, plus a per-task
+"declined, do not re-ask until X" memory.
+
+**This shaped the trial's own test plan**: I lowered `ask_timeout_s` before letting the gate fire,
+precisely to avoid wedging the daemon for eight hours overnight.
+
+### F27 — codex `process_crashed` at ~33% on this host, with a diagnosable signature
+Severity: minor for the orchestrator (it handled both perfectly), major for an operator running
+codex as primary. Lever: environment / codex CLI version pin — plus a docs line so it is recognised.
+
+`provider_attempts` across chain 002:
+| provider | succeeded | process_crashed |
+| --- | ---: | ---: |
+| claude | 19 | 0 |
+| codex | 4 | **2** |
+
+Both failures are `review` attempt 1 (002b 23:52, 002c 00:30) and both carry the same stderr:
+```
+ERROR codex_models_manager::cache: failed to load models cache:
+      missing field `base_instructions` at line 97 column 5
+ERROR codex_models_manager::manager: failed to renew cache TTL:  (same, repeated ~8x)
+```
+i.e. codex 0.144.4's own model-cache schema is out of step with the cache file on disk. Not an
+orchestrator defect — and the orchestrator's handling is a **positive**: classified as
+`process_crashed`, routed to the `claude` fallback, flow continued, and on both occasions the
+fallback produced the better review. Recorded because (a) the rate rose through the trial (0/3 on
+002a, then 1/2, then 1/1), and (b) an operator seeing `exit 1` with no final message has no way to
+know it is a provider-side cache problem unless someone tells them this signature.
+
+### F28 — the "best-effort" terminal Telegram notification has no timeout, and wedged the daemon live
+Severity: **major**. Lever: orchestrator source — `notify/telegram.py` `_safe_send` / `_run_sync`.
+**Observed, not inferred.**
+
+Timeline:
+```
+02:37:34.608  "terminal exchange sealed"        <- last log line of any kind
+   (silence)
+02:41        `worc stop`  -> "watcher 59782 did not confirm shutdown in 30s; graceful stop is
+                             still pending (kept its PID file)"
+02:44        sample 59782 -> main thread ends in select_kqueue_control_impl -> kevent
+                             (an asyncio selector), plus an idle `asyncio_0` worker thread.
+                             No child processes. Stop sentinel present and ignored throughout.
+02:47        `worc stop --force-full` -> "hard-stopped (killed its process group)"  -> reaped
+```
+~10 minutes wedged, immune to the cooperative stop.
+
+The code path: `Orchestrator._notify_terminal` (`core/orchestrator.py:4885-4900`) is documented as
+> "Best-effort terminal notification. **Never raises and never alters the outcome.**"
+
+and it delivers on that with a `try/except`. But `_safe_send` (`notify/telegram.py:281-287`) wraps
+only exceptions:
+```python
+try:
+    self._client.send_message(chat_id=..., text=...)   # no timeout argument
+except Exception as exc:
+    self._warn(f"{op} send failed", ...)
+```
+and the call runs through `_run_sync` (`telegram.py:585-598`) = `asyncio.run(factory())` with **no
+deadline anywhere**. So "never raises" is not "never hangs": a stalled Telegram send blocks the tick
+indefinitely, and because `watch_loop` checks its stop channels only *around* ticks, the daemon stops
+answering `stop` for as long as the network does.
+
+**This is the same family as F26 and it makes the family's real shape clear:** *any* Telegram call
+made from inside a tick is unbounded and uninterruptible, and the stop ladder cannot reach it. F26 is
+the `ask_human` instance (bounded by `ask_timeout_s`, which is 8h here); F28 is the fire-and-forget
+instance (bounded by nothing at all). This config also sets `telegram.trace: true`, which calls
+`send_trace` after **every node** (`core/orchestrator.py:3687`) — so the exposure is not one call per
+task, it is one per node.
+
+Fixes: pass an explicit timeout into `send_message` and wrap `_run_sync` in
+`asyncio.wait_for`; and give the notifier the `is_cancelled` predicate `cmd_watch` already builds for
+the FlowEngine, so the stop ladder can reach a call in flight.
+
+**Positive, in the same breath:** `stop --force-full` did exactly what it advertises — "The rung for
+a wedged or suspended watcher a soft stop cannot reach" — killed the process group, cleared the PID
+file, and reported "it resumes from its checkpoint on next start". The ladder's design anticipated
+this state; nothing was lost (002c was already terminal, PR #6 created).
+
+### F18 — now demonstrated with the artifact, and the damage is not the trailer
+The previous session reasoned about this from `git_manager.py:3021`. I ran it. With the daemon
+stopped, `worc merge-task 002c... -y` merged PR #6 and produced this on `main` (`58f16c2`):
+```
+SUBJECT: Root-page exit confirmation for the hardware back button (#6)
+BODY:    * feat(002c-back-button-exit-confirm): Root-page exit confirmation for the hardware back button
+         * chore(orchestrator): audit trail for 002c-back-button-exit-confirm
+```
+against the repo's policy (`gh api repos/... -> {"title":"COMMIT_OR_PR_TITLE",
+"message":"COMMIT_MESSAGES"}`).
+
+Two concrete consequences, neither of which is the agent-trailer risk the original finding led with:
+1. **The subject lost its Conventional Commits type.** The branch commit was
+   `feat(002c-back-button-exit-confirm): ...`; the squash subject is bare prose. `.rules/git-workflow.md:7`
+   requires "**Conventional Commits** ... `feat:`, `fix:`, `chore:`, `docs:`, `refactor:`". So the
+   tool's own merge path violates the target repo's first git rule. My four manual merges
+   (`docs:`, `chore:`, `feat:`, `chore:`) all comply, because `--subject` let me set them.
+2. **The orchestrator's internal bookkeeping leaked into `main`'s history** — `chore(orchestrator):
+   audit trail for ...` is a private commit on the task branch that nobody merging a feature wants
+   in the permanent record.
+
+The trailer risk did **not** materialise here, only because the orchestrator's own commits are clean
+(verified). That is luck of configuration, not a guarantee: the same mechanism would carry any
+trailer a future commit contained.
+
+`merge-task --dry-run` remains the cheapest fix and still does not report the one thing that
+mattered: it printed status / branch / base / pr / pr state / "-> update branch w/ base, then merge
+via 'squash'" and said nothing about what the squash message would be.
+
+**Cost accepted deliberately:** I used `merge-task` here *knowing* F18, to convert a code-read into
+an observation. The price is one non-conventional subject line on `main` (`58f16c2`). I am not
+rewriting published history to tidy it; it stands as the evidence.
+
+## Auto-mode probes — results so far
+### Queue partitioning: PASS, at zero agent cost
+With three eligible `queue=default` tasks pending:
+```
+$ worc watch --queue nosuchqueue --poll-seconds 0
+watch: nothing to do (slot free, no pending tasks)      exit 0
+```
+The instance saw none of the real tasks. `scan_pending_sorted` (cli.py:1464-1480) filters on plain
+string equality before ranking, and it is the single source shared by `watch_once`, `worc list` and
+`worc top`, so the shown order cannot drift from the claim order. Partitioning works as documented.
+
+**Hazard worth reporting:** `worc list` has **no** `--queue` flag (only `top` and `shell` do), and it
+renders `config.orchestrator.queue` only (cli.py:4423). So a task whose `queue` is misspelled is
+invisible in the default operator listing, with no warning that a pending file was skipped — it just
+is not there. The daemon is equally silent: a foreign-queue file is filtered out before the loop, so
+it produces no "waiting"/"skipped" line either.
+
+### Daemon start: works, picks up in 9s
+`worc --log-file .worc/logs/daemon.log watch --poll-seconds 60`
+01:25:48 launched -> 01:25:57 `002b-back-button-reference-guards` claimed -> 01:25:59 `planning`.
+PID file `.worc/orchestrator.pid` = `{"pid": 47040, "start_time": null}`.
+
+**F20's control case, proven A/B.** The same engine state that read `parked (no daemon)` under
+`worc run` now reads correctly under the daemon:
+```
+$ worc status      status=running   node=planning
+$ worc list        active:  running   002b-back-button-reference-guards
+```
+Identical DB status (`RUNNING`); the only difference is the PID file. That is F20 isolated to its
+cause, with the daemon as the control.
+
+### `worc top` — works; LOG panel default is inconsistent with `shell`
+Renders ACTIVE / QUEUE (in true claim order) / RECENT / LOG, refreshes on `--poll-seconds`, degrades
+sanely without a TTY. But:
+```
+$ worc top                                  ->  LOG (no --log-file) / (no output)
+$ worc top --log-file .worc/logs/daemon.log ->  LOG (.worc/logs/daemon.log) / <live lines>
+```
+`worc shell` defaults this path to `.worc/logs/daemon.log` on purpose — `cli_shell.daemon_log_path`
+even documents why: "Defaulting to `.worc/logs/daemon.log` (not `None`) means the tail always has a
+path". `worc top` does not, so the operator's live monitor shows an empty LOG panel even when the
+daemon is writing to exactly that conventional location. Same family as **F19**, same two commands:
+the log-file story is right in `shell` and wrong in `top`.
+
+### `worc shell` — passive attach works as documented
+```
+shell: attached to running daemon (pid 47040) — tailing .worc/logs/daemon.log
+```
+`help` and `ps` rendered; `quit` left the daemon and its in-flight task running (pid 47040 still
+alive afterwards). It did **not** spawn a second daemon on entry — entry is passive, as designed.
+The `[shell]` extra is present (prompt_toolkit 3.0.53 in the pipx venv); a non-TTY stdin only warns.
+Worth recording as a safety positive: `help` states that `merge-task`, `finalize` and `rerun`
+"refuse while the daemon is up", so the console cannot race the engine it supervises.
+
+### Minor: the daemon's startup banner is lost to stdout buffering when redirected
+`cmd_watch` prints "watch: polling every 60s for git-pushed tasks (Ctrl-C or 'stop' to exit)" before
+the loop, but with stdout to a pipe/file Python block-buffers it, while the log stream (unbuffered)
+flows past it. Redirect the daemon to a file and the first thing an operator sees is a
+`read-isolation OFF` warning, not the banner that says the daemon came up and at what cadence.
+
+## THE FLAGSHIP AUTO-MODE RESULT — the daemon reports a blocked chain clearly
+002b reached `done` at 02:08:34 with PR #5 created (`git.auto_merge: false`, so nothing merged).
+One second later, in the same tick, the daemon continued its loop and said exactly why it stops:
+```
+02:08:35 level=info msg="task 002c-back-button-exit-confirm waiting:
+                         dependency '002b-back-button-reference-guards' PR is OPEN (unmerged)"
+02:08:35 level=info msg="task 002d-back-button-audit waiting:
+                         dependency '002c-back-button-exit-confirm' is pending (not yet run)"
+```
+and repeated both every tick (02:09:38, 02:10:42, 02:11:45 — a clean 60s cadence matching
+`--poll-seconds 60`).
+
+**Verdict: it announces the block, it does not spin silently.** The two messages are distinguishable
+and actionable — one names an unmerged PR, the other names an unrun predecessor, so an operator can
+tell "merge #5" from "nothing to do yet". They appear in both the `--log-file` sink and stdout.
+
+Two caveats worth stating with it:
+- They are `_LOG.info`. This config sets `logging.level: debug`, so they show. An operator running
+  at `warning` would see **nothing at all** — the daemon prints no per-tick summary
+  (`_summarize_watch` runs only on the single-pass branch), so at `warning` a fully blocked chain is
+  indistinguishable from a healthy idle one.
+- There is no escalation: no Telegram notice, no change of daemon state, no "blocked for N ticks"
+  aggregation. A chain blocked overnight produces N identical pairs of INFO lines and nothing else.
+  Cheap improvement: emit the waiting set once on transition, then only on change.
+
+## `review -> documentation` on accept: low findings get a second, correctly-scoped pass
+Review accepted with two `low` findings and the flow routed to `documentation` (no `fixing` round).
+The documentation node then triaged them **by remit**, which I did not expect:
+- Fixed the doc one, naming both sites: "`docs/ionic-angular-best-practices.md:72` and
+  `docs/architecture.md:127` both claimed every ladder reference ships a colocated spec. There is no
+  `back-button.service.spec.ts` (that's 002c) — I scoped the claim to
+  `inlineOverlay`/`overlayGuard`/`page` in both places." Verified in the merged branch: the phrase
+  is now "References, one per level:" and "spec'd next to its source" is gone.
+- **Explicitly declined the code one, and said so**: "The one open review finding I did **not**
+  address is a code matter, not a doc one: `_confirmInFlight` ... has no spec exercising it, so
+  deleting the flag would leave the suite green. That's a follow-up for a code step."
+That is the right behavior on both counts, and the explicit refusal-with-reason is what makes the
+residual auditable instead of lost. **Positive**, and an argument that `low` findings do not need a
+`fixing` round to be worth producing.
+Residual carried into the merge: the `_confirmInFlight` guard still has no test.
+
+## My own error, recorded against me
+While checking whether those findings were applied I ran `git checkout origin/feat/... -- .` on
+`main`, which staged the whole branch over the working tree **and** reverted my own
+`.worc/config.yaml` auto-mode edit. No orchestrator run was active (the daemon was idle between
+ticks) and nothing was committed or pushed from that state. Recovered with
+`git reset --hard origin/main` (tree verified empty afterwards) and re-applied the config edit. The
+right read-only tool was `git show <ref>:<path>`, which is what I used afterwards. Recorded because
+the trial's rule is that the target repo is observed, not perturbed, and I briefly perturbed it.
+
+### Chaining across a merge: PASS, one tick
+| time | event |
+| --- | --- |
+| 02:08:34 | 002b `done`, PR #5 opened, `auto_merge: false` so nothing merged |
+| 02:08:35 -> 02:12:47 | five ticks, each logging 002c "PR is OPEN (unmerged)" and 002d "pending (not yet run)" |
+| ~02:13:30 | I squash-merge PR #5 -> `main` `5e6b624` (clean, no agent trailers) |
+| 02:13:51 | **next tick**: `refresh_repo` ff-pulls the merge, `dependency_eligibility` flips to ELIGIBLE, 002c claimed — `validated -> preparing` |
+| 02:13:53 | 002c `running`, `planning` started |
+
+~20 seconds from merge to pickup, no operator action beyond the merge. This is the auto-mode
+promise working end to end on a real dependency chain: block detected, block announced per tick,
+block cleared, next task claimed automatically.
+
+Worth noting what makes it work: the per-tick `refresh_repo` is what notices the merge (nothing
+watches GitHub), and `_dependency_merged` re-probes PR state each time rather than caching a verdict.
+
+### `worc restart --force` mid-task: PASS, and it proves the documented asymmetry
+```
+02:16:03  restart --force --timeout 600 --poll-seconds 60 requested
+          -> .worc/orchestrator.stop sentinel written; old daemon (47040) keeps running
+02:20:44  planning completes normally, 410.3s, exit 0        <- work preserved, not killed
+02:20:44  level=info node_id=implementation error_class=cancelled blocked_until=None
+          msg="task parked (resumable)"                       <- parked AT the next node boundary
+          "watch: stopped"  exit 0
+02:20:51  new daemon (pid 59782) starts and resumes node_id=implementation
+```
+**Seven seconds of handover, no work lost, and no confirmation prompt** — even though the new daemon
+read `confirm_next_task: true` (verified in the file it loaded). `grep -iE
+"ask_human|human_input|telegram|approval|next-task gate"` over the daemon log for the handover
+window returns **nothing**.
+
+That is exactly what `AutoModeConfig`'s comment promises — "Gates new claims only — resuming an
+in-flight task on daemon restart is never gated" — confirmed by direct probe rather than by reading
+it. The cooperative soft stop also behaved as documented: it did **not** interrupt the running
+`planning` node, it waited out its 410s and parked on the boundary. Note this needs a `--timeout`
+larger than the remaining node time: the default 30s would have escalated to a tree kill 30 seconds
+in, discarding ~380s of `planning` work. Worth saying out loud in the docs, since "soft stop" and a
+30-second default are in tension for a flow whose nodes routinely run 5-12 minutes.
+
+### Confirms the stdout-buffering nit
+The old daemon's banner — "watch: polling every 60s for git-pushed tasks (Ctrl-C or 'stop' to exit)"
+— appears in its captured stdout **after** every log line, immediately before "watch: stopped". It
+was block-buffered from 01:25 until process exit at 02:20. So under redirection the operator gets
+the daemon's cadence banner only when the daemon dies.
+
+## What `analyze-task-run` caught, and what it structurally cannot
+Ran it on 002a from the orchestrator repo (report: `analyze-task-run-002a.md`). It is a **good**
+tool: from artifacts alone it independently reconstructed the run, and reached F21, F9, F10, F7, F11
+and the audit-fidelity gaps, each with the right lever. Two things it did better than my first pass:
+it noticed the ledger holds **two** entries for one task id after a `finalize` (double-counting
+hazard I had not spotted), and it framed the verdict correctly — "the run did not fail on its work,
+it failed on its gate".
+
+What it cannot reach, and why — this is the case for a supervised trial on top of it:
+
+1. **It can detect the build contradiction but not resolve it.** The skill reads `check_runs`, so it
+   sees green builds beside an agent saying the build is broken. But it is read-only and single-repo:
+   it cannot run `npm run build` itself, cannot run the unsandboxed `lmdb` probe, and therefore
+   cannot tell "the host is broken and the Check Runner is lying" from "the sandbox is the
+   variable". Three nodes in the artifacts assert the host is broken; nothing inside `.worc/`
+   refutes them. **Falsifying a unanimous false claim required acting outside the artifact set.**
+2. **Cross-run patterns are invisible.** F9's rate (1/11 on 001, then the first review of both 002a
+   and 002b) and the four-different-diagnoses pattern only exist across tasks. A per-run post-mortem
+   sees one instance and can only call it "an occurrence".
+3. **Anything outside a task run is out of frame.** F19 (`worc top --help` naming a flag argparse
+   rejects), F20 (`run` writes no PID file -> "parked" -> `rerun --continue` passes every guard),
+   F23 (`finalize` leaves the task-file move uncommitted), F25 (`merge-task` refuses under a live
+   daemon, `--dry-run` included) and every auto-mode result are properties of the **CLI and the
+   operator workflow**, not of a run's artifacts. The skill's map is `<target>/.worc/` plus the
+   orchestrator source; none of these leave a trace there.
+4. **It judges the diff against `task.normalized.json`, not against the upstream spec.** So it cannot
+   see F22 — that `docs/tasks/002-...md` claimed nothing documented the ladder while
+   `.rules/architecture.md:95` and `docs/ionic-angular-best-practices.md:53` already did (added
+   2026-08-26). Catching that needed the target's git history and the human-authored spec, neither of
+   which is in its frame.
+5. **It cannot verify the product.** It reads the diff; it does not typecheck the specs
+   (`tsc -p tsconfig.spec.json --noEmit`), probe for a browser, or re-run the gate. My independent
+   checks are what turned "the agent says the specs are fine" into "the specs compile".
+6. **F24's correction needed an observation it never gets.** Predicting that a tracked
+   `.worc/config.yaml` would ride into the PR, then watching a real publish disprove it, is a
+   live-experiment result. A post-mortem of one run would have inherited my wrong reading of the
+   `git add -A` docstring.
+
+Net: `analyze-task-run` is strong on *this run's* prompt/model/flow levers and should be run after
+every task. It is not a substitute for a supervised trial, because everything about the **operator
+surface**, **cross-run frequency**, and **claims that need falsifying from outside the sandbox** is
+structurally outside its inputs.
+
+### F24 — corrected a SECOND time, and the severity goes back up
+I first over-claimed (predicting the file would land in the PR), then under-claimed (downgrading to a
+nit when it did not). Both were wrong. The real cost showed up on 002d.
+
+`.worc/config.yaml` — my operator edit — was in the review diff of three consecutive tasks, and the
+reviewer's verdict on the *identical* situation escalated each time:
+| task | verdict on `.worc/config.yaml` |
+| --- | --- |
+| 002b | noticed, deliberately ignored ("Not mine, orchestrator-private, left untouched") |
+| 002c | **`low`** finding, correct, with an "unless the operator did it deliberately" hedge |
+| 002d | **`blocking`** finding — twice, costing a `fixing` round that could not act |
+
+002d round 2 stated the problem better than the evaluator contract can:
+> "The prior fix correctly reports that the agent cannot clean this up because this run's contract
+> forbids reading or writing `.worc/`; this is therefore **blocked on human/orchestrator cleanup, not
+> another code-fix loop**."
+
+So the cost is real: an operator config change made while tasks are running poisons the review of
+every task that follows, with **non-deterministic severity**, and can hard-block a task on something
+no agent is permitted to touch. Severity restored to **minor-to-major** depending on whether the
+reviewer picks `low` or `blocking` — and that variance is itself the finding.
+
+Fix stands and is now better motivated: exclude `.worc/` from `current.diff` the way the publish
+pathspec already effectively excludes it from the commit. One line, and it removes a whole class of
+unfixable blocking findings.
+
+**My part in it, stated plainly.** This was my contamination, not the pipeline's: I edited
+`.worc/config.yaml` between runs (a sanctioned auto-mode change) and left it in the working tree
+across four task runs. On seeing it hard-block 002d I reverted it (`git checkout -- .worc/config.yaml`),
+which removes the perturbation rather than rescuing the run — the running daemon had already read
+`auto_mode: true` into memory at start, so 002d continued unaffected and the next review sees a clean
+diff. Recorded because the trial's rule is to observe without perturbing, and for four runs I did
+perturb. The upside is that it produced the best evidence in the trial for the `current.diff`
+exclusion.
+
+Note this also reverts config change #1 as a side effect: `auto_mode.enabled` is back to `false` on
+disk, which is the value the trial started with.
+
+## `confirm_next_task` — the three branches
+### Timeout: PASS, fail-closed, and clearly logged
+Single-pass `worc watch --poll-seconds 0` with `ask_timeout_s: 90`, 002c merged so 002d eligible:
+```
+03:30:52  gate fires (one Telegram prompt sent)
+03:32:31  level=info msg="next-task gate: not claiming 002d-back-button-audit (timeout)"
+          watch: nothing to do (slot free, no pending tasks)
+          EXIT=0
+```
+002d stayed in `tasks/pending/` — fail-closed exactly as `AutoModeConfig` documents. The reason is
+named (`timeout`), and `_confirm_next_task`'s log expression
+(`result.failure or ("denied" if result.answered else "no answer")`) means deny, silence and
+transport failure would each be distinguishable in the log. Good.
+
+### F29 — the single-pass summary contradicts the gate line it just printed
+Severity: nit. Lever: `cli.py` `_summarize_watch`.
+The two lines above are adjacent and disagree: the gate says it is **not claiming a specific pending
+task**, then the summary says **"no pending tasks"**. `_summarize_watch` (cli.py:3558-3562) prints
+that sentence whenever `results` is empty, and a gate-declined task produces no `PipelineResult`. So
+the operator-facing summary of a deliberate decline reads as an empty queue. It should distinguish
+"nothing pending" from "pending, but not claimed".
+
+### Approve / deny: NOT tested, and why I did not fake them
+Both branches require a human pressing a button in the operator's Telegram chat. The operator is
+asleep; I have no legitimate way to answer. I did **not** reach for the bot token in `.worc/.env` to
+post a synthetic approval: impersonating the operator's approval would destroy the only thing the
+gate is for, and it is an outward action on a third-party service that was not authorised.
+
+What can be said without running them, from `cli.py:1594-1624`: all three negative outcomes converge
+on one expression —
+```python
+approved = result.failure is None and result.answered and result.approved is True
+if not approved: ... break
+```
+so **deny and timeout share the same code path and the same fail-closed `break`**; only the logged
+reason differs (`"denied"` when `result.answered`, `"no answer"` otherwise, or `result.failure`).
+The timeout branch I did exercise therefore covers the deny branch's *mechanism*; what remains
+untested is only that a real "no" button maps to `answered=True, approved=False`. Approve is
+genuinely untested.
+
+### Transport unavailable: PASS, fail-closed, distinguishable reason
+Config change #4 (temporary): `telegram.bot_token_env` -> an unset variable.
+```
+$ worc preflight
+telegram: FAIL — env var(s) not set: TELEGRAM_BOT_TOKEN_MISSING_PROBE
+preflight: NOT ready
+
+$ worc watch --poll-seconds 0
+level=debug reason=missing_env vars=TELEGRAM_BOT_TOKEN_MISSING_PROBE msg="telegram notifier disabled"
+level=info  msg="next-task gate: not claiming 002d-back-button-audit (transport_error)"
+watch: nothing to do (slot free, no pending tasks)          exit 0
+```
+The notifier degrades to disabled with a named reason, the gate fails closed with
+`transport_error` — distinct from `timeout` — and 002d stays pending. Exactly the documented
+fail-closed contract, and the three negative reasons are all separable in the log.
+
+One nuance worth recording rather than filing: `AutoModeConfig`'s comment says the gate "Requires
+`telegram.enabled` (**preflight**)", but `worc watch` **started anyway** with preflight reporting
+NOT ready — preflight is a check the operator runs, not a launch gate. The behavior is safe
+(fail-closed), but the consequence is that an operator whose Telegram credentials break mid-flight
+gets a daemon that never claims anything again and says so only in one INFO line per tick. With auto
+mode on, that is indistinguishable at a glance from an idle queue — the same visibility gap as the
+WAITING lines.
+
+## Auto-mode scorecard (all probes)
+| Capability | Result | Evidence |
+| --- | --- | --- |
+| `auto_mode.enabled` chaining | **PASS** | 002b claimed 9s after daemon start; 002c claimed on the first tick after PR #5 merged (~20s) |
+| Behaviour at a non-`done` terminal | **PASS (by design)** | 002a's `manual_action_required` predates auto mode; `watch_once` breaks on it so a manual task never chains silently |
+| Blocked-chain reporting | **PASS, with a caveat** | per-tick INFO naming task + dependency + reason ("PR is OPEN (unmerged)" vs "is pending (not yet run)"); invisible at `logging.level: warning`, no escalation, no dedup |
+| `confirm_next_task` — timeout | **PASS** | `not claiming 002d-back-button-audit (timeout)`, task stayed pending |
+| `confirm_next_task` — transport down | **PASS** | `telegram notifier disabled` + `not claiming ... (transport_error)`, task stayed pending |
+| `confirm_next_task` — deny | **not run** (needs the operator); shares the fail-closed path with timeout (`cli.py:1621-1624`) |
+| `confirm_next_task` — approve | **not run** (needs the operator) |
+| `poll_interval_seconds` tick | **PASS** | clean 60s cadence across 5+ idle ticks; per-tick `refresh_repo` is what noticed the merge |
+| git-pushed task discovery | **partially covered** — the merge of PR #5/#6 was discovered by the same `refresh_repo` fetch/pull path; a task file pushed from another machine was **not** separately tested |
+| `queue` partitioning | **PASS** | `--queue nosuchqueue --poll-seconds 0` -> "nothing to do", real tasks untouched |
+| `worc watch` / `stop` / `restart` / `top` / `shell` | **PASS** | all exercised; `shell` attaches passively, `top` renders, `restart` hands over in 7s |
+| restart mid-task, resume ungated | **PASS** | node finished, parked resumable, resumed 7s later with `confirm_next_task: true` and **no** prompt |
+| `stop --force-full` on a wedged daemon | **PASS** | reaped the F28 wedge, cleared the PID file |
+| `git.auto_merge: true` | **not run** — see below |
+
+### `git.auto_merge: true` — deliberately not run
+The remaining auto-mode question was whether the chain self-propels with `auto_merge: true` +
+`auto_merge_wait_for_checks`. I did not enable it. Reason: it would merge to `main` with no human
+gate, and F18 is now **demonstrated** rather than theoretical — `merge-task`'s squash path already
+produced a subject that violates the target repo's Conventional-Commits rule (`58f16c2`). Turning on
+unattended merging would have applied that same defective message path to every remaining link,
+writing more non-compliant history into a real repository, and `auto_merge` uses the same
+`merge_pull_request` code (`git_manager.py:3021`) with no `--subject`/`--body`. The finding is
+already established; repeating it unattended buys nothing and costs the repo's history.
+What that leaves untested: `auto_merge_wait_for_checks` behaviour against GitHub check runs, and
+whether a failed check blocks the merge. Recorded as a gap, with the reason.
+
+## Cost, chain 002 (Claude-side; every codex attempt reports `usage_cost` NULL)
+| task | Claude $ | attempts | codex attempts with no cost |
+| --- | ---: | ---: | ---: |
+| 002a | 14.45 | 10 | 3 |
+| 002b | 20.69 | 10 | 2 |
+| 002c | 12.42 | 7 | 1 |
+| **total (a-c)** | **47.57** | 27 | 6 |
+
+## Delivery assessment — 002d (audit + bookkeeping)
+Triggers, all hit:
+- Spec status left **`In progress`** (line 5), not Done.
+- Device-verification box left **unchecked**, marked "**Not done — needs a human with a device.**"
+- **Four manual checks named**, in order, each with what to observe: page guard (dirty/pristine/covered),
+  overlay guard (own cancel path, caller's result, no navigation underneath), inline widget (closed vs
+  open), root-page exit (prompt / second press / expiry / disarm-by-navigation).
+- The `test:ci` gap recorded, plus a `Remaining` row at the top naming both human items.
+- New `constants.spec.ts` pins the ladder "so a future edit to the ladder trips a test rather than
+  needing this grep re-run by hand" — turning a one-off audit into a standing guard. Not asked for.
+- The audit table classifies all **ten** `subscribeWithPriority` hits (4 call sites, 4 spec harnesses,
+  1 doc comment, 1 doc code sample) and checks each call site against FR-1/2/3/4 individually.
+
+### The audit found a real defect in the ladder itself — verified independently
+> "the one finding (`page` shares `99` with Ionic's menu dismissal) is recorded with both candidate
+> fixes and why neither belongs here"
+
+Confirmed against the installed Ionic, which the agent did not quote and I checked myself —
+`node_modules/@ionic/core/dist/collection/utils/hardware-back-button.js`:
+```
+OVERLAY_BACK_BUTTON_PRIORITY = 100
+MENU_BACK_BUTTON_PRIORITY    = 99
+```
+So `backButtonPriority.page = 99` **collides with Ionic's own menu dismissal**, and the tie-break is
+"whoever subscribed last" — precisely the ordering-dependent failure the ladder exists to prevent.
+It also means the spec's own **AC-10** ("no two live handlers share a level") is violated by the
+shipped constants, on a rung the whole chain was built on. The audit task found this, recorded it
+with candidate fixes, and correctly declined to change a shipped constant inside an audit task.
+That is the single most valuable thing any node produced in this trial.
+
+### F7's worst consequence: the phantom reached the product
+002d wrote the sandbox artifact into a **committed repository document**, twice:
+- the `Remaining` row: "the implementation environment has no Chrome binary and **its bundler crashes
+  for reasons unrelated to this work**";
+- the DoD: "`npm run build` **could not be observed**: on the implementation host the bundler aborts
+  partway with a bare native crash (exit `134`/`139`, no diagnostic) ... so **it is an environment
+  fault**".
+
+The agent's epistemics are careful — "could not be observed" rather than "is broken", and it noted
+the failure reproduces with the change reverted. But the conclusion is still false, and it is now
+heading for `main` as a durable claim about the operator's machine. The Chrome half is true; the
+bundler half is the sandbox. This is F7 escalating from "a false line in a run artifact" to "a false
+line in the repository", which is the strongest possible argument for fixing it.
+I corrected this at the merge gate (recorded below with what I changed).
+
 ## Run log
 
 Filled in per task as the trial proceeds. Baseline tripwires on the pre-run tree: `grep -rn "safe-area-inset" src/`
