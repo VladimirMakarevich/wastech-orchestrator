@@ -391,6 +391,24 @@ It is **intermittent**, which is worse than deterministic: reviews `run-000005`,
 in the *same task* read the same `.worc-io/` paths without complaint. Same prompt, same provider, different
 outcome. The fix is to make the bullet an explicit grant and scope the trailing sentence to `.worc/`.
 
+#### F9 — FIXED, and it was never a misreading
+
+The paragraph above calls the refusal an easy misreading and lists three things that make it easy. There is a fourth, and it settles the question: **under advanced mode the block forbids reading `.worc-io/` outright.** Rendered at exactly the configuration this trial ran (`read_isolation_off=True, advanced_mode=True` — advanced mode is ON in the pinned environment table), the third paragraph ends:
+
+> And do not read or write `.worc/`, `.worc-io/`, `.git/` or `tasks/`. Both are checked after you finish…
+
+Verified present at the audited commit (`git show 3e472b699:…/security_preamble.py`), so it is what actually reached the reviewer. The trial only quoted the first two paragraphs, which is why the entry reads as a wording nit.
+
+That changes the diagnosis. The prompt did not merely invite a misreading — it contained a **flat contradiction**: one bullet grants "read only the paths you are given" under `.worc-io/`, and a later paragraph bans reading `.worc-io/`. A model resolving a contradiction is not being careless, and that is a better explanation of the intermittency than "same prompt, same provider, different outcome": it hit 1 review in 6 on task `001` and then the _first_ review of both `002a` and `002b`, because there was nothing in the text to converge on.
+
+Fixed in all three sentences, on the branch that carries this document:
+
+1. The bullet leads with the grant — "the paths you are given under it are yours to read — that is what it is for, and nothing below takes that back" — instead of leading with a restriction that reads like the `.worc/` ban three characters away.
+2. The read-isolation paragraph's blanket ("or any orchestrator-private file") is replaced by the two things it actually means (`.worc/` and credential/environment files), plus one sentence saying the exchange paths are not among them.
+3. The advanced-mode paragraph bans **writing** `.worc-io/` and no longer bans reading it.
+
+The write ban is untouched in every configuration — the exchange is the immutable surface a post-node fingerprint checks, so a node writing it is a containment event — and `.worc/` stays read- and write-banned in all three places. Three tests pin exactly that split, and each fails against the old wording.
+
 ### F10 — the evaluator contract cannot express "I could not review"
 
 **Severity: major.** **Lever: orchestrator source —
@@ -682,7 +700,7 @@ addressable.
 [`git_manager.py`](../../../src/wastech_orchestrator/git_manager.py), `merge_pull_request`.**
 
 ```python
-args = ["pr", "merge", pr_url, f"--{strategy.value}"]   # git_manager.py:3021
+args = ["pr", "merge", pr_url, f"--{strategy.value}"]  # git_manager.py:3021
 ```
 
 No `--subject`, no `--body`. With `git.auto_merge_strategy: squash` the squash commit's content is therefore
@@ -1125,7 +1143,7 @@ and it delivers on that with a `try/except`. But `_safe_send` (`notify/telegram.
 only exceptions:
 ```python
 try:
-    self._client.send_message(chat_id=..., text=...)   # no timeout argument
+    self._client.send_message(chat_id=..., text=...)  # no timeout argument
 except Exception as exc:
     self._warn(f"{op} send failed", ...)
 ```

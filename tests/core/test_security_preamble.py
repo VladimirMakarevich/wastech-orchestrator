@@ -83,6 +83,65 @@ def test_the_mode_paragraph_appears_only_in_the_mode_and_still_forbids_publishin
     assert "you have the network" in tail and "write outside this clone" in tail
 
 
+def test_no_configuration_forbids_reading_the_exchange_it_hands_the_node() -> None:
+    """The exchange is read-granted in every configuration; only writing it is banned.
+
+    E2E-trial finding F9. At the trial's own configuration — read-isolation off plus advanced mode,
+    both true together — the block said three things about `.worc-io/` at once: read only the paths
+    you are given, do not read "any orchestrator-private file", and (in the mode paragraph)
+    literally "do not read or write `.worc-io/`". Reviewers resolved that contradiction by refusing
+    to review, filing a blocking finding that the task/plan/diff they were handed were forbidden
+    reading — on the first review of two separate tasks. So the grant has to be explicit and no
+    later sentence may take it back.
+    """
+    for kwargs in (
+        {"read_isolation_off": False},
+        {"read_isolation_off": True},
+        {"read_isolation_off": True, "advanced_mode": True},
+        {"read_isolation_off": True, "advanced_mode": True, "no_write_floor": True},
+    ):
+        text = build_orchestrator_security_preamble(**kwargs)
+        assert f"`{EXCHANGE_HOME_DIRNAME}/` is your read-only input context" in text
+        assert "are yours to read" in text
+        # No sentence anywhere may forbid *reading* the exchange.
+        for sentence in text.replace("\n", " ").split(". "):
+            if EXCHANGE_HOME_DIRNAME not in sentence:
+                continue
+            assert "do not read or write " + f"`{EXCHANGE_HOME_DIRNAME}/`" not in sentence, kwargs
+            assert "read no other path" not in sentence.lower() or "yours to read" in sentence
+        # The blanket that a reader could fold the exchange into is gone.
+        assert "any orchestrator-private file" not in text
+
+
+def test_the_exchange_write_ban_survives_in_every_configuration() -> None:
+    # The other half of F9: relaxing the read wording must not relax the write wording. The
+    # exchange is the immutable surface a post-node fingerprint checks, so a node writing it is a
+    # containment event — that ban is the same in all four renders.
+    for kwargs in (
+        {"read_isolation_off": False},
+        {"read_isolation_off": True},
+        {"read_isolation_off": True, "advanced_mode": True},
+        {"read_isolation_off": True, "advanced_mode": True, "no_write_floor": True},
+    ):
+        text = build_orchestrator_security_preamble(**kwargs)
+        assert "never create, modify, move, or delete anything there" in text
+    mode = build_orchestrator_security_preamble(read_isolation_off=True, advanced_mode=True)
+    assert f"do not write `{EXCHANGE_HOME_DIRNAME}/`" in mode
+
+
+def test_the_private_home_read_ban_is_not_weakened_by_the_exchange_grant() -> None:
+    # F9's fix must not become a hole: `.worc/` stays read-banned and write-banned in the baseline,
+    # in the read-restraint paragraph, and in the mode paragraph.
+    base = build_orchestrator_security_preamble(read_isolation_off=False)
+    assert f"`{CONTROL_HOME_DIRNAME}/` is the orchestrator's private runtime" in base
+    assert "do not read it and do not write it" in base
+    relaxed = build_orchestrator_security_preamble(read_isolation_off=True)
+    assert f"read nothing under `{CONTROL_HOME_DIRNAME}/`" in relaxed
+    assert "no credential or environment file" in relaxed
+    mode = build_orchestrator_security_preamble(read_isolation_off=True, advanced_mode=True)
+    assert f"do not read or write `{CONTROL_HOME_DIRNAME}/`, `.git/` or `tasks/`" in mode
+
+
 def test_the_no_sandbox_paragraph_is_withheld_where_a_sandbox_exists() -> None:
     """Say "nothing enforces this" only where nothing does.
 
