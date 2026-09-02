@@ -3231,7 +3231,7 @@ class Orchestrator:
             if resume and not in_pre and current is not None:
                 return phase(current, None)
             return phase(regions.region_entry, None)
-        return self._fan_out_subtasks(p, run_state, regions, phase, inputs)
+        return self._fan_out_subtasks(p, run_state, regions, phase, inputs, recorder)
 
     def _fan_out_subtasks(
         self,
@@ -3240,6 +3240,7 @@ class Orchestrator:
         regions: DecompositionRegions,
         phase: Callable[..., FlowRunResult],
         inputs: NodeInputs,
+        recorder: StateStoreRunRecorder,
     ) -> FlowRunResult:
         """Run the sub_flow region once per subtask (commit each, reset per-subtask counters), then
         the post-region phase. A subtask with a verified commit is never re-run (recovery).
@@ -3275,6 +3276,20 @@ class Orchestrator:
             sub = phase(regions.region_entry, regions.region, subtask=unit.order)
             if sub.status is not Status.DONE:
                 return sub
+            if index != len(units) - 1:
+                # A region exits by a forward edge LEAVING it, so the engine's last checkpoint
+                # names the post-region node — for a subtask that is not what runs next, and the
+                # gap is not instantaneous: the commit below, then the spec publish and the
+                # supervisor's handoff turn, run before the next region phase re-seeds it. That
+                # window reported ``node=documentation`` beside ``subtask=3/5``, telling an
+                # operator a five-subtask task had reached its last stage while it was starting
+                # its third. Point it at what actually runs next. Resume is unaffected: the
+                # fan-out re-enters from the committed subtask rows and never reads this value
+                # (only the ``pre`` region's exit checkpoint is load-bearing there) — and the last
+                # subtask deliberately keeps the engine's value, because for it the post-region
+                # node IS next.
+                run_state.current_node = regions.region_entry
+                recorder.save_checkpoint(run_state)
             self._commit_subtask(p, unit)
             if index != len(units) - 1:
                 run_state.reset_consecutive_fix_budget()  # fresh per-loop budgets; global accrues

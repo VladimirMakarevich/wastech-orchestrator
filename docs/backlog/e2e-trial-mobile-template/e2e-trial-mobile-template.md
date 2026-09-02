@@ -373,6 +373,8 @@ node=documentation   subtask=3/5   fix_iterations=4
 
 Functionally nothing is wrong — `subtasks/index.json` correctly showed orders 1 and 2 `committed` and 3-5 `pending`, and the graph routed correctly. But an operator watching `worc status` would believe a five-subtask task had reached its documentation stage while it was in fact starting subtask 3. The lever is named tentatively: the symptom is precisely located, the exact write site is not isolated.
 
+**FIXED**, and the write site is `engine.py`'s region exit — where the write is deliberate, because the same line is what lets a resumed run continue past `planning`. The repair is in the driver: between subtasks the checkpoint is re-pointed at the region entry, and only the last subtask keeps the post-region node. See [what was fixed](e2e-trial-mobile-template.fixes.md#f12--the-checkpoint-that-named-the-stage-after-the-one-still-running).
+
 ### F13 — `prompt-audit` records the per-node override, not the effective model/reasoning
 
 **Severity: minor.** **Lever: orchestrator source — the prompt-audit writer.**

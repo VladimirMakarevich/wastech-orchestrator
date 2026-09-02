@@ -16,6 +16,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -3291,6 +3292,48 @@ def test_operator_decomposition_runs_each_subtask_one_pr(
     assert row.branch is not None
     count = git_run(["rev-list", "--count", f"main..{row.branch}"], git_repo.clone)
     assert int(count) >= 3
+
+
+def test_checkpoint_between_subtasks_names_what_runs_next(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # A region is left by a forward edge, so the engine's last checkpoint inside a decomposition
+    # names the POST-region node (`documentation`). Between subtasks that is not what runs next,
+    # and the window is not instantaneous: the subtask commit, the spec publish and the
+    # supervisor's handoff turn all run before the next region phase re-seeds it. `worc status`
+    # read that window and reported `node=documentation` beside `subtask=3/5` — an operator would
+    # believe a five-subtask task had reached its last stage while it was starting its third.
+    # Probed at the commit, which is inside the window, once per subtask.
+    _write_subtask(tmp_path, "subtasks/01-first.md", title="First")
+    _write_subtask(tmp_path, "subtasks/02-second.md", title="Second", depends_on=("first",))
+    _write_subtask(tmp_path, "subtasks/03-third.md", title="Third", depends_on=("second",))
+    root = _operator_root(
+        tmp_path,
+        "epic-f12",
+        ["subtasks/01-first.md", "subtasks/02-second.md", "subtasks/03-third.md"],
+    )
+    state = {"n": 0}
+    providers = {
+        ProviderId.CLAUDE: _OpImplProvider("claude", clone=git_repo.clone, state=state),
+        ProviderId.CODEX: _OpImplProvider("codex", clone=git_repo.clone, state=state),
+    }
+    orch, store, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    seen: list[str | None] = []
+    original = orch._commit_subtask
+
+    def spy(pipeline: Any, unit: Any) -> None:
+        seen.append(store.get_flow_checkpoint(pipeline.task.id)[0])
+        original(pipeline, unit)
+
+    orch._commit_subtask = spy  # type: ignore[method-assign]
+
+    assert orch.run_task(root).final_status is Status.DONE
+    # Subtasks 1 and 2 are followed by another subtask, so the checkpoint names the region entry —
+    # the node that is about to run. The last one deliberately keeps the engine's own value:
+    # after the final subtask the post-region node really is what runs next.
+    assert seen == ["implementation", "implementation", "documentation"]
 
 
 def test_operator_decomposition_when_planning_disabled(

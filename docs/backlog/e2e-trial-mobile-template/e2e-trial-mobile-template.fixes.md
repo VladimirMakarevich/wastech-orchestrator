@@ -31,6 +31,7 @@ The table below covers what this document records: the findings that were repair
 | F14 — the subtask handoff's factual floor is built from `depends_on` | minor | **fixed** | `core/orchestrator.py`, `core/supervisor.py`, `implementation.md` |
 | F13 — `prompt-audit` records the override, not the effective value | minor | **fixed** | `routing/router.py`, `core/flow/observability.py`, `config/schema.py` |
 | F17 — a task cannot contribute to its own commit message | minor | **fixed** (shape chosen by the operator) | `task/model.py`, `task/validation_gate.py`, `core/orchestrator.py`, `worc-task`, `worc-deco-task` |
+| F12 — `status` names the wrong node in a decompose region | minor | **fixed** | `core/orchestrator.py` (`_fan_out_subtasks`) |
 
 ## F1 + F2 — the reviewer under decomposition
 
@@ -323,3 +324,24 @@ The finding offers two shapes ("either give an agent's summary a way in, or have
 **Fail-closed, unlike its neighbours.** `priority` folds an unknown value to `mid` (a scheduling hint must never block a task) and `commit_type` does the opposite: an unknown type rejects the task. The value lands on the target's base branch, where a typo that silently deferred to `feat` would be discovered after the merge, by which time no re-run fixes it. The merge path, which runs long after and holds no live task object, reads the type back from the persisted `task.normalized.json` and falls back to the default when that file is gone — a merge subject must never fail to exist because a log directory was cleaned.
 
 **A defect found next door and fixed with it.** `write_normalized` did not persist `trust_level`. A resumed task therefore lost its per-task `strict` and fell back to the instance default — an approval threshold for the dangerous-diff gate, quietly relaxed by a restart, in the one direction it must never move. It is two lines in the same round-trip this change was already editing, it now has its own test, and it is recorded here rather than left as a silent rider: it is not part of F17, and nothing in the trial found it.
+
+## F12 — the checkpoint that named the stage after the one still running
+
+The finding located the symptom precisely and said so: "the write site is not isolated". It is `engine.py`'s region exit, and the reason it is not a bug there is what decides the shape of the fix.
+
+**The mechanism.** A region run ends when a forward edge leaves the region, and the engine writes and persists `current_node = edge.to` _before_ it notices that the edge left:
+
+```python
+self._run_state.current_node = edge.to        # 'documentation'
+self._recorder.save_checkpoint(self._run_state)
+if self._region is not None and edge.to not in self._region:
+    return FlowRunResult(status=Status.DONE, final_node=node.id)
+```
+
+So after subtask 2's `review` passes, the checkpoint names `documentation` — the post-region node. That write is **load-bearing for the `pre` region**: after `planning` the same line records the sub_flow entry, which is what makes a resumed run continue past planning instead of re-deciding the split (`in_pre` is computed from exactly this value). Removing it would have traded an operator-surface defect for a re-planned resume.
+
+**Why the window was a minute wide.** The trial saw the wrong node twice, about a minute apart, and that is not a race — it is the work between two region phases: the subtask commit, the redacted spec publish, and the **supervisor's handoff turn**, which is an LLM call. `active_subtask` is bumped inside that window too, which is why the two halves of the line disagreed: `subtask=3/5` beside `node=documentation`.
+
+**The fix, in the driver rather than the engine.** `_fan_out_subtasks` re-points the checkpoint at the region entry before committing a subtask that has a successor. The last subtask deliberately keeps the engine's value — for it the post-region node _is_ what runs next, so the previous behavior was right exactly once out of five. Resume is untouched: the fan-out path re-enters from the committed subtask rows and never reads `current_node` (only the `pre` exit does), and a `rerun --continue` on an interrupted decomposition now names the node it will actually re-enter.
+
+The test probes inside the window — a spy on the subtask commit reads the persisted checkpoint — and asserts `["implementation", "implementation", "documentation"]` across three subtasks. Against the previous code it returns `documentation` three times, which is the trial's screenshot.
