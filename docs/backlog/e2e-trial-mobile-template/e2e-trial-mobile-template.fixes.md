@@ -37,6 +37,7 @@ The table below covers what this document records: the findings that were repair
 | F5 + F8 + F16 — the three authoring lessons | nit / minor | **fixed as guidance** | `worc-task/SKILL.md`, `worc-deco-task/SKILL.md` |
 | F15 — a correct finding with an invented authority | minor | **fixed, paid for** | `review.md` |
 | F27 — codex crashes on its own model cache | minor here, major for a codex-primary route | **fixed in the environment** | the host's `codex` install, `README.md` |
+| F22 — a task spec contradicted by a page it never mentioned | minor | **fixed in the target, not landed** | the target's `docs/tasks/002-android-hardware-back-button.md` |
 
 ## F1 + F2 — the reviewer under decomposition
 
@@ -408,3 +409,31 @@ The one finding in the trial whose lever is outside the repository, and the reas
 One docstring came with it: `_preflight_degraded_reasons` claimed its grep "passes on the current 0.142.x grammar", two releases stale and the word _current_ is the false half. It names 0.152.1 — the version the probe was actually run against — so the claim is checkable where the probe lives.
 
 **Not fixed, and deliberately.** No version gate was added to the code. The preflight is capability-based on purpose (probe the flag, do not compare a number), the README floor is prose rather than an assertion, and a numeric gate would refuse a working newer CLI the day the server payload moves again — which is the failure this finding _is_. The stale `/usr/local/bin/codex` (0.139.0, second on this host's PATH) is left alone: it is shadowed by `~/.local/bin/codex` today, so removing a binary from the operator's `/usr/local/bin` buys nothing a PATH change would not re-break, but it is the thing to check first if this signature ever returns on a host that reports an upgraded codex.
+
+## F22 — the spec that contradicted a page it never mentioned
+
+Filed as one line inside the `analyze-task-run` list rather than as a section, like F23, so it was reproduced from the target repository and its git history rather than confirmed. Both moved: the finding is right that the spec was false when written, and wrong about which files prove it.
+
+**Still there, and not where the rewrite would have removed it.** The task file was rewritten by runs `002a`–`002d`, so the first question was whether the claim survived. It did, in three places: the Problem section's "**nothing documents the contract and no page or modal demonstrates it**", a "Missing — this task" row whose consequence reads "nothing tells a developer it is mandatory, or why `100` is skipped", and — the reason the first two lasted — a "Current state" table that never named the page in question. The spec does not cite `docs/ionic-angular-best-practices.md` anywhere, which is why four runs of agents working from it never noticed.
+
+**One of the finding's two citations is chronologically impossible.** The claim entered at `7e4a48c`, 2026-08-26 12:01:52. Of the two files the finding names:
+
+| File | Its back-button section | vs. the claim |
+| --- | --- | --- |
+| `docs/ionic-angular-best-practices.md` | `6bea68f`, 2026-08-19 13:50 | **7 days earlier** — the claim was false when written |
+| `.rules/architecture.md` | `67d8ba2`, 2026-08-26 13:37 | **1h35m later** — cannot be evidence about a claim already committed |
+
+Both were dated "added 2026-08-26" in the finding, which is true of one of them and hides that it came _after_. `AGENTS.md`'s rule and `docs/architecture.md`'s section came later still (`7155cf3`, 2026-09-02) — they are the task's own Phase 1 output, so the spec was right that they were missing. The finding needed one file, not two, and it had one.
+
+**And the one file is a worse contradiction than "already documented".** Read at the authoring commit, that page already carried the levels with their values, "never a literal number", why `100` is left alone, the `processNextHandler()` requirement _with_ the swallowed-press failure mode, and a reference implementation — most of the contract the spec then went on to define from scratch. It also said "Unsubscribe in `ngOnDestroy`", which is precisely the third trap the spec's own Problem section describes: `ion-router-outlet` keeps a covered page alive, so a page that unsubscribes there keeps eating back presses after the user has left it. So the state of the repo was not "undocumented" but "documented as guidance, and wrong on the point that matters most for a routed page" — a sharper motivation for the task than the false one it shipped with, and the reason the repair is not a deletion.
+
+**What the target's own conventions decided.** `docs/tasks/README.md` says the "Current state" section "reflects the repo as it actually was **when the task was written**". That rules out the tempting fix — refreshing the section to today's repo, where four documents describe the ladder — because the section is a dated snapshot by design, not a live view. It also rules out marking the task `Done`: the README says what keeps 002 open is physical-device verification plus one operator check run, neither of which this touches. So the repair is to make the snapshot _true of 2026-08-26_, and nothing else:
+
+- The Problem paragraph now says the contract was already written down in part, names the page, and states the two things it did not do — bind, and get the lifecycle right.
+- "Current state" gains the row it was missing, describing the page as guidance rather than a rule and naming the wrong `ngOnDestroy` bullet.
+- The "Missing" row keeps its target (`AGENTS.md` / `docs/architecture.md`, correctly missing then) and loses "or why `100` is skipped", which the page already explained.
+- Phase 1 gains the step that actually happened: reconcile that page, because two documents describing one contract is how a developer follows the wrong one. `7155cf3` did exactly this — it replaced the `ngOnDestroy` bullet with the three subscription shapes — so the plan now matches what landed.
+
+**Not landed, deliberately.** The change sits in the target's working tree. That repository's own `.rules/git-workflow.md` forbids committing directly to `main` and forbids creating a working branch unless the operator explicitly asks for one, so both routes need a decision this campaign does not own. The operator chose to keep it uncommitted; the residual item is in [the status index](e2e-trial-mobile-template.status.md).
+
+**What this says about the trial's tooling, which is why it is worth a section.** The finding's own point was that `analyze-task-run` cannot see this class of defect because it judges the diff against `task.normalized.json` rather than against the upstream spec. Reproducing it adds the sharper version: nothing in the pipeline reads the spec against the repository it describes. Four runs of agents each read this spec as their statement of the world, and its first substantive sentence was false about a tracked file two directories away — while one of them was editing that very file to fix the bullet the spec had not noticed was wrong.

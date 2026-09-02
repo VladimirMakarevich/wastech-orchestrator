@@ -8,11 +8,11 @@ The index for the campaign. [The findings document](e2e-trial-mobile-template.md
 
 | State | Count | Findings |
 | --- | --- | --- |
-| Fixed | 27 | F1, F2, F3, F4, F5 (as guidance), F6, F8 (as guidance), F9, F10 (as a warning), F11, F12, F13, F14, F15, F16 (as guidance), F17, F18, F19, F20, F21, F23 (as visibility), F24, F25, F26, F27 (in the environment), F28, F29 |
+| Fixed | 28 | F1, F2, F3, F4, F5 (as guidance), F6, F8 (as guidance), F9, F10 (as a warning), F11, F12, F13, F14, F15, F16 (as guidance), F17, F18, F19, F20, F21, F22 (in the target repo, not landed), F23 (as visibility), F24, F25, F26, F27 (in the environment), F28, F29 |
 | Open — this campaign's lane | 0 | — |
-| Open — owned elsewhere | 2 | F7 (own ADR: `docs/backlog/full-tool-access/`), F22 (the target repo's task authoring) |
+| Open — owned elsewhere | 1 | F7 (own ADR: `docs/backlog/full-tool-access/`) |
 
-**Everything this campaign owns has landed.** The two in the last row are open work, not closed findings — they were never this campaign's to spend on: F7 is step 4 of its own ADR, and F22 is task authoring in the target repository. F7 is the one open `major` anywhere in the trial. F27 was the third of them and is now closed: its lever was outside the repository (the host's `codex` install), and taking it turned up that this repository's own supported-version floor named the broken release. What else remains is below and is not repairable by code: three verification gaps that need a human or a throwaway repo, and the halves deliberately left inside findings that are otherwise fixed.
+**Everything this campaign owns has landed.** The one in the last row is open work, not a closed finding, and was never this campaign's to spend on: F7 is step 4 of its own ADR, and the one open `major` anywhere in the trial. The other two in that row are now closed, and taking each turned up something its finding had wrong. F27's lever was outside the repository (the host's `codex` install), its `~33%` was a one-way transition rather than a rate, and this repository's own supported-version floor named the broken release. F22 still reproduced in the target's four-times-rewritten spec, but over-cited: of the two files it says already documented the ladder, only one pre-dates the spec. What else remains is below and is not repairable by code: three verification gaps that need a human or a throwaway repo, and the halves deliberately left inside findings that are otherwise fixed.
 
 ## Every finding
 
@@ -41,7 +41,7 @@ The index for the campaign. [The findings document](e2e-trial-mobile-template.md
 | **F19** — help for a flag that is not there | nit | **fixed** | `top --log-file`'s help described the path as "passed to `watch --log-file`", an argv argparse rejects. It now names the parent-flag form, and the test pins both forms rather than the prose. | `8c8841d` — [record](e2e-trial-mobile-template.fixes.md#f19--the-help-text-for-a-flag-that-is-not-there) |
 | **F20** — `run` reads as parked, and `rerun` would start a second engine | major | **fixed** | `worc run` recorded nothing about itself, so its task read as `parked (no daemon)` for the whole run and `rerun --continue` passed every refusal. `run` now writes its own liveness marker and every probe and guard reads it. | `32ebf2a` — [record](e2e-trial-mobile-template.fixes.md#f20--the-executor-that-recorded-nothing-about-itself) |
 | **F21** — no check verdict on a pass | major | **fixed** | The reviewer was never given the check results, so it re-ran the build inside its own sandbox and blocked on F7's phantom failure. `checks.json` is published on the pass edge and `review.md` says the gate is not the reviewer's to run. | `9d158ed` — [record](e2e-trial-mobile-template.fixes.md#f21--the-check-verdict-on-a-pass) |
-| **F22** — a task spec contradicted by the repo it describes | minor | **open** | The target's own `docs/tasks/002-…md` claimed nothing documented the back-button ladder while two files already did. Task authoring in the target repository, not orchestrator behavior. | Target repo |
+| **F22** — a task spec contradicted by a page it never mentioned | minor | **fixed in the target, not landed** | The target's own `docs/tasks/002-…md` claimed nothing documented the back-button ladder, and still did after four rewrites, because the spec cites the page that already covered it nowhere. Of the finding's two citations one post-dates the claim by 1h35m; the other pre-dates it by 7 days and told a routed page to unsubscribe in `ngOnDestroy` — the third trap the spec itself names. The authoring snapshot is corrected per that repo's own "Current state" convention rather than refreshed to today. | Target's working tree — [record](e2e-trial-mobile-template.fixes.md#f22--the-spec-that-contradicted-a-page-it-never-mentioned) |
 | **F23** — the move nobody was told about | (filed as one line) | **fixed as visibility** | `finalize` moves the task file and commits nothing, leaving a tracked deletion in the operator's tree that no surface mentioned. The contract not to commit is right — the operator may be on `main` — so both surfaces now name the move. | `5df064f` — [record](e2e-trial-mobile-template.fixes.md#f23--the-move-nobody-was-told-about) |
 | **F24** — the runtime home in the review diff | minor→major | **fixed** | An operator config edit rode into the review diff of every following task, with severity escalating from ignored to `blocking` — a finding no agent is permitted to fix. `.worc/` and `.worc-io/` are excluded from the review diff and from the base merge. | `c1d4355` — [record](e2e-trial-mobile-template.fixes.md#f24--the-runtime-home-in-the-review-diff) |
 | **F25** — the merge gate cannot be operated under a live daemon | major | **fixed** | `merge-task --dry-run` exited 1 while the daemon ran, which is exactly the state an operator using the human merge gate is in. The guard moved below the flag on three commands, each dry run naming the executor that owns the clone. | `39dc2a9` — [record](e2e-trial-mobile-template.fixes.md#f25--a-plan-is-not-a-mutation) |
@@ -55,7 +55,6 @@ The index for the campaign. [The findings document](e2e-trial-mobile-template.md
 | Finding | Owner | What it takes |
 | --- | --- | --- |
 | F7 | this repository, another entry | Step 4 of the [`full-tool-access`](../full-tool-access/) ADR. The one open `major` in the trial, deliberately out of this campaign because the fix is a posture decision, not a repair. |
-| F22 | the target repository | A task spec there claimed nothing documented the back-button ladder while two files already did. Task authoring in the target, not orchestrator behavior. |
 
 ## Left open inside findings that are otherwise fixed
 
@@ -66,6 +65,7 @@ The index for the campaign. [The findings document](e2e-trial-mobile-template.md
 | F23 | An uncommitted task-file move still rides into the next task's review diff — F24's mechanism on a path the agent may write. The false docstring claim ("covers the same set the code commit does") is corrected in place. | Excluding `tasks/` from the review diff would remove the only surface that shows an agent editing its own task file. A decision with a security side. |
 | F18 | ~~Every task's commit subject is `feat(<id>): <title>`; the type cannot be chosen per task.~~ **Closed with F17**: a task's `commit_type` sets the type for the code commit, every subtask commit and the squash commit. | Was F17. |
 | F2 | Fixed as a static defect with no evidence it has ever bitten — the trial's own prediction about it was falsified. | Nothing to do; recorded so the entry is not re-opened as unproven. |
+| F22 | The corrected spec sits in the target's working tree, uncommitted. | That repository's `.rules/git-workflow.md` forbids a direct `main` commit **and** an unasked working branch, so landing it is the operator's call rather than this campaign's. |
 
 ## Verification gaps — not defects, and not fixable by code
 
