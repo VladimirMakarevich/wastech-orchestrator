@@ -1,6 +1,6 @@
 # Advanced mode still sandboxes the shell — what that costs, and whether it should
 
-Status: **investigation — no decision taken** Date: 2026-09-02 Owner: Vladimir Makarevich
+Status: **инвестигейт закончен — причина найдена, решение владельца записано** Date: 2026-09-03 Owner: Vladimir Makarevich
 
 **Written in Russian**, like the campaign it continues ([full-tool-access/](full-tool-access/README.md)): the decision this document questions is recorded there in Russian, and it is quoted here verbatim rather than paraphrased.
 
@@ -77,7 +77,9 @@ if "Bash" in tools:
 
 Симптом указывает на другой род ограничения: `runService` ждёт на канале, которого никто не закроет, — то есть Node-хост esbuild не смог поднять дочерний процесс или обменяться с ним по пайпу. Это **процессно-IPC-ось seatbelt** (spawn, pipes, mach ports), а не файлы и не сеть. Ни один ключ её не адресует, и ни один документ кампании её не называет.
 
-Если гипотеза верна, из неё следует: для этого класса отказов Шаг 4 — не «один из рычагов», а **единственный существующий**, потому что остальные оси уже открыты и мимо цели. Гипотеза не проверена — это первая проба задачи, не вывод.
+Если гипотеза верна, из неё следует: для этого класса отказов Шаг 4 — не «один из рычагов», а **единственный существующий**, потому что остальные оси уже открыты и мимо цели.
+
+**Проверено. Гипотеза верна по сути и неверна по механизму** — ось действительно пятая и действительно IPC-ная, но это не spawn, не пайпы и не mach-порты. Что именно — ниже; раздел выше оставлен как есть, потому что он показывает, что искали, а следующий — что нашли.
 
 ## Что проверить
 
