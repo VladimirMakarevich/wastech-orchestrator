@@ -461,6 +461,8 @@ so GitHub concatenates every commit message into the squash body. An operator sq
 
 Severity: nit. Lever: CLI help text (`cli.py`, `top` parser `--log-file` help). `worc top --log-file PATH` is described as "the daemon log file to tail (the path passed to 'watch --log-file')". `worc watch` has no `--log-file` option: its parser carries only `--poll-seconds` and `--queue`. `--log-file` is a **parent-parser** flag, so the working form is `worc --log-file PATH watch`. Verified: `worc watch --log-file /tmp/x.log --poll-seconds 0` prints the top-level usage error; `worc --log-file /tmp/x.log watch --help` parses. Notable because the codebase already knows this: `cli_shell.start_watch`'s docstring says the parent flags go "**before** the `watch` subcommand (they are parent-parser options — appending them after `watch` is why the old auto-spawn died on an argparse error)". The lesson was learned in the spawn path and not carried into the help text an operator reads. `worc shell --log-file` is correct — it is a real option on `shell`, which spawns the daemon itself.
 
+**FIXED** — the help names `worc --log-file PATH watch`, and its test pins both argv forms rather than the prose, since a help string is a claim about the parser. See [what was fixed](e2e-trial-mobile-template.fixes.md#f19--the-help-text-for-a-flag-that-is-not-there).
+
 ### F20 — every `worc run` task reads as "parked (no daemon)", and `rerun --continue` will start a second engine on it
 
 Severity: **major**. Lever: orchestrator source — `cli.py` `_display_status` / `cmd_rerun`'s guard, `core/orchestrator.py` `RERUN_ELIGIBLE_STATUSES` + `plan_rerun`.

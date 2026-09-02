@@ -23,6 +23,7 @@ Kept separate from the findings document for a mechanical reason too: that docum
 | F18 — `merge-task` cannot control the squash commit message | minor | **fixed** | `git_manager.py`, `orchestrator.py`, `cli.py` |
 | F11 — the observe turn is blind to the step it is explaining | major | **fixed** | `core/supervisor.py` |
 | F29 — the summary of a declined tick reads as an empty queue | nit | **fixed** | `cli.py` |
+| F19 — `top --help` documents an argv argparse rejects | nit | **fixed** | `cli.py` |
 
 ## F1 + F2 — the reviewer under decomposition
 
@@ -238,3 +239,11 @@ Two things beyond the entry:
 
 - **An unmerged dependency is withheld too.** A `WAITING` skip has the identical shape — a named pending task, no result, and the same "no pending tasks" summary — and it is a non-blocking skip, so it is the case an operator meets most often. Fixing only the gate would have left the sentence lying in the more common half.
 - **The parameter budget was full, and the ratchet is not for widening.** Threading the collector took `watch_loop` to 11 arguments against a `PLR0913` limit of 10. Rather than add the code to `cli.py`'s per-file ignores — the burn-down list, which is only ever meant to shrink — two merges paid for it, and both are things the code already treated as one: the gate's cool-off map and the withheld list became one `WatchNotes` ("what the pass decided about tasks it did not run"), and `stop_event`/`stop_file` became one `StopChannels`, which is how the loop's own docstring had described them all along ("Two stop channels are checked around ticks and during idle sleep"). Net: 10 arguments, two fewer loose parameters than before the finding.
+
+## F19 — the help text for a flag that is not there
+
+One sentence, and the entry has it exactly right, down to the observation that makes it worth fixing rather than shrugging at: **the codebase already knew.** `cli_shell.start_watch`'s docstring records that appending the parent flags after `watch` "is why the old auto-spawn died on an argparse error to a `DEVNULL`'d stderr" — the lesson was learned in the spawn path and not carried into the help text an operator reads.
+
+`top --log-file`'s help now names the working form (`worc --log-file PATH watch`). The test does two things rather than one: it asserts the text no longer names `watch --log-file`, and it pins **both argv forms** — the parent-flag form parses, the appended form raises. A help string is a claim about the parser, so the test that guards it should fail when either half stops being true, not only when someone edits the prose.
+
+Checked while there: no operator-facing document repeats the wrong form (`grep` over the tracked corpus finds it only in this trial's own notes and in the new test's comment), so nothing else needed the same repair.

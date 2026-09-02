@@ -435,7 +435,11 @@ def build_parser() -> argparse.ArgumentParser:
         dest="tail_file",
         default=None,
         metavar="PATH",
-        help="the daemon log file to tail (the path passed to 'watch --log-file')",
+        # `--log-file` is a parent-parser flag, so it goes BEFORE the subcommand
+        # (`worc --log-file PATH watch`). Naming the wrong form here sent an operator to an argv
+        # argparse rejects — the same mistake `cli_shell.start_watch` records having made in the
+        # auto-spawn path, where it died on an argparse error to a DEVNULL'd stderr.
+        help="the daemon log file to tail (the path given as 'worc --log-file PATH watch')",
     )
     top_cmd.add_argument(
         "--recent",
