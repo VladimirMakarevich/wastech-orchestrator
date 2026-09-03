@@ -5001,6 +5001,11 @@ def _audit_dir(art: Path, task_id: str) -> Path:
     return task_artifact_dir(art, task_id) / "prompt-audit"
 
 
+def _step_metadata(step_text: str) -> Any:
+    """The step document's fenced ``json`` header, parsed (the prompt is its Markdown body)."""
+    return json.loads(step_text.split("```json\n", 1)[1].split("\n```", 1)[0])
+
+
 def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path: Path) -> None:
     """With the global flag on, each stage run is recorded as a self-contained, chronological file
     plus a combined timeline; the records carry the who-metadata and the prompt."""
@@ -5018,12 +5023,12 @@ def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path
     assert result.final_status is Status.DONE
 
     audit_dir = _audit_dir(art, "task-001")
-    step_files = sorted(audit_dir.glob("*.json"))
+    step_files = sorted(audit_dir.glob("*.md"))
     assert step_files, "per-step audit files were written"
     # Filenames are zero-padded node_run_id → lexical sort is chronological.
     ids = [int(p.name.split("-")[0]) for p in step_files]
     assert ids == sorted(ids)
-    records = [json.loads(p.read_text()) for p in step_files]
+    records = [_step_metadata(p.read_text()) for p in step_files]
     node_records = [r for r in records if r["node_id"] != "supervisor"]
     supervisor_records = [r for r in records if r["node_id"] == "supervisor"]
     # complete task → refinement skipped; planning/implementation/review/documentation run agents.
@@ -5117,7 +5122,7 @@ def test_prompt_audit_task_overrides_global_off(git_repo, make_git_config, tmp_p
     audit_dir = _audit_dir(art, "task-001")
     assert audit_dir.exists()
     assert (audit_dir / "timeline.jsonl").exists()
-    assert sorted(audit_dir.glob("*.json"))
+    assert sorted(audit_dir.glob("*.md"))
 
 
 # --- task dependencies (``depends_on`` merge-gated scheduling) -----------------------------
