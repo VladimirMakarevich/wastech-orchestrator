@@ -110,16 +110,21 @@ security:
                                       #   agent under YOUR responsibility, except the floor": read
                                       #   isolation is forced off, the parent environment is
                                       #   forwarded whole to every process run on the agent's
-                                      #   behalf, every node gets a shell and the network, and the
-                                      #   agent may write anywhere on the workspace's own volume.
-                                      #   true = the fail-closed sandbox instead.
+                                      #   behalf, every node gets a shell and the network, the
+                                      #   agent may write anywhere your own account can, and on
+                                      #   Claude no OS sandbox is raised at all — on any host, so
+                                      #   nothing binds the subprocesses a command starts. Codex is
+                                      #   NOT symmetric: it keeps its generated permission profile
+                                      #   at both values. true = the fail-closed sandbox instead.
                                       #   What holds either way: the provider full-access modes
                                       #   (Codex --sandbox danger-full-access, Claude
                                       #   --permission-mode bypassPermissions) are forbidden at
                                       #   BOTH values, together with --dangerously-skip-permissions,
-                                      #   --yolo and --ignore-rules; and no proof is skipped — the
-                                      #   config-legality check and the capability probes run at
-                                      #   either setting.
+                                      #   --yolo and --ignore-rules; and no proof that still
+                                      #   applies is skipped — the config-legality check and
+                                      #   Codex's capability probes run at either setting. Claude's
+                                      #   --paid-isolation-probe declines under false, because with
+                                      #   no sandbox raised there is nothing to demonstrate.
                                       #   `worc preflight` and the run log announce the mode in ONE
                                       #   line. What that line stands for — the four levels of the
                                       #   floor, what each one is held by, and the two that are held
@@ -159,8 +164,9 @@ security:
                                       #   so there is no capability left to grant and the verb list
                                       #   is not applied; it starts mattering the moment you set
                                       #   strict_isolation: true. Turning it on does NOT make the
-                                      #   node writable: the sandbox write-denies the whole clone
-                                      #   (Claude) / forbids every mutation outright (Codex),
+                                      #   node writable: under strict_isolation the sandbox
+                                      #   write-denies the whole clone (Claude) / forbids every
+                                      #   mutation outright (Codex),
                                       #   denied_commands is rendered as friction (it binds tool
                                       #   calls, not the shell), and publication stays the
                                       #   orchestrator's by mandate.
@@ -241,9 +247,12 @@ security:
                                       #       npm_config_cache: "/abs/path/to/repo/.toolcache/npm"
                                       #       GOMODCACHE: "/abs/path/to/repo/.toolcache/go"
                                       #   THE CACHE RECIPE. `dotnet build`, `cargo build` and `npm ci`
-                                      #   fail under the sandbox not because the tool is forbidden but
-                                      #   because they write to ~/.nuget, ~/.cargo, ~/.npm — outside the
-                                      #   clone. Redirect those caches INTO the clone and they work: the
+                                      #   fail under strict isolation's sandbox not because the tool is
+                                      #   forbidden but because they write to ~/.nuget, ~/.cargo, ~/.npm
+                                      #   — outside the clone. (Advanced mode raises no Claude sandbox,
+                                      #   so the recipe is not needed there; it still is on Codex, which
+                                      #   keeps its profile at both values.) Redirect those caches INTO
+                                      #   the clone and they work: the
                                       #   clone is writable for a node with a shell, and nothing cleans
                                       #   it between tasks, so the cache survives. `.toolcache/` is only
                                       #   this guide's suggested name; any path inside the clone works.

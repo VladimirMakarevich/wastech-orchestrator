@@ -51,7 +51,8 @@
     // queue, and REF-001 is what caught it. Assume link rot in this folder is now unmonitored.
     //
     // WHEN TO REMOVE IT: when the campaign is finished and its documents are archived or deleted
-    // (step 4, `unsandboxed_commands`, is still open), or if the linter gains a per-path exclusion
+    // (step 4 closed as unnecessary on 2026-09-03, so what is left is the campaign's own wind-down),
+    // or if the linter gains a per-path exclusion
     // for GRP-001 — either makes the narrow fix available and this entry unnecessary.
     "docs/backlog/full-tool-access/**"
   ],

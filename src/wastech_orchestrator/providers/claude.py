@@ -85,6 +85,7 @@ __all__ = [
     "build_context_footer",
     "build_effective_prompt",
     "build_paid_probe_fixture",
+    "build_sandbox_off_settings",
     "build_sandbox_settings",
     "classify_paid_probe",
     "default_sandbox_probe",
@@ -201,19 +202,6 @@ _ADVANCED_MODE_FRICTION_DENIES: tuple[str, ...] = (
 )
 
 
-def _write_anywhere_root(working_directory: str) -> Path | None:
-    """The workspace volume's root — how "write outside the clone" is expressed to the sandbox.
-
-    The anchor of the workspace path, so one expression covers every platform this settings file is
-    ever written on: ``/`` on macOS and Linux/WSL2, a drive root on native Windows (where no Bash
-    sandbox exists, so no such file is written at all today). ``None`` for a relative path — a unit
-    harness rather than a real attempt — because a relative anchor names no volume, and a grant on
-    ``.`` would be a rule about the process's cwd.
-    """
-    anchor = Path(working_directory).anchor
-    return Path(anchor) if anchor else None
-
-
 def _effective_network_access(granted: bool, *, strict_isolation: bool) -> bool:
     """Whether this attempt reaches the network — the ONE place the formula lives.
 
@@ -308,8 +296,10 @@ class ClaudeToolPlan:
     ``mode`` is the ``--permission-mode`` value; ``tools`` is the built-in tool set;
     ``allow_patterns`` holds the scoped ``Tool(arg:*)`` entries that replace a bare name in the
     ``--allowedTools`` auto-approve list (see :attr:`allowed_tools`); ``needs_sandbox`` is True only
-    when the resolved set keeps ``Bash`` on a host that can OS-sandbox it (so the adapter emits the
-    private ``--settings`` sandbox file).
+    under ``strict_isolation: true``, when the resolved set keeps ``Bash`` on a host that can
+    OS-sandbox it. It answers "does a sandbox policy have to be compiled for this attempt", NOT
+    "is a settings file written" — in the advanced mode the adapter writes one either way, carrying
+    ``sandbox.enabled: false``.
 
     What ``tools`` MEANS depends on the mode, and the two readings are not interchangeable. Under
     ``strict_isolation: true`` it is the hard ``--tools`` existence gate: a tool absent from it does
@@ -409,10 +399,15 @@ def resolve_claude_tools(
                 "bubblewrap+socat on PATH (Linux/WSL2); refusing to run Bash unsandboxed under "
                 "strict_isolation",
             )
-        elif _bash_sandbox_available(capability):
+        elif _bash_sandbox_available(capability) and strict_isolation:
             needs_sandbox = True
-        # else: LINUX_MISSING_DEPS/NATIVE_WINDOWS under strict_isolation:false → keep Bash
-        # unsandboxed.
+        # else: the shell stays unsandboxed. Two ways to land here, one host-shaped and one chosen:
+        # LINUX_MISSING_DEPS/NATIVE_WINDOWS have no sandbox to raise, and under
+        # ``strict_isolation: false`` a capable host does not raise one either — the mode means "no
+        # restrictions", and the OS sandbox is part of that "no" (owner decision 2026-09-03). What
+        # replaces the mechanical half is stated rather than implied: :func:`host_floor_gap` reports
+        # the loss on EVERY host in the mode, and the settings file still goes out saying
+        # ``sandbox.enabled: false`` instead of leaving the default to the target repository.
     if _effective_network_access(network_access, strict_isolation=strict_isolation):
         # The advanced mode is online whatever the flow granted, so the web tools join every node's
         # auto-approve list there. Outside it nothing changes: no grant, no web tools.
@@ -724,7 +719,6 @@ def build_sandbox_settings(
     network_access: bool,
     read_isolation_off: bool = False,
     deny_write_root: Path | None = None,
-    allow_write_root: Path | None = None,
 ) -> dict[str, Any]:
     """Build the adapter-owned Claude OS Bash-sandbox settings.
 
@@ -745,25 +739,11 @@ def build_sandbox_settings(
     ``deny_write_root`` write-denies one whole subtree on top of the sets above. The adapter passes
     the workspace root for a read-only attempt that was granted a shell: what keeps such a node
     read-only is then the OS sandbox — the same mechanism Codex relies on — and not the goodwill of
-    a verb allowlist. One qualifier, symmetric with ``allow_write_root`` below: in the advanced mode
-    this deny sits INSIDE the volume-wide allow, so the shell half of "read-only cannot change the
-    repository" rests on the nesting order described there. The tool half does not: the whole editor
-    set (:data:`_EDITOR_TOOL_NAMES`) is denied on the clone for such a node, and those tools never
-    pass through this sandbox.
-
-    ``allow_write_root`` write-ALLOWS one whole subtree, and the adapter passes the workspace
-    volume's root in the advanced mode: without it the sandbox permits writes only inside the
-    workspace and the session temp, which is what makes ``dotnet build`` fail on ``~/.nuget`` rather
-    than on anything to do with ``dotnet``. It is emitted as ``filesystem.allowWrite`` and only when
-    given, so the file this function builds outside the mode is unchanged. Two things to know before
-    reading this as a boundary. The deny sets above are *more specific* paths inside it, and nesting
-    a deny inside an allow is a construction the vendor supports outright: the pinned binary
-    (:data:`TOOL_REGISTRY_READ_FROM_VERSION`) carries ``filesystem.denyWrite`` into a field named
-    ``denyWithinAllow`` and applies it inside the allowed set. That is read out of the binary, not
-    proven on this host, and the loud preflight line says exactly that on floor 1 — the instrument
-    that can settle it is ``worc preflight --paid-isolation-probe``. And on Claude what actually
-    holds ``.git``/``.worc`` regardless of that ranking is the tool-level editor denies, which never
-    pass through this sandbox at all.
+    a verb allowlist. Every path in this file is now an unconditional deny with no enclosing allow,
+    which is what makes that sentence hold on its own: the volume-wide ``allowWrite`` the advanced
+    mode used to emit is gone with the sandbox it belonged to, and with it the open question of how
+    the vendor ranks a deny nested inside an allow. This function is therefore reached only under
+    ``strict_isolation: true``; the mode's file is :func:`build_sandbox_off_settings`.
     """
     internal = [_sandbox_path(p) for p in deny_policy.denied_paths]
     # With read-isolation OFF the private set stays WRITE-denied (control plane immutable) but is
@@ -776,12 +756,7 @@ def build_sandbox_settings(
     if deny_write_root is not None:
         deny_write.append(_sandbox_path(deny_write_root))
     deny_write = list(dict.fromkeys(deny_write))  # order-preserving de-dup
-    filesystem: dict[str, Any] = {}
-    if allow_write_root is not None:
-        # Grant first, carve out second — the order this dict is read in, not a precedence claim.
-        filesystem["allowWrite"] = [_sandbox_path(allow_write_root)]
-    filesystem["denyRead"] = deny_read
-    filesystem["denyWrite"] = deny_write
+    filesystem: dict[str, Any] = {"denyRead": deny_read, "denyWrite": deny_write}
     sandbox: dict[str, Any] = {
         "enabled": True,
         "failIfUnavailable": True,
@@ -800,6 +775,27 @@ def build_sandbox_settings(
             "files": [{"path": _sandbox_path(deny_policy.env_file), "mode": "deny"}]
         }
     return {"sandbox": sandbox}
+
+
+def build_sandbox_off_settings() -> dict[str, Any]:
+    """The advanced mode's settings file: the OS sandbox is off, and that is said rather than left.
+
+    Under ``strict_isolation: false`` the mode means "no restrictions", and the OS sandbox is part
+    of that "no" (owner decision 2026-09-03) — so there is no policy to compile and none of
+    :func:`build_sandbox_settings`' keys would mean anything. What is NOT done is to simply stop
+    emitting ``--settings``: the unsandboxed shell would then rest on the vendor default, and the
+    mode also relaxes read-isolation, which puts ``--setting-sources project`` on the command line —
+    so the target repository's own ``.claude/settings.json`` and the next CLI release would be
+    deciding this, not us. Asserting the value is the same argument that already writes
+    ``autoAllowBashIfSandboxed`` explicitly instead of inheriting it.
+
+    Nothing here holds the floor, and nothing here is asked to: what carries it in the mode is the
+    tool-level deny set (``--disallowedTools`` over the whole editor set), which never passed
+    through this sandbox anyway, plus the advisory contract in the preamble and after-the-fact
+    detection. That the mechanical half is gone for the processes a command starts is reported
+    out loud by :func:`host_floor_gap` on every host in the mode.
+    """
+    return {"sandbox": {"enabled": False}}
 
 
 def map_permission(profile: str) -> tuple[str, tuple[str, ...]]:
@@ -1075,22 +1071,34 @@ def isolation_reasons(config: ProviderConfig) -> list[str]:
     return reasons
 
 
-def host_floor_gap(*, capability: SandboxCapability | None = None) -> str | None:
-    """What this host cannot enforce, or ``None`` when an OS-enforced write floor can exist here.
+def host_floor_gap(
+    *, strict_isolation: bool, capability: SandboxCapability | None = None
+) -> str | None:
+    """Why no OS-enforced write floor exists for this run, or ``None`` when one does.
 
     The write floor — the clone's ``.git`` and the private ``.worc`` home unwritable by anything the
-    agent starts — is the one guarantee that does not depend on the agent cooperating, and on two
-    host classes it cannot exist: native Windows has no supported OS sandbox for the shell, and
-    Linux/WSL2 needs ``bubblewrap`` + ``socat`` on ``PATH``. Deliberately **profile-blind**: the
-    question is what the machine can do, not what this config happens to ask for, so the answer is
-    the same whichever node runs next.
+    agent starts — is the one guarantee that does not depend on the agent cooperating, and three
+    things remove it. Two are host classes: native Windows has no supported OS sandbox for the
+    shell, and Linux/WSL2 needs ``bubblewrap`` + ``socat`` on ``PATH``. The third is chosen rather
+    than suffered, and it is checked first because it holds on every host: under
+    ``strict_isolation: false`` the mode raises no sandbox at all (owner decision 2026-09-03), so
+    the answer there is the same on macOS as on native Windows. Still deliberately
+    **profile-blind** — the question is what this machine and this posture can enforce, not what one
+    node's profile happens to ask for, so the answer is the same whichever node runs next.
 
     The verdict is a loud line, never a refusal (a host that cannot sandbox is still a host an
-    operator may work on), so it must carry the remedy where one exists. The refusal that does
-    remain is per-attempt and lives in :func:`resolve_claude_tools`, where the node's profile is
-    known: under strict isolation an attempt that would keep a shell here is refused or loses it,
-    which a fallback provider can cover. ``capability`` defaults to the real host; tests inject it.
+    operator may work on), so it must carry the remedy where one exists — and the mode's arm carries
+    none on purpose: the remedy is ``strict_isolation: true``, which is the operator's whole
+    decision rather than a missing dependency. The refusal that does remain is per-attempt and lives
+    in :func:`resolve_claude_tools`, where the node's profile is known: under strict isolation an
+    attempt that would keep a shell on a dependency-less Linux host is refused or loses it, which a
+    fallback provider can cover. ``capability`` defaults to the real host; tests inject it.
     """
+    if not strict_isolation:
+        return (
+            "the advanced mode (security.strict_isolation: false) raises no OS sandbox for the "
+            "agent shell on any host, so nothing binds the child processes a command starts"
+        )
     cap = capability if capability is not None else default_sandbox_probe()
     if cap is SandboxCapability.NATIVE_WINDOWS:
         return "native Windows has no supported OS sandbox for the agent shell"
@@ -1679,21 +1687,36 @@ class ClaudeCodeProvider(BaseCliProvider):
         (:meth:`_record_paid_probe_evidence`): the per-path verdicts plus the model's last message,
         beside the report rather than inside a temporary tree.
 
-        It runs under ``strict_isolation: false`` too, because there is a claim to prove there: the
-        sandbox settings file is written whenever the resolved tool set keeps a shell and the host
-        can sandbox it, at either setting — so in advanced mode the write-deny on ``.git`` and
-        ``.worc`` is still asserted, and it is the only part of the floor that does not depend on
-        the agent cooperating. The same reasoning as the Codex smoke above: the configuration that
-        leans hardest on the profile is the last one to excuse from proving it.
+        Two configurations have nothing for it to demonstrate, and it says so instead of running:
+        a host with no Bash sandbox, and — since the owner's 2026-09-03 decision — the advanced
+        mode, which raises no sandbox on any host. Running it in the mode would not merely waste a
+        call: the probe asks for a shell write into ``.git``, that write now LANDS, and
+        :func:`classify_paid_probe` would report a proven leak, which is fatal — so
+        ``worc preflight --paid-isolation-probe`` on the shipped default config would fail while
+        describing the mode's accepted price as a security violation. The honest carrier for that
+        price is the loud ``isolation-floor: NONE`` line (:func:`host_floor_gap`), not a FAIL here.
+        Both arms report ``CAPABILITY_UNSUPPORTED``, non-fatal: the enforcement is absent, which is
+        different from unproven.
 
-        In the mode it is also the ONLY instrument that can answer the open precedence question: the
-        settings file it launches under carries the volume-wide ``allowWrite`` with the carve-outs
-        nested inside it. That answer needs a SHELL write to have been attempted, because the
-        tool-level denies never reach the sandbox at all — which is why the prompt demands both
-        attempts per path and the verdict says which it got (:func:`classify_paid_probe`). A pass
-        where the model stopped at its file-writing tool is reported as the narrower thing it is, so
-        the loud floor-1 line points an operator at an instrument that cannot overstate itself.
+        Under ``strict_isolation: true`` it stays the only instrument that can settle the question
+        for Claude, and it needs a SHELL write to have been attempted, because the tool-level denies
+        never reach the sandbox at all — which is why the prompt demands both attempts per path and
+        the verdict says which it got (:func:`classify_paid_probe`). A pass where the model stopped
+        at its file-writing tool is reported as the narrower thing it is, so the loud floor-1 line
+        points an operator at an instrument that cannot overstate itself.
         """
+        if not self._security.strict_isolation:
+            return IsolationCapabilityReport(
+                ok=False,
+                status=CAPABILITY_UNSUPPORTED,
+                detail=(
+                    "claude paid isolation probe: the advanced mode "
+                    "(security.strict_isolation: false) raises no OS sandbox on any host, so there "
+                    "is no enforcement to demonstrate — the isolation-floor line already reports "
+                    "that the mechanical half is gone for the processes a command starts"
+                ),
+                fatal=False,
+            )
         probe = self._sandbox_probe if self._sandbox_probe is not None else default_sandbox_probe
         if not _bash_sandbox_available(probe()):
             return IsolationCapabilityReport(
@@ -1821,8 +1844,13 @@ class ClaudeCodeProvider(BaseCliProvider):
             git_evidence=request.git_evidence,
         )
         settings_path: str | None = None
-        if plan.needs_sandbox and self._deny_policy is not None:
-            advanced_mode = not self._security.strict_isolation
+        if not self._security.strict_isolation:
+            # The mode raises no sandbox, and says so in a file rather than by omitting one: see
+            # :func:`build_sandbox_off_settings` for why the vendor default is not good enough here.
+            # Unconditional on the deny policy, unlike the strict arm below — there is no policy to
+            # project, and the assertion is worth making with or without one.
+            settings_path = self._write_sandbox_settings(paths, build_sandbox_off_settings())
+        elif plan.needs_sandbox and self._deny_policy is not None:
             settings = build_sandbox_settings(
                 self._deny_policy,
                 request.write_guard,
@@ -1832,19 +1860,11 @@ class ClaudeCodeProvider(BaseCliProvider):
                 read_isolation_off=self._security.read_isolation_off,
                 # A read-only attempt only reaches a sandbox when it was granted a shell, and then
                 # the whole clone is write-denied: the sandbox is what holds it to reading, so a
-                # command outside the allowlist still cannot change the repository. In the advanced
-                # mode this deny lands inside the volume-wide allow below, so that half rests on the
-                # vendor's ``denyWithinAllow`` nesting (read offline, not proven here); the half
-                # that does not is the editor denies, which bypass this sandbox entirely.
+                # command outside the allowlist still cannot change the repository. The editor
+                # denies stand on the same paths and bypass this sandbox entirely, which is what
+                # keeps the claim true for the CLI's own tools as well as for the shell.
                 deny_write_root=(
                     Path(request.working_directory) if profile == "read-only" else None
-                ),
-                # The advanced mode writes outside the clone (:func:`_write_anywhere_root`). It
-                # applies to a read-only attempt too — the ADR settled that writable reach outside
-                # the clone follows the shell, not the profile — and the clone itself stays denied
-                # for one by ``deny_write_root`` above.
-                allow_write_root=(
-                    _write_anywhere_root(request.working_directory) if advanced_mode else None
                 ),
             )
             settings_path = self._write_sandbox_settings(paths, settings)

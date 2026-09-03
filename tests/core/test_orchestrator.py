@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 
 from wastech_orchestrator.check_runner import CheckRunner
+from wastech_orchestrator.composition import HOST_FLOOR_CHECKS
 from wastech_orchestrator.core.flow.exchange_seal import (
     exchange_quarantine_root,
     exchange_seal_root,
@@ -39,6 +40,7 @@ from wastech_orchestrator.git_manager import (
 )
 from wastech_orchestrator.ledger import Ledger, LedgerRecord
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult, Notifier
+from wastech_orchestrator.providers import claude as claude_mod
 from wastech_orchestrator.providers.artifacts import (
     create_attempt_dir,
     exchange_node_run_dir,
@@ -330,6 +332,7 @@ def _build(
     gh: Callable[[Sequence[str]], GitResult] | None = None,
     clock: Callable[[], str] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
+    host_floor_checks: dict | None = None,
 ) -> tuple[Orchestrator, StateStore, Ledger, Path]:
     from tests.conftest import seed_builtin_flows
 
@@ -372,6 +375,10 @@ def _build(
         ),
         notifier=notifier,
         resolver=CheckResolver(config),  # normalize checks.command_sets (production wires this)
+        # Default `None` becomes `{}` inside the Orchestrator — "the run says nothing about the
+        # floor" — which is what nearly every test here wants. A test about the floor line has to
+        # pass the real table, the way the composition root does.
+        host_floor_checks=host_floor_checks,
         **extra,
     )
     return orch, store, ledger, art
@@ -3715,6 +3722,43 @@ def test_advanced_mode_is_announced_in_the_run_log_and_recorded_durably(
     manifests = list(art.rglob("control-bundles/*/manifest.json"))
     assert manifests, "the frozen control bundle should exist with clean_runs_on_success off"
     assert json.loads(manifests[0].read_text("utf-8"))["metadata"]["advanced_mode"] == "true"
+
+
+def test_the_mode_announces_the_missing_floor_through_the_real_check_table(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repo,
+    make_git_config,
+    tmp_path: Path,
+) -> None:
+    """The mode's floor line, end to end, without stubbing the formatter.
+
+    The sibling floor test monkeypatches `describe_host_floor`, so it proves the log framing and
+    nothing about which runs get a line. This one goes through the real `HOST_FLOOR_CHECKS` on an
+    injected macOS host — the class that reported NO gap before, and is exactly where the mode was
+    keeping a sandbox it promised not to. Both halves of the sentence are asserted: the provider's
+    reason and the shared cost tail, since the two live in different modules and only their
+    concatenation is what an operator reads.
+    """
+    monkeypatch.setattr(
+        claude_mod, "default_sandbox_probe", lambda: claude_mod.SandboxCapability.MACOS
+    )
+    orch, _, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        config_kwargs={"strict_isolation": False},
+        host_floor_checks=dict(HOST_FLOOR_CHECKS),
+    )
+    with _collected_warnings() as messages:
+        result = orch.run_task(_complete_task(tmp_path, "task-mode-floor"))
+
+    assert result.final_status is not Status.FAILED  # announced, never refused
+    floor = [m for m in messages if "isolation floor NONE" in m]
+    assert len(floor) == 1, messages
+    assert "claude: the advanced mode" in floor[0]
+    assert "EVERY node here keeps an unsandboxed shell" in floor[0]
 
 
 def test_a_default_run_carries_the_mode_marker_as_false(
