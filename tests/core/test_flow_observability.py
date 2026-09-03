@@ -100,6 +100,11 @@ def _register(calls: list[tuple[str, str, str]]) -> Any:
     return lambda t, k, p: calls.append((t, k, p))
 
 
+def _step_metadata(step_text: str) -> Any:
+    """The step document's fenced ``json`` header, parsed."""
+    return json.loads(step_text.split("```json\n", 1)[1].split("\n```", 1)[0])
+
+
 def test_write_prompt_audit_step_timeline_who_metadata_and_redaction(tmp_path: Path) -> None:
     calls: list[tuple[str, str, str]] = []
     write_prompt_audit(
@@ -108,7 +113,7 @@ def test_write_prompt_audit_step_timeline_who_metadata_and_redaction(tmp_path: P
         node_id="implementation",
         subtask=None,
         run_id=7,
-        prompt="do the thing with TOKEN_ABC123",
+        prompt="do the thing\nwith TOKEN_ABC123",
         route=_route(),
         outcome=_outcome(),
         configured_model=None,  # the node pins neither — the trial's shape for every node but one
@@ -118,8 +123,9 @@ def test_write_prompt_audit_step_timeline_who_metadata_and_redaction(tmp_path: P
         register=_register(calls),
     )
     audit_dir = task_artifact_dir(tmp_path, "task-1") / "prompt-audit"
-    step = audit_dir / "000007-implementation.json"
-    record = json.loads(step.read_text("utf-8"))
+    step = audit_dir / "000007-implementation.md"
+    step_text = step.read_text("utf-8")
+    record = _step_metadata(step_text)
     assert record["provider_used"] == "claude"
     # The plain names carry what the settled attempt ACTUALLY ran on, so a node that overrides
     # nothing is not recorded as having run on nothing; the override keeps its own pair of keys.
@@ -135,8 +141,16 @@ def test_write_prompt_audit_step_timeline_who_metadata_and_redaction(tmp_path: P
     assert by_provider["codex"]["model"] == "gpt-5.5"
     assert by_provider["codex"]["reasoning"] == "xhigh"
     assert by_provider["claude"]["model"] == "claude-opus-5"
-    assert "TOKEN_ABC123" not in record["prompt"]  # redacted
-    assert (audit_dir / "timeline.jsonl").read_text("utf-8").count("\n") == 1
+    # The prompt is the document's body, not a JSON string field: its newlines survive as real
+    # newlines an operator can read, and it is out of the metadata block entirely.
+    assert "prompt" not in record
+    assert step_text.startswith("# implementation — run 000007\n")
+    assert step_text.endswith("## Prompt\n\ndo the thing\nwith [REDACTED]\n")
+    assert "TOKEN_ABC123" not in step_text  # redacted
+    # The timeline stays the machine-readable half: one whole record per line, prompt included.
+    timeline = (audit_dir / "timeline.jsonl").read_text("utf-8").splitlines()
+    assert len(timeline) == 1
+    assert "TOKEN_ABC123" not in json.loads(timeline[0])["prompt"]
     kinds = {k for _, k, _ in calls}
     assert {"prompt_audit", "prompt_audit_timeline"} <= kinds
 

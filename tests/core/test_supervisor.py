@@ -680,11 +680,12 @@ def test_finalize_writes_prompt_audit_when_enabled(tmp_path: Path) -> None:
 
     audit_dir = task_artifact_dir(str(tmp_path / "art"), _TASK) / "prompt-audit"
     # finalize's node_run_id is the reserved ``0`` sentinel (not a node_runs id).
-    step_path = audit_dir / "000000-supervisor.json"
+    step_path = audit_dir / "000000-supervisor.md"
     assert step_path.exists()
-    record = json.loads(step_path.read_text("utf-8"))
-    assert record["node_id"] == "supervisor"
-    assert record["prompt"]  # the finalize turn's input prompt was persisted
+    step_text = step_path.read_text("utf-8")
+    assert '"node_id": "supervisor"' in step_text
+    # the finalize turn's input prompt was persisted, as the document's readable body
+    assert step_text.split("## Prompt\n\n", 1)[1].strip()
     timeline = (audit_dir / "timeline.jsonl").read_text("utf-8").splitlines()
     assert any(json.loads(line)["node_id"] == "supervisor" for line in timeline)
 
@@ -1676,10 +1677,9 @@ def test_handoff_records_subtask_in_prompt_audit(tmp_path: Path) -> None:
     sup.handoff(task_id=_TASK, subtask_order=2, floor_context="F")
 
     audit_dir = task_artifact_dir(str(tmp_path / "art"), _TASK) / "prompt-audit"
-    step_path = audit_dir / f"{_HANDOFF_RUN_ID_BASE + 2:06d}-supervisor-sub02.json"
+    step_path = audit_dir / f"{_HANDOFF_RUN_ID_BASE + 2:06d}-supervisor-sub02.md"
     assert step_path.exists()
-    record = json.loads(step_path.read_text("utf-8"))
-    assert record["subtask"] == 2
+    assert '"subtask": 2' in step_path.read_text("utf-8")
 
 
 def test_handoff_uses_flow_handoff_role_file(tmp_path: Path) -> None:

@@ -1,20 +1,24 @@
 """Per-node observability — rendered-prompt, prompt-audit, and provider-attempt records.
 
-Writes the rendered prompt + prompt-audit JSON and the per-attempt provider-attempt rows so the
-engine path produces the same audit surfaces the integration suite asserts. The agent/evaluator
-runners call :func:`record_run_observability` after ``router.run_stage``; it is keyed by the
-``node_runs`` row id, so audit files still sort chronologically.
+Writes the rendered prompt + the prompt-audit records and the per-attempt provider-attempt
+rows so the engine path produces the same audit surfaces the integration suite asserts. The
+agent/evaluator runners call :func:`record_run_observability` after ``router.run_stage``; it is
+keyed by the ``node_runs`` row id, so audit files still sort chronologically.
 
 Gating: provider-attempt rows are always recorded (an audit surface). The on-disk
 rendered-prompt / prompt-audit artifacts are written only when the orchestrator wired a
-``register_artifact`` callback; the prompt-audit JSON additionally honors the per-task / global
+``register_artifact`` callback; the prompt-audit records additionally honor the per-task / global
 ``prompt_audit`` gate resolved into ``NodeServices.prompt_audit``.
+
+The prompt-audit directory carries the same content twice, one half per reader: the per-step ``.md``
+file an operator opens (metadata header + the prompt as readable text) and ``timeline.jsonl``, the
+machine-readable record of every step in order.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
@@ -241,6 +245,12 @@ def write_prompt_audit(
 ) -> None:
     """Write one prompt-audit step (who + redacted prompt) and append it to the timeline.
 
+    The step file is Markdown — a fenced-JSON metadata header, then the prompt verbatim as the
+    body — because it is the surface an operator opens: inside a JSON string every newline is an
+    escaped ``\n``, so a multi-page prompt reads as one flat line. Nothing is lost by moving the
+    prompt out of the JSON, since ``timeline.jsonl`` still carries each record whole and is the
+    machine-readable half of this directory.
+
     ``model`` / ``reasoning`` are the **effective** values the settled attempt ran with, because
     this is the artifact an operator opens to answer "what did this node actually run on"; the
     ``configured_*`` pair beside them is the flow node's (or supervisor phase's) own override,
@@ -282,10 +292,27 @@ def write_prompt_audit(
         "prompt": redact_text(prompt, extra_secrets=secrets),
     }
     sub = f"-sub{subtask:02d}" if subtask is not None else ""
-    step_path = audit_dir / f"{run_id:06d}-{node_id}{sub}.json"
-    step_path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    title = f"{node_id} — run {run_id:06d}" + (f" — subtask {subtask:02d}" if sub else "")
+    step_path = audit_dir / f"{run_id:06d}-{node_id}{sub}.md"
+    step_path.write_text(_render_step(record, title=title), encoding="utf-8")
     timeline_path = audit_dir / "timeline.jsonl"
     with timeline_path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
     register(task_id, "prompt_audit", str(step_path))
     register(task_id, "prompt_audit_timeline", str(timeline_path))
+
+
+def _render_step(record: Mapping[str, object], *, title: str) -> str:
+    """Render one prompt-audit record as the readable step document.
+
+    Metadata goes into a fenced ``json`` block (still copy-pasteable into a parser); the prompt
+    follows as ordinary Markdown body text. The prompt is written last and unescaped, so a prompt
+    that contains its own fences or headings cannot break anything above it.
+    """
+    meta = {key: value for key, value in record.items() if key != "prompt"}
+    prompt = str(record.get("prompt", "")).rstrip("\n")
+    return (
+        f"# {title}\n\n"
+        f"```json\n{json.dumps(meta, indent=2, ensure_ascii=False)}\n```\n\n"
+        f"## Prompt\n\n{prompt}\n"
+    )
