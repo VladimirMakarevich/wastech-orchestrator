@@ -983,6 +983,60 @@ def test_merge_pr_immediate_argv_sha_and_no_admin(
     assert op is not None and op.status == "completed" and op.result_ref == "deadbeef"
 
 
+def test_merge_pr_squash_carries_the_subject_and_an_empty_body(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # Without these flags the squash message is whatever the TARGET repository's settings dictate:
+    # on a `COMMIT_OR_PR_TITLE` / `COMMIT_MESSAGES` repo that means a subject with no Conventional
+    # Commits type and a body holding every branch commit — the orchestrator's own audit-trail
+    # commit included. Both were observed on a real merge.
+    _task(store)
+    calls: list[list[str]] = []
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=_merge_gh(calls))
+
+    gm.merge_pr(
+        "task-001",
+        _PR_URL,
+        strategy=MergeStrategy.SQUASH,
+        wait_for_checks=False,
+        subject="feat(task-001): T (#1)",
+        body="",
+    )
+
+    assert calls[0] == [
+        "pr",
+        "merge",
+        _PR_URL,
+        "--squash",
+        "--subject",
+        "feat(task-001): T (#1)",
+        "--body",
+        "",
+        "--repo",
+        _GH_SLUG,
+    ]
+
+
+def test_merge_pr_rebase_carries_no_message(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # A rebase produces no merge commit, so there is no message to set and gh takes no such flags.
+    _task(store)
+    calls: list[list[str]] = []
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=_merge_gh(calls))
+
+    gm.merge_pr(
+        "task-001",
+        _PR_URL,
+        strategy=MergeStrategy.REBASE,
+        wait_for_checks=False,
+        subject="feat(task-001): T (#1)",
+        body="",
+    )
+
+    assert calls[0] == ["pr", "merge", _PR_URL, "--rebase", "--repo", _GH_SLUG]
+
+
 def test_merge_pr_wait_for_checks_arms_auto(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
@@ -1140,6 +1194,30 @@ def test_write_current_diff_renders_nul_content_as_text(
     diff = Path(gm.write_current_diff("task-001")).read_text(encoding="utf-8")
     assert "Binary files differ" not in diff
     assert "after" in diff
+
+
+def test_write_current_diff_excludes_the_tracked_runtime_home(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # `worc install` appends `.worc/` to .gitignore but repos re-include the config deliberately
+    # (`!.worc/config.yaml`, so its changes are reviewable in history), which makes that one file
+    # TRACKED. An operator editing it mid-run then appears in the review diff of every task that
+    # follows — a file no agent may read or write, so a finding against it can never be fixed.
+    # The runtime home is excluded here the way the commit pathspec already excludes it.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    worc_home = git_repo.clone / RUNTIME_EXCLUDED_DIRS[0]
+    worc_home.mkdir()
+    (worc_home / "config.yaml").write_text("poll_interval_seconds: 60\n", encoding="utf-8")
+    git_run(["add", "-f", f"{RUNTIME_EXCLUDED_DIRS[0]}/config.yaml"], git_repo.clone)
+    git_run(["commit", "-m", "track the orchestrator config"], git_repo.clone)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    (worc_home / "config.yaml").write_text("poll_interval_seconds: 30\n", encoding="utf-8")
+    (git_repo.clone / "feature.py").write_text("value = 42\n", encoding="utf-8")
+    diff = Path(gm.write_current_diff("task-001")).read_text(encoding="utf-8")
+    assert "feature.py" in diff and "value = 42" in diff  # the task's own change is still there
+    assert RUNTIME_EXCLUDED_DIRS[0] not in diff
+    assert "poll_interval_seconds" not in diff
 
 
 def test_control_byte_paths_flags_only_nul_files(
@@ -2093,6 +2171,38 @@ def test_control_state_detects_config_change_without_leaking_value(
     assert (
         "SUPERSECRETVALUE" not in summary
     )  # the value never is (redaction / hash-only fingerprint)
+
+
+def test_control_state_ignores_the_key_an_ide_writes_per_branch(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # `repo.local_path` is the operator's own working checkout, so `--local` config is IDE-writable
+    # as well as agent-writable. VS Code writes one `branch.<name>.vscode-merge-base` per branch it
+    # notices, and the orchestrator makes a branch per task — so this fired on ~every task, at
+    # whichever node happened to be running, and told the operator to stop the run and discard the
+    # clone. On the shipped default that warn line is the only trace a real isolation failure
+    # leaves, which makes a per-task false positive a cost to the signal, not just noise.
+    gm = _armed(git_repo, store, tmp_path / "art", make_git_config)
+    before = gm.capture_git_control_state()
+    git_run(
+        ["config", "branch.feat/001-x.vscode-merge-base", "refs/remotes/origin/main"],
+        git_repo.clone,
+    )
+
+    assert gm.compare_git_control_state(before) is None
+
+
+def test_control_state_still_reports_any_other_new_key(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # The exclusion is one key an editor reads and git ignores — it cannot launch a program, move a
+    # ref, bind a hook or redirect a remote. Everything else still reports, this neighbour included.
+    gm = _armed(git_repo, store, tmp_path / "art", make_git_config)
+    before = gm.capture_git_control_state()
+    git_run(["config", "branch.feat/001-x.merge", "refs/heads/main"], git_repo.clone)
+
+    drift = gm.compare_git_control_state(before)
+    assert drift is not None and "branch.feat/001-x.merge" in drift.summary()
 
 
 def test_control_state_detects_head_and_ref_move(

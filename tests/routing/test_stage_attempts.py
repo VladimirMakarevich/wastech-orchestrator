@@ -203,3 +203,46 @@ def test_a_raised_attempt_carries_its_own_result_not_a_row_write_clock(
     assert raised.result is not None
     assert raised.result.started_at != raised.result.finished_at  # a real interval
     assert raised.result.exit_code == 1
+
+
+def test_each_attempt_records_the_model_and_reasoning_it_ran_at(
+    config: OrchestratorConfig,
+    make_fake_provider: Callable[..., object],
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # The audit's model/reasoning used to be the flow node's override, which is ``None`` for every
+    # node that takes a provider default — so the record named for auditing could not answer "what
+    # did the reviewer run on". Each row now carries the value ITS provider resolved, which is also
+    # why one value per stage would not do: the codex hop and the claude fallback ran different
+    # models, and the request the fallback was handed no longer carries the primary's pin.
+    primary = make_fake_provider(ProviderId.CODEX, raises=ErrorClass.RATE_LIMITED)
+    fallback = make_fake_provider(ProviderId.CLAUDE)
+    router = _router(config, primary, fallback)
+    outcome = router.run_stage(
+        make_request(node_id="review"), router.resolve_route("review", ProviderId.CODEX)
+    )
+    rows = {a.provider: a for a in outcome.attempts}
+    codex_cfg = config.agents.providers[ProviderId.CODEX]
+    claude_cfg = config.agents.providers[ProviderId.CLAUDE]
+    assert rows[ProviderId.CODEX].model == codex_cfg.model
+    assert rows[ProviderId.CODEX].reasoning == codex_cfg.reasoning
+    assert rows[ProviderId.CLAUDE].model == claude_cfg.model
+    assert rows[ProviderId.CLAUDE].reasoning == claude_cfg.reasoning
+    assert rows[ProviderId.CODEX].model != rows[ProviderId.CLAUDE].model  # not one stage value
+
+
+def test_a_node_override_is_recorded_as_the_effective_value(
+    config: OrchestratorConfig,
+    make_fake_provider: Callable[..., object],
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # The other half: when the node DOES pin a model/reasoning, the row names the pin rather than
+    # the provider default — the row is the effective value, whichever side supplied it.
+    primary = make_fake_provider(ProviderId.CODEX)
+    fallback = make_fake_provider(ProviderId.CLAUDE)
+    router = _router(config, primary, fallback)
+    outcome = router.run_stage(
+        make_request(node_id="review", model="gpt-pinned", reasoning="minimal"),
+        router.resolve_route("review", ProviderId.CODEX),
+    )
+    assert [(a.model, a.reasoning) for a in outcome.attempts] == [("gpt-pinned", "minimal")]

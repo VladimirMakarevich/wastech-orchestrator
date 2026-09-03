@@ -106,6 +106,7 @@ def test_schema_constants() -> None:
     # A clean task carries only identity/dispatch (``task_type`` selects the flow) + the sanctioned
     # task-wins gates: ``nodes.<node-id>.enabled`` (disable), ``auto_merge``,
     # ``prompt_audit``, ``decomposition``, and ``trust_level``. No provider/model/reasoning/refined.
+    # ``commit_type`` joins them as the only channel into a commit message, which no node can write.
     assert {
         "id",
         "title",
@@ -118,6 +119,7 @@ def test_schema_constants() -> None:
         "prompt_audit",
         "decomposition",
         "trust_level",
+        "commit_type",
         "contacts",
         "depends_on",
         "priority",

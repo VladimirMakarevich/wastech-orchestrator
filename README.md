@@ -57,7 +57,7 @@ One task at a time, end to end. A read-only supervisor watches the steps that de
 - The agent CLIs you want to use on your `PATH`: **`codex`** and/or **`claude`**.
 - **GitHub CLI (`gh`)** — only if you want PRs opened automatically.
 
-**Officially supported CLI versions:** `claude` **≥ 2.1.210** and `codex` **≥ 0.144.4**. Older versions may work but are not guaranteed — the orchestrator is developed and tested against these.
+**Officially supported CLI versions:** `claude` **≥ 2.1.210** and `codex` **≥ 0.152.1**. Older versions may work but are not guaranteed — the orchestrator is developed and tested against these. The `codex` floor is a hard one rather than a cautious one: the models endpoint stopped serving a field its older clients require, so a stale `codex` exits 1 with no final message and `ERROR codex_models_manager::cache: failed to load models cache` on stderr (on 0.144.4, `missing field base_instructions`). The orchestrator classifies that as `process_crashed` and falls over to the other provider, so a run survives it — but a `codex`-only route has nothing to fall over to.
 
 You authorize the tools yourself, once, in the environment the orchestrator runs in (`git push` for your remote, `gh auth login`, and signing in to `codex` / `claude`). The orchestrator never installs the CLIs or stores credentials. Under strict isolation, agent-side processes receive the allowlisted environment plus explicit non-secret assignments; advanced mode forwards the parent environment except names loaded from `.worc/.env`. Orchestrator-owned `git`/`gh` keep the allowlist in both modes.
 

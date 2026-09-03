@@ -209,8 +209,8 @@ class EvaluatorNodeRunner:
             prompt=build_effective_prompt(request),
             route=route,
             outcome=outcome,
-            model=node.model,
-            reasoning=node.reasoning,
+            configured_model=node.model,
+            configured_reasoning=node.reasoning,
             started_at=started_at,
             usage_baseline=baseline,
             baseline_session_id=session_id,
@@ -279,6 +279,7 @@ class EvaluatorNodeRunner:
                 # an evaluator that emitted findings as a gate that "passed". The agent runner has
                 # always passed this; the evaluator runner dropped it one layer up.
                 final_message=outcome.result.final_message,
+                gating_findings_name_no_path=_no_gating_finding_names_a_path(findings, gating),
             ),
             node_run_id=run_id,
         )
@@ -549,6 +550,16 @@ class EvaluatorNodeRunner:
         )
 
     def _prompt_variables(self, ctx: NodeContext, node: EvaluatorNode) -> dict[str, object | None]:
+        """The variables this evaluator's role prompt may substitute (paths and ids only).
+
+        Kept in step with the agent runner's set by name, because the two have now diverged on one
+        channel twice: the memory packet was wired for agent nodes only, leaving ``review.md``'s
+        ``{?memory_path}`` block dead (see :meth:`_memory_path`), and the decomposition variables
+        the same way. The one deliberate difference is ``predecessor_context`` — the *author's*
+        handoff brief, assembled for the node that writes a subtask, which an evaluator is not the
+        reader of. ``test_the_agent_and_evaluator_runners_publish_the_same_variable_names`` compares
+        the two key sets so the next omission fails a test rather than a run.
+        """
         paths = build_path_context(self._in, self._s.repo_dir)
         variables: dict[str, object | None] = {
             "task_id": ctx.task_id,
@@ -557,6 +568,16 @@ class EvaluatorNodeRunner:
             **paths,
             "memory_path": self._memory_path(node, ctx),
         }
+        # An evaluator inside a decompose region runs once PER SUBTASK, and without these it judged
+        # each subtask's diff against the ROOT task file and the shared plan — the only two things
+        # it was given. So it could hold neither the subtask's own acceptance criteria nor its
+        # "out of scope for this subtask" boundary, and charged every not-yet-implemented part of
+        # the whole task against whichever subtask was under review. The runner already used
+        # ``ctx.subtask_order`` for its own artifact namespacing; it simply never passed it on.
+        if ctx.subtask_order is not None:
+            variables["subtask_order"] = ctx.subtask_order
+            variables["subtask_count"] = self._in.subtask_count
+            variables["subtask_spec_path"] = self._in.subtask_spec_path
         # An evaluator judging the *work* (a coverage gate, a critic) needs the upstream
         # node's output, not only the report a later node wrote from it. Same channel the agent
         # runner reads, same rule — a path to a Core-written redacted artifact, never inlined
@@ -670,6 +691,27 @@ class EvaluatorNodeRunner:
             return ()
         gate_rank = _severity_rank(node.gate_severity)
         return tuple(self._is_blocking(f, gate_rank) for f in raw_findings)
+
+
+def _no_gating_finding_names_a_path(
+    findings: tuple[Finding, ...], gating: tuple[bool, ...]
+) -> bool:
+    """Whether the verdict gates and yet no gating finding says where.
+
+    The rework edge leads to ``fixing``, whose whole job is to open a named source location and
+    change it; a gating finding carrying no path gives it nothing to open. Observed twice on the
+    same trial, both times the same shape: the evaluator did not find a defect, it reported that it
+    *could not review* — a contradiction in its own instructions once, a build that died in its
+    sandbox the other time — and the findings contract, whose ``path`` is nullable by design, had no
+    way to say so. Each refusal was accepted as an ordinary verdict and spent a full fix round (426s
+    and 474s) establishing there was nothing to fix.
+
+    Judged over the **gating** findings only, and only when they are all pathless. One pathless
+    blocker beside a located one still leaves ``fixing`` real work, so that is not this signal; and
+    an advisory finding without a path routes nowhere and costs nothing.
+    """
+    gated = [f for f, gates in zip(findings, gating, strict=True) if gates]
+    return bool(gated) and not any(f.paths for f in gated)
 
 
 def _to_finding(raw: Mapping[str, Any]) -> Finding:

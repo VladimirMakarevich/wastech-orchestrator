@@ -163,11 +163,11 @@ id  node_id     node_kind  status
 
 **Блок Б доказан живьём.** Шесть попыток Codex, все `succeeded`, ни одного `permission_denied` и ни одного отката на Claude — при том что предыдущие пять прогонов подряд падали на первой же попытке Codex:
 
-| Узел | Модель | Время | Итог |
-| --- | --- | --- | --- |
-| `polish` | `gpt-5.6-sol` | 411 с | succeeded |
+| Узел              | Модель        | Время             | Итог      |
+| ----------------- | ------------- | ----------------- | --------- |
+| `polish`          | `gpt-5.6-sol` | 411 с             | succeeded |
 | `rules_critic` ×3 | `gpt-5.6-sol` | 308 / 160 / 160 с | succeeded |
-| `rules_fixing` ×2 | `gpt-5.5` | 165 / 153 с | succeeded |
+| `rules_fixing` ×2 | `gpt-5.5`     | 165 / 153 с       | succeeded |
 
 `rules_fixing` важнее остальных: он правит файлы, то есть проходит ровно тем путём `apply_patch` → fs sandbox helper → re-exec бинаря под `sandbox-exec`, который деналь на `$CODEX_HOME` и ломала. Это закрывает вторую живую пробу из DoD фазы на этом хосте.
 

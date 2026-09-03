@@ -36,6 +36,7 @@ from wastech_orchestrator.security.injection import scan_frontmatter
 from wastech_orchestrator.task.model import (
     ALLOWED_TASK_KEYS,
     BRANCH_NAME_MAX_LEN,
+    COMMIT_TYPES,
     DEFAULT_QUEUE,
     REQUIRED_TASK_FIELDS,
     TASK_ID_PATTERN,
@@ -325,6 +326,12 @@ class ValidationGate:
                 if frontmatter.get("trust_level") is not None
                 else None
             ),
+            # Same shape as ``trust_level``: validated above when present, absent → the default.
+            commit_type=(
+                str(frontmatter["commit_type"]).strip()
+                if frontmatter.get("commit_type") is not None
+                else None
+            ),
             contacts=[str(c) for c in frontmatter.get("contacts", [])],
             depends_on=depends_on,
             # Fail-open: an unrecognised priority normalizes to ``mid`` rather than rejecting the
@@ -396,6 +403,16 @@ class ValidationGate:
                 return _Reject(
                     ValidationReason.INVALID_FIELD_TYPE,
                     f"trust_level must be one of {sorted(TRUST_LEVELS)}",
+                )
+        # ``commit_type`` is fail-closed for a sharper reason than ``trust_level``'s: it is written
+        # into permanent history on the target's base branch, so a typo deferring silently to
+        # ``feat`` would be discovered after the merge, when it is no longer fixable by a re-run.
+        if "commit_type" in fm and fm["commit_type"] is not None:
+            commit_type = fm["commit_type"]
+            if not isinstance(commit_type, str) or commit_type.strip() not in COMMIT_TYPES:
+                return _Reject(
+                    ValidationReason.INVALID_FIELD_TYPE,
+                    f"commit_type must be one of {sorted(COMMIT_TYPES)}",
                 )
         if "contacts" in fm:
             contacts = fm["contacts"]

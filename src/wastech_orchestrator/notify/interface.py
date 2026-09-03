@@ -12,7 +12,12 @@ from dataclasses import dataclass
 from typing import Literal, Protocol, runtime_checkable
 
 AskKind = Literal["question", "approval"]
-AskFailure = Literal["timeout", "transport_error", "invalid_response"]
+#: Why a human interaction produced no usable answer. ``cancelled`` is the one that is nobody's
+#: fault: something outside asked this process to stop while the wait was in flight, so the wait
+#: was abandoned rather than waited out. It is kept distinct from ``timeout`` because the operator
+#: was never late — and, for the daemon, distinct from an approval by the same fail-closed rule as
+#: every other failure.
+AskFailure = Literal["timeout", "transport_error", "invalid_response", "cancelled"]
 
 #: Synthetic ``send_trace`` outcome label for a non-blocking evaluator that accepted only because
 #: its whole ``max_rework_per_stage`` budget was spent (findings still open). Distinct from a clean
@@ -46,6 +51,15 @@ TRACE_GIT_CONTROL_DRIFT = "done (node changed git control state)"
 #: therefore now covers someone else's work too. A pull request says this in its body; with
 #: ``publish: push``/``commit`` there is no body, and then this ⚠️ is the only place it is said.
 TRACE_ADOPTED_COMMITS = "done (publish adopted commits it did not make)"
+
+#: Synthetic ``send_trace`` outcome label for a gating verdict whose gating findings name no source
+#: path. The rework edge leads to a node whose job is to open a named location and change it, so
+#: such a round can only end in a refusal — which is what a reviewer reporting it *could not
+#: review* produces. The task is not parked over it (the loop keeps its named budget, and a verdict
+#: that gates for a real reason must not be discarded), so this ⚠️ is the signal that tells the
+#: operator a wasted round from a productive one while it is still running. Only reachable on a
+#: ``rework``: a budget-exhausted accept takes :data:`TRACE_REWORK_EXHAUSTED` instead.
+TRACE_FINDINGS_WITHOUT_A_PATH = "rework (no gating finding names a path)"
 
 #: Maps an internal terminal reason / loop ``limit_name`` (:mod:`core.flow.engine`) to one human
 #: sentence for the operator-facing terminal notification. These tokens are code-path
@@ -193,7 +207,11 @@ class Notifier(Protocol):
         """Send one correlated prompt and return a durable handle without waiting."""
 
     def wait_for_answer(self, handle: AskHandle) -> AskResult:
-        """Wait for the correlated answer until the handle's persisted deadline."""
+        """Wait for the correlated answer until the handle's persisted deadline.
+
+        A transport may also abandon the wait early when something outside asks the process to
+        stop, reporting ``cancelled``; the deadline is the only other way out.
+        """
 
     def ask_human(
         self,

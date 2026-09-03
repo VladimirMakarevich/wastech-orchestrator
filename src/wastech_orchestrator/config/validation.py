@@ -452,6 +452,12 @@ def _validate_telegram(config: OrchestratorConfig, issues: list[str]) -> None:
     telegram = config.telegram
     if telegram.ask_timeout_s <= 0:
         issues.append(f"telegram.ask_timeout_s must be > 0 (got {telegram.ask_timeout_s})")
+    gate_timeout = config.orchestrator.auto_mode.confirm_timeout_s
+    if gate_timeout <= 0:
+        # Zero would make the gate fail closed on every tick with no chance to answer, which reads
+        # as "auto mode is broken" rather than as the configuration it is. Off is `confirm_next_task
+        # : false`.
+        issues.append(f"orchestrator.auto_mode.confirm_timeout_s must be > 0 (got {gate_timeout})")
     for field, value in (
         ("bot_token_env", telegram.bot_token_env),
         ("chat_id_env", telegram.chat_id_env),
@@ -473,6 +479,7 @@ def _validate_confirmation_gates(config: OrchestratorConfig, issues: list[str]) 
         return
     if config.orchestrator.auto_mode.confirm_next_task:
         issues.append("orchestrator.auto_mode.confirm_next_task requires telegram.enabled: true")
+
     for pid, provider in config.agents.providers.items():
         if provider.max_turns_gate:
             issues.append(

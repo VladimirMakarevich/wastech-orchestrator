@@ -163,6 +163,13 @@ class ProviderAttempt:
     status: RunStatus | None  # None when the run raised a ProviderError
     error_class: ErrorClass | None
     result: AgentRunResult | None
+    # What THIS attempt was launched with, resolved the way the adapter resolves it (a flow node's
+    # override, else the provider's configured default). Per attempt because a cross-provider
+    # fallback re-resolves against the substitute's own config: a stage that failed over from
+    # ``codex``/``gpt-5.5`` to ``claude`` did not run on ``gpt-5.5``, and one value for the stage
+    # would say it did. Defaulted so a row built without them (unit harnesses) stays valid.
+    model: str | None = None
+    reasoning: str | None = None
 
 
 @dataclass(frozen=True)
@@ -374,9 +381,10 @@ class AgentRouter:
                     error_class=exc.error_class, message=str(exc), resets_at=exc.resets_at
                 )
                 attempts.append(
-                    ProviderAttempt(
-                        provider=pid,
-                        attempt=attempt_no,
+                    self._attempt_row(
+                        pid,
+                        req,
+                        attempt_no,
                         status=None,
                         error_class=exc.error_class,
                         # The adapter's own result for the attempt that RAISED, when it built one.
@@ -437,9 +445,10 @@ class AgentRouter:
                             resets_at=fresh_exc.resets_at,
                         )
                         attempts.append(
-                            ProviderAttempt(
-                                provider=pid,
-                                attempt=fresh_no,
+                            self._attempt_row(
+                                pid,
+                                fresh_req,
+                                fresh_no,
                                 status=None,
                                 error_class=fresh_exc.error_class,
                                 result=fresh_exc.result,
@@ -448,9 +457,10 @@ class AgentRouter:
                         exc = fresh_exc  # the fallback decision below uses the fresh error
                     else:
                         attempts.append(
-                            ProviderAttempt(
-                                provider=pid,
-                                attempt=fresh_no,
+                            self._attempt_row(
+                                pid,
+                                fresh_req,
+                                fresh_no,
                                 status=result.status,
                                 error_class=result.error.error_class if result.error else None,
                                 result=result,
@@ -533,9 +543,10 @@ class AgentRouter:
                 continue
 
             attempts.append(
-                ProviderAttempt(
-                    provider=pid,
-                    attempt=attempt_no,
+                self._attempt_row(
+                    pid,
+                    req,
+                    attempt_no,
                     status=result.status,
                     error_class=result.error.error_class if result.error else None,
                     result=result,
@@ -620,9 +631,10 @@ class AgentRouter:
             except ProviderError as exc:
                 last_class = exc.error_class
                 attempts.append(
-                    ProviderAttempt(
-                        provider=pid,
-                        attempt=audit_attempt,
+                    self._attempt_row(
+                        pid,
+                        attempt_req,
+                        audit_attempt,
                         status=None,
                         error_class=exc.error_class,
                         result=exc.result,
@@ -644,9 +656,10 @@ class AgentRouter:
                     return None, last_class, audit_attempt  # non-transient → stop; fallback decides
                 continue
             attempts.append(
-                ProviderAttempt(
-                    provider=pid,
-                    attempt=audit_attempt,
+                self._attempt_row(
+                    pid,
+                    attempt_req,
+                    audit_attempt,
                     status=result.status,
                     error_class=result.error.error_class if result.error else None,
                     result=result,
@@ -700,6 +713,36 @@ class AgentRouter:
                 session_id=None,
             )
         return req
+
+    def _attempt_row(
+        self,
+        pid: ProviderId,
+        req: AgentRunRequest,
+        attempt: int,
+        *,
+        status: RunStatus | None,
+        error_class: ErrorClass | None,
+        result: AgentRunResult | None,
+    ) -> ProviderAttempt:
+        """One ``provider_attempts`` row for an invocation of *pid* with *req*.
+
+        Every construction site goes through here so no attempt is recorded without the model and
+        reasoning it ran at: the audit surface named for auditing carried the flow-node override
+        (``None`` for a node that overrides nothing) while the effective value lived only in the
+        attempt's ``request.json``, so the two disagreed about the same run. Resolution is
+        :class:`ProviderConfig`'s, from the per-attempt request the adapter is handed — so a
+        cross-provider fallback, which clears the pinned model, records the substitute's own.
+        """
+        cfg = self._config.agents.providers[pid]
+        return ProviderAttempt(
+            provider=pid,
+            attempt=attempt,
+            status=status,
+            error_class=error_class,
+            result=result,
+            model=cfg.effective_model(req.model),
+            reasoning=cfg.effective_reasoning(req.reasoning),
+        )
 
     def _profile_of(self, pid: ProviderId) -> str:
         return self._config.agents.providers[pid].permission_profile

@@ -2,8 +2,12 @@
 
 A short, fixed security block the orchestrator prepends to *every* provider prompt — agent,
 evaluator, and each supervisor turn — as defense-in-depth. It tells the agent up-front not to read
-or mutate the orchestrator's service files (``.worc``/``.worc-io``/``.git``/``tasks/`` and
-credential/environment files) and never to commit/push.
+or mutate the orchestrator's service files (``.worc``/``.git``/``tasks/`` and credential/environment
+files) and never to commit/push. ``.worc-io`` is the one asymmetric root: the paths handed to a node
+there are what it is *for* reading, so only writing it is banned. Saying that plainly is not a
+nicety — the wording that folded it into the read ban made reviewers refuse to review, filing a
+blocking finding that their context files were forbidden reading, and the refusal then travelled to
+``fixing`` as if it were rework.
 
 It is **advisory only** — it does NOT replace the filesystem sandbox + deny projection, which remain
 the enforcement. Its weight is inversely proportional to how much enforcement is left, so it grows
@@ -75,8 +79,10 @@ def build_orchestrator_security_preamble(
                 "logs, database, secrets, frozen bundles): do not read it and do not write it."
             ),
             (
-                f"- `{EXCHANGE_HOME_DIRNAME}/` is read-only input context: read only the paths "
-                "you are given; never create, modify, move, or delete anything under it."
+                f"- `{EXCHANGE_HOME_DIRNAME}/` is your read-only input context: the paths you are "
+                "given under it are yours to read — that is what it is for, and nothing below "
+                "takes that back. Read no other path under it, and never create, modify, move, or "
+                "delete anything there."
             ),
             (
                 "- Do not touch Git control state (`.git/`, its config, hooks, HEAD, refs); "
@@ -102,9 +108,11 @@ def build_orchestrator_security_preamble(
     if read_isolation_off:
         paragraphs.append(
             "Read-isolation is relaxed for this run, so the filesystem sandbox may not block the "
-            f"paths above. Honor these rules by choice: in particular do not read "
-            f"`{CONTROL_HOME_DIRNAME}/`, `.env`, or any orchestrator-private file even though you "
-            "may be technically able to."
+            "paths above. Honor these rules by choice: in particular read nothing under "
+            f"`{CONTROL_HOME_DIRNAME}/` and no credential or environment file (`.env` and the "
+            "like) even though you may be technically able to. The context paths you were given "
+            f"under `{EXCHANGE_HOME_DIRNAME}/` are not among those — they are the input you are "
+            "meant to read."
         )
     if advanced_mode:
         paragraphs.append(
@@ -116,8 +124,9 @@ def build_orchestrator_security_preamble(
             "turn out to be. Do not publish anything: no commit, push, merge, tag or pull request "
             "— not to this repository's remote and not to any other address, by any route, "
             "including a second clone assembled elsewhere. That is the orchestrator's job. And do "
-            f"not read or write `{CONTROL_HOME_DIRNAME}/`, `{EXCHANGE_HOME_DIRNAME}/`, `.git/` "
-            "or `tasks/`. Both are checked after you finish, and what they find goes to a "
+            f"not read or write `{CONTROL_HOME_DIRNAME}/`, `.git/` or `tasks/`, and do not write "
+            f"`{EXCHANGE_HOME_DIRNAME}/` — the context paths you were given there stay yours to "
+            "read. Both are checked after you finish, and what they find goes to a "
             "human instead of being fixed up on the way out."
         )
     if no_write_floor:

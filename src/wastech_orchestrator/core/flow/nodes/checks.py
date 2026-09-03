@@ -4,7 +4,10 @@ A ``checks`` node names a ``checker``; this runner dispatches on it, and every c
 same engine outcome — ``pass`` / ``fail`` — so the engine needs no per-checker special case:
 
 * ``command_profile`` — runs the resolved quality-gate commands through the CheckRunner
-  (exit codes authoritative). Used by the implementation flow's ``testing`` node.
+  (exit codes authoritative). Used by the implementation flow's ``testing`` node. Its verdict
+  reaches the next node as ``{checks_path}`` on **both** outcomes: the first failing log on a
+  failure (what ``fixing`` acts on), a per-command summary on a pass (what an evaluator judging
+  "the checks pass" needs, so it does not re-run the gate inside the agent sandbox instead).
 * ``citation`` — the deterministic, no-LLM citation-manifest validator: a hallucinated
   citation fails the check, gating the synthesis loop. Used by ``deep_research``.
 * ``dependency_scan`` — the core-owned argv advisory scanners as evidence: it always emits
@@ -115,7 +118,39 @@ class ChecksNodeRunner:
                 "(commit-candidate files changed across the check run) — a green-but-dirtying "
                 "check must not pass silently"
             )
+        self._publish_command_report(ctx, node, run_id, outcome)
         return self._complete(run_id, node, passed=True)
+
+    def _publish_command_report(
+        self, ctx: NodeContext, node: ChecksNode, run_id: int, outcome: CheckOutcome
+    ) -> None:
+        """Publish the per-command verdicts and point ``{checks_path}`` at them, on a PASS.
+
+        The failure path publishes the first failing log, which is the text ``fixing`` needs. A
+        pass published nothing, so ``{checks_path}`` stayed ``None`` and the next node was told
+        nothing about the gate at all. That is the same gap :meth:`_publish_citation_report`
+        already closes for the other profile, and it costs more here: an evaluator asked to judge
+        an acceptance criterion like "lint and build pass" is handed no evidence of it, and under a
+        profile that gives it a shell it verifies the only way left — by running the build itself,
+        inside the agent sandbox, which is not the environment the gate runs in. Observed: the
+        reviewer's own attempt died on the sandbox, and it filed that as a blocking finding with no
+        path, about a failure that had not happened, into a fix loop that could not act on it.
+
+        Deliberately a summary rather than the logs: what the next node needs is which commands ran
+        and how they ended, and a skipped check has to be distinguishable from a passing one — a
+        skip is not evidence of a pass.
+        """
+        run_dir = self._run_dir(ctx.task_id, node.id, run_id)
+        artifact = run_dir / "checks.json"
+        artifact.write_text(_command_report_json(outcome), encoding="utf-8")
+        self._register(ctx.task_id, "checks", str(artifact))
+        self._in.checks_path = publish_file(
+            self._s.exchange_root,
+            ctx.task_id,
+            f"checks/{artifact.name}",
+            str(artifact),
+            extra_secrets=self._s.prompt_secrets,
+        )
 
     def _publish_first_failure_log(self, ctx: NodeContext, outcome: CheckOutcome) -> None:
         """Publish the redacted first-failure log and set ``{checks_path}`` before the fail edge.
@@ -324,6 +359,33 @@ class ChecksNodeRunner:
                 skipped=run.skipped,
             )
         return outcome
+
+
+def _command_report_json(outcome: CheckOutcome) -> str:
+    # One entry per command, with `skipped` carried explicitly: a check whose toolchain was absent
+    # did not run, so a reader must not count it as a pass. `exit_code` is `None` for a command that
+    # never launched or was skipped.
+    return (
+        json.dumps(
+            {
+                "passed": outcome.passed,
+                "checks": [
+                    {
+                        "name": run.name,
+                        "command": run.command,
+                        "exit_code": run.exit_code,
+                        "passed": run.passed,
+                        "skipped": run.skipped,
+                        "timed_out": run.timed_out,
+                    }
+                    for run in outcome.runs
+                ],
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n"
+    )
 
 
 def _citation_json(report: CitationReport, manifest_path: str | None) -> str:

@@ -372,6 +372,30 @@ def test_top_subparser_parses_flags() -> None:
     assert args.recent == 3
 
 
+def test_top_log_file_help_names_a_form_argparse_accepts() -> None:
+    # The help described the path as "passed to 'watch --log-file'". `watch` has no such option —
+    # `--log-file` is a parent-parser flag, so the working form puts it before the subcommand. The
+    # codebase already knew this: `cli_shell.start_watch`'s docstring records that appending the
+    # parent flags after `watch` is why the old auto-spawn died on an argparse error.
+    parser = cli.build_parser()
+    help_text = (
+        next(
+            action
+            for action in parser._subparsers._group_actions[0].choices["top"]._actions
+            if action.dest == "tail_file"
+        ).help
+        or ""
+    )
+
+    assert "watch --log-file" not in help_text
+    assert "--log-file" in help_text and "watch" in help_text
+
+    # Pin the two argv forms the text is about, so the sentence stays true by construction.
+    assert parser.parse_args(["--log-file", "d.log", "watch"]).log_file == "d.log"
+    with pytest.raises(SystemExit):
+        parser.parse_args(["watch", "--log-file", "d.log"])
+
+
 def test_cmd_top_returns_2_without_config(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setattr(cli, "load_config_for", lambda _args: None)
     assert cli.cmd_top(cli.build_parser().parse_args(["top"])) == 2
@@ -409,14 +433,14 @@ def test_display_status_names_the_wake_instant() -> None:
     # which is the diagnosis cost this work exists to remove.
     row = TaskRow(task_id="t1", title="T", status=Status.RUNNING)
     parked = replace(row, blocked_since="2026-06-28T00:00:00+00:00")
-    assert cli._display_status(parked, daemon_alive=True) == "running (paused)"
+    assert cli._display_status(parked, executor_alive=True) == "running (paused)"
     with_instant = replace(parked, blocked_until="2026-06-28T01:30:00+00:00")
     assert (
-        cli._display_status(with_instant, daemon_alive=True)
+        cli._display_status(with_instant, executor_alive=True)
         == "running (paused until 2026-06-28T01:30:00+00:00)"
     )
     # A dead daemon still dominates: the task is parked at its checkpoint, not waiting on a window.
-    assert cli._display_status(with_instant, daemon_alive=False) == "parked (no daemon)"
+    assert cli._display_status(with_instant, executor_alive=False) == "parked (no daemon)"
 
 
 def test_build_top_snapshot_carries_the_wake_instant(

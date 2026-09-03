@@ -233,6 +233,12 @@ def write_normalized(task: NormalizedTask, artifacts_root: str | Path) -> str:
         "auto_merge": task.auto_merge,
         "prompt_audit": task.prompt_audit,
         "decomposition": task.decomposition,
+        "commit_type": task.commit_type,
+        # Persisted for the same reason as every gate above: a resume rebuilds the task from this
+        # file alone, and an absent key defers to the global. For ``trust_level`` that would
+        # silently DOWNGRADE a task-level ``strict`` to the instance default across a resume — an
+        # approval threshold relaxed by a restart, the one direction it must never move.
+        "trust_level": task.trust_level,
         "contacts": list(task.contacts),
         "depends_on": list(task.depends_on),
         "priority": task.priority,
@@ -293,6 +299,8 @@ def load_normalized(artifacts_root: str | Path, task_id: str) -> NormalizedTask:
         auto_merge=data.get("auto_merge"),
         prompt_audit=data.get("prompt_audit"),
         decomposition=data.get("decomposition"),
+        commit_type=data.get("commit_type"),
+        trust_level=data.get("trust_level"),
         contacts=list(data.get("contacts", [])),
         depends_on=tuple(data.get("depends_on", [])),
         priority=normalize_priority(data.get("priority")),
@@ -316,6 +324,40 @@ class SubtaskSpecFile:
     depends_on: tuple[str, ...]
     acceptance_criteria: tuple[str, ...]
     body: str
+
+
+def read_subtask_refs(task_file: str | Path) -> list[str]:
+    """Repo-relative ``subtasks:`` spec paths declared in a root task's front matter (else empty).
+
+    Shared by both halves of the task-file lifecycle, which is the point: ``promote`` carries a
+    decomposition root's spec files into ``pending/`` with it, and the terminal relocation carries
+    them out to ``done``/``failed`` with it. Reading the manifest from one place is what keeps the
+    two symmetric — a root that arrives with its specs and leaves without them cannot resolve its
+    own manifest afterwards, because the refs are relative to the root file's own directory.
+
+    Best-effort: a read/parse problem or a non-list value yields no refs, so the caller simply moves
+    the one file (the validation gate rejects a genuinely broken file if it later lands in
+    ``pending/``). Refs that escape the task directory (absolute or containing ``..``) are dropped.
+    """
+    try:
+        source = read_task_source(task_file)
+        parse = split_frontmatter(source.raw_bytes.decode("utf-8"), source.suffix)
+    except (OSError, UnicodeDecodeError):
+        return []
+    if not parse.present or parse.malformed:
+        return []
+    raw = parse.frontmatter.get("subtasks", [])
+    if not isinstance(raw, (list, tuple)):
+        return []
+    refs: list[str] = []
+    for entry in raw:
+        if not isinstance(entry, str) or not entry.strip():
+            continue
+        ref = entry.strip()
+        if Path(ref).is_absolute() or ".." in Path(ref).parts:
+            continue
+        refs.append(ref)
+    return refs
 
 
 def read_subtask_spec(text: str) -> SubtaskSpecFile | None:

@@ -94,6 +94,19 @@ _PUSH_RETRY_BACKOFF_SECONDS = 1.5
 # `__init__`). Together they form `self._excluded_dirs`.
 RUNTIME_EXCLUDED_DIRS = (CONTROL_HOME_DIRNAME, EXCHANGE_HOME_DIRNAME)
 
+
+def _runtime_exclude_pathspecs(roots: Sequence[str]) -> tuple[str, ...]:
+    """``:(exclude,top)`` pathspecs for *roots*, for a git command that sweeps the whole tree.
+
+    ``top`` anchors each pattern at the repo root instead of the process cwd: a bare
+    ``:(exclude).worc/`` is resolved relative to where git was launched, so the same argument
+    silently stops excluding anything the moment it runs from a subdirectory. Callers pass a subset
+    of :data:`RUNTIME_EXCLUDED_DIRS` so the roots cannot drift from the ones the ignore lines and
+    the changed-path filter already use.
+    """
+    return tuple(f":(exclude,top){r}/" for r in roots)
+
+
 _RUNTIME_IGNORE_COMMENT = (
     "# wastech-orchestrator runtime home + exchange (auto-appended by `worc install`)"
 )
@@ -290,6 +303,21 @@ _FILTER_DRIVER_KEY_RE = re.compile(
     r"^(filter|diff)\.[^.]+\.(clean|smudge|process|command|textconv)$"
 )
 _PROGRAM_CONFIG_KEYS = frozenset({"core.sshcommand", "credential.helper"})
+
+# Config keys an IDE writes as bookkeeping, excluded from the control-state REPORT (never from
+# anything that refuses). `repo.local_path` is the operator's own working checkout — what `install`
+# writes, and what a node's `working_directory` points at — so `--local` config there is operator-
+# and editor-writable as well as agent-writable. VS Code writes one
+# `branch.<name>.vscode-merge-base` per branch it notices, and this orchestrator creates a branch
+# per task: the drift line therefore fired on ~every task, at whichever node happened to be running
+# when the editor caught up, and told the operator to stop the run and discard the clone. The cost
+# is not the noise. On the shipped default that warn line is the only trace a real isolation failure
+# leaves, which is what makes it part of the mitigation rather than a nicety — and a signal that
+# cries wolf once per task is not that.
+# Narrow on purpose: this key is read by an editor and by nothing in git. It cannot launch a
+# program, move a ref, bind a hook or redirect a remote, so dropping it from the report gives up no
+# signal. Every other key — `branch.<name>.merge` next door included — still reports.
+_IDE_CONFIG_KEY_RE = re.compile(r"^branch\..*\.vscode-merge-base$")
 
 
 def _append_missing_lines(target: Path, lines: Sequence[str]) -> list[str]:
@@ -1710,9 +1738,15 @@ class GitManager:
     def _capture_local_config(self) -> dict[str, tuple[str, ...]]:
         """Repo-local (+worktree) config as ``{key: (value-sha256, ...)}`` — hashes, never values.
 
-        Scoped to ``--local``/``--worktree`` deliberately: it is exactly the agent-writable config
+        Scoped to ``--local``/``--worktree`` deliberately: that is the agent-writable config
         surface, and it excludes the command-line ``-c`` hardening prefix (never written to a config
         file), so neutralization is never seen as drift.
+
+        Agent-writable, not *only* agent-writable — the qualifier this docstring used to omit.
+        Where the orchestrator does not own the checkout (the default: ``repo.local_path`` is the
+        operator's real working copy) the same file is written by the operator and by their editor,
+        so :data:`_IDE_CONFIG_KEY_RE` is dropped here. It is the one exclusion, and it is a key git
+        itself never reads.
         """
         config: dict[str, list[str]] = {}
         for scope in ("--local", "--worktree"):
@@ -1723,6 +1757,8 @@ class GitManager:
                 if not record:
                     continue
                 key, _, value = record.partition("\n")
+                if _IDE_CONFIG_KEY_RE.match(key):
+                    continue
                 config.setdefault(key, []).append(hashlib.sha256(value.encode("utf-8")).hexdigest())
         return {key: tuple(values) for key, values in config.items()}
 
@@ -2182,7 +2218,12 @@ class GitManager:
         """Build the scoped ``git add`` pathspec: the code paths, plus a ``:(exclude)`` guard for
         the task lifecycle dir **only when that dir is tracked**.
 
-        ``.worc/`` is gitignored, so ``git add`` skips it without a guard. The task lifecycle dir
+        The runtime home needs no guard here: this pathspec is an **explicit list of changed code
+        paths** and :meth:`changed_code_paths` already drops everything under
+        :attr:`_excluded_dirs`, so no ``.worc/`` path is ever a candidate. (Not because ``.worc/``
+        is gitignored — an installed repo re-includes part of it on purpose, ``.worc/*`` plus
+        ``!.worc/flows/`` / ``!.worc/config.yaml``, to keep flows and config reviewable in history,
+        and those files are tracked.) The task lifecycle dir
         (``paths.tasks_dir``) rides the separate audit commit; when it is *tracked* it is guarded
         with ``:(exclude)`` so it never slips into the *code* commit. When it is *gitignored* (what
         ``worc install`` seeds by default), that guard is redundant — git already skips it — **and**
@@ -2203,6 +2244,24 @@ class GitManager:
         if self._tasks_dir_ignored():
             return stageable
         return [*stageable, f":(exclude){self._tasks_dir}/"]
+
+    def _runtime_add_excludes(self) -> tuple[str, ...]:
+        """The runtime-root exclusions that are safe to hand ``git add``, or ``()``.
+
+        Only the roots that are **not** ignored as a whole. ``git add`` refuses (exit 1, "The
+        following paths are ignored … use -f") whenever a pathspec names a root that exists on disk
+        and is entirely ignored — it stages the right set and *then* reports failure, which
+        :meth:`_git_checked` turns into a raise. That is the same trap :meth:`staged_pathspec`
+        documents for the task lifecycle dir, and it has the same escape: a fully-ignored root needs
+        no guard, because nothing under it can be tracked. A root ignored by its *contents* instead
+        (``.worc/*`` plus ``!.worc/flows/`` / ``!.worc/config.yaml``, which is what keeps flows and
+        config reviewable in history) does hold tracked files, and there git accepts the exclusion.
+        Probed per root, not once for the pair, because an installed repo reaches the two states
+        independently. Uncached: the one caller runs at most once per base merge.
+        """
+        return _runtime_exclude_pathspecs(
+            [d for d in RUNTIME_EXCLUDED_DIRS if not self._git("check-ignore", "-q", f"{d}/").ok]
+        )
 
     def _tasks_dir_ignored(self) -> bool:
         """Whether the task lifecycle dir is gitignored (cached ``git check-ignore``).
@@ -2450,10 +2509,19 @@ class GitManager:
         """Finalize the in-progress base-merge as one commit (after its conflicts are resolved).
 
         Distinct from :meth:`commit_code`: a merge also brings in base's incoming changes (not just
-        the agent's edits), so it stages the whole tree (``git add -A``; ``.worc/`` stays ignored)
-        and commits with ``MERGE_HEAD`` as the second parent. Idempotent via the ``merge_commit``
-        publish op; returns the merge commit SHA, or current HEAD when there is nothing to finalize
-        (no merge in flight — e.g. an already-current branch).
+        the agent's edits), so it stages the whole tree (``git add -A``) and commits with
+        ``MERGE_HEAD`` as the second parent. Sweeping the tree is the one publishing path that can
+        reach a **tracked** file under the runtime home — an installed repo re-includes part of
+        ``.worc/`` on purpose (``.worc/*`` plus ``!.worc/flows/`` / ``!.worc/config.yaml``, so flows
+        and config changes are reviewable in history) — so the runtime roots are excluded here the
+        way :meth:`staged_pathspec` never has to exclude them. Nothing was leaking without it:
+        :meth:`assert_exchange_never_staged` is the real boundary and refuses the commit outright.
+        But it refuses on an ordinary operator action — editing ``.worc/config.yaml`` or a flow
+        prompt while a task runs — and reports it as a runtime-artifact violation with no remedy but
+        reverting that edit. Excluding the roots here makes the routine case a non-event and leaves
+        the guard for what it is actually for (a force-added path). Idempotent via the
+        ``merge_commit`` publish op; returns the merge commit SHA, or current HEAD when there is
+        nothing to finalize (no merge in flight — e.g. an already-current branch).
         """
         existing = self._store.get_publish_op(task_id, KIND_MERGE_COMMIT, None)
         if existing is not None and existing.status == _STATUS_COMPLETED:
@@ -2470,7 +2538,8 @@ class GitManager:
             )
         )
         self._assert_no_untrusted_filters()  # `git add -A` runs clean filters
-        self._git_checked("add", "-A")
+        excludes = self._runtime_add_excludes()
+        self._git_checked("add", "-A", *(("--", ":/", *excludes) if excludes else ()))
         # Belt-and-braces: never commit a half-resolved merge. ``git diff --cached --check`` reports
         # "leftover conflict marker" lines; refuse if any remain (catches the case where no checks
         # are configured, so the flow's testing node could not catch the markers itself).
@@ -2993,13 +3062,28 @@ class GitManager:
         return bind(_LOG, task_id=task_id, component="gh")
 
     def merge_pr(
-        self, task_id: str, pr_url: str, *, strategy: MergeStrategy, wait_for_checks: bool
+        self,
+        task_id: str,
+        pr_url: str,
+        *,
+        strategy: MergeStrategy,
+        wait_for_checks: bool,
+        subject: str | None = None,
+        body: str | None = None,
     ) -> str | None:
         """Merge an open PR via ``gh pr merge``. Idempotent via the publish op.
 
         Returns a merge-outcome marker: the merge commit SHA (immediate mode), ``"merged"`` when the
         SHA is unreadable, or ``"armed"`` when GitHub-native auto-merge was armed (``--auto``);
         ``None`` when there is no PR. Reached only when ``git.auto_merge`` resolves true.
+
+        ``subject``/``body`` write the merge commit's message. Omitting them hands it to the
+        **target repository's** merge settings, which is not a neutral default: on a repo set to
+        ``COMMIT_OR_PR_TITLE`` + ``COMMIT_MESSAGES`` a squash then takes its subject from the pull
+        request title (no Conventional Commits type, because the title is the task's own) and its
+        body from every commit on the branch — this orchestrator's private audit-trail commit
+        included. Both were observed landing on a real ``main``. Passed only for the two strategies
+        that produce a commit: a ``rebase`` has none, and ``gh`` takes no message for it.
 
         DANGER: this bypasses the human review gate. It never weakens safety — **no** ``--admin``
         (branch protection is respected), no force-push, exactly one attempt (no retry). A blocked
@@ -3019,6 +3103,8 @@ class GitManager:
         # Fixed argv (no shell, no interpolation); strategy comes from the validated MergeStrategy
         # enum. ``--admin`` is never emitted, so a protected branch's checks remain the real gate.
         args = ["pr", "merge", pr_url, f"--{strategy.value}"]
+        if subject is not None and strategy is not MergeStrategy.REBASE:
+            args += ["--subject", subject, "--body", body or ""]
         if wait_for_checks:
             args.append("--auto")
         result = self._gh(args)
@@ -3120,6 +3206,22 @@ class GitManager:
         Git's heuristic misclassifies as binary (e.g. a NUL-delimited fixture) — without it such a
         file rendered as an opaque "Binary files differ", hiding the actual change.
 
+        The runtime home is excluded. That is **not** the same set the code commit covers, which
+        this docstring used to claim: ``changed_code_paths`` also drops the task lifecycle dir
+        (``_excluded_dirs``), and this diff keeps it — so a task-file move an operator ``finalize``
+        left uncommitted rides into the review diff of the next task, which is the ``.worc/``
+        mechanism on a path the agent may write. Not excluded here on purpose: nothing else reports
+        an agent editing its own task file, and hiding it from review would remove the only surface
+        that would show it. It
+        is not empty of tracked files: an installed repo ignores the home's *contents* (``.worc/*``)
+        so it can re-include ``!.worc/flows/``, ``!.worc/tools/`` and ``!.worc/config.yaml``, which
+        makes every flow YAML, every role prompt and the config **tracked** — reviewable in history,
+        which is the point. But then an operator editing one of them between runs lands it in the
+        review diff of every task that follows, and no agent may read or write that path: a finding
+        against it cannot be fixed, so it costs a rework round with nowhere to go. The pathspec is
+        anchored at the repo root (``:/`` + ``exclude,top``) rather than left relative to the
+        process cwd, so the exclusion cannot silently stop applying.
+
         The diff is redacted before writing: the failure report reads it back, so this is
         the single place that keeps a leaked secret out of both ``current.diff`` and the report.
         """
@@ -3128,7 +3230,14 @@ class GitManager:
         if untracked_paths:
             self._git("add", "--intent-to-add", "--", *untracked_paths)
         try:
-            diff = self._git("diff", "--text", self._diff_base()).stdout
+            diff = self._git(
+                "diff",
+                "--text",
+                self._diff_base(),
+                "--",
+                ":/",
+                *_runtime_exclude_pathspecs(RUNTIME_EXCLUDED_DIRS),
+            ).stdout
         finally:
             if untracked_paths:
                 self._git("reset", "--", *untracked_paths)

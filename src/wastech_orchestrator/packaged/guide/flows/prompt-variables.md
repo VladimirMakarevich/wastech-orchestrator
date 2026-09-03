@@ -16,15 +16,17 @@ Each variable names **which runner populates it** and **when it may be empty**. 
 | `{task_path}` | agent, evaluator | no on-disk task file exists (rare) |
 | `{plan_path}` | agent, evaluator | planning has not run yet, or the node that fills the `plan` output slot is disabled |
 | `{diff_path}` | agent, evaluator | no workspace-write edit has happened yet |
-| `{checks_path}` | agent, evaluator | the `checks` node has not run yet |
+| `{checks_path}` | agent, evaluator | the `checks` node has not run yet (it publishes on both outcomes — see `reference.md`) |
 | `{review_path}` | agent, evaluator | the `evaluator` (review) node has not run yet |
 | `{memory_path}` | agent, evaluator | memory is disabled, or nothing relevant was retrieved |
-| `{subtask_order}` | agent | the task is **not** decomposed (whole-task run) |
-| `{subtask_count}` | agent | the task is **not** decomposed |
-| `{subtask_spec_path}` | agent | the task is **not** decomposed |
-| `{predecessor_context}` | agent | not a decompose subtask, the subtask has no `depends_on` predecessor, or the node does not reference it |
+| `{subtask_order}` | agent, evaluator | the task is **not** decomposed (whole-task run) |
+| `{subtask_count}` | agent, evaluator | the task is **not** decomposed |
+| `{subtask_spec_path}` | agent, evaluator | the task is **not** decomposed |
+| `{predecessor_context}` | agent | not a decompose subtask, the subtask is the first one to run (nothing committed before it), or the node does not reference it |
 
-`{predecessor_context}` is the path to the intra-task **subtask handoff brief** — a deterministic factual floor (each predecessor subtask's changed files, commit, acceptance criteria, spec pointer) plus, when the supervisor is available, a three-section interpretive brief (new surface area / locked decisions / open edges). It is available to any agent node running inside a decompose region for a subtask that has `depends_on` predecessors — and, like `{memory_path}`, only when that node's own role prompt references it (the packaged `implementation` flow reads it from its `implementation` node); wrap it in `{?predecessor_context}…{/predecessor_context}`.
+The three subtask variables reach an **evaluator** as well as an agent, and that matters for any evaluator a flow puts inside `decomposition.sub_flow`: it runs once per subtask, so without them it judges each subtask's diff against the root task file and the shared plan — the only two things it has — and can hold neither the subtask's own acceptance criteria nor its out-of-scope boundary. The packaged `review` node reads all three. `{predecessor_context}` is deliberately **not** among them: it is the author's handoff brief, assembled for the node that writes the subtask.
+
+`{predecessor_context}` is the path to the intra-task **subtask handoff brief** — a deterministic factual floor (each predecessor subtask's changed files, commit, acceptance criteria, spec pointer) plus, when the supervisor is available, a three-section interpretive brief (new surface area / locked decisions / open edges). The floor is built from what landed on the branch — **every** subtask committed before this one, oldest first, with the ones its `depends_on` names marked as declared — because subtasks run sequentially on one branch, so an earlier commit is a predecessor in fact whether or not it was declared. It is therefore available to any agent node running inside a decompose region for every subtask after the first — and, like `{memory_path}`, only when that node's own role prompt references it (the packaged `implementation` flow reads it from its `implementation` node); wrap it in `{?predecessor_context}…{/predecessor_context}`.
 
 ("agent / evaluator / supervisor" is the node kind whose prompt receives the value. The supervisor is the constant oversight layer above the flow, not a node.)
 
