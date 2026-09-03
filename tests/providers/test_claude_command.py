@@ -16,6 +16,7 @@ from wastech_orchestrator.providers.claude import (
     build_claude_argv,
     build_context_footer,
     build_effective_prompt,
+    build_sandbox_off_settings,
     build_sandbox_settings,
     map_permission,
     resolve_claude_tools,
@@ -687,17 +688,20 @@ def test_build_sandbox_settings_shape_is_hardened() -> None:
     assert settings["network"]["allowedDomains"] == []
 
 
-def test_the_advanced_mode_grants_write_outside_the_clone_and_keeps_every_carve_out() -> None:
-    """``allowWrite`` on the volume root, with the floor listed one entry at a time.
+def test_the_sandbox_file_lists_the_whole_floor_one_entry_at_a_time() -> None:
+    """Every carve-out by NAME, and no enclosing allow for any of them to be nested inside.
 
-    The carve-outs are asserted by NAME rather than by "the write guard is in there", because the
+    The carve-outs are asserted by name rather than by "the write guard is in there", because the
     short form of the floor ("`.git` and `.worc`") does not show all of them: the frozen ``runs``
     tree and the resolved env-file are exactly what an implementer reading that short form drops.
-    The provider config homes are deliberately NOT carve-outs — nothing in the mode covers them.
+    The provider config homes are deliberately NOT carve-outs — nothing covers them.
 
-    What this does NOT prove, and cannot: that the CLI ranks a ``denyWrite`` inside an
-    ``allowWrite`` the way this file assumes. That needs a live probe on a real host, and the loud
-    preflight line on floor 1 says it is not proven.
+    The ``filesystem`` key set is pinned exactly, and that is now the load-bearing half. This file
+    used to carry a volume-wide ``allowWrite`` in the advanced mode, which put every deny below
+    INSIDE an allow and left their standing dependent on how the vendor ranks the two — an open
+    question no probe here could close. The mode no longer raises a sandbox at all, so the grant is
+    gone and this function is reached only under ``strict_isolation: true``: an ``allowWrite``
+    reappearing is the one mistake that would remove the floor everywhere at once.
     """
     deny = InternalDenyPolicy(
         control_home=Path("/repo/.worc"),
@@ -705,13 +709,8 @@ def test_the_advanced_mode_grants_write_outside_the_clone_and_keeps_every_carve_
         env_file=Path("/etc/worc/.env"),  # resolved outside the private home on purpose
         runs_home=Path("/repo/.worc/runs"),
     )
-    settings = build_sandbox_settings(
-        deny,
-        _write_guard(),
-        network_access=True,
-        allow_write_root=Path("/"),
-    )["sandbox"]
-    assert settings["filesystem"]["allowWrite"] == ["/"]
+    settings = build_sandbox_settings(deny, _write_guard(), network_access=True)["sandbox"]
+    assert set(settings["filesystem"]) == {"denyRead", "denyWrite"}
     deny_write = set(settings["filesystem"]["denyWrite"])
     assert {
         "/repo/.worc",  # the control plane
@@ -722,33 +721,31 @@ def test_the_advanced_mode_grants_write_outside_the_clone_and_keeps_every_carve_
         "/repo/.git/hooks",
         "/repo/tasks",  # the committed lifecycle tree
     } <= deny_write
-    # And the provider config homes are NOT in it — no deny covers them in the mode.
+    # And the provider config homes are NOT in it — no deny covers them.
     assert not any(p.endswith((".claude", ".codex")) for p in deny_write)
 
 
-def test_no_allow_write_key_appears_outside_the_advanced_mode() -> None:
-    # The shipped default's file, key for key. A grant leaking in unconditionally is the one mistake
-    # in this phase that would remove the floor everywhere at once, so this pins the exact key set
-    # rather than the absence of one name.
-    settings = build_sandbox_settings(_deny_policy(), _write_guard(), network_access=False)
-    assert set(settings["sandbox"]["filesystem"]) == {"denyRead", "denyWrite"}
+def test_the_modes_own_settings_file_is_the_sandbox_switched_off() -> None:
+    # What the mode sends instead. Pinned key for key, and deliberately minimal: with the sandbox
+    # off none of the policy keys mean anything, and writing them anyway would read as a policy
+    # that is in force. What matters is that a file IS produced — see the argv test for why not
+    # emitting one is different from asserting the value.
+    assert build_sandbox_off_settings() == {"sandbox": {"enabled": False}}
 
 
 def test_sandbox_settings_carry_no_deny_on_the_claude_config_home(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     # The settings-file surface: the OS sandbox policy carries no denyRead and no denyWrite on the
-    # Claude config home — including in the advanced mode, whose volume-wide allowWrite is not
-    # carved back out for it.
+    # Claude config home. Accepted cost of the mode, stated in `guide/config/security.md`.
     config_dir = tmp_path / "isolated-claude"
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
-    for kwargs in ({}, {"allow_write_root": Path("/")}):
-        settings = build_sandbox_settings(
-            _deny_policy(), _write_guard(), network_access=False, **kwargs
-        )["sandbox"]
-        home = str(config_dir.resolve())
-        assert home not in settings["filesystem"].get("denyRead", [])
-        assert home not in settings["filesystem"]["denyWrite"]
+    settings = build_sandbox_settings(_deny_policy(), _write_guard(), network_access=False)[
+        "sandbox"
+    ]
+    home = str(config_dir.resolve())
+    assert home not in settings["filesystem"].get("denyRead", [])
+    assert home not in settings["filesystem"]["denyWrite"]
 
 
 def test_build_sandbox_settings_network_grant_allows_domains() -> None:
@@ -1120,9 +1117,7 @@ def test_outside_the_mode_the_web_tools_still_follow_the_flow_grant(
     assert "WebFetch" in online[online.index("--tools") + 1].split(",")
 
 
-def test_advanced_mode_keeps_the_shell_on_a_host_that_cannot_sandbox_it(
-    claude_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
-) -> None:
+def test_advanced_mode_keeps_the_shell_on_a_host_that_cannot_sandbox_it() -> None:
     # Owner decision: a host with no OS sandbox is a loud line, not a refusal. Both classes are
     # injected rather than probed, so this holds on any CI host. What must NOT happen is a
     # CAPABILITY_UNAVAILABLE — that would stop a configuration which runs today.
@@ -1131,15 +1126,31 @@ def test_advanced_mode_keeps_the_shell_on_a_host_that_cannot_sandbox_it(
             "read-only", capability, False, strict_isolation=False, git_evidence=False
         )
         assert "Bash" in plan.tools, capability
-        # No sandbox file is written for such an attempt — there is nothing to write it against.
         assert plan.needs_sandbox is False, capability
-        argv = _argv(
-            claude_config,
-            make_request(permission_profile="read-only"),
-            capability=capability,
-            strict_isolation=False,
-        )
-        assert "--settings" not in argv, capability
+
+
+@pytest.mark.parametrize("capability", [SandboxCapability.MACOS, SandboxCapability.LINUX_AVAILABLE])
+@pytest.mark.parametrize("profile", ["read-only", "workspace-write"])
+def test_the_advanced_mode_raises_no_sandbox_on_a_host_that_could(
+    capability: SandboxCapability, profile: str
+) -> None:
+    """The regression this change exists for, at the one place that decided it.
+
+    ``needs_sandbox`` was computed from the resolved tool set and the host and never from the mode,
+    and macOS reports Seatbelt as unconditionally available — so on macOS and on a
+    dependency-complete Linux the mode promised "no restrictions" and shipped a sandbox anyway.
+    That cost a real finding: a command that dies only inside that sandbox reads, from inside it,
+    as a broken machine. Both arms are asserted together because the pair is the claim: the same
+    host that DOES raise one under strict isolation must not in the mode.
+    """
+    assert (
+        resolve_claude_tools(
+            profile, capability, False, strict_isolation=False, git_evidence=True
+        ).needs_sandbox
+        is False
+    )
+    strict = resolve_claude_tools(profile, capability, False, git_evidence=True)
+    assert strict.needs_sandbox is True
 
 
 def test_sandbox_file_states_the_headless_auto_approval_instead_of_inheriting_it(

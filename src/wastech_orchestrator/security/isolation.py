@@ -10,10 +10,11 @@ answer does:
 * :func:`check_isolation` — "is this provider's configuration legal?" The verdict is fatal: under
   ``security.strict_isolation`` the run stops before a branch is ever created (see
   :meth:`Orchestrator._drive_via_engine`) and ``worc preflight`` reports a failure.
-* :func:`describe_host_floor` — "can an OS-enforced write floor exist on this host at all?" The
+* :func:`describe_host_floor` — "does an OS-enforced write floor exist for this run at all?" The
   verdict is a loud line and nothing more. A host without a sandbox is still a host an operator has
-  to work on, so refusing the run there would leave them with neither the guarantee nor the work;
-  instead the loss is stated in full, in preflight and in the run log, and the run continues.
+  to work on, and the advanced mode is an operator who chose to do without one, so refusing either
+  would leave them with neither the guarantee nor the work; instead the loss is stated in full, in
+  preflight, in the run log and in the prompt every node receives, and the run continues.
 
 The provider-specific meaning of both stays in the adapters (``providers/*.py``) — Codex's sandbox,
 Claude's permission mode and Bash-sandbox host classes — so this module holds no CLI syntax; it only
@@ -39,6 +40,7 @@ declares the grant; flagging on the switch alone would fail preflight for runs t
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+from typing import Protocol
 
 from wastech_orchestrator.config.schema import OrchestratorConfig, ProviderConfig
 from wastech_orchestrator.providers.base import ProviderId
@@ -48,11 +50,27 @@ from wastech_orchestrator.providers.base import ProviderId
 # the composition root binds them and injects the table so this module imports no concrete adapter.
 IsolationCheck = Callable[[ProviderConfig], list[str]]
 
-# A provider's offline "what can this host not enforce?" answer: prose naming the missing floor (and
-# its remedy where one exists), or ``None`` when the floor can exist here. It takes no argument on
-# purpose — the answer describes the machine, not the configuration, so it cannot drift into a
-# per-config verdict and back into a refusal.
-HostFloorCheck = Callable[[], str | None]
+
+# A provider's offline "what can this run not enforce?" answer: prose naming the missing floor (and
+# its remedy where one exists), or ``None`` when the floor can exist here.
+#
+# ``strict_isolation`` is the ONE configuration value it takes, and the narrowness is the point.
+# The question used to be purely "what can this machine do", and the callable was zero-arg so it
+# could not drift into a per-config verdict; since the owner's 2026-09-03 decision that framing is
+# no longer answerable, because the advanced mode removes Claude's sandbox on every host — a
+# host-only answer would report a floor that this run does not have. What still keeps it from
+# drifting back into a refusal is the caller rather than the signature: :func:`describe_host_floor`
+# returns lines and never a verdict, and the fatal question stayed where it was
+# (:func:`check_isolation`, plus the adapters' per-attempt refusals). A ``Protocol`` rather than a
+# ``Callable`` alias so each adapter may keep its own injectable test seam (Claude's ``capability``,
+# Codex's ``system``) behind a default.
+class HostFloorCheck(Protocol):
+    """A provider-owned "is there an OS-enforced write floor for this run?" answer."""
+
+    def __call__(self, *, strict_isolation: bool) -> str | None:
+        """Return prose naming the missing floor, or ``None`` when one can exist here."""
+        ...
+
 
 # What is lost wherever no OS-enforced write floor exists, stated rather than softened. ``.worc`` is
 # the more expensive half of the two: with it writable a frozen control plane can be swapped without
@@ -131,13 +149,17 @@ def check_isolation(
 def describe_host_floor(
     config: OrchestratorConfig, checks: Mapping[ProviderId, HostFloorCheck]
 ) -> tuple[str, ...]:
-    """One line per provider whose host cannot enforce the write floor; ``()`` when every host can.
+    """One line per provider with no OS-enforced write floor for this run; ``()`` when all have one.
 
-    Each line names the gap and then what it costs. The cost half depends on
-    ``security.strict_isolation`` because the truth does: with it off the shell runs unsandboxed
-    and anything it starts reaches the denied paths, with it on the attempt loses its shell instead.
-    Both halves live in one formatter, so preflight and the run log can never describe the same
-    host differently; the caller supplies its own framing (a verdict line, a log record).
+    Each line names the gap and then what it costs, and ``security.strict_isolation`` decides both
+    halves because the truth does. The gap half is the provider's answer to it: under
+    ``strict_isolation: false`` Claude raises no sandbox on any host, while Codex still gets its
+    generated profile — so the mode produces a Claude line on a machine that reports nothing under
+    strict isolation, and never a Codex one. The cost half follows the same flag: with it off the
+    shell runs unsandboxed and anything it starts reaches the denied paths, with it on the attempt
+    loses its shell instead. Both live in one formatter, so preflight, the run log and the prompt
+    preamble can never describe the same run differently; the caller supplies its own framing (a
+    verdict line, a log record, a paragraph).
     """
     tail = (
         _FLOOR_LOSS_SHELL_WITHHELD
@@ -147,7 +169,9 @@ def describe_host_floor(
     lines: list[str] = []
     for provider_id in _providers_in_use(config):
         check = checks.get(provider_id)
-        gap = check() if check is not None else None
+        gap = (
+            check(strict_isolation=config.security.strict_isolation) if check is not None else None
+        )
         if gap is None:
             continue
         lines.append(f"{provider_id.value}: {gap}. {_FLOOR_LOSS}{tail}")

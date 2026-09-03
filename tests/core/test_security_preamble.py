@@ -142,19 +142,28 @@ def test_the_private_home_read_ban_is_not_weakened_by_the_exchange_grant() -> No
     assert f"do not read or write `{CONTROL_HOME_DIRNAME}/`, `.git/` or `tasks/`" in mode
 
 
-def test_the_no_sandbox_paragraph_is_withheld_where_a_sandbox_exists() -> None:
+def test_the_no_sandbox_paragraph_is_withheld_where_a_sandbox_is_in_force() -> None:
     """Say "nothing enforces this" only where nothing does.
 
     Rendered on every run it would be false on most of them, and a block that overstates once is
-    discounted from then on — which costs exactly the hosts where it is the only thing left.
+    discounted from then on — which costs exactly the runs where it is the only thing left.
+
+    The paragraph now speaks about the RUN rather than the host, and the wording carries that: a
+    macOS host in the advanced mode has a sandbox available and does not raise one, so "no
+    operating-system sandbox available" would have been false in exactly the configuration the
+    paragraph became necessary for. What decides it is still `no_write_floor` alone, which the
+    orchestrator derives from `describe_host_floor`.
     """
     with_floor = build_orchestrator_security_preamble(read_isolation_off=True, advanced_mode=True)
     without = build_orchestrator_security_preamble(
         read_isolation_off=True, advanced_mode=True, no_write_floor=True
     )
-    assert "no operating-system sandbox available" not in with_floor
+    assert "sandbox is in force" not in with_floor
     assert without.startswith(with_floor)
-    assert "no operating-system sandbox available" in without[len(with_floor) :]
+    tail = without[len(with_floor) :]
+    assert "No operating-system sandbox is in force for this run" in tail
+    # And it does not claim the machine lacks one — that was true of the two host classes only.
+    assert "available" not in tail
 
 
 def test_preamble_has_no_secret_or_unrendered_variable() -> None:

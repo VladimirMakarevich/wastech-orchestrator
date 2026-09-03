@@ -566,7 +566,7 @@ def isolation_reasons(config: ProviderConfig) -> list[str]:
     return reasons
 
 
-def host_floor_gap(*, system: str | None = None) -> str | None:
+def host_floor_gap(*, strict_isolation: bool, system: str | None = None) -> str | None:
     """What this host cannot be shown to enforce for Codex, or ``None`` when it can be.
 
     The counterpart of :func:`claude.host_floor_gap`, and deliberately shaped differently, because
@@ -577,8 +577,18 @@ def host_floor_gap(*, system: str | None = None) -> str | None:
     alternative was silence, and a Codex-only park on such a host learned nothing from
     ``worc preflight`` and then met the answer inside its first attempt.
 
+    ``strict_isolation`` is accepted and deliberately NOT read, and that is the asymmetry the
+    advanced mode has to state rather than imply. Claude's answer changes with this flag: the mode
+    raises no OS sandbox there, on any host. Codex's does not — every attempt gets a generated
+    permission profile (``read-only`` / ``workspace-write``) with no opt-out, and the one selector
+    that would remove it, ``danger-full-access``, is absolutely forbidden on all three enforcement
+    layers at every value of every key. So "no restrictions in the advanced mode" is true of Claude
+    and false of Codex, and this parameter is in the signature so a future reader cannot mistake
+    silence here for the question not having been asked.
+
     ``system`` is injectable for the deterministic suite; it defaults to the real host.
     """
+    del strict_isolation  # see above: Codex's floor does not move with the mode
     if (system if system is not None else platform.system()) != "Windows":
         return None
     return (
