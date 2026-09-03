@@ -1,10 +1,10 @@
-# Node-declared skills (`skills:`) — run the operator's own harness skills from a flow
+# Node-declared skills (`skills:` / `allow_skills:`) — run the operator's own harness skills from a flow, or refuse them
 
 Status: **proposed** Date: 2026-09-04 Owner: Vladimir Makarevich
 
 An operator who arrives with a working Claude Code harness already owns the knowledge this orchestrator asks them to re-author. They have a planning skill, an implementation skill, a testing skill — each proven against their own repository and maintained by their own team. Today the only way to get that knowledge into a flow is to copy its text into a role prompt, where the copy starts drifting from the original the moment it is made. This item lets a node point at the skill instead: the graph, the gates, the isolation and the publication stay the orchestrator's, and what a node _does_ inside its turn becomes the operator's own, already-tested instruction set.
 
-The feature is **advanced mode only** (`security.strict_isolation: false`) — not as policy, but because under strict isolation the `Skill` tool does not exist for the session at all.
+It has two directions, and they are not symmetric. **Requiring** a skill (`skills:`) is a widening and is **advanced mode only** (`security.strict_isolation: false`) — not as policy, but because under strict isolation the `Skill` tool does not exist for the session at all. **Refusing** every skill (`allow_skills: false`) is a narrowing, is legal at every value of that switch, and is backed by a real per-attempt CLI off-switch on both providers rather than by prompt text.
 
 ## Problem
 
@@ -18,13 +18,15 @@ A deterministic flow is the reason to adopt this orchestrator, and a role prompt
 - **`Skill` is the real tool name**, read out of the pinned binary (`2.1.234`, [`providers/claude.py:220`](../../src/wastech_orchestrator/providers/claude.py)) rather than from memory; `SlashCommand` is not in that registry. The CLI's own help confirms the surface: `--disable-slash-commands` is documented as "Disable all skills", and skills "resolve via `/skill-name`". That flag is already reserved against `extra_args`, so a flow cannot switch skills off either.
 - **`Skill` is not auto-approved.** It is absent from `--allowedTools` ([`providers/claude.py:1011`](../../src/wastech_orchestrator/providers/claude.py)), and how `acceptEdits` treats an existing-but-not-auto-approved tool in a headless run is not derivable from this code. The same uncertainty is already recorded in the advanced-mode restriction audit (`full-tool-access/audit-agent-restrictions-advanced-mode.md`, item 9). It is settled by a probe, not by reading.
 - **Codex has skills but no selector.** `codex-cli 0.152.1` reports `skill_search` as stable/enabled and carries `skip_host_skill_discovery`; `codex exec --help` offers no flag that names a skill. In advanced mode nothing is disabled and the project is trusted, so host discovery applies — but there is no argv through which we can require one.
+- **Both CLIs can be told to run no skills at all, per attempt.** Claude has `--disable-slash-commands`, documented by the CLI itself as "Disable all skills"; it is already in the adapter's reserved-flag set ([`providers/claude.py:640`](../../src/wastech_orchestrator/providers/claude.py)), so it is the adapter's to emit and an operator cannot reach it through `extra_args`. Codex has `--disable skill_search`; the name validates against the live binary (`codex sandbox --disable skill_search` runs, `--disable bogus_feature_xyz` fails with "Unknown feature flag"), and `--disable` is likewise reserved to the adapter.
+- **A flow may always narrow.** The config-aware validation layer already states the rule it enforces — "Security can only ever _narrow_ here" ([`core/flow/validator.py`](../../src/wastech_orchestrator/core/flow/validator.py)) — which is why an off-switch needs no mode gate while a requirement does.
 - **A skills layer existed here and was removed.** Its model was the opposite of this one: an inventory discovered by `git ls-files`, frozen into a package, handed to the agent as `- skill (read-only reference; advisory, do not execute)`, with the `Skill` tool deliberately unused for provider parity. It was deleted as unused product surface (see the "Agent instruction stubs in target repo" row in [README.md](README.md)). Nothing of it is revived here.
 
 ## Requirements
 
 | # | Requirement |
 | --- | --- |
-| **R1** | An `agent` node MAY declare `skills: [<name>, …]`. Evaluator nodes are out of scope for v1 (open question 5). |
+| **R1** | An `agent` node MAY declare `skills: [<name>, …]`. Evaluator nodes are out of scope for v1 (open question 8). |
 | **R2** | The declaration is legal **only** under `security.strict_isolation: false`. A flow declaring it against a strict config fails validation with a named violation — it is not accepted-and-inert the way `git_evidence` is, because an inert `skills` silently deletes the step's point. |
 | **R3** | The names reach the agent as a **Core-built deterministic block** appended at the existing neutral prompt seam, never through the role-file renderer: the renderer stays path-only, which is a security invariant. |
 | **R4** | That block states precedence explicitly: the security preamble and the role prompt win over anything a skill says, and no skill grants publication. The publication mandate is unchanged and unweakened. |
@@ -33,6 +35,9 @@ A deterministic flow is the reason to adopt this orchestrator, and a role prompt
 | **R7** | The Claude adapter adds `Skill` to `--allowedTools` for an attempt that carries names, **only** in advanced mode. It changes nothing else: no `--tools`, no deny, no permission mode. Under strict isolation the adapter refuses the names outright (defence in depth over R2). |
 | **R8** | Codex receives the same prompt block and no argv change. The shipped documentation says plainly that guaranteed invocation is Claude-only today. |
 | **R9** | No inventory, freeze, packaging, redaction or cap layer. Skills are ordinary repository files read by the CLI itself; the documentation states that they are **not** frozen for the task and that a writing node can change one mid-run. |
+| **R10** | An `agent` node MAY declare `allow_skills: true` / `false`, default `true` — today's behavior, where the CLI discovers the target's skills natively and the model may invoke one on its own. Setting it `false` is legal at **every** value of `security.strict_isolation`. |
+| **R11** | `allow_skills: false` is carried by the provider's own off-switch — Claude `--disable-slash-commands`, Codex `--disable skill_search` — not by prompt text. A one-line prompt statement MAY accompany it, and the documentation must label that line as advisory: this repository does not call friction a floor. |
+| **R12** | `skills: [...]` and `allow_skills: false` on the same node is a validation error. The switch is all-or-nothing per node: neither CLI offers "these skills and no others", so no wording may imply one. |
 
 ## Proposed minimal design
 
@@ -42,6 +47,16 @@ A deterministic flow is the reason to adopt this orchestrator, and a role prompt
   role_file: my_flow/implement.md
   permission_profile: workspace-write
   skills: [acme-implement, acme-tdd] # advanced mode only
+```
+
+And the other direction, on a node whose turn must stay exactly what the flow says:
+
+```yaml
+- id: review_gate
+  kind: agent
+  role_file: my_flow/gate.md
+  permission_profile: read-only
+  allow_skills: false # → --disable-slash-commands (Claude) / --disable skill_search (Codex)
 ```
 
 Core appends one deterministic block to the effective prompt (the operator never writes it, so it cannot drift from the YAML):
@@ -62,9 +77,10 @@ Three properties make this the small version rather than a subsystem. The seam a
 2. **Validation (R2).** In `_check_config_consistency` ([`core/flow/validator.py:484`](../../src/wastech_orchestrator/core/flow/validator.py)): a node with a non-empty `skills` under `strict_isolation: true` is a violation naming the node and the key. This is the config-aware layer, which is where a mode-dependent rule belongs; the config-free ceiling check stays untouched.
 3. **Prompt seam (R3, R4).** Add `required_skills: list[str]` to `AgentRunRequest` and render the block in `build_effective_prompt` ([`providers/base.py:193`, `:295`](../../src/wastech_orchestrator/providers/base.py)), beside the existing context footer. The agent runner fills the field from the node. Provider-neutral by construction: no adapter learns the syntax.
 4. **Claude argv (R7).** In `build_claude_argv`, extend the `--allowedTools` value with `Skill` when the request carries names and `strict_isolation` is off; raise `CONFIGURATION_ERROR` when it carries names under strict isolation ([`providers/claude.py:1011`](../../src/wastech_orchestrator/providers/claude.py)). Nothing else in the tool plan moves.
-5. **Existence gate (R5).** Resolve `<repo>/.claude/skills/<name>/SKILL.md` for every declared name at flow resolution / preflight and refuse the task with a message naming the node, the skill and the expected path.
-6. **Record (R6).** Persist the resolved names on the node run so the prompt audit and the run summary both show them; the rendered prompt already carries the block for free.
-7. **Docs + tests.** On this branch: `guide/flows/reference.md` (the node-field table), `guide/flows/roles.md`, `guide/config/security.md` (the advanced-mode section, including R9's "not frozen"), the three `worc-flow*` skills that author and tune flows, and the root `README.md`. Tests: flow parse/reject, the strict-mode violation, the prompt block, the argv arm both ways, and the missing-skill refusal. Doc-impact note for the documentation branch: touches the flow node surface and the advanced-mode description, so `configuration.md` and `worc_architecture.md` likely need a pass.
+5. **Off-switch (R10–R12).** `allow_skills: bool = True` on `AgentNode`, carried to `AgentRunRequest` as one field. Claude appends `--disable-slash-commands`; Codex appends `--disable skill_search` to the argv it already builds for feature disables. Validation rejects the `skills:` + `allow_skills: false` pair. No mode gate: this direction only ever narrows.
+6. **Existence gate (R5).** Resolve `<repo>/.claude/skills/<name>/SKILL.md` for every declared name at flow resolution / preflight and refuse the task with a message naming the node, the skill and the expected path.
+7. **Record (R6).** Persist the resolved names on the node run so the prompt audit and the run summary both show them; the rendered prompt already carries the block for free.
+8. **Docs + tests.** On this branch: `guide/flows/reference.md` (a node-field row per key), `guide/flows/roles.md`, `guide/config/security.md` (the advanced-mode section, including R9's "not frozen"), the three `worc-flow*` skills that author and tune flows, and the root `README.md`. Tests: flow parse/reject, the strict-mode violation, the `skills` + `allow_skills: false` conflict, the prompt block, both adapters' argv arms in both directions, and the missing-skill refusal. Doc-impact note for the documentation branch: touches the flow node surface and the advanced-mode description, so `configuration.md` and `worc_architecture.md` likely need a pass.
 
 ## Open questions
 
@@ -72,11 +88,14 @@ Three properties make this the small version rather than a subsystem. The seam a
 2. **User-level skills.** An operator's "already-configured harness" often lives in `~/.claude/skills` or in a plugin, and the adapter loads `project` only. Widening to `user,project` also imports their user-global hooks, MCP servers and plugins — a much larger surface for a small gain. v1 says: the skill must live in the target repository.
 3. **What a skill may not do.** A skill is arbitrary text from the target repo that can contradict the role prompt, the output contract, or the security preamble. R4 states precedence in the prompt; whether anything should _enforce_ it (and what could) is open.
 4. **Codex parity.** Prompt-only until a probe shows whether `codex exec` honours a `/name` token the way Claude does. If it does not, the shipped wording must say so rather than implying symmetry.
-5. **Evaluator nodes.** "Review with our own review skill" is an obvious next ask, and an evaluator is forced `read-only` with a typed findings contract that a skill could disturb. Deliberately deferred, not refused.
+5. **What `allow_skills` should default to.** `true` keeps today's advanced-mode behavior and matches a mode whose premise is the operator's freedom; `false` would match the product's determinism promise, since a skill the flow never asked for can fire on its own description. Recommended `true`, because silently narrowing a shipped mode contradicts what its own carriers say — but it is a real choice, not an obvious one.
+6. **What the off-switch does not stop.** It stops skill _invocation_. A node with a shell can still `cat` a `SKILL.md` and follow it as ordinary text, and no flag reaches that. The shipped wording must say so rather than implying the node cannot see the file.
+7. **Codex under strict isolation.** Whether `--ignore-user-config` plus the untrusted project layer already stops host skill discovery is not established here; `skip_host_skill_discovery` exists as its own feature flag, which suggests it does not. Worth a no-model probe, and a reason to emit the explicit disable regardless of the mode.
+8. **Evaluator nodes.** "Review with our own review skill" is an obvious next ask, and an evaluator is forced `read-only` with a typed findings contract that a skill could disturb. Deliberately deferred, not refused.
 
 ## Scope / risk
 
-One optional field, one validation rule, one prompt block, one argv token. No new subsystem, no state, no migration (greenfield). The risk is not correctness but **honesty about the boundary**: the feature hands a node instructions the orchestrator neither froze nor reviewed, on a provider surface that advanced mode had already opened. Nothing new is weakened — but the documentation has to say that plainly, in the same change, or the mode's carriers will read the feature as a promise of control it does not make.
+Two optional node fields, two validation rules, one prompt block, and three argv tokens (one to allow, two to refuse). No new subsystem, no state, no migration (greenfield). The risk is not correctness but **honesty about the boundary**: the feature hands a node instructions the orchestrator neither froze nor reviewed, on a provider surface that advanced mode had already opened. Nothing new is weakened — but the documentation has to say that plainly, in the same change, or the mode's carriers will read the feature as a promise of control it does not make.
 
 ## Depends on
 
