@@ -31,6 +31,7 @@ The reference is split by concern, so a page you open to answer one question is 
 | --- | --- | --- | --- | --- |
 | `orchestrator.auto_mode.enabled` | bool | `false` | — | `true` lets `watch` pick the next pending task automatically after one finishes (task chaining). Leave off for one-task-at-a-time. |
 | `orchestrator.auto_mode.confirm_next_task` | bool | `false` | **Requires `telegram.enabled: true`.** | `true` asks approve/deny in Telegram before claiming _each_ next task; deny/timeout/no-transport stops chaining (fail-closed). Gates new claims only — never a resume. |
+| `orchestrator.auto_mode.confirm_timeout_s` | int | `900` (15m) | `> 0` | How long that gate waits for the answer — its own key, not `telegram.ask_timeout_s` (which is the mid-run HITL ceiling). A refusal — deny, silence, or no transport — is remembered for an hour instead of being re-asked every tick; `stop` abandons a wait in flight. |
 | `orchestrator.poll_interval_seconds` | int | `300` | `>= 0` | Seconds between `watch` ticks (each tick fetch/pulls `base_branch`, then processes pending). `0` = single pass, no loop, no periodic sync. |
 | `orchestrator.queue` | string | `"default"` | Non-empty / non-whitespace. | This instance's selector: `watch` only claims a pending task whose `queue` equals this (string equality). Set it when several worc instances share one task pool. Override per launch with `--queue`. |
 
@@ -58,7 +59,7 @@ The reference is split by concern, so a page you open to answer one question is 
 | `git.create_pull_request` | bool | `true` | `false` = commit + push the task branch only, open no PR. |
 | `git.pr_base` | string | `"main"` | The branch the published PR targets (usually `base_branch`). |
 | `git.auto_merge` | bool | `false` | **DANGER — bypasses the human review gate.** `true` merges every published PR to `pr_base`. A per-task `auto_merge` wins outright over this. Enable only with protected branches + required CI already enforcing your bar. |
-| `git.auto_merge_strategy` | `merge` \| `squash` \| `rebase` | `squash` | The `gh pr merge` strategy when a merge fires. |
+| `git.auto_merge_strategy` | `merge` \| `squash` \| `rebase` | `squash` | The `gh pr merge` strategy when a merge fires. For `merge`/`squash` the orchestrator writes the commit message itself — subject `feat(<task-id>): <title> (#N)`, empty body — rather than letting your repository's squash settings take the PR title and concatenate the branch's commits (which would drop the Conventional Commits type and carry the private audit-trail commit into your base branch). `worc merge-task --dry-run` prints it. |
 | `git.auto_merge_wait_for_checks` | bool | `false` | `true` arms GitHub-native auto-merge (`--auto`) — merge only after required checks pass. |
 | `git.merge_flow` | string | `"merge"` | The flow `worc merge-task` runs to resolve base-merge conflicts (seeded at `.worc/flows/merge.yaml`). Clean merges are mechanical; only a conflicting base-merge runs it. |
 | `git.footprint.audit_commit_message` | string | `"chore(worc): audit trail for {task_id}"` | Template for the separate audit commit (the task file + its `<id>.summary.md`, not a second code commit). |

@@ -20,6 +20,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from importlib import resources
 from importlib.resources.abc import Traversable
@@ -107,7 +108,11 @@ from wastech_orchestrator.security.isolation import (
 from wastech_orchestrator.security.launchers import Which, resolve_launcher
 from wastech_orchestrator.state_store import IncompatibleStateError, StateStore, TaskRow
 from wastech_orchestrator.task.model import DEFAULT_QUEUE, priority_rank
-from wastech_orchestrator.task.parser import read_task_source, split_frontmatter
+from wastech_orchestrator.task.parser import (
+    read_subtask_refs,
+    read_task_source,
+    split_frontmatter,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -434,7 +439,11 @@ def build_parser() -> argparse.ArgumentParser:
         dest="tail_file",
         default=None,
         metavar="PATH",
-        help="the daemon log file to tail (the path passed to 'watch --log-file')",
+        # `--log-file` is a parent-parser flag, so it goes BEFORE the subcommand
+        # (`worc --log-file PATH watch`). Naming the wrong form here sent an operator to an argv
+        # argparse rejects — the same mistake `cli_shell.start_watch` records having made in the
+        # auto-spawn path, where it died on an argparse error to a DEVNULL'd stderr.
+        help="the daemon log file to tail (the path given as 'worc --log-file PATH watch')",
     )
     top_cmd.add_argument(
         "--recent",
@@ -1298,17 +1307,67 @@ def _daemon_alive(config: OrchestratorConfig) -> bool:
     )
 
 
-def _display_status(row: TaskRow, *, daemon_alive: bool) -> str:
+def _runner_alive(config: OrchestratorConfig) -> bool:
+    """Read-only: is a ``worc run`` executor working in this worc home (marker present + alive)?"""
+    return (
+        process_control.running_daemon_pid(process_control.runner_file_path(worc_home_for(config)))
+        is not None
+    )
+
+
+def _executor_alive(config: OrchestratorConfig) -> bool:
+    """Read-only: is ANY executor live for this worc home — the watch daemon **or** a ``worc run``?
+
+    The question every liveness probe actually means, and for a long time only half of it was
+    asked: ``run`` is a first-class entry point that recorded nothing about itself, so a task it was
+    executing read as ``parked (no daemon)`` for its whole duration — which is not merely a wrong
+    label but the exact prompt that sends an operator to ``rerun --continue``.
+    """
+    return _daemon_alive(config) or _runner_alive(config)
+
+
+def _executor_owner(config: OrchestratorConfig) -> str | None:
+    """Who owns this worc home right now and what to do about it, or ``None`` when it is free.
+
+    Every command that drives the pipeline or git in the shared clone needs the slot idle, and two
+    processes can hold it. The advice differs: the daemon is stoppable, while a ``run`` is not — it
+    installs no stop wiring, so the only honest instruction is to wait for it or interrupt it where
+    it runs.
+
+    Verb-free because the sentence is needed in two moods: a refusal (`<verb>: <owner>`) from a
+    command that would mutate the clone, and a note (`<verb>: note: <owner>`) beside a plan that
+    would not. A read-only plan is never refused for a busy clone — inspecting it is exactly what
+    an operator wants before deciding whether to stop the daemon at all — but it says who owns the
+    clone, so the plan is not read as executable right now.
+    """
+    root = worc_home_for(config)
+    daemon = process_control.running_daemon_pid(process_control.pid_file_path(root))
+    if daemon is not None:
+        return (
+            f"the watch daemon is running (pid {daemon}); stop it first with "
+            "'wastech-orchestrator stop'"
+        )
+    runner = process_control.running_daemon_pid(process_control.runner_file_path(root))
+    if runner is not None:
+        return (
+            f"a 'run' is executing a task in this clone (pid {runner}); wait for it to finish, "
+            "or interrupt it where it runs"
+        )
+    return None
+
+
+def _display_status(row: TaskRow, *, executor_alive: bool) -> str:
     """The human status label for a task row (the single source of truth for all read-only views).
 
-    A ``running`` row with no live daemon is parked at its checkpoint, awaiting resume — not
-    executing — so it reads as ``parked (no daemon)``. This dominates the B-lite ``(paused)``
-    marker, which only makes sense while the daemon is alive and waiting out a provider outage.
+    A ``running`` row with no live executor — neither the watch daemon nor a ``run`` — is parked at
+    its checkpoint, awaiting resume, not executing, so it reads as ``parked (no daemon)``. This
+    dominates the B-lite ``(paused)`` marker, which only makes sense while the daemon is alive and
+    waiting out a provider outage.
 
     A pause carrying a provider-reported wake instant names it, because otherwise a daemon correctly
     waiting out a limit is indistinguishable from a hung one.
     """
-    if row.status is Status.RUNNING and not daemon_alive:
+    if row.status is Status.RUNNING and not executor_alive:
         return "parked (no daemon)"
     if row.status is Status.RUNNING and row.blocked_since:
         if row.blocked_until:
@@ -1323,7 +1382,19 @@ def _parked_slot_note(config: OrchestratorConfig) -> str | None:
     Read-only, reopening ``state.db`` like :func:`has_active_task`. The task is parked at its
     checkpoint (the recovery invariant), not executing — so point the operator at the levers that
     actually clear or continue it, rather than leaving a silent, queue-blocking ``running`` row.
+
+    Unless it *is* executing: a ``worc run`` in another terminal holds the same slot, and there the
+    advice inverts — ``rerun --continue`` is precisely what must not be run — so the note says who
+    owns it and that ``stop`` does not reach that process.
     """
+    runner = process_control.running_daemon_pid(
+        process_control.runner_file_path(worc_home_for(config))
+    )
+    if runner is not None:
+        return (
+            f"stop: note: a 'run' is executing a task in this clone (pid {runner}); the stop "
+            "ladder does not reach it — wait for it to finish, or interrupt it where it runs"
+        )
     db_path = Path(worc_home_for(config)) / "state.db"
     if not db_path.is_file():
         return None
@@ -1506,34 +1577,6 @@ def _atomic_copy(src: Path, dest: Path) -> None:
         raise
 
 
-def _read_subtask_refs(task_file: Path) -> list[str]:
-    """Repo-relative ``subtasks:`` spec paths declared in a root task's front matter (else empty).
-
-    Best-effort: a read/parse problem or a non-list value yields no refs, so a single-file promote
-    simply moves the one file (the validation gate rejects a genuinely broken file if it later lands
-    in ``pending/``). Refs that escape the staging dir (absolute or containing ``..``) are dropped.
-    """
-    try:
-        source = read_task_source(task_file)
-        parse = split_frontmatter(source.raw_bytes.decode("utf-8"), source.suffix)
-    except (OSError, UnicodeDecodeError):
-        return []
-    if not parse.present or parse.malformed:
-        return []
-    raw = parse.frontmatter.get("subtasks", [])
-    if not isinstance(raw, (list, tuple)):
-        return []
-    refs: list[str] = []
-    for entry in raw:
-        if not isinstance(entry, str) or not entry.strip():
-            continue
-        ref = entry.strip()
-        if Path(ref).is_absolute() or ".." in Path(ref).parts:
-            continue
-        refs.append(ref)
-    return refs
-
-
 def _promote_one(src: Path, dest: Path, moved: list[str], errors: list[str]) -> None:
     """Atomically move one staged file into ``dest``; record the outcome in ``moved``/``errors``.
 
@@ -1585,10 +1628,36 @@ def promote_tasks(
     if match is None:
         errors.append(f"{target!r} is not a staged file in {preparing.name}/")
         return moved, errors
-    for ref in _read_subtask_refs(match):  # deco root: specs first, then the root
+    for ref in read_subtask_refs(match):  # deco root: specs first, then the root
         _promote_one(preparing / ref, pending / Path(ref), moved, errors)
     _promote_one(match, pending / match.name, moved, errors)
     return moved, errors
+
+
+@dataclass
+class WatchNotes:
+    """The bookkeeping one ``watch`` pass carries in and hands back out.
+
+    ``declined`` is the claim gate's per-task cool-off, owned by :func:`watch_loop` for the
+    daemon's lifetime so a refusal is not re-asked on every tick. ``withheld`` is what a pass
+    deliberately did not claim — a gate refusal, or a dependency that is not merged yet — which no
+    ``PipelineResult`` records, so without it the operator-facing summary cannot tell an empty queue
+    from one nobody was allowed to take from, and says the former.
+
+    One object rather than two keyword arguments because they are one thing: what the pass decided
+    about tasks it did not run, kept for the next tick and for the operator.
+    """
+
+    declined: dict[str, float] = field(default_factory=dict)
+    withheld: list[str] = field(default_factory=list)
+
+
+# How long a refused claim is left alone before the gate asks about that task again. A refusal
+# ("not now") must not become "never" — a daemon runs for days and the operator would have no way
+# back other than a restart — but re-asking on the next tick is worse: `break` ends only the
+# current cycle, so a poll interval of 60s means a Telegram prompt every 60s, forever, with no
+# backoff. An hour is long enough to be quiet and short enough that a change of mind is cheap.
+_DECLINE_COOLOFF_S = 3600.0
 
 
 def _confirm_next_task(
@@ -1599,10 +1668,16 @@ def _confirm_next_task(
 ) -> bool:
     """Ask the operator (Telegram) to approve claiming the next pending task.
 
-    Returns ``True`` only on an explicit approval; deny / timeout / no transport → ``False``
-    (fail-closed STOP — the task stays pending, the operator decides later). Non-durable by design:
-    a daemon restart mid-prompt simply re-asks next tick. Carries the task id + title only — never
-    diff or prompt content. Preflight guarantees ``telegram.enabled`` when this gate is on.
+    Returns ``True`` only on an explicit approval; deny / timeout / no transport / a stop arriving
+    mid-wait → ``False`` (fail-closed STOP — the task stays pending, the operator decides later).
+    Non-durable by design: a daemon restart mid-prompt simply re-asks next tick. Carries the task id
+    + title only — never diff or prompt content. Preflight guarantees ``telegram.enabled`` when this
+    gate is on.
+
+    The wait is bounded by ``auto_mode.confirm_timeout_s``, this gate's own key. Borrowing
+    ``telegram.ask_timeout_s`` (8h on the shipped-style value) conflated two different questions:
+    that one is the ceiling for a node asking a human to decide something mid-run, while this one
+    holds the processing slot idle and gets another chance on the next tick.
     """
     label = task_id or "(unknown id)"
     context = f"Task {label}" + (f" — {title}" if title else "")
@@ -1611,7 +1686,7 @@ def _confirm_next_task(
         context=context,
         task_id=task_id or "next-task",
         kind="approval",
-        timeout_s=config.telegram.ask_timeout_s,
+        timeout_s=config.orchestrator.auto_mode.confirm_timeout_s,
         interaction_id="next-task-" + uuid.uuid4().hex[:16],
     )
     approved = result.failure is None and result.answered and result.approved is True
@@ -1622,6 +1697,32 @@ def _confirm_next_task(
             result.failure or ("denied" if result.answered else "no answer"),
         )
     return approved
+
+
+def _claim_allowed(
+    orchestrator: Orchestrator,
+    config: OrchestratorConfig,
+    task_id: str | None,
+    title: str | None,
+    notes: WatchNotes | None,
+) -> bool:
+    """The claim gate with its memory: ask, unless this task was refused inside the cool-off.
+
+    ``notes.declined`` maps a task id to the monotonic instant its cool-off ends; the daemon owns
+    the notes for its lifetime and a single-pass caller may pass ``None`` (one tick has nothing to
+    remember). A refusal for an unidentified task is not remembered — there is no key to remember it
+    under, and such a file is rejected loudly by the gate it never reaches.
+    """
+    if notes is not None and task_id is not None:
+        until = notes.declined.get(task_id)
+        if until is not None and time.monotonic() < until:
+            _LOG.debug("next-task gate: %s was refused recently; not asking again yet", task_id)
+            return False
+    if _confirm_next_task(orchestrator, config, task_id, title):
+        return True
+    if notes is not None and task_id is not None:
+        notes.declined[task_id] = time.monotonic() + _DECLINE_COOLOFF_S
+    return False
 
 
 def _already_settled(orchestrator: Orchestrator, task_id: str, task_file: Path) -> bool:
@@ -1648,6 +1749,7 @@ def watch_once(
     folder: Path,
     *,
     queue: str | None = None,
+    notes: WatchNotes | None = None,
 ) -> list[PipelineResult]:
     """Resume any in-flight task, then process pending tasks per the auto-mode rule.
 
@@ -1665,6 +1767,10 @@ def watch_once(
     task can run instead — the slot never idles on CI; a dependency-broken task (cycle / unknown /
     self-ref) is terminally rejected. The skip does **not** consume the auto-mode-off "one task"
     budget, so the slot still runs one real eligible task per tick.
+
+    ``notes`` carries the claim gate's per-task refusals across ticks and collects what this pass
+    deliberately did not claim (see :class:`WatchNotes`); ``None`` means neither is kept, which is
+    all a single pass with no operator summary needs.
 
     A pending file whose id already reached a terminal status and is that task's own leftover is
     also skipped (:func:`_already_settled`): a ``manual_action_required`` task keeps its file in
@@ -1707,14 +1813,18 @@ def watch_once(
             verdict = orchestrator.dependency_eligibility(task_id, depends_on, pending=pending_map)
             if verdict.state is Eligibility.WAITING:
                 _LOG.info("task %s waiting: %s", task_id, verdict.detail)
+                if notes is not None:
+                    notes.withheld.append(task_id)
                 continue  # non-blocking skip — try the next eligible task
             if verdict.state is Eligibility.BROKEN:
                 results.append(orchestrator.reject_dependency(str(task_file), verdict.detail))
                 continue  # fail-closed terminal reject; the slot stays free
-        if config.orchestrator.auto_mode.confirm_next_task and not _confirm_next_task(
-            orchestrator, config, task_id, scan.title
+        if config.orchestrator.auto_mode.confirm_next_task and not _claim_allowed(
+            orchestrator, config, task_id, scan.title, notes
         ):
-            break  # operator denied / silent → leave pending, stop chaining this cycle
+            if notes is not None and task_id is not None:
+                notes.withheld.append(task_id)
+            break  # operator denied / silent / refused recently → leave pending, stop this cycle
         result = orchestrator.run_task(str(task_file))
         results.append(result)
         if result.final_status is Status.MANUAL_ACTION_REQUIRED:
@@ -1767,6 +1877,25 @@ def _build_cleanup_hook(config: OrchestratorConfig) -> Callable[[], None] | None
     return _run
 
 
+class StopChannels(NamedTuple):
+    """How a graceful stop reaches :func:`watch_loop` — one concept, two carriers.
+
+    ``event`` is set by the POSIX ``SIGTERM`` handler; ``file`` is the cross-platform sentinel
+    ``stop`` writes, and on Windows (where a signal cannot cross processes) it is the only one that
+    ever fires. They are checked together everywhere, and the interruptible poll sleep needs the
+    event's own ``wait`` — which is why this is a pair rather than one predicate.
+    """
+
+    event: threading.Event | None = None
+    file: Path | None = None
+
+
+#: No stop wiring at all — the default for a caller that runs the loop without a stop ladder
+#: (a single pass, or a test). A module-level singleton because it is immutable and a call in an
+#: argument default is its own hazard.
+NO_STOP_CHANNELS = StopChannels()
+
+
 # Granularity for noticing a stop request during the between-tick poll sleep. Bounds how long a
 # stop takes to be seen on Windows, where the SIGTERM event never fires cross-process and the
 # stop-file is the only channel (see watch_loop's poll-sleep loop). Kept small so shutdown lands
@@ -1783,9 +1912,9 @@ def watch_loop(
     queue: str | None = None,
     max_iterations: int | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
-    stop_event: threading.Event | None = None,
-    stop_file: Path | None = None,
+    stop: StopChannels = NO_STOP_CHANNELS,
     cleanup_hook: Callable[[], None] | None = None,
+    notes: WatchNotes | None = None,
 ) -> list[PipelineResult]:
     """Run ``watch_once`` on a loop, refreshing the repo each tick (periodic discovery).
 
@@ -1794,25 +1923,29 @@ def watch_loop(
     ``poll_interval <= 0`` runs exactly one tick (single pass, no sleep). ``max_iterations`` bounds
     the loop for tests; in production the loop runs until interrupted.
 
-    Two stop channels are checked around ticks and during idle sleep: a ``stop_event`` (set by a
-    POSIX ``SIGTERM`` handler) and the cross-platform ``stop_file`` sentinel. During an active tick,
-    ``cmd_watch`` injects the same predicate into the FlowEngine, which parks before the next node;
-    this loop then sees the still-present channel and exits. The ``sleep_fn`` path is kept for
+    Both :class:`StopChannels` are checked around ticks and during idle sleep. During an active
+    tick, ``cmd_watch`` injects the same predicate into the FlowEngine, which parks before the next
+    node; this loop then sees the still-present channel and exits. The ``sleep_fn`` path is kept for
     callers without an event (existing tests).
     """
 
     def _stop_requested() -> bool:
-        if stop_event is not None and stop_event.is_set():
+        if stop.event is not None and stop.event.is_set():
             return True
-        return stop_file is not None and process_control.stop_file_requested(stop_file)
+        return stop.file is not None and process_control.stop_file_requested(stop.file)
 
     results: list[PipelineResult] = []
     iteration = 0
+    # The gate's refusal memory lives exactly as long as this loop: a restart is the operator's own
+    # "ask me again". Deliberately not persisted — a decline is about this moment, and a durable one
+    # would need its own expiry story and an operator command to clear it. A caller that wants to
+    # report what was withheld passes its own notes in.
+    notes = notes if notes is not None else WatchNotes()
     while True:
         if _stop_requested():
             break
         orchestrator.refresh_repo()
-        results.extend(watch_once(orchestrator, config, folder, queue=queue))
+        results.extend(watch_once(orchestrator, config, folder, queue=queue, notes=notes))
         iteration += 1
         # Idle-gap memory cleanup: the single-slot invariant guarantees no active task here, but
         # double-check (a RUNNING soft-pause still holds the slot) so cleanup never races a task or
@@ -1823,9 +1956,9 @@ def watch_loop(
             break
         if max_iterations is not None and iteration >= max_iterations:
             break
-        if stop_event is not None:
+        if stop.event is not None:
             # Interruptible poll sleep: wait in _STOP_POLL_SECONDS chunks, re-checking both stop
-            # channels each chunk. On POSIX stop_event.wait wakes the instant SIGTERM fires; on
+            # channels each chunk. On POSIX the event's wait wakes the instant SIGTERM fires; on
             # Windows the event never fires cross-process, so the stop-file (checked by
             # _stop_requested) is the only channel — a monolithic wait(poll_interval) would delay
             # shutdown by up to poll_interval (300s), far past `stop --timeout` (30s), orphaning the
@@ -1833,7 +1966,7 @@ def watch_loop(
             remaining = float(poll_interval)
             while remaining > 0 and not _stop_requested():
                 chunk = min(_STOP_POLL_SECONDS, remaining)
-                if stop_event.wait(chunk):  # returns True the instant SIGTERM fires (POSIX)
+                if stop.event.wait(chunk):  # returns True the instant SIGTERM fires (POSIX)
                     break
                 remaining -= chunk
         else:
@@ -1859,6 +1992,12 @@ def cmd_run(args: argparse.Namespace) -> int:
     # A node may route to ANY allowed provider, so one that cannot start is refused up front
     # rather than discovered at the first fallback with a stage's work already spent.
     require_provider_auth(config)
+    # The single slot is per worc home, not per process: a second `run` (or one beside a daemon)
+    # would drive two engines over the same branch in the same clone.
+    owner = _executor_owner(config)
+    if owner is not None:
+        print(f"run: {owner}")
+        return 1
     orchestrator = build_orchestrator(
         config,
         layout=layout_for(config),
@@ -1875,7 +2014,16 @@ def cmd_run(args: argparse.Namespace) -> int:
         if verdict.state is not Eligibility.ELIGIBLE:
             print(f"error: refusing to run {task_id}: {verdict.detail}", file=sys.stderr)
             return 2
-    result = orchestrator.run_task(args.task_file)
+    # Record this executor for the duration, the way the daemon records itself: `status`/`list`/
+    # `top` need it to tell "executing now" from "parked at a checkpoint", and every command that
+    # needs the clone idle needs it to refuse. Reaped in `finally` — a marker left behind by a
+    # crash would refuse those commands forever.
+    runner_path = process_control.runner_file_path(worc_home_for(config))
+    process_control.write_pid_file(runner_path)
+    try:
+        result = orchestrator.run_task(args.task_file)
+    finally:
+        runner_path.unlink(missing_ok=True)
     if result.final_status is Status.RUNNING:
         # B-lite soft pause: every provider was transiently unavailable. The task is left resumable;
         # the next `run`/`watch`/restart continues it from the checkpoint (until max_blocked_s).
@@ -2018,13 +2166,13 @@ def cmd_rerun(args: argparse.Namespace) -> int:
         return 2
     root = worc_home_for(config)
 
-    # Rerun drives the pipeline in the shared clone; refuse while a live watch daemon owns it.
-    pid = process_control.running_daemon_pid(process_control.pid_file_path(root))
-    if pid is not None:
-        print(
-            f"rerun: the watch daemon is running (pid {pid}); stop it first with "
-            "'wastech-orchestrator stop'"
-        )
+    # Rerun drives the pipeline in the shared clone; refuse while any executor owns it. The
+    # ``--dry-run`` plan is read-only and passes, carrying the owner as a note below —
+    # ``plan_rerun`` treats a ``running`` row as recoverable *because* this guard refused a live
+    # executor, so a plan printed past it must say who is holding the clone.
+    owner = _executor_owner(config)
+    if owner is not None and not args.dry_run:
+        print(f"rerun: {owner}")
         return 1
 
     if not (Path(root) / "state.db").is_file():
@@ -2053,6 +2201,8 @@ def cmd_rerun(args: argparse.Namespace) -> int:
 
     if args.dry_run:
         _report_rerun_plan(plan)
+        if owner is not None:
+            print(f"rerun: note: {owner}")
         return 0
 
     require_launch_environment(config, env_file=resolve_env_file_path(args)[0])
@@ -2126,7 +2276,28 @@ _FINALIZE_STATUS: dict[str, Status] = {
 }
 
 
-def _report_finalize_plan(plan: FinalizePlan, *, as_: str) -> None:
+def _move_line(config: OrchestratorConfig, move: tuple[str, str]) -> str:
+    """``<from> -> <to>`` for a task-file move, repo-relative when the paths are in the repo."""
+
+    def show(path: str) -> str:
+        try:
+            return (
+                Path(path).resolve().relative_to(Path(config.repo.local_path).resolve()).as_posix()
+            )
+        except (OSError, ValueError):
+            return path
+
+    return f"{show(move[0])} -> {show(move[1])}"
+
+
+def _spec_suffix(moves: tuple[tuple[str, str], ...]) -> str:
+    """`` (+N subtask specs)`` when a decomposition root takes its specs along, else empty."""
+    if not moves:
+        return ""
+    return f" (+{len(moves)} subtask spec{'s' if len(moves) != 1 else ''})"
+
+
+def _report_finalize_plan(plan: FinalizePlan, config: OrchestratorConfig, *, as_: str) -> None:
     """Print the planned reconciliation for ``finalize --dry-run``; writes nothing."""
     print(f"finalize (dry-run): would finalize {plan.task_id} as {as_}")
     print(
@@ -2144,6 +2315,11 @@ def _report_finalize_plan(plan: FinalizePlan, *, as_: str) -> None:
     print(f"  branch:    {plan.branch or '(none)'}")
     abandoned = ", outcome=abandoned" if plan.declared is Status.MANUAL_ACTION_REQUIRED else ""
     print(f"  ledger:    append a manual record{abandoned}")
+    if plan.task_file_move is not None:
+        print(
+            f"  file:      {_move_line(config, plan.task_file_move)}"
+            f"{_spec_suffix(plan.subtask_spec_moves)} (not committed)"
+        )
     for warning in plan.warnings:
         print(f"  WARNING:   {warning}")
 
@@ -2156,14 +2332,12 @@ def cmd_finalize(args: argparse.Namespace) -> int:
         return 2
     root = worc_home_for(config)
 
-    # Finalize runs terminal cleanup (`git checkout base`) in the shared clone; refuse while a live
-    # watch daemon owns it. An orphaned-active task (dead PID) is exactly what finalize reconciles.
-    pid = process_control.running_daemon_pid(process_control.pid_file_path(root))
-    if pid is not None:
-        print(
-            f"finalize: the watch daemon is running (pid {pid}); stop it first with "
-            "'wastech-orchestrator stop'"
-        )
+    # Finalize runs terminal cleanup (`git checkout base`) in the shared clone; refuse while any
+    # executor owns it. An orphaned-active task (dead PID) is exactly what finalize reconciles.
+    # ``--dry-run`` is read-only (``plan_finalize`` mutates nothing) and passes with a note.
+    owner = _executor_owner(config)
+    if owner is not None and not args.dry_run:
+        print(f"finalize: {owner}")
         return 1
 
     if not (Path(root) / "state.db").is_file():
@@ -2186,7 +2360,9 @@ def cmd_finalize(args: argparse.Namespace) -> int:
         return 1
 
     if args.dry_run:
-        _report_finalize_plan(plan, as_=args.as_)
+        _report_finalize_plan(plan, config, as_=args.as_)
+        if owner is not None:
+            print(f"finalize: note: {owner}")
         return 0
 
     if not args.yes:
@@ -2207,6 +2383,14 @@ def cmd_finalize(args: argparse.Namespace) -> int:
     )
     suffix = f" → {result.pr_url}" if result.pr_url else ""
     print(f"{result.task_id}: {result.final_status.value}{suffix} (finalized)")
+    # `finalize` makes no commit, so the move it just made is sitting in the operator's working
+    # tree. Unannounced it was found later in `git status` — or not found, and carried into the next
+    # task's review diff, where a stray path costs a rework round that can do nothing about it.
+    if plan.task_file_move is not None and Path(plan.task_file_move[1]).exists():
+        print(
+            f"finalize: moved {_move_line(config, plan.task_file_move)}"
+            f"{_spec_suffix(plan.subtask_spec_moves)} (not committed)"
+        )
     return _EXIT_BY_STATUS.get(result.final_status, 1)
 
 
@@ -2268,12 +2452,12 @@ def cmd_prs(args: argparse.Namespace) -> int:
 
 def _cmd_prs_sync(args: argparse.Namespace, config: OrchestratorConfig, root: Path) -> int:
     """The ``prs --sync`` reconcile path: dry-run by default, writes only with ``-y/--yes``."""
-    # A write run touches the shared clone/DB; refuse while a live watch daemon owns it (like
-    # finalize). The read-only dry-run is always safe.
+    # A write run touches the shared clone/DB; refuse while any executor owns it (like finalize).
+    # The read-only dry-run is always safe.
     if args.yes:
-        pid = process_control.running_daemon_pid(process_control.pid_file_path(root))
-        if pid is not None:
-            print(f"prs --sync: the watch daemon is running (pid {pid}); stop it first")
+        owner = _executor_owner(config)
+        if owner is not None:
+            print(f"prs --sync: {owner}")
             return 1
     orchestrator = build_orchestrator(
         config,
@@ -2319,6 +2503,11 @@ def _report_merge_plan(
         wait = " (wait for checks)" if wait_for_checks else ""
         resolve_note = "" if resolve else "; --no-resolve: abort on conflict"
         print(f"  -> update branch w/ base, then merge via '{strategy.value}'{wait}{resolve_note}")
+        # The one thing this leaves in the base branch's history forever, and the one thing the
+        # plan used to omit. A rebase writes no commit, so there is nothing to report for it.
+        if plan.commit_subject and strategy is not MergeStrategy.REBASE:
+            print(f"  message:  {plan.commit_subject}")
+            print("            (empty body — the branch's own commits are not the merge message)")
     for warning in plan.warnings:
         print(f"  WARNING — {warning}")
 
@@ -2330,14 +2519,13 @@ def cmd_merge_task(args: argparse.Namespace) -> int:
     if config is None:
         return 2
     root = worc_home_for(config)
-    # merge-task updates the branch + runs gh/merge in the shared clone; refuse while the daemon
-    # owns it (like finalize). The merge flow + git ops need the idle slot.
-    pid = process_control.running_daemon_pid(process_control.pid_file_path(root))
-    if pid is not None:
-        print(
-            f"merge-task: the watch daemon is running (pid {pid}); stop it first with "
-            "'wastech-orchestrator stop'"
-        )
+    # merge-task updates the branch + runs gh/merge in the shared clone; refuse while any executor
+    # owns it (like finalize). The merge flow + git ops need the idle slot — a ``--dry-run`` needs
+    # neither, and under auto mode with `git.auto_merge: false` reading the plan is the operator's
+    # normal move between two linked tasks, which is precisely when the daemon is up.
+    owner = _executor_owner(config)
+    if owner is not None and not args.dry_run:
+        print(f"merge-task: {owner}")
         return 1
     if not (Path(root) / "state.db").is_file():
         print(f"merge-task: no state database at {Path(root) / 'state.db'}")
@@ -2365,6 +2553,8 @@ def cmd_merge_task(args: argparse.Namespace) -> int:
         _report_merge_plan(
             plan, strategy=strategy, wait_for_checks=wait_for_checks, resolve=args.resolve
         )
+        if owner is not None:
+            print(f"merge-task: note: {owner}")
         return 0
 
     if not args.yes:
@@ -3555,9 +3745,23 @@ def cmd_telegram_test(args: argparse.Namespace) -> int:
     return 0
 
 
-def _summarize_watch(results: list[PipelineResult]) -> int:
-    """Print one line per processed task and return the worst exit code (0 when nothing ran)."""
+def _summarize_watch(results: list[PipelineResult], *, withheld: Sequence[str] = ()) -> int:
+    """Print one line per processed task and return the worst exit code (0 when nothing ran).
+
+    ``withheld`` are pending tasks the tick deliberately did not claim (see :func:`watch_once`).
+    They produce no result, so an empty result list alone cannot tell an empty queue from a queue
+    nobody was allowed to take from — and the summary used to print "no pending tasks" directly
+    under a gate line naming the pending task it had just declined. Still exit 0: a fail-closed
+    decline is the gate working, not a failure.
+    """
     if not results:
+        held = sorted(set(withheld))
+        if held:
+            print(
+                f"watch: nothing claimed ({len(held)} pending task(s) held back: "
+                f"{', '.join(held)}) — the log says why"
+            )
+            return 0
         print("watch: nothing to do (slot free, no pending tasks)")
         return 0
     for result in results:
@@ -3619,6 +3823,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
             env_file=resolve_env_file_path(args)[0],
             heartbeat_seconds=args.heartbeat_seconds,
         )
+        notes = WatchNotes()
         return _summarize_watch(
             watch_loop(
                 orchestrator,
@@ -3627,7 +3832,9 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 poll_interval=poll,
                 queue=args.queue,
                 cleanup_hook=cleanup_hook,
-            )
+                notes=notes,
+            ),
+            withheld=notes.withheld,
         )
 
     # Daemon: refuse a second watcher for the same artifact root. A stale PID file (process gone) is
@@ -3637,6 +3844,17 @@ def cmd_watch(args: argparse.Namespace) -> int:
         print(
             f"watch: already running (pid {existing}); stop it first with "
             f"'wastech-orchestrator stop', or use 'restart' ({pid_path})"
+        )
+        return 1
+    # A `run` holds the same single slot in the same clone, and it is not a watcher — so it is not
+    # covered by the PID file above and cannot be stopped by the advice that goes with it.
+    runner = process_control.running_daemon_pid(
+        process_control.runner_file_path(worc_home_for(config))
+    )
+    if runner is not None:
+        print(
+            f"watch: a 'run' is executing a task in this clone (pid {runner}); wait for it to "
+            "finish, or interrupt it where it runs"
         )
         return 1
 
@@ -3662,6 +3880,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
     print(f"watch: polling every {poll}s for git-pushed tasks (Ctrl-C or 'stop' to exit)")
     results: list[PipelineResult] = []
+    daemon_notes = WatchNotes()
     stopped = False
     try:
         with controller:
@@ -3678,9 +3897,9 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 folder,
                 poll_interval=poll,
                 queue=args.queue,
-                stop_event=controller.event,
-                stop_file=stop_path,
+                stop=StopChannels(controller.event, stop_path),
                 cleanup_hook=cleanup_hook,
+                notes=daemon_notes,
             )
             # Graceful stop arrived via SIGTERM (event) or the stop-file (Windows / cross-shell).
             stopped = controller.event.is_set() or process_control.stop_file_requested(stop_path)
@@ -3701,7 +3920,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     if stopped:
         print("watch: stopped")  # graceful shutdown (SIGTERM or stop-file)
         return 0
-    return _summarize_watch(results)
+    return _summarize_watch(results, withheld=daemon_notes.withheld)
 
 
 class _StopDecision(NamedTuple):
@@ -3987,13 +4206,13 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 1 if args.task_id else 0
 
     now = datetime.now(UTC)
-    daemon_alive = _daemon_alive(config)
+    executor_alive = _executor_alive(config)
     for index, task in enumerate(tasks):
         if index:
             print()
         print(f"task_id={task.task_id}")
         print(f"title={task.title}")
-        print(f"status={_display_status(task, daemon_alive=daemon_alive)}")
+        print(f"status={_display_status(task, executor_alive=executor_alive)}")
         node = current_nodes.get(task.task_id)
         if node:
             print(f"node={node}")  # the flow checkpoint: where the engine will resume
@@ -4017,13 +4236,13 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def _task_entry(row: TaskRow, *, daemon_alive: bool = True) -> dict[str, str | None]:
-    # Status label via the shared renderer: a RUNNING row shows "parked (no daemon)" with no live
-    # daemon, else "(paused)" on a B-lite provider-outage park, else the plain status. The
-    # daemon_alive default keeps terminal rows (recent/all) and any direct caller unchanged.
+def _task_entry(row: TaskRow, *, executor_alive: bool = True) -> dict[str, str | None]:
+    # Status label via the shared renderer: a RUNNING row shows "parked (no daemon)" when neither
+    # the daemon nor a `run` is alive, else "(paused)" on a B-lite provider-outage park, else the
+    # plain status. The default keeps terminal rows (recent/all) and any direct caller unchanged.
     return {
         "task_id": row.task_id,
-        "status": _display_status(row, daemon_alive=daemon_alive),
+        "status": _display_status(row, executor_alive=executor_alive),
         "title": row.title,
         "branch": row.branch,
     }
@@ -4161,7 +4380,7 @@ def build_top_snapshot(
     ``store`` is ``None`` when no database exists yet (fresh install), yielding empty task sections.
     """
     worc_home = worc_home_for(config)
-    daemon_alive = _daemon_alive(config)
+    executor_alive = _executor_alive(config)
     active: list[_ActiveView] = []
     for row in store.find_active_tasks() if store is not None else []:
         try:
@@ -4178,7 +4397,7 @@ def build_top_snapshot(
         active.append(
             _ActiveView(
                 task_id=row.task_id,
-                status_label=_task_entry(row, daemon_alive=daemon_alive)["status"]
+                status_label=_task_entry(row, executor_alive=executor_alive)["status"]
                 or row.status.value,
                 title=row.title,
                 branch=row.branch,
@@ -4423,12 +4642,12 @@ def _list_sections(
             scan_pending_sorted(pending_dir(config), config.orchestrator.queue), start=1
         )
     ]
-    # Only RUNNING rows are relabelled by daemon liveness; probe once and pass it to the sections
+    # Only RUNNING rows are relabelled by executor liveness; probe once and pass it to the sections
     # that can contain a RUNNING row (active/all). recent/pending are terminal/file-only.
-    daemon_alive = _daemon_alive(config)
+    executor_alive = _executor_alive(config)
     if args.all:
         rows = store.all_tasks() if store else []
-        return [("all", [_task_entry(r, daemon_alive=daemon_alive) for r in rows])]
+        return [("all", [_task_entry(r, executor_alive=executor_alive) for r in rows])]
     if args.pending:
         return [("pending", pending)]
     if args.recent is not None:
@@ -4437,7 +4656,7 @@ def _list_sections(
     active = store.find_active_tasks() if store else []
     recent = store.recent_tasks(_LIST_RECENT_DEFAULT) if store else []
     return [
-        ("active", [_task_entry(r, daemon_alive=daemon_alive) for r in active]),
+        ("active", [_task_entry(r, executor_alive=executor_alive) for r in active]),
         ("pending", pending),
         ("recent", [_task_entry(r) for r in recent]),
     ]

@@ -415,7 +415,8 @@ def mark_interaction_status(path: Path, status: str) -> None:
 
 
 # Statuses an interaction can carry while still un-answered: the delivered-but-unanswered "waiting"
-# plus every AskFailure (timeout / transport_error / invalid_response, persisted by write_answer).
+# plus every AskFailure (timeout / transport_error / invalid_response / cancelled, persisted by
+# write_answer).
 # Cleanup (reset / consume) acts on exactly these — derived from AskFailure so a new failure mode is
 # covered automatically and never silently skipped.
 _RESETTABLE_STATUSES: frozenset[str] = frozenset({"waiting", *get_args(AskFailure)})

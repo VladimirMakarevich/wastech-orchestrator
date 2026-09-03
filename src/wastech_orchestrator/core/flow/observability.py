@@ -22,7 +22,7 @@ from wastech_orchestrator.core.flow.usage_accounting import compute_usage_delta
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
 from wastech_orchestrator.providers.base import AgentRunResult, NormalizedUsage
 from wastech_orchestrator.providers.redaction import redact_text
-from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
+from wastech_orchestrator.routing.router import ProviderAttempt, ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import ProviderAttemptRow
 
 if TYPE_CHECKING:
@@ -49,8 +49,8 @@ def record_run_observability(
     prompt: str,
     route: ResolvedRoute,
     outcome: StageOutcome,
-    model: str | None,
-    reasoning: str | None,
+    configured_model: str | None,
+    configured_reasoning: str | None,
     started_at: str,
     usage_baseline: NormalizedUsage | None = None,
     baseline_session_id: str | None = None,
@@ -61,6 +61,10 @@ def record_run_observability(
     and the session it belongs to; the runner reads them from the lineage row (or, for an in-process
     HITL re-run, the first invocation's result) so the per-attempt usage can be reduced to a per-run
     delta. ``None`` for a fresh run.
+
+    ``configured_*`` are the flow node's own ``model`` / ``reasoning`` overrides — ``None`` for a
+    node that declares neither. The values the attempts actually ran with are carried by the
+    attempt rows themselves (:class:`ProviderAttempt`), which is where the audit reads them.
     """
     record_provider_attempts(
         services.store,
@@ -93,8 +97,8 @@ def record_run_observability(
             prompt=prompt,
             route=route,
             outcome=outcome,
-            model=model,
-            reasoning=reasoning,
+            configured_model=configured_model,
+            configured_reasoning=configured_reasoning,
             started_at=started_at,
             secrets=services.prompt_secrets,
             register=register,
@@ -205,6 +209,20 @@ def write_rendered_prompt(
     register(task_id, "rendered_prompt", str(path))
 
 
+def _settled_attempt(outcome: StageOutcome) -> ProviderAttempt | None:
+    """The attempt whose run the stage settled on — the one that produced ``outcome.result``.
+
+    Identity, not provider equality: a stage can invoke the same provider more than once (a
+    session-unavailable retry, a transient retry), and only one of those rows is the run the node's
+    verdict came from. When every attempt raised, the last row is the one that decided the failure;
+    with no attempts at all (a unit harness) there is nothing to name.
+    """
+    for attempt in outcome.attempts:
+        if outcome.result is not None and attempt.result is outcome.result:
+            return attempt
+    return outcome.attempts[-1] if outcome.attempts else None
+
+
 def write_prompt_audit(
     *,
     artifacts_root: str,
@@ -215,13 +233,23 @@ def write_prompt_audit(
     prompt: str,
     route: ResolvedRoute,
     outcome: StageOutcome,
-    model: str | None,
-    reasoning: str | None,
+    configured_model: str | None,
+    configured_reasoning: str | None,
     started_at: str,
     secrets: tuple[str, ...],
     register: RegisterArtifact,
 ) -> None:
-    """Write one prompt-audit step (who + redacted prompt) and append it to the timeline."""
+    """Write one prompt-audit step (who + redacted prompt) and append it to the timeline.
+
+    ``model`` / ``reasoning`` are the **effective** values the settled attempt ran with, because
+    this is the artifact an operator opens to answer "what did this node actually run on"; the
+    ``configured_*`` pair beside them is the flow node's (or supervisor phase's) own override,
+    ``None`` whenever it overrode nothing. Recording only the override — which is what this
+    surface used to carry under the plain names — made the record named for auditing disagree
+    with the attempt's ``request.json`` on every node that took a provider default. Each row in
+    ``agents`` carries its own pair, so a stage that fell over to another provider does not report
+    one model for two different CLIs.
+    """
     audit_dir = task_artifact_dir(artifacts_root, task_id) / "prompt-audit"
     audit_dir.mkdir(parents=True, exist_ok=True)
     agents = [
@@ -233,17 +261,22 @@ def write_prompt_audit(
             "error_class": attempt.error_class.value if attempt.error_class else None,
             "started_at": attempt.result.started_at if attempt.result else None,
             "finished_at": attempt.result.finished_at if attempt.result else None,
+            "model": attempt.model,
+            "reasoning": attempt.reasoning,
         }
         for attempt in outcome.attempts
     ]
+    settled = _settled_attempt(outcome)
     record: dict[str, object] = {
         "node_run_id": run_id,
         "node_id": node_id,
         "subtask": subtask,
         "route_primary": route.primary.value,
         "provider_used": outcome.provider_used.value if outcome.provider_used else None,
-        "model": model,
-        "reasoning": reasoning,
+        "model": settled.model if settled else None,
+        "reasoning": settled.reasoning if settled else None,
+        "model_configured": configured_model,
+        "reasoning_configured": configured_reasoning,
         "started_at": started_at,
         "agents": agents,
         "prompt": redact_text(prompt, extra_secrets=secrets),

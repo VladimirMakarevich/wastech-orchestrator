@@ -1027,12 +1027,12 @@ def build_claude_argv(
         # The adapter-owned OS Bash-sandbox policy (workspace-write on a sandbox host). The
         # CLI parent reads this file directly (outside the sandbox), so a private-home path is fine.
         argv += ["--settings", sandbox_settings_path]
-    model = request.model or config.model
+    model = config.effective_model(request.model)
     if model:
         argv += ["--model", model]
     # --effort enables adaptive thinking at the specified depth (low/medium/high/xhigh/max).
     # No separate --thinking flag needed; --effort alone activates it.
-    reasoning = request.reasoning or config.reasoning
+    reasoning = config.effective_reasoning(request.reasoning)
     if reasoning:
         argv += ["--effort", reasoning]
     if request.session_id:
@@ -1883,7 +1883,7 @@ class ClaudeCodeProvider(BaseCliProvider):
         return parse_stream_json(raw_stdout)
 
     def _representation_extras(self, request: AgentRunRequest) -> dict[str, Any]:
-        return {"reasoning": request.reasoning or self._config.reasoning or None}
+        return {"reasoning": self._config.effective_reasoning(request.reasoning)}
 
     def _write_output_schema(self, paths: ArtifactPaths, request: AgentRunRequest) -> str | None:
         if request.output_schema is None:

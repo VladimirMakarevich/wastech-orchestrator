@@ -55,11 +55,13 @@ class FakeGh:
     def __init__(self, state: str = "OPEN") -> None:
         self.state = state
         self.merge_called = False
+        self.merge_argv: list[str] = []
 
     def __call__(self, args: Sequence[str]) -> GitResult:
         a = list(args)
         if a[:2] == ["pr", "merge"]:
             self.merge_called = True
+            self.merge_argv = a
             return _result()
         if a[:2] == ["pr", "view"]:
             if "-q" in a and ".state" in a:
@@ -156,6 +158,26 @@ def test_clean_base_merge_merges(git_repo, fake_cli, git_run, tmp_path: Path) ->
     assert gh.merge_called is True
     assert orch._git.merge_in_progress() is False
     assert orch._store.get_publish_op("m1", KIND_PR_MERGE, None) is not None
+
+
+def test_merge_task_dictates_the_squash_message(
+    git_repo, fake_cli, git_run, tmp_path: Path
+) -> None:
+    # Left to the target repository's settings, a `COMMIT_OR_PR_TITLE` / `COMMIT_MESSAGES` repo
+    # writes a subject with no Conventional Commits type and a body listing every branch commit —
+    # the orchestrator's own `chore(orchestrator): audit trail` included. Both landed on a real
+    # `main`. The subject is the same one the task's code commit carries, plus the PR number.
+    gh = FakeGh("OPEN")
+    orch = _build(git_repo, fake_cli, tmp_path, scenario="success", gh=gh)
+    _seed_task(orch._store)
+    _setup_branch(git_run, git_repo.clone, conflict=False)
+
+    orch.merge_task("m1", strategy=MergeStrategy.SQUASH, wait_for_checks=False)
+
+    argv = gh.merge_argv
+    assert "--subject" in argv and "--body" in argv
+    assert argv[argv.index("--subject") + 1] == "feat(m1): merge me (#1)"
+    assert argv[argv.index("--body") + 1] == ""  # the audit trail belongs to the branch, not main
 
 
 def test_conflict_resolved_by_flow_then_merges(git_repo, fake_cli, git_run, tmp_path: Path) -> None:

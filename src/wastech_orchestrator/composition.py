@@ -157,9 +157,12 @@ def build_orchestrator(
     the re-run id past the duplicate-id check (scoped to one id; every other gate check still runs).
 
     ``agent_handle_recorder`` and ``is_cancelled`` are set only by the ``watch`` daemon: the
-    recorder lets a hard stop reap a running agent's subtree, while ``is_cancelled`` both stops the
-    flow at the next node boundary and tells the Router a raised provider error is a stop-kill (not
-    a crash), so it never falls back to a fresh agent.
+    recorder lets a hard stop reap a running agent's subtree, while ``is_cancelled`` stops the flow
+    at the next node boundary, tells the Router a raised provider error is a stop-kill (not a
+    crash) so it never falls back to a fresh agent, and abandons a blocking Telegram ask in flight.
+    That last one is the notifier's and must stay on this line: a wait the ladder cannot reach —
+    the claim gate's, up to ``telegram.ask_timeout_s`` — leaves the daemon killable and nothing
+    else.
     """
     private_home = layout.private_home
     # Build the internal deny policy once (with the resolved ``env_file``) and thread
@@ -202,7 +205,7 @@ def build_orchestrator(
         is_recovery_rerun=is_recovery_rerun,
         ledger_only_validation_rejects=ledger.only_validation_rejects,
     )
-    notifier = build_notifier(config.telegram)
+    notifier = build_notifier(config.telegram, is_cancelled=is_cancelled)
     return Orchestrator(
         config,
         router=router,

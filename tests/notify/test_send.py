@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 
 from wastech_orchestrator.notify.interface import (
+    TRACE_ADOPTED_COMMITS,
+    TRACE_FINDINGS_WITHOUT_A_PATH,
     TRACE_GIT_CONTROL_DRIFT,
     TRACE_REWORK_EXHAUSTED,
     TRACE_UNEXPECTED_WRITE,
@@ -270,6 +272,27 @@ def test_send_trace_git_control_drift_renders_warning(fake_client: FakeTelegramC
     n.send_trace(task_id="t", node_id="audit", outcome=TRACE_GIT_CONTROL_DRIFT)
     text = fake_client.sent[0]["text"]
     assert "⚠️" in text and TRACE_GIT_CONTROL_DRIFT in text
+
+
+def test_send_trace_findings_without_a_path_renders_warning(
+    fake_client: FakeTelegramClient,
+) -> None:
+    # A gating verdict none of whose gating findings names a source path: the fix step has nothing
+    # to open, so the round cannot end in a fix. ⚠️ rather than the plain 🔁 a rework renders, so
+    # the operator can tell a wasted round from a productive one in the live trace.
+    n = _notifier(fake_client)
+    n.send_trace(task_id="t", node_id="review", outcome=TRACE_FINDINGS_WITHOUT_A_PATH)
+    text = fake_client.sent[0]["text"]
+    assert "⚠️" in text and TRACE_FINDINGS_WITHOUT_A_PATH in text
+
+
+def test_send_trace_adopted_commits_renders_warning(fake_client: FakeTelegramClient) -> None:
+    # This label was missing from the emoji map, so the one case whose ⚠️ its own docstring calls
+    # "the only place it is said" rendered as a neutral ▶️ instead.
+    n = _notifier(fake_client)
+    n.send_trace(task_id="t", node_id="publish", outcome=TRACE_ADOPTED_COMMITS)
+    text = fake_client.sent[0]["text"]
+    assert "⚠️" in text and TRACE_ADOPTED_COMMITS in text
 
 
 def test_send_trace_failure_is_swallowed(fake_client: FakeTelegramClient) -> None:

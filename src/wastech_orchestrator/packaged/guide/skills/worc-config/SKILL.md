@@ -31,9 +31,10 @@ Before drafting or changing any field, consult `reference.md` in the packaged co
    - which checks are mandatory for safe delivery;
    - whether Telegram should stay disabled.
 3. Start from the existing `.worc/config.yaml` when present. If there is no installed config yet, draft one in the packaged block order (`schema_version`, `orchestrator`, `repo`, `paths`, `agents`, `security`, `validation`, `checks`, `git`, `telegram`, `supervisor`, `logging`, `memory`, `tools`, `prompt_audit`). The only thing a config **must** carry is `agents.providers` with exactly one `primary: true` — every other block, `schema_version` and `repo` and `security` included, takes its defaults when omitted, and a file carrying that one block alone loads and validates clean. So write the blocks this repository actually needs rather than a full skeleton of defaults.
-4. Keep these unless the operator overrides them deliberately. Two of them are what `install` writes rather than what is safest — say which, so the operator is choosing rather than inheriting.
+4. Keep these unless the operator overrides them deliberately. Three of them are what `install` writes rather than what is safest — say which, so the operator is choosing rather than inheriting.
    - exactly one provider is `primary: true`, and it is listed in `agents.allowed` — both are hard validation rules, not preferences: zero or two primaries refuses the config outright;
    - `strict_isolation`: `install` writes `false`, which **is** the advanced mode, not a milder sandbox — `true` is the fail-closed one and is what an omitted key means;
+   - `disable_read_isolation`: `install` writes `true`, and `true` is also the code default — read-isolation is **off** out of the box. It is the key that makes hardening the master switch a two-line change rather than one: the effective state is `disable_read_isolation OR NOT strict_isolation`, so an operator who sets `strict_isolation: true` on the advice above and leaves this key as installed still runs with read-isolation off, and nothing says so. Set it to `false` in the same edit;
    - `allow_git_evidence`: `install` writes `true`; it is inert beside `strict_isolation: false` and becomes a real grant the moment that is `true`, so turn it off then unless a flow here audits delivery history;
    - `auto_merge: false`;
    - no forbidden `extra_args`;

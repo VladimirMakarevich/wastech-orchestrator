@@ -531,10 +531,10 @@ def build_codex_argv(
     # subcommand; on the fresh path (no subcommand) they follow the exec options.
     if request.session_id:
         argv += ["resume", request.session_id]
-    model = request.model or config.model
+    model = config.effective_model(request.model)
     if model:
         argv += ["--model", model]
-    reasoning = request.reasoning or config.reasoning
+    reasoning = config.effective_reasoning(request.reasoning)
     if reasoning:
         effort = normalize_codex_reasoning(reasoning)
         if effort is None:
@@ -974,7 +974,7 @@ class CodexProvider(BaseCliProvider):
         documentation, rework, fixing). Probe ``codex exec resume --help`` and flag the drift so
         preflight surfaces it — fatal only when codex has no fallback provider (decided upstream),
         else a warning. Light grep contract (like the ``-c/--config`` probe): empty output is
-        inconclusive (no flag); passes on the current 0.142.x grammar.
+        inconclusive (no flag); passes on the 0.152.1 grammar this adapter is verified against.
         """
         ok, help_text = self._probe([self._config.command, "exec", "resume", "--help"], env)
         if not help_text.strip():

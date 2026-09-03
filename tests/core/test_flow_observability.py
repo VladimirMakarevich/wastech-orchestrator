@@ -55,7 +55,9 @@ def _result(provider: str, status: RunStatus) -> AgentRunResult:
 
 
 def _outcome() -> StageOutcome:
-    # primary codex failed (infra), fallback claude succeeded.
+    # primary codex failed (infra), fallback claude succeeded — each attempt stamped with what the
+    # Router resolved for ITS provider, which is why the two rows do not name the same model.
+    settled = _result("claude", RunStatus.SUCCEEDED)
     attempts = (
         ProviderAttempt(
             provider=ProviderId.CODEX,
@@ -63,18 +65,22 @@ def _outcome() -> StageOutcome:
             status=RunStatus.FAILED,
             error_class=ErrorClass.RATE_LIMITED,
             result=_result("codex", RunStatus.FAILED),
+            model="gpt-5.5",
+            reasoning="xhigh",
         ),
         ProviderAttempt(
             provider=ProviderId.CLAUDE,
             attempt=2,
             status=RunStatus.SUCCEEDED,
             error_class=None,
-            result=_result("claude", RunStatus.SUCCEEDED),
+            result=settled,
+            model="claude-opus-5",
+            reasoning="high",
         ),
     )
     return StageOutcome(
         route=_route(),
-        result=_result("claude", RunStatus.SUCCEEDED),
+        result=settled,
         provider_used=ProviderId.CLAUDE,
         stage_attempts=2,
         terminal_error=None,
@@ -105,8 +111,8 @@ def test_write_prompt_audit_step_timeline_who_metadata_and_redaction(tmp_path: P
         prompt="do the thing with TOKEN_ABC123",
         route=_route(),
         outcome=_outcome(),
-        model="gpt-x",
-        reasoning="high",
+        configured_model=None,  # the node pins neither — the trial's shape for every node but one
+        configured_reasoning=None,
         started_at="t0",
         secrets=("TOKEN_ABC123",),
         register=_register(calls),
@@ -115,14 +121,20 @@ def test_write_prompt_audit_step_timeline_who_metadata_and_redaction(tmp_path: P
     step = audit_dir / "000007-implementation.json"
     record = json.loads(step.read_text("utf-8"))
     assert record["provider_used"] == "claude"
-    assert record["model"] == "gpt-x"
-    # The effective reasoning (post-override) is auditable alongside the model.
+    # The plain names carry what the settled attempt ACTUALLY ran on, so a node that overrides
+    # nothing is not recorded as having run on nothing; the override keeps its own pair of keys.
+    assert record["model"] == "claude-opus-5"
     assert record["reasoning"] == "high"
+    assert record["model_configured"] is None and record["reasoning_configured"] is None
     # who-metadata: primary codex marked fallback=False, claude fallback=True.
     by_provider = {a["provider"]: a for a in record["agents"]}
     assert by_provider["codex"]["is_fallback"] is False
     assert by_provider["claude"]["is_fallback"] is True
     assert by_provider["codex"]["error_class"] == "rate_limited"
+    # Per attempt, not per stage: the failed codex hop is not reported as having run Claude's model.
+    assert by_provider["codex"]["model"] == "gpt-5.5"
+    assert by_provider["codex"]["reasoning"] == "xhigh"
+    assert by_provider["claude"]["model"] == "claude-opus-5"
     assert "TOKEN_ABC123" not in record["prompt"]  # redacted
     assert (audit_dir / "timeline.jsonl").read_text("utf-8").count("\n") == 1
     kinds = {k for _, k, _ in calls}
