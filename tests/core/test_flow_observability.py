@@ -358,15 +358,22 @@ def test_prompt_audit_names_the_variant_each_attempt_received(tmp_path: Path) ->
         register=_register(calls),
     )
     audit_dir = task_artifact_dir(tmp_path, "task-1") / "prompt-audit"
-    record = json.loads((audit_dir / "000007-fixing.json").read_text(encoding="utf-8"))
+    step_text = (audit_dir / "000007-fixing.md").read_text(encoding="utf-8")
+    record = _step_metadata(step_text)
 
-    # Both texts, once each — the reader can see what the run had to choose between.
-    assert record["prompt"] == "FULL TEXT"
-    assert record["continuation_prompt"] == "CONTINUATION TEXT"
     assert [(a["attempt"], a["resumed"], a["prompt_variant"]) for a in record["agents"]] == [
         (1, True, "continuation"),
         (2, False, "full"),
     ]
+    # Both texts, once each, and both as document body: a prompt inside the JSON header would read
+    # as one flat line of escaped newlines, which is what the Markdown step file exists to avoid.
+    assert "prompt" not in record and "continuation_prompt" not in record
+    assert "## Prompt\n\nFULL TEXT" in step_text
+    assert "## Continuation prompt\n\nCONTINUATION TEXT" in step_text
+    # The machine-readable half still carries the whole record.
+    timeline = json.loads((audit_dir / "timeline.jsonl").read_text("utf-8").splitlines()[0])
+    assert timeline["prompt"] == "FULL TEXT"
+    assert timeline["continuation_prompt"] == "CONTINUATION TEXT"
 
 
 def test_prompt_audit_omits_the_variant_for_a_node_with_one_text(tmp_path: Path) -> None:
@@ -389,7 +396,11 @@ def test_prompt_audit_omits_the_variant_for_a_node_with_one_text(tmp_path: Path)
         register=_register(calls),
     )
     audit_dir = task_artifact_dir(tmp_path, "task-1") / "prompt-audit"
-    record = json.loads((audit_dir / "000008-implementation.json").read_text(encoding="utf-8"))
-    assert "continuation_prompt" not in record
+    step_text = (audit_dir / "000008-implementation.md").read_text(encoding="utf-8")
+    record = _step_metadata(step_text)
     assert all("prompt_variant" not in agent for agent in record["agents"])
     assert [agent["resumed"] for agent in record["agents"]] == [False, False]
+    # One prompt, one body section — the document does not grow an empty second heading.
+    assert "## Continuation prompt" not in step_text
+    timeline = json.loads((audit_dir / "timeline.jsonl").read_text("utf-8").splitlines()[0])
+    assert "continuation_prompt" not in timeline
