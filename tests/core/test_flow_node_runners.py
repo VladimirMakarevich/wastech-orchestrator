@@ -158,6 +158,25 @@ class FakeStore:
     def upsert_editing_lineage(self, row: EditingLineageRow, conn: Any = None) -> None:
         self.editing_lineage[(row.task_id, row.subtask_order, row.lineage_key)] = row
 
+    def has_prior_provider_run(
+        self,
+        task_id: str,
+        node_id: str,
+        subtask_order: int | None,
+        provider: str,
+        *,
+        exclude_run_id: int,
+    ) -> bool:
+        # Faithful to the SQL rather than a stub: only a run that a provider actually settled
+        # counts, so the caller's own reserved row (recorded, never completed) cannot answer yes.
+        settled = {c["run_id"]: c.get("provider_used") for c in self.completed}
+        return any(
+            index != exclude_run_id
+            and (run.task_id, run.node_id, run.subtask_order) == (task_id, node_id, subtask_order)
+            and settled.get(index) == provider
+            for index, run in enumerate(self.recorded, start=1)
+        )
+
 
 def _result(
     structured: dict[str, Any] | None = None, *, final_message: str | None = None
@@ -4385,3 +4404,103 @@ def test_publish_does_not_rerun_checks_when_nothing_was_adopted(tmp_path: Path) 
     )
     PublishNodeRunner(services, inputs).run(node, _ctx(node))
     assert checks.runs == [] and git.pr_notice is None
+
+
+# -- continuation prompts (resume_role_file) ----------------------------------
+
+
+def _continuing_pair(tmp_path: Path) -> tuple[AgentNode, AgentNode]:
+    """The packaged shape: a head-of-lineage author and an affinity node that joins its session."""
+    (tmp_path / "impl.md").write_text("implement {task_path}", "utf-8")
+    (tmp_path / "fix.md").write_text("fix the findings", "utf-8")
+    (tmp_path / "fix.continue.md").write_text("another round", "utf-8")
+    impl = AgentNode(
+        id="implementation",
+        kind="agent",
+        role_file="impl.md",
+        session_scope=SessionScope.EDITING_LINEAGE,
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
+    fixing = AgentNode(
+        id="fixing",
+        kind="agent",
+        role_file="fix.md",
+        resume_role_file="fix.continue.md",
+        session_scope=SessionScope.EDITING_LINEAGE,
+        lineage_affinity="implementation",
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
+    return impl, fixing
+
+
+def _run_agent(
+    node: AgentNode, store: FakeStore, tmp_path: Path, session: str, ctx: Any = None
+) -> Any:
+    from dataclasses import replace
+
+    router = FakeRouter(replace(_result(), session_id=session))
+    check = FakeCheckRunner(CheckOutcome(passed=True, runs=()))
+    AgentNodeRunner(_services(router, store, check), _inputs(tmp_path)).run(
+        node, ctx if ctx is not None else _ctx(node)
+    )
+    return router.requests[0]
+
+
+def test_first_round_of_an_affinity_node_gets_the_full_prompt(tmp_path: Path) -> None:
+    # The row a session_id-only predicate would get wrong: `fixing` round 1 resumes the session
+    # `implementation` opened, so history exists — but this role has never stated its rules in it.
+    impl, fixing = _continuing_pair(tmp_path)
+    store = FakeStore()
+    _run_agent(impl, store, tmp_path, "impl-session")
+
+    request = _run_agent(fixing, store, tmp_path, "fix-session")
+    assert request.session_id == "impl-session"  # a session IS being resumed
+    assert request.continuation_prompt is None  # and it still gets the whole of fix.md
+    assert request.prompt.startswith("fix the findings")
+
+
+def test_second_round_of_the_same_node_gets_the_continuation_prompt(tmp_path: Path) -> None:
+    impl, fixing = _continuing_pair(tmp_path)
+    store = FakeStore()
+    _run_agent(impl, store, tmp_path, "impl-session")
+    _run_agent(fixing, store, tmp_path, "fix-session")
+
+    request = _run_agent(fixing, store, tmp_path, "fix-session-2")
+    assert request.continuation_prompt == "another round"
+    assert request.prompt.startswith("fix the findings")  # both texts ride the request
+
+
+def test_a_node_declaring_no_continuation_file_is_unchanged(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    impl, fixing = _continuing_pair(tmp_path)
+    plain = replace(fixing, resume_role_file=None)
+    store = FakeStore()
+    _run_agent(impl, store, tmp_path, "impl-session")
+    _run_agent(plain, store, tmp_path, "fix-session")
+
+    assert _run_agent(plain, store, tmp_path, "fix-session-2").continuation_prompt is None
+
+
+def test_a_fresh_session_gets_the_full_prompt_however_many_rounds_ran(tmp_path: Path) -> None:
+    # Even with two settled rounds behind it, a node whose lineage is gone starts over honestly.
+    _impl, fixing = _continuing_pair(tmp_path)
+    store = FakeStore()
+    _run_agent(fixing, store, tmp_path, "s1")
+    request = _run_agent(fixing, store, tmp_path, "s2")
+    assert request.continuation_prompt == "another round"
+
+    store.editing_lineage.clear()
+    assert _run_agent(fixing, store, tmp_path, "s3").continuation_prompt is None
+
+
+def test_another_subtasks_rounds_do_not_count_as_this_units(tmp_path: Path) -> None:
+    # One FlowRunState spans a decompose region, so the unit discriminator has to be the row's own
+    # subtask_order — otherwise subtask 2 opens on a continuation of subtask 1's conversation.
+    _impl, fixing = _continuing_pair(tmp_path)
+    store = FakeStore()
+    _run_agent(fixing, store, tmp_path, "s1", ctx=_subtask_ctx(fixing, order=1))
+    _run_agent(fixing, store, tmp_path, "s1b", ctx=_subtask_ctx(fixing, order=1))
+
+    first = _run_agent(fixing, store, tmp_path, "s2", ctx=_subtask_ctx(fixing, order=2))
+    assert first.continuation_prompt is None

@@ -14,6 +14,7 @@ flow directory** (defense-in-depth on top of the load-time traversal check in
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from pathlib import Path
 
 from wastech_orchestrator.core.prompts import ALLOWED_PROMPT_VARS, render_prompt
@@ -53,3 +54,29 @@ def render_role_prompt(
     fixed security core — every value in *variables* is still a Core-written artifact path.
     """
     return render_prompt(read_role_file(flow_dir, role_file), variables, allowed=allowed)
+
+
+def references_variable(flow_dir: Path, role_files: Iterable[str | None], token: str) -> bool:
+    """Whether any of *role_files* references ``{token}`` or ``{?token}``.
+
+    Some variables are built only when a prompt asks for them — the memory packet, the subtask
+    handoff brief — so the runner reads the template to decide. It must read **every** template the
+    node can render, because they all draw from one variable dict: a continuation prompt naming a
+    variable its main prompt does not would otherwise render an empty block and report nothing,
+    which is the renderer's designed behavior for an unknown name and exactly the silence this
+    avoids. ``None`` entries are skipped, so a node with no second prompt asks the same question it
+    always did.
+
+    Best-effort on IO: a template that cannot be read answers "no" here; the real read error is
+    surfaced by :func:`render_role_prompt` when the node actually runs.
+    """
+    for role_file in role_files:
+        if role_file is None:
+            continue
+        try:
+            template = read_role_file(flow_dir, role_file)
+        except RoleFileError:
+            continue
+        if f"{{{token}}}" in template or f"{{?{token}}}" in template:
+            return True
+    return False

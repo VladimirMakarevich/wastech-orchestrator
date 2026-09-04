@@ -10,7 +10,12 @@ from pathlib import Path
 import pytest
 
 from wastech_orchestrator.config.schema import ProviderConfig
-from wastech_orchestrator.providers.base import AgentRunRequest, ErrorClass, ProviderError
+from wastech_orchestrator.providers.base import (
+    AgentRunRequest,
+    ErrorClass,
+    ProviderError,
+    uses_continuation,
+)
 from wastech_orchestrator.providers.claude import (
     SandboxCapability,
     build_claude_argv,
@@ -1185,3 +1190,55 @@ def test_the_shipped_default_keeps_the_tool_flags_and_deny_membership_it_always_
         assert "NotebookEdit" not in disallowed, profile
         for name in ("EnterWorktree", "AskUserQuestion", "CronCreate", "RemoteTrigger"):
             assert name not in disallowed.split(","), profile
+
+
+def test_continuation_prompt_is_used_only_while_the_session_is_live(
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # The whole guarantee in one place: the variant and the resume argv come from one field of one
+    # request, so an attempt whose session the router cleared gets the full text back — with no
+    # router change and nothing for an adapter to remember.
+    resumed = make_request(prompt="FULL", continuation_prompt="CONT", session_id="sess-1")
+    assert build_effective_prompt(resumed).startswith("CONT")
+
+    dropped = replace(resumed, session_id=None)
+    assert build_effective_prompt(dropped).startswith("FULL")
+
+
+def test_continuation_prompt_absent_is_byte_for_byte_today(
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # A node that declares no second prompt is unaffected on both paths.
+    for session_id in (None, "sess-1"):
+        request = make_request(prompt="P", task_path="/t/task.md", session_id=session_id)
+        assert build_effective_prompt(request) == build_effective_prompt(
+            replace(request, continuation_prompt=None)
+        )
+        assert build_effective_prompt(request).startswith("P\n\n")
+
+
+def test_effective_prompt_body_override_renders_the_variant_not_sent(
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # The audit needs both texts through the one assembler, preamble and footer included, without
+    # restating how the choice is made.
+    request = make_request(
+        prompt="FULL",
+        continuation_prompt="CONT",
+        session_id="sess-1",
+        task_path="/t/task.md",
+        security_preamble="[contract]",
+    )
+    full = build_effective_prompt(request, body=request.prompt)
+    assert full.startswith("[contract]\n\nFULL\n\n")
+    assert "/t/task.md" in full
+    assert build_effective_prompt(request).startswith("[contract]\n\nCONT\n\n")
+
+
+def test_uses_continuation_is_the_single_rule(
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    both = make_request(prompt="FULL", continuation_prompt="CONT", session_id="s")
+    assert uses_continuation(both) is True
+    assert uses_continuation(replace(both, session_id=None)) is False
+    assert uses_continuation(replace(both, continuation_prompt=None)) is False

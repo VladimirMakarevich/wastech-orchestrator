@@ -1063,6 +1063,44 @@ class StateStore:
         row = cur.fetchone()
         return _node_run_from_row(row) if row is not None else None
 
+    def has_prior_provider_run(
+        self,
+        task_id: str,
+        node_id: str,
+        subtask_order: int | None,
+        provider: str,
+        *,
+        exclude_run_id: int,
+    ) -> bool:
+        """Whether this node has already been run by *provider* on this unit, before *run_id*.
+
+        The fact a continuation prompt turns on: not "does this session have history" — an author
+        node can inherit a session another node opened — but "has THIS role already been stated on
+        it". Scoped to the unit, so a decomposed task does not read one subtask's runs as another's
+        (``subtask_order IS ?`` matches ``NULL`` to root-level runs only).
+
+        ``provider_used`` is doing more than provider matching: it is written only when a provider
+        actually settled a run, so three row classes fall out of the answer without a clause of
+        their own — the caller's own row (reserved ``running``, provider still ``NULL``), a node
+        skipped by its ``when`` predicate, and a run stranded by a hard stop and later closed by
+        :meth:`reconcile_open_node_runs`. The last is the conservative reading for recovery: a turn
+        that was killed may never have reached the provider, so the node counts as not yet spoken.
+        ``exclude_run_id`` is belt-and-braces on the first of those, stated rather than relied upon.
+
+        A narrow read rather than :meth:`get_node_runs` + filtering: the whole-task scan grows with
+        the run and this is asked once per node run.
+        """
+        row = self._conn.execute(
+            """
+            SELECT 1 FROM node_runs
+            WHERE task_id = ? AND node_id = ? AND subtask_order IS ?
+              AND provider_used = ? AND id != ?
+            LIMIT 1
+            """,
+            (task_id, node_id, subtask_order, provider, exclude_run_id),
+        ).fetchone()
+        return row is not None
+
     def reconcile_open_node_runs(
         self,
         task_id: str,

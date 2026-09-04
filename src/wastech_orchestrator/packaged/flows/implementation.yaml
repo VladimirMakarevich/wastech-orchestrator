@@ -79,6 +79,10 @@ flow:
     - id: implementation
       kind: agent
       role_file: implementation/implementation.md
+      # The short text for a turn that continues this node's own session — a renewed turn
+      # grant, a delivered human answer, a reconsider after a denial. Selected only when
+      # the session is live and this node has already spoken on it.
+      resume_role_file: implementation/implementation.continue.md
       session_scope: editing_lineage
       permission_profile: workspace-write
       # optional overrides (uncomment to pin this node):
@@ -112,6 +116,7 @@ flow:
     - id: fixing
       kind: agent
       role_file: implementation/fixing.md
+      resume_role_file: implementation/fixing.continue.md
       session_scope: editing_lineage
       lineage_affinity: implementation
       permission_profile: workspace-write

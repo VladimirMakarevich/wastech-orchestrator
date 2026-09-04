@@ -170,6 +170,12 @@ class ProviderAttempt:
     # would say it did. Defaulted so a row built without them (unit harnesses) stays valid.
     model: str | None = None
     reasoning: str | None = None
+    # Whether THIS attempt was launched against a live session. Per attempt for the same reason the
+    # two fields above are: the degradations below hand a substitute attempt a request with the
+    # session cleared, so a stage that began as a continuation of an existing conversation did not
+    # necessarily stay one. The prompt audit reads it to say which of a node's two prompt texts an
+    # attempt received; a node with only one text is unaffected either way.
+    resumed: bool = False
 
 
 @dataclass(frozen=True)
@@ -726,8 +732,9 @@ class AgentRouter:
     ) -> ProviderAttempt:
         """One ``provider_attempts`` row for an invocation of *pid* with *req*.
 
-        Every construction site goes through here so no attempt is recorded without the model and
-        reasoning it ran at: the audit surface named for auditing carried the flow-node override
+        Every construction site goes through here so no attempt is recorded without the model,
+        reasoning and session state it ran at: the audit surface named for auditing carried the
+        flow-node override
         (``None`` for a node that overrides nothing) while the effective value lived only in the
         attempt's ``request.json``, so the two disagreed about the same run. Resolution is
         :class:`ProviderConfig`'s, from the per-attempt request the adapter is handed — so a
@@ -742,6 +749,7 @@ class AgentRouter:
             result=result,
             model=cfg.effective_model(req.model),
             reasoning=cfg.effective_reasoning(req.reasoning),
+            resumed=req.session_id is not None,
         )
 
     def _profile_of(self, pid: ProviderId) -> str:

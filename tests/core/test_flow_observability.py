@@ -300,3 +300,96 @@ def test_record_provider_attempts_persists_per_run_delta() -> None:
     assert row.usage_reasoning_output == 131
     assert row.usage_delta_status == "ok"
     assert row.provider_usage_raw == '{"input_tokens":282699}'
+
+
+def _degraded_outcome() -> StageOutcome:
+    """A stage that opened on a live session and then lost it — the case the flag exists for."""
+    settled = _result("codex", RunStatus.SUCCEEDED)
+    attempts = (
+        ProviderAttempt(
+            provider=ProviderId.CODEX,
+            attempt=1,
+            status=None,
+            error_class=ErrorClass.SESSION_UNAVAILABLE,
+            result=None,
+            model="gpt-5.5",
+            reasoning="xhigh",
+            resumed=True,
+        ),
+        ProviderAttempt(
+            provider=ProviderId.CODEX,
+            attempt=2,
+            status=RunStatus.SUCCEEDED,
+            error_class=None,
+            result=settled,
+            model="gpt-5.5",
+            reasoning="xhigh",
+            resumed=False,
+        ),
+    )
+    return StageOutcome(
+        route=_route(),
+        result=settled,
+        provider_used=ProviderId.CODEX,
+        stage_attempts=2,
+        terminal_error=None,
+        attempts=attempts,
+    )
+
+
+def test_prompt_audit_names_the_variant_each_attempt_received(tmp_path: Path) -> None:
+    # The record is built from the request the Core assembled, so a stage-level answer would say
+    # "continuation" for an attempt that was handed the full text after its session was dropped.
+    calls: list[tuple[str, str, str]] = []
+    write_prompt_audit(
+        artifacts_root=str(tmp_path),
+        task_id="task-1",
+        node_id="fixing",
+        subtask=None,
+        run_id=7,
+        prompt="FULL TEXT",
+        continuation_prompt="CONTINUATION TEXT",
+        route=_route(),
+        outcome=_degraded_outcome(),
+        configured_model=None,
+        configured_reasoning=None,
+        started_at="t0",
+        secrets=(),
+        register=_register(calls),
+    )
+    audit_dir = task_artifact_dir(tmp_path, "task-1") / "prompt-audit"
+    record = json.loads((audit_dir / "000007-fixing.json").read_text(encoding="utf-8"))
+
+    # Both texts, once each — the reader can see what the run had to choose between.
+    assert record["prompt"] == "FULL TEXT"
+    assert record["continuation_prompt"] == "CONTINUATION TEXT"
+    assert [(a["attempt"], a["resumed"], a["prompt_variant"]) for a in record["agents"]] == [
+        (1, True, "continuation"),
+        (2, False, "full"),
+    ]
+
+
+def test_prompt_audit_omits_the_variant_for_a_node_with_one_text(tmp_path: Path) -> None:
+    # Most nodes have nothing to choose between; the record does not grow a key that would always
+    # say the same thing.
+    calls: list[tuple[str, str, str]] = []
+    write_prompt_audit(
+        artifacts_root=str(tmp_path),
+        task_id="task-1",
+        node_id="implementation",
+        subtask=None,
+        run_id=8,
+        prompt="only text",
+        route=_route(),
+        outcome=_outcome(),
+        configured_model=None,
+        configured_reasoning=None,
+        started_at="t0",
+        secrets=(),
+        register=_register(calls),
+    )
+    audit_dir = task_artifact_dir(tmp_path, "task-1") / "prompt-audit"
+    record = json.loads((audit_dir / "000008-implementation.json").read_text(encoding="utf-8"))
+    assert "continuation_prompt" not in record
+    assert all("prompt_variant" not in agent for agent in record["agents"])
+    assert [agent["resumed"] for agent in record["agents"]] == [False, False]

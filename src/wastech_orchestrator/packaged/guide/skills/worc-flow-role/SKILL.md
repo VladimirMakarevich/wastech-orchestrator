@@ -1,6 +1,6 @@
 ---
 name: worc-flow-role
-description: Write or revise a single flow node's role prompt (`role_file`) for wastech-orchestrator — the Markdown text that becomes that node's instructions — honoring the node's typed output contract and the `{name}` variable allowlist. Use when you want to change what a step says without changing the graph; author a whole new flow with worc-flow, or repoint a step's provider/model with worc-flow-tune.
+description: Write or revise a flow node's role prompt (`role_file`, and its optional re-entry prompt `resume_role_file`) for wastech-orchestrator — the Markdown text that becomes that node's instructions — honoring the node's typed output contract and the `{name}` variable allowlist. Use when you want to change what a step says without changing the graph; author a whole new flow with worc-flow, or repoint a step's provider/model with worc-flow-tune.
 ---
 
 # worc-flow-role
@@ -12,23 +12,23 @@ Help an operator write or revise one node's role prompt. A `role_file` is a plai
 - The operator wants a step to behave differently in _wording/emphasis_ — a sharper review lens, a more specific implementation brief, a different research angle — but the graph (nodes, edges, output kind, route) stays the same.
 - For a new step, a new route, or a different output kind → **worc-flow**. To change which provider/model/reasoning a step uses → **worc-flow-tune**. Neither of those is a prompt edit.
 
-Before editing, read the packaged role guide `.worc/guide/flows/roles.md` (what a role file is, the built-in evaluator roles, and the per-node output contract) and `.worc/guide/flows/prompt-variables.md` (the `{name}` allowlist and the `{?name}…{/name}` syntax). Do not invent variables or output shapes.
+Before editing, read the packaged role guide `.worc/guide/flows/roles.md` (what a role file is, the built-in evaluator roles, and the per-node output contract) and `.worc/guide/flows/prompt-variables.md` (the `{name}` allowlist and the `{?name}…{/name}` syntax). If the node declares a `resume_role_file`, read that guide's section on it too — the two files are written against each other. Do not invent variables or output shapes.
 
 ## How to run
 
-1. Locate the node and its prompt. In `.worc/flows/<task_type>.yaml` find the node, read its `role_file:` value (relative to `.worc/flows/`), and open that file under `.worc/flows/<task_type>/`. Confirm the node's `kind` (`agent` vs `evaluator`) and whether it has `hitl:` or is the planning node named by `decomposition.proposed_by` — that decides the contract.
+1. Locate the node and its prompt. In `.worc/flows/<task_type>.yaml` find the node, read its `role_file:` value (relative to `.worc/flows/`), and open that file under `.worc/flows/<task_type>/`. Confirm the node's `kind` (`agent` vs `evaluator`), whether it has `hitl:` or is the planning node named by `decomposition.proposed_by` — that decides the contract — and whether it also declares a `resume_role_file:`, the short text used on turns that continue a session the node has already spoken on.
 2. Honor the node's typed output contract (the core re-validates it — a malformed result fails the node; you cannot loosen this from a prompt):
    - **plain `agent`** — returns its final message (also exposed downstream as `{<id>_path}`). If the node declares `output_file:` in the flow, the **file** it writes is what travels as `{<id>_path}` instead — so the prompt must name that same filename and require the file to stand alone, because no closing message goes with it.
    - **`agent` with `hitl:`** — returns `content` plus an optional question/approval object; ask a question only for a material ambiguity repository evidence cannot resolve.
    - **planning agent** (`decomposition.proposed_by`) — `content` + optional `human_input` + `decompose` + `subtasks`.
    - **`evaluator`** — must emit `{ findings: [ { severity, path, what, fix } ] }`, where `severity` is one of `blocking` / `critical` / `high` / `medium` / `low` (a schema enum — any other word is a malformed result, so name the five in the prompt) and `path`/`fix` may be null. It is **fail-closed**: a prose-only "looks good" routes the task to `manual_action_required`. Return an **empty `findings` array** when clean, not prose. Only findings at or above the node's `gate_severity` (default `high`) gate the graph; the rest are advisory. For an evaluator, also mind its `role` lens (`review` / `critic` / `verifier` / `test_quality`, or the default) and spell the findings fields out explicitly.
 3. Reference artifacts only by **allowlisted `{name}` path variables** (e.g. `{task_path}`, `{plan_path}`, `{diff_path}`, `{repo_path}`, and node-chaining `{<node_id>_path}`) — never inline task bodies, diffs, env, or secrets. Wrap every _optional_ variable in a `{?name}…{/name}` block so a missing value never leaves a dangling fragment.
-4. Keep the prompt short, imperative, and focused on the node's single job.
-5. Validate: run `worc validate-flow <name>`. Its anti-drift lint **warns** about any `{name}` no node populates (a typo like `{plna_path}` would otherwise ship as literal text — it renders verbatim, which is the safe fallback, so it is a warning not a failure). Set `prompt_audit: true` to inspect the exact rendered prompt per node under `logs/<task-id>/prompt-audit/`.
+4. Keep the prompt short, imperative, and focused on the node's single job. If the node has a `resume_role_file`, edit the pair together: the main file must stand alone (it is what a fresh or recovered session gets), and the continuation file carries only what changed this turn, what is expected of it, and the one line of output contract whose wording the schema cannot enforce. A continuation file that restates the main one has bought nothing; a rule about *reporting* rather than about the work is the exception and stays in both.
+5. Validate: run `worc validate-flow <name>`. Its anti-drift lint **warns** about any `{name}` no node populates (a typo like `{plna_path}` would otherwise ship as literal text — it renders verbatim, which is the safe fallback, so it is a warning not a failure). Set `prompt_audit: true` to inspect the rendered prompt per node under `logs/<task-id>/prompt-audit/`; a node with two prompts records both, and each attempt names which one it received.
 
 ## Heuristics
 
-- One role file = one node's single job. If you find yourself asking a prompt to do a second step's work, that is a graph change (**worc-flow**), not a prompt edit.
+- One node, one job — in at most two files. If you find yourself asking a prompt to do a second _step's_ work, that is a graph change (**worc-flow**), not a prompt edit. A `resume_role_file` is not a second job: it is the same job said shorter to an agent that already has the rules.
 - Supervisor prompts are a special case: they live at `.worc/flows/roles/supervisor.md` (or a flow's `supervisor:` block) and receive **only** `{task_id}` and `{repo}`/`{repo_path}` — no node/path variables.
 
 ## What not to do
@@ -36,4 +36,6 @@ Before editing, read the packaged role guide `.worc/guide/flows/roles.md` (what 
 - Don't turn an evaluator into a prose review — it must emit the findings result (empty array when clean) or the task fail-closes to manual.
 - Don't reference a `{name}` that no node populates for that node; don't paste task text, diffs, secrets, or environment values into the prompt — only path variables are allowed.
 - Don't try to change the machine contract from wording (output schemas, follow-ups, memory delta stay in the orchestrator). A prompt can move tone and emphasis, never what the orchestrator parses.
-- Don't point a `role_file` outside the flow's own `<task_type>/` folder, and never use `..`.
+- Don't point a `role_file` or `resume_role_file` outside the flow's own `<task_type>/` folder, and never use `..`.
+- Don't add a `resume_role_file` to a node whose `session_scope` is `fresh_disposable` — nothing resumes it, so the file would never be selected, and validation refuses it rather than letting it look like it works.
+- Don't let a continuation prompt drop an evaluator's findings contract. The schema pins the shape, never the calibration.

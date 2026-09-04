@@ -61,7 +61,7 @@ from wastech_orchestrator.core.flow.nodes.exchange_publish import (
 from wastech_orchestrator.core.flow.nodes.human_gate import HumanGate
 from wastech_orchestrator.core.flow.observability import record_run_observability
 from wastech_orchestrator.core.flow.output_policy import resolve_output_policy, within_subdir
-from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file, render_role_prompt
+from wastech_orchestrator.core.flow.prompt import references_variable, render_role_prompt
 from wastech_orchestrator.core.flow.prompt_vars import valid_prompt_vars
 from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode
 from wastech_orchestrator.core.flow.usage_accounting import (
@@ -92,7 +92,6 @@ from wastech_orchestrator.providers.base import (
     AgentRunRequest,
     NormalizedUsage,
     ProviderId,
-    build_effective_prompt,
 )
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import EditingLineageRow, NodeRunRow
@@ -556,7 +555,7 @@ class AgentNodeRunner:
             node_id=node.id,
             subtask=ctx.subtask_order,
             run_id=run_id,
-            prompt=build_effective_prompt(request),
+            request=request,
             route=route,
             outcome=outcome,
             configured_model=node.model,
@@ -762,11 +761,17 @@ class AgentNodeRunner:
         # The renderer stays the fixed security core; the caller widens *which names* it may
         # substitute to the flow-derived set (core allowlist ∪ each agent node's {<id>_path}), and
         # only ever places path values in the dict — never inlined content.
-        prompt = render_role_prompt(
-            self._in.flow_dir,
-            node.role_file,
-            self._prompt_variables(ctx, node),
-            allowed=valid_prompt_vars(ctx.snapshot),
+        variables = self._prompt_variables(ctx, node)
+        allowed = valid_prompt_vars(ctx.snapshot)
+        prompt = render_role_prompt(self._in.flow_dir, node.role_file, variables, allowed=allowed)
+        # The second text is rendered only for a turn that could genuinely continue this node's own
+        # conversation; whether the attempt then IS one is decided at the provider seam, from the
+        # same field that decides the resume argv.
+        continuation_prompt = (
+            render_role_prompt(self._in.flow_dir, node.resume_role_file, variables, allowed=allowed)
+            if node.resume_role_file is not None
+            and self._continues_own_session(node, ctx, route, run_id, session_id)
+            else None
         )
         output_schema = (
             json.loads(node.output_schema)
@@ -793,6 +798,7 @@ class AgentNodeRunner:
             reasoning=node.reasoning,
             extra_args=list(node.extra_args),
             session_id=session_id,
+            continuation_prompt=continuation_prompt,
             resume_baseline_output_tokens=resume_baseline_output_tokens,
             # Network is a per-node override on top of the flow-wide default: the node's
             # ``network_access`` wins (a node-level grant works even in a flow with no
@@ -809,6 +815,38 @@ class AgentNodeRunner:
             # Defense-in-depth: the Core-owned advisory security contract, threaded via
             # NodeServices; the neutral seam prepends it to the effective prompt.
             security_preamble=self._s.security_preamble,
+        )
+
+    def _continues_own_session(
+        self,
+        node: AgentNode,
+        ctx: NodeContext,
+        route: ResolvedRoute,
+        run_id: int,
+        session_id: str | None,
+    ) -> bool:
+        """Whether this node has already stated its role on the session being resumed.
+
+        Not "is a session being resumed": an ``editing_lineage`` node keys its lineage by its
+        ``lineage_affinity`` target, so ``fixing`` inherits the conversation ``implementation``
+        opened without having said a word in it — and answering the easier question would strip its
+        rules from the one round that needs them. The provider asked about is ``route.primary``
+        because that is the only provider a resumed session can belong to here: the lineage read
+        refuses a row from another one, and an explicitly passed session is dropped on a mismatch.
+
+        What it proves is "this node completed a run under that provider on this unit", which is
+        one step short of "on that exact session": the two facts are written a few lines apart in
+        :meth:`_invoke`, and a run that records the first and then raises before the second can
+        leave them disagreeing. That needs a new session AND a raise inside the gap, and the cost
+        is a shorter prompt on one turn.
+
+        The store is asked only after the node is known to declare a second prompt, so a flow that
+        declares none never issues the query.
+        """
+        if session_id is None:
+            return False
+        return self._s.store.has_prior_provider_run(
+            ctx.task_id, node.id, ctx.subtask_order, route.primary.value, exclude_run_id=run_id
         )
 
     def _prompt_variables(self, ctx: NodeContext, node: AgentNode) -> dict[str, object | None]:
@@ -842,11 +880,9 @@ class AgentNodeRunner:
         path = self._in.predecessor_context_path
         if path is None:
             return None
-        try:
-            template = read_role_file(self._in.flow_dir, node.role_file)
-        except RoleFileError:
-            return None
-        if "{predecessor_context}" not in template and "{?predecessor_context}" not in template:
+        if not references_variable(
+            self._in.flow_dir, (node.role_file, node.resume_role_file), "predecessor_context"
+        ):
             return None
         return path
 
@@ -870,11 +906,9 @@ class AgentNodeRunner:
         builder = self._s.packet_builder
         if builder is None:  # memory disabled — no store, empty variable, unchanged behavior
             return None
-        try:
-            template = read_role_file(self._in.flow_dir, node.role_file)
-        except RoleFileError:
-            return None  # render_role_prompt surfaces the real read error
-        if "{memory_path}" not in template and "{?memory_path}" not in template:
+        if not references_variable(
+            self._in.flow_dir, (node.role_file, node.resume_role_file), "memory_path"
+        ):
             return None
         # This task's changed paths (per-task chain base), not the whole shared branch's, so
         # the packet's path-overlap ranking stays relevant on a chain branch.
