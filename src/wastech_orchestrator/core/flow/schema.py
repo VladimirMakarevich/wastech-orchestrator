@@ -53,6 +53,15 @@ class AgentNode:
     id: str
     kind: Literal["agent"]
     role_file: str
+    #: optional second role file, used only on a turn that CONTINUES a session this node has
+    #: already spoken on — a loop re-entry, a renewed turn grant, a delivered human answer. It is
+    #: an ordinary role file (same flow-dir containment, same renderer, same variable set) selected
+    #: on a different turn, so the full text is stated once per session instead of every round.
+    #: The runner decides *whether* a turn may be a continuation; the provider seam decides whether
+    #: the attempt actually is one, from the same field that decides the resume argv — so an
+    #: attempt whose session was dropped gets the full text back. ``None`` keeps today's behavior
+    #: byte for byte. Requires ``editing_lineage``: no other scope resumes across node runs.
+    resume_role_file: str | None = None
     session_scope: SessionScope = SessionScope.FRESH_DISPOSABLE
     lineage_affinity: str | None = None
     permission_profile: PermissionProfile | None = None  # None → resolved from flow ceiling
@@ -99,6 +108,11 @@ class EvaluatorNode:
     kind: Literal["evaluator"]
     role: str
     role_file: str
+    #: optional second role file for a continuation turn (see :class:`AgentNode`). Here it requires
+    #: ``resume_own_lineage``: the evaluator's session is keyed by its own id and written only by
+    #: its own successful pass, so a live session already means this role has spoken on it — no
+    #: further check is needed, and none of the affinity ambiguity of an author node applies.
+    resume_role_file: str | None = None
     session_scope: SessionScope = SessionScope.FRESH_DISPOSABLE
     permission_profile: PermissionProfile = PermissionProfile.READ_ONLY  # const per schema
     #: per-node override of the flow-wide network grant (see :class:`AgentNode`); ``None`` inherits

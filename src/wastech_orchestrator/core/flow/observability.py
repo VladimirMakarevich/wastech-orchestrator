@@ -24,7 +24,12 @@ from typing import TYPE_CHECKING, Protocol
 
 from wastech_orchestrator.core.flow.usage_accounting import compute_usage_delta
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
-from wastech_orchestrator.providers.base import AgentRunResult, NormalizedUsage
+from wastech_orchestrator.providers.base import (
+    AgentRunRequest,
+    AgentRunResult,
+    NormalizedUsage,
+    build_effective_prompt,
+)
 from wastech_orchestrator.providers.redaction import redact_text
 from wastech_orchestrator.routing.router import ProviderAttempt, ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import ProviderAttemptRow
@@ -50,7 +55,7 @@ def record_run_observability(
     node_id: str,
     subtask: int | None,
     run_id: int,
-    prompt: str,
+    request: AgentRunRequest,
     route: ResolvedRoute,
     outcome: StageOutcome,
     configured_model: str | None,
@@ -60,6 +65,12 @@ def record_run_observability(
     baseline_session_id: str | None = None,
 ) -> None:
     """Record provider attempts + (when wired) the rendered prompt and the prompt-audit step.
+
+    Takes the *request* rather than a finished prompt string because the two artifacts below want
+    different texts, and deriving them apart is how they drift: ``rendered-prompt.md`` keeps its
+    documented meaning (the text this run was launched with), while the audit record holds the
+    node's full text plus its continuation text, so a reader can see both regardless of which one
+    the run selected. The seam renders each, so nothing here restates how the choice is made.
 
     ``usage_baseline`` / ``baseline_session_id`` are the resumed session's previous cumulative usage
     and the session it belongs to; the runner reads them from the lineage row (or, for an in-process
@@ -87,7 +98,7 @@ def record_run_observability(
         task_id=task_id,
         node_id=node_id,
         run_id=run_id,
-        prompt=prompt,
+        prompt=build_effective_prompt(request),
         secrets=services.prompt_secrets,
         register=register,
     )
@@ -98,7 +109,12 @@ def record_run_observability(
             node_id=node_id,
             subtask=subtask,
             run_id=run_id,
-            prompt=prompt,
+            prompt=build_effective_prompt(request, body=request.prompt),
+            continuation_prompt=(
+                build_effective_prompt(request, body=request.continuation_prompt)
+                if request.continuation_prompt is not None
+                else None
+            ),
             route=route,
             outcome=outcome,
             configured_model=configured_model,
@@ -242,6 +258,7 @@ def write_prompt_audit(
     started_at: str,
     secrets: tuple[str, ...],
     register: RegisterArtifact,
+    continuation_prompt: str | None = None,
 ) -> None:
     """Write one prompt-audit step (who + redacted prompt) and append it to the timeline.
 
@@ -259,6 +276,14 @@ def write_prompt_audit(
     with the attempt's ``request.json`` on every node that took a provider default. Each row in
     ``agents`` carries its own pair, so a stage that fell over to another provider does not report
     one model for two different CLIs.
+
+    ``continuation_prompt`` is the node's second text when it declares one — recorded beside
+    ``prompt`` (the full text) rather than in place of it, so the record holds both regardless of
+    which the run selected. Which one an attempt actually received is per attempt for the same
+    reason the model is: this record is built from the request the Core assembled, and an attempt
+    whose session the router dropped got the full text however the run began. ``resumed`` on each
+    row is that fact, and ``prompt_variant`` is stated only for a node that has two texts to
+    choose between.
     """
     audit_dir = task_artifact_dir(artifacts_root, task_id) / "prompt-audit"
     audit_dir.mkdir(parents=True, exist_ok=True)
@@ -273,6 +298,12 @@ def write_prompt_audit(
             "finished_at": attempt.result.finished_at if attempt.result else None,
             "model": attempt.model,
             "reasoning": attempt.reasoning,
+            "resumed": attempt.resumed,
+            **(
+                {"prompt_variant": "continuation" if attempt.resumed else "full"}
+                if continuation_prompt is not None
+                else {}
+            ),
         }
         for attempt in outcome.attempts
     ]
@@ -290,6 +321,11 @@ def write_prompt_audit(
         "started_at": started_at,
         "agents": agents,
         "prompt": redact_text(prompt, extra_secrets=secrets),
+        **(
+            {"continuation_prompt": redact_text(continuation_prompt, extra_secrets=secrets)}
+            if continuation_prompt is not None
+            else {}
+        ),
     }
     sub = f"-sub{subtask:02d}" if subtask is not None else ""
     title = f"{node_id} — run {run_id:06d}" + (f" — subtask {subtask:02d}" if sub else "")
@@ -302,17 +338,36 @@ def write_prompt_audit(
     register(task_id, "prompt_audit_timeline", str(timeline_path))
 
 
+#: Record keys whose value is a prompt, and therefore belongs in the document body rather than in
+#: the metadata block — the whole point of the Markdown step file. A node with a
+#: ``resume_role_file`` has two of them, and the second must not slide back into the JSON, where
+#: every newline would be an escaped ``\n`` again.
+_PROMPT_KEYS: tuple[tuple[str, str], ...] = (
+    ("prompt", "Prompt"),
+    ("continuation_prompt", "Continuation prompt"),
+)
+
+
 def _render_step(record: Mapping[str, object], *, title: str) -> str:
     """Render one prompt-audit record as the readable step document.
 
-    Metadata goes into a fenced ``json`` block (still copy-pasteable into a parser); the prompt
-    follows as ordinary Markdown body text. The prompt is written last and unescaped, so a prompt
-    that contains its own fences or headings cannot break anything above it.
+    Metadata goes into a fenced ``json`` block (still copy-pasteable into a parser); each prompt
+    the record carries follows as ordinary Markdown body text under its own heading. The prompts
+    are written last and unescaped, so one that contains its own fences or headings cannot break
+    anything above it.
     """
-    meta = {key: value for key, value in record.items() if key != "prompt"}
-    prompt = str(record.get("prompt", "")).rstrip("\n")
+    meta = {
+        key: value
+        for key, value in record.items()
+        if key not in {name for name, _heading in _PROMPT_KEYS}
+    }
+    body = "".join(
+        f"## {heading}\n\n{str(record[key]).rstrip(chr(10))}\n\n"
+        for key, heading in _PROMPT_KEYS
+        if record.get(key) is not None
+    )
     return (
         f"# {title}\n\n"
         f"```json\n{json.dumps(meta, indent=2, ensure_ascii=False)}\n```\n\n"
-        f"## Prompt\n\n{prompt}\n"
+        f"{body.rstrip()}\n"
     )

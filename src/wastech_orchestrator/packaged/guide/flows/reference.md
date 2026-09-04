@@ -72,7 +72,7 @@ A third member of the same warn-and-continue family, on the evaluator side: an e
 
 ### `defaults.evaluator`
 
-Applied to any evaluator node that omits the field. Keys: `session_scope` (default `fresh_disposable`), `permission_profile` (default `read-only`), `max_rework_per_stage` (default `1`), `gate_severity` (built-in default `high`). Use it to avoid repeating the same evaluator settings across many evaluator nodes — `deep_research` sets `gate_severity: medium` here, which covers all three of its evaluators (`coverage_gate`, `fact_verification`, `critical_review`) at once.
+Applied to any evaluator node that omits the field. Keys: `session_scope` (default `fresh_disposable`), `permission_profile` (default `read-only`), `max_rework_per_stage` (default `1`), `gate_severity` (built-in default `high`). `resume_role_file` is deliberately **not** among them: a prompt file belongs to one node, and a flow-wide default that quietly hands the same second prompt to every evaluator would be worse than repeating it. Use it to avoid repeating the same evaluator settings across many evaluator nodes — `deep_research` sets `gate_severity: medium` here, which covers all three of its evaluators (`coverage_gate`, `fact_verification`, `critical_review`) at once.
 
 ### `decomposition`
 
@@ -104,6 +104,7 @@ Every node has an `id` (unique; see reserved ids below) and a `kind`. The six ki
 | Field | Type / values | Default | Constraint | Meaning |
 | --- | --- | --- | --- | --- |
 | `role_file` | string | required | Flow-dir-relative; no `..`/absolute. | The node's prompt file, under this flow's own folder. |
+| `resume_role_file` | string \| null | `null` | Same containment as `role_file`. Requires `session_scope: editing_lineage` (fatal otherwise) — no other scope resumes a session between node runs. | A second, short prompt for a turn that **continues** a session this node has already spoken on: a loop re-entry, a renewed turn grant, a delivered human answer. Absent, the node is re-sent its whole `role_file` every round. The orchestrator decides, never the model — and an attempt whose session was dropped gets the full text back. See [roles.md](roles.md#when-a-node-re-enters-a-live-session-resume_role_file). |
 | `session_scope` | `fresh_disposable` \| `editing_lineage` \| `resume_own_lineage` | `fresh_disposable` | — | Session intent: fresh each pass, a durable editing session, or its own resumable session. Resuming re-sends the session's full history each turn (input tokens grow), so prefer `fresh_disposable` between unrelated stages. |
 | `lineage_affinity` | string \| null | `null` | Target must be an `editing_lineage` owner with no affinity of its own (one hop; no cross-provider). | Join another editing node's session (e.g. `fixing` joins `implementation`). |
 | `permission_profile` | `read-only` \| `workspace-write` \| null | `null` → resolved from the flow ceiling | Must be `<= permission_ceiling`. | This node's filesystem access. Grant `workspace-write` only to nodes that edit. |
@@ -138,6 +139,7 @@ Neither is a relevance test. To make a node optional per task, disable it in the
 | --- | --- | --- | --- | --- |
 | `role` | string | required | Built-ins `review` / `critic` / `verifier` / `test_quality`; other strings get default evaluator behavior. | The evaluator's lens (see [roles.md](roles.md)). |
 | `role_file` | string | required | Flow-dir-relative; no `..`. | The evaluator's prompt. |
+| `resume_role_file` | string \| null | `null` | as agent, but requires `session_scope: resume_own_lineage` (fatal otherwise). | The continuation prompt for a multi-round evaluator (see the agent row). Its session is its own, so round 1 always gets the full text and every later round the short one. |
 | `session_scope` | `fresh_disposable` \| `resume_own_lineage` | `fresh_disposable` (or `defaults.evaluator`) | **Never `editing_lineage`** (fatal). | An evaluator never joins an author's editing session. |
 | `permission_profile` | `read-only` | `read-only` | **Forced read-only** (fatal otherwise). | Evaluators never write. |
 | `network_access` | bool \| null | `null` (inherit) | — | Per-node network override. |
@@ -203,7 +205,7 @@ Allowed `outcome` values by source kind: **evaluator** `{accept, rework}`; **che
 ## Validation (what `validate-flow` checks — all fatal, all collected)
 
 1. **Graph integrity** — edges resolve; outcomes are legal for the source kind; every `rework`/`fail` edge is bounded; named loops are declared in `budgets`; exactly one entry node (no incoming edges); full forward reachability; at least one terminal and every node reaches one; `lineage_affinity` is valid; decomposition references resolve and its `sub_flow` region is connected (an edge from `proposed_by` into it, and a forward exit edge out of it).
-2. **Security ceiling** — evaluators forced `read-only` and never `editing_lineage`; every agent `permission_profile <= permission_ceiling`; `git_evidence` rejected on a `workspace-write` agent node; `extra_args` pass the forbidden-args scan; all `role_file` / supervisor prompt paths are flow-dir-contained.
+2. **Security ceiling** — evaluators forced `read-only` and never `editing_lineage`; every agent `permission_profile <= permission_ceiling`; `git_evidence` rejected on a `workspace-write` agent node; `extra_args` pass the forbidden-args scan; all `role_file` / `resume_role_file` / supervisor prompt paths are flow-dir-contained; a `resume_role_file` is declared only where a session is actually resumed (`editing_lineage` on an agent, `resume_own_lineage` on an evaluator).
 3. **Config-aware** (when a config is loaded) — every `provider` is in `agents.allowed`; `reasoning` is valid for the resolved provider; a Codex `workspace-write` node never also has network (not checked under `security.strict_isolation: false`, which grants both to every node by definition); the ceiling is satisfiable by some allowed provider; `supervisor.observe.mode` is no broader than the config's (rank `none < events < selected < all`; skipped entirely when `supervisor.enabled` is false — there is then no cadence to widen); every `tool` name resolves in `.worc/tools/`.
 
 Non-fatal: a `budgets` value above a config cap (the engine clamps to the min), a PR-publishing flow with no git configured (runs local-commit mode), and the prompt-variable anti-drift lint (warns on a `{name}` no node populates).

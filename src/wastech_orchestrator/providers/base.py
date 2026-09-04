@@ -225,6 +225,14 @@ class AgentRunRequest:
     extra_args: list[str] = field(default_factory=list)
     reasoning: str | None = None
     session_id: str | None = None
+    # The node's continuation prompt, rendered by Core when this turn MAY continue a session the
+    # node has already spoken on. Honored only while ``session_id`` is live, and that pairing is
+    # the whole point: the router drops the session after Core built the request and without
+    # touching the text (session-unavailable retry, transient degrade, cross-provider fallback), so
+    # only here — one field of one request object, the same one that decides the resume argv — is
+    # the choice still true per attempt. ``None`` (a node that declares no second prompt, or a turn
+    # that cannot be a continuation) sends ``prompt``, which is today's behavior byte for byte.
+    continuation_prompt: str | None = None
     # The resumed session's previous cumulative output-token count, for the no-work guard only.
     # Set by the orchestrator only when ``session_id`` resumes a cumulative-scope session; the guard
     # subtracts it so a resumed run that produced no NEW output is recognized (a cumulative
@@ -292,15 +300,35 @@ def build_context_footer(request: AgentRunRequest) -> str:
     return "\n".join(lines)
 
 
-def build_effective_prompt(request: AgentRunRequest) -> str:
+def uses_continuation(request: AgentRunRequest) -> bool:
+    """Whether this attempt sends the node's continuation prompt instead of its full one.
+
+    The single definition of that choice. Both the seam below and the observability layer — which
+    has to report which text an attempt received — read it here rather than each restating
+    ``session_id and continuation_prompt``: two copies of one rule is how the recorded model and
+    reasoning came to disagree with what a fallback attempt actually ran on.
+    """
+    return request.session_id is not None and request.continuation_prompt is not None
+
+
+def build_effective_prompt(request: AgentRunRequest, *, body: str | None = None) -> str:
     """Combine the orchestrator security preamble, the Core-assembled prompt, and the footer.
 
     Order in the single stdin channel: ``preamble → prompt → footer``. A ``None``/empty
     preamble or footer is omitted, so an unset preamble yields today's output byte-for-byte. Pure
     text concatenation — no CLI syntax; the preamble content is built in Core and carried on the
     request.
+
+    Which of the node's two texts is used follows :func:`uses_continuation`. *body* overrides that
+    choice with a text of the caller's own, so the audit can render the variant this attempt did
+    **not** get through the one function that assembles preamble + body + footer; it is never
+    passed on a launch path.
     """
-    body = request.prompt
+    if body is None:
+        body = request.prompt
+        continuation = request.continuation_prompt
+        if continuation is not None and uses_continuation(request):
+            body = continuation
     if request.security_preamble:
         body = f"{request.security_preamble}\n\n{body}"
     footer = build_context_footer(request)

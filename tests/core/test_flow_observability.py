@@ -300,3 +300,107 @@ def test_record_provider_attempts_persists_per_run_delta() -> None:
     assert row.usage_reasoning_output == 131
     assert row.usage_delta_status == "ok"
     assert row.provider_usage_raw == '{"input_tokens":282699}'
+
+
+def _degraded_outcome() -> StageOutcome:
+    """A stage that opened on a live session and then lost it — the case the flag exists for."""
+    settled = _result("codex", RunStatus.SUCCEEDED)
+    attempts = (
+        ProviderAttempt(
+            provider=ProviderId.CODEX,
+            attempt=1,
+            status=None,
+            error_class=ErrorClass.SESSION_UNAVAILABLE,
+            result=None,
+            model="gpt-5.5",
+            reasoning="xhigh",
+            resumed=True,
+        ),
+        ProviderAttempt(
+            provider=ProviderId.CODEX,
+            attempt=2,
+            status=RunStatus.SUCCEEDED,
+            error_class=None,
+            result=settled,
+            model="gpt-5.5",
+            reasoning="xhigh",
+            resumed=False,
+        ),
+    )
+    return StageOutcome(
+        route=_route(),
+        result=settled,
+        provider_used=ProviderId.CODEX,
+        stage_attempts=2,
+        terminal_error=None,
+        attempts=attempts,
+    )
+
+
+def test_prompt_audit_names_the_variant_each_attempt_received(tmp_path: Path) -> None:
+    # The record is built from the request the Core assembled, so a stage-level answer would say
+    # "continuation" for an attempt that was handed the full text after its session was dropped.
+    calls: list[tuple[str, str, str]] = []
+    write_prompt_audit(
+        artifacts_root=str(tmp_path),
+        task_id="task-1",
+        node_id="fixing",
+        subtask=None,
+        run_id=7,
+        prompt="FULL TEXT",
+        continuation_prompt="CONTINUATION TEXT",
+        route=_route(),
+        outcome=_degraded_outcome(),
+        configured_model=None,
+        configured_reasoning=None,
+        started_at="t0",
+        secrets=(),
+        register=_register(calls),
+    )
+    audit_dir = task_artifact_dir(tmp_path, "task-1") / "prompt-audit"
+    step_text = (audit_dir / "000007-fixing.md").read_text(encoding="utf-8")
+    record = _step_metadata(step_text)
+
+    assert [(a["attempt"], a["resumed"], a["prompt_variant"]) for a in record["agents"]] == [
+        (1, True, "continuation"),
+        (2, False, "full"),
+    ]
+    # Both texts, once each, and both as document body: a prompt inside the JSON header would read
+    # as one flat line of escaped newlines, which is what the Markdown step file exists to avoid.
+    assert "prompt" not in record and "continuation_prompt" not in record
+    assert "## Prompt\n\nFULL TEXT" in step_text
+    assert "## Continuation prompt\n\nCONTINUATION TEXT" in step_text
+    # The machine-readable half still carries the whole record.
+    timeline = json.loads((audit_dir / "timeline.jsonl").read_text("utf-8").splitlines()[0])
+    assert timeline["prompt"] == "FULL TEXT"
+    assert timeline["continuation_prompt"] == "CONTINUATION TEXT"
+
+
+def test_prompt_audit_omits_the_variant_for_a_node_with_one_text(tmp_path: Path) -> None:
+    # Most nodes have nothing to choose between; the record does not grow a key that would always
+    # say the same thing.
+    calls: list[tuple[str, str, str]] = []
+    write_prompt_audit(
+        artifacts_root=str(tmp_path),
+        task_id="task-1",
+        node_id="implementation",
+        subtask=None,
+        run_id=8,
+        prompt="only text",
+        route=_route(),
+        outcome=_outcome(),
+        configured_model=None,
+        configured_reasoning=None,
+        started_at="t0",
+        secrets=(),
+        register=_register(calls),
+    )
+    audit_dir = task_artifact_dir(tmp_path, "task-1") / "prompt-audit"
+    step_text = (audit_dir / "000008-implementation.md").read_text(encoding="utf-8")
+    record = _step_metadata(step_text)
+    assert all("prompt_variant" not in agent for agent in record["agents"])
+    assert [agent["resumed"] for agent in record["agents"]] == [False, False]
+    # One prompt, one body section — the document does not grow an empty second heading.
+    assert "## Continuation prompt" not in step_text
+    timeline = json.loads((audit_dir / "timeline.jsonl").read_text("utf-8").splitlines()[0])
+    assert "continuation_prompt" not in timeline

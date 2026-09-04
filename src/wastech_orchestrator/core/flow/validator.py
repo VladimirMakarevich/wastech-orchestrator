@@ -10,8 +10,9 @@ one pass:
      references valid.
   2. **Security ceiling** — evaluator always ``read-only`` and never ``editing_lineage``; every
      agent ``permission_profile`` ≤ ``permission_ceiling``; ``extra_args`` pass
-     :func:`~wastech_orchestrator.security.forbidden_args.find_forbidden_args`; ``role_file``
-     paths contain no traversal (``..`` or absolute).
+     :func:`~wastech_orchestrator.security.forbidden_args.find_forbidden_args`; ``role_file`` and
+     ``resume_role_file`` paths contain no traversal (``..`` or absolute); a ``resume_role_file``
+     is declared only where a session is actually resumed.
 
 :func:`validate_flow_against_config` is the **config-aware** third layer: it needs the
 ``OrchestratorConfig`` (node providers ∈ ``agents.allowed``; node reasoning is valid for the
@@ -421,7 +422,24 @@ def _check_ceiling(snap: FlowSnapshot) -> list[Violation]:
                         "(evaluator must not inherit the author workspace context)"
                     )
                 )
+            if (
+                node.resume_role_file is not None
+                and node.session_scope is not SessionScope.RESUME_OWN_LINEAGE
+            ):
+                # Only a node that resumes a session can take a continuation prompt, and an
+                # evaluator resumes exactly one: its own. Rejected rather than ignored, for the
+                # reason git_evidence is below — a field that silently does nothing reads as
+                # protection.
+                errs.append(
+                    c(
+                        f"evaluator {node.id!r}: resume_role_file requires session_scope "
+                        "resume_own_lineage (nothing resumes a fresh_disposable evaluator, so the "
+                        "second prompt could never be selected)"
+                    )
+                )
             _check_path(node.id, node.role_file, errs)
+            if node.resume_role_file is not None:
+                _check_path(node.id, node.resume_role_file, errs, "resume_role_file")
 
         if isinstance(node, AgentNode):
             if node.permission_profile is not None and not is_same_or_stricter(
@@ -453,7 +471,23 @@ def _check_ceiling(snap: FlowSnapshot) -> list[Violation]:
                         "or set permission_profile: read-only)"
                     )
                 )
+            if (
+                node.resume_role_file is not None
+                and node.session_scope is not SessionScope.EDITING_LINEAGE
+            ):
+                # An author node resumes across node runs only through the editing lineage; every
+                # other scope hands the runner no session, so the second prompt would be dead
+                # weight the operator believes is working.
+                errs.append(
+                    c(
+                        f"agent {node.id!r}: resume_role_file requires session_scope "
+                        "editing_lineage (no other scope resumes a session between node runs, so "
+                        "the second prompt could never be selected)"
+                    )
+                )
             _check_path(node.id, node.role_file, errs)
+            if node.resume_role_file is not None:
+                _check_path(node.id, node.resume_role_file, errs, "resume_role_file")
 
     # Flow-local supervisor prompt files are flow-dir-contained, exactly like a node role_file: a
     # path that escapes the flow directory is fatal (prompt-and-supervisor authoring contract).
@@ -470,11 +504,11 @@ def _check_ceiling(snap: FlowSnapshot) -> list[Violation]:
     return errs
 
 
-def _check_path(node_id: str, path: str, errs: list[Violation]) -> None:
+def _check_path(node_id: str, path: str, errs: list[Violation], field: str = "role_file") -> None:
     parts = path.replace("\\", "/").split("/")
     if ".." in parts or path.startswith("/"):
         errs.append(
-            Violation("ceiling", f"node {node_id!r}: role_file {path!r} contains path traversal")
+            Violation("ceiling", f"node {node_id!r}: {field} {path!r} contains path traversal")
         )
 
 
@@ -624,7 +658,8 @@ class PromptVarWarning:
 
 
 def lint_prompt_variables(snapshot: FlowSnapshot) -> list[PromptVarWarning]:
-    """Scan every node role file for ``{name}`` / ``{?name}`` tokens outside the flow's valid-set.
+    """Scan every node role file — and its continuation prompt, when it declares one — for
+    ``{name}`` / ``{?name}`` tokens outside the flow's valid-set.
 
     The valid-set is **flow-derived**, matching each node's real effective allowlist: an **agent**
     or **evaluator** node is checked against :func:`~.prompt_vars.valid_prompt_vars` (core allowlist
@@ -658,15 +693,21 @@ def lint_prompt_variables(snapshot: FlowSnapshot) -> list[PromptVarWarning]:
         allowed = (
             flow_allowed if isinstance(node, AgentNode | EvaluatorNode) else ALLOWED_PROMPT_VARS
         )
-        try:
-            template = read_role_file(flow_dir, role_file)
-        except RoleFileError:
-            continue  # unreadable/traversing — surfaced by the fatal path check / at run time
-        for token in sorted(referenced_variables(template)):
-            if token in allowed or (role_file, token) in seen:
+        # A node's continuation prompt renders the same variable set on the same node, so a typo
+        # there reaches the agent as verbatim placeholder text exactly as one in the main template
+        # would. Scanned under its own filename, which is what the warning names.
+        for template_file in (role_file, getattr(node, "resume_role_file", None)):
+            if not isinstance(template_file, str):
                 continue
-            seen.add((role_file, token))
-            warnings.append(PromptVarWarning(role_file=role_file, token=token))
+            try:
+                template = read_role_file(flow_dir, template_file)
+            except RoleFileError:
+                continue  # unreadable/traversing — surfaced by the fatal path check / at run time
+            for token in sorted(referenced_variables(template)):
+                if token in allowed or (template_file, token) in seen:
+                    continue
+                seen.add((template_file, token))
+                warnings.append(PromptVarWarning(role_file=template_file, token=token))
     # The flow-local supervisor prompts (observe / finalize / handoff lenses) are role files too,
     # but the supervisor populates only ``_SUPERVISOR_PROMPT_VARS`` — so a node-allowlist variable
     # there renders verbatim just the same. Scan them against that tiny set.
