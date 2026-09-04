@@ -4504,3 +4504,32 @@ def test_another_subtasks_rounds_do_not_count_as_this_units(tmp_path: Path) -> N
 
     first = _run_agent(fixing, store, tmp_path, "s2", ctx=_subtask_ctx(fixing, order=2))
     assert first.continuation_prompt is None
+
+
+def test_a_renewed_turn_grant_continues_instead_of_restarting(tmp_path: Path) -> None:
+    # The sharpest of the three re-entries: an agent that merely ran out of turns was being handed
+    # "Implement the assigned task…" again, which reads as "start over" inside its own conversation.
+    # It now gets the short text — and only on the second call, because on the first it had said
+    # nothing yet.
+    from dataclasses import replace
+
+    from wastech_orchestrator.notify import AskResult
+
+    (tmp_path / "r.md").write_text("implement the task", "utf-8")
+    (tmp_path / "r.continue.md").write_text("carry on where you stopped", "utf-8")
+    node = replace(
+        _gate_node(),
+        resume_role_file="r.continue.md",
+        session_scope=SessionScope.EDITING_LINEAGE,
+    )
+    router = _GateRouter([_max_turns_result(), _result({"content": "done"})])
+    notifier = FakeNotifier(AskResult(answered=True, approved=True))
+    services = _gate_services(tmp_path, router, FakeStore(), notifier)
+
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+    assert result.outcome.kind == "done"
+    assert router.calls == 2
+    assert router.requests[0].continuation_prompt is None  # first turn: the whole brief
+    assert router.requests[1].session_id == "sess-1"
+    assert router.requests[1].continuation_prompt == "carry on where you stopped"
