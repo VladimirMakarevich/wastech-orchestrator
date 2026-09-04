@@ -577,6 +577,20 @@ def isolation_reasons(config: ProviderConfig) -> list[str]:
     return reasons
 
 
+def default_host_system() -> str:
+    """The host platform name Codex's offline floor answer keys on (``platform.system()``).
+
+    A module-level seam mirroring :func:`~wastech_orchestrator.providers.claude`'s
+    ``default_sandbox_probe``, and it exists for the same reason: ``host_floor_gap`` is bound into
+    the composition table at import time and is thereafter reachable only through the one-argument
+    :class:`~wastech_orchestrator.security.isolation.HostFloorCheck` protocol, which has nowhere to
+    put an injected host. Reading the host through a name the deterministic suite can pin — rather
+    than calling ``platform.system()`` inline — is what keeps a suite assertion about the floor from
+    becoming a property of the machine running it.
+    """
+    return platform.system()
+
+
 def host_floor_gap(*, strict_isolation: bool, system: str | None = None) -> str | None:
     """What this host cannot be shown to enforce for Codex, or ``None`` when it can be.
 
@@ -597,10 +611,11 @@ def host_floor_gap(*, strict_isolation: bool, system: str | None = None) -> str 
     and false of Codex, and this parameter is in the signature so a future reader cannot mistake
     silence here for the question not having been asked.
 
-    ``system`` is injectable for the deterministic suite; it defaults to the real host.
+    ``system`` is injectable for the deterministic suite; it defaults to the real host through
+    :func:`default_host_system`, which callers that cannot reach this parameter pin instead.
     """
     del strict_isolation  # see above: Codex's floor does not move with the mode
-    if (system if system is not None else platform.system()) != "Windows":
+    if (system if system is not None else default_host_system()) != "Windows":
         return None
     return (
         "native Windows: whether the Codex sandbox can enforce here is decided by the CLI's "

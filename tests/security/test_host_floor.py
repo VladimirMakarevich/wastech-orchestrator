@@ -264,3 +264,20 @@ def test_a_codex_only_fleet_on_windows_gets_a_floor_line(base_config: Orchestrat
 def test_the_bound_table_carries_both_providers() -> None:
     # The composition table is what production uses; a missing entry is silence, not a default.
     assert set(HOST_FLOOR_CHECKS) == {ProviderId.CLAUDE, ProviderId.CODEX}
+
+
+def test_the_live_table_answers_the_same_on_every_host_the_suite_runs_on(
+    base_config: OrchestratorConfig,
+) -> None:
+    """The real table, uninjected, must not make an assertion's arity a property of the runner.
+
+    Every test that reads ``HOST_FLOOR_CHECKS`` without injecting a host inherits whatever the
+    machine says, and that is not hypothetical: three floor tests asserted a single line, passed on
+    macOS and Linux, and failed only on the native-Windows runner, where the real Codex probe
+    contributed a second one. The suite pins both provider hosts in one autouse fixture so the live
+    table is deterministic; this is the guard on that promise, and it fails on Windows the moment
+    either half of the pin is dropped.
+    """
+    lines = describe_host_floor(_with_strict(base_config, False), HOST_FLOOR_CHECKS)
+    assert len(lines) == 1 and lines[0].startswith("claude: the advanced mode")
+    assert describe_host_floor(_with_strict(base_config, True), HOST_FLOOR_CHECKS) == ()
