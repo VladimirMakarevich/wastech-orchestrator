@@ -951,6 +951,16 @@ def build_claude_argv(
 
     profile = request.permission_profile or config.permission_profile or _DEFAULT_PROFILE
     advanced_mode = not strict_isolation
+    if request.required_skills and strict_isolation:
+        # Defence in depth over the flow validator's rule. Under strict isolation ``--tools`` is a
+        # hard existence gate carrying the profile baseline only, so ``Skill`` does not exist for
+        # the session and the node would silently skip the operator's tested step. Refused here too
+        # because the validator is config-aware and this builder is the last thing before a launch.
+        raise ProviderError(
+            ErrorClass.CONFIGURATION_ERROR,
+            f"required skills {list(request.required_skills)} need security.strict_isolation: "
+            "false; the Skill tool does not exist for a strictly isolated session",
+        )
     probe = sandbox_probe if sandbox_probe is not None else default_sandbox_probe
     plan = resolve_claude_tools(
         profile,
@@ -1009,6 +1019,17 @@ def build_claude_argv(
         # alone (:attr:`ClaudeToolPlan.allowed_tools`), so it still exists for the session but only
         # the matching invocations run.
         argv += ["--allowedTools", ",".join(plan.allowed_tools)]
+    if not request.allow_skills:
+        # The node's skills off-switch. ``--disable-slash-commands`` is the CLI's own ("Disable
+        # all skills"), and a probe against the pinned binary showed it is a hard existence gate,
+        # not friction: with it the session reports no ``Skill`` tool and an empty skill list. It
+        # is emitted at every value of ``strict_isolation`` — a flow may always narrow, and under
+        # strict isolation ``--tools`` already withholds ``Skill``, so this only restates the floor
+        # there. ``Skill`` is deliberately NOT added to ``--allowedTools`` in the other direction:
+        # the same probe showed a headless ``acceptEdits`` run invokes it without being asked, so
+        # allow-listing it would buy nothing. What this stops is invocation only — a node with a
+        # shell can still read a ``SKILL.md`` and follow it as text, which the shipped docs say.
+        argv += ["--disable-slash-commands"]
     denied_tools = _disallowed_tools(
         profile=profile,
         advanced_mode=advanced_mode,

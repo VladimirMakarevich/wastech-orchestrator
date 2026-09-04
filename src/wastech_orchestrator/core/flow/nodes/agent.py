@@ -36,6 +36,7 @@ from wastech_orchestrator.core.flow.context_paths import (
 from wastech_orchestrator.core.flow.contracts import (
     PermissionProfile,
     SessionScope,
+    resolve_allow_skills,
     resolve_git_evidence,
     resolve_network_access,
 )
@@ -505,6 +506,8 @@ class AgentNodeRunner:
                 route_fallback=route.fallback.value if route.fallback else None,
                 route_source=route.source.value,
                 started_at=started_at,
+                skills_allowed=resolve_allow_skills(node.allow_skills, node.skills),
+                skills_required=node.skills,
             )
         )
         session_id, baseline, baseline_session_id = self._resolve_resume(
@@ -815,6 +818,12 @@ class AgentNodeRunner:
             # Defense-in-depth: the Core-owned advisory security contract, threaded via
             # NodeServices; the neutral seam prepends it to the effective prompt.
             security_preamble=self._s.security_preamble,
+            # The repository's own harness skills this node must invoke, and whether it may invoke
+            # any at all. Names go to the neutral seam as a Core-built prompt block (never through
+            # the role renderer, which stays path-only); the resolved switch decides whether each
+            # adapter emits its per-attempt off-switch. Skills are off unless the flow asked.
+            required_skills=node.skills,
+            allow_skills=resolve_allow_skills(node.allow_skills, node.skills),
         )
 
     def _continues_own_session(

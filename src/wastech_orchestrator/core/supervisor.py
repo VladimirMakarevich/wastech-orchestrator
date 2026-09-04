@@ -1085,6 +1085,10 @@ class Supervisor:
                     # (a phase that pins nothing) no longer empties the record's model field.
                     configured_model=request.model,
                     configured_reasoning=reasoning,
+                    # The supervisor is not a graph node and declares no skills, so this records
+                    # the off posture every supervisor turn actually runs with.
+                    skills_allowed=request.allow_skills,
+                    skills_required=request.required_skills,
                     started_at=outcome.result.started_at,
                     secrets=self._prompt_secrets,
                     register=self._register_artifact,

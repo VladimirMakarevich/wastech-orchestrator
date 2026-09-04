@@ -77,6 +77,28 @@ class AgentNode:
     #: verbs cannot mutate, the sandbox write-denies the clone, and publishing stays the
     #: orchestrator's.
     git_evidence: bool | None = None
+    #: the target repository's OWN harness skills this node must invoke, by name
+    #: (``<repo>/.claude/skills/<name>/SKILL.md``, which must exist — the flow is refused if it
+    #: does not). Legal only under ``security.strict_isolation: false``: under strict isolation
+    #: ``--tools`` is a hard existence gate carrying the profile baseline, so the ``Skill`` tool
+    #: does not exist for the session at all and a declaration there is a validation error rather
+    #: than something accepted and inert. Declaring names turns skills ON for the node (see
+    #: ``allow_skills``) and appends a Core-built block naming them to the effective prompt; that
+    #: block also states that the security preamble and the role prompt win over anything a skill
+    #: says. The skills themselves are ordinary repository files the CLI discovers and reads by
+    #: itself: they are NOT frozen into the task's control bundle, and a writing node can change
+    #: one mid-run.
+    skills: tuple[str, ...] = ()
+    #: whether this node may invoke skills at all — tri-state like ``network_access``. ``None``
+    #: (default) resolves from ``skills``: a node that declares no skill runs with the provider's
+    #: own per-attempt off-switch emitted (Claude ``--disable-slash-commands``, Codex
+    #: ``--disable skill_search``), so a flow gets what it asked for and nothing else. ``True``
+    #: turns skills on without requiring any particular one — an error under
+    #: ``security.strict_isolation: true``, where the mode cannot give it; an absent key is not a
+    #: request and is never an error. ``False`` refuses every skill and is legal at every value of
+    #: that switch, because a flow may always narrow. It cannot be combined with ``skills``: neither
+    #: CLI offers "these skills and no others", so the switch is all-or-nothing per node.
+    allow_skills: bool | None = None
     #: which provider runs this node; None → the config's global primary. Validated against
     #: ``agents.allowed`` at preflight; never relaxes the security ceiling.
     provider: ProviderId | None = None
