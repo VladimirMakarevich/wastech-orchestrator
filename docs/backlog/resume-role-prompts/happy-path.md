@@ -11,7 +11,7 @@ Three inputs decide every row below, all resolved before the provider is launche
 | Input | Source |
 | --- | --- |
 | `session_id` — is a session being resumed? | `_resolve_resume` → `_resume_lineage`: the `editing_lineage` row for `(task, lineage_key, subtask)` whose `provider` matches the resolved route |
-| has this node spoken on it? | a prior `node_runs` row for `(task, node_id, subtask)` with `provider_used` = that provider |
+| has this node spoken on it? | a prior `node_runs` row for `(task, node_id, subtask)` with `provider_used` = that provider. Agent nodes only: an evaluator's `node_lineage` row is written by nobody but itself, so a live session already answers this |
 | does the node offer a second text? | `resume_role_file` on the node |
 
 ## The sequence
@@ -93,8 +93,21 @@ request = AgentRunRequest(
 body = request.continuation_prompt if (request.session_id and request.continuation_prompt) else request.prompt
 ```
 
+On an evaluator the third clause drops: its session comes from `node_lineage`, which only that node writes, so `session_id is not None` already carries "has spoken here".
+
 Core decides what _may_ be a continuation; the seam decides whether this attempt actually is one. Rendering the second template costs a file read and a regex pass, and only for a node that declares one.
 
 ## Verifying it on a real run
 
-With the top-level `prompt_audit: true` (or the same key on the task) the run writes `prompt-audit/timeline.jsonl` plus a per-node-run prompt file. On the walk-through above the signature is: `fixing` run 1 at full length, runs 2 and 3 visibly shorter, `documentation` at full length again, and — on any run that shows a fallback or a session retry — that attempt back at full length. Anything else means the predicate is wrong, not the wording.
+With the top-level `prompt_audit: true` (or the same key on the task) the run writes `prompt-audit/timeline.jsonl` plus a per-node-run prompt file. The record carries both texts once and names the variant **per attempt** — it has to, because the node-level record is built from the request Core assembled, and an attempt the router degraded never received it:
+
+```json
+"prompt": "<full fixing.md>",
+"continuation_prompt": "<continuation text>",
+"agents": [
+  { "provider": "codex", "attempt": 1, "resumed": true,  "prompt_variant": "continuation", "error_class": "session_unavailable" },
+  { "provider": "codex", "attempt": 2, "resumed": false, "prompt_variant": "full" }
+]
+```
+
+On the walk-through above the signature is: `fixing` run 1 with no `continuation_prompt` at all, runs 2 and 3 carrying one with every attempt at `continuation`, `documentation` back to none, and any run that fell back or retried fresh showing `prompt_variant: full` on exactly that attempt. Anything else means the predicate is wrong, not the wording.
