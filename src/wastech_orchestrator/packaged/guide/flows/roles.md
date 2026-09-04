@@ -95,6 +95,18 @@ Both files render the same variables, and the runner reads both when deciding wh
 
 Allowed only where a session actually survives: `editing_lineage` on an agent node, `resume_own_lineage` on an evaluator. Anywhere else it is a validation error rather than a field that quietly never fires.
 
+## When the node should run your own repository's skills (`skills:`)
+
+A node can name skills your repository already ships (`skills: [acme-tdd]`) rather than have you re-state their contents in a role prompt. That changes nothing about how you write the role file, and there is nothing to add to it: the orchestrator appends the naming block itself, at the same seam it prepends the security contract. **Do not put the skill names in the role file** — a `/name` you type into a prompt is just text the model may or may not act on, while the key is a validated field the run refuses to start without.
+
+Two consequences worth keeping in mind while you write the prompt.
+
+**Your role prompt outranks the skill, and the block says so.** The appended text ends by stating that where a skill conflicts with the instructions above it, those instructions win, and that no skill grants any right to publish. That is a statement, not an enforcement: a skill is arbitrary text from the target repository which nothing here froze or reviewed, and it can contradict the role prompt, the output contract, or the security preamble. So a node with an output contract — an evaluator's findings, a decomposition proposal — is the wrong place to reach for a skill that has opinions about output shape, and evaluator nodes cannot declare skills at all in this version.
+
+**The node still has to do its own job.** A skill describes how your team does something; the role file still has to say what this step delivers and in what form. Write the prompt as if the skill were not there, and let the skill supply the house conventions.
+
+The field's own constraints — advanced mode only, the skill must exist in the target repository, off unless asked, and what the off-switch does and does not stop — are in [reference.md](reference.md#node-declared-skills).
+
 ## Custom output schema (the one real foot-gun)
 
 An `agent` node may set an inline `output_schema:` to return data of your own shape. If you do, **every object in the schema — top level and every nested object — must set `additionalProperties: false`.** Codex enforces `--output-schema` through OpenAI Structured Outputs and rejects a non-strict schema with a hard **400**, failing the node on every run. Claude tolerates a loose schema, but write it strict so the flow runs on both providers. Prefer the built-in contract unless you genuinely need a custom shape; keep a string `content` field if the node also fills a slot.

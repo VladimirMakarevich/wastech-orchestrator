@@ -17,7 +17,9 @@ one pass:
 :func:`validate_flow_against_config` is the **config-aware** third layer: it needs the
 ``OrchestratorConfig`` (node providers ∈ ``agents.allowed``; node reasoning is valid for the
 resolved provider; Codex never receives a write-enabled node with network access;
-``permission_ceiling`` ≤ a configured provider's capability). It is kept separate so
+``permission_ceiling`` ≤ a configured provider's capability; node-declared ``skills`` and an
+explicit ``allow_skills: true`` are refused under ``security.strict_isolation: true``, and every
+declared skill name resolves to a file in the target repository). It is kept separate so
 :func:`validate_flow` stays unit-testable without a config, and so the layers (graph / ceiling /
 config) never mix in one signature. The :class:`~.registry.FlowRegistry` calls it after
 :func:`validate_flow`; both raise :class:`FlowValidationError`.
@@ -41,6 +43,7 @@ and before any provider launch. Together the three layers form the fatal gate.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 from wastech_orchestrator.config.schema import OrchestratorConfig
@@ -56,6 +59,7 @@ from wastech_orchestrator.core.flow.schema import (
     REWORK_OUTCOMES,
     AgentNode,
     EvaluatorNode,
+    FlowDoc,
     ToolNode,
 )
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
@@ -116,9 +120,11 @@ def validate_flow_against_config(
     configured provider can reach, a flow-local ``supervisor.observe.mode`` broader than the
     operator's global cadence (unless ``supervisor.enabled`` is false — there is then no cadence to
     widen), a ``tool`` node naming an unregistered executable (when a
-    :class:`~.tools_registry.ToolRegistry` is supplied), or a node whose ``extra_args`` select a
-    provider full-access mode — refused at **every** value of ``security.strict_isolation``, since
-    there is no opt-in to it and never was one at this layer. Security can only ever *narrow* here.
+    :class:`~.tools_registry.ToolRegistry` is supplied), an agent node asking for skills under
+    ``security.strict_isolation: true`` or naming one that is not in the target repository, or a
+    node whose ``extra_args`` select a provider full-access mode — refused at **every** value of
+    ``security.strict_isolation``, since there is no opt-in to it and never was one at this layer.
+    Security can only ever *narrow* here.
     (Flow ``budgets`` and ``publishing`` are handled by graceful runtime degradation, not here — see
     the module docstring.)
 
@@ -515,6 +521,54 @@ def _check_path(node_id: str, path: str, errs: list[Violation], field: str = "ro
 # -- config consistency -------------------------------------------------------
 
 
+def _check_node_skills(doc: FlowDoc, config: OrchestratorConfig) -> list[Violation]:
+    """The three node-skill rules: two mode refusals, and the fail-closed name resolution.
+
+    Split out because it is the one config-aware check that reads the **target working tree** rather
+    than the config or the control plane, and folding a filesystem probe into the provider/reasoning
+    loop would hide that. Names resolve against ``<repo>/.claude/skills/<name>/SKILL.md`` — v1 is
+    deliberately the target repository only, not the operator's ``~/.claude/skills``, because
+    reaching those would mean loading their user-global hooks, MCP servers and plugins into every
+    run for a small gain. A name that does not resolve is refused before any launch: a run that
+    silently skipped the operator's tested step is worse than one that refused to start.
+    """
+    errs: list[Violation] = []
+    strict = config.security.strict_isolation
+    skills_root = Path(config.repo.local_path) / ".claude" / "skills"
+    for node in doc.nodes:
+        if not isinstance(node, AgentNode):
+            continue
+        if strict and node.skills:
+            errs.append(
+                Violation(
+                    "config",
+                    f"node {node.id!r}: 'skills' requires security.strict_isolation: false — under "
+                    "strict isolation the Skill tool does not exist for the session, so the node "
+                    "would silently skip the step (drop the key, or switch the mode)",
+                )
+            )
+        if strict and node.allow_skills is True:
+            errs.append(
+                Violation(
+                    "config",
+                    f"node {node.id!r}: 'allow_skills: true' requires "
+                    "security.strict_isolation: false — the mode cannot grant it (drop the key: "
+                    "omitting it is not a request and is never an error)",
+                )
+            )
+        for name in node.skills:
+            expected = skills_root / name / "SKILL.md"
+            if not expected.is_file():
+                errs.append(
+                    Violation(
+                        "config",
+                        f"node {node.id!r}: skill {name!r} not found "
+                        f"(expected {expected.as_posix()})",
+                    )
+                )
+    return errs
+
+
 def _check_config_consistency(
     snap: FlowSnapshot, config: OrchestratorConfig, tools: ToolRegistry | None = None
 ) -> list[Violation]:
@@ -579,6 +633,18 @@ def _check_config_consistency(
                     "network_access: false"
                 )
             )
+
+    # 1b. Node-declared skills, and why the two refusals are conditional on the mode while the
+    #     off-switch never is. Under ``security.strict_isolation: true`` the ``Skill`` tool does not
+    #     exist for the session — ``--tools`` is a hard existence gate carrying the profile baseline
+    #     only — so a node asking for skills there is asking for something this config cannot give.
+    #     It is refused rather than accepted-and-inert (the ``git_evidence`` precedent is
+    #     deliberately not followed): an inert ``git_evidence`` costs a node one read-only
+    #     convenience, whereas an inert ``skills`` silently deletes the step's whole point, and the
+    #     run would look like it did the operator's tested procedure without having done it. An
+    #     *absent* ``allow_skills`` is not a request and is never an error, which is what the
+    #     tri-state buys; ``false`` narrows and is legal at every value of the switch.
+    errs += _check_node_skills(doc, config)
 
     # 2. permission_ceiling ≤ a configured provider's capability: at least one allowed provider must
     #    be able to operate at the ceiling, else no node clamped to the ceiling could ever run.

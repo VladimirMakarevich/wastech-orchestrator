@@ -512,3 +512,80 @@ def test_recovery_ceiling_only_narrows(tmp_path: Path) -> None:
     tightened = _config(tmp_path, claude_profile="read-only", codex_profile="read-only")
     with pytest.raises(FlowValidationError):
         FlowRegistry(operator_flows_dir=flows_dir, config=tightened).resolve("t")
+
+
+# =============================================================================
+# Node-declared skills: a flow may narrow, never widen (config-aware)
+# =============================================================================
+
+
+def _with_skill(tmp_path: Path, name: str = "acme-tdd") -> None:
+    """Create the target repository's skill so a declaration resolves fail-closed."""
+    skill = tmp_path / ".claude" / "skills" / name
+    skill.mkdir(parents=True, exist_ok=True)
+    (skill / "SKILL.md").write_text("---\nname: acme-tdd\ndescription: d\n---\n", newline="")
+
+
+def test_threat_skills_declared_under_strict_isolation_fatal(tmp_path: Path) -> None:
+    # Under strict isolation `--tools` is a hard existence gate carrying the profile baseline, so
+    # `Skill` does not exist for the session. Refused rather than accepted-and-inert: an inert
+    # `skills` would let a run report success having silently skipped the operator's tested step.
+    _with_skill(tmp_path)
+    vs = _config_violations(
+        _flow(extra="skills: [acme-tdd]"), _config(tmp_path, strict_isolation=True), tmp_path
+    )
+    assert _has(vs, "config", "'skills' requires security.strict_isolation: false")
+
+
+def test_threat_explicit_allow_skills_true_under_strict_isolation_fatal(tmp_path: Path) -> None:
+    # The quieter half of the same widening: asking for skills without naming one.
+    vs = _config_violations(
+        _flow(extra="allow_skills: true"), _config(tmp_path, strict_isolation=True), tmp_path
+    )
+    assert _has(vs, "config", "'allow_skills: true' requires security.strict_isolation: false")
+
+
+def test_an_absent_allow_skills_is_never_a_violation(tmp_path: Path) -> None:
+    # Silence is not a request. Refusing a flow for omitting a key would refuse every flow ever
+    # written, at both values of the switch — which is the whole reason the field is tri-state.
+    for strict in (True, False):
+        validate_flow_against_config(
+            _snap(_flow(), tmp_path), _config(tmp_path, strict_isolation=strict)
+        )
+
+
+def test_allow_skills_false_is_legal_at_either_isolation_value(tmp_path: Path) -> None:
+    # A narrowing needs no mode gate: `false` is legal wherever `strict_isolation` lands.
+    for strict in (True, False):
+        validate_flow_against_config(
+            _snap(_flow(extra="allow_skills: false"), tmp_path),
+            _config(tmp_path, strict_isolation=strict),
+        )
+
+
+def test_skills_accepted_in_advanced_mode_when_the_skill_exists(tmp_path: Path) -> None:
+    _with_skill(tmp_path)
+    validate_flow_against_config(
+        _snap(_flow(extra="skills: [acme-tdd]"), tmp_path),
+        _config(tmp_path, strict_isolation=False),
+    )
+
+
+def test_threat_declared_skill_missing_from_the_repo_is_fatal(tmp_path: Path) -> None:
+    # Fail-closed name resolution, before any launch and before any side effect: a run that
+    # silently skipped the operator's tested step is worse than one that refused to start. The
+    # message names the node, the skill and the path it looked at, so the fix needs no guessing.
+    vs = _config_violations(
+        _flow(extra="skills: [acme-tdd]"), _config(tmp_path, strict_isolation=False), tmp_path
+    )
+    expected = (tmp_path / ".claude" / "skills" / "acme-tdd" / "SKILL.md").as_posix()
+    assert _has(vs, "config", f"node 'work': skill 'acme-tdd' not found (expected {expected})")
+
+
+def test_a_skills_directory_without_a_skill_file_is_fatal(tmp_path: Path) -> None:
+    # The directory alone is not the skill: the CLI reads SKILL.md, so that is what must exist.
+    (tmp_path / ".claude" / "skills" / "acme-tdd").mkdir(parents=True)
+    vs = _config_violations(
+        _flow(extra="skills: [acme-tdd]"), _config(tmp_path, strict_isolation=False), tmp_path
+    )
+    assert _has(vs, "config", "skill 'acme-tdd' not found")

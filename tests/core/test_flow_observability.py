@@ -118,6 +118,8 @@ def test_write_prompt_audit_step_timeline_who_metadata_and_redaction(tmp_path: P
         outcome=_outcome(),
         configured_model=None,  # the node pins neither — the trial's shape for every node but one
         configured_reasoning=None,
+        skills_allowed=False,
+        skills_required=(),
         started_at="t0",
         secrets=("TOKEN_ABC123",),
         register=_register(calls),
@@ -353,6 +355,8 @@ def test_prompt_audit_names_the_variant_each_attempt_received(tmp_path: Path) ->
         outcome=_degraded_outcome(),
         configured_model=None,
         configured_reasoning=None,
+        skills_allowed=False,
+        skills_required=(),
         started_at="t0",
         secrets=(),
         register=_register(calls),
@@ -391,6 +395,8 @@ def test_prompt_audit_omits_the_variant_for_a_node_with_one_text(tmp_path: Path)
         outcome=_outcome(),
         configured_model=None,
         configured_reasoning=None,
+        skills_allowed=False,
+        skills_required=(),
         started_at="t0",
         secrets=(),
         register=_register(calls),
@@ -404,3 +410,30 @@ def test_prompt_audit_omits_the_variant_for_a_node_with_one_text(tmp_path: Path)
     assert "## Continuation prompt" not in step_text
     timeline = json.loads((audit_dir / "timeline.jsonl").read_text("utf-8").splitlines()[0])
     assert "continuation_prompt" not in timeline
+
+
+def test_prompt_audit_records_the_declared_skill_posture(tmp_path: Path) -> None:
+    # `skills_allowed` is the fact that is nowhere in the prompt — it rides a CLI flag, not text —
+    # so without it the audit could not answer whether the node could invoke a skill at all.
+    calls: list[tuple[str, str, str]] = []
+    write_prompt_audit(
+        artifacts_root=str(tmp_path),
+        task_id="task-1",
+        node_id="implementation",
+        subtask=None,
+        run_id=9,
+        prompt="p",
+        route=_route(),
+        outcome=_outcome(),
+        configured_model=None,
+        configured_reasoning=None,
+        skills_allowed=True,
+        skills_required=("acme-tdd",),
+        started_at="t0",
+        secrets=(),
+        register=_register(calls),
+    )
+    audit_dir = task_artifact_dir(tmp_path, "task-1") / "prompt-audit"
+    record = _step_metadata((audit_dir / "000009-implementation.md").read_text(encoding="utf-8"))
+    assert record["skills_allowed"] is True
+    assert record["skills_required"] == ["acme-tdd"]

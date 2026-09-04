@@ -523,6 +523,17 @@ def build_codex_argv(
         # In the advanced mode every attempt is online, which is also why the validator rule
         # forbidding a Codex workspace-write node with network does not apply there.
         argv += ["-c", 'web_search="disabled"']
+    if not request.allow_skills:
+        # The node's skills off-switch, deliberately emitted HERE and not folded into
+        # ``_isolation_argv``'s feature list: that list is emptied wholesale in the advanced mode,
+        # which is the one mode where skills are reachable, so the flag would vanish exactly where
+        # it is needed. Kept under strict isolation too — ``--ignore-user-config`` plus an untrusted
+        # project is not established to stop host skill discovery (``skip_host_skill_discovery``
+        # exists as its own feature flag, which suggests it does not), and a flow may always narrow.
+        # ``skill_search`` is validated against the live binary; an unknown feature name is a parse
+        # error, so a typo here cannot pass silently. Codex has no flag that *names* a skill, so
+        # this is the only skills argv it gets: the requiring direction is prompt-only there.
+        argv += ["--disable", "skill_search"]
     if output_schema_path is not None:
         argv += ["--output-schema", output_schema_path]
     # Durable session resume: ``codex exec [exec-options] resume <SESSION_ID>`` continues the

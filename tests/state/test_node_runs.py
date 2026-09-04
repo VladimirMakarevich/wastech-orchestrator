@@ -250,3 +250,41 @@ def test_continue_keeps_the_history_a_full_rerun_clears(tmp_path: Path) -> None:
 
     store.reset_task_for_rerun("t1")
     assert not store.has_prior_provider_run("t1", "fixing", None, "codex", exclude_run_id=0)
+
+
+def test_declared_skills_survive_the_roundtrip(tmp_path: Path) -> None:
+    # The durable half of "which skills did this node have": recorded when the row is reserved,
+    # before the node runs, because it is the declared posture rather than an observation — neither
+    # CLI reports back which skill actually fired.
+    store = _store(tmp_path)
+    store.record_node_run(
+        NodeRunRow(
+            task_id="t1",
+            node_id="implementation",
+            node_kind="agent",
+            skills_allowed=True,
+            skills_required=("acme-tdd", "acme-implement"),
+        )
+    )
+    row = store.get_node_runs("t1")[0]
+    assert row.skills_allowed is True
+    # Author order, not sorted: it is the order the prompt block names them in.
+    assert row.skills_required == ("acme-tdd", "acme-implement")
+
+
+def test_a_node_that_declared_no_skills_records_the_off_posture(tmp_path: Path) -> None:
+    store = _store(tmp_path)
+    store.record_node_run(NodeRunRow(task_id="t1", node_id="review", node_kind="evaluator"))
+    row = store.get_node_runs("t1")[0]
+    assert row.skills_allowed is False and row.skills_required == ()
+
+
+def test_skills_allowed_without_required_names_is_distinguishable(tmp_path: Path) -> None:
+    # `allow_skills: true` with no `skills:` is a real state — skills on, none required — and the
+    # record has to keep it apart from "off", which a names-only column could not.
+    store = _store(tmp_path)
+    store.record_node_run(
+        NodeRunRow(task_id="t1", node_id="work", node_kind="agent", skills_allowed=True)
+    )
+    row = store.get_node_runs("t1")[0]
+    assert row.skills_allowed is True and row.skills_required == ()

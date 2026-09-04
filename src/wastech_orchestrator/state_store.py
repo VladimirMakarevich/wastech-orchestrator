@@ -38,7 +38,7 @@ def _utc_now_iso() -> str:
 # in place is beyond an additive-only migration, and with no production data anywhere the honest
 # answer is to recreate the local ``state.db`` rather than run on a shape the code does not match
 # (see :func:`_enforce_schema_version`).
-DB_SCHEMA_VERSION = 25
+DB_SCHEMA_VERSION = 26
 
 
 class IncompatibleStateError(Exception):
@@ -255,7 +255,9 @@ CREATE TABLE IF NOT EXISTS node_runs (
     started_at TEXT,
     finished_at TEXT,
     skipped INTEGER NOT NULL DEFAULT 0,
-    skip_reason TEXT
+    skip_reason TEXT,
+    skills_allowed INTEGER NOT NULL DEFAULT 0,
+    skills_required TEXT
 );
 
 CREATE TABLE IF NOT EXISTS provider_attempts (
@@ -462,6 +464,13 @@ class NodeRunRow:
     finished_at: str | None = None
     skipped: bool = False
     skip_reason: str | None = None
+    #: whether this node run was allowed to invoke skills at all, and which of the target
+    #: repository's skills it was required to invoke. The declared posture, not an observation:
+    #: neither CLI reports back which skill actually fired, so a finished run answers "what did
+    #: this node have" from state rather than from inference. Empty/false on every node kind that
+    #: cannot declare them.
+    skills_allowed: bool = False
+    skills_required: tuple[str, ...] = ()
     id: int | None = None
 
 
@@ -956,8 +965,8 @@ class StateStore:
                     task_id, node_id, node_kind, subtask_order, status, outcome,
                     route_primary, route_fallback, route_source, provider_used, error_class,
                     stage_attempts, commit_sha_before, commit_sha_after, started_at, finished_at,
-                    skipped, skip_reason
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    skipped, skip_reason, skills_allowed, skills_required
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     run.task_id,
@@ -978,6 +987,8 @@ class StateStore:
                     run.finished_at,
                     1 if run.skipped else 0,
                     run.skip_reason,
+                    1 if run.skills_allowed else 0,
+                    _encode_skills(run.skills_required),
                 ),
             )
             return int(cur.lastrowid or 0)
@@ -1830,6 +1841,18 @@ def _provider_attempt_from_row(row: sqlite3.Row) -> ProviderAttemptRow:
     )
 
 
+def _encode_skills(names: tuple[str, ...]) -> str | None:
+    """Encode a node run's declared skill names for storage; ``None`` when it declared none."""
+    return json.dumps(list(names)) if names else None
+
+
+def _decode_skills(raw: str | None) -> tuple[str, ...]:
+    """Decode the stored skill names, tolerating the ``NULL`` a node that declared none writes."""
+    if not raw:
+        return ()
+    return tuple(str(name) for name in json.loads(raw))
+
+
 def _node_run_from_row(row: sqlite3.Row) -> NodeRunRow:
     return NodeRunRow(
         task_id=row["task_id"],
@@ -1850,6 +1873,8 @@ def _node_run_from_row(row: sqlite3.Row) -> NodeRunRow:
         finished_at=row["finished_at"],
         skipped=bool(row["skipped"]),
         skip_reason=row["skip_reason"],
+        skills_allowed=bool(row["skills_allowed"]),
+        skills_required=_decode_skills(row["skills_required"]),
         id=row["id"],
     )
 

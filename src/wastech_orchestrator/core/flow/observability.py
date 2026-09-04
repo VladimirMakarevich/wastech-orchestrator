@@ -119,6 +119,8 @@ def record_run_observability(
             outcome=outcome,
             configured_model=configured_model,
             configured_reasoning=configured_reasoning,
+            skills_allowed=request.allow_skills,
+            skills_required=request.required_skills,
             started_at=started_at,
             secrets=services.prompt_secrets,
             register=register,
@@ -255,6 +257,8 @@ def write_prompt_audit(
     outcome: StageOutcome,
     configured_model: str | None,
     configured_reasoning: str | None,
+    skills_allowed: bool,
+    skills_required: tuple[str, ...],
     started_at: str,
     secrets: tuple[str, ...],
     register: RegisterArtifact,
@@ -276,6 +280,12 @@ def write_prompt_audit(
     with the attempt's ``request.json`` on every node that took a provider default. Each row in
     ``agents`` carries its own pair, so a stage that fell over to another provider does not report
     one model for two different CLIs.
+
+    ``skills_allowed`` / ``skills_required`` are the node's declared skill posture. Declared, not
+    observed, and there is no effective counterpart to pair them with the way ``model`` has one:
+    neither CLI reports back which skill actually fired. ``skills_allowed`` is the fact worth
+    recording here — it is nowhere in the prompt, since it is carried by a CLI flag rather than by
+    text, so without it the audit could not say whether a node could invoke a skill at all.
 
     ``continuation_prompt`` is the node's second text when it declares one — recorded beside
     ``prompt`` (the full text) rather than in place of it, so the record holds both regardless of
@@ -318,6 +328,8 @@ def write_prompt_audit(
         "reasoning": settled.reasoning if settled else None,
         "model_configured": configured_model,
         "reasoning_configured": configured_reasoning,
+        "skills_allowed": skills_allowed,
+        "skills_required": list(skills_required),
         "started_at": started_at,
         "agents": agents,
         "prompt": redact_text(prompt, extra_secrets=secrets),

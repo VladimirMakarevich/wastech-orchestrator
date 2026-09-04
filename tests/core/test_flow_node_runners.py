@@ -4533,3 +4533,63 @@ def test_a_renewed_turn_grant_continues_instead_of_restarting(tmp_path: Path) ->
     assert router.requests[0].continuation_prompt is None  # first turn: the whole brief
     assert router.requests[1].session_id == "sess-1"
     assert router.requests[1].continuation_prompt == "carry on where you stopped"
+
+
+def test_declared_skills_reach_both_the_request_and_the_node_run(tmp_path: Path) -> None:
+    # The two carriers R6 names, filled from one node: the request (which the neutral seam turns
+    # into the prompt block, and each adapter into its off-switch) and the reserved node-run row,
+    # written before the node executes because it is the declared posture, not an observation.
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(
+        id="work",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+        skills=("acme-tdd",),
+    )
+    router, store = FakeRouter(_result()), FakeStore()
+    services = _services(router, store, FakeCheckRunner(CheckOutcome(passed=True, runs=())))
+    AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+    assert router.requests[0].required_skills == ("acme-tdd",)
+    # Naming a skill is itself the request: the node never wrote `allow_skills`.
+    assert router.requests[0].allow_skills is True
+    assert store.recorded[0].skills_required == ("acme-tdd",)
+    assert store.recorded[0].skills_allowed is True
+
+
+def test_a_node_that_declares_nothing_runs_with_skills_off(tmp_path: Path) -> None:
+    # The shipped default, and the one every packaged flow's node takes: a step the flow did not
+    # ask for cannot fire on a description written in the target repository.
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(
+        id="work",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
+    router, store = FakeRouter(_result()), FakeStore()
+    services = _services(router, store, FakeCheckRunner(CheckOutcome(passed=True, runs=())))
+    AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+    assert router.requests[0].allow_skills is False
+    assert router.requests[0].required_skills == ()
+    assert store.recorded[0].skills_allowed is False
+
+
+def test_allow_skills_true_without_names_turns_them_on(tmp_path: Path) -> None:
+    # "Use your own harness however you see fit" — skills on, none required, so no prompt block.
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(
+        id="work",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+        allow_skills=True,
+    )
+    router, store = FakeRouter(_result()), FakeStore()
+    services = _services(router, store, FakeCheckRunner(CheckOutcome(passed=True, runs=())))
+    AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+    assert router.requests[0].allow_skills is True
+    assert router.requests[0].required_skills == ()
