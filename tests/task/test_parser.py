@@ -169,6 +169,25 @@ def test_prompt_audit_round_trips(tmp_path: Path, value: bool | None) -> None:
     assert load_normalized(tmp_path, "task-001").prompt_audit is value
 
 
+@pytest.mark.parametrize("value", ["fix", "docs", None])
+def test_commit_type_round_trips(tmp_path: Path, value: str | None) -> None:
+    # Restart-safety with a longer reach than the others: ``merge-task`` reads the type back from
+    # this file long after the run, so a lost value would land the squash commit on the base branch
+    # under the wrong Conventional-Commits type.
+    task = NormalizedTask(id="task-001", title="T", description="Do it", commit_type=value)
+    write_normalized(task, tmp_path)
+    assert load_normalized(tmp_path, "task-001").commit_type == value
+
+
+@pytest.mark.parametrize("value", ["strict", "auto", None])
+def test_trust_level_round_trips(tmp_path: Path, value: str | None) -> None:
+    # This one was NOT persisted: a resumed task lost its per-task ``strict`` and fell back to the
+    # instance default, relaxing the dangerous-diff approval threshold across a restart.
+    task = NormalizedTask(id="task-001", title="T", description="Do it", trust_level=value)
+    write_normalized(task, tmp_path)
+    assert load_normalized(tmp_path, "task-001").trust_level == value
+
+
 @pytest.mark.parametrize("value", [True, False, None])
 def test_decomposition_round_trips(tmp_path: Path, value: bool | None) -> None:
     # Restart-safety: a resumed task must keep its exact decomposition tri-state, or a crash before

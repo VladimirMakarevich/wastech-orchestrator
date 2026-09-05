@@ -42,6 +42,7 @@ flow:
     - id: fixing
       kind: agent
       role_file: merge/fixing.md
+      resume_role_file: merge/fixing.continue.md
       session_scope: editing_lineage
       lineage_affinity: conflict_resolution
       permission_profile: workspace-write

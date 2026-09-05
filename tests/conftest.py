@@ -19,29 +19,35 @@ import pytest
 from wastech_orchestrator.config.loader import loads_config
 from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.providers import claude as _claude
+from wastech_orchestrator.providers import codex as _codex
 
 _FAKE_AGENT = Path(__file__).resolve().parent / "fakes" / "fake_agent.py"
 
 
 @pytest.fixture(autouse=True)
-def _assume_bash_sandbox_available(monkeypatch: pytest.MonkeyPatch) -> None:
+def _assume_a_sandbox_capable_host(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make the deterministic suite host-independent by assuming a sandbox-capable host.
 
-    The Claude Bash-sandbox capability depends on the real host (macOS Seatbelt / a Linux+WSL2 with
-    bubblewrap+socat), so a bwrap-less CI would otherwise flag every workspace-write
-    ``isolation_reasons``
-    / ``check_isolation`` / provider run. The deterministic suite cannot prove the real host
-    boundary
-    anyway (no real Claude) — the real proof is the native-Windows CI gate — so we pin the default
-    probe
-    to "available"; the platform-branch tests inject a concrete ``SandboxCapability`` to
-    exercise the native-Windows / missing-deps branches.
+    **Both** providers, because both answer a host question and either one can make an assertion a
+    property of the machine running it. The Claude Bash-sandbox capability depends on the real host
+    (macOS Seatbelt / a Linux+WSL2 with bubblewrap+socat), so a bwrap-less CI would otherwise flag
+    every workspace-write ``isolation_reasons`` / ``check_isolation`` / provider run. Codex answers
+    a differently shaped question — on native Windows its sandbox availability is decided by an
+    elevated backend that cannot be classified offline — and an unpinned host there adds a second
+    ``isolation-floor: NONE`` line on the Windows runner alone, which is exactly how three
+    floor tests passed everywhere but there.
+
+    The deterministic suite cannot prove the real host boundary anyway (no real CLI) — the real
+    proof is the native-Windows CI gate — so both defaults are pinned to "capable"; the
+    platform-branch tests inject a concrete ``SandboxCapability`` / ``system`` to exercise the
+    native-Windows / missing-deps branches.
     """
     monkeypatch.setattr(
         _claude,
         "default_sandbox_probe",
         lambda *a, **k: _claude.SandboxCapability.LINUX_AVAILABLE,
     )
+    monkeypatch.setattr(_codex, "default_host_system", lambda: "Linux")
 
 
 @pytest.fixture

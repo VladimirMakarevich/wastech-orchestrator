@@ -10,13 +10,16 @@ one pass:
      references valid.
   2. **Security ceiling** — evaluator always ``read-only`` and never ``editing_lineage``; every
      agent ``permission_profile`` ≤ ``permission_ceiling``; ``extra_args`` pass
-     :func:`~wastech_orchestrator.security.forbidden_args.find_forbidden_args`; ``role_file``
-     paths contain no traversal (``..`` or absolute).
+     :func:`~wastech_orchestrator.security.forbidden_args.find_forbidden_args`; ``role_file`` and
+     ``resume_role_file`` paths contain no traversal (``..`` or absolute); a ``resume_role_file``
+     is declared only where a session is actually resumed.
 
 :func:`validate_flow_against_config` is the **config-aware** third layer: it needs the
 ``OrchestratorConfig`` (node providers ∈ ``agents.allowed``; node reasoning is valid for the
 resolved provider; Codex never receives a write-enabled node with network access;
-``permission_ceiling`` ≤ a configured provider's capability). It is kept separate so
+``permission_ceiling`` ≤ a configured provider's capability; node-declared ``skills`` and an
+explicit ``allow_skills: true`` are refused under ``security.strict_isolation: true``, and every
+declared skill name resolves to a file in the target repository). It is kept separate so
 :func:`validate_flow` stays unit-testable without a config, and so the layers (graph / ceiling /
 config) never mix in one signature. The :class:`~.registry.FlowRegistry` calls it after
 :func:`validate_flow`; both raise :class:`FlowValidationError`.
@@ -40,6 +43,7 @@ and before any provider launch. Together the three layers form the fatal gate.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Literal
 
 from wastech_orchestrator.config.schema import OrchestratorConfig
@@ -55,6 +59,7 @@ from wastech_orchestrator.core.flow.schema import (
     REWORK_OUTCOMES,
     AgentNode,
     EvaluatorNode,
+    FlowDoc,
     ToolNode,
 )
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
@@ -115,9 +120,11 @@ def validate_flow_against_config(
     configured provider can reach, a flow-local ``supervisor.observe.mode`` broader than the
     operator's global cadence (unless ``supervisor.enabled`` is false — there is then no cadence to
     widen), a ``tool`` node naming an unregistered executable (when a
-    :class:`~.tools_registry.ToolRegistry` is supplied), or a node whose ``extra_args`` select a
-    provider full-access mode — refused at **every** value of ``security.strict_isolation``, since
-    there is no opt-in to it and never was one at this layer. Security can only ever *narrow* here.
+    :class:`~.tools_registry.ToolRegistry` is supplied), an agent node asking for skills under
+    ``security.strict_isolation: true`` or naming one that is not in the target repository, or a
+    node whose ``extra_args`` select a provider full-access mode — refused at **every** value of
+    ``security.strict_isolation``, since there is no opt-in to it and never was one at this layer.
+    Security can only ever *narrow* here.
     (Flow ``budgets`` and ``publishing`` are handled by graceful runtime degradation, not here — see
     the module docstring.)
 
@@ -421,7 +428,24 @@ def _check_ceiling(snap: FlowSnapshot) -> list[Violation]:
                         "(evaluator must not inherit the author workspace context)"
                     )
                 )
+            if (
+                node.resume_role_file is not None
+                and node.session_scope is not SessionScope.RESUME_OWN_LINEAGE
+            ):
+                # Only a node that resumes a session can take a continuation prompt, and an
+                # evaluator resumes exactly one: its own. Rejected rather than ignored, for the
+                # reason git_evidence is below — a field that silently does nothing reads as
+                # protection.
+                errs.append(
+                    c(
+                        f"evaluator {node.id!r}: resume_role_file requires session_scope "
+                        "resume_own_lineage (nothing resumes a fresh_disposable evaluator, so the "
+                        "second prompt could never be selected)"
+                    )
+                )
             _check_path(node.id, node.role_file, errs)
+            if node.resume_role_file is not None:
+                _check_path(node.id, node.resume_role_file, errs, "resume_role_file")
 
         if isinstance(node, AgentNode):
             if node.permission_profile is not None and not is_same_or_stricter(
@@ -453,7 +477,23 @@ def _check_ceiling(snap: FlowSnapshot) -> list[Violation]:
                         "or set permission_profile: read-only)"
                     )
                 )
+            if (
+                node.resume_role_file is not None
+                and node.session_scope is not SessionScope.EDITING_LINEAGE
+            ):
+                # An author node resumes across node runs only through the editing lineage; every
+                # other scope hands the runner no session, so the second prompt would be dead
+                # weight the operator believes is working.
+                errs.append(
+                    c(
+                        f"agent {node.id!r}: resume_role_file requires session_scope "
+                        "editing_lineage (no other scope resumes a session between node runs, so "
+                        "the second prompt could never be selected)"
+                    )
+                )
             _check_path(node.id, node.role_file, errs)
+            if node.resume_role_file is not None:
+                _check_path(node.id, node.resume_role_file, errs, "resume_role_file")
 
     # Flow-local supervisor prompt files are flow-dir-contained, exactly like a node role_file: a
     # path that escapes the flow directory is fatal (prompt-and-supervisor authoring contract).
@@ -470,15 +510,63 @@ def _check_ceiling(snap: FlowSnapshot) -> list[Violation]:
     return errs
 
 
-def _check_path(node_id: str, path: str, errs: list[Violation]) -> None:
+def _check_path(node_id: str, path: str, errs: list[Violation], field: str = "role_file") -> None:
     parts = path.replace("\\", "/").split("/")
     if ".." in parts or path.startswith("/"):
         errs.append(
-            Violation("ceiling", f"node {node_id!r}: role_file {path!r} contains path traversal")
+            Violation("ceiling", f"node {node_id!r}: {field} {path!r} contains path traversal")
         )
 
 
 # -- config consistency -------------------------------------------------------
+
+
+def _check_node_skills(doc: FlowDoc, config: OrchestratorConfig) -> list[Violation]:
+    """The three node-skill rules: two mode refusals, and the fail-closed name resolution.
+
+    Split out because it is the one config-aware check that reads the **target working tree** rather
+    than the config or the control plane, and folding a filesystem probe into the provider/reasoning
+    loop would hide that. Names resolve against ``<repo>/.claude/skills/<name>/SKILL.md`` — v1 is
+    deliberately the target repository only, not the operator's ``~/.claude/skills``, because
+    reaching those would mean loading their user-global hooks, MCP servers and plugins into every
+    run for a small gain. A name that does not resolve is refused before any launch: a run that
+    silently skipped the operator's tested step is worse than one that refused to start.
+    """
+    errs: list[Violation] = []
+    strict = config.security.strict_isolation
+    skills_root = Path(config.repo.local_path) / ".claude" / "skills"
+    for node in doc.nodes:
+        if not isinstance(node, AgentNode):
+            continue
+        if strict and node.skills:
+            errs.append(
+                Violation(
+                    "config",
+                    f"node {node.id!r}: 'skills' requires security.strict_isolation: false — under "
+                    "strict isolation the Skill tool does not exist for the session, so the node "
+                    "would silently skip the step (drop the key, or switch the mode)",
+                )
+            )
+        if strict and node.allow_skills is True:
+            errs.append(
+                Violation(
+                    "config",
+                    f"node {node.id!r}: 'allow_skills: true' requires "
+                    "security.strict_isolation: false — the mode cannot grant it (drop the key: "
+                    "omitting it is not a request and is never an error)",
+                )
+            )
+        for name in node.skills:
+            expected = skills_root / name / "SKILL.md"
+            if not expected.is_file():
+                errs.append(
+                    Violation(
+                        "config",
+                        f"node {node.id!r}: skill {name!r} not found "
+                        f"(expected {expected.as_posix()})",
+                    )
+                )
+    return errs
 
 
 def _check_config_consistency(
@@ -545,6 +633,18 @@ def _check_config_consistency(
                     "network_access: false"
                 )
             )
+
+    # 1b. Node-declared skills, and why the two refusals are conditional on the mode while the
+    #     off-switch never is. Under ``security.strict_isolation: true`` the ``Skill`` tool does not
+    #     exist for the session — ``--tools`` is a hard existence gate carrying the profile baseline
+    #     only — so a node asking for skills there is asking for something this config cannot give.
+    #     It is refused rather than accepted-and-inert (the ``git_evidence`` precedent is
+    #     deliberately not followed): an inert ``git_evidence`` costs a node one read-only
+    #     convenience, whereas an inert ``skills`` silently deletes the step's whole point, and the
+    #     run would look like it did the operator's tested procedure without having done it. An
+    #     *absent* ``allow_skills`` is not a request and is never an error, which is what the
+    #     tri-state buys; ``false`` narrows and is legal at every value of the switch.
+    errs += _check_node_skills(doc, config)
 
     # 2. permission_ceiling ≤ a configured provider's capability: at least one allowed provider must
     #    be able to operate at the ceiling, else no node clamped to the ceiling could ever run.
@@ -624,7 +724,8 @@ class PromptVarWarning:
 
 
 def lint_prompt_variables(snapshot: FlowSnapshot) -> list[PromptVarWarning]:
-    """Scan every node role file for ``{name}`` / ``{?name}`` tokens outside the flow's valid-set.
+    """Scan every node role file — and its continuation prompt, when it declares one — for
+    ``{name}`` / ``{?name}`` tokens outside the flow's valid-set.
 
     The valid-set is **flow-derived**, matching each node's real effective allowlist: an **agent**
     or **evaluator** node is checked against :func:`~.prompt_vars.valid_prompt_vars` (core allowlist
@@ -658,15 +759,21 @@ def lint_prompt_variables(snapshot: FlowSnapshot) -> list[PromptVarWarning]:
         allowed = (
             flow_allowed if isinstance(node, AgentNode | EvaluatorNode) else ALLOWED_PROMPT_VARS
         )
-        try:
-            template = read_role_file(flow_dir, role_file)
-        except RoleFileError:
-            continue  # unreadable/traversing — surfaced by the fatal path check / at run time
-        for token in sorted(referenced_variables(template)):
-            if token in allowed or (role_file, token) in seen:
+        # A node's continuation prompt renders the same variable set on the same node, so a typo
+        # there reaches the agent as verbatim placeholder text exactly as one in the main template
+        # would. Scanned under its own filename, which is what the warning names.
+        for template_file in (role_file, getattr(node, "resume_role_file", None)):
+            if not isinstance(template_file, str):
                 continue
-            seen.add((role_file, token))
-            warnings.append(PromptVarWarning(role_file=role_file, token=token))
+            try:
+                template = read_role_file(flow_dir, template_file)
+            except RoleFileError:
+                continue  # unreadable/traversing — surfaced by the fatal path check / at run time
+            for token in sorted(referenced_variables(template)):
+                if token in allowed or (template_file, token) in seen:
+                    continue
+                seen.add((template_file, token))
+                warnings.append(PromptVarWarning(role_file=template_file, token=token))
     # The flow-local supervisor prompts (observe / finalize / handoff lenses) are role files too,
     # but the supervisor populates only ``_SUPERVISOR_PROMPT_VARS`` — so a node-allowlist variable
     # there renders verbatim just the same. Scan them against that tiny set.

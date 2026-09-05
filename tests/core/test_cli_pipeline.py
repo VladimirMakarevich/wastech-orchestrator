@@ -476,7 +476,7 @@ def test_watch_loop_refreshes_each_tick_and_sleeps_between(
     orch = _FakeOrch()
     ticks = {"n": 0}
 
-    def fake_watch_once(_o, _c, _f, *, queue=None):
+    def fake_watch_once(_o, _c, _f, *, queue=None, notes=None):
         ticks["n"] += 1
         return [_done(f"t{ticks['n']}")]
 
@@ -496,7 +496,7 @@ def test_watch_loop_single_pass_when_poll_zero(
 ) -> None:
     config = make_git_config(git_repo.clone)
     orch = _FakeOrch()
-    monkeypatch.setattr(cli, "watch_once", lambda _o, _c, _f, *, queue=None: [])
+    monkeypatch.setattr(cli, "watch_once", lambda _o, _c, _f, *, queue=None, notes=None: [])
     sleeps: list[float] = []
     cli.watch_loop(orch, config, tmp_path, poll_interval=0, sleep_fn=sleeps.append)  # type: ignore[arg-type]
     assert orch.refresh_calls == 1  # one tick (still refreshes before scanning)

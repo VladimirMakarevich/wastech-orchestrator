@@ -659,6 +659,21 @@ def test_empty_or_whitespace_queue_is_rejected(base_config: OrchestratorConfig, 
     assert any("orchestrator.queue" in issue for issue in exc.value.issues)
 
 
+def test_non_positive_claim_gate_timeout_is_rejected(base_config: OrchestratorConfig) -> None:
+    # Zero would make the gate fail closed on every tick with no chance to answer, which reads as
+    # "auto mode is broken" rather than as a configuration. Off is `confirm_next_task: false`.
+    bad = replace(
+        base_config,
+        orchestrator=replace(
+            base_config.orchestrator,
+            auto_mode=replace(base_config.orchestrator.auto_mode, confirm_timeout_s=0),
+        ),
+    )
+    with pytest.raises(ConfigError) as exc:
+        validate_config(bad)
+    assert any("auto_mode.confirm_timeout_s" in issue for issue in exc.value.issues)
+
+
 def test_non_positive_telegram_timeout_is_rejected(base_config: OrchestratorConfig) -> None:
     bad = replace(
         base_config,

@@ -209,6 +209,16 @@ class NodeRunStorePort(Protocol):
 
     def upsert_node_lineage(self, row: NodeLineageRow) -> None: ...
 
+    def has_prior_provider_run(
+        self,
+        task_id: str,
+        node_id: str,
+        subtask_order: int | None,
+        provider: str,
+        *,
+        exclude_run_id: int,
+    ) -> bool: ...
+
 
 class NotifierPort(Protocol):
     """The slice of :class:`~wastech_orchestrator.notify.interface.Notifier` the durable HITL gate

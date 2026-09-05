@@ -48,6 +48,7 @@ from wastech_orchestrator.core.flow.observability import (
     write_rendered_prompt,
 )
 from wastech_orchestrator.core.flow.prompt import RoleFileError, render_role_prompt
+from wastech_orchestrator.core.flow.recorder import collect_step_facts
 from wastech_orchestrator.core.flow.schema import SupervisorBlock
 from wastech_orchestrator.core.flow.usage_accounting import (
     deserialize_usage,
@@ -318,6 +319,11 @@ _SUMMARY_OPEN_TAG = "<summary>"
 # sections on every flow.
 _SUMMARY_MIN_CHARS = 120
 
+# How many preceding steps a per-step observation carries (see ``_step_history``). The question the
+# observer is being asked — is this loop converging? — is answerable from a handful of steps, and
+# the cap is what stops a deep fix loop from re-sending the whole run's history on every round.
+_HISTORY_STEPS = 6
+
 
 def _sanitize_summary(summary_text: str) -> str:
     """Strip a leaked structured dump from a finalize ``summary``.
@@ -502,8 +508,14 @@ class Supervisor:
         ``findings`` are an evaluator's typed findings for this step: without them the
         observation is a bare outcome label with nothing to react to, which is why the observer made
         no tool calls on any evaluator step of the run this came from.
+
+        The prompt also carries what the *preceding* steps reported (:meth:`_step_history`), which
+        is what makes a verdict about a loop answerable at all — see that method for why the
+        layer's own warm session is not enough.
         """
-        prompt = self._step_prompt(task_id, node_id, outcome_kind, final_message, findings)
+        prompt = self._step_prompt(
+            task_id, node_id, outcome_kind, final_message, findings, node_run_id
+        )
         # Observation is advisory and runs once per node-run, so a deep fix loop drives many
         # observe turns; it never needs a max reasoning tier, so cap it to `high` (the whole-task
         # finalize keeps the configured tier).
@@ -1068,10 +1080,15 @@ class Supervisor:
                     prompt=effective_prompt,
                     route=route,
                     outcome=outcome,
-                    # The phase's model as actually sent — read off the request rather than
-                    # re-resolving it, so the audit cannot disagree with the launch.
-                    model=request.model,
-                    reasoning=reasoning,
+                    # The phase's own overrides. What the turn actually ran on is stamped on the
+                    # attempt rows by the Router and read from there, so this pair being ``None``
+                    # (a phase that pins nothing) no longer empties the record's model field.
+                    configured_model=request.model,
+                    configured_reasoning=reasoning,
+                    # The supervisor is not a graph node and declares no skills, so this records
+                    # the off posture every supervisor turn actually runs with.
+                    skills_allowed=request.allow_skills,
+                    skills_required=request.required_skills,
                     started_at=outcome.result.started_at,
                     secrets=self._prompt_secrets,
                     register=self._register_artifact,
@@ -1199,6 +1216,7 @@ class Supervisor:
         outcome_kind: str,
         final_message: str | None,
         findings: Sequence[Finding] = (),
+        node_run_id: int | None = None,
     ) -> str:
         observed = f"## Step observed\nNode: {node_id}\nOutcome: {outcome_kind}\n"
         if findings:
@@ -1207,7 +1225,54 @@ class Supervisor:
             # Bounded by the same per-step cap the packet uses: unbounded, a chatty node's closing
             # message inflated every observation turn, and each rework round paid for it again.
             observed += f"\nThe step reported:\n{bound_step_message(final_message)}\n"
-        return self._base_prompt(task_id) + "\n\n" + observed
+        history = self._step_history(task_id, node_run_id)
+        return self._base_prompt(task_id) + "\n\n" + history + observed
+
+    def _step_history(self, task_id: str, node_run_id: int | None) -> str:
+        """What the steps before this one reported, or ``""`` when there are none to report.
+
+        The observed step's own message and findings say what just happened; a verdict about a
+        *loop* needs the round before it, and this layer's own session does not carry it. Under the
+        shipped cadence (``events``) a turn is spent only on a deviation, so a ``fixing`` round that
+        finished cleanly is never observed and its report never enters this session — which is how
+        an observation of the evaluator that reworked afterwards concluded "the implementer produced
+        nothing at all … check whether the implementation node is erroring or timing out" about a
+        step that had run 474s, exited 0 and written down exactly why it changed nothing. Reading an
+        absence as a failure is the one mistake this section exists to prevent.
+
+        Read from the same durable sources the finalize packet is built from — the run rows plus
+        each run's own output file — so the two cannot disagree, and bounded twice: the most recent
+        :data:`_HISTORY_STEPS` runs, each message capped at the packet's own per-step cap with
+        newlines folded so one step stays one line. A deep fix loop drives many observations and
+        each pays for its own prompt.
+
+        Best-effort like the rest of the layer: a store or filesystem error costs this section, not
+        the observation.
+        """
+        try:
+            rows = list(self._store.get_node_runs(task_id))
+        except Exception as exc:
+            _LOG.debug("supervisor step history unavailable: %s", type(exc).__name__)
+            return ""
+        cut = next((index for index, row in enumerate(rows) if row.id == node_run_id), len(rows))
+        preceding = [row for row in rows[:cut] if row.id is not None]
+        if not preceding:
+            return ""
+        facts = collect_step_facts(
+            tuple(preceding[-_HISTORY_STEPS:]), self._artifacts_root, task_id
+        )
+        lines = []
+        for fact in facts:
+            said = " ".join(fact.message.split()) if fact.message else ""
+            reported = bound_step_message(said) if said else "(no closing message)"
+            lines.append(f"- {fact.node_id} ({fact.outcome or fact.status}): {reported}")
+        return (
+            "## What the earlier steps reported\n"
+            "Oldest first. You have not been shown most of these: a turn is spent only on a "
+            "deviation, so a step that finished cleanly passed without one. Judge a loop from this "
+            "sequence rather than from an absence of visible work in it — a step that deliberately "
+            "changed nothing says so here.\n" + "\n".join(lines) + "\n\n"
+        )
 
     def _finalize_prompt(
         self,
@@ -1324,7 +1389,9 @@ class Supervisor:
         return (
             self._handoff_base(task_id)
             + f"\n\n## Handoff to subtask {subtask_order}\n"
-            + "The predecessor subtask(s) it depends on just completed and committed:\n\n"
+            + "Every subtask already committed on this branch, oldest first — the ones this "
+            "subtask declares as dependencies are marked, the rest landed before it and are "
+            "facts it still has to live with:\n\n"
             + floor_context
             + "\n\nWrite a focused brief for the agent implementing this next subtask, as the "
             "structured output's three sections: `new_surface_area` (what the predecessor(s) built "

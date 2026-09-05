@@ -68,6 +68,11 @@ def _assert_reasoning_config(argv: list[str], value: str) -> None:
     assert f'model_reasoning_effort="{value}"' in _config_values(argv)
 
 
+def _disable_pairs(argv: list[str]) -> list[str]:
+    """Every feature name passed via ``--disable``, in argv order."""
+    return [argv[i + 1] for i, tok in enumerate(argv) if tok == "--disable"]
+
+
 def test_leaves_project_doc_discovery_enabled(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
@@ -539,12 +544,82 @@ def test_advanced_mode_hands_back_every_feature_surface_but_keeps_the_profile(
     # surfaces and the memory store.
     argv = _argv(
         codex_config,
-        make_request(working_directory="/clone"),
+        make_request(working_directory="/clone", allow_skills=True),
         strict_isolation=False,
         read_isolation_off=True,
     )
     assert "--disable" not in argv
+    # The one exception, and it is not the mode's doing: a node that did not ask for skills gets the
+    # per-node off-switch here as it does everywhere, which is a flow narrowing itself rather than
+    # the mode withholding a surface. Asked for above, so this arm stays the clean "nothing
+    # disabled" assertion it was written to be.
+    assert "--disable" in _argv(
+        codex_config,
+        make_request(working_directory="/clone"),
+        strict_isolation=False,
+        read_isolation_off=True,
+    )
     # What does NOT become optional: the generated profile and its selection. It is the local floor
     # in this mode, and it is what the pre-launch canary re-runs to prove that floor exists at all.
     assert f'default_permissions="{PROFILE_NAME}"' in _config_values(argv)
     assert any(v.startswith(f"permissions.{PROFILE_NAME}=") for v in _config_values(argv))
+
+
+# -- node-declared skills -----------------------------------------------------------------------
+
+
+def test_skills_are_off_by_default_and_carried_by_the_feature_flag(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(codex_config, make_request())
+    assert _disable_pairs(argv).count("skill_search") == 1
+
+
+def test_skills_on_emits_no_skill_disable(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(codex_config, make_request(allow_skills=True))
+    assert "skill_search" not in _disable_pairs(argv)
+
+
+def test_the_skill_disable_survives_advanced_mode(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # The isolation layer empties its whole feature-disable set in advanced mode. The node's own
+    # off-switch is emitted outside that set on purpose: folding it in would drop the flag in
+    # exactly the mode where skills are reachable.
+    argv = _argv(
+        codex_config,
+        make_request(working_directory="/clone"),
+        strict_isolation=False,
+        read_isolation_off=True,
+    )
+    assert _disable_pairs(argv) == ["skill_search"]
+
+
+def test_the_skill_disable_is_emitted_under_strict_isolation_too(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # `--ignore-user-config` plus an untrusted project is not established to stop host skill
+    # discovery — `skip_host_skill_discovery` exists as its own feature flag, which suggests it does
+    # not — so the explicit disable is emitted regardless of the mode.
+    assert "skill_search" in _disable_pairs(_argv(codex_config, make_request()))
+
+
+def test_required_skills_add_no_codex_argv(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # `codex exec` has no flag that names a skill, so the requiring direction is prompt-only here.
+    # It is not refused under strict isolation either: only the Claude adapter can act on the names.
+    argv = _argv(codex_config, make_request(required_skills=("acme-tdd",), allow_skills=True))
+    assert "skill_search" not in _disable_pairs(argv)
+    assert "acme-tdd" not in " ".join(argv)
+
+
+def test_effective_prompt_carries_the_required_skills_block(
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # The same Core-built block reaches Codex through the same neutral seam — no adapter learns the
+    # syntax, and the shipped docs say guaranteed invocation is Claude-only today.
+    prompt = build_effective_prompt(make_request(prompt="ROLE", required_skills=("acme-tdd",)))
+    assert "- /acme-tdd" in prompt and "the instructions above win" in prompt

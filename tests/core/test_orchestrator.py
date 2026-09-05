@@ -16,10 +16,12 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from wastech_orchestrator.check_runner import CheckRunner
+from wastech_orchestrator.composition import HOST_FLOOR_CHECKS
 from wastech_orchestrator.core.flow.exchange_seal import (
     exchange_quarantine_root,
     exchange_seal_root,
@@ -38,6 +40,7 @@ from wastech_orchestrator.git_manager import (
 )
 from wastech_orchestrator.ledger import Ledger, LedgerRecord
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult, Notifier
+from wastech_orchestrator.providers import claude as claude_mod
 from wastech_orchestrator.providers.artifacts import (
     create_attempt_dir,
     exchange_node_run_dir,
@@ -329,6 +332,7 @@ def _build(
     gh: Callable[[Sequence[str]], GitResult] | None = None,
     clock: Callable[[], str] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
+    host_floor_checks: dict | None = None,
 ) -> tuple[Orchestrator, StateStore, Ledger, Path]:
     from tests.conftest import seed_builtin_flows
 
@@ -371,6 +375,10 @@ def _build(
         ),
         notifier=notifier,
         resolver=CheckResolver(config),  # normalize checks.command_sets (production wires this)
+        # Default `None` becomes `{}` inside the Orchestrator — "the run says nothing about the
+        # floor" — which is what nearly every test here wants. A test about the floor line has to
+        # pass the real table, the way the composition root does.
+        host_floor_checks=host_floor_checks,
         **extra,
     )
     return orch, store, ledger, art
@@ -400,10 +408,10 @@ def _log_fields() -> Iterator[list[dict[str, object]]]:
         logger.removeHandler(handler)
 
 
-def _complete_task(tmp_path: Path, task_id: str = "task-001") -> str:
+def _complete_task(tmp_path: Path, task_id: str = "task-001", *, front_extra: str = "") -> str:
     path = tmp_path / f"{task_id}.md"
     path.write_text(
-        f'---\nid: {task_id}\ntitle: "Add a thing"\n---\n\n'
+        f'---\nid: {task_id}\ntitle: "Add a thing"\n{front_extra}---\n\n'
         "## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
         encoding="utf-8",
     )
@@ -678,7 +686,10 @@ def test_rework_budget_exhausted_warns_operator_and_marks_trace(
     (flows / "roles" / "fixing.md").write_text("Fix the issue.", "utf-8")
     (flows / "implementation.yaml").write_text(_NON_BLOCKING_REVIEW_FLOW, "utf-8")
 
-    gating = {"findings": [{"severity": "high", "path": None, "what": "boom", "fix": None}]}
+    # The finding names a path on purpose: a gating verdict whose gating findings are ALL
+    # pathless takes the `rework (no gating finding names a path)` trace label instead of the
+    # plain `rework` this test asserts for the pre-exhaustion pass. That label has its own test.
+    gating = {"findings": [{"severity": "high", "path": "feature.py", "what": "boom", "fix": None}]}
     providers = _both(outputs={"review": ("needs work", gating)})
     notifier = RecordingNotifier()
     orch, store, _, art = _build(
@@ -738,6 +749,73 @@ def test_rework_budget_exhausted_warns_operator_and_marks_trace(
     assert follow_ups[0]["evidence"] == [
         "review evaluator finding still open — rework budget exhausted"
     ]
+
+
+def test_a_gating_verdict_with_no_path_warns_the_operator_and_marks_the_trace(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    """F10, end to end: a rework round that cannot end in a fix says so while it is running.
+
+    The rework edge leads to a node whose job is to open a named location and change it, so a
+    gating verdict whose gating findings are all pathless spends a full round and changes nothing.
+    On the trial that shape was an evaluator reporting it *could not review* — twice, 426s and
+    474s — and the findings contract had no way to say that instead of "here is a defect".
+
+    Routing is deliberately unchanged: the verdict still reworks, the loop keeps its named budget,
+    and a blocker that gates for a real reason but was written without a path is not discarded.
+    What is new is that the operator is told, on the console and in the live trace.
+    """
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+    from wastech_orchestrator.notify import TRACE_FINDINGS_WITHOUT_A_PATH
+
+    flows = tmp_path / "flows"
+    (flows / "roles").mkdir(parents=True)
+    (flows / "roles" / "implementation.md").write_text("Implement {task_path}.", "utf-8")
+    (flows / "roles" / "review.md").write_text("Review the change.", "utf-8")
+    (flows / "roles" / "fixing.md").write_text("Fix the issue.", "utf-8")
+    (flows / "implementation.yaml").write_text(_NON_BLOCKING_REVIEW_FLOW, "utf-8")
+
+    refusal = {
+        "findings": [
+            {
+                "severity": "high",
+                "path": None,
+                "what": "I cannot review the diff: the context files are ones I may not read.",
+                "fix": "Run the review with a context path that is permitted.",
+            }
+        ]
+    }
+    providers = _both(outputs={"review": ("needs work", refusal)})
+    notifier = RecordingNotifier()
+    orch, _, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+        config_kwargs={"telegram_trace": True},
+    )
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
+
+    messages: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    logger = logging.getLogger("wastech_orchestrator")
+    handler = _Collect()
+    logger.addHandler(handler)
+    try:
+        result = orch.run_task(_complete_task(tmp_path, "task-nopath"))
+    finally:
+        logger.removeHandler(handler)
+
+    assert result.final_status is Status.DONE  # a warning, never a park or a manual terminal
+    review_traces = [c["outcome"] for c in notifier.trace_calls if c["node_id"] == "review"]
+    assert TRACE_FINDINGS_WITHOUT_A_PATH in review_traces
+    assert any("the gating findings name no source path" in m for m in messages)
 
 
 def _run_complete_task_store_dir(
@@ -2948,7 +3026,7 @@ def test_decomposed_task_commits_each_subtask(
         check_verdicts=[0],
         config_kwargs={"decomposition": True},
     )
-    result = orch.run_task(_complete_task(tmp_path, "task-007"))
+    result = orch.run_task(_complete_task(tmp_path, "task-007", front_extra="commit_type: fix\n"))
     assert result.final_status is Status.DONE
     row = store.get_task("task-007")
     assert row is not None
@@ -2961,6 +3039,13 @@ def test_decomposed_task_commits_each_subtask(
     assert int(count) >= 2
     subs = store.get_subtasks("task-007")
     assert all(s.commit_sha for s in subs)
+    # Every commit a task lands carries the task's own Conventional-Commits type, subtask commits
+    # included — they were hardcoded `feat` while the code commit beside them could be anything.
+    subjects = [
+        git_run(["log", "-1", "--format=%s", str(s.commit_sha)], git_repo.clone).strip()
+        for s in subs
+    ]
+    assert subjects == ["fix(task-007): subtask 01 First", "fix(task-007): subtask 02 Second"]
 
 
 def test_decomposed_subtask_spec_path_reaches_implementation_prompt(
@@ -3036,9 +3121,12 @@ def test_subtask_handoff_context_reaches_successor_implementation(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
     # subtask-context-handoff: each successor subtask's implementation prompt receives
-    # {predecessor_context} pointing at a handoff brief assembled from its depends_on predecessors
-    # (the deterministic factual floor). A diamond (3 <- [1,2]) selects BOTH predecessors; subtask 1
-    # (no deps) gets no brief. The briefs live under logs/ — never in the memory tiers.
+    # {predecessor_context} pointing at a handoff brief whose deterministic factual floor is
+    # assembled from what LANDED on the branch — every subtask committed before it, oldest first —
+    # and not from its declared ``depends_on``. Subtask 2 declares nothing and still gets subtask 1
+    # (the edge case that used to yield no brief at all); subtask 3 declares only 1 and gets both 1
+    # and 2, with 1 marked as the declared dependency. Subtask 1 is first, so nothing is committed
+    # before it and it gets no brief. The briefs live under logs/ — never in the memory tiers.
     subtasks = {
         "decompose": True,
         "subtasks": [
@@ -3054,14 +3142,14 @@ def test_subtask_handoff_context_reaches_successor_implementation(
                 "title": "Second",
                 "slug": "second",
                 "acceptance_criteria": ["crit-two"],
-                "depends_on": [1],
+                "depends_on": [],  # declares nothing; subtask 1 is still a predecessor in fact
             },
             {
                 "order": 3,
                 "title": "Third",
                 "slug": "third",
                 "acceptance_criteria": ["crit-three"],
-                "depends_on": [1, 2],
+                "depends_on": [1],  # declares one of the two subtasks committed before it
             },
         ],
     }
@@ -3105,22 +3193,26 @@ def test_subtask_handoff_context_reaches_successor_implementation(
         r.prompt for r in providers[ProviderId.CLAUDE].requests if r.node_id == "implementation"
     ]
     assert len(impl_prompts) == 3
-    assert ".handoff.md" not in impl_prompts[0]  # subtask 1 has no predecessors → no brief injected
+    assert ".handoff.md" not in impl_prompts[0]  # subtask 1 runs first → nothing committed → none
     assert "02-second.handoff.md" in impl_prompts[1]  # subtask 2 reads its brief
     assert "03-third.handoff.md" in impl_prompts[2]  # subtask 3 reads its brief
 
     subtasks_dir = task_artifact_dir(art, "task-hnd") / "subtasks"
     # The floor is assembled from existing artifacts: predecessor spec pointer + acceptance criteria
-    # + changed files. Subtask 2's brief names predecessor 1.
+    # + changed files. Subtask 2 declares no dependency and is still handed subtask 1, unmarked.
     h2 = (subtasks_dir / "02-second.handoff.md").read_text("utf-8")
     assert "01-first.md" in h2 and "crit-one" in h2 and "Changed files" in h2
-    # The diamond: subtask 3's brief names BOTH predecessors 1 and 2.
+    assert "Subtask 01: First\n" in h2  # named as a fact, not as a declared dependency
+    # Subtask 3 declares only subtask 1, so the floor names both committed predecessors and marks
+    # which one the author declared.
     h3 = (subtasks_dir / "03-third.handoff.md").read_text("utf-8")
     assert "01-first.md" in h3 and "02-second.md" in h3
     assert "crit-one" in h3 and "crit-two" in h3
+    assert "Subtask 01: First (declared dependency)" in h3
+    assert "Subtask 02: Second\n" in h3
     # Reading the briefs from logs/<task>/subtasks/ IS the memory-tier isolation: they are written
     # to the transient task-scoped dir, never to the .worc/memory/ store.
-    assert not (subtasks_dir / "01-first.handoff.md").exists()  # no brief for the depless subtask
+    assert not (subtasks_dir / "01-first.handoff.md").exists()  # no brief for the first subtask
 
 
 # --- operator-authored decomposition (``subtasks:`` manifest) ------------------------------
@@ -3207,6 +3299,48 @@ def test_operator_decomposition_runs_each_subtask_one_pr(
     assert row.branch is not None
     count = git_run(["rev-list", "--count", f"main..{row.branch}"], git_repo.clone)
     assert int(count) >= 3
+
+
+def test_checkpoint_between_subtasks_names_what_runs_next(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # A region is left by a forward edge, so the engine's last checkpoint inside a decomposition
+    # names the POST-region node (`documentation`). Between subtasks that is not what runs next,
+    # and the window is not instantaneous: the subtask commit, the spec publish and the
+    # supervisor's handoff turn all run before the next region phase re-seeds it. `worc status`
+    # read that window and reported `node=documentation` beside `subtask=3/5` — an operator would
+    # believe a five-subtask task had reached its last stage while it was starting its third.
+    # Probed at the commit, which is inside the window, once per subtask.
+    _write_subtask(tmp_path, "subtasks/01-first.md", title="First")
+    _write_subtask(tmp_path, "subtasks/02-second.md", title="Second", depends_on=("first",))
+    _write_subtask(tmp_path, "subtasks/03-third.md", title="Third", depends_on=("second",))
+    root = _operator_root(
+        tmp_path,
+        "epic-f12",
+        ["subtasks/01-first.md", "subtasks/02-second.md", "subtasks/03-third.md"],
+    )
+    state = {"n": 0}
+    providers = {
+        ProviderId.CLAUDE: _OpImplProvider("claude", clone=git_repo.clone, state=state),
+        ProviderId.CODEX: _OpImplProvider("codex", clone=git_repo.clone, state=state),
+    }
+    orch, store, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    seen: list[str | None] = []
+    original = orch._commit_subtask
+
+    def spy(pipeline: Any, unit: Any) -> None:
+        seen.append(store.get_flow_checkpoint(pipeline.task.id)[0])
+        original(pipeline, unit)
+
+    orch._commit_subtask = spy  # type: ignore[method-assign]
+
+    assert orch.run_task(root).final_status is Status.DONE
+    # Subtasks 1 and 2 are followed by another subtask, so the checkpoint names the region entry —
+    # the node that is about to run. The last one deliberately keeps the engine's own value:
+    # after the final subtask the post-region node really is what runs next.
+    assert seen == ["implementation", "implementation", "documentation"]
 
 
 def test_operator_decomposition_when_planning_disabled(
@@ -3588,6 +3722,43 @@ def test_advanced_mode_is_announced_in_the_run_log_and_recorded_durably(
     manifests = list(art.rglob("control-bundles/*/manifest.json"))
     assert manifests, "the frozen control bundle should exist with clean_runs_on_success off"
     assert json.loads(manifests[0].read_text("utf-8"))["metadata"]["advanced_mode"] == "true"
+
+
+def test_the_mode_announces_the_missing_floor_through_the_real_check_table(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repo,
+    make_git_config,
+    tmp_path: Path,
+) -> None:
+    """The mode's floor line, end to end, without stubbing the formatter.
+
+    The sibling floor test monkeypatches `describe_host_floor`, so it proves the log framing and
+    nothing about which runs get a line. This one goes through the real `HOST_FLOOR_CHECKS` on an
+    injected macOS host — the class that reported NO gap before, and is exactly where the mode was
+    keeping a sandbox it promised not to. Both halves of the sentence are asserted: the provider's
+    reason and the shared cost tail, since the two live in different modules and only their
+    concatenation is what an operator reads.
+    """
+    monkeypatch.setattr(
+        claude_mod, "default_sandbox_probe", lambda: claude_mod.SandboxCapability.MACOS
+    )
+    orch, _, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        config_kwargs={"strict_isolation": False},
+        host_floor_checks=dict(HOST_FLOOR_CHECKS),
+    )
+    with _collected_warnings() as messages:
+        result = orch.run_task(_complete_task(tmp_path, "task-mode-floor"))
+
+    assert result.final_status is not Status.FAILED  # announced, never refused
+    floor = [m for m in messages if "isolation floor NONE" in m]
+    assert len(floor) == 1, messages
+    assert "claude: the advanced mode" in floor[0]
+    assert "EVERY node here keeps an unsandboxed shell" in floor[0]
 
 
 def test_a_default_run_carries_the_mode_marker_as_false(
@@ -4431,11 +4602,65 @@ def test_global_auto_merge_merges_pr(git_repo, make_git_config, tmp_path: Path) 
     _patch_impl_edit(providers, git_repo)
     result = orch.run_task(_complete_task(tmp_path))
     assert result.final_status is Status.DONE
-    assert _merge_calls(calls) == [["pr", "merge", "https://example/pr/1", "--squash", *_GH_PIN]]
+    # The message is the orchestrator's, not the target repository's settings' (see merge_pr):
+    # `feat(<id>): <title> (#N)` and an empty body, on the auto-merge path exactly as on
+    # `merge-task`.
+    assert _merge_calls(calls) == [
+        [
+            "pr",
+            "merge",
+            "https://example/pr/1",
+            "--squash",
+            "--subject",
+            "feat(task-001): Add a thing (#1)",
+            "--body",
+            "",
+            *_GH_PIN,
+        ]
+    ]
     rec = ledger.records()[0]
     assert rec["auto_merged"] is True and rec["merge_outcome"] == "deadbeef"
     op = store.get_publish_op("task-001", "pr_merge")
     assert op is not None and op.status == "completed"
+
+
+def test_task_commit_type_reaches_every_commit_it_produces(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # The commit message is orchestrator-owned: no node can write into it, so an acceptance
+    # criterion asking an agent to put something there names a surface nothing can reach. The
+    # task's own ``commit_type`` is the channel that does exist, and it has to reach BOTH commits a
+    # task lands — the code commit on the branch and the squash commit on the base branch — or the
+    # history disagrees with itself about what kind of change this was.
+    task_path = tmp_path / "task-001.md"
+    task_path.write_text(
+        '---\nid: task-001\ntitle: "Add a thing"\ncommit_type: fix\n---\n\n'
+        "## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
+        encoding="utf-8",
+    )
+    providers = _both()
+    calls: list[list[str]] = []
+    orch, store, _ledger, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"auto_merge": True},
+        gh=_merge_gh(calls),
+    )
+    _patch_impl_edit(providers, git_repo)
+    result = orch.run_task(str(task_path))
+    assert result.final_status is Status.DONE
+
+    code_commit = store.get_publish_op("task-001", "code_commit", None)
+    assert code_commit is not None and code_commit.result_ref
+    subject = git_run(
+        ["log", "-1", "--format=%s", str(code_commit.result_ref)], git_repo.clone
+    ).strip()
+    assert subject == "fix(task-001): Add a thing"  # not the hardcoded `feat`
+    assert "--subject" in _merge_calls(calls)[0]
+    assert "fix(task-001): Add a thing (#1)" in _merge_calls(calls)[0]
 
 
 def test_no_auto_merge_leaves_pr_open(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -4535,7 +4760,18 @@ def test_auto_merge_wait_for_checks_arms_native_auto(
     result = orch.run_task(_complete_task(tmp_path))
     assert result.final_status is Status.DONE
     assert _merge_calls(calls) == [
-        ["pr", "merge", "https://example/pr/1", "--squash", "--auto", *_GH_PIN]
+        [
+            "pr",
+            "merge",
+            "https://example/pr/1",
+            "--squash",
+            "--subject",
+            "feat(task-001): Add a thing (#1)",
+            "--body",
+            "",
+            "--auto",
+            *_GH_PIN,
+        ]
     ]
     assert ledger.records()[0]["merge_outcome"] == "armed"
 
@@ -4765,6 +5001,11 @@ def _audit_dir(art: Path, task_id: str) -> Path:
     return task_artifact_dir(art, task_id) / "prompt-audit"
 
 
+def _step_metadata(step_text: str) -> Any:
+    """The step document's fenced ``json`` header, parsed (the prompt is its Markdown body)."""
+    return json.loads(step_text.split("```json\n", 1)[1].split("\n```", 1)[0])
+
+
 def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path: Path) -> None:
     """With the global flag on, each stage run is recorded as a self-contained, chronological file
     plus a combined timeline; the records carry the who-metadata and the prompt."""
@@ -4782,12 +5023,12 @@ def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path
     assert result.final_status is Status.DONE
 
     audit_dir = _audit_dir(art, "task-001")
-    step_files = sorted(audit_dir.glob("*.json"))
+    step_files = sorted(audit_dir.glob("*.md"))
     assert step_files, "per-step audit files were written"
     # Filenames are zero-padded node_run_id → lexical sort is chronological.
     ids = [int(p.name.split("-")[0]) for p in step_files]
     assert ids == sorted(ids)
-    records = [json.loads(p.read_text()) for p in step_files]
+    records = [_step_metadata(p.read_text()) for p in step_files]
     node_records = [r for r in records if r["node_id"] != "supervisor"]
     supervisor_records = [r for r in records if r["node_id"] == "supervisor"]
     # complete task → refinement skipped; planning/implementation/review/documentation run agents.
@@ -4881,7 +5122,7 @@ def test_prompt_audit_task_overrides_global_off(git_repo, make_git_config, tmp_p
     audit_dir = _audit_dir(art, "task-001")
     assert audit_dir.exists()
     assert (audit_dir / "timeline.jsonl").exists()
-    assert sorted(audit_dir.glob("*.json"))
+    assert sorted(audit_dir.glob("*.md"))
 
 
 # --- task dependencies (``depends_on`` merge-gated scheduling) -----------------------------

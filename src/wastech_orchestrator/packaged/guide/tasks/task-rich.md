@@ -15,6 +15,7 @@ branch_mode: new # new (default; fork a fresh branch from base) | existing (work
 # branch_ref: "feature/big-feature" # REQUIRED iff branch_mode: existing (the already-existing branch to check out); omit for new/current.
 publish: pull_request # downgrade-only cap on where the publish node stops: commit | push | pull_request. Effective = min(flow_policy, publish); omit ⇒ flow policy; no-op if the flow has no publish node.
 trust_level: auto # per-task override of the dangerous-diff approval gate: strict (gate every deletion/manifest edit) | auto (default; gate only operator protected_paths). Never lowers the hard ceiling.
+commit_type: fix # Conventional-Commits TYPE for every commit this task lands (branch commit, each subtask commit, the squash commit): feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert. Omit ⇒ feat. Scope is always the task id. Fail-closed: an unknown type REJECTS the task. The only part of a commit message a task supplies — no node can write one.
 auto_merge: false # true = auto-merge (DANGER: skips human review; the task author owns this call) / false = opt out / omit = config default. The task value wins outright.
 prompt_audit: true # true/false forces per-node prompt recording under logs/<task-id>/prompt-audit/ for THIS task; omit = the global config.prompt_audit. Task value wins.
 decomposition: false # true/false permits/forbids a split for THIS task (wins over agents.decomposition.enabled); omit = config default. Only flips the gate — the flow + planning still decide whether a split happens.

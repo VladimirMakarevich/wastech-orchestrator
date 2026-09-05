@@ -18,6 +18,7 @@ from wastech_orchestrator.providers.base import (
     ProviderHealth,
     ProviderId,
     RunStatus,
+    build_effective_prompt,
 )
 from wastech_orchestrator.routing.router import AgentRouter
 
@@ -78,3 +79,34 @@ def test_session_unavailable_retries_without_resume_no_fix_iteration(
     assert [r.session_id for r in primary.requests] == ["stale-session", None]
     others = [p for pid, p in providers.items() if pid is not route.primary]
     assert all(o.requests == [] for o in others)  # never fell back to the other provider
+
+
+def test_session_unavailable_retry_falls_back_to_the_full_prompt(
+    config: OrchestratorConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # The safety net's other half. Losing the session is exactly when a "carry on where you left
+    # off" text is worst: the retry has no history at all. It is handed the whole role prompt
+    # instead, and nothing in the router had to know that.
+    providers = {
+        ProviderId.CLAUDE: _SessionAwareProvider(ProviderId.CLAUDE),
+        ProviderId.CODEX: _SessionAwareProvider(ProviderId.CODEX),
+    }
+    router = AgentRouter(config, providers)  # type: ignore[arg-type]
+    route = router.resolve_route("fixing", None)
+    primary = providers[route.primary]
+
+    outcome = router.run_stage(
+        make_request(
+            node_id="fixing",
+            prompt="FULL",
+            continuation_prompt="CONT",
+            session_id="stale-session",
+        ),
+        route,
+    )
+
+    assert outcome.result is not None and outcome.result.status is RunStatus.SUCCEEDED
+    sent = [build_effective_prompt(r) for r in primary.requests]
+    assert sent[0].startswith("CONT")  # the resume attempt continued the conversation
+    assert sent[1].startswith("FULL")  # the fresh retry restated everything
+    assert [a.resumed for a in outcome.attempts] == [True, False]

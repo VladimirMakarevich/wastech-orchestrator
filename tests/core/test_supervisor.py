@@ -314,6 +314,104 @@ def test_observe_prompt_bounds_a_long_step_message(tmp_path: Path) -> None:
     assert len(reported) == 500 and reported.endswith("…")
 
 
+def test_observe_prompt_carries_what_the_earlier_steps_reported(tmp_path: Path) -> None:
+    # The trial's exact failure, and it is a starvation rather than a misjudgement. Under the
+    # shipped cadence (`events`) a `fixing` round that finishes cleanly is not a deviation, so no
+    # turn is spent on it and its report never enters the layer's own session. The observation of
+    # the *evaluator* that reworked afterwards therefore saw the reviewer's message and findings
+    # and nothing else — and concluded "the implementer produced nothing at all … check whether
+    # the implementation node is erroring or timing out", about a step that had run 474s, exited
+    # 0 and written down exactly why it changed nothing.
+    router, store = FakeRouter(), _store(tmp_path)
+    impl = _run_row(store, "implementation", "agent")
+    fixing = _run_row(store, "fixing", "agent")
+    review = _run_row(store, "review", "evaluator", outcome="rework")
+    _node_output(tmp_path, "implementation", impl, "Added the guard.")
+    _node_output(
+        tmp_path, "fixing", fixing, "Changed nothing: the spec forbids touching those two files."
+    )
+    sup = _supervisor(tmp_path, router, store)
+
+    sup.observe(
+        task_id=_TASK,
+        node_id="review",
+        node_run_id=review,
+        outcome_kind="rework",
+        final_message="Three findings stand.",
+        findings=(Finding(severity="high", reason="Still not fixed"),),
+    )
+
+    prompt = router.requests[0].prompt
+    assert "fixing" in prompt
+    assert "Changed nothing: the spec forbids touching those two files." in prompt
+    assert "Added the guard." in prompt
+
+
+def test_observe_prompt_does_not_repeat_the_observed_step_as_history(tmp_path: Path) -> None:
+    # The observed step has its own section; listing it twice would make a single step look like a
+    # loop, which is the very shape the observer is asked to judge.
+    router, store = FakeRouter(), _store(tmp_path)
+    first = _run_row(store, "implementation", "agent")
+    observed = _run_row(store, "review", "evaluator", outcome="rework")
+    _node_output(tmp_path, "implementation", first, "Wrote the guard.")
+    _node_output(tmp_path, "review", observed, "Findings stand.")
+    sup = _supervisor(tmp_path, router, store)
+
+    sup.observe(
+        task_id=_TASK,
+        node_id="review",
+        node_run_id=observed,
+        outcome_kind="rework",
+        final_message="Findings stand.",
+    )
+
+    history = router.requests[0].prompt.split("## Step observed")[0]
+    assert "Wrote the guard." in history
+    assert "Findings stand." not in history
+
+
+def test_observe_prompt_history_is_bounded(tmp_path: Path) -> None:
+    # A deep fix loop drives many observations and each pays for its own prompt, so the history is
+    # the most recent steps only, each message capped like the packet's.
+    router, store = FakeRouter(), _store(tmp_path)
+    for index in range(12):
+        run_id = _run_row(store, f"step{index}", "agent")
+        _node_output(tmp_path, f"step{index}", run_id, f"{index}: " + "y" * 900)
+    observed = _run_row(store, "review", "evaluator", outcome="rework")
+    sup = _supervisor(tmp_path, router, store)
+
+    sup.observe(task_id=_TASK, node_id="review", node_run_id=observed, outcome_kind="rework")
+
+    history = router.requests[0].prompt.split("## Step observed")[0]
+    assert "step11" in history  # the most recent survive…
+    assert "step0" not in history  # …the oldest are dropped
+    assert "…" in history  # and a long message is capped, not carried whole
+
+
+def test_observe_prompt_has_no_history_section_on_the_first_step(tmp_path: Path) -> None:
+    router, store = FakeRouter(), _store(tmp_path)
+    observed = _run_row(store, "planning", "agent")
+    sup = _supervisor(tmp_path, router, store)
+
+    sup.observe(task_id=_TASK, node_id="planning", node_run_id=observed, outcome_kind="done")
+
+    assert "earlier steps" not in router.requests[0].prompt
+
+
+def test_observe_survives_a_store_that_cannot_read_the_step_record(tmp_path: Path) -> None:
+    # The layer is advisory: a store error must cost the history section, never the observation.
+    router, store = FakeRouter(), _store(tmp_path)
+    sup = _supervisor(tmp_path, router, store)
+
+    def _boom(_task_id: str) -> list[Any]:
+        raise RuntimeError("db is gone")
+
+    sup._store.get_node_runs = _boom  # type: ignore[method-assign]
+    sup.observe(task_id=_TASK, node_id="review", node_run_id=3, outcome_kind="rework")
+
+    assert router.requests and "## Step observed" in router.requests[0].prompt
+
+
 def test_supervisor_observe_writes_rendered_prompt_when_registered(tmp_path: Path) -> None:
     # A supervisor turn is part of the audit trail like any other: rendered-prompt.md and the
     # prompt-audit JSON are written for observe/finalize/handoff turns too.
@@ -582,11 +680,12 @@ def test_finalize_writes_prompt_audit_when_enabled(tmp_path: Path) -> None:
 
     audit_dir = task_artifact_dir(str(tmp_path / "art"), _TASK) / "prompt-audit"
     # finalize's node_run_id is the reserved ``0`` sentinel (not a node_runs id).
-    step_path = audit_dir / "000000-supervisor.json"
+    step_path = audit_dir / "000000-supervisor.md"
     assert step_path.exists()
-    record = json.loads(step_path.read_text("utf-8"))
-    assert record["node_id"] == "supervisor"
-    assert record["prompt"]  # the finalize turn's input prompt was persisted
+    step_text = step_path.read_text("utf-8")
+    assert '"node_id": "supervisor"' in step_text
+    # the finalize turn's input prompt was persisted, as the document's readable body
+    assert step_text.split("## Prompt\n\n", 1)[1].strip()
     timeline = (audit_dir / "timeline.jsonl").read_text("utf-8").splitlines()
     assert any(json.loads(line)["node_id"] == "supervisor" for line in timeline)
 
@@ -1578,10 +1677,9 @@ def test_handoff_records_subtask_in_prompt_audit(tmp_path: Path) -> None:
     sup.handoff(task_id=_TASK, subtask_order=2, floor_context="F")
 
     audit_dir = task_artifact_dir(str(tmp_path / "art"), _TASK) / "prompt-audit"
-    step_path = audit_dir / f"{_HANDOFF_RUN_ID_BASE + 2:06d}-supervisor-sub02.json"
+    step_path = audit_dir / f"{_HANDOFF_RUN_ID_BASE + 2:06d}-supervisor-sub02.md"
     assert step_path.exists()
-    record = json.loads(step_path.read_text("utf-8"))
-    assert record["subtask"] == 2
+    assert '"subtask": 2' in step_path.read_text("utf-8")
 
 
 def test_handoff_uses_flow_handoff_role_file(tmp_path: Path) -> None:

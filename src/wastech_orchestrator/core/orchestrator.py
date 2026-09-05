@@ -51,6 +51,7 @@ from wastech_orchestrator.core.flow.control_bundle import (
     load_control_bundle,
 )
 from wastech_orchestrator.core.flow.engine import (
+    Finding,
     FlowCancelled,
     FlowRunResult,
     NodeOutcome,
@@ -186,6 +187,7 @@ from wastech_orchestrator.memory import (
 )
 from wastech_orchestrator.notify import (
     TRACE_ADOPTED_COMMITS,
+    TRACE_FINDINGS_WITHOUT_A_PATH,
     TRACE_GIT_CONTROL_DRIFT,
     TRACE_REWORK_EXHAUSTED,
     TRACE_UNEXPECTED_WRITE,
@@ -244,10 +246,11 @@ from wastech_orchestrator.state_store import (
     SubtaskRow,
     TaskRow,
 )
-from wastech_orchestrator.task.model import NormalizedTask
+from wastech_orchestrator.task.model import DEFAULT_COMMIT_TYPE, NormalizedTask
 from wastech_orchestrator.task.parser import (
     SubtaskSpecFile,
     load_normalized,
+    read_subtask_refs,
     read_subtask_spec,
     read_task_source,
     slugify,
@@ -284,6 +287,63 @@ _UNOBSERVED_NODE_KINDS = frozenset({"tool", "checks", "publish"})
 RERUN_ELIGIBLE_STATUSES: frozenset[Status] = frozenset(
     {Status.FAILED, Status.MANUAL_ACTION_REQUIRED, Status.RUNNING}
 )
+
+
+def task_commit_subject(task_id: str, title: str, commit_type: str | None = None) -> str:
+    """The Conventional-Commits subject for this task's own commit.
+
+    One place, because every commit a task produces carries it: the code commit on the task branch,
+    each subtask commit of a decomposition, and the squash/merge commit that lands them on the base
+    branch. They disagreed before — the squash subject was left to the target repository, which took
+    the bare pull-request title — and the target's own first git rule was "Conventional Commits", so
+    the tool's merge path violated it.
+
+    ``commit_type`` is the task's own front-matter key, defaulting to ``feat`` (what every task
+    produced before the key existed). The scope is always the task id: it is the one thing that
+    makes a subject greppable back to the task that produced it, and unlike the type it is never
+    the author's to choose. The task file is the whole channel into this subject — no node can
+    write a commit message — which is why the type is an operator field rather than an agent's.
+    """
+    return f"{commit_type or DEFAULT_COMMIT_TYPE}({task_id}): {title}"
+
+
+def merge_commit_subject(
+    task_id: str, title: str, pr_url: str | None, commit_type: str | None = None
+) -> str:
+    """:func:`task_commit_subject` plus the pull-request number, for the squash/merge commit.
+
+    The ``(#N)`` suffix is what GitHub appends itself when it is left to compose the subject, and
+    the target repository's history is full of it — so keeping it means the explicit subject reads
+    like every neighbouring commit rather than announcing that a tool wrote it.
+    """
+    number = _pr_number(pr_url)
+    suffix = f" (#{number})" if number else ""
+    return f"{task_commit_subject(task_id, title, commit_type)}{suffix}"
+
+
+def _pr_number(pr_url: str | None) -> str | None:
+    """The trailing number of a pull-request URL, or ``None`` when it does not end in one."""
+    if not pr_url:
+        return None
+    tail = pr_url.rstrip("/").rsplit("/", 1)[-1]
+    return tail if tail.isdigit() else None
+
+
+def lifecycle_destination(task_file: str | None, final: Status) -> Path | None:
+    """Where ``final`` sends a task file, or ``None`` when it sends it nowhere.
+
+    Pure, so a plan can state the move before it happens: ``finalize`` moves a tracked file in the
+    operator's own working tree and commits nothing (by contract — it may be on ``main``, and
+    committing there behind their back is worse than a change they can see), which left the move
+    both unannounced and uncommitted. Naming it is what the two surfaces owe.
+    """
+    folder_name = {Status.DONE: "done", Status.FAILED: "failed"}.get(final)
+    if folder_name is None or not task_file:
+        return None
+    src = Path(task_file)
+    parent = src.parent
+    tasks_root = parent.parent if parent.name in _LIFECYCLE_FOLDERS else parent
+    return tasks_root / folder_name / src.name
 
 
 def _utc_now_iso() -> str:
@@ -331,6 +391,10 @@ class MergePlan:
     pr_url: str | None = None
     verify_state: str | None = None  # gh PR state when checked (MERGED/OPEN/CLOSED)
     already_merged: bool = False  # PR is MERGED on GitHub → merge-task is an idempotent no-op
+    #: The subject the squash/merge commit would carry (``None`` for a rebase, which makes none).
+    #: In the plan because it is the one thing a merge leaves in the base branch's history forever,
+    #: and the dry run used to be silent about it.
+    commit_subject: str | None = None
     warnings: tuple[str, ...] = ()  # non-fatal (e.g. PR state unverifiable; will still attempt)
     refusals: tuple[str, ...] = ()  # fatal; abort with exit 1
 
@@ -362,6 +426,17 @@ class FinalizePlan:
     pr_url_source: str = "none"  # explicit | recorded | none
     verify_state: str | None = None  # gh PR state when checked (MERGED/OPEN/CLOSED)
     dirty_paths: tuple[str, ...] = ()
+    #: Where the task file will move (``from``, ``to``), or ``None`` when it stays put (an
+    #: ``abandoned`` finalize, or a task with no on-disk file). The move is a tracked change in the
+    #: operator's working tree that ``finalize`` deliberately does not commit, so both the plan and
+    #: the result say it happened rather than leaving it to be discovered in ``git status``.
+    task_file_move: tuple[str, str] | None = None
+    #: The spec files a decomposition root takes with it (``from``, ``to`` each), empty for an
+    #: ordinary task. They ride along because a ``subtasks:`` ref is relative to the root file's
+    #: directory, so a root separated from its specs cannot resolve its own manifest. Named for the
+    #: same reason as the move above: they are tracked files this dirties and does not commit, and
+    #: five of them appearing in ``git status`` unannounced is worse than one.
+    subtask_spec_moves: tuple[tuple[str, str], ...] = ()
     warnings: tuple[str, ...] = ()  # non-fatal; require confirmation (no URL / not merged)
     refusals: tuple[str, ...] = ()  # fatal; abort with exit 1
 
@@ -377,18 +452,28 @@ def _ledger_attempt_count(ledger: Ledger, task_id: str) -> int:
 
 
 def _format_predecessor_floor(
-    spec: SubtaskSpec, commit_sha: str, changed_files: list[str], spec_path: str
+    spec: SubtaskSpec,
+    commit_sha: str,
+    changed_files: list[str],
+    spec_path: str,
+    *,
+    declared: bool,
 ) -> str:
     """One predecessor subtask's deterministic factual floor for the handoff brief (ground truth).
 
     Assembled purely from artifacts that already exist — the subtask's spec (title / acceptance
     criteria / spec pointer), its committed SHA, and the files that commit changed — so it is
     present even when the supervisor (the interpretive layer) is unavailable.
+
+    ``declared`` marks a predecessor the successor's ``depends_on`` names, which is the author's
+    "build on this one" signal; the unmarked ones landed on the same branch first and are facts the
+    successor still has to live with (see :meth:`Orchestrator._assemble_predecessor_context`).
     """
     criteria = "\n".join(f"  - {c}" for c in spec.acceptance_criteria) or "  - (none recorded)"
     files = "\n".join(f"  - {p}" for p in changed_files) or "  - (none)"
+    marker = " (declared dependency)" if declared else ""
     return (
-        f"### Subtask {spec.order:02d}: {spec.title}\n"
+        f"### Subtask {spec.order:02d}: {spec.title}{marker}\n"
         f"- Commit: {commit_sha}\n"
         f"- Spec: {spec_path}\n"
         f"- Acceptance criteria:\n{criteria}\n"
@@ -463,6 +548,22 @@ def _top_blocking_finding(findings: object) -> TerminalFinding | None:
         reason=str(best.get("reason") or ""),
         paths=paths,
     )
+
+
+#: Longest finding text carried into the pathless-gating-verdict warning. The operator needs enough
+#: to tell "I could not review the diff" from a real defect written without a path; the whole
+#: finding is already on disk in ``findings.json``, which the log line's node id points at.
+_WARNED_FINDING_MAX = 200
+
+
+def _first_finding_reason(findings: Sequence[Finding]) -> str:
+    """The first finding's text, bounded, for a log line — ``""`` when there is none."""
+    if not findings:
+        return ""
+    reason = " ".join(findings[0].reason.split())
+    if len(reason) <= _WARNED_FINDING_MAX:
+        return reason
+    return reason[: _WARNED_FINDING_MAX - 1].rstrip() + "…"
 
 
 def _stuck_report_path(failure_report_path: str | None) -> str | None:
@@ -1145,8 +1246,9 @@ class Orchestrator:
             )
         refusals: list[str] = []
         # A stale ``running`` row is a killed/crashed task, directly recoverable: ``cmd_rerun``
-        # already refused if a live watch daemon owned the slot, so a ``running`` row reaching here
-        # is daemon-less (the "parked (no daemon)" state) — no ``finalize --as failed`` dance. The
+        # already refused if any executor owned the slot — the watch daemon or a ``worc run``, each
+        # with its own liveness marker — so a ``running`` row reaching here belongs to no live
+        # process (the "parked (no daemon)" state) and needs no ``finalize --as failed`` dance. The
         # active-slot check below excludes this task's own id, so it never self-blocks.
         if row.status not in RERUN_ELIGIBLE_STATUSES:
             refusals.append(
@@ -1546,6 +1648,16 @@ class Orchestrator:
                 verify_state = self._git.verify_pr_state(resolved_url)
                 if verify_state is not None and verify_state != "MERGED":
                     warnings.append(f"the PR is {verify_state}, not merged; recording done anyway")
+        task_move: tuple[str, str] | None = None
+        spec_moves: tuple[tuple[str, str], ...] = ()
+        if row.source_path and (dest := lifecycle_destination(row.source_path, declared)):
+            task_move = (row.source_path, str(dest))
+            root = Path(row.source_path)
+            spec_moves = tuple(
+                (str(root.parent / ref), str(dest.parent / ref))
+                for ref in read_subtask_refs(root)
+                if (root.parent / ref).is_file()
+            )
         return FinalizePlan(
             task_id=task_id,
             declared=declared,
@@ -1559,6 +1671,8 @@ class Orchestrator:
             pr_url_source=source,
             verify_state=verify_state,
             dirty_paths=tuple(sorted(dirty)),
+            task_file_move=task_move,
+            subtask_spec_moves=spec_moves,
             warnings=tuple(warnings),
             refusals=tuple(refusals),
         )
@@ -1683,6 +1797,9 @@ class Orchestrator:
             pr_url=pr_url,
             verify_state=verify_state,
             already_merged=already_merged,
+            commit_subject=merge_commit_subject(
+                task_id, row.title, pr_url, self._persisted_commit_type(task_id)
+            ),
             warnings=tuple(warnings),
             refusals=tuple(refusals),
         )
@@ -1751,7 +1868,18 @@ class Orchestrator:
             )
             self._git.push_branch_update(task_id, branch)
             outcome = self._git.merge_pr(
-                task_id, pr_url, strategy=strategy, wait_for_checks=wait_for_checks
+                task_id,
+                pr_url,
+                strategy=strategy,
+                wait_for_checks=wait_for_checks,
+                subject=merge_commit_subject(
+                    task_id, row.title, pr_url, self._persisted_commit_type(task_id)
+                ),
+                # No body: every commit this orchestrator makes on the branch is a single line, so
+                # a body assembled from them can only be a list of internal subjects — which is how
+                # `chore(orchestrator): audit trail` reached a real `main`. The readable account of
+                # the change is the pull request body, which stays on the pull request.
+                body="",
             )
             log.info("[MERGE-TASK] merged", extra={"pr_url": pr_url, "outcome": outcome})
         except (GitCommandError, PipelineFailed) as exc:
@@ -2766,7 +2894,7 @@ class Orchestrator:
             flow_dir=bundle.flow_dir,
             check_sets=self._check_sets(p),  # normalized command_sets; () = no gate
             pull_request_title=p.task.title,
-            commit_message=f"feat({p.task.id}): {p.task.title}",
+            commit_message=task_commit_subject(p.task.id, p.task.title, p.task.commit_type),
             summary_body_path=self._fallback_summary_path(p),
             branch_mode=self._branch_mode(p.task),
             publish_scope=p.task.publish,
@@ -3116,7 +3244,7 @@ class Orchestrator:
             if resume and not in_pre and current is not None:
                 return phase(current, None)
             return phase(regions.region_entry, None)
-        return self._fan_out_subtasks(p, run_state, regions, phase, inputs)
+        return self._fan_out_subtasks(p, run_state, regions, phase, inputs, recorder)
 
     def _fan_out_subtasks(
         self,
@@ -3125,14 +3253,18 @@ class Orchestrator:
         regions: DecompositionRegions,
         phase: Callable[..., FlowRunResult],
         inputs: NodeInputs,
+        recorder: StateStoreRunRecorder,
     ) -> FlowRunResult:
         """Run the sub_flow region once per subtask (commit each, reset per-subtask counters), then
         the post-region phase. A subtask with a verified commit is never re-run (recovery).
 
         Before each subtask's region runs, the active immutable spec is injected as
-        ``inputs.subtask_spec_path`` so the edit nodes' ``{subtask_spec_path}`` (plus
-        ``{subtask_order}`` / ``{subtask_count}``) scopes them to that one subtask. The post-region
-        phase is whole-task again, so the spec path is cleared first."""
+        ``inputs.subtask_spec_path`` so ``{subtask_spec_path}`` (plus ``{subtask_order}`` /
+        ``{subtask_count}``) scopes the region's nodes to that one subtask. **Every** node kind in
+        the region reads it, not only the ones that edit: an evaluator in the region judges one
+        subtask's diff, and while it saw only the root task file and the shared plan it charged the
+        task's unfinished parts against whichever subtask was under review. The post-region phase is
+        whole-task again, so the spec path is cleared first."""
         units = list(p.decomposition.subtasks)
         # Decomposition is decided during planning (after `inputs` was built), so the count was None
         # at build time; surface it now for the edit nodes' "subtask N of M" context.
@@ -3142,7 +3274,7 @@ class Orchestrator:
             if unit.order in committed:
                 continue
             # Private spec stays the audit/immutable record; the redacted exchange copy is the
-            # {subtask_spec_path} the edit nodes read.
+            # {subtask_spec_path} the region's nodes read.
             private_spec = subtask_spec_path(self._artifacts_root, p.task.id, unit.order, unit.slug)
             inputs.subtask_spec_path = publish_file(
                 str(self._exchange_root),
@@ -3151,12 +3283,26 @@ class Orchestrator:
                 str(private_spec),
                 extra_secrets=self._memory_extra_secrets(),
             )
-            # Two-layer handoff brief for this subtask's committed ``depends_on`` predecessors
-            # ``None`` when the subtask has no predecessors.
+            # Two-layer handoff brief over every subtask already committed on this branch
+            # (``None`` for the first one, which has no predecessors).
             inputs.predecessor_context_path = self._assemble_predecessor_context(p, unit)
             sub = phase(regions.region_entry, regions.region, subtask=unit.order)
             if sub.status is not Status.DONE:
                 return sub
+            if index != len(units) - 1:
+                # A region exits by a forward edge LEAVING it, so the engine's last checkpoint
+                # names the post-region node — for a subtask that is not what runs next, and the
+                # gap is not instantaneous: the commit below, then the spec publish and the
+                # supervisor's handoff turn, run before the next region phase re-seeds it. That
+                # window reported ``node=documentation`` beside ``subtask=3/5``, telling an
+                # operator a five-subtask task had reached its last stage while it was starting
+                # its third. Point it at what actually runs next. Resume is unaffected: the
+                # fan-out re-enters from the committed subtask rows and never reads this value
+                # (only the ``pre`` region's exit checkpoint is load-bearing there) — and the last
+                # subtask deliberately keeps the engine's value, because for it the post-region
+                # node IS next.
+                run_state.current_node = regions.region_entry
+                recorder.save_checkpoint(run_state)
             self._commit_subtask(p, unit)
             if index != len(units) - 1:
                 run_state.reset_consecutive_fix_budget()  # fresh per-loop budgets; global accrues
@@ -3169,27 +3315,49 @@ class Orchestrator:
         """Assemble the subtask handoff brief for *unit* and return its path (or ``None``).
 
         Two layers: a **deterministic factual floor** (always, zero
-        LLM) — each ``depends_on`` predecessor's changed files, commit, acceptance criteria, and
-        spec pointer, from artifacts that already exist — plus an **interpretive supervisor brief**
+        LLM) — each predecessor's changed files, commit, acceptance criteria, and spec pointer,
+        from artifacts that already exist — plus an **interpretive supervisor brief**
         when the supervisor is available (it resumes its warm session; no new turn budget). The
         combined content is redaction-scrubbed and written to ``logs/<task-id>/subtasks/
-        NN-slug.handoff.md`` (local, uncommitted, never in the memory tiers). Best-effort: a subtask
-        with no ``depends_on`` gets ``None``; a failed/empty brief still ships the floor.
+        NN-slug.handoff.md`` (local, uncommitted, never in the memory tiers). Best-effort: the
+        first subtask (nothing committed yet) gets ``None``; a failed/empty brief still ships the
+        floor.
+
+        The floor is built from **what landed on the branch** — every subtask before this one
+        carrying a commit, oldest first — and not from ``depends_on``. Subtasks run sequentially on
+        one branch, so an earlier commit is a predecessor in fact whether or not it was declared:
+        reading ``depends_on`` instead hid two committed subtasks from a successor that declared
+        only one, and gave a subtask with no declared dependency no brief at all next to three
+        committed siblings. ``depends_on`` stays the author's emphasis signal — the predecessors it
+        names are marked as declared — never the source of the facts.
         """
-        if not unit.depends_on:
-            return None
         specs = {s.order: s for s in p.decomposition.subtasks}
-        rows = {s.order: s for s in self._store.get_subtasks(p.task.id) if s.commit_sha}
+        landed = sorted(
+            (
+                row
+                for row in self._store.get_subtasks(p.task.id)
+                if row.commit_sha and row.order < unit.order
+            ),
+            key=lambda row: row.order,
+        )
         floors: list[str] = []
-        for dep in unit.depends_on:
-            spec, row = specs.get(dep), rows.get(dep)
-            if spec is None or row is None or row.commit_sha is None:
-                continue  # predecessor not committed yet (should not happen in a sequential run)
+        for row in landed:
+            spec = specs.get(row.order)
+            if spec is None or row.commit_sha is None:
+                continue  # not part of this run's accepted decomposition (should not happen)
             spec_path = subtask_spec_path(
-                self._artifacts_root, p.task.id, dep, spec.slug
+                self._artifacts_root, p.task.id, row.order, spec.slug
             ).as_posix()
             files = self._git.files_in_commit(row.commit_sha) if self._git is not None else []
-            floors.append(_format_predecessor_floor(spec, row.commit_sha, files, spec_path))
+            floors.append(
+                _format_predecessor_floor(
+                    spec,
+                    row.commit_sha,
+                    files,
+                    spec_path,
+                    declared=row.order in unit.depends_on,
+                )
+            )
         if not floors:
             return None
         floor = "\n\n".join(floors)
@@ -3218,7 +3386,9 @@ class Orchestrator:
 
     def _commit_subtask(self, p: _Pipeline, unit: SubtaskSpec) -> None:
         """Commit one completed subtask + persist its SHA."""
-        message = f"feat({p.task.id}): subtask {unit.order:02d} {unit.title}"
+        message = task_commit_subject(
+            p.task.id, f"subtask {unit.order:02d} {unit.title}", p.task.commit_type
+        )
         sha = self._git.commit_subtask(p.task.id, unit.order, unit.slug, message)
         update_subtask_index(
             self._artifacts_root, p.task.id, unit.order, status="committed", commit_sha=sha
@@ -3667,6 +3837,28 @@ class Orchestrator:
                     ", ".join(outcome.adopted_commits[:5]),
                     extra={"stage": node.id},
                 )
+            # A gating verdict none of whose gating findings names a source path. The rework edge
+            # leads to `fixing`, whose job is to open a named location and change it, so this round
+            # can only end in a refusal — which is what an evaluator reporting it *could not
+            # review* produces, and the findings contract (nullable `path` by design) has no way to
+            # say that instead. Deliberately a warning and not a park: the loop keeps its named
+            # budget, and a verdict that gates for a real reason but was written without a path
+            # must not be discarded. This line is what lets an operator tell a wasted round from a
+            # productive one while it is still running, instead of reading it out of the ledger
+            # afterwards.
+            findings_without_a_path = False
+            if outcome.gating_findings_name_no_path:
+                findings_without_a_path = True
+                self._log(p.task.id).warning(
+                    "the gating findings name no source path, so the fix step has nothing to open "
+                    "— continuing per policy; if the evaluator was reporting that it could not "
+                    "review rather than a defect, this round will change nothing",
+                    extra={
+                        "stage": node.id,
+                        "findings": len(outcome.findings),
+                        "first_finding": _first_finding_reason(outcome.findings),
+                    },
+                )
             # Best-effort live progress trace: one message per executed node finish (never on a
             # skip). Gated on the flag alone — when Telegram is off the notifier is a NullNotifier
             # and this is a no-op. Carries only node id + outcome (no secrets); never raises. A
@@ -3684,6 +3876,10 @@ class Orchestrator:
                     trace_outcome = TRACE_UNEXPECTED_WRITE
                 elif outcome.adopted_commits:
                     trace_outcome = TRACE_ADOPTED_COMMITS
+                elif findings_without_a_path:
+                    # Last of the five: a wasted rework round is worth saying, but never at the
+                    # cost of the single label slot when git control state also moved.
+                    trace_outcome = TRACE_FINDINGS_WITHOUT_A_PATH
                 self._notifier.send_trace(task_id=p.task.id, node_id=node.id, outcome=trace_outcome)
             # Chronological per-run index: one line per executed node run of every kind, so an
             # operator can read a re-running node's sequence without listing run-*/ dirs. Runs that
@@ -3900,6 +4096,10 @@ class Orchestrator:
                     pr_url,
                     strategy=git.auto_merge_strategy,
                     wait_for_checks=git.auto_merge_wait_for_checks,
+                    subject=merge_commit_subject(
+                        p.task.id, p.task.title, pr_url, p.task.commit_type
+                    ),
+                    body="",  # see merge_task: the branch's own commits are not a merge body
                 ),
             )
         except GitCommandError as exc:
@@ -4531,18 +4731,25 @@ class Orchestrator:
         resolve — so a finalize `--as abandoned` leaves the file where it is. A gate
         reject is quarantined separately. Idempotent: returns the destination whether it
         moved now or was already in place; returns ``None`` when there is nothing to do.
+
+        A decomposition root travels **with the spec files it references**, mirroring the promote
+        that brought them in together. That symmetry is load-bearing rather than tidy: the refs in
+        a ``subtasks:`` manifest are relative to the root file's own directory, so a root that
+        lands in ``done/`` while its specs stay in ``pending/subtasks/`` can no longer resolve its
+        own manifest — every ref reads as missing, which is a hard reject, and a reject quarantines
+        the very file this move just filed as finished.
         """
-        folder_name = {Status.DONE: "done", Status.FAILED: "failed"}.get(final)
-        if folder_name is None or not task_file:
+        dest = lifecycle_destination(task_file, final)
+        if dest is None:
             return None
-        src = Path(task_file)
-        parent = src.parent
-        tasks_root = parent.parent if parent.name in _LIFECYCLE_FOLDERS else parent
-        dest = tasks_root / folder_name / src.name
+        src = Path(task_file or "")
         if src.resolve() == dest.resolve():
             return dest  # already in its lifecycle folder (idempotent restart)
         if not src.exists():
             return dest if dest.exists() else None  # already moved
+        # Read the manifest while the root is still beside its specs — afterwards the refs no
+        # longer resolve from anywhere, which is the defect this move exists to avoid creating.
+        refs = read_subtask_refs(src)
         try:
             dest.parent.mkdir(parents=True, exist_ok=True)
             src.replace(dest)
@@ -4550,7 +4757,33 @@ class Orchestrator:
         except OSError:
             # Never let a file-move failure mask the terminal outcome; the ledger still records it.
             return None
+        self._relocate_subtask_specs(refs, src.parent, dest.parent)
         return dest
+
+    @staticmethod
+    def _relocate_subtask_specs(refs: Sequence[str], src_dir: Path, dest_dir: Path) -> None:
+        """Carry a decomposition root's spec files to the folder the root just moved into.
+
+        Each destination is the ref re-anchored on the root's **new** directory, never a per-file
+        ``lifecycle_destination``: a spec lives one level down, so asking that function where
+        ``tasks/pending/subtasks/01-a.md`` belongs answers ``tasks/pending/subtasks/done/01-a.md``
+        — a lifecycle folder nested inside the queue rather than beside it.
+
+        Best-effort and idempotent, for the same reason the root's own move is: the task has
+        already reached a terminal status and nothing here may mask it. A ref that has gone missing,
+        one already at its destination, and an occupied destination are all skipped rather than
+        forced, so a re-entered relocation finishes what an interrupted one started.
+        """
+        for ref in refs:
+            source = src_dir / ref
+            target = dest_dir / ref
+            if not source.is_file() or target.exists():
+                continue
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                source.replace(target)
+            except OSError:
+                continue
 
     def _reject(self, task_file: str, result: ValidationResult) -> PipelineResult:
         """Handle a Phase-A reject: failed, quarantine, report, ledger — no branch."""
@@ -4735,6 +4968,17 @@ class Orchestrator:
             return self._config.repo.branch_mode
         return self._branch_mode(task)
 
+    def _persisted_commit_type(self, task_id: str) -> str | None:
+        """The task's ``commit_type`` read from its persisted normalized manifest — the merge path,
+        where the live :class:`NormalizedTask` isn't in hand (``merge-task`` runs against a stored
+        row long after the run). ``None`` when the manifest can't be read, which
+        :func:`task_commit_subject` renders as the default type: a merge subject must never fail to
+        exist because a log directory was cleaned."""
+        try:
+            return load_normalized(self._artifacts_root, task_id).commit_type
+        except (json.JSONDecodeError, OSError, KeyError, ValueError):
+            return None
+
     def _restart_display_branch(self, task_id: str, mode: BranchMode) -> str | None:
         """Best-effort name of the operator-owned branch a restart-in-place will run on, for the
         confirm / dry-run view. ``current`` → the current git branch; ``existing`` → the task's
@@ -4889,7 +5133,10 @@ class Orchestrator:
         contacts: tuple[str, ...] = (),
         governance_changed: tuple[str, ...] = (),
     ) -> None:
-        """Best-effort terminal notification. Never raises and never alters the outcome."""
+        """Best-effort terminal notification. Never raises, never hangs, never alters the
+        outcome. The "never hangs" half is the transport's: every notifier call carries its own
+        wall-clock deadline, because this runs inside a watch tick and the stop ladder cannot
+        reach a call in flight."""
         try:
             self._notifier.send_notification(
                 task_id=task_id,

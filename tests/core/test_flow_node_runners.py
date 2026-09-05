@@ -158,6 +158,25 @@ class FakeStore:
     def upsert_editing_lineage(self, row: EditingLineageRow, conn: Any = None) -> None:
         self.editing_lineage[(row.task_id, row.subtask_order, row.lineage_key)] = row
 
+    def has_prior_provider_run(
+        self,
+        task_id: str,
+        node_id: str,
+        subtask_order: int | None,
+        provider: str,
+        *,
+        exclude_run_id: int,
+    ) -> bool:
+        # Faithful to the SQL rather than a stub: only a run that a provider actually settled
+        # counts, so the caller's own reserved row (recorded, never completed) cannot answer yes.
+        settled = {c["run_id"]: c.get("provider_used") for c in self.completed}
+        return any(
+            index != exclude_run_id
+            and (run.task_id, run.node_id, run.subtask_order) == (task_id, node_id, subtask_order)
+            and settled.get(index) == provider
+            for index, run in enumerate(self.recorded, start=1)
+        )
+
 
 def _result(
     structured: dict[str, Any] | None = None, *, final_message: str | None = None
@@ -2065,6 +2084,201 @@ def test_evaluator_maps_blocking_findings(
     assert result.outcome.kind == expected
 
 
+def _review_verdict(tmp_path: Path, findings: list[dict[str, Any]]) -> Any:
+    """Run a default `review` evaluator over *findings* and return its NodeResult."""
+    (tmp_path / "r.md").write_text("review {diff_path}", "utf-8")
+    node = _evaluator("review")
+    services = _services(
+        FakeRouter(_result({"findings": findings})),
+        FakeStore(),
+        FakeCheckRunner(CheckOutcome(passed=True, runs=())),
+        artifacts_root=str(tmp_path),
+    )
+    return EvaluatorNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+
+def test_a_gating_verdict_with_no_path_anywhere_is_flagged_for_the_operator(
+    tmp_path: Path,
+) -> None:
+    """F10: the contract cannot say "I could not review", so at least say it out loud.
+
+    Verbatim shape of both occurrences on the trial — one blocking finding, `path: null`, whose
+    text is a refusal rather than a defect. Routing is unchanged (the loop keeps its named budget,
+    and a real blocker written without a path must not be discarded), but the outcome now carries
+    the flag the orchestrator turns into an operator warning and a ⚠️ trace, so a round that cannot
+    end in a fix is visible while it runs instead of afterwards in the ledger.
+    """
+    result = _review_verdict(
+        tmp_path,
+        [
+            {
+                "severity": "blocking",
+                "path": None,
+                "what": (
+                    "I cannot perform the requested diff review under the provided constraints "
+                    "because the task, plan, and diff are only available under `.worc-io/`."
+                ),
+                "fix": "Provide the task, plan, and diff content directly in the prompt.",
+            }
+        ],
+    )
+    assert result.outcome.kind == "rework"  # a warning, not a gate
+    assert result.outcome.gating_findings_name_no_path is True
+
+
+def test_a_located_blocker_beside_a_pathless_one_is_not_flagged(tmp_path: Path) -> None:
+    # `fixing` has real work whenever one gating finding names a location, so a mixed verdict is
+    # not this signal — flagging it would cry wolf on every review that also made a whole-diff
+    # observation.
+    result = _review_verdict(
+        tmp_path,
+        [
+            {"severity": "blocking", "path": None, "what": "no tests at all", "fix": "add some"},
+            {"severity": "blocking", "path": "src/x.py", "what": "off by one", "fix": "use <="},
+        ],
+    )
+    assert result.outcome.kind == "rework"
+    assert result.outcome.gating_findings_name_no_path is False
+
+
+def test_a_pathless_advisory_finding_is_not_flagged(tmp_path: Path) -> None:
+    # An advisory finding routes nowhere and costs no round, so it never warns — only a finding
+    # the gate actually sent back does.
+    result = _review_verdict(
+        tmp_path,
+        [{"severity": "low", "path": None, "what": "consider a comment", "fix": None}],
+    )
+    assert result.outcome.kind == "accept"
+    assert result.outcome.gating_findings_name_no_path is False
+
+
+def test_a_clean_verdict_is_not_flagged(tmp_path: Path) -> None:
+    # Nothing gated, so there is nothing to warn about.
+    result = _review_verdict(tmp_path, [])
+    assert result.outcome.kind == "accept"
+    assert result.outcome.gating_findings_name_no_path is False
+
+
+def _subtask_ctx(node: FlowNode, order: int = 1) -> NodeContext:
+    """A NodeContext inside an active decompose region (``subtask_order`` set)."""
+    return NodeContext(
+        snapshot=_snapshot(node),
+        run_state=FlowRunState(flow_fingerprint="fp"),
+        node=node,
+        task_id="task-1",
+        subtask_order=order,
+    )
+
+
+def test_evaluator_in_a_decompose_region_receives_the_subtask_variables(tmp_path: Path) -> None:
+    """F1: the reviewer judged each subtask against the ROOT task, because it never saw the spec.
+
+    The agent runner publishes the three decomposition variables; the evaluator runner did not, so
+    a `review` node inside `decomposition.sub_flow` — running once per subtask, with
+    `ctx.subtask_order` live and already used for its own artifact namespacing — held only the root
+    task file and the shared plan. It could enforce neither the subtask's own acceptance criteria
+    nor its "out of scope for this subtask" boundary, because it never saw the file they live in.
+
+    Measured consequence on the trial: the reviewer charged every not-yet-implemented part of the
+    whole task against whichever subtask was under review — 3 false blocking findings on subtask 1
+    of 5, each demanding work the subtask's own spec explicitly forbade, and the count tracked the
+    volume of later-subtask work still absent from the tree. Meanwhile `fixing`, for the same
+    subtask, was being told "you are fixing subtask 1 of 5; keep your change scoped to that
+    subtask's spec" — two nodes in one run holding contradictory instructions.
+    """
+    (tmp_path / "r.md").write_text(
+        "Review.{?subtask_spec_path} Subtask {subtask_order} of {subtask_count}; "
+        "its spec is {subtask_spec_path}.{/subtask_spec_path}",
+        "utf-8",
+    )
+    node = _evaluator("review")
+    router = FakeRouter(_result(structured={"findings": []}))
+    services = _services(router, FakeStore(), None, artifacts_root=str(tmp_path))
+    inputs = _inputs(
+        tmp_path, subtask_count=5, subtask_spec_path=".worc-io/task-1/subtasks/01-tokens.md"
+    )
+
+    EvaluatorNodeRunner(services, inputs).run(node, _subtask_ctx(node, order=1))
+
+    assert (
+        "Subtask 1 of 5; its spec is .worc-io/task-1/subtasks/01-tokens.md."
+        in router.requests[0].prompt
+    )
+
+
+def test_evaluator_subtask_variables_drop_outside_a_decompose_region(tmp_path: Path) -> None:
+    # A whole-task run has no subtask, so the block drops rather than rendering "Subtask None of
+    # None" — the same rule the agent runner follows.
+    (tmp_path / "r.md").write_text(
+        "Review.{?subtask_spec_path} Subtask {subtask_order} of "
+        "{subtask_count}.{/subtask_spec_path}",
+        "utf-8",
+    )
+    node = _evaluator("review")
+    router = FakeRouter(_result(structured={"findings": []}))
+    services = _services(router, FakeStore(), None, artifacts_root=str(tmp_path))
+    inputs = _inputs(tmp_path, subtask_count=5, subtask_spec_path="ignored-without-an-order.md")
+
+    EvaluatorNodeRunner(services, inputs).run(node, _ctx(node))  # _ctx has subtask_order=None
+
+    assert router.requests[0].prompt == "Review."
+
+
+def test_the_agent_and_evaluator_runners_publish_the_same_variable_names(tmp_path: Path) -> None:
+    """Anti-drift, because this is the third time the two runners diverged on one channel.
+
+    `_memory_path`'s own docstring records the first (the memory packet was wired for agents only,
+    leaving `review.md`'s `{?memory_path}` block dead); F1 was the second, on the decomposition
+    variables. Comparing the published key sets directly means the next channel added to one runner
+    and forgotten in the other fails here instead of in a run.
+
+    `predecessor_context` is deliberately excluded: it is the *author's* handoff brief, assembled
+    for the node that writes the subtask, and an evaluator is not its reader.
+    """
+    (tmp_path / "impl.md").write_text("Build.", "utf-8")
+    (tmp_path / "r.md").write_text("Review.", "utf-8")
+    agent_node = AgentNode(id="implementation", kind="agent", role_file="impl.md")
+    review_node = _evaluator("review")
+    services = _services(FakeRouter(_result()), FakeStore(), None, artifacts_root=str(tmp_path))
+    inputs = _inputs(tmp_path, subtask_count=5, subtask_spec_path="spec.md")
+
+    # One snapshot holding both nodes, so the flow-derived `{<node_id>_path}` channel contributes
+    # the same names to each side and only the runner-owned difference is left to compare.
+    doc = FlowDoc(
+        name="t",
+        task_type="t",
+        permission_ceiling=PermissionProfile.WORKSPACE_WRITE,
+        output_policy=OutputPolicy.CODE_CHANGE,
+        publishing=PublishingPolicy.PULL_REQUEST,
+        nodes=(agent_node, review_node),
+        edges=(),
+        budgets=MappingProxyType({}),
+    )
+    snapshot = FlowSnapshot(
+        doc=doc,
+        nodes_by_id=MappingProxyType({agent_node.id: agent_node, review_node.id: review_node}),
+        adjacency=MappingProxyType({}),
+        flow_fingerprint="fp",
+    )
+
+    def ctx(node: FlowNode) -> NodeContext:
+        return NodeContext(
+            snapshot=snapshot,
+            run_state=FlowRunState(flow_fingerprint="fp"),
+            node=node,
+            task_id="task-1",
+            subtask_order=1,
+        )
+
+    agent_vars = AgentNodeRunner(services, inputs)._prompt_variables(ctx(agent_node), agent_node)
+    review_vars = EvaluatorNodeRunner(services, inputs)._prompt_variables(
+        ctx(review_node), review_node
+    )
+
+    assert set(agent_vars) - set(review_vars) == {"predecessor_context"}
+    assert set(review_vars) - set(agent_vars) == set()
+
+
 @pytest.mark.parametrize(
     ("gate_severity", "severity", "expected"),
     [
@@ -2712,6 +2926,7 @@ def test_checks_pass_outcome(tmp_path: Path) -> None:
         FakeRouter(_result()),
         store,
         FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),))),
+        artifacts_root=str(tmp_path),
     )
     result = ChecksNodeRunner(services, _checks_inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "pass"
@@ -2732,6 +2947,83 @@ def test_checks_fail_outcome(tmp_path: Path) -> None:
     )
     result = ChecksNodeRunner(services, _checks_inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "fail"
+
+
+def test_checks_pass_publishes_the_command_verdicts_as_checks_path(tmp_path: Path) -> None:
+    """A passing gate reaches the next node; F21 had it reach nobody.
+
+    `{checks_path}` was set only on the fail edge, so on a pass the next node was told nothing
+    about the gate. An evaluator asked to judge an acceptance criterion like "lint and build pass"
+    then had no evidence of it and, holding a shell, verified the only way left to it — by running
+    the build inside the agent sandbox, which is not the environment the gate runs in. Observed on
+    the trial: its own attempt died there, and it filed that as a blocking finding with no path,
+    about a failure that had not happened, into a fix loop that could not act on it.
+    """
+    node = _checks_node()
+    store = FakeStore()
+    outcome = CheckOutcome(passed=True, runs=(_run(True), _skipped_run()), any_skipped=True)
+    services = _services(
+        FakeRouter(_result()), store, FakeCheckRunner(outcome), artifacts_root=str(tmp_path)
+    )
+    inputs = _checks_inputs(tmp_path)
+
+    result = ChecksNodeRunner(services, inputs).run(node, _ctx(node))
+
+    assert result.outcome.kind == "pass"
+    assert inputs.checks_path is not None
+    published = json.loads(Path(inputs.checks_path).read_text(encoding="utf-8"))
+    assert published["passed"] is True
+    by_command = {entry["command"]: entry for entry in published["checks"]}
+    assert by_command["pytest"]["passed"] is True
+    assert by_command["pytest"]["exit_code"] == 0
+    # A skip is not evidence of a pass, so the reader must be able to tell the two apart.
+    assert by_command["xcodebuild test"]["skipped"] is True
+    assert by_command["xcodebuild test"]["passed"] is False
+
+
+def test_checks_failure_still_publishes_the_first_failure_log(tmp_path: Path) -> None:
+    # The pass path gained a summary; the fail path must still hand `fixing` the failing log
+    # itself, which is the text it acts on — a summary would have told it nothing it can fix.
+    log = tmp_path / "first-failure.log"
+    log.write_text("E   assert 1 == 2\n", encoding="utf-8")
+    node = _checks_node()
+    store = FakeStore()
+    outcome = CheckOutcome(
+        passed=False, runs=(_run(False),), any_quality_failed=True, first_failure_log=str(log)
+    )
+    services = _services(
+        FakeRouter(_result()), store, FakeCheckRunner(outcome), artifacts_root=str(tmp_path)
+    )
+    inputs = _checks_inputs(tmp_path)
+
+    result = ChecksNodeRunner(services, inputs).run(node, _ctx(node))
+
+    assert result.outcome.kind == "fail"
+    assert inputs.checks_path == str(log)  # no exchange wired → the private log path
+    assert not (tmp_path / "checks.json").exists()
+
+
+def test_a_dirtying_check_publishes_nothing_before_it_goes_manual(tmp_path: Path) -> None:
+    # The green-but-dirtying guard fails closed to manual review, so the run does not continue to
+    # a next node — publishing a "the gate passed" report from that state would be a claim about a
+    # tree nobody has accepted yet.
+    from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
+
+    node = _checks_node()
+    store = FakeStore()
+    services = _services(
+        FakeRouter(_result()),
+        store,
+        FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),))),
+        snapshot=FakeSnapshot(["before", "after"]),  # checksum changed → mutated
+        artifacts_root=str(tmp_path),
+    )
+    inputs = _checks_inputs(tmp_path)
+
+    with pytest.raises(NodeManualRequired):
+        ChecksNodeRunner(services, inputs).run(node, _ctx(node))
+
+    assert inputs.checks_path is None
 
 
 def test_checks_launch_failure_is_manual(tmp_path: Path) -> None:
@@ -2773,7 +3065,9 @@ def test_checks_partial_skip_still_passes(tmp_path: Path) -> None:
     node = _checks_node()
     store = FakeStore()
     outcome = CheckOutcome(passed=True, runs=(_run(True), _skipped_run()), any_skipped=True)
-    services = _services(FakeRouter(_result()), store, FakeCheckRunner(outcome))
+    services = _services(
+        FakeRouter(_result()), store, FakeCheckRunner(outcome), artifacts_root=str(tmp_path)
+    )
     result = ChecksNodeRunner(services, _checks_inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "pass"
     assert len(store.check_runs) == 2  # both the run and the skip are recorded
@@ -2806,7 +3100,13 @@ def test_checks_selects_from_committed_change_when_tree_clean(tmp_path: Path) ->
     node = _checks_node()
     store = FakeStore()
     check_runner = FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),)))
-    services = _services(FakeRouter(_result()), store, check_runner, git=CleanTreeGit())
+    services = _services(
+        FakeRouter(_result()),
+        store,
+        check_runner,
+        git=CleanTreeGit(),
+        artifacts_root=str(tmp_path),
+    )
     result = ChecksNodeRunner(services, _checks_inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "pass"
     assert len(store.check_runs) == 1  # the set ran — not a vacuous pass
@@ -2862,6 +3162,7 @@ def test_mutation_guard_clean_check_still_passes(tmp_path: Path) -> None:
         FakeStore(),
         FakeCheckRunner(CheckOutcome(passed=True, runs=(_run(True),))),
         snapshot=FakeSnapshot(["same"]),
+        artifacts_root=str(tmp_path),
     )  # capture() returns "same" both times
     result = ChecksNodeRunner(services, _checks_inputs(tmp_path)).run(node, _ctx(node))
     assert result.outcome.kind == "pass"
@@ -4103,3 +4404,192 @@ def test_publish_does_not_rerun_checks_when_nothing_was_adopted(tmp_path: Path) 
     )
     PublishNodeRunner(services, inputs).run(node, _ctx(node))
     assert checks.runs == [] and git.pr_notice is None
+
+
+# -- continuation prompts (resume_role_file) ----------------------------------
+
+
+def _continuing_pair(tmp_path: Path) -> tuple[AgentNode, AgentNode]:
+    """The packaged shape: a head-of-lineage author and an affinity node that joins its session."""
+    (tmp_path / "impl.md").write_text("implement {task_path}", "utf-8")
+    (tmp_path / "fix.md").write_text("fix the findings", "utf-8")
+    (tmp_path / "fix.continue.md").write_text("another round", "utf-8")
+    impl = AgentNode(
+        id="implementation",
+        kind="agent",
+        role_file="impl.md",
+        session_scope=SessionScope.EDITING_LINEAGE,
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
+    fixing = AgentNode(
+        id="fixing",
+        kind="agent",
+        role_file="fix.md",
+        resume_role_file="fix.continue.md",
+        session_scope=SessionScope.EDITING_LINEAGE,
+        lineage_affinity="implementation",
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
+    return impl, fixing
+
+
+def _run_agent(
+    node: AgentNode, store: FakeStore, tmp_path: Path, session: str, ctx: Any = None
+) -> Any:
+    from dataclasses import replace
+
+    router = FakeRouter(replace(_result(), session_id=session))
+    check = FakeCheckRunner(CheckOutcome(passed=True, runs=()))
+    AgentNodeRunner(_services(router, store, check), _inputs(tmp_path)).run(
+        node, ctx if ctx is not None else _ctx(node)
+    )
+    return router.requests[0]
+
+
+def test_first_round_of_an_affinity_node_gets_the_full_prompt(tmp_path: Path) -> None:
+    # The row a session_id-only predicate would get wrong: `fixing` round 1 resumes the session
+    # `implementation` opened, so history exists — but this role has never stated its rules in it.
+    impl, fixing = _continuing_pair(tmp_path)
+    store = FakeStore()
+    _run_agent(impl, store, tmp_path, "impl-session")
+
+    request = _run_agent(fixing, store, tmp_path, "fix-session")
+    assert request.session_id == "impl-session"  # a session IS being resumed
+    assert request.continuation_prompt is None  # and it still gets the whole of fix.md
+    assert request.prompt.startswith("fix the findings")
+
+
+def test_second_round_of_the_same_node_gets_the_continuation_prompt(tmp_path: Path) -> None:
+    impl, fixing = _continuing_pair(tmp_path)
+    store = FakeStore()
+    _run_agent(impl, store, tmp_path, "impl-session")
+    _run_agent(fixing, store, tmp_path, "fix-session")
+
+    request = _run_agent(fixing, store, tmp_path, "fix-session-2")
+    assert request.continuation_prompt == "another round"
+    assert request.prompt.startswith("fix the findings")  # both texts ride the request
+
+
+def test_a_node_declaring_no_continuation_file_is_unchanged(tmp_path: Path) -> None:
+    from dataclasses import replace
+
+    impl, fixing = _continuing_pair(tmp_path)
+    plain = replace(fixing, resume_role_file=None)
+    store = FakeStore()
+    _run_agent(impl, store, tmp_path, "impl-session")
+    _run_agent(plain, store, tmp_path, "fix-session")
+
+    assert _run_agent(plain, store, tmp_path, "fix-session-2").continuation_prompt is None
+
+
+def test_a_fresh_session_gets_the_full_prompt_however_many_rounds_ran(tmp_path: Path) -> None:
+    # Even with two settled rounds behind it, a node whose lineage is gone starts over honestly.
+    _impl, fixing = _continuing_pair(tmp_path)
+    store = FakeStore()
+    _run_agent(fixing, store, tmp_path, "s1")
+    request = _run_agent(fixing, store, tmp_path, "s2")
+    assert request.continuation_prompt == "another round"
+
+    store.editing_lineage.clear()
+    assert _run_agent(fixing, store, tmp_path, "s3").continuation_prompt is None
+
+
+def test_another_subtasks_rounds_do_not_count_as_this_units(tmp_path: Path) -> None:
+    # One FlowRunState spans a decompose region, so the unit discriminator has to be the row's own
+    # subtask_order — otherwise subtask 2 opens on a continuation of subtask 1's conversation.
+    _impl, fixing = _continuing_pair(tmp_path)
+    store = FakeStore()
+    _run_agent(fixing, store, tmp_path, "s1", ctx=_subtask_ctx(fixing, order=1))
+    _run_agent(fixing, store, tmp_path, "s1b", ctx=_subtask_ctx(fixing, order=1))
+
+    first = _run_agent(fixing, store, tmp_path, "s2", ctx=_subtask_ctx(fixing, order=2))
+    assert first.continuation_prompt is None
+
+
+def test_a_renewed_turn_grant_continues_instead_of_restarting(tmp_path: Path) -> None:
+    # The sharpest of the three re-entries: an agent that merely ran out of turns was being handed
+    # "Implement the assigned task…" again, which reads as "start over" inside its own conversation.
+    # It now gets the short text — and only on the second call, because on the first it had said
+    # nothing yet.
+    from dataclasses import replace
+
+    from wastech_orchestrator.notify import AskResult
+
+    (tmp_path / "r.md").write_text("implement the task", "utf-8")
+    (tmp_path / "r.continue.md").write_text("carry on where you stopped", "utf-8")
+    node = replace(
+        _gate_node(),
+        resume_role_file="r.continue.md",
+        session_scope=SessionScope.EDITING_LINEAGE,
+    )
+    router = _GateRouter([_max_turns_result(), _result({"content": "done"})])
+    notifier = FakeNotifier(AskResult(answered=True, approved=True))
+    services = _gate_services(tmp_path, router, FakeStore(), notifier)
+
+    result = AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+    assert result.outcome.kind == "done"
+    assert router.calls == 2
+    assert router.requests[0].continuation_prompt is None  # first turn: the whole brief
+    assert router.requests[1].session_id == "sess-1"
+    assert router.requests[1].continuation_prompt == "carry on where you stopped"
+
+
+def test_declared_skills_reach_both_the_request_and_the_node_run(tmp_path: Path) -> None:
+    # The two carriers R6 names, filled from one node: the request (which the neutral seam turns
+    # into the prompt block, and each adapter into its off-switch) and the reserved node-run row,
+    # written before the node executes because it is the declared posture, not an observation.
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(
+        id="work",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+        skills=("acme-tdd",),
+    )
+    router, store = FakeRouter(_result()), FakeStore()
+    services = _services(router, store, FakeCheckRunner(CheckOutcome(passed=True, runs=())))
+    AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+    assert router.requests[0].required_skills == ("acme-tdd",)
+    # Naming a skill is itself the request: the node never wrote `allow_skills`.
+    assert router.requests[0].allow_skills is True
+    assert store.recorded[0].skills_required == ("acme-tdd",)
+    assert store.recorded[0].skills_allowed is True
+
+
+def test_a_node_that_declares_nothing_runs_with_skills_off(tmp_path: Path) -> None:
+    # The shipped default, and the one every packaged flow's node takes: a step the flow did not
+    # ask for cannot fire on a description written in the target repository.
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(
+        id="work",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+    )
+    router, store = FakeRouter(_result()), FakeStore()
+    services = _services(router, store, FakeCheckRunner(CheckOutcome(passed=True, runs=())))
+    AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+    assert router.requests[0].allow_skills is False
+    assert router.requests[0].required_skills == ()
+    assert store.recorded[0].skills_allowed is False
+
+
+def test_allow_skills_true_without_names_turns_them_on(tmp_path: Path) -> None:
+    # "Use your own harness however you see fit" — skills on, none required, so no prompt block.
+    (tmp_path / "r.md").write_text("go", "utf-8")
+    node = AgentNode(
+        id="work",
+        kind="agent",
+        role_file="r.md",
+        permission_profile=PermissionProfile.WORKSPACE_WRITE,
+        allow_skills=True,
+    )
+    router, store = FakeRouter(_result()), FakeStore()
+    services = _services(router, store, FakeCheckRunner(CheckOutcome(passed=True, runs=())))
+    AgentNodeRunner(services, _inputs(tmp_path)).run(node, _ctx(node))
+
+    assert router.requests[0].allow_skills is True
+    assert router.requests[0].required_skills == ()

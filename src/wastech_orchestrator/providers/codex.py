@@ -523,6 +523,17 @@ def build_codex_argv(
         # In the advanced mode every attempt is online, which is also why the validator rule
         # forbidding a Codex workspace-write node with network does not apply there.
         argv += ["-c", 'web_search="disabled"']
+    if not request.allow_skills:
+        # The node's skills off-switch, deliberately emitted HERE and not folded into
+        # ``_isolation_argv``'s feature list: that list is emptied wholesale in the advanced mode,
+        # which is the one mode where skills are reachable, so the flag would vanish exactly where
+        # it is needed. Kept under strict isolation too — ``--ignore-user-config`` plus an untrusted
+        # project is not established to stop host skill discovery (``skip_host_skill_discovery``
+        # exists as its own feature flag, which suggests it does not), and a flow may always narrow.
+        # ``skill_search`` is validated against the live binary; an unknown feature name is a parse
+        # error, so a typo here cannot pass silently. Codex has no flag that *names* a skill, so
+        # this is the only skills argv it gets: the requiring direction is prompt-only there.
+        argv += ["--disable", "skill_search"]
     if output_schema_path is not None:
         argv += ["--output-schema", output_schema_path]
     # Durable session resume: ``codex exec [exec-options] resume <SESSION_ID>`` continues the
@@ -531,10 +542,10 @@ def build_codex_argv(
     # subcommand; on the fresh path (no subcommand) they follow the exec options.
     if request.session_id:
         argv += ["resume", request.session_id]
-    model = request.model or config.model
+    model = config.effective_model(request.model)
     if model:
         argv += ["--model", model]
-    reasoning = request.reasoning or config.reasoning
+    reasoning = config.effective_reasoning(request.reasoning)
     if reasoning:
         effort = normalize_codex_reasoning(reasoning)
         if effort is None:
@@ -566,7 +577,21 @@ def isolation_reasons(config: ProviderConfig) -> list[str]:
     return reasons
 
 
-def host_floor_gap(*, system: str | None = None) -> str | None:
+def default_host_system() -> str:
+    """The host platform name Codex's offline floor answer keys on (``platform.system()``).
+
+    A module-level seam mirroring :func:`~wastech_orchestrator.providers.claude`'s
+    ``default_sandbox_probe``, and it exists for the same reason: ``host_floor_gap`` is bound into
+    the composition table at import time and is thereafter reachable only through the one-argument
+    :class:`~wastech_orchestrator.security.isolation.HostFloorCheck` protocol, which has nowhere to
+    put an injected host. Reading the host through a name the deterministic suite can pin — rather
+    than calling ``platform.system()`` inline — is what keeps a suite assertion about the floor from
+    becoming a property of the machine running it.
+    """
+    return platform.system()
+
+
+def host_floor_gap(*, strict_isolation: bool, system: str | None = None) -> str | None:
     """What this host cannot be shown to enforce for Codex, or ``None`` when it can be.
 
     The counterpart of :func:`claude.host_floor_gap`, and deliberately shaped differently, because
@@ -577,9 +602,20 @@ def host_floor_gap(*, system: str | None = None) -> str | None:
     alternative was silence, and a Codex-only park on such a host learned nothing from
     ``worc preflight`` and then met the answer inside its first attempt.
 
-    ``system`` is injectable for the deterministic suite; it defaults to the real host.
+    ``strict_isolation`` is accepted and deliberately NOT read, and that is the asymmetry the
+    advanced mode has to state rather than imply. Claude's answer changes with this flag: the mode
+    raises no OS sandbox there, on any host. Codex's does not — every attempt gets a generated
+    permission profile (``read-only`` / ``workspace-write``) with no opt-out, and the one selector
+    that would remove it, ``danger-full-access``, is absolutely forbidden on all three enforcement
+    layers at every value of every key. So "no restrictions in the advanced mode" is true of Claude
+    and false of Codex, and this parameter is in the signature so a future reader cannot mistake
+    silence here for the question not having been asked.
+
+    ``system`` is injectable for the deterministic suite; it defaults to the real host through
+    :func:`default_host_system`, which callers that cannot reach this parameter pin instead.
     """
-    if (system if system is not None else platform.system()) != "Windows":
+    del strict_isolation  # see above: Codex's floor does not move with the mode
+    if (system if system is not None else default_host_system()) != "Windows":
         return None
     return (
         "native Windows: whether the Codex sandbox can enforce here is decided by the CLI's "
@@ -974,7 +1010,7 @@ class CodexProvider(BaseCliProvider):
         documentation, rework, fixing). Probe ``codex exec resume --help`` and flag the drift so
         preflight surfaces it — fatal only when codex has no fallback provider (decided upstream),
         else a warning. Light grep contract (like the ``-c/--config`` probe): empty output is
-        inconclusive (no flag); passes on the current 0.142.x grammar.
+        inconclusive (no flag); passes on the 0.152.1 grammar this adapter is verified against.
         """
         ok, help_text = self._probe([self._config.command, "exec", "resume", "--help"], env)
         if not help_text.strip():

@@ -380,10 +380,11 @@ def _enum[E: StrEnum](
 def _build_auto_mode(raw: Any, issues: list[str]) -> AutoModeConfig:
     where = "orchestrator.auto_mode"
     m = _mapping(raw, where, issues)
-    _check_keys(m, {"enabled", "confirm_next_task"}, where, issues)
+    _check_keys(m, {"enabled", "confirm_next_task", "confirm_timeout_s"}, where, issues)
     return AutoModeConfig(
         enabled=_bool(m, "enabled", False, where, issues),
         confirm_next_task=_bool(m, "confirm_next_task", False, where, issues),
+        confirm_timeout_s=_int(m, "confirm_timeout_s", 900, where, issues),
     )
 
 

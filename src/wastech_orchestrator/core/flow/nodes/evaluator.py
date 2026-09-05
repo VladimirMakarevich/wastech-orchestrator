@@ -58,7 +58,7 @@ from wastech_orchestrator.core.flow.nodes.exchange_publish import (
     publish_node_run_file,
 )
 from wastech_orchestrator.core.flow.observability import record_run_observability
-from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file, render_role_prompt
+from wastech_orchestrator.core.flow.prompt import references_variable, render_role_prompt
 from wastech_orchestrator.core.flow.prompt_vars import valid_prompt_vars
 from wastech_orchestrator.core.flow.schema import SEVERITY_ORDER, EvaluatorNode, FlowNode
 from wastech_orchestrator.core.flow.usage_accounting import (
@@ -73,7 +73,7 @@ from wastech_orchestrator.providers.artifacts import (
     node_run_dir,
     task_artifact_dir,
 )
-from wastech_orchestrator.providers.base import AgentRunRequest, build_effective_prompt
+from wastech_orchestrator.providers.base import AgentRunRequest
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import EvaluationRow, NodeLineageRow, NodeRunRow
 
@@ -206,11 +206,11 @@ class EvaluatorNodeRunner:
             node_id=node.id,
             subtask=ctx.subtask_order,
             run_id=run_id,
-            prompt=build_effective_prompt(request),
+            request=request,
             route=route,
             outcome=outcome,
-            model=node.model,
-            reasoning=node.reasoning,
+            configured_model=node.model,
+            configured_reasoning=node.reasoning,
             started_at=started_at,
             usage_baseline=baseline,
             baseline_session_id=session_id,
@@ -279,6 +279,7 @@ class EvaluatorNodeRunner:
                 # an evaluator that emitted findings as a gate that "passed". The agent runner has
                 # always passed this; the evaluator runner dropped it one layer up.
                 final_message=outcome.result.final_message,
+                gating_findings_name_no_path=_no_gating_finding_names_a_path(findings, gating),
             ),
             node_run_id=run_id,
         )
@@ -430,11 +431,17 @@ class EvaluatorNodeRunner:
         # The renderer stays the fixed security core; the caller widens *which names* it may
         # substitute to the flow-derived set (core allowlist ∪ each agent/tool node's {<id>_path}),
         # exactly as the agent runner does, and only ever places path values in the dict.
-        prompt = render_role_prompt(
-            self._in.flow_dir,
-            node.role_file,
-            self._prompt_variables(ctx, node),
-            allowed=valid_prompt_vars(ctx.snapshot),
+        variables = self._prompt_variables(ctx, node)
+        allowed = valid_prompt_vars(ctx.snapshot)
+        prompt = render_role_prompt(self._in.flow_dir, node.role_file, variables, allowed=allowed)
+        # No store read is needed to know this evaluator has spoken on the session it is resuming:
+        # the row it comes from is keyed by this node's own id and written only by this node's own
+        # successful pass, so a session in hand IS that proof. None of the affinity ambiguity that
+        # makes the author side ask a second question applies here.
+        continuation_prompt = (
+            render_role_prompt(self._in.flow_dir, node.resume_role_file, variables, allowed=allowed)
+            if node.resume_role_file is not None and session_id is not None
+            else None
         )
         return AgentRunRequest(
             task_id=ctx.task_id,
@@ -466,6 +473,7 @@ class EvaluatorNodeRunner:
             # across rework rounds. The resumed session (and its usage baseline) is resolved
             # by the caller so the row is read once.
             session_id=session_id,
+            continuation_prompt=continuation_prompt,
             resume_baseline_output_tokens=resume_baseline_output_tokens,
             # Network is a per-node override on top of the flow-wide default (a research verifier
             # may need it): the node's ``network_access`` wins, else it inherits the flow's
@@ -549,6 +557,16 @@ class EvaluatorNodeRunner:
         )
 
     def _prompt_variables(self, ctx: NodeContext, node: EvaluatorNode) -> dict[str, object | None]:
+        """The variables this evaluator's role prompt may substitute (paths and ids only).
+
+        Kept in step with the agent runner's set by name, because the two have now diverged on one
+        channel twice: the memory packet was wired for agent nodes only, leaving ``review.md``'s
+        ``{?memory_path}`` block dead (see :meth:`_memory_path`), and the decomposition variables
+        the same way. The one deliberate difference is ``predecessor_context`` — the *author's*
+        handoff brief, assembled for the node that writes a subtask, which an evaluator is not the
+        reader of. ``test_the_agent_and_evaluator_runners_publish_the_same_variable_names`` compares
+        the two key sets so the next omission fails a test rather than a run.
+        """
         paths = build_path_context(self._in, self._s.repo_dir)
         variables: dict[str, object | None] = {
             "task_id": ctx.task_id,
@@ -557,6 +575,16 @@ class EvaluatorNodeRunner:
             **paths,
             "memory_path": self._memory_path(node, ctx),
         }
+        # An evaluator inside a decompose region runs once PER SUBTASK, and without these it judged
+        # each subtask's diff against the ROOT task file and the shared plan — the only two things
+        # it was given. So it could hold neither the subtask's own acceptance criteria nor its
+        # "out of scope for this subtask" boundary, and charged every not-yet-implemented part of
+        # the whole task against whichever subtask was under review. The runner already used
+        # ``ctx.subtask_order`` for its own artifact namespacing; it simply never passed it on.
+        if ctx.subtask_order is not None:
+            variables["subtask_order"] = ctx.subtask_order
+            variables["subtask_count"] = self._in.subtask_count
+            variables["subtask_spec_path"] = self._in.subtask_spec_path
         # An evaluator judging the *work* (a coverage gate, a critic) needs the upstream
         # node's output, not only the report a later node wrote from it. Same channel the agent
         # runner reads, same rule — a path to a Core-written redacted artifact, never inlined
@@ -583,11 +611,9 @@ class EvaluatorNodeRunner:
         builder = self._s.packet_builder
         if builder is None:  # memory disabled — no store, empty variable, unchanged behavior
             return None
-        try:
-            template = read_role_file(self._in.flow_dir, node.role_file)
-        except RoleFileError:
-            return None  # render_role_prompt surfaces the real read error
-        if "{memory_path}" not in template and "{?memory_path}" not in template:
+        if not references_variable(
+            self._in.flow_dir, (node.role_file, node.resume_role_file), "memory_path"
+        ):
             return None
         # This task's changed paths (per-task chain base), not the whole shared branch's, so
         # the packet's path-overlap ranking stays relevant on a chain branch.
@@ -670,6 +696,27 @@ class EvaluatorNodeRunner:
             return ()
         gate_rank = _severity_rank(node.gate_severity)
         return tuple(self._is_blocking(f, gate_rank) for f in raw_findings)
+
+
+def _no_gating_finding_names_a_path(
+    findings: tuple[Finding, ...], gating: tuple[bool, ...]
+) -> bool:
+    """Whether the verdict gates and yet no gating finding says where.
+
+    The rework edge leads to ``fixing``, whose whole job is to open a named source location and
+    change it; a gating finding carrying no path gives it nothing to open. Observed twice on the
+    same trial, both times the same shape: the evaluator did not find a defect, it reported that it
+    *could not review* — a contradiction in its own instructions once, a build that died in its
+    sandbox the other time — and the findings contract, whose ``path`` is nullable by design, had no
+    way to say so. Each refusal was accepted as an ordinary verdict and spent a full fix round (426s
+    and 474s) establishing there was nothing to fix.
+
+    Judged over the **gating** findings only, and only when they are all pathless. One pathless
+    blocker beside a located one still leaves ``fixing`` real work, so that is not this signal; and
+    an advisory finding without a path routes nowhere and costs nothing.
+    """
+    gated = [f for f, gates in zip(findings, gating, strict=True) if gates]
+    return bool(gated) and not any(f.paths for f in gated)
 
 
 def _to_finding(raw: Mapping[str, Any]) -> Finding:

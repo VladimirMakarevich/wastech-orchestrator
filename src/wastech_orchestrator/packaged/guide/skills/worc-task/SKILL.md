@@ -41,6 +41,14 @@ Good:
 
 Avoid (vague, untestable): "Make pagination better.", "Clean up the API."
 
+**Cite a repository rule, never restate it.** A task that paraphrases a rule ("keep comments short") replaces the rule with the paraphrase: the agent complies with what the task said, and the reviewer — which reads the rule itself — files the violation. Name the file and the rule (`.rules/coding-style.md`, the comment-density rule) and let the agent read it. The same holds for a spec or design doc a task builds on: **name every file the task requires**, with its path. One named and one left to inference is one the agent may never open.
+
+**A property is not a path list.** "Leave full-bleed screens alone — `src/app/pages/onboarding/`, `src/app/pages/auth/`" reads as a definition and is used as one: a page under those directories that is _not_ full-bleed gets skipped, and a full-bleed page elsewhere gets changed. State the property, and if paths help, mark them as examples of it — never as its extent. Whichever way the two disagree, it is a delivery gap.
+
+**Make a criterion greppable.** A criterion is checked by someone who has to find its evidence: prefer "`grep -r 'safe-padding-bottom' src/` returns nothing" over "the utility class is not shipped", and a named file or symbol over a description of one. This is what lets the review step and the operator reach the same verdict.
+
+**Never write a criterion about a surface no node can write.** The commit message and the squash commit's subject are assembled by the orchestrator from the task's `title` and `commit_type`; no agent can add to them, so "name the affected files in the commit message" is a criterion the run can only fail. The pull-request description **is** reachable — it is the run summary — so ask for content there instead, and use `commit_type` for the one thing the commit message takes from you.
+
 If acceptance criteria are present **and** the Description is non-empty, the orchestrator skips refinement automatically. Omit them only when you want the refinement stage to enrich an under-specified task (missing criteria never rejects the task — there is no flag).
 
 ## The task contract (front-matter fields)
@@ -57,6 +65,7 @@ Only these keys are allowed. **Any other key makes the task rejected** (`unknown
 | `branch_ref` | no | string | Branch to check out — **required iff** `branch_mode: existing`; must already exist (never auto-created). Ignored for other modes. |
 | `publish` | no | `commit` \| `push` \| `pull_request` | Downgrade-only cap on where the publish node stops (`min(flow_policy, publish)`). Omit ⇒ the flow's policy; no-op on a flow with no publish node. |
 | `trust_level` | no | `strict` \| `auto` | Per-task override of the dangerous-diff approval threshold. `strict` gates every deletion/manifest edit; `auto` (default) gates only operator `protected_paths`. Never lowers the hard security ceiling. |
+| `commit_type` | no | `feat` \| `fix` \| `docs` \| `style` \| `refactor` \| `perf` \| `test` \| `build` \| `ci` \| `chore` \| `revert` | The Conventional-Commits **type** for every commit this task lands — the branch commit, each subtask commit, and the squash commit on the base branch. Omit ⇒ `feat`. The scope is always the task id (`fix(task-001): <title>`) and is never yours to choose. **Fail-closed**: an unknown type rejects the task, because the value goes into permanent history. |
 | `auto_merge` | no | boolean | `true` requests auto-merge of the PR (**DANGER — skips human review**); `false` always opts out; omit uses the instance default. A set per-task value wins outright. |
 | `prompt_audit` | no | boolean | `true`/`false` forces prompt-audit recording for this task; omit uses the config default. |
 | `decomposition` | no | boolean | `true`/`false` permits/forbids decomposition for this task (task-wins over `agents.decomposition.enabled`); omit uses the config default. Only flips the gate — the flow + planning still decide whether a split happens. Not for operator-authored `subtasks`. |
@@ -136,4 +145,7 @@ Webhook delivery should stop retrying after a bounded number of failed attempts.
 - Don't add any front-matter key outside the allowed table.
 - Don't embed secrets, and don't put CLI-flag-shaped or shell-punctuation values in **any** front-matter field (including `title`/`contacts`) — a leading `-` or a `` ` ``/`;`/`|`/`$(` gets the task rejected. Put such content in the body.
 - Don't try to add, replace, or relax checks, or weaken the sandbox — those are operator config, not task fields.
+- Don't restate a repository rule in the task body — cite it by file and name; the agent obeys the restatement and the reviewer reads the rule.
+- Don't define a property by listing paths — state the property and mark any paths as examples, or the list becomes its extent.
+- Don't write an acceptance criterion asking for content in the commit message or the squash subject — the orchestrator writes both, and `commit_type` is the only part a task supplies. The PR description is the run summary, so that one can be asked for.
 - Don't cram several unrelated changes into one task — split into separate tasks. To split **one** change into ordered steps that land as a single PR, use **worc-deco-task**.

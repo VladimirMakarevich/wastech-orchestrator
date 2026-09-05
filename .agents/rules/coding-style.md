@@ -29,9 +29,9 @@
   ```
 
 - **Historical narrative is forbidden — a comment states what is, never what was.** The code and its comments describe the design as it stands today; git already keeps the history, and a comment that narrates a change is a second, unmaintained copy of it that decays the moment the next change lands. Forbidden in every form: "used to be", "changed from", "no longer …", "not … any more", "we now …", "removed in vNN", "superseded by", "previously", "historically", "kept for backward compatibility", and the compatibility tombstone left behind after a rewrite. Rewrite each one as a positive statement of the current rule plus the reason it holds — a reader who has never seen the old behavior must lose nothing.
-- **No decision attribution, no dates, no change-log entries.** A comment never records *who* decided something or *when* — no "owner decision", "owner decision 2026-08-24", "decided by the operator", "per the audit", "accepted 2026-08-05", no bare dates in prose, and no `# vNN (<date>, <slug>): …` changelogs enumerating what each version added or dropped. Attribution and timestamps answer a question the reader is not asking and cannot verify from the code; the reason a rule exists is what makes it enforceable, and the reason must stand on its own without knowing whose call it was.
+- **No decision attribution, no dates, no change-log entries.** A comment never records _who_ decided something or _when_ — no "owner decision", "owner decision 2026-08-24", "decided by the operator", "per the audit", "accepted 2026-08-05", no bare dates in prose, and no `# vNN (<date>, <slug>): …` changelogs enumerating what each version added or dropped. Attribution and timestamps answer a question the reader is not asking and cannot verify from the code; the reason a rule exists is what makes it enforceable, and the reason must stand on its own without knowing whose call it was.
 - **No references to runs, incidents, tasks, or phases.** Names of concrete runs, task ids, and incidents — `journey-18a`, "the incident replayed live", "the regression from the live run", campaign/phase tags (`Ам-5`, `Блок Б`, `Т5.7`, `Пре3-8`) — are references of the same class as a document identifier and are forbidden the same way. What a run once proved is either a real constraint, in which case state the constraint (`a standalone install keeps the CLI binary inside its own config home, so a deny there stops the binary from executing`), or it is not, in which case delete it.
-- These three rules bind **documentation as well as code**: [.agents/rules/](.), [README.md](../../README.md), and every operator-facing file under `src/wastech_orchestrator/packaged/` (flows, role prompts, `guide/`, `config.example.yaml`). The operator has no access to our backlog, our dates, or our run ids, so text of this kind is pure noise there. The one place a decision record legitimately lives is `docs/backlog/` — those documents *are* the record, and this rule does not apply inside them.
+- These three rules bind **documentation as well as code**: [.agents/rules/](.), [README.md](../../README.md), and every operator-facing file under `src/wastech_orchestrator/packaged/` (flows, role prompts, `guide/`, `config.example.yaml`). The operator has no access to our backlog, our dates, or our run ids, so text of this kind is pure noise there. The one place a decision record legitimately lives is `docs/backlog/` — those documents _are_ the record, and this rule does not apply inside them.
 
   ```python
   # Before — attribution, a date, a phase tag and a narrated change, and not one enforceable fact:
@@ -40,6 +40,7 @@
   # $CODEX_HOME carries no deny: a standalone install keeps the `codex` binary and its
   # `apply_patch` helper inside that home, so denying it stops the CLI from executing at all.
   ```
+
 - If a block is hard to justify with a short why-comment, simplify or restructure it until the intent and rationale are clear.
 
 ## General principles

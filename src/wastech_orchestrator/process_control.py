@@ -1,4 +1,4 @@
-"""PID-file and graceful-shutdown plumbing for the ``watch`` daemon.
+"""PID-file and graceful-shutdown plumbing for the orchestrator's executors.
 
 Pure and print-free by design: the CLI owns all operator output and exit codes; this module only
 reads/writes the PID file, probes liveness, signals a process, and bridges ``SIGTERM`` to a
@@ -39,6 +39,7 @@ SignalFn = Callable[[int, SignalHandler], SignalHandler]
 PID_FILENAME = "orchestrator.pid"
 STOP_FILENAME = "orchestrator.stop"
 CHILDREN_FILENAME = "orchestrator.children"
+RUNNER_FILENAME = "orchestrator.run"
 
 # Kill the whole subtree of an agent recorded as (pid, pgid): killpg + a descendant sweep (POSIX) or
 # ``taskkill /F /T`` (Windows). Injected as a seam so this module never shells out, exactly as
@@ -151,6 +152,19 @@ def read_process_state(pid: int) -> str | None:
 def pid_file_path(artifacts_root: str | os.PathLike[str]) -> Path:
     """The canonical PID-file location under an artifacts root (``<root>/orchestrator.pid``)."""
     return Path(artifacts_root) / PID_FILENAME
+
+
+def runner_file_path(artifacts_root: str | os.PathLike[str]) -> Path:
+    """The canonical ``run``-executor marker (``<root>/orchestrator.run``).
+
+    A self-managed liveness file beside the daemon's ``orchestrator.pid``, and deliberately **not**
+    the same file. ``run`` installs no stop wiring — no ``SIGTERM`` handler, no stop-file poll — so
+    a ``stop`` that believed it could ask this process to finish would wait out its timeout and
+    escalate to a kill on a process that was working correctly. Two files let every "is anything
+    executing in this clone?" probe answer yes while the stop ladder keeps addressing only the
+    process that can answer it.
+    """
+    return Path(artifacts_root) / RUNNER_FILENAME
 
 
 def stop_file_path(artifacts_root: str | os.PathLike[str]) -> Path:
@@ -354,7 +368,10 @@ def running_daemon_pid(
     start_time_fn: StartTimeFn = _read_proc_start_time,
     can_signal: bool | None = None,
 ) -> int | None:
-    """The PID of the running daemon recorded in ``path``, or ``None``.
+    """The PID of the live process recorded in ``path``, or ``None``.
+
+    ``path`` is any self-managed PID file written by :func:`write_pid_file` — the watch daemon's
+    (:func:`pid_file_path`) or a ``run`` executor's (:func:`runner_file_path`).
 
     Where the platform can signal an unrelated PID (POSIX; see :func:`_can_signal`), this combines
     :func:`read_pid_record` with :func:`is_running`'s start-time recycling guard: a recorded PID

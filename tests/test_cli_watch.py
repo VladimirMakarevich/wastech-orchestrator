@@ -86,7 +86,7 @@ def test_watch_loop_stops_before_first_tick_when_event_preset(
     event = threading.Event()
     event.set()
     results = cli.watch_loop(
-        orch, in_repo_config, tmp_path / "pending", poll_interval=5, stop_event=event
+        orch, in_repo_config, tmp_path / "pending", poll_interval=5, stop=cli.StopChannels(event)
     )
     assert results == []
     assert orch.refresh_calls == 0
@@ -97,7 +97,13 @@ def test_watch_loop_honors_event_set_during_tick(
 ) -> None:
     event = threading.Event()
     orch = _FakeOrch(on_refresh=event.set)  # SIGTERM arrives mid-tick
-    cli.watch_loop(orch, in_repo_config, tmp_path / "pending", poll_interval=100, stop_event=event)
+    cli.watch_loop(
+        orch,
+        in_repo_config,
+        tmp_path / "pending",
+        poll_interval=100,
+        stop=cli.StopChannels(event=event),
+    )
     assert orch.refresh_calls == 1  # post-tick wait returns at once; no second tick
 
 
@@ -125,7 +131,11 @@ def test_watch_loop_stops_before_first_tick_when_stop_file_present(
     stop_file.write_text("stop\n", encoding="utf-8")
     orch = _FakeOrch()
     results = cli.watch_loop(
-        orch, in_repo_config, tmp_path / "pending", poll_interval=5, stop_file=stop_file
+        orch,
+        in_repo_config,
+        tmp_path / "pending",
+        poll_interval=5,
+        stop=cli.StopChannels(file=stop_file),
     )
     assert results == []
     assert orch.refresh_calls == 0  # cross-platform stop honored before any work
@@ -143,7 +153,7 @@ def test_watch_loop_honors_stop_file_created_during_tick(
         tmp_path / "pending",
         poll_interval=100,
         sleep_fn=sleeps.append,
-        stop_file=stop_file,
+        stop=cli.StopChannels(file=stop_file),
     )
     assert orch.refresh_calls == 1  # noticed the sentinel between ticks; no second tick
     assert sleeps == [100]
@@ -152,10 +162,11 @@ def test_watch_loop_honors_stop_file_created_during_tick(
 def test_watch_loop_event_present_honors_stop_file(
     in_repo_config: OrchestratorConfig, tmp_path: Path
 ) -> None:
-    # The real daemon always passes a stop_event (SIGTERM channel). On Windows that event never
+    # The real daemon always passes both channels (the SIGTERM event and the sentinel). On
+    # Windows that event never
     # fires cross-process, so a stop request rides the stop-file alone. Regression guard: the
     # between-tick wait must re-check the stop-file, not block the whole poll_interval on the event.
-    # Pre-fix this called stop_event.wait(100) on an unset event and slept ~100s (would hang here).
+    # Pre-fix this called event.wait(100) on an unset event and slept ~100s (would hang here).
     stop_file = tmp_path / "orchestrator.stop"
     event = threading.Event()  # never set — mimics Windows (no cross-process SIGTERM)
     orch = _FakeOrch(on_refresh=lambda: stop_file.write_text("stop\n", encoding="utf-8"))
@@ -164,8 +175,7 @@ def test_watch_loop_event_present_honors_stop_file(
         in_repo_config,
         tmp_path / "pending",
         poll_interval=100,
-        stop_event=event,
-        stop_file=stop_file,
+        stop=cli.StopChannels(event, stop_file),
     )
     assert orch.refresh_calls == 1  # stop-file noticed in the interruptible wait; no second tick
 
@@ -280,7 +290,7 @@ def test_watch_clears_stale_stop_file_on_start_and_reaps_on_exit(
     seen: dict[str, object] = {}
 
     def fake_loop(orch: object, config: object, folder: object, **kw: object) -> list[object]:
-        seen["stop_file_kw"] = kw.get("stop_file")
+        seen["stop_file_kw"] = kw["stop"].file
         seen["cleared_during"] = not stop_path.exists()
         return []
 

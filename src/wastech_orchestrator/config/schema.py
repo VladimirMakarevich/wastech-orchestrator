@@ -19,7 +19,7 @@ from wastech_orchestrator.providers.base import ProviderId
 # lower value loads, since every removed key is either tolerated-and-ignored or reported by name.
 # There is no migration runner: an installation that has drifted is repaired by ``upgrade-config``,
 # which merges the packaged template over the operator's file and stamps this value.
-CONFIG_SCHEMA_VERSION = 39
+CONFIG_SCHEMA_VERSION = 40
 
 
 class AuditBranch(StrEnum):
@@ -88,6 +88,12 @@ class AutoModeConfig:
     # stays pending. Requires `telegram.enabled` (preflight). Gates new claims only — resuming an
     # in-flight task on daemon restart is never gated.
     confirm_next_task: bool = False
+    # How long the claim gate waits for that approval. Deliberately NOT `telegram.ask_timeout_s`:
+    # that is the ceiling for a node asking a human to decide something mid-run (8h shipped, and
+    # sensibly so), while this one holds the processing slot idle and re-asks on a later tick, so
+    # it is a different question with a different right answer. A refusal — deny, silence, or no
+    # transport — is remembered for an hour rather than re-asked every tick.
+    confirm_timeout_s: int = 900
 
 
 @dataclass(frozen=True)
@@ -187,6 +193,24 @@ class ProviderConfig:
     # resumes the same agent session with a fresh turn grant. Requires ``telegram.enabled``
     # (preflight). With this on, a low ``max_turns`` (~50–100) is safe — extendable on demand.
     max_turns_gate: bool = False
+
+    def effective_model(self, override: str | None) -> str | None:
+        """The model an attempt actually runs on: a flow node's ``model``, else this default.
+
+        One place for the override rule, because it is asked from three: each adapter's argv
+        builder, the request representation on disk, and the Router's audit row. ``None`` when
+        neither is set — the provider then picks its own default and no ``--model`` is passed.
+        """
+        return override or self.model or None
+
+    def effective_reasoning(self, override: str | None) -> str | None:
+        """The reasoning/effort an attempt runs at, resolved like :meth:`effective_model`.
+
+        The *configured* level, which is what an operator pins and audits. An adapter may still
+        translate it for its CLI (Codex maps ``max`` onto its ``xhigh`` ceiling); the translated
+        value is the one in the attempt's recorded ``argv``.
+        """
+        return override or self.reasoning or None
 
 
 @dataclass(frozen=True)
