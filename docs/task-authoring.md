@@ -61,6 +61,7 @@ Allowed fields:
 | `branch_mode` | no | `new` \| `existing` \| `current` | Where this task's git operations point. Omitted ⇒ the instance default `repo.branch_mode`. `new` forks a fresh task branch; `existing` works in `branch_ref`; `current` works in the working tree's current branch as-is. The task value wins. See [`branch_mode`](#branch_mode). |
 | `branch_ref` | no | string | The existing branch to work in — **required iff** the resolved mode is `existing`, and a validation error otherwise. Must already exist locally or on the remote (no auto-create; checked at preflight). See [`branch_mode`](#branch_mode). |
 | `publish` | no | `commit` \| `push` \| `pull_request` | Downgrade-only cap on how far the `publish` node goes: `commit` stops after the commits, `push` stops before the PR, `pull_request` is the full sequence. Omitted ⇒ the flow's publishing policy. A cap, never an escalation (`min(flow_policy, publish)`); a no-op on a flow with no PR-publishing node. See [`publish`](#publish). |
+| `commit_type` | no | `feat` \| `fix` \| `docs` \| `style` \| `refactor` \| `perf` \| `test` \| `build` \| `ci` \| `chore` \| `revert` | The Conventional-Commits **type** for every commit this task lands — the code commit on the task branch, each subtask commit of a decomposition, and the squash commit on the base branch. Omit ⇒ `feat`. The scope is always the task id and is never yours to choose. Fail-closed: an unknown type rejects the task. See [`commit_type`](#commit_type). |
 | `trust_level` | no | `strict` \| `auto` | Per-task override of the mid-task dangerous-diff approval gate: `strict` gates every tracked-file deletion/rename or dependency-manifest edit, `auto` gates only a `security.protected_paths` match. Omitted ⇒ the instance default `security.trust_level`. The task value wins; it never lowers the hard security ceiling and cannot touch `protected_paths`. See [`trust_level`](#trust_level). |
 | `auto_merge` | no | boolean | `true` requests auto-merge, `false` always opts out, omitted uses the instance default. A set per-task value wins outright over `git.auto_merge`. See [`auto_merge`](#auto_merge). |
 | `prompt_audit` | no | boolean | `true` records each step's prompt + who for this task, `false` disables it, omitted uses config. Always overrides the global. See [`prompt_audit`](#prompt_audit). |
@@ -176,6 +177,20 @@ publish: pull_request # the full sequence (same as omitting it on a PR flow)
 
 The effective scope is `min(flow_policy, publish)` over `commit < push < pull_request`, so it can only **narrow** what the flow already does — it can never manufacture publishing. On a flow whose graph has no PR-publishing node it is a no-op. This is the low-ceremony way to run a task and stop at a local commit (or a pushed branch) for inspection; it composes with `branch_mode: current` for a local experiment.
 
+## `commit_type`
+
+The one part of a commit message a task supplies. Every commit the task lands takes its subject from the orchestrator — `<type>(<task-id>): <title>` — and `commit_type` picks the type:
+
+```yaml
+commit_type: fix # feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert; omit ⇒ feat
+```
+
+It applies to all three places a task's work is committed: the code commit on the task branch, each subtask commit of a decomposition (set it once, on the **root** — a subtask spec cannot set its own), and the **squash commit** on the base branch that `merge-task` / auto-merge writes. Before this key the squash subject was left to the target repository's own `squash_merge_commit_message` setting, which took the bare pull-request title and so produced a subject with no Conventional-Commits type at all; the orchestrator now writes `--subject` itself, with the `(#N)` pull-request suffix GitHub would have appended.
+
+The scope is always the task id, because that is the one thing that makes a subject greppable back to the task that produced it. The body is deliberately **empty**: every commit the orchestrator makes on a branch is a single line, so a body assembled from them could only be a list of internal subjects — the readable account is the pull-request body and it stays on the pull request.
+
+Fail-closed on an unknown type (the value reaches permanent history on the base branch, where a typo is not fixable by a re-run). And it is the reason an acceptance criterion asking an agent to write something into the commit message can only fail: no node can reach that surface. The pull-request description **is** reachable — it is the run summary.
+
 ## `trust_level`
 
 `trust_level` sets the approval threshold for the mid-task **dangerous-diff gate** — the guard that can pause after a `workspace-write` edit when the agent's diff deletes/renames a tracked file or touches a dependency manifest/lock. It defaults to the instance-wide `security.trust_level` (whose fresh-install default is `auto`), so unless you set it, nothing changes:
@@ -237,7 +252,7 @@ Values:
 | `false` | Disable the prompt audit for this task.           |
 | omitted | Use the global `prompt_audit` from `config.yaml`. |
 
-The per-task value **always overrides** the global one (in both directions — there is no operator gate). When enabled, each agent-routed stage run is written as a self-contained, redacted JSON record under `<repo>/.worc/logs/<task-id>/prompt-audit/`, in chronological order, plus a combined `timeline.jsonl`. See [configuration.md](configuration.md#prompt_audit) for the file layout.
+The per-task value **always overrides** the global one (in both directions — there is no operator gate). When enabled, each agent-routed stage run is written as a self-contained, redacted **Markdown** step file under `<repo>/.worc/logs/<task-id>/prompt-audit/`, in chronological order — a fenced `json` metadata header followed by the prompt verbatim as the document body — plus a combined `timeline.jsonl` that carries the same records whole and is the machine-readable half. See [configuration.md](configuration.md#prompt_audit) for the file layout.
 
 ## decomposition
 
