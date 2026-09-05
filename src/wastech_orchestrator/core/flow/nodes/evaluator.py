@@ -58,7 +58,7 @@ from wastech_orchestrator.core.flow.nodes.exchange_publish import (
     publish_node_run_file,
 )
 from wastech_orchestrator.core.flow.observability import record_run_observability
-from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file, render_role_prompt
+from wastech_orchestrator.core.flow.prompt import references_variable, render_role_prompt
 from wastech_orchestrator.core.flow.prompt_vars import valid_prompt_vars
 from wastech_orchestrator.core.flow.schema import SEVERITY_ORDER, EvaluatorNode, FlowNode
 from wastech_orchestrator.core.flow.usage_accounting import (
@@ -73,7 +73,7 @@ from wastech_orchestrator.providers.artifacts import (
     node_run_dir,
     task_artifact_dir,
 )
-from wastech_orchestrator.providers.base import AgentRunRequest, build_effective_prompt
+from wastech_orchestrator.providers.base import AgentRunRequest
 from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import EvaluationRow, NodeLineageRow, NodeRunRow
 
@@ -206,7 +206,7 @@ class EvaluatorNodeRunner:
             node_id=node.id,
             subtask=ctx.subtask_order,
             run_id=run_id,
-            prompt=build_effective_prompt(request),
+            request=request,
             route=route,
             outcome=outcome,
             configured_model=node.model,
@@ -431,11 +431,17 @@ class EvaluatorNodeRunner:
         # The renderer stays the fixed security core; the caller widens *which names* it may
         # substitute to the flow-derived set (core allowlist ∪ each agent/tool node's {<id>_path}),
         # exactly as the agent runner does, and only ever places path values in the dict.
-        prompt = render_role_prompt(
-            self._in.flow_dir,
-            node.role_file,
-            self._prompt_variables(ctx, node),
-            allowed=valid_prompt_vars(ctx.snapshot),
+        variables = self._prompt_variables(ctx, node)
+        allowed = valid_prompt_vars(ctx.snapshot)
+        prompt = render_role_prompt(self._in.flow_dir, node.role_file, variables, allowed=allowed)
+        # No store read is needed to know this evaluator has spoken on the session it is resuming:
+        # the row it comes from is keyed by this node's own id and written only by this node's own
+        # successful pass, so a session in hand IS that proof. None of the affinity ambiguity that
+        # makes the author side ask a second question applies here.
+        continuation_prompt = (
+            render_role_prompt(self._in.flow_dir, node.resume_role_file, variables, allowed=allowed)
+            if node.resume_role_file is not None and session_id is not None
+            else None
         )
         return AgentRunRequest(
             task_id=ctx.task_id,
@@ -467,6 +473,7 @@ class EvaluatorNodeRunner:
             # across rework rounds. The resumed session (and its usage baseline) is resolved
             # by the caller so the row is read once.
             session_id=session_id,
+            continuation_prompt=continuation_prompt,
             resume_baseline_output_tokens=resume_baseline_output_tokens,
             # Network is a per-node override on top of the flow-wide default (a research verifier
             # may need it): the node's ``network_access`` wins, else it inherits the flow's
@@ -604,11 +611,9 @@ class EvaluatorNodeRunner:
         builder = self._s.packet_builder
         if builder is None:  # memory disabled — no store, empty variable, unchanged behavior
             return None
-        try:
-            template = read_role_file(self._in.flow_dir, node.role_file)
-        except RoleFileError:
-            return None  # render_role_prompt surfaces the real read error
-        if "{memory_path}" not in template and "{?memory_path}" not in template:
+        if not references_variable(
+            self._in.flow_dir, (node.role_file, node.resume_role_file), "memory_path"
+        ):
             return None
         # This task's changed paths (per-task chain base), not the whole shared branch's, so
         # the packet's path-overlap ranking stays relevant on a chain branch.

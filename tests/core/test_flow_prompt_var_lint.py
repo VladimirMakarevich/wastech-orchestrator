@@ -162,3 +162,47 @@ def test_packaged_flows_lint_clean() -> None:
     # lint is silent on them (its value is catching operator typos, not packaged drift).
     for yaml in sorted(PACKAGED.glob("*.yaml")):
         assert lint_prompt_variables(load_flow(yaml)) == [], yaml.name
+
+
+_CONTINUATION_FLOW = """\
+flow:
+  name: t
+  task_type: t
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: pull_request
+  nodes:
+    - id: implement
+      kind: agent
+      role_file: t/implement.md
+      resume_role_file: t/implement.continue.md
+      session_scope: editing_lineage
+    - id: scan
+      kind: agent
+      role_file: t/scan.md
+  edges:
+    - { from: implement, to: scan }
+  budgets: {}
+"""
+
+
+def _load_with_continuation(tmp_path: Path, continue_body: str):
+    flow_dir = tmp_path / "flows"
+    (flow_dir / "t").mkdir(parents=True)
+    (flow_dir / "t.yaml").write_text(_CONTINUATION_FLOW, encoding="utf-8")
+    (flow_dir / "t" / "implement.md").write_text("do it at {repo}", encoding="utf-8")
+    (flow_dir / "t" / "implement.continue.md").write_text(continue_body, encoding="utf-8")
+    (flow_dir / "t" / "scan.md").write_text("read {repo}", encoding="utf-8")
+    return load_flow(flow_dir / "t.yaml")
+
+
+def test_lint_reads_the_continuation_template_too(tmp_path: Path) -> None:
+    # A continuation prompt renders the same variable set, so a typo there ships to the agent as
+    # verbatim placeholder text exactly as one in the main template would — and is named by its
+    # own filename, which is the file the operator has to open.
+    warnings = lint_prompt_variables(_load_with_continuation(tmp_path, "carry on at {plna_path}"))
+    assert [(w.role_file, w.token) for w in warnings] == [("t/implement.continue.md", "plna_path")]
+
+
+def test_lint_passes_a_clean_continuation_template(tmp_path: Path) -> None:
+    assert lint_prompt_variables(_load_with_continuation(tmp_path, "carry on at {repo}")) == []

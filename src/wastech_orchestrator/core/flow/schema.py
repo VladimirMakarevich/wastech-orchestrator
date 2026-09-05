@@ -53,6 +53,15 @@ class AgentNode:
     id: str
     kind: Literal["agent"]
     role_file: str
+    #: optional second role file, used only on a turn that CONTINUES a session this node has
+    #: already spoken on — a loop re-entry, a renewed turn grant, a delivered human answer. It is
+    #: an ordinary role file (same flow-dir containment, same renderer, same variable set) selected
+    #: on a different turn, so the full text is stated once per session instead of every round.
+    #: The runner decides *whether* a turn may be a continuation; the provider seam decides whether
+    #: the attempt actually is one, from the same field that decides the resume argv — so an
+    #: attempt whose session was dropped gets the full text back. ``None`` keeps today's behavior
+    #: byte for byte. Requires ``editing_lineage``: no other scope resumes across node runs.
+    resume_role_file: str | None = None
     session_scope: SessionScope = SessionScope.FRESH_DISPOSABLE
     lineage_affinity: str | None = None
     permission_profile: PermissionProfile | None = None  # None → resolved from flow ceiling
@@ -68,6 +77,28 @@ class AgentNode:
     #: verbs cannot mutate, the sandbox write-denies the clone, and publishing stays the
     #: orchestrator's.
     git_evidence: bool | None = None
+    #: the target repository's OWN harness skills this node must invoke, by name
+    #: (``<repo>/.claude/skills/<name>/SKILL.md``, which must exist — the flow is refused if it
+    #: does not). Legal only under ``security.strict_isolation: false``: under strict isolation
+    #: ``--tools`` is a hard existence gate carrying the profile baseline, so the ``Skill`` tool
+    #: does not exist for the session at all and a declaration there is a validation error rather
+    #: than something accepted and inert. Declaring names turns skills ON for the node (see
+    #: ``allow_skills``) and appends a Core-built block naming them to the effective prompt; that
+    #: block also states that the security preamble and the role prompt win over anything a skill
+    #: says. The skills themselves are ordinary repository files the CLI discovers and reads by
+    #: itself: they are NOT frozen into the task's control bundle, and a writing node can change
+    #: one mid-run.
+    skills: tuple[str, ...] = ()
+    #: whether this node may invoke skills at all — tri-state like ``network_access``. ``None``
+    #: (default) resolves from ``skills``: a node that declares no skill runs with the provider's
+    #: own per-attempt off-switch emitted (Claude ``--disable-slash-commands``, Codex
+    #: ``--disable skill_search``), so a flow gets what it asked for and nothing else. ``True``
+    #: turns skills on without requiring any particular one — an error under
+    #: ``security.strict_isolation: true``, where the mode cannot give it; an absent key is not a
+    #: request and is never an error. ``False`` refuses every skill and is legal at every value of
+    #: that switch, because a flow may always narrow. It cannot be combined with ``skills``: neither
+    #: CLI offers "these skills and no others", so the switch is all-or-nothing per node.
+    allow_skills: bool | None = None
     #: which provider runs this node; None → the config's global primary. Validated against
     #: ``agents.allowed`` at preflight; never relaxes the security ceiling.
     provider: ProviderId | None = None
@@ -99,6 +130,11 @@ class EvaluatorNode:
     kind: Literal["evaluator"]
     role: str
     role_file: str
+    #: optional second role file for a continuation turn (see :class:`AgentNode`). Here it requires
+    #: ``resume_own_lineage``: the evaluator's session is keyed by its own id and written only by
+    #: its own successful pass, so a live session already means this role has spoken on it — no
+    #: further check is needed, and none of the affinity ambiguity of an author node applies.
+    resume_role_file: str | None = None
     session_scope: SessionScope = SessionScope.FRESH_DISPOSABLE
     permission_profile: PermissionProfile = PermissionProfile.READ_ONLY  # const per schema
     #: per-node override of the flow-wide network grant (see :class:`AgentNode`); ``None`` inherits

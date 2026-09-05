@@ -245,9 +245,11 @@ flow:
       kind: evaluator
       role: critic
       role_file: deep_research/critic.md
+      resume_role_file: deep_research/critic.continue.md
       # Keeps the critic's own session across rounds so a second pass can see what it already raised.
-      # Round 1 has no prior lineage and always starts fresh — which is why the role prompt makes
-      # re-review conditional on actually seeing an earlier round rather than asserting continuity.
+      # Round 1 has no prior lineage and always starts fresh, which is why there are two prompts:
+      # the runner knows which turn this is, so neither text asks the model to work it out from
+      # what it can see of its own conversation.
       # It only became reachable at all once a `medium` finding could force a second round.
       session_scope: resume_own_lineage
       permission_profile: read-only

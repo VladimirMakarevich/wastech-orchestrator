@@ -6,7 +6,7 @@
 
 - A plain Markdown file, no front matter, no schema — just prompt text.
 - **Owned by the flow.** Each flow keeps its prompts in a sibling folder named after its `task_type`: `.worc/flows/<task_type>/<name>.md`. A node's `role_file` is relative to `.worc/flows/` and must stay inside that folder (`role_file: my_flow/implement.md`); a `..`/absolute path fails validation.
-- **One role file per node.** To change only _what a step says_, edit its `role_file` — you do not need a new flow.
+- **One role file per node** — with one optional second file for re-entry. To change only _what a step says_, edit its `role_file`; you do not need a new flow. A node that runs more than once on the same conversation may also declare a `resume_role_file` (see below).
 - The one shared exception is the supervisor lens at `.worc/flows/roles/supervisor.md`, used by every flow that does not override it (see below).
 
 Prompts are short and imperative. They reference artifacts by path variable (never inlined content) and wrap any optional variable in a `{?name}…{/name}` block. Keep them focused on the node's single job.
@@ -70,6 +70,43 @@ A node that writes a document — a report, a translated chapter, a generated sp
 
 One portable filename (no `/`, no `..`), resolved inside the flow's `output_policy` report directory — the only place the node may write anyway — or the repository root for a policy without one. It is mutually exclusive with `output_artifact` (a slot node's channel is its slot). Two things to write into the prompt when you use it: the file has to **stand alone**, since no closing message travels with it, and the filename in the prompt has to match the one in the flow. If the file never appears the channel falls back to the message and the run logs a warning — never a silent empty handoff.
 
+## When a node re-enters a live session (`resume_role_file`)
+
+A node in a loop is run more than once on the same conversation. By default every one of those turns is handed the whole role file again — the same rules and the same remit, into a session that already contains them — and with `test_fix: 15` that is fifteen restatements riding a history the provider re-sends each turn. Worse than the tokens: a start-of-work text ("Implement the assigned task…") replayed as a reply reads as "start over" to an agent that merely ran out of turns.
+
+Name a second, short file and the orchestrator decides which one each turn gets:
+
+```yaml
+- id: fixing
+  kind: agent
+  role_file: my_flow/fixing.md
+  resume_role_file: my_flow/fixing.continue.md # only on a turn that continues this node's session
+  session_scope: editing_lineage
+  lineage_affinity: implement
+```
+
+**You never write the choice into the prompt.** The continuation file is used only when a session is live _and_ this node has already spoken on it. That second half is the part worth understanding: `fixing` joins the session `implement` opened, so on its first round the conversation has history but nobody has stated `fixing`'s rules yet — it gets the full text. From round two on it gets the short one. The same holds for a node that follows an accepted review on the same lineage.
+
+If the session is lost — the provider dropped it, or the run failed over to the other provider — that attempt is handed the **full** text automatically, so a continuation turn can never land in an empty conversation.
+
+What to write into it: what changed since the last turn (the artifact paths, which are the only thing that really differs round to round), what is expected of this turn, and **one line of the output contract where the wording carries meaning the schema cannot** — an evaluator's "grade honestly, the flow decides the gate" is enforced by nothing else. What to leave out: the rules, the remit, and anything already stated. If the continuation file restates the main one, it has bought nothing. The exception is a rule about **reporting** rather than about the work — "a command that fails under you is evidence about your sandbox" applies to every round's report, so it stays.
+
+Both files render the same variables, and the runner reads both when deciding whether to build an optional one — so `{?memory_path}` works in either. Prefer not to repeat it: the packet was already delivered on the fresh turn and is in the session.
+
+Allowed only where a session actually survives: `editing_lineage` on an agent node, `resume_own_lineage` on an evaluator. Anywhere else it is a validation error rather than a field that quietly never fires.
+
+## When the node should run your own repository's skills (`skills:`)
+
+A node can name skills your repository already ships (`skills: [acme-tdd]`) rather than have you re-state their contents in a role prompt. That changes nothing about how you write the role file, and there is nothing to add to it: the orchestrator appends the naming block itself, at the same seam it prepends the security contract. **Do not put the skill names in the role file** — a `/name` you type into a prompt is just text the model may or may not act on, while the key is a validated field the run refuses to start without.
+
+Two consequences worth keeping in mind while you write the prompt.
+
+**Your role prompt outranks the skill, and the block says so.** The appended text ends by stating that where a skill conflicts with the instructions above it, those instructions win, and that no skill grants any right to publish. That is a statement, not an enforcement: a skill is arbitrary text from the target repository which nothing here froze or reviewed, and it can contradict the role prompt, the output contract, or the security preamble. So a node with an output contract — an evaluator's findings, a decomposition proposal — is the wrong place to reach for a skill that has opinions about output shape, and evaluator nodes cannot declare skills at all in this version.
+
+**The node still has to do its own job.** A skill describes how your team does something; the role file still has to say what this step delivers and in what form. Write the prompt as if the skill were not there, and let the skill supply the house conventions.
+
+The field's own constraints — advanced mode only, the skill must exist in the target repository, off unless asked, and what the off-switch does and does not stop — are in [reference.md](reference.md#node-declared-skills).
+
 ## Custom output schema (the one real foot-gun)
 
 An `agent` node may set an inline `output_schema:` to return data of your own shape. If you do, **every object in the schema — top level and every nested object — must set `additionalProperties: false`.** Codex enforces `--output-schema` through OpenAI Structured Outputs and rejects a non-strict schema with a hard **400**, failing the node on every run. Claude tolerates a loose schema, but write it strict so the flow runs on both providers. Prefer the built-in contract unless you genuinely need a custom shape; keep a string `content` field if the node also fills a slot.
@@ -101,7 +138,7 @@ Only the **wording** moves into files. The structured-output schemas (the memory
 1. State the node's single job in the imperative; name the artifacts it should read by path variable.
 2. For an evaluator, spell out the findings contract explicitly (severities, the `path`/`what`/`fix` fields, "empty array when clean").
 3. Wrap every optional variable in `{?name}…{/name}` so a missing value never leaves a dangling fragment.
-4. Run `worc validate-flow <name>` — its anti-drift lint **warns** about any `{name}` no node populates (a typo like `{plna_path}` would otherwise ship as literal text). It is a warning, not a failure, because a verbatim render is the safe fallback.
-5. Set `prompt_audit: true` to inspect the exact rendered prompt per node under `logs/<task-id>/prompt-audit/`.
+4. Run `worc validate-flow <name>` — its anti-drift lint **warns** about any `{name}` no node populates (a typo like `{plna_path}` would otherwise ship as literal text), in a `resume_role_file` as well as in the main one. It is a warning, not a failure, because a verbatim render is the safe fallback.
+5. Set `prompt_audit: true` to inspect the rendered prompt per node under `logs/<task-id>/prompt-audit/`. A node with two prompts records both, and each attempt says which of them it received — read that per attempt, not per node, because a run that lost its session got the full text however it began.
 
 See [prompt-variables.md](prompt-variables.md) for the full `{name}` allowlist, which runner populates each, and the `{<node_id>_path}` chaining channel.

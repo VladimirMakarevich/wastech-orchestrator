@@ -3323,13 +3323,6 @@ def _append_isolation_probe_lines(
     return ok
 
 
-#: The Claude CLI environment variable that changes what a generated settings file MEANS: in its
-#: env-scrub branch a volume-wide ``allowWrite`` entry is filtered out by name, so the advanced
-#: mode's write grant quietly does not apply. Named here because ``worc preflight`` is the one place
-#: that announces that grant, and in the mode the parent environment reaches the agent whole.
-_CLAUDE_ENV_SCRUB_VAR = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"
-
-
 def _provider_binary_lines(config: OrchestratorConfig, *, which: Which = shutil.which) -> list[str]:
     """One diagnostic line per configured provider: where its CLI binary really lies.
 
@@ -3545,9 +3538,10 @@ def run_preflight(
             "isolation-floor: WARN — this host cannot enforce the write floor and "
             f"{config.agents.allowed[0].value} is the only allowed provider, so a node needing a "
             "sandboxed shell will be refused mid-run (CAPABILITY_UNAVAILABLE) with no fallback to "
-            "cover it. Allow a second provider, install the missing sandbox dependencies, or set "
-            "security.strict_isolation: false and read guide/config/security.md for what that mode "
-            "holds instead"
+            "cover it. Allow a second provider, or install the missing sandbox dependencies. "
+            "security.strict_isolation: false also gets the run moving, but it is not a remedy for "
+            "this: it keeps the shell by giving up the write floor everywhere rather than here — "
+            "read guide/config/security.md for what that mode holds instead"
         )
 
     # The mode itself: the loudest line in the report, from the shared formatter so the run log
@@ -3557,20 +3551,6 @@ def run_preflight(
     # disagreement this phase also fixed.
     mode_lines = describe_advanced_mode(config)
     lines.extend(mode_lines)
-
-    # The one environment variable that silently changes what the mode's write grant means. In the
-    # CLI's env-scrub branch the settings compiler filters a volume-wide `allowWrite` entry by name,
-    # so with this set the grant this report just announced is not the grant the agent gets — and in
-    # the mode the parent environment is forwarded whole, so it takes no config change to arrive.
-    # A warning, not a failure: a narrower write grant is not a security problem, it is a
-    # correctness surprise (a toolchain cache stops being writable and the build looks broken).
-    if mode_lines and os.environ.get(_CLAUDE_ENV_SCRUB_VAR):
-        lines.append(
-            f"write-grant: WARN — {_CLAUDE_ENV_SCRUB_VAR} is set in this environment, and the "
-            "Claude CLI filters the volume-wide write grant out of its settings in that branch. "
-            "The mode's write grant then does not apply as documented: expect writes outside the "
-            "clone to be refused, and unset the variable if you meant the grant to apply"
-        )
 
     # Same principle for the git-evidence grant: an operator reading preflight should see which
     # optional capabilities are live, not have to infer them from the config file. The mode makes

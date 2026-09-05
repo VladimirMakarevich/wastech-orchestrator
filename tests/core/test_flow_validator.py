@@ -936,3 +936,86 @@ def test_git_evidence_rejected_on_a_workspace_write_node(tmp_path: Path) -> None
         ceiling="workspace-write", profile="permission_profile: workspace-write"
     )
     assert _has(_violations(content, tmp_path), "ceiling", "git_evidence applies only to a")
+
+
+# -- continuation prompts (resume_role_file) ----------------------------------
+
+_CONTINUATION_FLOW = """\
+flow:
+  name: t
+  task_type: t
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: pull_request
+  nodes:
+    - id: p
+      kind: agent
+      role_file: t/p.md
+    - id: a
+      kind: agent
+      role_file: t/a.md
+      resume_role_file: {agent_resume}
+      session_scope: {agent_scope}
+    - id: r
+      kind: evaluator
+      role: review
+      role_file: t/r.md
+      resume_role_file: {eval_resume}
+      session_scope: {eval_scope}
+    - id: b
+      kind: publish
+      policy: pull_request
+  edges:
+    - {{ from: p, to: a }}
+    - {{ from: a, to: r }}
+    - {{ from: r, to: b, outcome: accept }}
+    - {{ from: r, to: a, outcome: rework, budget: 2 }}
+"""
+
+
+def _continuation_flow(
+    *,
+    agent_scope: str = "editing_lineage",
+    eval_scope: str = "resume_own_lineage",
+    agent_resume: str = "t/a.continue.md",
+    eval_resume: str = "t/r.continue.md",
+) -> str:
+    return _CONTINUATION_FLOW.format(
+        agent_scope=agent_scope,
+        eval_scope=eval_scope,
+        agent_resume=agent_resume,
+        eval_resume=eval_resume,
+    )
+
+
+def test_continuation_prompt_accepted_on_the_scopes_that_resume(tmp_path: Path) -> None:
+    # editing_lineage for an author, resume_own_lineage for an evaluator: the two scopes where a
+    # session actually survives to be continued.
+    validate_flow(_snap(_continuation_flow(), tmp_path))
+
+
+def test_continuation_prompt_rejected_where_nothing_resumes(tmp_path: Path) -> None:
+    # A field that silently does nothing reads as protection, so it is refused rather than ignored.
+    vs = _violations(_continuation_flow(agent_scope="fresh_disposable"), tmp_path)
+    assert _has(vs, "ceiling", "agent 'a': resume_role_file requires session_scope editing_lineage")
+
+    vs = _violations(_continuation_flow(eval_scope="fresh_disposable"), tmp_path)
+    assert _has(
+        vs, "ceiling", "evaluator 'r': resume_role_file requires session_scope resume_own_lineage"
+    )
+
+
+def test_continuation_prompt_rejected_on_an_agents_own_lineage(tmp_path: Path) -> None:
+    # An author resumes across node runs only through the editing lineage — resume_own_lineage
+    # hands its runner no session, so the second prompt would be near-dead weight.
+    vs = _violations(_continuation_flow(agent_scope="resume_own_lineage"), tmp_path)
+    assert _has(vs, "ceiling", "agent 'a': resume_role_file requires session_scope editing_lineage")
+
+
+def test_continuation_prompt_path_traversal_is_fatal(tmp_path: Path) -> None:
+    # Same containment as any role file, and the message names the field the operator wrote.
+    vs = _violations(_continuation_flow(agent_resume="../escape.md"), tmp_path)
+    assert _has(vs, "ceiling", "node 'a': resume_role_file '../escape.md' contains path traversal")
+
+    vs = _violations(_continuation_flow(eval_resume="/etc/passwd"), tmp_path)
+    assert _has(vs, "ceiling", "node 'r': resume_role_file '/etc/passwd' contains path traversal")

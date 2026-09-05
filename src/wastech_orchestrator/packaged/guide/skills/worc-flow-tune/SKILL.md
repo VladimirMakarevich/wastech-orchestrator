@@ -1,6 +1,6 @@
 ---
 name: worc-flow-tune
-description: Tune an existing wastech-orchestrator flow's per-node execution knobs — which `provider`/`model`/`reasoning` a step runs on, plus `timeout_seconds`, `network_access`, `git_evidence`, `extra_args`, and the flow's loop `budgets` — without changing the graph or the prompts. Use when a step should run on a different provider or effort; author a new flow with worc-flow, or reword a step with worc-flow-role.
+description: Tune an existing wastech-orchestrator flow's per-node execution knobs — which `provider`/`model`/`reasoning` a step runs on, plus `timeout_seconds`, `network_access`, `git_evidence`, `skills`/`allow_skills`, `extra_args`, and the flow's loop `budgets` — without changing the graph or the prompts. Use when a step should run on a different provider or effort; author a new flow with worc-flow, or reword a step with worc-flow-role.
 ---
 
 # worc-flow-tune
@@ -24,11 +24,13 @@ Before editing, read the packaged flow reference `.worc/guide/flows/reference.md
    - `timeout_seconds` — per-attempt CLI wall-clock ceiling.
    - `network_access` — tri-state per-node override of the flow's `network_policy` (`true`/`false`/omit).
    - `git_evidence` — tri-state; `true` asks for the read-only git verbs so the node can inspect delivery history. Honored only while the operator's `security.allow_git_evidence` is on (`install` writes it on; with it off the declaration is inert), and **rejected on a `workspace-write` node** — it already has an unrestricted shell. Inert as well under `security.strict_isolation: false` (advanced mode), where every node has an unscoped shell already: declaring it there buys nothing, so do not reach for it instead of `workspace-write` on that configuration.
+   - `skills` — name the **target repository's own** Claude Code skills this node must invoke (`skills: [acme-tdd]`), so the step runs instructions the team already wrote instead of a re-authored copy. **Advanced mode only** (`security.strict_isolation: false`) — under strict isolation the skill tool does not exist for the session, so this is rejected rather than left inert. Each name must resolve to `<repo>/.claude/skills/<name>/SKILL.md` or the task refuses to start.
+   - `allow_skills` — tri-state, and the default is **off**: a node that declares neither key is launched with the CLI's skills switch turned off, so a skill the flow never asked for cannot fire on its own description. `true` turns them on without requiring a particular one (advanced mode only); `false` refuses them and is legal at every value of `strict_isolation`. Cannot be combined with `skills`.
    - `extra_args` — raw CLI flags for this node (subject to the forbidden-args scan).
    - `best_effort` — tolerate an infrastructure failure and continue (e.g. a summary node).
 3. For loop iteration caps, edit the flow-level `budgets:` mapping (each named `fail`/`rework` loop; the engine clamps to `min(flow, config cap)`), not a node field.
 4. Confirm the model/reasoning you chose is actually configured for that provider in `.worc/config.yaml agents.providers.<id>` — if the provider or its reasoning set needs adjusting, that is a config change (use **worc-config**), not a flow edit.
-5. Validate: run `worc validate-flow <name>`. The config-aware layer checks that every `provider` is in `agents.allowed`, that `reasoning` is valid for the resolved provider, and — on the shipped default — that no Codex `workspace-write` node also has network (that last check is skipped under `security.strict_isolation: false`, where the mode grants both anyway). `worc preflight` does **not** validate flows.
+5. Validate: run `worc validate-flow <name>`. The config-aware layer checks that every `provider` is in `agents.allowed`, that `reasoning` is valid for the resolved provider, that no Codex `workspace-write` node also has network on the shipped default (that check is skipped under `security.strict_isolation: false`, where the mode grants both anyway), and that any node-declared `skills` / explicit `allow_skills: true` are legal for this isolation setting and that every named skill exists in the target repository. `worc preflight` does **not** validate flows.
 
 ## Applying the change to a task already in flight
 
@@ -48,4 +50,7 @@ Editing a flow **while a run is in flight** is a third case, and the one most li
 - Don't name a `provider` that is not in `agents.allowed`, or a `reasoning` value invalid for that provider — validation fails.
 - Don't give a Codex `workspace-write` node `network_access: true` — it is rejected; split external fetches into a `read-only` node. That refusal belongs to strict isolation: under `security.strict_isolation: false` (advanced mode) the validator accepts the combination, because the mode has already granted every node both the write and the network.
 - Don't invent a `model` id; it is passed through unverified and will only fail at run time. Keep to models the provider actually serves.
+- Don't reach for `skills`/`allow_skills: true` on a strictly isolated configuration — it fails validation rather than going quietly inert, because a silently skipped step would let a run report success without having done the operator's tested procedure. `allow_skills: false` is fine there: a flow may always narrow.
+- Don't read `allow_skills: false` as "this node cannot see the repository's skills". It removes the tool, not the files — a node with a shell can still read a `SKILL.md` and follow it as ordinary text.
+- Don't promise a Codex node will invoke a named skill. It gets the same prompt block, but `codex exec` has no flag that names one, so only the off-switch is real there.
 - Don't add full-access `extra_args` — the forbidden-args scan rejects them at any value of `strict_isolation`.

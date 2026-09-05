@@ -98,7 +98,8 @@ class _Ref:
 def _referenced_inputs(snapshot: FlowSnapshot, flow_dir: Path, tools: ToolRegistry) -> list[_Ref]:
     """Enumerate the exact control inputs the flow references, in a deterministic order.
 
-    The flow YAML, every node ``role_file``, the supervisor block's three role files, and the
+    The flow YAML, every node ``role_file`` and ``resume_role_file``, the supervisor block's three
+    role files, and the
     complete supported launch set for each ``tool`` node (via the **live** registry — a resolution
     failure is a mutation/misconfig and fails closed). Role files are keyed by their flow-relative
     path so the frozen copy resolves identically under the bundle ``flows/`` dir; tools by their
@@ -120,6 +121,11 @@ def _referenced_inputs(snapshot: FlowSnapshot, flow_dir: Path, tools: ToolRegist
 
     for node in snapshot.doc.nodes:
         _add_role(getattr(node, "role_file", None))
+        # A node's continuation prompt is a control input like any other role file: frozen at task
+        # start, in the manifest digest, and re-checked for drift. So a resumed session cannot be
+        # handed a prompt the task was never validated against — and a missing one fails here, at
+        # task start, rather than at the node run that first needs it.
+        _add_role(getattr(node, "resume_role_file", None))
     supervisor = snapshot.doc.supervisor
     if supervisor is not None:
         _add_role(supervisor.role_file)

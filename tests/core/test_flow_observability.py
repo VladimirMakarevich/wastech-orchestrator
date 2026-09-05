@@ -100,6 +100,11 @@ def _register(calls: list[tuple[str, str, str]]) -> Any:
     return lambda t, k, p: calls.append((t, k, p))
 
 
+def _step_metadata(step_text: str) -> Any:
+    """The step document's fenced ``json`` header, parsed."""
+    return json.loads(step_text.split("```json\n", 1)[1].split("\n```", 1)[0])
+
+
 def test_write_prompt_audit_step_timeline_who_metadata_and_redaction(tmp_path: Path) -> None:
     calls: list[tuple[str, str, str]] = []
     write_prompt_audit(
@@ -108,18 +113,21 @@ def test_write_prompt_audit_step_timeline_who_metadata_and_redaction(tmp_path: P
         node_id="implementation",
         subtask=None,
         run_id=7,
-        prompt="do the thing with TOKEN_ABC123",
+        prompt="do the thing\nwith TOKEN_ABC123",
         route=_route(),
         outcome=_outcome(),
         configured_model=None,  # the node pins neither — the trial's shape for every node but one
         configured_reasoning=None,
+        skills_allowed=False,
+        skills_required=(),
         started_at="t0",
         secrets=("TOKEN_ABC123",),
         register=_register(calls),
     )
     audit_dir = task_artifact_dir(tmp_path, "task-1") / "prompt-audit"
-    step = audit_dir / "000007-implementation.json"
-    record = json.loads(step.read_text("utf-8"))
+    step = audit_dir / "000007-implementation.md"
+    step_text = step.read_text("utf-8")
+    record = _step_metadata(step_text)
     assert record["provider_used"] == "claude"
     # The plain names carry what the settled attempt ACTUALLY ran on, so a node that overrides
     # nothing is not recorded as having run on nothing; the override keeps its own pair of keys.
@@ -135,8 +143,16 @@ def test_write_prompt_audit_step_timeline_who_metadata_and_redaction(tmp_path: P
     assert by_provider["codex"]["model"] == "gpt-5.5"
     assert by_provider["codex"]["reasoning"] == "xhigh"
     assert by_provider["claude"]["model"] == "claude-opus-5"
-    assert "TOKEN_ABC123" not in record["prompt"]  # redacted
-    assert (audit_dir / "timeline.jsonl").read_text("utf-8").count("\n") == 1
+    # The prompt is the document's body, not a JSON string field: its newlines survive as real
+    # newlines an operator can read, and it is out of the metadata block entirely.
+    assert "prompt" not in record
+    assert step_text.startswith("# implementation — run 000007\n")
+    assert step_text.endswith("## Prompt\n\ndo the thing\nwith [REDACTED]\n")
+    assert "TOKEN_ABC123" not in step_text  # redacted
+    # The timeline stays the machine-readable half: one whole record per line, prompt included.
+    timeline = (audit_dir / "timeline.jsonl").read_text("utf-8").splitlines()
+    assert len(timeline) == 1
+    assert "TOKEN_ABC123" not in json.loads(timeline[0])["prompt"]
     kinds = {k for _, k, _ in calls}
     assert {"prompt_audit", "prompt_audit_timeline"} <= kinds
 
@@ -286,3 +302,138 @@ def test_record_provider_attempts_persists_per_run_delta() -> None:
     assert row.usage_reasoning_output == 131
     assert row.usage_delta_status == "ok"
     assert row.provider_usage_raw == '{"input_tokens":282699}'
+
+
+def _degraded_outcome() -> StageOutcome:
+    """A stage that opened on a live session and then lost it — the case the flag exists for."""
+    settled = _result("codex", RunStatus.SUCCEEDED)
+    attempts = (
+        ProviderAttempt(
+            provider=ProviderId.CODEX,
+            attempt=1,
+            status=None,
+            error_class=ErrorClass.SESSION_UNAVAILABLE,
+            result=None,
+            model="gpt-5.5",
+            reasoning="xhigh",
+            resumed=True,
+        ),
+        ProviderAttempt(
+            provider=ProviderId.CODEX,
+            attempt=2,
+            status=RunStatus.SUCCEEDED,
+            error_class=None,
+            result=settled,
+            model="gpt-5.5",
+            reasoning="xhigh",
+            resumed=False,
+        ),
+    )
+    return StageOutcome(
+        route=_route(),
+        result=settled,
+        provider_used=ProviderId.CODEX,
+        stage_attempts=2,
+        terminal_error=None,
+        attempts=attempts,
+    )
+
+
+def test_prompt_audit_names_the_variant_each_attempt_received(tmp_path: Path) -> None:
+    # The record is built from the request the Core assembled, so a stage-level answer would say
+    # "continuation" for an attempt that was handed the full text after its session was dropped.
+    calls: list[tuple[str, str, str]] = []
+    write_prompt_audit(
+        artifacts_root=str(tmp_path),
+        task_id="task-1",
+        node_id="fixing",
+        subtask=None,
+        run_id=7,
+        prompt="FULL TEXT",
+        continuation_prompt="CONTINUATION TEXT",
+        route=_route(),
+        outcome=_degraded_outcome(),
+        configured_model=None,
+        configured_reasoning=None,
+        skills_allowed=False,
+        skills_required=(),
+        started_at="t0",
+        secrets=(),
+        register=_register(calls),
+    )
+    audit_dir = task_artifact_dir(tmp_path, "task-1") / "prompt-audit"
+    step_text = (audit_dir / "000007-fixing.md").read_text(encoding="utf-8")
+    record = _step_metadata(step_text)
+
+    assert [(a["attempt"], a["resumed"], a["prompt_variant"]) for a in record["agents"]] == [
+        (1, True, "continuation"),
+        (2, False, "full"),
+    ]
+    # Both texts, once each, and both as document body: a prompt inside the JSON header would read
+    # as one flat line of escaped newlines, which is what the Markdown step file exists to avoid.
+    assert "prompt" not in record and "continuation_prompt" not in record
+    assert "## Prompt\n\nFULL TEXT" in step_text
+    assert "## Continuation prompt\n\nCONTINUATION TEXT" in step_text
+    # The machine-readable half still carries the whole record.
+    timeline = json.loads((audit_dir / "timeline.jsonl").read_text("utf-8").splitlines()[0])
+    assert timeline["prompt"] == "FULL TEXT"
+    assert timeline["continuation_prompt"] == "CONTINUATION TEXT"
+
+
+def test_prompt_audit_omits_the_variant_for_a_node_with_one_text(tmp_path: Path) -> None:
+    # Most nodes have nothing to choose between; the record does not grow a key that would always
+    # say the same thing.
+    calls: list[tuple[str, str, str]] = []
+    write_prompt_audit(
+        artifacts_root=str(tmp_path),
+        task_id="task-1",
+        node_id="implementation",
+        subtask=None,
+        run_id=8,
+        prompt="only text",
+        route=_route(),
+        outcome=_outcome(),
+        configured_model=None,
+        configured_reasoning=None,
+        skills_allowed=False,
+        skills_required=(),
+        started_at="t0",
+        secrets=(),
+        register=_register(calls),
+    )
+    audit_dir = task_artifact_dir(tmp_path, "task-1") / "prompt-audit"
+    step_text = (audit_dir / "000008-implementation.md").read_text(encoding="utf-8")
+    record = _step_metadata(step_text)
+    assert all("prompt_variant" not in agent for agent in record["agents"])
+    assert [agent["resumed"] for agent in record["agents"]] == [False, False]
+    # One prompt, one body section — the document does not grow an empty second heading.
+    assert "## Continuation prompt" not in step_text
+    timeline = json.loads((audit_dir / "timeline.jsonl").read_text("utf-8").splitlines()[0])
+    assert "continuation_prompt" not in timeline
+
+
+def test_prompt_audit_records_the_declared_skill_posture(tmp_path: Path) -> None:
+    # `skills_allowed` is the fact that is nowhere in the prompt — it rides a CLI flag, not text —
+    # so without it the audit could not answer whether the node could invoke a skill at all.
+    calls: list[tuple[str, str, str]] = []
+    write_prompt_audit(
+        artifacts_root=str(tmp_path),
+        task_id="task-1",
+        node_id="implementation",
+        subtask=None,
+        run_id=9,
+        prompt="p",
+        route=_route(),
+        outcome=_outcome(),
+        configured_model=None,
+        configured_reasoning=None,
+        skills_allowed=True,
+        skills_required=("acme-tdd",),
+        started_at="t0",
+        secrets=(),
+        register=_register(calls),
+    )
+    audit_dir = task_artifact_dir(tmp_path, "task-1") / "prompt-audit"
+    record = _step_metadata((audit_dir / "000009-implementation.md").read_text(encoding="utf-8"))
+    assert record["skills_allowed"] is True
+    assert record["skills_required"] == ["acme-tdd"]

@@ -38,7 +38,7 @@ def _utc_now_iso() -> str:
 # in place is beyond an additive-only migration, and with no production data anywhere the honest
 # answer is to recreate the local ``state.db`` rather than run on a shape the code does not match
 # (see :func:`_enforce_schema_version`).
-DB_SCHEMA_VERSION = 25
+DB_SCHEMA_VERSION = 26
 
 
 class IncompatibleStateError(Exception):
@@ -255,7 +255,9 @@ CREATE TABLE IF NOT EXISTS node_runs (
     started_at TEXT,
     finished_at TEXT,
     skipped INTEGER NOT NULL DEFAULT 0,
-    skip_reason TEXT
+    skip_reason TEXT,
+    skills_allowed INTEGER NOT NULL DEFAULT 0,
+    skills_required TEXT
 );
 
 CREATE TABLE IF NOT EXISTS provider_attempts (
@@ -462,6 +464,13 @@ class NodeRunRow:
     finished_at: str | None = None
     skipped: bool = False
     skip_reason: str | None = None
+    #: whether this node run was allowed to invoke skills at all, and which of the target
+    #: repository's skills it was required to invoke. The declared posture, not an observation:
+    #: neither CLI reports back which skill actually fired, so a finished run answers "what did
+    #: this node have" from state rather than from inference. Empty/false on every node kind that
+    #: cannot declare them.
+    skills_allowed: bool = False
+    skills_required: tuple[str, ...] = ()
     id: int | None = None
 
 
@@ -956,8 +965,8 @@ class StateStore:
                     task_id, node_id, node_kind, subtask_order, status, outcome,
                     route_primary, route_fallback, route_source, provider_used, error_class,
                     stage_attempts, commit_sha_before, commit_sha_after, started_at, finished_at,
-                    skipped, skip_reason
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    skipped, skip_reason, skills_allowed, skills_required
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     run.task_id,
@@ -978,6 +987,8 @@ class StateStore:
                     run.finished_at,
                     1 if run.skipped else 0,
                     run.skip_reason,
+                    1 if run.skills_allowed else 0,
+                    _encode_skills(run.skills_required),
                 ),
             )
             return int(cur.lastrowid or 0)
@@ -1062,6 +1073,44 @@ class StateStore:
         cur = self._conn.execute("SELECT * FROM node_runs WHERE id = ?", (run_id,))
         row = cur.fetchone()
         return _node_run_from_row(row) if row is not None else None
+
+    def has_prior_provider_run(
+        self,
+        task_id: str,
+        node_id: str,
+        subtask_order: int | None,
+        provider: str,
+        *,
+        exclude_run_id: int,
+    ) -> bool:
+        """Whether this node has already been run by *provider* on this unit, before *run_id*.
+
+        The fact a continuation prompt turns on: not "does this session have history" — an author
+        node can inherit a session another node opened — but "has THIS role already been stated on
+        it". Scoped to the unit, so a decomposed task does not read one subtask's runs as another's
+        (``subtask_order IS ?`` matches ``NULL`` to root-level runs only).
+
+        ``provider_used`` is doing more than provider matching: it is written only when a provider
+        actually settled a run, so three row classes fall out of the answer without a clause of
+        their own — the caller's own row (reserved ``running``, provider still ``NULL``), a node
+        skipped by its ``when`` predicate, and a run stranded by a hard stop and later closed by
+        :meth:`reconcile_open_node_runs`. The last is the conservative reading for recovery: a turn
+        that was killed may never have reached the provider, so the node counts as not yet spoken.
+        ``exclude_run_id`` is belt-and-braces on the first of those, stated rather than relied upon.
+
+        A narrow read rather than :meth:`get_node_runs` + filtering: the whole-task scan grows with
+        the run and this is asked once per node run.
+        """
+        row = self._conn.execute(
+            """
+            SELECT 1 FROM node_runs
+            WHERE task_id = ? AND node_id = ? AND subtask_order IS ?
+              AND provider_used = ? AND id != ?
+            LIMIT 1
+            """,
+            (task_id, node_id, subtask_order, provider, exclude_run_id),
+        ).fetchone()
+        return row is not None
 
     def reconcile_open_node_runs(
         self,
@@ -1792,6 +1841,18 @@ def _provider_attempt_from_row(row: sqlite3.Row) -> ProviderAttemptRow:
     )
 
 
+def _encode_skills(names: tuple[str, ...]) -> str | None:
+    """Encode a node run's declared skill names for storage; ``None`` when it declared none."""
+    return json.dumps(list(names)) if names else None
+
+
+def _decode_skills(raw: str | None) -> tuple[str, ...]:
+    """Decode the stored skill names, tolerating the ``NULL`` a node that declared none writes."""
+    if not raw:
+        return ()
+    return tuple(str(name) for name in json.loads(raw))
+
+
 def _node_run_from_row(row: sqlite3.Row) -> NodeRunRow:
     return NodeRunRow(
         task_id=row["task_id"],
@@ -1812,6 +1873,8 @@ def _node_run_from_row(row: sqlite3.Row) -> NodeRunRow:
         finished_at=row["finished_at"],
         skipped=bool(row["skipped"]),
         skip_reason=row["skip_reason"],
+        skills_allowed=bool(row["skills_allowed"]),
+        skills_required=_decode_skills(row["skills_required"]),
         id=row["id"],
     )
 

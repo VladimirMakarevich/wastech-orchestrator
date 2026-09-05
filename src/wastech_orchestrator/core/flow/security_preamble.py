@@ -55,11 +55,15 @@ def build_orchestrator_security_preamble(
     costs one paragraph at a single insertion point, so it cannot drift from what is actually
     enforced the way fifty-odd role prompts would.
 
-    ``no_write_floor`` is for the host where no OS sandbox exists at all (native Windows;
-    Linux/WSL2 without ``bubblewrap``+``socat``). There the write-deny on ``.git`` and ``.worc`` is
-    not enforced by anything, and saying so is the honest form of the request. Rendered ONLY on such
-    a host: a paragraph that claimed it everywhere would be false on most runs, and would teach the
-    reader to discount the whole block.
+    ``no_write_floor`` is for the run with no OS sandbox under it: a host where none exists at all
+    (native Windows; Linux/WSL2 without ``bubblewrap``+``socat``), or — on every host — the advanced
+    mode, which raises none by choice. There the write-deny on ``.git`` and ``.worc`` is not
+    enforced by anything, and saying so is the honest form of the request. Still rendered ONLY when
+    that is true: a paragraph that claimed it everywhere would be false under strict isolation on a
+    capable host, and would teach the reader to discount the whole block. It overlaps the
+    ``advanced_mode`` paragraph above by design — that one says the rules are asked rather than
+    imposed, this one names the mechanism that stopped imposing them and how far its absence reaches
+    (a program the shell starts, and a shell that program starts).
     """
     instruction_files = ", ".join(f"`{name}`" for name in REPO_INSTRUCTION_NAMES)
     baseline = "\n".join(
@@ -131,8 +135,8 @@ def build_orchestrator_security_preamble(
         )
     if no_write_floor:
         paragraphs.append(
-            "On this host there is no operating-system sandbox available, so nothing outside your "
-            f"own compliance keeps a write out of `.git/` or `{CONTROL_HOME_DIRNAME}/` — not the "
+            "No operating-system sandbox is in force for this run, so nothing outside your own "
+            f"compliance keeps a write out of `.git/` or `{CONTROL_HOME_DIRNAME}/` — not the "
             "shell you have been given, not a program that shell starts, and not a second shell "
             "started by that program. This applies to every step of this run, including the ones "
             "whose job is only to read. Treat those paths as if they were read-only hardware."

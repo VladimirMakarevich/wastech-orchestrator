@@ -1294,44 +1294,50 @@ def test_the_mode_line_is_absent_under_strict_isolation(
     assert "pinned-executables" not in out
 
 
-def test_the_mode_warns_when_the_claude_env_scrub_variable_would_shrink_the_write_grant(
+def test_the_mode_announces_the_missing_floor_on_a_host_that_could_sandbox(
     monkeypatch: pytest.MonkeyPatch,
     git_repo,
     make_git_config,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """One variable in the operator's shell silently narrows the grant this report announces.
+    """The mode's floor line, on the host class that used to report nothing at all.
 
-    In the CLI's env-scrub branch the settings compiler filters a volume-wide ``allowWrite`` out by
-    name, and in this mode the parent environment reaches the agent whole — so it takes no config
-    change to arrive. A warning rather than a failure: a narrower write grant is a correctness
-    surprise (the toolchain cache stops being writable and the build looks broken), not a hole.
+    `isolation-floor: NONE` was a host verdict: printed on native Windows and on a Linux missing
+    `bubblewrap`+`socat`, and silent on macOS — which is precisely where the mode was quietly
+    keeping a sandbox nobody had asked for. It is now printed here too, because the floor really is
+    absent, and it is still advisory: `preflight: ready` and rc 0. The capability is injected, so
+    this asserts the mode's arm rather than the CI host's.
     """
-    monkeypatch.setenv("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "1")
+    monkeypatch.setattr(
+        claude_mod, "default_sandbox_probe", lambda: claude_mod.SandboxCapability.MACOS
+    )
     _patch_providers(monkeypatch, _mode(make_git_config(git_repo.clone)))
     assert cli.cmd_preflight(_args()) == 0
     out = capsys.readouterr().out
-    assert "write-grant: WARN — CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set" in out
-    assert "preflight: ready" in out
+    assert "isolation-floor: NONE — claude: the advanced mode" in out
+    # The cost half is the one the shared formatter owns, and it has to be the relaxed tail here.
+    assert "EVERY node here keeps an unsandboxed shell" in out
+    assert "advanced-mode: ON" in out and "preflight: ready" in out
+    # Codex is not symmetric and the report must not claim it is.
+    assert "isolation-floor: NONE — codex" not in out
 
 
-def test_no_write_grant_warning_without_that_variable_or_without_the_mode(
+def test_no_floor_line_on_a_capable_host_under_strict_isolation(
     monkeypatch: pytest.MonkeyPatch,
     git_repo,
     make_git_config,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    # Both halves of the condition, so neither can rot: unset in the mode says nothing, and set
-    # outside the mode says nothing either (there is no volume-wide grant to shrink).
-    monkeypatch.delenv("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", raising=False)
-    _patch_providers(monkeypatch, _mode(make_git_config(git_repo.clone)))
-    cli.cmd_preflight(_args())
-    assert "write-grant: WARN" not in capsys.readouterr().out
-
-    monkeypatch.setenv("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "1")
+    # The counterweight, so the line above cannot become unconditional: the same injected macOS
+    # host says nothing when the operator kept the sandbox.
+    monkeypatch.setattr(
+        claude_mod, "default_sandbox_probe", lambda: claude_mod.SandboxCapability.MACOS
+    )
     _patch_providers(monkeypatch, make_git_config(git_repo.clone))
-    cli.cmd_preflight(_args())
-    assert "write-grant: WARN" not in capsys.readouterr().out
+    assert cli.cmd_preflight(_args()) == 0
+    out = capsys.readouterr().out
+    assert "isolation-floor: NONE" not in out
+    assert "isolation: OK (enforced)" in out
 
 
 def test_the_windows_launch_gate_also_protects_git_in_advanced_mode(

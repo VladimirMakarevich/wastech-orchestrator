@@ -492,55 +492,37 @@ def test_workspace_write_run_with_deny_policy_writes_sandbox_settings(
     assert (tmp_path / ".worc").as_posix() in sandbox["filesystem"]["denyRead"]
 
 
-def test_a_read_only_run_in_the_advanced_mode_gets_the_sandbox_that_holds_it_to_reading(
-    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
-) -> None:
-    # A read-only node never reached this path before: with no Bash in its tool set there was
-    # nothing to sandbox, so no settings file was written at all. The mode gives it a shell, which
-    # makes the file appear for the first time — and that file is now half of what "read-only"
-    # means, the other half being the bare Write/Edit/NotebookEdit denies. Losing either one turns
-    # an audit node into a writer without anything failing.
-    deny = InternalDenyPolicy(
-        control_home=tmp_path / ".worc",
-        private_home=tmp_path / ".worc",
-        env_file=None,
-    )
-    fake = FakeRun(stdout=_success_stream())
-    provider = ClaudeCodeProvider(
+def _mode_provider(
+    claude_config: ProviderConfig,
+    security_config: SecurityConfig,
+    tmp_path: Path,
+    fake: FakeRun,
+    *,
+    deny_policy: InternalDenyPolicy | None = None,
+) -> ClaudeCodeProvider:
+    """A provider in the advanced mode on a host that CAN sandbox — the interesting combination."""
+    return ClaudeCodeProvider(
         claude_config,
         security=replace(security_config, strict_isolation=False),
         artifacts_root=tmp_path,
         clock=lambda: FIXED_TIME,
         run_process=fake,
         sandbox_probe=lambda: SandboxCapability.MACOS,
-        deny_policy=deny,
+        deny_policy=deny_policy,
     )
-    provider.run(replace(_make_ws_request(tmp_path), permission_profile="read-only"))
-
-    argv = fake.captured["argv"]
-    assert "--tools" not in argv
-    assert "Bash" in argv[argv.index("--allowedTools") + 1].split(",")
-    assert {"Write", "Edit", "NotebookEdit"} <= set(
-        argv[argv.index("--disallowedTools") + 1].split(",")
-    )
-    sandbox = json.loads(Path(argv[argv.index("--settings") + 1]).read_text(encoding="utf-8"))[
-        "sandbox"
-    ]
-    # The whole clone, not just the control paths: what holds this node to reading is the OS, and
-    # a command the auto-approve list let through still cannot change the repository.
-    assert (tmp_path / "clone").as_posix() in sandbox["filesystem"]["denyWrite"]
-    assert sandbox["autoAllowBashIfSandboxed"] is True
 
 
-def test_the_advanced_mode_writes_the_volume_root_and_the_open_network_into_the_sandbox_file(
+def test_a_read_only_run_in_the_advanced_mode_is_held_to_reading_by_the_tool_denies_alone(
     claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
 ) -> None:
-    """The wiring, end to end: mode on → ``allowWrite`` on the volume root and ``allowedDomains``.
+    """What "read-only" means in the mode once the OS sandbox is not raised: the editor denies.
 
-    The unit tests prove the file's shape; this proves the adapter actually asks for that shape from
-    a real request, which is the half that breaks silently. The node here was granted NO network by
-    its flow, on purpose: the mode is a config-level grant of the whole network, and a flow cannot
-    take it back — the shell would reach the network regardless of any tool list.
+    It used to mean two mechanisms — the whole clone ``denyWrite`` in the sandbox file, plus the
+    bare editor denies — with the sandbox half described as what actually held a shell-bearing
+    audit node to reading. The mode no longer raises a sandbox, so that half is gone for
+    subprocesses on every host, and the tool denies are the entire remaining boundary. This asserts
+    the four editor names rather than three: ``MultiEdit`` is in the mode's deny set and dropping it
+    would leave a writer wearing the name of an audit node with nothing failing.
     """
     deny = InternalDenyPolicy(
         control_home=tmp_path / ".worc",
@@ -548,28 +530,48 @@ def test_the_advanced_mode_writes_the_volume_root_and_the_open_network_into_the_
         env_file=None,
     )
     fake = FakeRun(stdout=_success_stream())
-    provider = ClaudeCodeProvider(
-        claude_config,
-        security=replace(security_config, strict_isolation=False),
-        artifacts_root=tmp_path,
-        clock=lambda: FIXED_TIME,
-        run_process=fake,
-        sandbox_probe=lambda: SandboxCapability.MACOS,
-        deny_policy=deny,
-    )
-    provider.run(replace(_make_ws_request(tmp_path), network_access=False))
+    provider = _mode_provider(claude_config, security_config, tmp_path, fake, deny_policy=deny)
+    provider.run(replace(_make_ws_request(tmp_path), permission_profile="read-only"))
 
     argv = fake.captured["argv"]
+    assert "--tools" not in argv
+    assert "Bash" in argv[argv.index("--allowedTools") + 1].split(",")
+    denied = set(argv[argv.index("--disallowedTools") + 1].split(","))
+    assert {"Write", "Edit", "MultiEdit", "NotebookEdit"} <= denied
     sandbox = json.loads(Path(argv[argv.index("--settings") + 1]).read_text(encoding="utf-8"))[
         "sandbox"
     ]
-    # The volume root, taken from the workspace path's own anchor rather than a hardcoded "/".
-    assert sandbox["filesystem"]["allowWrite"] == [Path((tmp_path / "clone").anchor).as_posix()]
-    assert sandbox["network"]["allowedDomains"] == ["*"]
-    # The floor is still spelled out inside that grant, and so is the whole clone for a writer's
-    # control paths — this attempt is workspace-write, so the guard roots are what to look for.
-    deny_write = set(sandbox["filesystem"]["denyWrite"])
-    assert (tmp_path / ".worc").as_posix() in deny_write
+    # And no sandbox policy pretends to be the other half: the file says the sandbox is off, and
+    # carries no filesystem block that a reader could mistake for a boundary in force.
+    assert sandbox == {"enabled": False}
+
+
+def test_the_advanced_mode_asserts_the_sandbox_is_off_instead_of_omitting_the_file(
+    claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
+) -> None:
+    """The mode still sends ``--settings``, and that is the point rather than an accident.
+
+    Dropping ``needs_sandbox`` would have stopped emitting the flag altogether, and the shell would
+    then be unsandboxed by the vendor's default — a state owned by the next CLI release and, because
+    the mode also relaxes read-isolation and so puts ``--setting-sources project`` on the command
+    line, by the target repository's own ``.claude/settings.json``. Asserting the value is the same
+    argument that already writes ``autoAllowBashIfSandboxed`` explicitly instead of inheriting it.
+
+    Also pinned here: this happens with NO deny policy. There is no policy to project, and the
+    assertion is worth making either way — the strict arm is the one that needs a deny policy.
+    """
+    fake = FakeRun(stdout=_success_stream())
+    provider = _mode_provider(claude_config, security_config, tmp_path, fake)
+    provider.run(replace(_make_ws_request(tmp_path), network_access=False))
+
+    argv = fake.captured["argv"]
+    assert "--settings" in argv
+    assert argv[argv.index("--setting-sources") + 1] == "project"
+    settings = json.loads(Path(argv[argv.index("--settings") + 1]).read_text(encoding="utf-8"))
+    assert settings == {"sandbox": {"enabled": False}}
+    # The mode's network grant is unchanged and does not live in that file for the web tools: the
+    # node was granted NO network by its flow, and gets it anyway because the mode is a
+    # config-level grant a flow cannot take back.
     assert {"WebFetch", "WebSearch"} <= set(argv[argv.index("--allowedTools") + 1].split(","))
 
 
@@ -1094,16 +1096,23 @@ def test_the_paid_probe_is_skipped_without_an_os_sandbox(
     assert fake.calls == 0
 
 
-def test_the_paid_probe_runs_in_advanced_mode_too(
+def test_the_paid_probe_is_skipped_in_the_advanced_mode(
     claude_config: ProviderConfig, security_config: SecurityConfig, tmp_path: Path
 ) -> None:
-    """The paid probe: `strict_isolation: false` is not an exemption from proof.
+    """The mode has nothing for this probe to demonstrate, and running it would FAIL preflight.
 
-    There is a claim to prove there: the sandbox settings file is written whenever the resolved tool
-    set keeps a shell and the host can sandbox it, at either setting — so in advanced mode the
-    write-deny on `.git` and `.worc` is still asserted, and it is the only part of the floor that
-    does not need the agent's cooperation. Declining to prove it exactly where the rest of the
-    enforcement is relaxed would have it backwards.
+    This test used to assert the opposite — that `strict_isolation: false` is not an exemption from
+    proof — and it was right while the mode still wrote a sandbox file. It no longer does, and the
+    probe's own prompt then becomes a trap: it asks for a shell write into `.git`, that write now
+    LANDS, and `classify_paid_probe` reports a proven leak, which is fatal. So `worc preflight
+    --paid-isolation-probe` on the shipped default config would fail while describing the mode's
+    accepted price as a security violation. The `_WritingRun` here lets every write through, which
+    is exactly what an unsandboxed host does — so removing this arm makes this test fail as a leak
+    rather than pass quietly.
+
+    `unsupported` is the right status rather than a failure: the enforcement is ABSENT, which is a
+    different answer from unproven, and its honest carrier is the loud `isolation-floor: NONE` line.
+    On a capable host under strict isolation the probe still runs — pinned above.
     """
     fake = _WritingRun(write=lambda path: True, stdout=_success_stream())
     provider = _paid_provider(
@@ -1111,12 +1120,7 @@ def test_the_paid_probe_runs_in_advanced_mode_too(
     )
     report = provider.paid_isolation_probe(home_dir=tmp_path)
     assert report is not None
-    assert fake.calls == 1
-    # And it asks the one question no free probe can: the settings file it launches under carries
-    # the mode's volume-wide `allowWrite` WITH the carve-outs nested inside it, so an
-    # operator running this opt-in is testing that precedence for real rather than taking the
-    # adapter's word for it. That is why the "not proven" row names this command.
-    assert fake.sandbox_settings is not None
-    filesystem = fake.sandbox_settings["sandbox"]["filesystem"]
-    assert filesystem["allowWrite"], filesystem
-    assert any(path.endswith(".git") for path in filesystem["denyWrite"]), filesystem
+    assert report.status == "unsupported" and report.fatal is False
+    assert "advanced mode" in report.detail
+    # No model call spent, and no fixture written to classify.
+    assert fake.calls == 0
