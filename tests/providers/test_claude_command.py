@@ -1220,8 +1220,9 @@ def test_continuation_prompt_absent_is_byte_for_byte_today(
 def test_effective_prompt_body_override_renders_the_variant_not_sent(
     make_request: Callable[..., AgentRunRequest],
 ) -> None:
-    # The audit needs both texts through the one assembler, preamble and footer included, without
-    # restating how the choice is made.
+    # The audit needs both texts through the one assembler, footer included, without restating how
+    # the choice is made — and both agree with what the attempt actually got: this request resumes
+    # a live session, so neither variant carries the contract.
     request = make_request(
         prompt="FULL",
         continuation_prompt="CONT",
@@ -1230,9 +1231,38 @@ def test_effective_prompt_body_override_renders_the_variant_not_sent(
         security_preamble="[contract]",
     )
     full = build_effective_prompt(request, body=request.prompt)
-    assert full.startswith("[contract]\n\nFULL\n\n")
+    assert full.startswith("FULL\n\n")
     assert "/t/task.md" in full
-    assert build_effective_prompt(request).startswith("[contract]\n\nCONT\n\n")
+    assert build_effective_prompt(request).startswith("CONT\n\n")
+    assert "[contract]" not in full
+
+
+def test_security_preamble_is_withheld_from_an_attempt_that_resumes_a_session(
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    """The contract is sent once per session, on the turn that opens it.
+
+    A live session already contains it — every session-opening request of the run carries it — and
+    restating it each round buys nothing while riding a history the provider re-sends every turn.
+    Read here, at the seam, from the same field that decides the resume argv: an attempt whose
+    session the router cleared (session-unavailable, transient degrade, cross-provider fallback)
+    gets the contract back with the full prompt.
+    """
+    opening = make_request(
+        prompt="P",
+        task_path="/t/task.md",
+        required_skills=("acme-tdd",),
+        security_preamble="[contract]",
+    )
+    assert build_effective_prompt(opening).startswith("[contract]\n\nP\n\n")
+
+    resumed = replace(opening, session_id="sess-1")
+    effective = build_effective_prompt(resumed)
+    assert effective.startswith("P\n\n")
+    assert "[contract]" not in effective
+    # Only the preamble is withheld: the paths and the skills block change round to round.
+    assert "task: /t/task.md" in effective
+    assert "/acme-tdd" in effective
 
 
 def test_uses_continuation_is_the_single_rule(

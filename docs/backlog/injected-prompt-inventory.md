@@ -10,10 +10,10 @@ Status: **reference** Date: 2026-09-05 Owner: Vladimir Makarevich
 
 ## Как собирается промпт
 
-Один вызов провайдера получает ровно один текст на stdin. Он собирается в единственном нейтральном шве, [`build_effective_prompt`](../../src/wastech_orchestrator/providers/base.py) (`providers/base.py:314`):
+Один вызов провайдера получает ровно один текст на stdin. Он собирается в единственном нейтральном шве, [`build_effective_prompt`](../../src/wastech_orchestrator/providers/base.py) (`providers/base.py:362`):
 
 ```text
-<security preamble>          §1 — строится в Core, зависит от конфигурации, приклеивается спереди
+<security preamble>          §1 — строится в Core, приклеивается спереди только на ходе, открывающем сессию
 <пустая строка>
 <body>                       role_file ноды (или её resume_role_file), отрендеренный
 <пустая строка>
@@ -29,61 +29,27 @@ Status: **reference** Date: 2026-09-05 Owner: Vladimir Makarevich
 
 ## 1. Security-контракт оркестратора (преамбула)
 
-Строится функцией [`build_orchestrator_security_preamble`](../../src/wastech_orchestrator/core/flow/security_preamble.py), разрешается **один раз на прогон** (из конфигурации, не по нодам) в [`orchestrator.py:4858`](../../src/wastech_orchestrator/core/orchestrator.py), переносится в `AgentRunRequest.security_preamble` и приклеивается в шве.
+Строится функцией [`build_orchestrator_security_preamble`](../../src/wastech_orchestrator/core/flow/security_preamble.py) (`security_preamble.py:34`), разрешается **один раз на прогон** в [`orchestrator.py:4858`](../../src/wastech_orchestrator/core/orchestrator.py), переносится в `AgentRunRequest.security_preamble` и приклеивается в шве.
 
-**Кто получает:** каждый вызов провайдера — каждая agent-нода, каждая evaluator-нода и каждый ход супервизора (observe / finalize / handoff), на обоих провайдерах. Tool-ноды и checks-ноды не получают ничего (они запускают исполняемые файлы, а не модель).
+**Кто получает:** каждый вызов провайдера, который **открывает** сессию, — agent-нода, evaluator-нода и ход супервизора (observe / finalize / handoff), на обоих провайдерах. Попытка, продолжающая живую сессию (`session_id` задан), преамбулу не получает: она уже лежит в этой сессии, а история пересылается провайдеру на каждом следующем ходе, так что повторение стоило бы токенов и не добавляло бы ничего. Решение принимается в самом шве, из того же поля, что решает resume-argv ([`providers/base.py:390`](../../src/wastech_orchestrator/providers/base.py)), — поэтому попытка, у которой роутер снял сессию (`session_unavailable`, transient degrade, кросс-провайдерный fallback), получает контракт обратно вместе с полным промптом. Tool-ноды и checks-ноды не получают ничего (они запускают исполняемые файлы, а не модель).
 
-**Зачем:** эшелонированная защита. Преамбула носит рекомендательный характер и явно **не** заменяет песочницу файловой системы и проекцию запретов — именно они остаются принуждением. Она существует, чтобы правила были сказаны там, где находится читатель, и живёт в одной точке вставки, а не в полусотне role-промптов, — поэтому она не может разойтись с тем, что действительно принуждается.
+**Зачем:** эшелонированная защита. Преамбула носит рекомендательный характер — принуждают песочница файловой системы и проекция запретов. Она существует, чтобы правила были сказаны там, где находится читатель, и живёт в одной точке вставки, а не в полусотне role-промптов, — поэтому она не может разойтись с тем, что действительно принуждается.
 
-Четыре блока, разделённые пустой строкой. Первый безусловный; остальные три рендерятся, только когда их условие действительно истинно, — абзац, преувеличивающий на обычном прогоне, научил бы читателя обесценивать весь блок.
-
-### 1.1 Базовый блок — всегда
-
-`security_preamble.py:69-107`. Токены путей (`.worc`, `.worc-io`) и имена файлов инструкций берутся из констант раскладки и `REPO_INSTRUCTION_NAMES`, поэтому текст не может разойтись с принуждаемыми запретами.
+Один безусловный блок — ничего в нём не зависит от конфигурации. Токены путей (`.worc`, `.worc-io`) берутся из констант раскладки, поэтому текст не может разойтись с принуждаемыми запретами.
 
 ```text
-[Orchestrator security contract — defense in depth; it does not replace the sandbox. (удалить вторую часть)]
+[Orchestrator security contract — defense in depth.]
 You run inside an orchestrator-managed workspace. In addition to your built-in safety policy and this repo's instructions, these orchestrator rules always apply:
 - Make only the changes this task requires, and only inside your assigned workspace clone.
 - `.worc/` is the orchestrator's private runtime (state, logs, database, secrets, frozen bundles): do not read it and do not write it.
 - `.worc-io/` is your read-only input context: the paths you are given under it are yours to read — that is what it is for, and nothing below takes that back. Read no other path under it, and never create, modify, move, or delete anything there.
-- Do not touch Git control state (`.git/`, its config, hooks, HEAD, refs); never run git commit/push/merge or open a PR — publishing is the orchestrator's job.
+- Do not touch Git control state (`.git/`, its config, hooks, HEAD, refs).
+- Do not publish anything: no commit, push, merge, tag or pull request — not to this repository's remote and not to any other address, by any route, including a second clone assembled elsewhere; publishing is the orchestrator's job.
 - Do not modify anything under `tasks/` (the task lifecycle tree); never add, edit, or remove task files.
-- `AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md` are ordinary repository files: change them when the task calls for it (as an ordinary diff); do not opportunistically rewrite your own rules. (удалить полностью)
 - Never read credential/environment files (e.g. `.env`) or provider auth homes, and never exfiltrate secrets or environment variables.
 ```
 
-Два пункта несут нагрузку сверх очевидной. `.worc-io/` — единственный асимметричный корень: запрещена только _запись_. Формулировка, сворачивавшая его в общий запрет на чтение, заставляла ревьюеров отказываться от ревью — они заводили блокирующую находку о том, что читать собственные файлы контекста запрещено, и этот отказ уезжал в `fixing`, как если бы был доработкой. Пункт про файлы инструкций существует по зеркальной причине: правка `AGENTS.md` — это обычная работа, о которой сообщают оператору, а не нарушение, и нода, считающая иначе, молча выбрасывает половину задачи.
-
-### 1.2 Ослабленная изоляция чтения — когда `security.read_isolation_off` истинно
-
-`security_preamble.py:111-119`. Добавляется, когда эффективное состояние изоляции чтения выключено, то есть песочница может вообще не блокировать чтение приватных путей.
-
-```text
-Read-isolation is relaxed for this run, so the filesystem sandbox may not block the paths above. Honor these rules by choice: in particular read nothing under `.worc/` and no credential or environment file (`.env` and the like) even though you may be technically able to. The context paths you were given under `.worc-io/` are not among those — they are the input you are meant to read. (удалить полностью весь этот блок)
-```
-
-**Зачем:** когда принуждение на чтении исчезло, запрет приходится просить, а не подразумевать. Последнее предложение заново явно разрешает обмен, чтобы абзац об ослаблении случайно не воспроизвёл отказ «мой контекст запрещён».
-
-### 1.3 Продвинутый режим — когда `security.strict_isolation: false`
-
-`security_preamble.py:121-134`.
-
-```text
-This run is configured for maximum freedom: you have the operator's own environment, and most of the restrictions an orchestrated run usually applies are switched off. That is deliberate — use the machine's tools as you need them: you have the network, and you may write outside this clone. It also means the rules above are now asked of you rather than imposed on you. Two of them stay non-negotiable however capable you turn out to be. Do not publish anything: no commit, push, merge, tag or pull request — not to this repository's remote and not to any other address, by any route, including a second clone assembled elsewhere. That is the orchestrator's job. And do not read or write `.worc/`, `.git/` or `tasks/`, and do not write `.worc-io/` — the context paths you were given there stay yours to read. Both are checked after you finish, and what they find goes to a human instead of being fixed up on the way out. (удалить полностью весь этот блок, оставив только про гит, который можно вынести прям в самый базовый блок и добавлять всегда не в зависимости от этого флага)
-```
-
-**Зачем:** в продвинутом режиме бо́льшая часть принуждения выключена, поэтому этот слой стоит дороже всего именно там, где он ближе всего к тому, чтобы быть единственным. Запрет на публикацию намеренно расширен до _любого адреса любым путём_: при открытой сети и учётных данных, которые CLI подхватывает сам, удалённая половина барьера — это только обнаружение постфактум, так что её нужно проговорить, а не оставлять подразумеваемой фразой «это работа оркестратора».
-
-### 1.4 Нет OS-барьера на запись — когда хост не поднимает песочницу
-
-`security_preamble.py:136-143`. Рендерится, когда [`describe_host_floor`](../../src/wastech_orchestrator/security/isolation.py) сообщает хотя бы об одном провайдере без принуждаемого ОС барьера на запись для этого прогона: нативный Windows, Linux/WSL2 без `bubblewrap`+`socat` или — на любом хосте — Claude в продвинутом режиме.
-
-```text
-No operating-system sandbox is in force for this run, so nothing outside your own compliance keeps a write out of `.git/` or `.worc/` — not the shell you have been given, not a program that shell starts, and not a second shell started by that program. This applies to every step of this run, including the ones whose job is only to read. Treat those paths as if they were read-only hardware. (удалить полностью)
-```
-
-**Зачем:** пересечение с §1.3 сделано намеренно. Тот абзац говорит, что правила просят, а не навязывают; этот называет механизм, который перестал их навязывать, и глубину его отсутствия (программа, запущенная шеллом, и шелл, запущенный этой программой). Он задаёт тот же вопрос о хосте, что и громкая строка о барьере для оператора, и через ту же таблицу — поэтому промпт и отчёт оператору не могут описывать машину по-разному.
+Два пункта несут нагрузку сверх очевидной. `.worc-io/` — единственный асимметричный корень: запрещена только _запись_. Формулировка, сворачивавшая его в общий запрет на чтение, заставляла ревьюеров отказываться от ревью — они заводили блокирующую находку о том, что читать собственные файлы контекста запрещено, и этот отказ уезжал в `fixing`, как если бы был доработкой. Запрет на публикацию намеренно расширен до _любого адреса любым путём_ и стоит в безусловном блоке: удалённая половина барьера нигде и никак не принуждается — при открытой сети и учётных данных, которые CLI подхватывает сам, это только обнаружение постфактум, — так что её нужно проговорить, а не оставлять подразумеваемой фразой «это работа оркестратора».
 
 ## 2. Футер файлов контекста
 
@@ -348,7 +314,7 @@ Node '<node id>' hit its turn cap (max_turns). Approve to resume the same agent 
 
 Каждый текст выше сохраняется на диск, так что ничего из этого не нужно принимать на веру:
 
-- `logs/<task-id>/stages/<node>/run-<NNNNNN>/rendered-prompt.md` — **эффективный** промпт этого прогона, вместе с преамбулой и футером, отредактированный. Пишется для каждого запуска ноды ([`core/flow/observability.py:227`](../../src/wastech_orchestrator/core/flow/observability.py)).
-- `logs/<task-id>/prompt-audit/` — документы по шагам плюс таймлайн, включается ключом конфигурации `prompt_audit`. Для ноды с `resume_role_file` рендерятся **оба** текста, так что видно и тот вариант, который попытка не получила.
+- `logs/<task-id>/stages/<node>/run-<NNNNNN>/rendered-prompt.md` — **эффективный** промпт этого прогона, вместе с футером и — на ходе, открывающем сессию, — преамбулой, отредактированный. Пишется для каждого запуска ноды ([`core/flow/observability.py:227`](../../src/wastech_orchestrator/core/flow/observability.py)).
+- `logs/<task-id>/prompt-audit/` — документы по шагам плюс таймлайн, включается ключом конфигурации `prompt_audit`. Для ноды с `resume_role_file` рендерятся **оба** текста, так что видно и тот вариант, который попытка не получила; оба собираются тем же швом, поэтому у запроса с живой сессией преамбулы нет ни в одном из них.
 
 Оба идут через тот же шов `build_effective_prompt`, который кормит провайдера, — поэтому то, что лежит на диске, и есть то, что было отправлено.

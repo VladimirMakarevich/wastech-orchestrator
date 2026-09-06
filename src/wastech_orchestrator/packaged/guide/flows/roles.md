@@ -89,6 +89,8 @@ Name a second, short file and the orchestrator decides which one each turn gets:
 
 If the session is lost — the provider dropped it, or the run failed over to the other provider — that attempt is handed the **full** text automatically, so a continuation turn can never land in an empty conversation.
 
+**The orchestrator drops its own boilerplate too.** Its security contract — the block it prepends to every prompt itself — is sent on the turn that *opens* a session and withheld from every turn that resumes one, where it is already in the conversation. That is decided per attempt from the same field as the resume itself, so an attempt that lost its session gets the contract back with the full text. The context-files footer is never dropped: those paths are the one thing that really changes round to round.
+
 What to write into it: what changed since the last turn (the artifact paths, which are the only thing that really differs round to round), what is expected of this turn, and **one line of the output contract where the wording carries meaning the schema cannot** — an evaluator's "grade honestly, the flow decides the gate" is enforced by nothing else. What to leave out: the rules, the remit, and anything already stated. If the continuation file restates the main one, it has bought nothing. The exception is a rule about **reporting** rather than about the work — "a command that fails under you is evidence about your sandbox" applies to every round's report, so it stays.
 
 Both files render the same variables, and the runner reads both when deciding whether to build an optional one — so `{?memory_path}` works in either. Prefer not to repeat it: the packet was already delivered on the fresh turn and is in the session.
