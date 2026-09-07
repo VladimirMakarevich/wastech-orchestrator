@@ -156,11 +156,13 @@ def _services(
     prompt_secrets: tuple[str, ...] = (),
     register_artifact: Any = None,
     tool_path: Path | None = None,
+    git: Any = None,
 ) -> NodeServices:
     return NodeServices(
         router=None,  # type: ignore[arg-type]  # the tool runner never touches router/checks
         check_runner=None,  # type: ignore[arg-type]
         store=store,
+        git=git,
         repo_dir=str(tmp_path / "repo"),
         artifacts_root=str(tmp_path / "art"),
         clock=lambda: "ts",
@@ -475,3 +477,67 @@ def test_tool_timeout_resolution_precedence(tmp_path: Path) -> None:
     services3 = _services(tmp_path, fake3, FakeStore())  # default services default = 3600
     ToolNodeRunner(services3, _inputs(tmp_path)).run(_TOOL, _ctx(_snapshot(_TOOL), _TOOL))
     assert fake3.calls[0]["timeout"] == 3600  # built-in fallback
+
+
+# -- Git-control bracket ------------------------------------------------------
+
+
+class _FakeGit:
+    """Enough Git Manager for the bracket: a scripted control-state drift and tree change."""
+
+    def __init__(
+        self, *, drift: Any = None, changed_seq: list[tuple[Any, ...]] | None = None
+    ) -> None:
+        self._drift = drift
+        self._changed_seq = changed_seq or [(), ()]
+        self.captures = 0
+
+    def capture_git_control_state(self) -> object:
+        self.captures += 1
+        return object()
+
+    def compare_git_control_state(self, before: object) -> Any:
+        return self._drift
+
+    def changed_code_entries(self, task_id: str = "task-1") -> tuple[Any, ...]:
+        return self._changed_seq.pop(0) if len(self._changed_seq) > 1 else self._changed_seq[0]
+
+
+def test_a_tool_that_poisons_git_control_state_is_reported(tmp_path: Path) -> None:
+    # A tool node runs an operator program inside the clone: a shell by definition, no write access
+    # by design, and — before this — no fingerprint at all. Reported, never parked: the outcome the
+    # tool returned still decides routing.
+    from wastech_orchestrator.git_manager import ChangedPath, GitControlDrift, GitControlDriftItem
+
+    drift = GitControlDrift((GitControlDriftItem("hooks", "hook 'post-commit' added"),))
+    git = _FakeGit(drift=drift, changed_seq=[(), (ChangedPath(status="??", path="stray.txt"),)])
+    fake = FakeRunProcess(stdout="", exit_code=0)
+    services = _services(tmp_path, fake, FakeStore(), git=git)
+    result = ToolNodeRunner(services, _inputs(tmp_path)).run(_TOOL, _ctx(_snapshot(_TOOL), _TOOL))
+    assert result.outcome.kind == "pass"  # the tool's own verdict is untouched
+    assert result.outcome.git_control_drift == "hooks: hook 'post-commit' added"
+    assert result.outcome.unexpected_write is True
+    assert git.captures == 1  # one bracket per run, taken before the program starts
+
+
+def test_a_clean_tool_run_reports_nothing(tmp_path: Path) -> None:
+    # Before-vs-after, not "is the tree dirty": a diff an earlier writing node left behind is not
+    # this tool's doing.
+    from wastech_orchestrator.git_manager import ChangedPath
+
+    dirty = (ChangedPath(status="M", path="already.txt"),)
+    git = _FakeGit(changed_seq=[dirty, dirty])
+    fake = FakeRunProcess(stdout="", exit_code=0)
+    services = _services(tmp_path, fake, FakeStore(), git=git)
+    result = ToolNodeRunner(services, _inputs(tmp_path)).run(_TOOL, _ctx(_snapshot(_TOOL), _TOOL))
+    assert result.outcome.git_control_drift is None
+    assert result.outcome.unexpected_write is False
+
+
+def test_a_tool_run_without_a_git_manager_skips_the_bracket(tmp_path: Path) -> None:
+    # A harness with no clone has nothing to compare; skipping is the honest answer, not a guess.
+    fake = FakeRunProcess(stdout="", exit_code=0)
+    services = _services(tmp_path, fake, FakeStore())
+    result = ToolNodeRunner(services, _inputs(tmp_path)).run(_TOOL, _ctx(_snapshot(_TOOL), _TOOL))
+    assert result.outcome.git_control_drift is None
+    assert result.outcome.unexpected_write is False

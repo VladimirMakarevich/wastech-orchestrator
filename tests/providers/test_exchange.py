@@ -373,7 +373,6 @@ def test_paths_contained_accepts_exchange_paths(tmp_path: Path) -> None:
         tmp_path / "repo",
         task_path=str(td / "task.md"),
         plan_path=str(td / "plan.md"),
-        skill_reference_paths=(str(td / "skills" / "s" / "SKILL.md"),),
     )
     assert_orchestration_paths_contained(req, exchange_root)  # does not raise
 

@@ -78,7 +78,6 @@ def test_allowlist_matches_documented_variables() -> None:
         "subtask_order",
         "subtask_count",
         "subtask_spec_path",
-        "skills_path",
         "memory_path",  # per-node retrieval packet path (memory subsystem, phase 03)
         "predecessor_context",  # intra-task subtask handoff brief path (subtask-context-handoff)
     } == ALLOWED_PROMPT_VARS

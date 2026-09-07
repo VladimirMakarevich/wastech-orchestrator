@@ -9,15 +9,19 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import subprocess
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from wastech_orchestrator.check_runner import CheckRunner
+from wastech_orchestrator.composition import HOST_FLOOR_CHECKS
 from wastech_orchestrator.core.flow.exchange_seal import (
     exchange_quarantine_root,
     exchange_seal_root,
@@ -36,6 +40,7 @@ from wastech_orchestrator.git_manager import (
 )
 from wastech_orchestrator.ledger import Ledger, LedgerRecord
 from wastech_orchestrator.notify import AskHandle, AskKind, AskResult, Notifier
+from wastech_orchestrator.providers import claude as claude_mod
 from wastech_orchestrator.providers.artifacts import (
     create_attempt_dir,
     exchange_node_run_dir,
@@ -327,6 +332,7 @@ def _build(
     gh: Callable[[Sequence[str]], GitResult] | None = None,
     clock: Callable[[], str] | None = None,
     is_cancelled: Callable[[], bool] | None = None,
+    host_floor_checks: dict | None = None,
 ) -> tuple[Orchestrator, StateStore, Ledger, Path]:
     from tests.conftest import seed_builtin_flows
 
@@ -369,15 +375,43 @@ def _build(
         ),
         notifier=notifier,
         resolver=CheckResolver(config),  # normalize checks.command_sets (production wires this)
+        # Default `None` becomes `{}` inside the Orchestrator — "the run says nothing about the
+        # floor" — which is what nearly every test here wants. A test about the floor line has to
+        # pass the real table, the way the composition root does.
+        host_floor_checks=host_floor_checks,
         **extra,
     )
     return orch, store, ledger, art
 
 
-def _complete_task(tmp_path: Path, task_id: str = "task-001") -> str:
+@contextmanager
+def _log_fields() -> Iterator[list[dict[str, object]]]:
+    """Collect the structured ``extra=`` fields of each package log record.
+
+    ``package_log_text`` keeps only the message, and the operator-facing detail of several
+    warnings — which exchange entry was cleared, which control-plane key diverged — travels in
+    ``extra``. It is rendered into the logfmt line the operator reads, so a test that means to
+    assert the operator can see it has to read the fields, not the message.
+    """
+    fields: list[dict[str, object]] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            fields.append(dict(getattr(record, "logfmt_fields", {}) or {}))
+
+    logger = logging.getLogger("wastech_orchestrator")
+    handler = _Collect(level=logging.DEBUG)
+    logger.addHandler(handler)
+    try:
+        yield fields
+    finally:
+        logger.removeHandler(handler)
+
+
+def _complete_task(tmp_path: Path, task_id: str = "task-001", *, front_extra: str = "") -> str:
     path = tmp_path / f"{task_id}.md"
     path.write_text(
-        f'---\nid: {task_id}\ntitle: "Add a thing"\n---\n\n'
+        f'---\nid: {task_id}\ntitle: "Add a thing"\n{front_extra}---\n\n'
         "## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
         encoding="utf-8",
     )
@@ -652,7 +686,10 @@ def test_rework_budget_exhausted_warns_operator_and_marks_trace(
     (flows / "roles" / "fixing.md").write_text("Fix the issue.", "utf-8")
     (flows / "implementation.yaml").write_text(_NON_BLOCKING_REVIEW_FLOW, "utf-8")
 
-    gating = {"findings": [{"severity": "high", "path": None, "what": "boom", "fix": None}]}
+    # The finding names a path on purpose: a gating verdict whose gating findings are ALL
+    # pathless takes the `rework (no gating finding names a path)` trace label instead of the
+    # plain `rework` this test asserts for the pre-exhaustion pass. That label has its own test.
+    gating = {"findings": [{"severity": "high", "path": "feature.py", "what": "boom", "fix": None}]}
     providers = _both(outputs={"review": ("needs work", gating)})
     notifier = RecordingNotifier()
     orch, store, _, art = _build(
@@ -712,6 +749,73 @@ def test_rework_budget_exhausted_warns_operator_and_marks_trace(
     assert follow_ups[0]["evidence"] == [
         "review evaluator finding still open — rework budget exhausted"
     ]
+
+
+def test_a_gating_verdict_with_no_path_warns_the_operator_and_marks_the_trace(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    """F10, end to end: a rework round that cannot end in a fix says so while it is running.
+
+    The rework edge leads to a node whose job is to open a named location and change it, so a
+    gating verdict whose gating findings are all pathless spends a full round and changes nothing.
+    On the trial that shape was an evaluator reporting it *could not review* — twice, 426s and
+    474s — and the findings contract had no way to say that instead of "here is a defect".
+
+    Routing is deliberately unchanged: the verdict still reworks, the loop keeps its named budget,
+    and a blocker that gates for a real reason but was written without a path is not discarded.
+    What is new is that the operator is told, on the console and in the live trace.
+    """
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+    from wastech_orchestrator.notify import TRACE_FINDINGS_WITHOUT_A_PATH
+
+    flows = tmp_path / "flows"
+    (flows / "roles").mkdir(parents=True)
+    (flows / "roles" / "implementation.md").write_text("Implement {task_path}.", "utf-8")
+    (flows / "roles" / "review.md").write_text("Review the change.", "utf-8")
+    (flows / "roles" / "fixing.md").write_text("Fix the issue.", "utf-8")
+    (flows / "implementation.yaml").write_text(_NON_BLOCKING_REVIEW_FLOW, "utf-8")
+
+    refusal = {
+        "findings": [
+            {
+                "severity": "high",
+                "path": None,
+                "what": "I cannot review the diff: the context files are ones I may not read.",
+                "fix": "Run the review with a context path that is permitted.",
+            }
+        ]
+    }
+    providers = _both(outputs={"review": ("needs work", refusal)})
+    notifier = RecordingNotifier()
+    orch, _, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+        config_kwargs={"telegram_trace": True},
+    )
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
+
+    messages: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    logger = logging.getLogger("wastech_orchestrator")
+    handler = _Collect()
+    logger.addHandler(handler)
+    try:
+        result = orch.run_task(_complete_task(tmp_path, "task-nopath"))
+    finally:
+        logger.removeHandler(handler)
+
+    assert result.final_status is Status.DONE  # a warning, never a park or a manual terminal
+    review_traces = [c["outcome"] for c in notifier.trace_calls if c["node_id"] == "review"]
+    assert TRACE_FINDINGS_WITHOUT_A_PATH in review_traces
+    assert any("the gating findings name no source path" in m for m in messages)
 
 
 def _run_complete_task_store_dir(
@@ -904,7 +1008,7 @@ def test_supervisor_layer_costs_one_call_on_a_clean_run_and_still_writes_the_sum
     assert any(r["kind"] == "in_flow_verdict" and r["node_id"] == "review" for r in rows)
     # The summary is always written (no config.summary_enabled gate) and committed as the PR body.
     assert (task_artifact_dir(art, "task-sup") / "summary.md").exists()
-    # There is no summary graph node anymore — the layer owns it.
+    # There is no summary graph node — the layer owns it.
     assert "summary" not in _ran_nodes(store, "task-sup")
     # That one call is labelled with the job it did, so the layer's spend is readable per phase and
     # not as one lump; a graph node's attempts stay unlabelled and out of the layer's report.
@@ -937,6 +1041,63 @@ def test_packaged_flow_cadence_narrows_a_broader_global_mode(
     assert orch.run_task(_complete_task(tmp_path, "task-narrow")).final_status is Status.DONE
     assert _observed_nodes(store, "task-narrow") == []
     assert len(_supervisor_attempts(store, "task-narrow")) == 1  # finalize only
+
+
+def test_a_flow_narrowing_the_observation_cadence_says_so_once(
+    git_repo, make_git_config, tmp_path: Path, package_log_text
+) -> None:
+    # The narrowing is legitimate and stays; what was wrong is that it happened in silence. An
+    # operator who configured `events` with all three triggers and then ran a packaged content flow
+    # (they all ship `none`) got run after run with a real provider fallback in them and not one
+    # observation, with nothing anywhere saying why. So the line names both modes and the triggers
+    # that stop applying — the surprising half, since the triggers are configured globally and
+    # discarded per flow. It does not decide whether they *should* survive; it makes the loss
+    # visible.
+    providers = _both()
+    orch, _store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"supervisor_observe": "all"},
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    with _log_fields() as fields:
+        assert orch.run_task(_complete_task(tmp_path, "task-say")).final_status is Status.DONE
+
+    assert package_log_text().count("observation cadence narrowed by the flow") == 1
+    said = [f for f in fields if f.get("configured_observe_mode")]
+    assert [(f["configured_observe_mode"], f["observe_mode"]) for f in said] == [("all", "events")]
+
+
+def test_no_cadence_line_when_the_flow_declares_nothing_to_narrow(
+    git_repo, make_git_config, tmp_path: Path, package_log_text
+) -> None:
+    # The other direction, so the line stays a signal: a flow with no `supervisor:` block inherits
+    # the operator's mode, nothing is lost, and nothing is said.
+    flows = tmp_path / "flows"
+    (flows / "roles").mkdir(parents=True)
+    (flows / "roles" / "implementation.md").write_text("Implement {task_path}.", "utf-8")
+    (flows / "roles" / "review.md").write_text("Review {diff_path}.", "utf-8")
+    (flows / "implementation.yaml").write_text(_NO_SUPERVISOR_BLOCK_FLOW, "utf-8")
+    providers = _both()
+    orch, _store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"supervisor_observe": "events"},
+    )
+    from wastech_orchestrator.core.flow.registry import FlowRegistry
+
+    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
+    _patch_impl_edit(providers, git_repo)
+
+    assert orch.run_task(_complete_task(tmp_path, "task-quiet")).final_status is Status.DONE
+    assert "observation cadence narrowed" not in package_log_text()
 
 
 # A flow with no `supervisor:` block at all: it inherits the operator's global cadence, which is
@@ -1220,8 +1381,8 @@ def test_an_observed_step_carries_the_evaluator_findings_not_just_the_label(
 def test_supervisor_turns_write_rendered_prompt_and_prompt_audit(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    """The supervisor's own turns are now part of the audit trail: previously rendered-prompt.md
-    and the prompt-audit JSON/timeline were never written for observe/finalize turns at all."""
+    """The supervisor's own turns are part of the audit trail: rendered-prompt.md and the
+    prompt-audit JSON/timeline are written for observe/finalize turns too."""
     providers = _both()
     orch, _, _, art = _build(
         git_repo,
@@ -1345,7 +1506,7 @@ def test_supervisor_summary_once_per_whole_task_not_subtask(
 
 
 def test_live_route_defaults_to_global_primary(git_repo, make_git_config, tmp_path: Path) -> None:
-    # Routing is node-based now (PRE.1): the packaged implementation flow declares no per-node
+    # Routing is node-based now: the packaged implementation flow declares no per-node
     # `provider`, so every node resolves to the config's global primary (claude) on the live engine
     # path, tagged RouteSource.CONFIG. A task can no longer repoint a stage's provider.
     providers = _both()
@@ -1391,7 +1552,7 @@ def test_vague_task_runs_refinement(git_repo, make_git_config, tmp_path: Path) -
 
     result = orch.run_task(str(path))
     assert result.final_status is Status.DONE
-    # No acceptance criteria → needs_enrichment → refinement node ran (deterministic, PRE.3).
+    # No acceptance criteria → needs_enrichment → refinement node ran (deterministic).
     assert "refinement" in _ran_nodes(store, "task-002")
     assert (art / "logs" / "task-002" / "task.enriched.md").exists()
 
@@ -1757,13 +1918,71 @@ def test_containment_unverified_goes_manual_action_required(
     assert ledger.records()[0]["final_status"] == "manual_action_required"
 
 
-def test_live_control_plane_edit_during_run_is_manual_not_fallback(
-    git_repo, make_git_config, tmp_path: Path
+def test_a_park_from_a_node_explains_itself_in_the_log_and_in_artifacts(
+    git_repo, make_git_config, tmp_path: Path, package_log_text
 ) -> None:
-    # An agent that rewrites a live control file (here the flow YAML) during a provider
-    # attempt is caught by the post-node verify — the provider tree is already proven quiescent
-    # so a live diff means a control file was mutated under the run. It is a non-fallback
-    # manual-action security violation, and no downstream node runs on the provider-selected bytes.
+    # The whole of block V of the phase, in one run. A node raising to manual_action_required went
+    # straight to the terminal transition, skipping the finalize hook that lives inside the publish
+    # node — so the reason it stopped was computed, written to `tasks.cleanup_last_error`, and
+    # nowhere else. The operator got "status changed to manual_action_required": no warning, no
+    # failure report, no summary of what the run had managed to do first. Diagnosing one such run
+    # took an hour of reading SQLite. Now every non-`done` terminal leaves all three.
+    providers = _both(
+        infra_fail={"implementation"}, infra_error_class=ErrorClass.CONTAINMENT_UNVERIFIED
+    )
+    orch, store, ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    with _log_fields() as fields:
+        result = orch.run_task(_complete_task(tmp_path, "task-why"))
+
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+    task = store.get_task("task-why")
+    assert task is not None and task.cleanup_last_error is not None
+    # 1. the reason, out loud, beside the status change rather than only in the column
+    assert "task stopped" in package_log_text()
+    stopped = [f for f in fields if f.get("final_status") == "manual_action_required"]
+    assert any("containment_unverified" in str(f.get("reason", "")) for f in stopped)
+    # 2. the node evidence — the same two artifacts an infra terminal always wrote
+    assert (art / "logs" / "task-why" / "failure_report.json").exists()
+    assert (art / "logs" / "task-why" / "stuck.md").exists()
+    assert task.failure_report_path is not None
+    # 3. what did happen before the stop, from the deterministic packet — no supervisor turn needed
+    assert (art / "logs" / "task-why" / "summary.md").exists()
+    assert ledger.records()[0]["final_status"] == "manual_action_required"
+
+
+def test_a_done_terminal_gains_no_failure_report(
+    git_repo, make_git_config, tmp_path: Path, package_log_text
+) -> None:
+    # The bound on the above: `done` explains itself, so it gets neither the warning nor the report.
+    # A failure report on a successful run would make "is there a stuck.md" useless as a question.
+    providers = _both()
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    assert orch.run_task(_complete_task(tmp_path, "task-ok")).final_status is Status.DONE
+
+    task = store.get_task("task-ok")
+    assert task is not None and task.failure_report_path is None
+    assert not (art / "logs" / "task-ok" / "failure_report.json").exists()
+    assert "task stopped" not in package_log_text()
+
+
+def test_live_control_plane_edit_during_run_warns_once_and_runs_on_the_frozen_copy(
+    git_repo, make_git_config, tmp_path: Path, package_log_text
+) -> None:
+    # A live control file rewritten mid-run (here the flow YAML) is caught by the post-node compare,
+    # but the compare cannot say whose hand did it — and on a repository whose operator edits flows
+    # daily it is usually theirs. So it warns and the run continues. Nothing is lost by continuing,
+    # which is the whole point of freezing: every node runs on the frozen bundle, so the edit cannot
+    # select control bytes for a downstream node either way. It takes effect from the next run, or
+    # from a `rerun --continue`, which adopts it deliberately. The warning names the diverged key
+    # and is printed once per run, not once per remaining node.
     providers = _both()
     orch, store, ledger, _ = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
@@ -1782,14 +2001,16 @@ def test_live_control_plane_edit_during_run_is_manual_not_fallback(
 
     providers[ProviderId.CLAUDE].run = run_mutate  # type: ignore[method-assign]
 
-    result = orch.run_task(_complete_task(tmp_path, "task-mut"))
+    with _log_fields() as fields:
+        result = orch.run_task(_complete_task(tmp_path, "task-mut"))
 
-    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+    assert result.final_status is Status.DONE
     ran = _ran_nodes(store, "task-mut")
-    assert "planning" in ran  # the mutating node completed
-    assert "implementation" not in ran  # ...but nothing downstream ran on the mutated control
-    assert "publish" not in ran
-    assert ledger.records()[0]["final_status"] == "manual_action_required"
+    assert "implementation" in ran and "publish" in ran  # the run finished on the frozen bundle
+    assert ledger.records()[0]["final_status"] == "done"
+    # Once for the run, not once per remaining node: the compare runs after every one of them.
+    assert package_log_text().count("the live control plane no longer matches") == 1
+    assert any(f.get("changed") == "flows/implementation.yaml" for f in fields)
 
 
 def test_autorecovery_after_parked_live_edit_stays_conflict_manual(
@@ -1860,6 +2081,69 @@ def test_continue_task_after_parked_live_edit_adopts_flow(
     assert store.get_instruction_manifest_digest("task-adopt") != inst_before
     assert "publish" in _ran_nodes(store, "task-adopt")  # resumed past implementation
     assert ledger.records()[0]["final_status"] == "done"
+
+
+def test_continue_task_clears_a_contaminated_exchange_flag(
+    git_repo, make_git_config, tmp_path: Path, package_log_text
+) -> None:
+    # Detection of an agent-side exchange mutation still parks the run and still quarantines the
+    # tree as evidence — that is the one guard on the writing class the phase kept. What it stopped
+    # being on 2026-08-24 is a life sentence: the flag refused every `--continue` forever, so an
+    # operator who had read the diagnosis and decided it was fine had no way forward except paying
+    # for a whole fresh run. Their `--continue` clears it, on the same trust the control plane is
+    # adopted on.
+    providers = _both(
+        infra_fail={"implementation"}, infra_error_class=ErrorClass.PROVIDER_UNAVAILABLE
+    )
+    orch, store, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    first = orch.run_task(_complete_task(tmp_path, "task-contadopt"))
+    assert first.final_status is Status.RUNNING  # parked, resumable
+    for provider in providers.values():
+        provider.heal()
+    store.update_task("task-contadopt", exchange_contaminated=1)  # as detection would have
+
+    result = orch.continue_task("task-contadopt")
+
+    assert result.final_status is Status.DONE
+    contaminated, _unsafe = store.get_exchange_guard("task-contadopt")
+    assert contaminated is False  # cleared by the operator's own command, not by a config knob
+    assert "continuing over an exchange flagged contaminated" in package_log_text()
+    assert ledger.records()[0]["final_status"] == "done"
+
+
+def test_autorecovery_over_a_contaminated_exchange_still_refuses(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The other half, and the reason the unlock is safe: the daemon coming back up sets no marker,
+    # so it is still refused. A crash can follow the very mutation that set the flag, and nothing
+    # about a restart says a person looked at it.
+    providers = _both(
+        infra_fail={"implementation"}, infra_error_class=ErrorClass.PROVIDER_UNAVAILABLE
+    )
+    orch, store, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    first = orch.run_task(_complete_task(tmp_path, "task-contauto"))
+    assert first.final_status is Status.RUNNING
+    for provider in providers.values():
+        provider.heal()
+    store.update_task("task-contauto", exchange_contaminated=1)
+
+    result = orch.resume()  # auto-recovery path — no adopt marker
+
+    assert result is not None and result.final_status is Status.MANUAL_ACTION_REQUIRED
+    task = store.get_task("task-contauto")
+    assert task is not None and task.cleanup_last_error is not None
+    assert "contaminated" in task.cleanup_last_error
+    contaminated, _unsafe = store.get_exchange_guard("task-contauto")
+    assert contaminated is True  # untouched: only an operator command clears it
+    assert ledger.records()[0]["final_status"] == "manual_action_required"
 
 
 def test_stop_cancellation_parks_task_resumable(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -1957,15 +2241,21 @@ def test_boundary_cancellation_parks_then_resumes_from_untouched_node(
 
 
 def test_parked_task_resumes_when_provider_recovers(
-    git_repo, make_git_config, tmp_path: Path
+    git_repo, make_git_config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # After parking, the outage clears: resume() continues from the checkpoint to DONE, clearing
     # blocked_since. The implementation is committed exactly once (the parked run never committed).
     providers = _both(
         infra_fail={"implementation"}, infra_error_class=ErrorClass.PROVIDER_UNAVAILABLE
     )
+    monkeypatch.setenv("DOTNET_ROOT", "/opt/dotnet")
     orch, store, ledger, art = _build(
-        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"allowed_environment_patterns": ["DOTNET_*"]},
     )
     _patch_impl_edit(providers, git_repo)
 
@@ -1974,9 +2264,12 @@ def test_parked_task_resumes_when_provider_recovers(
 
     for provider in providers.values():
         provider.heal()
-    result = orch.resume()
+    with _collected_warnings(logging.INFO) as messages:
+        result = orch.resume()
 
     assert result is not None and result.final_status is Status.DONE
+    announced = [m for m in messages if "allowed_environment prefix patterns resolved" in m]
+    assert len(announced) == 1  # resume has its own posture preamble before more work launches
     task = store.get_task("task-resume")
     assert task is not None and task.blocked_since is None  # cleared at terminal
     assert ledger.records()[0]["final_status"] == "done"
@@ -2473,8 +2766,8 @@ def test_summary_fallback_when_provider_fails(git_repo, make_git_config, tmp_pat
 
 
 @contextmanager
-def _collected_warnings() -> Iterator[list[str]]:
-    """Collect ``wastech_orchestrator`` WARNING messages emitted inside the block.
+def _collected_warnings(level: int = logging.WARNING) -> Iterator[list[str]]:
+    """Collect package messages at ``level`` or above emitted inside the block.
 
     A handler on the package logger rather than ``caplog``: the per-task logger is a bound adapter
     whose records do not reach pytest's capture handler.
@@ -2486,15 +2779,154 @@ def _collected_warnings() -> Iterator[list[str]]:
             messages.append(record.getMessage())
 
     logger = logging.getLogger("wastech_orchestrator")
-    handler = _Collect(level=logging.WARNING)
+    handler = _Collect(level=level)
     logger.addHandler(handler)
     prior_level = logger.level
-    logger.setLevel(logging.WARNING)
+    logger.setLevel(level)
     try:
         yield messages
     finally:
         logger.removeHandler(handler)
         logger.setLevel(prior_level)
+
+
+def test_environment_patterns_are_announced_once_per_run(
+    git_repo, make_git_config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """2 (run half): the pattern expansion reaches the run log ONCE, not per child process.
+
+    The run builds a child environment many times over — every agent turn, every check command,
+    every git invocation — so the announcement deliberately does not live in the builder. It fires
+    in the flow preamble, which is also the only place where "before any work" is true. A dropped
+    name is a WARNING because the operator wrote a pattern that reached a credential.
+    """
+    for name in [k for k in os.environ if k.startswith("NUGET_")]:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("NUGET_PACKAGES", "/repo/.toolcache/nuget")
+    monkeypatch.setenv("NUGET_API_KEY", "oy2-secret")
+    orch, _store, _ledger, _art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        config_kwargs={"allowed_environment_patterns": ["NUGET_*"]},
+    )
+
+    with _collected_warnings() as messages:
+        result = orch.run_task(_complete_task(tmp_path, "task-envpat"))
+
+    assert result.final_status is Status.DONE
+    announced = [m for m in messages if "allowed_environment prefix patterns resolved" in m]
+    assert len(announced) == 1, announced
+    assert "NUGET_* \u2192 1 name(s) (NUGET_PACKAGES)" in announced[0]
+    assert "1 dropped as secret-named (NUGET_API_KEY)" in announced[0]
+    assert "oy2-secret" not in announced[0]  # names, never values
+
+
+def test_clean_environment_pattern_expansion_is_announced_at_info(
+    git_repo, make_git_config, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ordinary, no-secret pattern branch is observable in the run log."""
+    # A prefix pattern resolves against the LIVE environment, so a test asserting an exact
+    # expansion has to own the namespace first — a GitHub Ubuntu runner ships DOTNET_NOLOGO,
+    # DOTNET_MULTILEVEL_LOOKUP and DOTNET_SKIP_FIRST_TIME_EXPERIENCE of its own, and the
+    # assertion below would then read four names instead of one.
+    for name in [k for k in os.environ if k.startswith("DOTNET_")]:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("DOTNET_ROOT", "/opt/dotnet")
+    orch, _store, _ledger, _art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        config_kwargs={"allowed_environment_patterns": ["DOTNET_*"]},
+    )
+
+    with _collected_warnings(logging.INFO) as messages:
+        result = orch.run_task(_complete_task(tmp_path, "task-envpat-info"))
+
+    assert result.final_status is Status.DONE
+    announced = [m for m in messages if "allowed_environment prefix patterns resolved" in m]
+    assert len(announced) == 1
+    assert "DOTNET_* → 1 name(s) (DOTNET_ROOT)" in announced[0]
+
+
+def test_a_run_excludes_an_assigned_in_clone_cache_without_preflight(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    """The cache exclusion has to hold on the path where the damage happens, not only in preflight.
+
+    `worc preflight` repairs and verifies these rules, but nothing forces an operator to run it
+    after editing a cache path — and an unignored toolchain cache puts thousands of untracked
+    files into this task's diff, tripping a review gate that has nothing to do with caches. Branch
+    preparation therefore guarantees it too, exactly as it does for the `.worc/` runtime home.
+    """
+    cache = git_repo.clone / ".toolcache" / "nuget"
+    orch, _store, _ledger, _art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        config_kwargs={"extra_environment": {"NUGET_PACKAGES": str(cache)}},
+    )
+    exclude = git_repo.clone / ".git" / "info" / "exclude"
+    before = exclude.read_text(encoding="utf-8") if exclude.exists() else ""
+    assert "/.toolcache/nuget" not in before  # no preflight ran
+
+    assert orch.run_task(_complete_task(tmp_path, "task-cacheign")).final_status is Status.DONE
+
+    after = exclude.read_text(encoding="utf-8")
+    assert after.count("/.toolcache/nuget") == 1
+    # And it really takes: a cache filled during the run stays out of the working tree's status.
+    cache.mkdir(parents=True, exist_ok=True)
+    (cache / "package.nupkg").write_text("binary", encoding="utf-8")
+    status = subprocess.run(
+        ["git", "status", "--porcelain"], cwd=git_repo.clone, capture_output=True, text=True
+    )
+    assert ".toolcache" not in status.stdout
+
+
+def test_a_failed_assigned_cache_exclude_warns_without_stopping_the_task(
+    git_repo,
+    make_git_config,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    package_log_text,
+) -> None:
+    """0.4-12: ignore repair failure is loud but remains non-terminal by contract."""
+    cache = git_repo.clone / ".toolcache" / "nuget"
+    monkeypatch.setattr(
+        "wastech_orchestrator.git_manager.ensure_path_excluded", lambda *_a, **_kw: False
+    )
+    orch, _store, _ledger, _art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        config_kwargs={"extra_environment": {"NUGET_PACKAGES": str(cache)}},
+    )
+
+    result = orch.run_task(_complete_task(tmp_path, "task-cacheign-warning"))
+
+    assert result.final_status is Status.DONE
+    assert "assigned path for NUGET_PACKAGES points into the clone" in package_log_text()
+
+
+def test_a_config_without_patterns_announces_nothing(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # No pattern, no line. The announcement reports what is in effect, and the plain-name case
+    # is the one every existing config is in.
+    orch, _store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    with _collected_warnings(logging.INFO) as messages:
+        assert orch.run_task(_complete_task(tmp_path, "task-nopat")).final_status is Status.DONE
+    assert not [m for m in messages if "prefix patterns" in m]
 
 
 def test_degraded_summary_is_loud_on_done_path(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -2526,35 +2958,11 @@ def test_degraded_summary_is_loud_on_done_path(git_repo, make_git_config, tmp_pa
     summary = (art / "logs" / "task-degraded" / "summary.md").read_text(encoding="utf-8")
     assert "Fallback summary" in summary  # visible degradation callout in the PR body
     assert any("summary degraded to deterministic fallback" in m for m in messages)
-    # The p0-2 hole, closed: a finding the gate let past used to land in summary.json and vanish
-    # from the PR body on exactly this path, because the derivation lived inside the turn that
-    # failed. It is deterministic, so it survives the failure.
+    # A finding the gate let past must not land in summary.json and vanish from the PR body on
+    # this path. It would, if the derivation lived inside the turn that failed; it is deterministic
+    # instead, so it survives the failure.
     assert "## Technical debt / follow-ups" in summary
     assert finding_text in summary
-
-
-def test_native_memory_opt_in_is_announced_per_run(
-    git_repo, make_git_config, tmp_path: Path
-) -> None:
-    # The one relaxation whose effects land OUTSIDE the run's audit: Claude's own per-project memory
-    # store lives in the operator's HOME, so what a task writes there escapes the frozen bundle, the
-    # diff, and the redaction net — and a later task on the same repo reads it. The hatch stays (it
-    # is operator-owned) but it is never silent, like read-isolation and git-evidence before it.
-    for opted_in, announced in ((True, True), (False, False)):
-        providers = _both()
-        orch, _, _, _ = _build(
-            git_repo,
-            make_git_config,
-            tmp_path / f"native-{int(opted_in)}",
-            providers=providers,
-            check_verdicts=[0],
-            config_kwargs={"allow_native_memory": opted_in},
-        )
-        _patch_impl_edit(providers, git_repo)
-        with _collected_warnings() as messages:
-            result = orch.run_task(_complete_task(tmp_path, f"task-native-{int(opted_in)}"))
-        assert result.final_status is Status.DONE
-        assert any("native Claude memory ON" in m for m in messages) is announced
 
 
 def test_decomposed_task_commits_each_subtask(
@@ -2618,7 +3026,7 @@ def test_decomposed_task_commits_each_subtask(
         check_verdicts=[0],
         config_kwargs={"decomposition": True},
     )
-    result = orch.run_task(_complete_task(tmp_path, "task-007"))
+    result = orch.run_task(_complete_task(tmp_path, "task-007", front_extra="commit_type: fix\n"))
     assert result.final_status is Status.DONE
     row = store.get_task("task-007")
     assert row is not None
@@ -2631,6 +3039,13 @@ def test_decomposed_task_commits_each_subtask(
     assert int(count) >= 2
     subs = store.get_subtasks("task-007")
     assert all(s.commit_sha for s in subs)
+    # Every commit a task lands carries the task's own Conventional-Commits type, subtask commits
+    # included — they were hardcoded `feat` while the code commit beside them could be anything.
+    subjects = [
+        git_run(["log", "-1", "--format=%s", str(s.commit_sha)], git_repo.clone).strip()
+        for s in subs
+    ]
+    assert subjects == ["fix(task-007): subtask 01 First", "fix(task-007): subtask 02 Second"]
 
 
 def test_decomposed_subtask_spec_path_reaches_implementation_prompt(
@@ -2706,9 +3121,12 @@ def test_subtask_handoff_context_reaches_successor_implementation(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
     # subtask-context-handoff: each successor subtask's implementation prompt receives
-    # {predecessor_context} pointing at a handoff brief assembled from its depends_on predecessors
-    # (the deterministic factual floor). A diamond (3 <- [1,2]) selects BOTH predecessors; subtask 1
-    # (no deps) gets no brief. The briefs live under logs/ — never in the memory tiers.
+    # {predecessor_context} pointing at a handoff brief whose deterministic factual floor is
+    # assembled from what LANDED on the branch — every subtask committed before it, oldest first —
+    # and not from its declared ``depends_on``. Subtask 2 declares nothing and still gets subtask 1
+    # (the edge case that used to yield no brief at all); subtask 3 declares only 1 and gets both 1
+    # and 2, with 1 marked as the declared dependency. Subtask 1 is first, so nothing is committed
+    # before it and it gets no brief. The briefs live under logs/ — never in the memory tiers.
     subtasks = {
         "decompose": True,
         "subtasks": [
@@ -2724,14 +3142,14 @@ def test_subtask_handoff_context_reaches_successor_implementation(
                 "title": "Second",
                 "slug": "second",
                 "acceptance_criteria": ["crit-two"],
-                "depends_on": [1],
+                "depends_on": [],  # declares nothing; subtask 1 is still a predecessor in fact
             },
             {
                 "order": 3,
                 "title": "Third",
                 "slug": "third",
                 "acceptance_criteria": ["crit-three"],
-                "depends_on": [1, 2],
+                "depends_on": [1],  # declares one of the two subtasks committed before it
             },
         ],
     }
@@ -2775,22 +3193,26 @@ def test_subtask_handoff_context_reaches_successor_implementation(
         r.prompt for r in providers[ProviderId.CLAUDE].requests if r.node_id == "implementation"
     ]
     assert len(impl_prompts) == 3
-    assert ".handoff.md" not in impl_prompts[0]  # subtask 1 has no predecessors → no brief injected
+    assert ".handoff.md" not in impl_prompts[0]  # subtask 1 runs first → nothing committed → none
     assert "02-second.handoff.md" in impl_prompts[1]  # subtask 2 reads its brief
     assert "03-third.handoff.md" in impl_prompts[2]  # subtask 3 reads its brief
 
     subtasks_dir = task_artifact_dir(art, "task-hnd") / "subtasks"
     # The floor is assembled from existing artifacts: predecessor spec pointer + acceptance criteria
-    # + changed files. Subtask 2's brief names predecessor 1.
+    # + changed files. Subtask 2 declares no dependency and is still handed subtask 1, unmarked.
     h2 = (subtasks_dir / "02-second.handoff.md").read_text("utf-8")
     assert "01-first.md" in h2 and "crit-one" in h2 and "Changed files" in h2
-    # The diamond: subtask 3's brief names BOTH predecessors 1 and 2.
+    assert "Subtask 01: First\n" in h2  # named as a fact, not as a declared dependency
+    # Subtask 3 declares only subtask 1, so the floor names both committed predecessors and marks
+    # which one the author declared.
     h3 = (subtasks_dir / "03-third.handoff.md").read_text("utf-8")
     assert "01-first.md" in h3 and "02-second.md" in h3
     assert "crit-one" in h3 and "crit-two" in h3
+    assert "Subtask 01: First (declared dependency)" in h3
+    assert "Subtask 02: Second\n" in h3
     # Reading the briefs from logs/<task>/subtasks/ IS the memory-tier isolation: they are written
     # to the transient task-scoped dir, never to the .worc/memory/ store.
-    assert not (subtasks_dir / "01-first.handoff.md").exists()  # no brief for the depless subtask
+    assert not (subtasks_dir / "01-first.handoff.md").exists()  # no brief for the first subtask
 
 
 # --- operator-authored decomposition (``subtasks:`` manifest) ------------------------------
@@ -2877,6 +3299,48 @@ def test_operator_decomposition_runs_each_subtask_one_pr(
     assert row.branch is not None
     count = git_run(["rev-list", "--count", f"main..{row.branch}"], git_repo.clone)
     assert int(count) >= 3
+
+
+def test_checkpoint_between_subtasks_names_what_runs_next(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # A region is left by a forward edge, so the engine's last checkpoint inside a decomposition
+    # names the POST-region node (`documentation`). Between subtasks that is not what runs next,
+    # and the window is not instantaneous: the subtask commit, the spec publish and the
+    # supervisor's handoff turn all run before the next region phase re-seeds it. `worc status`
+    # read that window and reported `node=documentation` beside `subtask=3/5` — an operator would
+    # believe a five-subtask task had reached its last stage while it was starting its third.
+    # Probed at the commit, which is inside the window, once per subtask.
+    _write_subtask(tmp_path, "subtasks/01-first.md", title="First")
+    _write_subtask(tmp_path, "subtasks/02-second.md", title="Second", depends_on=("first",))
+    _write_subtask(tmp_path, "subtasks/03-third.md", title="Third", depends_on=("second",))
+    root = _operator_root(
+        tmp_path,
+        "epic-f12",
+        ["subtasks/01-first.md", "subtasks/02-second.md", "subtasks/03-third.md"],
+    )
+    state = {"n": 0}
+    providers = {
+        ProviderId.CLAUDE: _OpImplProvider("claude", clone=git_repo.clone, state=state),
+        ProviderId.CODEX: _OpImplProvider("codex", clone=git_repo.clone, state=state),
+    }
+    orch, store, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    seen: list[str | None] = []
+    original = orch._commit_subtask
+
+    def spy(pipeline: Any, unit: Any) -> None:
+        seen.append(store.get_flow_checkpoint(pipeline.task.id)[0])
+        original(pipeline, unit)
+
+    orch._commit_subtask = spy  # type: ignore[method-assign]
+
+    assert orch.run_task(root).final_status is Status.DONE
+    # Subtasks 1 and 2 are followed by another subtask, so the checkpoint names the region entry —
+    # the node that is about to run. The last one deliberately keeps the engine's own value:
+    # after the final subtask the post-region node really is what runs next.
+    assert seen == ["implementation", "implementation", "documentation"]
 
 
 def test_operator_decomposition_when_planning_disabled(
@@ -3072,6 +3536,31 @@ def test_rejected_task_no_branch(git_repo, make_git_config, git_run, tmp_path: P
     ]
 
 
+def test_relative_quarantine_resolves_under_the_repo_not_the_cwd(
+    git_repo, make_git_config, monkeypatch, tmp_path: Path
+) -> None:
+    # `install` leaves `validation.quarantine_folder` at its repo-relative default instead of
+    # freezing an absolute path, so the resolution must not depend on where `worc` was launched:
+    # the operator runs it from any subdirectory of the clone.
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    orch, _store, _ledger, _art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        config_kwargs={"quarantine": "./.worc/tasks/rejected"},
+    )
+    bad = tmp_path / "task-010.md"
+    bad.write_text("no front matter at all\n", encoding="utf-8")
+
+    assert orch.run_task(str(bad)).final_status is Status.FAILED
+    assert (git_repo.clone / ".worc" / "tasks" / "rejected" / "task-010.md").exists()
+    assert not (elsewhere / ".worc").exists()
+
+
 def test_notifier_exception_does_not_change_terminal_outcome(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
@@ -3148,9 +3637,7 @@ def test_strict_isolation_preflight_fails_without_branch(
     )
     monkeypatch.setattr(
         "wastech_orchestrator.core.orchestrator.check_isolation",
-        lambda _config, _checks: [
-            "codex: sandbox 'danger-full-access' grants full filesystem access"
-        ],
+        lambda _config, _checks: ["claude: extra_args flag '--add-dir' is reserved"],
     )
     result = orch.run_task(_complete_task(tmp_path, "task-iso"))
 
@@ -3159,6 +3646,163 @@ def test_strict_isolation_preflight_fails_without_branch(
     assert row is not None and row.status is Status.FAILED
     assert git_run(["branch", "--list", "worc/*"], git_repo.clone) == ""  # no branch created
     assert ledger.records()[0]["final_status"] == "failed"
+
+
+def test_a_host_without_a_floor_is_announced_and_the_run_continues(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repo,
+    make_git_config,
+    git_run,
+    tmp_path: Path,
+) -> None:
+    # The advisory twin of the gate above, and the difference that matters: the same preamble that
+    # fails the run for an illegal config only speaks up here. The branch IS created, so the loss is
+    # on the record while the operator keeps their host.
+    #
+    # `_collected_warnings` rather than `caplog`: once any run configures runtime logging it sets
+    # `propagate = False` on the package logger, so a root-attached caplog silently sees nothing —
+    # and a loud-line assertion that can pass because it captured everything and fail because it
+    # captured nothing is worse than no assertion at all.
+    orch, store, _, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    monkeypatch.setattr(
+        "wastech_orchestrator.core.orchestrator.describe_host_floor",
+        lambda _config, _checks: ("claude: no OS sandbox on this host — .git and .worc writable",),
+    )
+    with _collected_warnings() as messages:
+        result = orch.run_task(_complete_task(tmp_path, "task-floor"))
+
+    assert result.final_status is not Status.FAILED
+    row = store.get_task("task-floor")
+    assert row is not None and row.status is not Status.FAILED
+    assert git_run(["branch", "--list", "worc/*"], git_repo.clone) != ""  # the run went ahead
+    assert any("isolation floor NONE — claude: no OS sandbox" in m for m in messages)
+
+
+def test_advanced_mode_is_announced_in_the_run_log_and_recorded_durably(
+    git_repo,
+    make_git_config,
+    tmp_path: Path,
+) -> None:
+    """The mode reaches the run log, the ledger record and the frozen bundle.
+
+    Three carriers, one question, and they do not overlap by accident. The log line is the same text
+    preflight prints, from the same formatter, so a run cannot describe itself differently from the
+    report — one line since 2026-08-24, with what it stands for in the shipped security guide.
+    The bundle's manifest records the posture the task STARTED in — written before the first
+    node, so it exists for a task that never reached a terminal transition. The ledger record
+    answers for a task that finished. Together they are the only durable answer to "what was this
+    run allowed to do": the attempt's `request.json`, which carries the permission profile and the
+    full argv, is deleted at the end of every attempt under the shipped artifact levels.
+    """
+    orch, store, ledger, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        config_kwargs={"strict_isolation": False, "clean_runs_on_success": False},
+    )
+    # See the sibling test above for why this is not `caplog`: the package logger stops propagating
+    # as soon as any run configures logging, so under a serial run the capture came up empty.
+    with _collected_warnings() as messages:
+        result = orch.run_task(_complete_task(tmp_path, "task-mode"))
+
+    assert result.final_status is not Status.FAILED  # announced, never refused
+    assert any("advanced-mode: ON (security.strict_isolation=false)" in m for m in messages)
+    assert any("guide/config/security.md" in m for m in messages)
+    # One line, not a recital. The floor levels and the relaxation axes live in the guide;
+    # asserting their absence is what keeps the posture block from growing into something that
+    # buries the run it introduces.
+    assert not any("floor 3 of 4" in m for m in messages)
+    assert not any("EVERY node gets a shell" in m for m in messages)
+    assert not any("EVERY node reaches the whole network" in m for m in messages)
+    assert ledger.records()[0]["advanced_mode"] is True
+    manifests = list(art.rglob("control-bundles/*/manifest.json"))
+    assert manifests, "the frozen control bundle should exist with clean_runs_on_success off"
+    assert json.loads(manifests[0].read_text("utf-8"))["metadata"]["advanced_mode"] == "true"
+
+
+def test_the_mode_announces_the_missing_floor_through_the_real_check_table(
+    monkeypatch: pytest.MonkeyPatch,
+    git_repo,
+    make_git_config,
+    tmp_path: Path,
+) -> None:
+    """The mode's floor line, end to end, without stubbing the formatter.
+
+    The sibling floor test monkeypatches `describe_host_floor`, so it proves the log framing and
+    nothing about which runs get a line. This one goes through the real `HOST_FLOOR_CHECKS` on an
+    injected macOS host — the class that reported NO gap before, and is exactly where the mode was
+    keeping a sandbox it promised not to. Both halves of the sentence are asserted: the provider's
+    reason and the shared cost tail, since the two live in different modules and only their
+    concatenation is what an operator reads.
+    """
+    monkeypatch.setattr(
+        claude_mod, "default_sandbox_probe", lambda: claude_mod.SandboxCapability.MACOS
+    )
+    orch, _, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        config_kwargs={"strict_isolation": False},
+        host_floor_checks=dict(HOST_FLOOR_CHECKS),
+    )
+    with _collected_warnings() as messages:
+        result = orch.run_task(_complete_task(tmp_path, "task-mode-floor"))
+
+    assert result.final_status is not Status.FAILED  # announced, never refused
+    floor = [m for m in messages if "isolation floor NONE" in m]
+    assert len(floor) == 1, messages
+    assert "claude: the advanced mode" in floor[0]
+    assert "EVERY node here keeps an unsandboxed shell" in floor[0]
+
+
+def test_a_default_run_carries_the_mode_marker_as_false(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The marker is written on every run, not only in the mode: "this key is absent" and "this run
+    # was ordinary" have to be different answers, or the ledger cannot be read as evidence at all.
+    orch, _, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    orch.run_task(_complete_task(tmp_path, "task-plain"))
+    assert ledger.records()[0]["advanced_mode"] is False
+
+
+def test_config_legality_is_checked_even_with_strict_isolation_off(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    """`check_isolation` no longer skips when `strict_isolation` is false.
+
+    What is left of that check after the host half moved out is "is this provider configuration
+    legal?" — pure, host-independent, and nothing a configuration value earns an exemption from.
+    Skipping it under `strict_isolation: false` skipped it in exactly the mode where the generated
+    profile carries the whole local floor, and it disagreed with `worc preflight`, which has always
+    run the check unconditionally: the same file reported `isolation: FAIL` there and started here.
+    """
+    orch, store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        config_kwargs={"strict_isolation": False},
+    )
+    monkeypatch.setattr(
+        "wastech_orchestrator.core.orchestrator.check_isolation",
+        lambda _config, _checks: ["claude: extra_args carries a forbidden flag"],
+    )
+    result = orch.run_task(_complete_task(tmp_path, "task-illegal"))
+
+    assert result.final_status is Status.FAILED
+    row = store.get_task("task-illegal")
+    assert row is not None and row.status is Status.FAILED
+    # Stopped before the branch: the gate is part of the preamble, ahead of any side effect.
+    assert git_run(["branch", "--list", "worc/*"], git_repo.clone) == ""
 
 
 def test_failed_with_branch_commits_and_pushes_task_and_summary(
@@ -3563,6 +4207,48 @@ def test_dangerous_diff_requires_approval(
     assert "documentation" in _ran_nodes(store, f"task-{danger}-approval")
 
 
+def test_an_agent_self_commit_on_a_writing_node_is_still_put_to_the_gate(
+    git_repo, make_git_config, tmp_path: Path, git_run
+) -> None:
+    # The guarantee that carries the whole never-park rule on the writing class: the node commits
+    # its own work, the run carries on, and the deletion inside that commit still has to be
+    # approved by a human — because the gate measures from the last commit the orchestrator itself
+    # made, never from `HEAD`, so a commit made inside the task cannot empty it.
+    class SelfCommittingProvider(FakeProvider):
+        def run(self, request: AgentRunRequest) -> AgentRunResult:
+            if request.node_id == "implementation":
+                (git_repo.clone / "README.md").unlink()  # the dangerous half: a deletion
+                (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+                git_run(["add", "-A", "README.md", "feature.py"], git_repo.clone)
+                git_run(["commit", "-m", "agent: my own commit"], git_repo.clone)
+            return super().run(request)
+
+    providers = {
+        ProviderId.CLAUDE: SelfCommittingProvider("claude"),
+        ProviderId.CODEX: SelfCommittingProvider("codex"),
+    }
+    notifier = RecordingNotifier(
+        ask_results=[AskResult(answered=True, text="approved", approved=True)]
+    )
+    orch, store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+        # The diff-shape gate is `strict`-only; `auto` (the default) asks on protected_paths alone.
+        config_kwargs={"trust_level": "strict"},
+    )
+
+    result = orch.run_task(_complete_task(tmp_path, "task-selfcommit"))
+
+    assert result.final_status is Status.DONE  # reported, not parked
+    approvals = [c for c in notifier.ask_calls if c["kind"] == "approval"]
+    assert approvals, "the deletion the agent committed itself must still be asked about"
+    assert "publish" in _ran_nodes(store, "task-selfcommit")
+
+
 def test_denied_dependency_change_gets_one_safe_reconsideration(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
@@ -3784,6 +4470,69 @@ def _merge_gh(
     return gh
 
 
+def test_an_operator_commit_inside_a_writing_node_reaches_publication(
+    git_repo, make_git_config, tmp_path: Path, package_log_text, git_run
+) -> None:
+    # The everyday case, reproduced: the operator commits an unrelated file in their own
+    # repository while the writing node is working, so the fingerprint sees `HEAD` and the task ref
+    # move. Parking there would throw away a node's finished work; it warns and publishes instead.
+    #
+    # The three things that have to be true for that to be safe, all asserted below: the node's own
+    # work is still committed (`commit_code` did not degrade to the adoption arm, which is what a
+    # `HEAD`-relative staging set would have done), the operator's commit is not lost from what the
+    # run reports, and the drift is said out loud so the operator can tell their own commit from
+    # something planted. What the run does NOT do is rewrite the operator's commit out of the
+    # branch: it is an ancestor of the task's head, and pulling it out is not something the
+    # orchestrator does to someone else's work.
+    providers = _both()
+    orch, store, ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_operator_commit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")  # the task's
+            neighbour = git_repo.clone / "neighbour.md"  # the operator's, in another file entirely
+            neighbour.write_text("an unrelated chapter\n", encoding="utf-8")
+            git_run(["add", "neighbour.md"], git_repo.clone)
+            git_run(["commit", "-m", "chore: a neighbouring chapter"], git_repo.clone)
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_operator_commit  # type: ignore[method-assign]
+
+    with _log_fields() as fields:
+        result = orch.run_task(_complete_task(tmp_path, "task-18a"))
+
+    assert result.final_status is Status.DONE
+    assert "publish" in _ran_nodes(store, "task-18a")
+    assert ledger.records()[0]["final_status"] == "done"
+
+    # The node's work reached a commit of ours, rather than being swept into the adoption arm.
+    code_commit = store.get_publish_op("task-18a", "code_commit", None)
+    assert code_commit is not None and code_commit.result_ref
+    committed = git_run(
+        ["diff-tree", "--no-commit-id", "--name-only", "-r", str(code_commit.result_ref)],
+        git_repo.clone,
+    )
+    assert "feature.py" in committed
+    assert "neighbour.md" not in committed  # theirs stayed theirs; we did not restage it
+
+    # And the operator's commit did not vanish from what the run measured: the reported diff is
+    # taken from the task's base, so it covers both, and the branch carries both commits.
+    assert "neighbour.md" in (art / "logs" / "task-18a" / "current.diff").read_text("utf-8")
+    task = store.get_task("task-18a")
+    assert task is not None and task.branch
+    branch_subjects = git_run(["log", "--format=%s", "-4", task.branch], git_repo.clone)
+    assert "chore: a neighbouring chapter" in branch_subjects
+
+    # Said out loud, naming the aspects, because the operator is the one who can tell their own
+    # commit from a planted hook — and the previous behaviour told them by killing the task.
+    assert "git control state changed during this node" in package_log_text()
+    drift = [str(f.get("drift", "")) for f in fields if f.get("drift")]
+    assert any("head" in d for d in drift)
+
+
 def _patch_impl_edit(providers: dict[ProviderId, FakeProvider], git_repo) -> None:
     """Make the implementation stage leave a change to commit (so publish has a real diff)."""
     orig = providers[ProviderId.CLAUDE].run
@@ -3807,6 +4556,11 @@ def _task_with_auto_merge(tmp_path: Path, value: bool, task_id: str = "task-001"
     return str(path)
 
 
+#: Every `gh` call is pinned to the repository with `--repo`, derived from the test config's
+#: `repo.url` (`git@example.com:o/r.git`) — so a rewritten hosts.yml/insteadOf cannot retarget it.
+_GH_PIN = ["--repo", "example.com/o/r"]
+
+
 def _merge_calls(calls: list[list[str]]) -> list[list[str]]:
     return [c for c in calls if c[:2] == ["pr", "merge"]]
 
@@ -3824,7 +4578,7 @@ def test_auto_merge_resolution_matrix(git_repo, make_git_config, tmp_path: Path)
         task = NormalizedTask(id="t", title="T", description="d", auto_merge=task_am)
         return orch._auto_merge_on(task)
 
-    # The per-task value wins outright (PRE.2), in every config combination.
+    # The per-task value wins outright, in every config combination.
     for cfg_am in (True, False):
         assert eff(False, cfg_am) is False
         assert eff(True, cfg_am) is True
@@ -3848,11 +4602,65 @@ def test_global_auto_merge_merges_pr(git_repo, make_git_config, tmp_path: Path) 
     _patch_impl_edit(providers, git_repo)
     result = orch.run_task(_complete_task(tmp_path))
     assert result.final_status is Status.DONE
-    assert _merge_calls(calls) == [["pr", "merge", "https://example/pr/1", "--squash"]]
+    # The message is the orchestrator's, not the target repository's settings' (see merge_pr):
+    # `feat(<id>): <title> (#N)` and an empty body, on the auto-merge path exactly as on
+    # `merge-task`.
+    assert _merge_calls(calls) == [
+        [
+            "pr",
+            "merge",
+            "https://example/pr/1",
+            "--squash",
+            "--subject",
+            "feat(task-001): Add a thing (#1)",
+            "--body",
+            "",
+            *_GH_PIN,
+        ]
+    ]
     rec = ledger.records()[0]
     assert rec["auto_merged"] is True and rec["merge_outcome"] == "deadbeef"
     op = store.get_publish_op("task-001", "pr_merge")
     assert op is not None and op.status == "completed"
+
+
+def test_task_commit_type_reaches_every_commit_it_produces(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # The commit message is orchestrator-owned: no node can write into it, so an acceptance
+    # criterion asking an agent to put something there names a surface nothing can reach. The
+    # task's own ``commit_type`` is the channel that does exist, and it has to reach BOTH commits a
+    # task lands — the code commit on the branch and the squash commit on the base branch — or the
+    # history disagrees with itself about what kind of change this was.
+    task_path = tmp_path / "task-001.md"
+    task_path.write_text(
+        '---\nid: task-001\ntitle: "Add a thing"\ncommit_type: fix\n---\n\n'
+        "## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
+        encoding="utf-8",
+    )
+    providers = _both()
+    calls: list[list[str]] = []
+    orch, store, _ledger, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"auto_merge": True},
+        gh=_merge_gh(calls),
+    )
+    _patch_impl_edit(providers, git_repo)
+    result = orch.run_task(str(task_path))
+    assert result.final_status is Status.DONE
+
+    code_commit = store.get_publish_op("task-001", "code_commit", None)
+    assert code_commit is not None and code_commit.result_ref
+    subject = git_run(
+        ["log", "-1", "--format=%s", str(code_commit.result_ref)], git_repo.clone
+    ).strip()
+    assert subject == "fix(task-001): Add a thing"  # not the hardcoded `feat`
+    assert "--subject" in _merge_calls(calls)[0]
+    assert "fix(task-001): Add a thing (#1)" in _merge_calls(calls)[0]
 
 
 def test_no_auto_merge_leaves_pr_open(git_repo, make_git_config, tmp_path: Path) -> None:
@@ -3874,7 +4682,7 @@ def test_no_auto_merge_leaves_pr_open(git_repo, make_git_config, tmp_path: Path)
 
 
 def test_per_task_true_wins_over_global_false(git_repo, make_git_config, tmp_path: Path) -> None:
-    # PRE.2: a per-task ``auto_merge: true`` wins outright over the instance default ``false``;
+    # A per-task ``auto_merge: true`` wins outright over the instance default ``false``;
     # there is no operator gate — auto-merge is a publishing-policy call owned by the task author,
     # the same trusted party as the config, not something the orchestrator second-guesses.
     providers = _both()
@@ -3951,7 +4759,20 @@ def test_auto_merge_wait_for_checks_arms_native_auto(
     _patch_impl_edit(providers, git_repo)
     result = orch.run_task(_complete_task(tmp_path))
     assert result.final_status is Status.DONE
-    assert _merge_calls(calls) == [["pr", "merge", "https://example/pr/1", "--squash", "--auto"]]
+    assert _merge_calls(calls) == [
+        [
+            "pr",
+            "merge",
+            "https://example/pr/1",
+            "--squash",
+            "--subject",
+            "feat(task-001): Add a thing (#1)",
+            "--body",
+            "",
+            "--auto",
+            *_GH_PIN,
+        ]
+    ]
     assert ledger.records()[0]["merge_outcome"] == "armed"
 
 
@@ -4125,126 +4946,6 @@ def test_review_disabled_with_auto_merge_still_merges(
     assert len(_merge_calls(calls)) == 1  # it really did merge without a review gate
 
 
-def test_supervisor_proposed_skills_reach_downstream_stages(
-    git_repo, make_git_config, git_run, tmp_path: Path
-) -> None:
-    # skills-selection-rework: discovery is whole-repo (git ls-files); the supervisor proposes a
-    # node->skills map once per task and the Core accepts it deterministically (an unknown node or
-    # skill is filtered, never an error). Seed a committed repo skill so the inventory is non-empty.
-    skill_dir = git_repo.clone / ".claude" / "skills" / "safe-change"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text(
-        "---\nname: safe-change\ndescription: review your change\n---\n\n# Body\nguidance\n",
-        encoding="utf-8",
-    )
-    git_run(["add", ".claude/skills/safe-change/SKILL.md"], git_repo.clone)
-    git_run(["commit", "-m", "add safe-change skill"], git_repo.clone)
-    proposal = {
-        "assignments": [
-            {"node": "implementation", "skills": ["safe-change", "ghost"]},  # ghost is filtered
-            {"node": "ghost-node", "skills": ["safe-change"]},  # not a flow node → filtered
-        ]
-    }
-    providers = {
-        ProviderId.CLAUDE: FakeProvider("claude", outputs={"supervisor": ("ok", proposal)}),
-        ProviderId.CODEX: FakeProvider("codex"),
-    }
-    orch, store, _, art = _build(
-        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
-    )
-    # This test exercises the dynamic proposal, which is opt-in (default off).
-    from dataclasses import replace
-
-    from wastech_orchestrator.config.schema import SkillsConfig
-
-    orch._config = replace(orch._config, skills=SkillsConfig(dynamic=True))
-
-    result = orch.run_task(_complete_task(tmp_path, "task-skills"))
-    assert result.final_status is Status.DONE
-
-    # The effective per-node map is persisted (resume restores it without re-proposing): only the
-    # known node + known skill survive; the unknown node/skill are filtered.
-    skill_map = json.loads((art / "logs" / "task-skills" / "skill_map.json").read_text("utf-8"))
-    assert [s["name"] for s in skill_map["implementation"]] == ["safe-change"]
-    assert skill_map["implementation"][0]["path"] == ".claude/skills/safe-change/SKILL.md"
-    assert "ghost-node" not in skill_map  # a proposal for a non-flow node is dropped
-
-    # The chosen SKILL.md reaches the implementation node as an absolute read-only reference path,
-    # not its body — and only that node (the proposal was node-scoped).
-    impl = next(r for p in providers.values() for r in p.requests if r.node_id == "implementation")
-    assert any(path.endswith("safe-change/SKILL.md") for path in impl.skill_reference_paths)
-    assert "ghost" not in str(impl.skill_reference_paths)  # unknown name never surfaced
-    assert "# Body" not in impl.prompt  # the skill body is never inlined into the prompt
-
-    # The proposal is recorded as one advisory evaluation row (it proposes, never routes).
-    rows = _evaluations(store, "task-skills")
-    assert any(
-        r["kind"] == "supervisor_skill_proposal" and r["verdict"] == "advisory" for r in rows
-    )
-
-
-def _write_pinned_flow(flows: Path, pins: list[str]) -> None:
-    """A minimal implement→publish flow with operator ``skills:`` pins on the implement node."""
-    (flows / "roles").mkdir(parents=True, exist_ok=True)
-    (flows / "roles" / "implementation.md").write_text("Implement {task_path}.", "utf-8")
-    flow = _MINIMAL_FLOW.replace(
-        "      permission_profile: workspace-write\n",
-        f"      permission_profile: workspace-write\n      skills: {json.dumps(pins)}\n",
-    )
-    (flows / "implementation.yaml").write_text(flow, "utf-8")
-
-
-def test_operator_pinned_skill_reaches_node(
-    git_repo, make_git_config, git_run, tmp_path: Path
-) -> None:
-    # The static layer: a skill pinned on a flow node is always included (deterministic, no LLM).
-    # Here the dynamic proposal contributes nothing, so the pin alone drives the per-node selection.
-    from wastech_orchestrator.core.flow.registry import FlowRegistry
-
-    skill_dir = git_repo.clone / ".claude" / "skills" / "safe-change"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text(
-        "---\nname: safe-change\ndescription: d\n---\n# Body\n", "utf-8"
-    )
-    git_run(["add", ".claude/skills/safe-change/SKILL.md"], git_repo.clone)
-    git_run(["commit", "-m", "add skill"], git_repo.clone)
-    flows = tmp_path / "flows"
-    _write_pinned_flow(flows, ["safe-change"])
-    providers = _both()
-    orch, store, _, art = _build(
-        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
-    )
-    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
-    _patch_impl_edit(providers, git_repo)
-
-    result = orch.run_task(_complete_task(tmp_path, "task-pin"))
-    assert result.final_status is Status.DONE
-    impl = next(r for p in providers.values() for r in p.requests if r.node_id == "implementation")
-    assert any(path.endswith("safe-change/SKILL.md") for path in impl.skill_reference_paths)
-    skill_map = json.loads((art / "logs" / "task-pin" / "skill_map.json").read_text("utf-8"))
-    assert [s["name"] for s in skill_map["implementation"]] == ["safe-change"]
-
-
-def test_strict_unresolved_pin_stops_task(git_repo, make_git_config, tmp_path: Path) -> None:
-    # skills.strict: an operator pin that does not resolve (here: no such skill in the repo) stops
-    # the task in manual_action_required before any node runs — a fixable config/repo error.
-    from wastech_orchestrator.config.schema import SkillsConfig
-    from wastech_orchestrator.core.flow.registry import FlowRegistry
-
-    flows = tmp_path / "flows"
-    _write_pinned_flow(flows, ["ghost-skill"])
-    providers = _both()
-    orch, store, _, _ = _build(
-        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
-    )
-    orch._flow_registry = FlowRegistry(operator_flows_dir=flows)
-    orch._config = replace(orch._config, skills=SkillsConfig(dynamic=False, strict=True))
-
-    result = orch.run_task(_complete_task(tmp_path, "task-strict"))
-    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
-    assert "implementation" not in _ran_nodes(store, "task-strict")  # stopped before any node
-
-
 # --- prompt audit (who+prompt per step) -----------------------------------------------------
 
 
@@ -4300,6 +5001,11 @@ def _audit_dir(art: Path, task_id: str) -> Path:
     return task_artifact_dir(art, task_id) / "prompt-audit"
 
 
+def _step_metadata(step_text: str) -> Any:
+    """The step document's fenced ``json`` header, parsed (the prompt is its Markdown body)."""
+    return json.loads(step_text.split("```json\n", 1)[1].split("\n```", 1)[0])
+
+
 def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path: Path) -> None:
     """With the global flag on, each stage run is recorded as a self-contained, chronological file
     plus a combined timeline; the records carry the who-metadata and the prompt."""
@@ -4317,12 +5023,12 @@ def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path
     assert result.final_status is Status.DONE
 
     audit_dir = _audit_dir(art, "task-001")
-    step_files = sorted(audit_dir.glob("*.json"))
+    step_files = sorted(audit_dir.glob("*.md"))
     assert step_files, "per-step audit files were written"
     # Filenames are zero-padded node_run_id → lexical sort is chronological.
     ids = [int(p.name.split("-")[0]) for p in step_files]
     assert ids == sorted(ids)
-    records = [json.loads(p.read_text()) for p in step_files]
+    records = [_step_metadata(p.read_text()) for p in step_files]
     node_records = [r for r in records if r["node_id"] != "supervisor"]
     supervisor_records = [r for r in records if r["node_id"] == "supervisor"]
     # complete task → refinement skipped; planning/implementation/review/documentation run agents.
@@ -4357,7 +5063,7 @@ def test_prompt_audit_records_steps_in_order(git_repo, make_git_config, tmp_path
         assert rec["agents"] and rec["agents"][0]["status"] == "succeeded"
         assert "route_primary" in rec and "provider_used" in rec
 
-    # Who-metadata is correct: every node defaults to the global primary (claude) now (PRE.1).
+    # Who-metadata is correct: every node defaults to the global primary (claude) now.
     review = next(r for r in timeline if r["node_id"] == "review")
     assert review["provider_used"] == "claude"
     assert review["agents"][0]["provider"] == "claude"
@@ -4416,7 +5122,7 @@ def test_prompt_audit_task_overrides_global_off(git_repo, make_git_config, tmp_p
     audit_dir = _audit_dir(art, "task-001")
     assert audit_dir.exists()
     assert (audit_dir / "timeline.jsonl").exists()
-    assert sorted(audit_dir.glob("*.json"))
+    assert sorted(audit_dir.glob("*.md"))
 
 
 # --- task dependencies (``depends_on`` merge-gated scheduling) -----------------------------
@@ -5167,28 +5873,58 @@ def test_containment_unverified_on_evaluator_marks_unsafe_and_skips_seal(
     assert task is not None and task.cleanup_completed is False  # Git/cleanup withheld
 
 
-def test_stale_foreign_exchange_goes_manual_not_crash(
+def test_leftover_exchange_entry_is_cleared_and_named_not_parked(
+    git_repo, make_git_config, tmp_path: Path, package_log_text
+) -> None:
+    # A prior task's directory left in the exchange root — a run interrupted before its seal — must
+    # not stop the next task before any provider launches. It is not evidence of anything: the
+    # directory is private, gitignored and rebuilt from durable facts on every launch, so it is
+    # deleted, named in the log, and the run proceeds.
+    providers = _both()
+    orch, store, ledger, _ = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+    exchange_root = Path(git_repo.clone) / ".worc-io"
+    leftover = exchange_root / "task-OTHER"
+    leftover.mkdir(parents=True)
+    (leftover / "plan.md").write_text("a previous task's assignment", encoding="utf-8")
+
+    with _log_fields() as fields:
+        result = orch.run_task(_complete_task(tmp_path, "task-h1"))
+
+    assert result.final_status is Status.DONE
+    assert not leftover.exists()  # cleared, not merely tolerated
+    assert "cleared leftover exchange entries" in package_log_text()
+    assert any(f.get("removed") == "task-OTHER" for f in fields)  # named, not silently swept
+    task = store.get_task("task-h1")
+    assert task is not None and task.status is Status.DONE
+    assert ledger.records()[0]["final_status"] == "done"
+
+
+def test_a_symlinked_exchange_task_entry_still_parks(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # A stale/foreign entry left in the exchange root (e.g. a prior task whose seal was
-    # interrupted) must fail closed to manual_action_required — never let a bare ExchangeError
-    # escape uncaught and crash-loop the daemon. The border still holds (no provider launches over a
-    # dirty exchange), so nothing downstream runs.
+    # The other half of the same invariant, and the half that stays fail-closed: the task's own
+    # exchange entry replaced by a symlink is not leftover state that a delete could fix — it is the
+    # private surface pointed at something else. Nothing an interrupted run produces looks like it.
     providers = _both()
     orch, store, ledger, _ = _build(
         git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
     )
     exchange_root = Path(git_repo.clone) / ".worc-io"
-    (exchange_root / "task-OTHER").mkdir(parents=True)  # foreign leftover from a prior task
+    exchange_root.mkdir(parents=True, exist_ok=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (exchange_root / "task-h2").symlink_to(elsewhere, target_is_directory=True)
 
-    # Must NOT raise — returns a clean terminal instead of crashing.
-    result = orch.run_task(_complete_task(tmp_path, "task-h1"))
+    result = orch.run_task(_complete_task(tmp_path, "task-h2"))
 
     assert result.final_status is Status.MANUAL_ACTION_REQUIRED
-    task = store.get_task("task-h1")
-    assert task is not None and task.status is Status.MANUAL_ACTION_REQUIRED
-    assert not _ran_nodes(store, "task-h1")  # no node launched over the dirty exchange
-    assert task.cleanup_last_error is not None and "task-OTHER" in task.cleanup_last_error
+    assert not _ran_nodes(store, "task-h2")  # no provider launched over a substituted exchange
+    task = store.get_task("task-h2")
+    assert task is not None and task.cleanup_last_error is not None
+    assert "not a real directory" in task.cleanup_last_error
     assert ledger.records()[0]["final_status"] == "manual_action_required"
 
 
@@ -5230,7 +5966,7 @@ def test_read_only_node_that_writes_warns_operator_and_never_parks_the_task(
     # manual_action_required: the grant exists so an audit node can read delivery history, and
     # trading that for a stray file would be the wrong bargain.
     from wastech_orchestrator.core.flow.registry import FlowRegistry
-    from wastech_orchestrator.notify import TRACE_READ_ONLY_WRITE
+    from wastech_orchestrator.notify import TRACE_UNEXPECTED_WRITE
 
     flows = tmp_path / "flows"
     (flows / "roles").mkdir(parents=True)
@@ -5281,21 +6017,21 @@ def test_read_only_node_that_writes_warns_operator_and_never_parks_the_task(
 
     assert result.final_status is Status.DONE  # warned, not parked
     audit_traces = [c["outcome"] for c in notifier.trace_calls if c["node_id"] == "audit"]
-    assert audit_traces == [TRACE_READ_ONLY_WRITE]
+    assert audit_traces == [TRACE_UNEXPECTED_WRITE]
     assert any("changed the working tree" in m for m in messages)
 
 
 def test_read_only_node_that_poisons_a_git_hook_warns_operator_and_never_parks_the_task(
     git_repo, make_git_config, tmp_path: Path
 ) -> None:
-    # The sharper half of the same rule (operator decision 2, read literally): the granted read-only
-    # node plants a `.git/hooks/post-commit`, the drift event — the next git command in
-    # that clone is the orchestrator's own, so a hook is how a read-only node borrows the
-    # orchestrator's credentials. It still does not park the task: the operator gets a warning
-    # naming the drifted aspect plus the ⚠️ trace, and the run continues. A workspace-write node
-    # doing the same is still terminal (see test_workspace_write_git_control_drift_is_manual).
+    # The sharper half of the same rule: the granted read-only node plants a
+    # `.git/hooks/post-commit`, the drift event — the next git command in that clone is the
+    # orchestrator's own, so a hook is how a node borrows the orchestrator's credentials. It does
+    # not park the task: the operator gets a warning naming the drifted aspect plus the ⚠️ trace,
+    # and the run continues. Since 2026-08-24 a workspace-write node doing the same gets the same
+    # treatment — see the per-aspect matrix in test_flow_node_runners.
     from wastech_orchestrator.core.flow.registry import FlowRegistry
-    from wastech_orchestrator.notify import TRACE_READ_ONLY_GIT_DRIFT
+    from wastech_orchestrator.notify import TRACE_GIT_CONTROL_DRIFT
 
     flows = tmp_path / "flows"
     (flows / "roles").mkdir(parents=True)
@@ -5345,8 +6081,8 @@ def test_read_only_node_that_poisons_a_git_hook_warns_operator_and_never_parks_t
 
     assert result.final_status is Status.DONE  # warned, not parked
     audit_traces = [c["outcome"] for c in notifier.trace_calls if c["node_id"] == "audit"]
-    assert audit_traces == [TRACE_READ_ONLY_GIT_DRIFT]
-    assert any("changed git control state" in m for m in messages)
+    assert audit_traces == [TRACE_GIT_CONTROL_DRIFT]
+    assert any("git control state changed during this node" in m for m in messages)
 
 
 # --- supervisor.enabled: false — the whole layer removed (P3) -------------------------------
@@ -5381,7 +6117,7 @@ def test_disabled_layer_makes_no_calls_and_still_writes_the_pr_body(
     # Not one provider call, not one row, not one artifact belonging to the layer.
     assert _supervisor_attempts(store, "task-nosup") == []
     kinds = {row["kind"] for row in _evaluations(store, "task-nosup")}
-    assert not kinds & {"supervisor_step", "supervisor_final", "supervisor_skill_proposal"}
+    assert not kinds & {"supervisor_step", "supervisor_final"}
     task_dir = task_artifact_dir(art, "task-nosup")
     assert not (task_dir / "packet.json").exists()
 
@@ -5426,46 +6162,6 @@ def test_absent_enabled_key_matches_an_explicit_true(
         )
 
     assert run("task-default") == run("task-explicit", supervisor_enabled=True)
-
-
-def test_disabled_layer_leaves_only_the_operators_skill_pins(
-    git_repo, make_git_config, git_run, tmp_path: Path
-) -> None:
-    # `skills.dynamic: true` with no layer degrades to "only what the flow pins", which is correct
-    # (the dynamic layer is fail-open by design) but silent — hence the config warning. Here: the
-    # inventory is non-empty and dynamic is on, yet nothing is proposed, so the map stays empty.
-    skill_dir = git_repo.clone / ".claude" / "skills" / "safe-change"
-    skill_dir.mkdir(parents=True)
-    (skill_dir / "SKILL.md").write_text(
-        "---\nname: safe-change\ndescription: review your change\n---\n\n# Body\nguidance\n",
-        encoding="utf-8",
-    )
-    git_run(["add", ".claude/skills/safe-change/SKILL.md"], git_repo.clone)
-    git_run(["commit", "-m", "add safe-change skill"], git_repo.clone)
-
-    providers = _both()
-    orch, store, _, art = _build(
-        git_repo,
-        make_git_config,
-        tmp_path,
-        providers=providers,
-        check_verdicts=[0],
-        config_kwargs={"supervisor_enabled": False, "skills_dynamic": True},
-    )
-    _patch_impl_edit(providers, git_repo)
-
-    assert orch.run_task(_complete_task(tmp_path, "task-nosup-skills")).final_status is Status.DONE
-    skill_map = json.loads(
-        (task_artifact_dir(art, "task-nosup-skills") / "skill_map.json").read_text("utf-8")
-    )
-    # The packaged flow pins nothing, so with no proposal the effective set is empty for every node.
-    assert all(not refs for refs in skill_map.values())
-    assert not any(
-        row["kind"] == "supervisor_skill_proposal"
-        for row in _evaluations(store, "task-nosup-skills")
-    )
-    impl = next(r for p in providers.values() for r in p.requests if r.node_id == "implementation")
-    assert impl.skill_reference_paths == ()
 
 
 def test_disabled_layer_still_writes_the_deterministic_handoff_floor(
@@ -5533,3 +6229,38 @@ def test_disabled_layer_still_writes_the_deterministic_handoff_floor(
     assert brief.exists() and brief.read_text("utf-8").strip()
     body = brief.read_text("utf-8")
     assert "01-first.md" in body and "crit-one" in body and "Changed files" in body
+
+
+def test_assigned_environment_reaches_node_services(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    """The orchestrator call site: the env handed to the flow's own child processes.
+
+    `NodeServices.process_env` is what the `dependency_scan` checker and every `tool` node launch
+    their argv with. It is assembled here rather than by the Check Runner, so it is its own delivery
+    point — and these two must not drift apart.
+    """
+    from wastech_orchestrator.core.decomposition import DecompositionDecision
+    from wastech_orchestrator.core.loop_control import LoopCounters
+    from wastech_orchestrator.core.orchestrator import _Pipeline
+    from wastech_orchestrator.security.env import build_child_env
+    from wastech_orchestrator.task.model import NormalizedTask
+
+    orch, _store, _ledger, _art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers={ProviderId.CLAUDE: FakeProvider("claude")},
+        check_verdicts=[0],
+        config_kwargs={"extra_environment": {"NUGET_PACKAGES": "/repo/.toolcache/nuget"}},
+    )
+    pipeline = _Pipeline(
+        task=NormalizedTask(id="task-001", title="T", description="d"),
+        task_file="task-001.md",
+        status=Status.PENDING,
+        counters=LoopCounters(),
+        decomposition=DecompositionDecision(accepted=False, reason="single unit", n=1),
+    )
+    services = orch._build_engine_services(pipeline, finalize=None)
+    assert services.process_env["NUGET_PACKAGES"] == "/repo/.toolcache/nuget"
+    assert services.process_env == build_child_env(orch._config.security)

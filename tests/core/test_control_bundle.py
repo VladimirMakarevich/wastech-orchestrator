@@ -45,6 +45,8 @@ flow:
     - id: build
       kind: agent
       role_file: sample/build.md
+      resume_role_file: sample/build.continue.md
+      session_scope: editing_lineage
     - id: run_tool
       kind: tool
       tool: mytool
@@ -64,6 +66,7 @@ def _make_control_plane(root: Path) -> tuple[Path, Path]:
     (flow_dir / "sample.yaml").write_text(_FLOW_YAML, encoding="utf-8")
     (flow_dir / "sample" / "planning.md").write_text("plan {task_path}\n", encoding="utf-8")
     (flow_dir / "sample" / "build.md").write_text("build {plan_path}\n", encoding="utf-8")
+    (flow_dir / "sample" / "build.continue.md").write_text("carry on\n", encoding="utf-8")
     (flow_dir / "roles" / "supervisor.md").write_text("observe\n", encoding="utf-8")
     tools_dir = root / "tools"
     tools_dir.mkdir()
@@ -88,6 +91,8 @@ def test_freeze_copies_exactly_the_referenced_inputs(tmp_path: Path) -> None:
     assert (bundle.flow_dir / "sample.yaml").is_file()
     assert (bundle.flow_dir / "sample" / "planning.md").is_file()
     assert (bundle.flow_dir / "sample" / "build.md").is_file()
+    # A node's continuation prompt is a control input like any other role file.
+    assert (bundle.flow_dir / "sample" / "build.continue.md").is_file()
     assert (bundle.flow_dir / "roles" / "supervisor.md").is_file()
     assert (bundle.tools_dir / _tool_name()).is_file()
     assert (bundle_dir / MANIFEST_NAME).is_file()
@@ -228,3 +233,20 @@ def test_freeze_refuses_non_single_link_regular_source(tmp_path: Path, facts: Fi
     inspector = _inspector_reporting("build.md", facts)
     with pytest.raises(ControlBundleError):
         freeze_control_bundle(tmp_path / "bundle", snapshot, flow_dir, tools, inspect=inspector)
+
+
+def test_continuation_prompt_is_in_the_digest_and_drift_on_it_is_seen(tmp_path: Path) -> None:
+    # The reason it must be frozen: a resumed session must not be handed a prompt the task was
+    # never validated against, so the second file has to move the digest exactly as the first does.
+    bundle_dir = tmp_path / "bundle"
+    snapshot, flow_dir, tools, bundle = _freeze(tmp_path / "live", bundle_dir)
+
+    manifest = json.loads((bundle_dir / MANIFEST_NAME).read_text(encoding="utf-8"))
+    entries = {entry["path"]: entry["sha256"] for entry in manifest["entries"]}
+    assert entries["flows/sample/build.continue.md"] == sha256_file(
+        bundle.flow_dir / "sample" / "build.continue.md"
+    )
+
+    assert digest_live_control_inputs(snapshot, flow_dir, tools) == bundle.bundle_digest
+    (flow_dir / "sample" / "build.continue.md").write_text("edited\n", encoding="utf-8")
+    assert digest_live_control_inputs(snapshot, flow_dir, tools) != bundle.bundle_digest

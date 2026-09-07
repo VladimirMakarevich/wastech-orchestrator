@@ -19,7 +19,7 @@ Record an exact `path:line` for every observation you intend to make a claim abo
 - **Invariants.** Where the project documents its own rules (`.agents/rules/`, `CLAUDE.md`, `AGENTS.md`, an architecture document), check whether the core code actually upholds each one rather than assuming it does.
 - **Weak code.** Fragile logic, non-deterministic ordering, unhandled error paths, TODO/FIXME markers, and abstractions built ahead of a concrete need.
 - **Configuration and data model.** Defaults that are unsafe or unreachable, validation that does not validate, a declared shape the rest of the code contradicts.
-- **Delivery evidence.** Where the history is reachable **with the tools you were actually granted** (`git log` / `git show` need a shell), a change that did less than it claims is a prime finding. With no shell, say so and drop the claim — do not grep a changelog and present that as history.
+- **Delivery evidence.** Where the history is reachable **with the tools you were actually granted** (`git log` / `git show` need a shell), a change that did less than it claims is a prime finding. Whether you have one depends on how this run is configured, so check rather than assume: if you do not, say so and drop the claim — do not grep a changelog and present that as history.
 
 {?review_path}
 

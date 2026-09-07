@@ -29,6 +29,7 @@ from wastech_orchestrator.providers.base import (
     ErrorClass,
     ProviderId,
     RunStatus,
+    build_effective_prompt,
 )
 from wastech_orchestrator.providers.claude import ClaudeCodeProvider
 from wastech_orchestrator.providers.codex import CodexProvider
@@ -212,7 +213,7 @@ def test_cross_provider_fallback_drops_provider_specific_request_fields(
     outcome = router.run_stage(
         make_request(
             node_id="review",
-            model="gpt-5.4",
+            model="gpt-5.5",
             reasoning="high",
             extra_args=["-c", 'model_reasoning_effort="high"'],
             session_id="codex-session-123",
@@ -225,7 +226,7 @@ def test_cross_provider_fallback_drops_provider_specific_request_fields(
 
     assert outcome.provider_used is ProviderId.CLAUDE
     # The primary saw the pins; the cross-provider fallback saw provider-specific fields cleared.
-    assert primary.requests[0].model == "gpt-5.4"  # type: ignore[attr-defined]
+    assert primary.requests[0].model == "gpt-5.5"  # type: ignore[attr-defined]
     assert primary.requests[0].reasoning == "high"  # type: ignore[attr-defined]
     assert primary.requests[0].extra_args == [  # type: ignore[attr-defined]
         "-c",
@@ -511,3 +512,41 @@ def test_no_work_both_providers_terminal(
     assert outcome.terminal_error is not None
     assert outcome.terminal_error.error_class is ErrorClass.AGENT_NO_PROGRESS
     assert [a.provider for a in outcome.attempts] == [ProviderId.CLAUDE, ProviderId.CODEX]
+
+
+def test_a_degraded_attempt_falls_back_to_the_full_prompt(
+    config: OrchestratorConfig,
+    make_fake_provider: Callable[..., object],
+    make_request: Callable[..., AgentRunRequest],
+    tmp_path: Path,
+) -> None:
+    # The failure this design exists to prevent: "carry on where you left off" arriving in a
+    # brand-new session with no rules and no history — a run that reports success and quietly
+    # produces worse work. The router clears the session without touching either text, so the
+    # substitute attempt selects the full prompt on its own, with no router change at all.
+    primary = make_fake_provider(ProviderId.CODEX, raises=ErrorClass.RATE_LIMITED)
+    fallback = make_fake_provider(ProviderId.CLAUDE)
+    router = AgentRouter(config, {ProviderId.CODEX: primary, ProviderId.CLAUDE: fallback})
+    route = router.resolve_route("fixing", ProviderId.CODEX)
+
+    outcome = router.run_stage(
+        make_request(
+            node_id="fixing",
+            prompt="FULL",
+            continuation_prompt="CONT",
+            session_id="codex-session-123",
+        ),
+        route,
+    )
+
+    assert outcome.provider_used is ProviderId.CLAUDE
+    primary_req = primary.requests[0]  # type: ignore[attr-defined]
+    fallback_req = fallback.requests[0]  # type: ignore[attr-defined]
+    # Both texts are portable, so both survive the switch; only the session is provider-specific.
+    assert fallback_req.continuation_prompt == "CONT"
+    assert fallback_req.prompt == "FULL"
+    assert fallback_req.session_id is None
+    assert build_effective_prompt(primary_req).startswith("CONT")
+    assert build_effective_prompt(fallback_req).startswith("FULL")
+    # And each attempt records the session state it actually ran under.
+    assert [a.resumed for a in outcome.attempts] == [True, False]

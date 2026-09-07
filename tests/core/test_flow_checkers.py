@@ -302,9 +302,9 @@ def test_citation_multiline_snippet_at_the_cited_line_is_verified(tmp_path: Path
 
 
 def test_citation_non_int_line_is_not_silently_skipped(tmp_path: Path) -> None:
-    # A string `line` fails `isinstance(..., int)`, so it used to skip the bounds check AND the
-    # on-line check, then pass via the whole-file fallback. Now it reads as "no line cited": the
-    # snippet still has to resolve, but no location is credited.
+    # A string `line` fails `isinstance(..., int)`, so an unguarded path skips the bounds check AND
+    # the on-line check and then passes via the whole-file fallback. It has to read as "no line
+    # cited" instead: the snippet still has to resolve, but no location is credited.
     (tmp_path / "a.py").write_text("x = 0\nneedle = 1\n", encoding="utf-8")
     manifest = tmp_path / "sources.json"
     manifest.write_text(

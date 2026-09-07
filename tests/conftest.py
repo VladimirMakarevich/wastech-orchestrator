@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import shlex
 import shutil
 import stat
 import subprocess
 import sys
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from importlib import resources
 from pathlib import Path
@@ -18,29 +19,35 @@ import pytest
 from wastech_orchestrator.config.loader import loads_config
 from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.providers import claude as _claude
+from wastech_orchestrator.providers import codex as _codex
 
 _FAKE_AGENT = Path(__file__).resolve().parent / "fakes" / "fake_agent.py"
 
 
 @pytest.fixture(autouse=True)
-def _assume_bash_sandbox_available(monkeypatch: pytest.MonkeyPatch) -> None:
+def _assume_a_sandbox_capable_host(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make the deterministic suite host-independent by assuming a sandbox-capable host.
 
-    The Claude Bash-sandbox capability depends on the real host (macOS Seatbelt / a Linux+WSL2 with
-    bubblewrap+socat), so a bwrap-less CI would otherwise flag every workspace-write
-    ``isolation_reasons``
-    / ``check_isolation`` / provider run. The deterministic suite cannot prove the real host
-    boundary
-    anyway (no real Claude) — the real proof is the native-Windows CI gate — so we pin the default
-    probe
-    to "available"; the platform-branch tests inject a concrete ``SandboxCapability`` to
-    exercise the native-Windows / missing-deps branches.
+    **Both** providers, because both answer a host question and either one can make an assertion a
+    property of the machine running it. The Claude Bash-sandbox capability depends on the real host
+    (macOS Seatbelt / a Linux+WSL2 with bubblewrap+socat), so a bwrap-less CI would otherwise flag
+    every workspace-write ``isolation_reasons`` / ``check_isolation`` / provider run. Codex answers
+    a differently shaped question — on native Windows its sandbox availability is decided by an
+    elevated backend that cannot be classified offline — and an unpinned host there adds a second
+    ``isolation-floor: NONE`` line on the Windows runner alone, which is exactly how three
+    floor tests passed everywhere but there.
+
+    The deterministic suite cannot prove the real host boundary anyway (no real CLI) — the real
+    proof is the native-Windows CI gate — so both defaults are pinned to "capable"; the
+    platform-branch tests inject a concrete ``SandboxCapability`` / ``system`` to exercise the
+    native-Windows / missing-deps branches.
     """
     monkeypatch.setattr(
         _claude,
         "default_sandbox_probe",
         lambda *a, **k: _claude.SandboxCapability.LINUX_AVAILABLE,
     )
+    monkeypatch.setattr(_codex, "default_host_system", lambda: "Linux")
 
 
 @pytest.fixture
@@ -86,6 +93,34 @@ def seed_builtin_flows(clone: Path) -> None:
     missing = [ln for ln in (".worc/", ".worc-io/") if ln not in present]
     if missing:
         exclude.write_text("\n".join([*present, *missing]) + "\n", encoding="utf-8")
+
+
+@pytest.fixture
+def package_log_text() -> Iterator[Callable[[], str]]:
+    """Return a reader for the ``wastech_orchestrator`` log text emitted during the test.
+
+    ``caplog`` cannot be used for these records: the product's logging setup detaches the package
+    logger from the root (``propagate = False``), so a root-attached capture handler sees nothing —
+    and whether the setup has run yet depends on which test touched it first in this worker, which
+    turns any ``caplog`` assertion on orchestrator output into an order-dependent flake. Attaching
+    to the package logger directly is order-independent.
+    """
+    records: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record.getMessage())
+
+    logger = logging.getLogger("wastech_orchestrator")
+    handler = _Collect(level=logging.DEBUG)
+    logger.addHandler(handler)
+    prior_level = logger.level
+    logger.setLevel(logging.DEBUG)
+    try:
+        yield lambda: "\n".join(records)
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(prior_level)
 
 
 # A broad-but-explicit env allowlist so git runs under the orchestrator's allowlisted environment on
@@ -190,14 +225,15 @@ def build_git_config(
     telegram_trace: bool = False,
     memory_enabled: bool = False,
     allow_git_evidence: bool = False,
-    allow_native_memory: bool = False,
     trust_level: str | None = None,
     checkout_base_on_cleanup: bool | None = None,
     clean_runs_on_success: bool = True,
     supervisor_observe: str | None = None,
     supervisor_include_nodes: Sequence[str] = (),
     supervisor_enabled: bool | None = None,
-    skills_dynamic: bool | None = None,
+    extra_environment: Mapping[str, str] | None = None,
+    allowed_environment_patterns: Sequence[str] = (),
+    strict_isolation: bool = True,
 ) -> OrchestratorConfig:
     """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks.
 
@@ -216,7 +252,18 @@ def build_git_config(
     returns has ``memory.enabled is False``. The warning that says so is on
     ``loads_config(...).warnings``, which this helper drops; assert it through ``loads_config``.
     """
-    env_lines = "\n".join(f"    - {e}" for e in _TEST_ALLOWED_ENV)
+    # Prefix patterns are APPENDED to the test allowlist rather than replacing it: a pattern test
+    # cares about what its own pattern resolves to, and dropping the base names would break git.
+    env_lines = "\n".join(f"    - {e}" for e in (*_TEST_ALLOWED_ENV, *allowed_environment_patterns))
+    # Variables the orchestrator ASSIGNS to every child process (security.extra_environment).
+    # Absent => the key is omitted entirely, which is what most tests want: the child environment
+    # then has to be byte-for-byte the pre-key one.
+    extra_env_block = (
+        "  extra_environment:\n"
+        + "".join(f"    {name}: {value!r}\n" for name, value in extra_environment.items())
+        if extra_environment
+        else ""
+    )
     cleanup_line = (
         f"  checkout_base_on_cleanup: {str(checkout_base_on_cleanup).lower()}\n"
         if checkout_base_on_cleanup is not None
@@ -236,9 +283,6 @@ def build_git_config(
     memory_block = "memory:\n  enabled: true\n" if memory_enabled else ""
     logging_block = (
         "logging:\n  clean_runs_on_success: false\n" if not clean_runs_on_success else ""
-    )
-    skills_block = (
-        f"skills:\n  dynamic: {str(skills_dynamic).lower()}\n" if skills_dynamic is not None else ""
     )
     supervisor_lines = []
     if supervisor_enabled is not None:
@@ -268,12 +312,12 @@ repo:
     claude:
       command: "claude"
       primary: true
-      allow_native_memory: {str(allow_native_memory).lower()}
     codex:
       command: "codex"
 security:
+  strict_isolation: {str(strict_isolation).lower()}
   allow_git_evidence: {str(allow_git_evidence).lower()}
-{trust_level_line}  allowed_environment:
+{trust_level_line}{extra_env_block}  allowed_environment:
 {env_lines}
 {validation_block}{telegram_block}checks:
 {checks_block}  timeout_seconds: 30
@@ -284,10 +328,10 @@ git:
   auto_merge_strategy: {auto_merge_strategy}
   auto_merge_wait_for_checks: {str(auto_merge_wait_for_checks).lower()}
   footprint:
-    audit_commit_message: "chore(orchestrator): audit trail for {{task_id}}"
+    audit_commit_message: "chore(worc): audit trail for {{task_id}}"
     audit_on_branch: {audit_on_branch}
 prompt_audit: {str(prompt_audit).lower()}
-{memory_block}{logging_block}{skills_block}{supervisor_block}"""
+{memory_block}{logging_block}{supervisor_block}"""
     return loads_config(text).config
 
 

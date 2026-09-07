@@ -124,6 +124,24 @@ def resolve_git_evidence(node_value: bool | None, allowed: bool) -> bool:
     return bool(node_value) and allowed
 
 
+def resolve_allow_skills(node_value: bool | None, declared: tuple[str, ...]) -> bool:
+    """Whether this node may invoke skills at all: it said so, or it named one.
+
+    Skills are **off** unless the flow asks for them. An explicit ``True``/``False`` wins; an
+    omitted key resolves from ``skills``, so naming one is itself the request and no flow has to
+    write both keys. Off is the default because a skill the flow never asked for can fire on its own
+    description, and a graph whose steps are chosen by a description in the target repository is not
+    the deterministic graph this orchestrator is adopted for. The cost is stated rather than hidden:
+    a node that wants the operator's own harness back says so in one key.
+
+    Resolves only the skill dimension — never the filesystem permission ceiling, and never
+    publication, which no skill can grant at any value of this.
+    """
+    if node_value is not None:
+        return node_value
+    return bool(declared)
+
+
 @dataclass(frozen=True, slots=True)
 class ExecutionUnit:
     """The foundation-owned identity of the thing being executed: ``(task_id, subtask_order)``.

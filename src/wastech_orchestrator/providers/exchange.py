@@ -406,10 +406,6 @@ def assert_orchestration_paths_contained(
         )
         if value
     ]
-    named += [
-        (f"skill_reference_paths[{i}]", value)
-        for i, value in enumerate(request.skill_reference_paths)
-    ]
     for name, value in named:
         try:
             Path(value).resolve().relative_to(root)

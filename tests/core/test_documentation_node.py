@@ -63,7 +63,7 @@ def test_documentation_role_prompt_only_interpolates_allowed_vars() -> None:
     from wastech_orchestrator.core.prompts import ALLOWED_PROMPT_VARS, render_prompt
 
     template = (_PACKAGED / "implementation" / "documentation.md").read_text(encoding="utf-8")
-    rendered = render_prompt(template, {"plan_path": "/p", "diff_path": "/d", "skills_path": None})
+    rendered = render_prompt(template, {"plan_path": "/p", "diff_path": "/d"})
     # The plan/diff path tokens are substituted; no unresolved allowlisted token leaks through.
     assert "{plan_path}" not in rendered and "/p" in rendered
     assert "{diff_path}" not in rendered and "/d" in rendered
@@ -110,6 +110,6 @@ def test_documentation_runs_once_after_decomposition(impl_snap: FlowSnapshot) ->
 
 
 def test_documentation_disabled_per_task_skips(impl_snap: FlowSnapshot) -> None:
-    # PRE.3 per-task disable: `nodes.documentation.enabled: false` is routing-sound — the node's
+    # Per-task disable: `nodes.documentation.enabled: false` is routing-sound — the node's
     # `done` skip-outcome takes its single forward edge straight to publish (no mid-run crash).
     validate_disabled_nodes(impl_snap, frozenset({"documentation"}))  # must not raise

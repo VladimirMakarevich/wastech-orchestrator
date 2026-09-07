@@ -83,8 +83,8 @@ _SENSITIVE_WORD = (
 )
 #
 # The optional quote BEFORE the separator is what makes the ``"NAME": "VALUE"`` form in the comment
-# above real: the name group cannot cross a quote, so a JSON key's closing quote used to end the
-# match and ``"access_token": "…"`` was never redacted at all.
+# above real: the name group cannot cross a quote, so without it a JSON key's closing quote ends the
+# match and ``"access_token": "…"`` is never redacted at all.
 _ASSIGNMENT = re.compile(
     rf"(?i)([A-Za-z0-9_]*{_SENSITIVE_WORD}[A-Za-z0-9_]*)(\"?\s*[:=]\s*\"?)([^\s\"]+)",
 )
@@ -123,21 +123,63 @@ def is_sensitive_key(name: str) -> bool:
     return any(seg in _SENSITIVE_SEGMENTS for seg in _SEGMENT_SPLIT.split(name.lower()) if seg)
 
 
-def secret_env_values(allowed_environment: Iterable[str]) -> tuple[str, ...]:
-    """Values of non-allowlisted, secret-named parent env vars, as defensive redaction literals.
+# Names :func:`is_sensitive_key` calls secret that never carry one, exempted from the harvest in
+# both of its branches. ``PWD``/``OLDPWD`` match on the segment ``pwd`` (which is there for
+# ``DB_PWD`` / ``MYSQL_PWD``) while holding a working directory — so the run's own absolute path was
+# being collected as a redaction literal, and every ``file:line`` citation in a report and in a
+# pull-request body came out as ``[REDACTED]/src/foo.py:42``. The length floor cannot help: a path
+# is always longer than eight characters.
+#
+# An exemption, not a change to :func:`is_sensitive_key`: dropping ``pwd`` from the segment set
+# would also stop scrubbing ``DB_PWD``, i.e. narrow the harvest to fix its width. Testing whether
+# the value looks like a real path was rejected too — it would put a disk probe inside a pure
+# function and make redaction differ between machines. The exemption is by exact name, so
+# ``TOKEN_PWD`` is unaffected.
+#
+# It applies to BOTH branches below on purpose. Under strict isolation an operator could work around
+# the defect by allowlisting ``PWD``; advanced mode takes that escape away (the allowlist stops
+# exempting anything), so an exemption that only existed in the wide branch would fix the mode and
+# leave the default broken. The property "the mode's literal set is never smaller than the strict
+# one" is also compared after the exemption, so applying it once on each side keeps that intact
+# rather than one-sidedly breaking it.
+_HARVEST_EXEMPT_NAMES: frozenset[str] = frozenset({"PWD", "OLDPWD"})
 
-    The single source of truth for env-secret harvesting: a value is collected only when its env-var
-    name looks secret-bearing (:func:`is_sensitive_key`), the name is **not** on the process
-    allowlist (allowlisted vars are deliberately exported, not secrets to scrub), and the value is
-    at least :data:`_MIN_DENIED_SECRET_LEN` chars (so short values like ``true`` are never turned
-    into a redaction literal that would mangle unrelated output). Used by the provider adapters and
-    the memory write path to scrub a known secret value that matches no structural token shape.
+
+def secret_env_values(
+    allowed_environment: Iterable[str], *, exempt_allowlisted: bool = True
+) -> tuple[str, ...]:
+    """Values of secret-named parent env vars, as defensive redaction literals.
+
+    The single source of truth for env-secret harvesting. A value is collected when its env-var
+    name looks secret-bearing (:func:`is_sensitive_key`), the name is not in
+    :data:`_HARVEST_EXEMPT_NAMES`, and the value is at least :data:`_MIN_DENIED_SECRET_LEN` chars
+    (so short values like ``true`` are never turned into a redaction literal that would mangle
+    unrelated output). Used by the provider adapters and the memory write path to scrub a secret
+    that matches no structural token shape.
+
+    ``exempt_allowlisted`` decides whether membership of *allowed_environment* also excuses a name,
+    and it tracks ``security.strict_isolation``:
+
+    * **True** (strict isolation) — an allowlisted variable is exported on purpose, so it is not a
+      secret to scrub, and leaving it alone keeps legitimate values readable in artifacts.
+    * **False** (advanced mode) — the allowlist does not gate what a child receives
+      (:func:`~wastech_orchestrator.security.env.build_child_env`), so "not allowlisted" would match
+      nothing and this layer would collect an empty set — precisely when the environment holds the
+      most secrets, and precisely for the secrets that have no recognizable shape for the structural
+      patterns to catch. So the allowlist stops excusing anything and the name policy decides alone.
+
+    The accepted cost of the wide branch is a secret-named variable whose value is harmless being
+    scrubbed out of output. The structural layers (``ghp_…``, ``sk-…``, ``AKIA…``, ``Bearer …``,
+    JWT, ``NAME=value``) are unaffected either way — they never consulted the allowlist.
     """
-    allowed = set(allowed_environment)
+    allowed = set(allowed_environment) if exempt_allowlisted else set()
     return tuple(
         value
         for key, value in os.environ.items()
-        if key not in allowed and len(value) >= _MIN_DENIED_SECRET_LEN and is_sensitive_key(key)
+        if key not in allowed
+        and key not in _HARVEST_EXEMPT_NAMES
+        and len(value) >= _MIN_DENIED_SECRET_LEN
+        and is_sensitive_key(key)
     )
 
 

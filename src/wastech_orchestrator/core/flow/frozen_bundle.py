@@ -7,7 +7,7 @@ Two independent freezers snapshot different-but-adjacent inputs at task start:
   reads/executes those bytes with the orchestrator's own authority, so a mid-run mutation is an
   execution-boundary violation routed to ``manual_action_required``.
 * :mod:`~wastech_orchestrator.core.flow.instruction_bundle` freezes the *agent inputs* —
-  the task packet, selected skill packages, and root repository instruction files — so a later
+  the task packet and the root repository instruction files — so a later
   agent/evaluator/supervisor/resume/fallback call cannot receive instructions the running task was
   never validated against.
 
@@ -50,7 +50,8 @@ def inspect_frozen_source(
     must
     be a regular file (not a fifo/socket/device), must have exactly one hard link (no alias back to
     another live location), and must carry no NTFS alternate data stream. ``label`` names the input
-    class in the error message (e.g. ``"control input"``, ``"skill file"``) so the message reads
+    class in the error message (e.g. ``"control input"``, ``"repository instruction"``) so the
+    message reads
     naturally for whichever freezer called it; ``error_cls`` selects the caller's subclass so a
     ``pytest.raises``/``except`` on the specific type still matches.
     """

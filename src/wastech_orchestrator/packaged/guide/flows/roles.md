@@ -6,7 +6,7 @@
 
 - A plain Markdown file, no front matter, no schema — just prompt text.
 - **Owned by the flow.** Each flow keeps its prompts in a sibling folder named after its `task_type`: `.worc/flows/<task_type>/<name>.md`. A node's `role_file` is relative to `.worc/flows/` and must stay inside that folder (`role_file: my_flow/implement.md`); a `..`/absolute path fails validation.
-- **One role file per node.** To change only _what a step says_, edit its `role_file` — you do not need a new flow.
+- **One role file per node** — with one optional second file for re-entry. To change only _what a step says_, edit its `role_file`; you do not need a new flow. A node that runs more than once on the same conversation may also declare a `resume_role_file` (see below).
 - The one shared exception is the supervisor lens at `.worc/flows/roles/supervisor.md`, used by every flow that does not override it (see below).
 
 Prompts are short and imperative. They reference artifacts by path variable (never inlined content) and wrap any optional variable in a `{?name}…{/name}` block. Keep them focused on the node's single job.
@@ -41,7 +41,7 @@ A non-blocking evaluator (`blocking: false`) never parks the task: once its `max
 
 `role` is an audit/behavior discriminator, not a permission — every evaluator is forced `read-only` and can never use `editing_lineage` (see [reference.md](reference.md)).
 
-An audit lens that treats delivery history as evidence — "did the change that closed this milestone actually touch what it claims" — can be given the read-only git verbs with `git_evidence: true`, provided the operator turned `security.allow_git_evidence` on. It stays read-only: the verbs only report, the sandbox denies every write, and publishing is still the orchestrator's. See [Read-only git evidence](reference.md#read-only-git-evidence).
+An audit lens that treats delivery history as evidence — "did the change that closed this milestone actually touch what it claims" — can be given the read-only git verbs with `git_evidence: true`, provided the operator turned `security.allow_git_evidence` on. It stays read-only: the verbs only report, the sandbox denies every write, and publishing is still the orchestrator's. In advanced mode (`security.strict_isolation: false`) the key is inert — the node already has an unscoped shell. See [Read-only git evidence](reference.md#read-only-git-evidence).
 
 ## Named output slots (`output_artifact`)
 
@@ -70,6 +70,45 @@ A node that writes a document — a report, a translated chapter, a generated sp
 
 One portable filename (no `/`, no `..`), resolved inside the flow's `output_policy` report directory — the only place the node may write anyway — or the repository root for a policy without one. It is mutually exclusive with `output_artifact` (a slot node's channel is its slot). Two things to write into the prompt when you use it: the file has to **stand alone**, since no closing message travels with it, and the filename in the prompt has to match the one in the flow. If the file never appears the channel falls back to the message and the run logs a warning — never a silent empty handoff.
 
+## When a node re-enters a live session (`resume_role_file`)
+
+A node in a loop is run more than once on the same conversation. By default every one of those turns is handed the whole role file again — the same rules and the same remit, into a session that already contains them — and with `test_fix: 15` that is fifteen restatements riding a history the provider re-sends each turn. Worse than the tokens: a start-of-work text ("Implement the assigned task…") replayed as a reply reads as "start over" to an agent that merely ran out of turns.
+
+Name a second, short file and the orchestrator decides which one each turn gets:
+
+```yaml
+- id: fixing
+  kind: agent
+  role_file: my_flow/fixing.md
+  resume_role_file: my_flow/fixing.continue.md # only on a turn that continues this node's session
+  session_scope: editing_lineage
+  lineage_affinity: implement
+```
+
+**You never write the choice into the prompt.** The continuation file is used only when a session is live _and_ this node has already spoken on it. That second half is the part worth understanding: `fixing` joins the session `implement` opened, so on its first round the conversation has history but nobody has stated `fixing`'s rules yet — it gets the full text. From round two on it gets the short one. The same holds for a node that follows an accepted review on the same lineage.
+
+If the session is lost — the provider dropped it, or the run failed over to the other provider — that attempt is handed the **full** text automatically, so a continuation turn can never land in an empty conversation.
+
+**The orchestrator drops its own boilerplate too.** Its security contract — the block it prepends to every prompt itself — is sent on the turn that *opens* a session and withheld from every turn that resumes one, where it is already in the conversation. That is decided per attempt from the same field as the resume itself, so an attempt that lost its session gets the contract back with the full text. The context-files footer is never dropped: those paths are the one thing that really changes round to round.
+
+What to write into it: what changed since the last turn (the artifact paths, which are the only thing that really differs round to round), what is expected of this turn, and **one line of the output contract where the wording carries meaning the schema cannot** — an evaluator's "grade honestly, the flow decides the gate" is enforced by nothing else. What to leave out: the rules, the remit, and anything already stated. If the continuation file restates the main one, it has bought nothing. The exception is a rule about **reporting** rather than about the work — "a command that fails under you is evidence about your sandbox" applies to every round's report, so it stays.
+
+Both files render the same variables, and the runner reads both when deciding whether to build an optional one — so `{?memory_path}` works in either. Prefer not to repeat it: the packet was already delivered on the fresh turn and is in the session.
+
+Allowed only where a session actually survives: `editing_lineage` on an agent node, `resume_own_lineage` on an evaluator. Anywhere else it is a validation error rather than a field that quietly never fires.
+
+## When the node should run your own repository's skills (`skills:`)
+
+A node can name skills your repository already ships (`skills: [acme-tdd]`) rather than have you re-state their contents in a role prompt. That changes nothing about how you write the role file, and there is nothing to add to it: the orchestrator appends the naming block itself, at the same seam it prepends the security contract. **Do not put the skill names in the role file** — a `/name` you type into a prompt is just text the model may or may not act on, while the key is a validated field the run refuses to start without.
+
+Two consequences worth keeping in mind while you write the prompt.
+
+**Your role prompt outranks the skill, and the block says so.** The appended text ends by stating that where a skill conflicts with the instructions above it, those instructions win, and that no skill grants any right to publish. That is a statement, not an enforcement: a skill is arbitrary text from the target repository which nothing here froze or reviewed, and it can contradict the role prompt, the output contract, or the security preamble. So a node with an output contract — an evaluator's findings, a decomposition proposal — is the wrong place to reach for a skill that has opinions about output shape, and evaluator nodes cannot declare skills at all in this version.
+
+**The node still has to do its own job.** A skill describes how your team does something; the role file still has to say what this step delivers and in what form. Write the prompt as if the skill were not there, and let the skill supply the house conventions.
+
+The field's own constraints — advanced mode only, the skill must exist in the target repository, off unless asked, and what the off-switch does and does not stop — are in [reference.md](reference.md#node-declared-skills).
+
 ## Custom output schema (the one real foot-gun)
 
 An `agent` node may set an inline `output_schema:` to return data of your own shape. If you do, **every object in the schema — top level and every nested object — must set `additionalProperties: false`.** Codex enforces `--output-schema` through OpenAI Structured Outputs and rejects a non-strict schema with a hard **400**, failing the node on every run. Claude tolerates a loose schema, but write it strict so the flow runs on both providers. Prefer the built-in contract unless you genuinely need a custom shape; keep a string `content` field if the node also fills a slot.
@@ -92,7 +131,7 @@ Only the **wording** moves into files. The structured-output schemas (the memory
 - Regardless of mode, `tool` and `checks` nodes are **never** observed (their result is already a recorded fact — the node's outcome and, for checks, the per-command pass/fail — so an LLM note about it bought nothing and cost a full call per run), and neither is the terminal `publish` node.
 - The finalize turn runs on a **fresh** session, not as a continuation of those observations, and it happens under **every** mode including `none`. It is seeded by a small deterministic **packet** — a JSON file reachable as `packet` in its context footer, published at `.worc-io/<task-id>/supervisor/packet.json` — holding the changed paths and diff stat (with the full diff inlined only while it is small, otherwise a pointer to `current.diff`), every executed node with its outcome and what it reported, which check commands passed/failed/were skipped, a pointer to the latest evaluator findings, and whatever observations were recorded (none, at `mode: none`). The packet is built from the recorded node runs and each node's own output file, never from the observations, which is why turning them off costs you nothing in the summary. A finalize lens should therefore tell the turn to ground itself in that packet and to open the artifacts it points at — never to write from memory of the run, which it does not have — and should treat the observation section as possibly empty rather than promising to relay it.
 
-**What the layer cost you is written next to the summary.** Every run leaves a `supervisor_usage` block in `.worc/logs/<task-id>/summary.json` (local only — it is never committed and never reaches the pull-request body): calls, input, cached input, output, cost and provider wall time, given both as a total and split by which job spent it — `observe`, `finalize`, `handoff`, `skill`. That split is the number to look at before changing a cadence: it tells you whether the per-step notes actually cost more than the one turn that writes the summary on _your_ flow, instead of you having to guess. `cost` reads `null` when the provider does not report one (Codex), and a `calls_without_usage` count appears if some call reported no figures at all, so a total is never quietly short.
+**What the layer cost you is written next to the summary.** Every run leaves a `supervisor_usage` block in `.worc/logs/<task-id>/summary.json` (local only — it is never committed and never reaches the pull-request body): calls, input, cached input, output, cost and provider wall time, given both as a total and split by which job spent it — `observe`, `finalize`, `handoff`. That split is the number to look at before changing a cadence: it tells you whether the per-step notes actually cost more than the one turn that writes the summary on _your_ flow, instead of you having to guess. `cost` reads `null` when the provider does not report one (Codex), and a `calls_without_usage` count appears if some call reported no figures at all, so a total is never quietly short.
 
 **Set `finalize_role_file` whenever your deliverable is not a diff.** The built-in finalize lens summarizes "the actual committed change", which reads wrong for a document, a report, or a translation — and that summary becomes the pull-request body. Two things a good finalize lens says, both learned the hard way: the turn is a read-only observer, so it must describe what the _pipeline_ did rather than assert that it re-opened or spot-checked anything itself; and it must not state a count or a verdict it was not given ("all citations passed", "all gates passed"). It does not have to guess at the latter — the orchestrator appends every in-flow evaluator's recorded verdict and findings to that turn's prompt, so a gate that accepted **with** findings open cannot honestly be summarized as one that passed. The packaged `deep_research/summary.md` is the worked example.
 
@@ -101,7 +140,7 @@ Only the **wording** moves into files. The structured-output schemas (the memory
 1. State the node's single job in the imperative; name the artifacts it should read by path variable.
 2. For an evaluator, spell out the findings contract explicitly (severities, the `path`/`what`/`fix` fields, "empty array when clean").
 3. Wrap every optional variable in `{?name}…{/name}` so a missing value never leaves a dangling fragment.
-4. Run `worc validate-flow <name>` — its anti-drift lint **warns** about any `{name}` no node populates (a typo like `{plna_path}` would otherwise ship as literal text). It is a warning, not a failure, because a verbatim render is the safe fallback.
-5. Set `prompt_audit: true` to inspect the exact rendered prompt per node under `logs/<task-id>/prompt-audit/`.
+4. Run `worc validate-flow <name>` — its anti-drift lint **warns** about any `{name}` no node populates (a typo like `{plna_path}` would otherwise ship as literal text), in a `resume_role_file` as well as in the main one. It is a warning, not a failure, because a verbatim render is the safe fallback.
+5. Set `prompt_audit: true` to inspect the rendered prompt per node under `logs/<task-id>/prompt-audit/`. A node with two prompts records both, and each attempt says which of them it received — read that per attempt, not per node, because a run that lost its session got the full text however it began.
 
 See [prompt-variables.md](prompt-variables.md) for the full `{name}` allowlist, which runner populates each, and the `{<node_id>_path}` chaining channel.

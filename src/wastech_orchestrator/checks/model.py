@@ -129,8 +129,8 @@ def normalize_command_sets(command_sets: Mapping[str, CommandSet]) -> tuple[Reso
 
 def is_safe_relpath(value: str) -> bool:
     """True iff ``value`` is a repo-relative path — not absolute, no ``~``, no ``..`` traversal, not
-    Windows-absolute. Mirrors the former ``checks/inspect.py`` ``_safe_scope_paths`` rule; used to
-    validate a check command's ``cwd`` at config-load time (and before the runner joins it)."""
+    Windows-absolute. Used to validate a check command's ``cwd`` at config-load time, and again
+    before the runner joins it."""
     norm = value.replace("\\", "/").strip()
     if not norm:
         return False

@@ -32,7 +32,6 @@ ALLOWED_PROMPT_VARS: frozenset[str] = frozenset(
         "subtask_order",
         "subtask_count",
         "subtask_spec_path",
-        "skills_path",
         "memory_path",  # per-node retrieval packet path (memory subsystem); node-driven, may be ""
         "predecessor_context",  # intra-task subtask handoff brief path; node-driven, may be ""
     }

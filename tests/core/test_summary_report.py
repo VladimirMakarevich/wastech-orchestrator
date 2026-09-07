@@ -94,7 +94,7 @@ def _render(facts: PacketFacts, **kwargs) -> str:
 
 
 def test_two_renders_of_the_same_facts_are_byte_identical() -> None:
-    # The same contract the packet keeps (P0-D2). `skipped_nodes` is a frozenset, whose iteration
+    # The same contract the packet keeps. `skipped_nodes` is a frozenset, whose iteration
     # order varies with the hash seed, so an unsorted render would differ ACROSS processes while
     # passing every in-process comparison — hence several names here, and the sort in the renderer.
     facts = _facts(diff_text=_DIFF, steps=(_step("implementation"), _step("review", "evaluator")))

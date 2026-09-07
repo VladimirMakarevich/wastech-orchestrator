@@ -84,7 +84,10 @@ def test_non_interactive_codex_only(git_repo: Any, monkeypatch: pytest.MonkeyPat
     cfg = load_config(config_path).config
     assert cfg.agents.allowed == (ProviderId.CODEX,)
     assert cfg.git.footprint.audit_on_branch is AuditBranch.TASK
-    assert cfg.validation.quarantine_folder == str(
+    # Left at the default, which is repo-root-relative: `install` no longer freezes an absolute
+    # path into the config, and the orchestrator resolves it against `repo.local_path`.
+    assert cfg.validation.quarantine_folder == "./.worc/tasks/rejected"
+    assert (Path(cfg.repo.local_path) / cfg.validation.quarantine_folder).resolve() == (
         git_repo.clone.resolve() / ".worc" / "tasks" / "rejected"
     )
     assert cfg.repo.local_path == str(git_repo.clone.resolve())

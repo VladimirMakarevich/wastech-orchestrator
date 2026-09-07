@@ -68,6 +68,11 @@ def _assert_reasoning_config(argv: list[str], value: str) -> None:
     assert f'model_reasoning_effort="{value}"' in _config_values(argv)
 
 
+def _disable_pairs(argv: list[str]) -> list[str]:
+    """Every feature name passed via ``--disable``, in argv order."""
+    return [argv[i + 1] for i, tok in enumerate(argv) if tok == "--disable"]
+
+
 def test_leaves_project_doc_discovery_enabled(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
@@ -121,6 +126,38 @@ def test_tool_surfaces_disabled(
     assert {"hooks", "multi_agent", "computer_use", "plugins"} <= disabled
 
 
+def test_the_extra_browser_surfaces_and_the_memory_store_are_disabled_too(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # Grounded in a live `codex features list` inventory: the deny is extended only where an ENABLED
+    # flag is a distinct surface that executes something or reaches data. An external browser and
+    # full CDP access reach the operator's own browser session, the in-app browser is a third name
+    # for the same class, and `memories` persists task content outside this orchestrator's redaction
+    # net — none of the four passes through the profiled shell, which is what the sandbox covers.
+    argv = _argv(codex_config, make_request())
+    disabled = {argv[i + 1] for i, tok in enumerate(argv[:-1]) if tok == "--disable"}
+    assert {
+        "browser_use",
+        "browser_use_external",
+        "browser_use_full_cdp_access",
+        "in_app_browser",
+        "memories",
+    } <= disabled
+    # And the names deliberately left enabled: disabling the profiled shell itself would remove the
+    # agent's ability to work, and the rest are either sub-surfaces of an already-denied flag or
+    # ship disabled anyway.
+    assert (
+        not {
+            "unified_exec",
+            "plugin_sharing",
+            "remote_plugin",
+            "enable_mcp_apps",
+            "standalone_web_search",
+        }
+        & disabled
+    )
+
+
 def test_deny_policy_and_write_guard_projected_into_profile(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
@@ -128,7 +165,6 @@ def test_deny_policy_and_write_guard_projected_into_profile(
         control_home=Path("/clone/.worc"),
         private_home=Path("/clone/.worc"),
         env_file=None,
-        provider_homes=(Path("/home/op/.codex"),),
     )
     wg = ProviderWriteGuardPolicy(
         exchange_root=Path("/clone/.worc-io"),
@@ -145,7 +181,6 @@ def test_deny_policy_and_write_guard_projected_into_profile(
     )
     profile = _profile_arg(argv)
     assert _fs_rule("/clone/.worc", "deny") in profile  # private/control home denied
-    assert _fs_rule("/home/op/.codex", "deny") in profile  # provider auth home denied
     assert _fs_rule("/clone/.env", "deny") in profile  # denied_read_paths projected
     assert _fs_rule("/clone/secrets", "deny") in profile
     assert _fs_rule("/clone/.worc-io", "read") in profile  # exchange readable, write-denied
@@ -166,11 +201,13 @@ def test_no_prompt_text_is_interpolated_into_argv(
 def test_no_legacy_sandbox_network_override(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # The old workspace-write network override is gone; network lives in the profile.
+    # The old workspace-write network override is gone; network lives in the profile, and it follows
+    # the attempt's effective grant rather than being pinned off.
     for networked in (True, False):
         argv = _argv(codex_config, make_request(network_access=networked))
         assert "sandbox_workspace_write.network_access=true" not in _config_values(argv)
-        assert '"network" = { "enabled" = false }' in _profile_arg(argv)
+        enabled = "true" if networked else "false"
+        assert f'"network" = {{ "enabled" = {enabled} }}' in _profile_arg(argv)
 
 
 def test_web_search_disabled_when_offline(
@@ -185,9 +222,42 @@ def test_web_search_disabled_when_offline(
 def test_web_search_not_disabled_when_network_granted(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
-    # An online node keeps its web_search grant; the profile still keeps the shell sandbox offline.
+    """An online node keeps web_search — and its profile is online too, on the same flag.
+
+    Before this the two halves disagreed: ``web_search`` followed the grant while the profile pinned
+    ``network.enabled = false``, so a node the flow put online had a web tool and an offline shell.
+    The pair is one decision now. The combination is legal for a ``read-only`` node;
+    ``workspace-write`` + network is refused by the flow validator outside the advanced mode, which
+    is why that pairing is only ever built in the mode's own tests.
+    """
     argv = _argv(codex_config, make_request(network_access=True))
     assert 'web_search="disabled"' not in _config_values(argv)
+    assert '"network" = { "enabled" = true }' in _profile_arg(argv)
+
+
+def test_the_advanced_mode_is_online_for_a_node_that_was_granted_no_network(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    """In the mode BOTH surfaces open, whatever the flow granted.
+
+    Half a network is the failure mode worth its own test, because the two are enforced in different
+    places: the profile's sandbox network is what a shell (``restore``, ``npm ci``) needs, while
+    ``web_search`` runs on the backend, outside that profile entirely. One effective flag drives
+    both, so neither can open without the other.
+    """
+    argv = _argv(codex_config, make_request(network_access=False), strict_isolation=False)
+    assert '"network" = { "enabled" = true }' in _profile_arg(argv)
+    assert 'web_search="disabled"' not in _config_values(argv)
+
+
+def test_outside_the_mode_an_offline_node_is_offline_on_both_surfaces(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # The counterweight, and the shipped default: nothing about the network moved for a node with no
+    # grant. Both halves in one place, so a later edit cannot open one of them quietly.
+    argv = _argv(codex_config, make_request(network_access=False))
+    assert '"network" = { "enabled" = false }' in _profile_arg(argv)
+    assert 'web_search="disabled"' in _config_values(argv)
 
 
 def test_output_schema_flag_only_when_requested(
@@ -281,17 +351,25 @@ def test_benign_extra_args_are_appended(
     assert "--image" in argv and "/tmp/diagram.png" in argv
 
 
-def test_danger_full_access_escape_builds_legacy_sandbox_argv(
-    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+@pytest.mark.parametrize(
+    "extra_args",
+    [
+        ("--sandbox", "danger-full-access"),
+        ("--sandbox=danger-full-access",),
+        ("-s", "danger-full-access"),
+    ],
+)
+def test_full_access_selector_never_builds_argv(
+    codex_config: ProviderConfig,
+    make_request: Callable[..., AgentRunRequest],
+    extra_args: tuple[str, ...],
 ) -> None:
-    # The full-access escape (danger-full-access, non-strict) makes NO isolation claim:
-    # it emits the legacy --sandbox flag and no permission profile. strict_isolation gates it at
-    # preflight (tests/security/test_isolation.py), not the argv builder.
-    full = replace(codex_config, sandbox="danger-full-access")
-    argv = _argv(full, make_request())
-    assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
-    assert not any(v.startswith(f"permissions.{PROFILE_NAME}=") for v in _config_values(argv))
-    assert "--ignore-user-config" not in argv
+    # Selecting full access discarded the generated profile wholesale — writable `.git`, and a
+    # canary with no profile left to prove. Nothing may select it, so the argv is never built.
+    cfg = replace(codex_config, extra_args=extra_args)
+    with pytest.raises(ProviderError) as exc:
+        _argv(cfg, make_request())
+    assert exc.value.error_class is ErrorClass.CONFIGURATION_ERROR
 
 
 def test_default_isolation_argv_unchanged(
@@ -423,7 +501,7 @@ def test_session_id_builds_exec_resume_with_isolation_before_resume(
     # (model_reasoning_effort) follow it. This keeps fresh/resume isolation identical.
     argv = _argv(
         codex_config,
-        make_request(session_id="sess-123", model="gpt-5.4", reasoning="high"),
+        make_request(session_id="sess-123", model="gpt-5.5", reasoning="high"),
         schema="/logs/schema.json",
     )
     resume = argv.index("resume")
@@ -455,3 +533,93 @@ def test_no_session_id_has_no_resume(
     codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
 ) -> None:
     assert "resume" not in _argv(codex_config, make_request())
+
+
+def test_advanced_mode_hands_back_every_feature_surface_but_keeps_the_profile(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # Every name in the set is disabled unconditionally under strict isolation (all but `hooks`,
+    # which follows read-isolation). Keeping them off in the one mode that exists to remove
+    # restrictions would turn a floor control into a plain loss of function — including the browser
+    # surfaces and the memory store.
+    argv = _argv(
+        codex_config,
+        make_request(working_directory="/clone", allow_skills=True),
+        strict_isolation=False,
+        read_isolation_off=True,
+    )
+    assert "--disable" not in argv
+    # The one exception, and it is not the mode's doing: a node that did not ask for skills gets the
+    # per-node off-switch here as it does everywhere, which is a flow narrowing itself rather than
+    # the mode withholding a surface. Asked for above, so this arm stays the clean "nothing
+    # disabled" assertion it was written to be.
+    assert "--disable" in _argv(
+        codex_config,
+        make_request(working_directory="/clone"),
+        strict_isolation=False,
+        read_isolation_off=True,
+    )
+    # What does NOT become optional: the generated profile and its selection. It is the local floor
+    # in this mode, and it is what the pre-launch canary re-runs to prove that floor exists at all.
+    assert f'default_permissions="{PROFILE_NAME}"' in _config_values(argv)
+    assert any(v.startswith(f"permissions.{PROFILE_NAME}=") for v in _config_values(argv))
+
+
+# -- node-declared skills -----------------------------------------------------------------------
+
+
+def test_skills_are_off_by_default_and_carried_by_the_feature_flag(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(codex_config, make_request())
+    assert _disable_pairs(argv).count("skill_search") == 1
+
+
+def test_skills_on_emits_no_skill_disable(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    argv = _argv(codex_config, make_request(allow_skills=True))
+    assert "skill_search" not in _disable_pairs(argv)
+
+
+def test_the_skill_disable_survives_advanced_mode(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # The isolation layer empties its whole feature-disable set in advanced mode. The node's own
+    # off-switch is emitted outside that set on purpose: folding it in would drop the flag in
+    # exactly the mode where skills are reachable.
+    argv = _argv(
+        codex_config,
+        make_request(working_directory="/clone"),
+        strict_isolation=False,
+        read_isolation_off=True,
+    )
+    assert _disable_pairs(argv) == ["skill_search"]
+
+
+def test_the_skill_disable_is_emitted_under_strict_isolation_too(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # `--ignore-user-config` plus an untrusted project is not established to stop host skill
+    # discovery — `skip_host_skill_discovery` exists as its own feature flag, which suggests it does
+    # not — so the explicit disable is emitted regardless of the mode.
+    assert "skill_search" in _disable_pairs(_argv(codex_config, make_request()))
+
+
+def test_required_skills_add_no_codex_argv(
+    codex_config: ProviderConfig, make_request: Callable[..., AgentRunRequest]
+) -> None:
+    # `codex exec` has no flag that names a skill, so the requiring direction is prompt-only here.
+    # It is not refused under strict isolation either: only the Claude adapter can act on the names.
+    argv = _argv(codex_config, make_request(required_skills=("acme-tdd",), allow_skills=True))
+    assert "skill_search" not in _disable_pairs(argv)
+    assert "acme-tdd" not in " ".join(argv)
+
+
+def test_effective_prompt_carries_the_required_skills_block(
+    make_request: Callable[..., AgentRunRequest],
+) -> None:
+    # The same Core-built block reaches Codex through the same neutral seam — no adapter learns the
+    # syntax, and the shipped docs say guaranteed invocation is Claude-only today.
+    prompt = build_effective_prompt(make_request(prompt="ROLE", required_skills=("acme-tdd",)))
+    assert "- /acme-tdd" in prompt and "the instructions above win" in prompt

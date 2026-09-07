@@ -314,6 +314,21 @@ def test_codex_workspace_write_with_network_is_fatal(tmp_path: Path) -> None:
     assert _has(vs, "config", "network_access=true")
 
 
+def test_codex_workspace_write_with_network_is_valid_in_the_advanced_mode(tmp_path: Path) -> None:
+    """The class ban is conditional on the mode, and this is the pair of tests that says which way.
+
+    The ban exists because "writes the clone AND reaches the network" is the shape a publishing
+    attempt needs. Under ``strict_isolation: false`` the operator has granted every node both by the
+    mode's own definition, so refusing the flow would refuse a configuration the run itself accepts
+    — protecting nothing while making a legal flow unloadable. Outside the mode it is unchanged
+    (the test above).
+    """
+    config = _config(tmp_path, strict_isolation=False)
+    snap = _snap(_flow(network_policy="research", extra="provider: codex"), tmp_path)
+    validate_flow(snap)
+    validate_flow_against_config(snap, config)
+
+
 def test_codex_read_only_with_network_is_valid(tmp_path: Path) -> None:
     config = _config(tmp_path)
     snap = _snap(
@@ -403,37 +418,30 @@ def test_threat_ceiling_above_provider_capability_fatal(tmp_path: Path) -> None:
     assert _has(vs, "config", "permission_ceiling")
 
 
+@pytest.mark.parametrize("strict_isolation", [True, False])
 @pytest.mark.parametrize(
     "extra",
     [
         "extra_args: ['--sandbox', 'danger-full-access']",  # Codex full-access sandbox
+        "extra_args: ['--sandbox=danger-full-access']",  # the inline spelling of the same
         "extra_args: ['--permission-mode', 'bypassPermissions']",  # Claude permission bypass
+        "extra_args: ['--permission-mode=bypassPermissions']",
     ],
 )
-def test_threat_node_full_access_blocked_under_strict_isolation(extra: str, tmp_path: Path) -> None:
-    # provider-config-cleanup Risk #2 (option b): a flow node selecting a provider full-access mode
-    # in extra_args is no longer an absolute ban (find_forbidden_args lets it through, so it is
-    # structurally valid), but under security.strict_isolation the config-aware layer rejects it —
-    # the flow-side half of the global isolation gate.
-    config = _config(tmp_path, strict_isolation=True)
-    vs = _config_violations(_flow(extra=extra), config, tmp_path)
-    assert _has(vs, "config", "strict_isolation")
-
-
-@pytest.mark.parametrize(
-    "extra",
-    [
-        "extra_args: ['--sandbox', 'danger-full-access']",
-        "extra_args: ['--permission-mode', 'bypassPermissions']",
-    ],
-)
-def test_node_full_access_allowed_when_strict_isolation_off(extra: str, tmp_path: Path) -> None:
-    # The operator opts in by setting strict_isolation: false; the gate then lets the node through
-    # (the operator owns the risk). validate_flow_against_config must not raise.
-    config = _config(tmp_path, strict_isolation=False)
-    snap = _snap(_flow(extra=extra), tmp_path)
-    validate_flow(snap)  # structurally valid (no absolute ban on the structured selector)
-    validate_flow_against_config(snap, config)  # no raise → operator-selected full access allowed
+def test_threat_node_full_access_is_always_rejected(
+    extra: str, strict_isolation: bool, tmp_path: Path
+) -> None:
+    # A target repository authors the flow, so a node's extra_args is the one full-access surface an
+    # operator never reviews. The rejection sits in the config-FREE ceiling layer, and that is what
+    # no config key can unlock — so the resolution path is driven with both values of the key that
+    # comes closest to being such an unlock, rather than the claim being argued from the signature.
+    flows_dir = tmp_path / "flows"
+    flows_dir.mkdir()
+    (flows_dir / "t.yaml").write_text(_flow(extra=extra))
+    config = _config(tmp_path, strict_isolation=strict_isolation)
+    with pytest.raises(FlowValidationError) as exc_info:
+        FlowRegistry(operator_flows_dir=flows_dir, config=config).resolve("t")
+    assert _has(exc_info.value.violations, "ceiling", "extra_args")
 
 
 def test_threat_direct_base_commit_blocked(tmp_path: Path) -> None:
@@ -504,3 +512,80 @@ def test_recovery_ceiling_only_narrows(tmp_path: Path) -> None:
     tightened = _config(tmp_path, claude_profile="read-only", codex_profile="read-only")
     with pytest.raises(FlowValidationError):
         FlowRegistry(operator_flows_dir=flows_dir, config=tightened).resolve("t")
+
+
+# =============================================================================
+# Node-declared skills: a flow may narrow, never widen (config-aware)
+# =============================================================================
+
+
+def _with_skill(tmp_path: Path, name: str = "acme-tdd") -> None:
+    """Create the target repository's skill so a declaration resolves fail-closed."""
+    skill = tmp_path / ".claude" / "skills" / name
+    skill.mkdir(parents=True, exist_ok=True)
+    (skill / "SKILL.md").write_text("---\nname: acme-tdd\ndescription: d\n---\n", newline="")
+
+
+def test_threat_skills_declared_under_strict_isolation_fatal(tmp_path: Path) -> None:
+    # Under strict isolation `--tools` is a hard existence gate carrying the profile baseline, so
+    # `Skill` does not exist for the session. Refused rather than accepted-and-inert: an inert
+    # `skills` would let a run report success having silently skipped the operator's tested step.
+    _with_skill(tmp_path)
+    vs = _config_violations(
+        _flow(extra="skills: [acme-tdd]"), _config(tmp_path, strict_isolation=True), tmp_path
+    )
+    assert _has(vs, "config", "'skills' requires security.strict_isolation: false")
+
+
+def test_threat_explicit_allow_skills_true_under_strict_isolation_fatal(tmp_path: Path) -> None:
+    # The quieter half of the same widening: asking for skills without naming one.
+    vs = _config_violations(
+        _flow(extra="allow_skills: true"), _config(tmp_path, strict_isolation=True), tmp_path
+    )
+    assert _has(vs, "config", "'allow_skills: true' requires security.strict_isolation: false")
+
+
+def test_an_absent_allow_skills_is_never_a_violation(tmp_path: Path) -> None:
+    # Silence is not a request. Refusing a flow for omitting a key would refuse every flow ever
+    # written, at both values of the switch — which is the whole reason the field is tri-state.
+    for strict in (True, False):
+        validate_flow_against_config(
+            _snap(_flow(), tmp_path), _config(tmp_path, strict_isolation=strict)
+        )
+
+
+def test_allow_skills_false_is_legal_at_either_isolation_value(tmp_path: Path) -> None:
+    # A narrowing needs no mode gate: `false` is legal wherever `strict_isolation` lands.
+    for strict in (True, False):
+        validate_flow_against_config(
+            _snap(_flow(extra="allow_skills: false"), tmp_path),
+            _config(tmp_path, strict_isolation=strict),
+        )
+
+
+def test_skills_accepted_in_advanced_mode_when_the_skill_exists(tmp_path: Path) -> None:
+    _with_skill(tmp_path)
+    validate_flow_against_config(
+        _snap(_flow(extra="skills: [acme-tdd]"), tmp_path),
+        _config(tmp_path, strict_isolation=False),
+    )
+
+
+def test_threat_declared_skill_missing_from_the_repo_is_fatal(tmp_path: Path) -> None:
+    # Fail-closed name resolution, before any launch and before any side effect: a run that
+    # silently skipped the operator's tested step is worse than one that refused to start. The
+    # message names the node, the skill and the path it looked at, so the fix needs no guessing.
+    vs = _config_violations(
+        _flow(extra="skills: [acme-tdd]"), _config(tmp_path, strict_isolation=False), tmp_path
+    )
+    expected = (tmp_path / ".claude" / "skills" / "acme-tdd" / "SKILL.md").as_posix()
+    assert _has(vs, "config", f"node 'work': skill 'acme-tdd' not found (expected {expected})")
+
+
+def test_a_skills_directory_without_a_skill_file_is_fatal(tmp_path: Path) -> None:
+    # The directory alone is not the skill: the CLI reads SKILL.md, so that is what must exist.
+    (tmp_path / ".claude" / "skills" / "acme-tdd").mkdir(parents=True)
+    vs = _config_violations(
+        _flow(extra="skills: [acme-tdd]"), _config(tmp_path, strict_isolation=False), tmp_path
+    )
+    assert _has(vs, "config", "skill 'acme-tdd' not found")

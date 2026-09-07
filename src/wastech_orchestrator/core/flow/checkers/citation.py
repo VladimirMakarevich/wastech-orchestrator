@@ -169,9 +169,10 @@ def _classify(repo_dir: str | Path, src: Any, index: int) -> CitationEntry:
         return here(CitationStatus.VERIFIED, "snippet present in the cited file (no line cited)")
     if needle in window_at(line_no):
         return here(CitationStatus.VERIFIED, "snippet present at the cited line")
-    # The quote is real but the location is not. Previously an `or` fallback accepted this as
-    # `verified`, which made the line number decorative: a correct snippet on a wrong in-range line
-    # passed the gate. Name the real line so synthesis can repair it in one round.
+    # The quote is real but the location is not — a distinct verdict, not a pass: accepting it as
+    # `verified` would make the cited line number decorative, since a correct snippet on a wrong
+    # in-range line would clear the gate. Name the real line so synthesis can repair it in one
+    # round.
     where = f"at line {found_at}" if found_at is not None else "elsewhere"
     return here(
         CitationStatus.WEAK, f"snippet found {where} in {rel_path!r}, not at line {line_no}"

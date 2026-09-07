@@ -1,11 +1,11 @@
-"""Agent Router: route resolution and infrastructure-only fallback (PRE.1).
+"""Agent Router: route resolution and infrastructure-only fallback.
 
 The layer between the Orchestrator Core and the provider adapters. For each node it:
 
 * resolves the ``(primary, fallback)`` pair from the flow node's ``provider`` field — the node's
   declared provider runs it, else the config's single global primary
   (``agents.providers.<id>.primary``); the fallback is that global primary (the sole infra-fallback
-  target) unless the primary already *is* it (PRE.1);
+  target) unless the primary already *is* it;
 * runs the primary and, **only** for infrastructure ``ProviderError`` classes (plus the conditional
   auth/permission case), falls back to the global primary;
 * counts ``stage_attempts`` across the fallback, bounded by ``agents.max_stage_attempts``;
@@ -46,16 +46,22 @@ from wastech_orchestrator.providers.capabilities import map_reasoning_for_provid
 from wastech_orchestrator.routing.snapshots import PartialChange, SnapshotHook
 from wastech_orchestrator.security.isolation import IsolationCheck
 from wastech_orchestrator.security.profiles import is_same_or_stricter
+from wastech_orchestrator.security.shell_reach import (
+    ShellCheck,
+    ShellQuery,
+    any_provider_grants_shell,
+)
 
 _LOG = logging.getLogger(__name__)
 
 # Error classes whose fallback is CONDITIONAL, decided here (not in providers.base):
 # * authorization_failed / permission_denied — only when the fallback provider runs in the same or a
 #   stricter permission profile (never relaxing the policy);
-# * capability_unavailable — only when the fallback is same-or-stricter AND can itself
-#   enforce the required isolation for the node on this host (``fallback_can_isolate``), so the
-#   Router never recovers a missing-sandbox refusal by falling over to an equally-unisolable
-# provider.
+# * capability_unavailable — only when the fallback is same-or-stricter AND is itself configured to
+#   isolate (``fallback_can_isolate``), so a capability refusal is never recovered by falling over
+#   to a provider whose own config forbids isolating. Whether the *host* can enforce a floor is
+#   deliberately not part of this: that answer is advisory everywhere else, and the fallback
+#   provider decides it per attempt, with the node's declaration in hand, before any CLI launches.
 CONDITIONAL_FALLBACK: frozenset[ErrorClass] = frozenset(
     {
         ErrorClass.AUTHORIZATION_FAILED,
@@ -78,7 +84,7 @@ def fallback_allowed(
     :data:`~wastech_orchestrator.providers.base.FALLBACK_ELIGIBLE`; conditional for
     ``authorization_failed`` / ``permission_denied`` (only when the fallback profile is the same or
     stricter — never relaxing the policy) and for ``capability_unavailable`` (same-or-stricter AND
-    ``fallback_can_isolate`` — the fallback must itself be able to isolate the node on this host);
+    ``fallback_can_isolate`` — the fallback's own configuration must permit isolating);
     never for quality (``task_failure``) or configuration errors. Pure and directly unit-tested as a
     decision table.
     """
@@ -109,7 +115,7 @@ def _earlier(current: str | None, candidate: str | None) -> str | None:
 
 
 def _resolve_global_primary(config: OrchestratorConfig) -> ProviderId:
-    """The single ``agents.providers.<id>.primary: true`` provider (PRE.1).
+    """The single ``agents.providers.<id>.primary: true`` provider.
 
     ``validate_config`` already guarantees exactly one; this is defensive so a router built from an
     unvalidated config fails loud (``ConfigError``) rather than silently picking a provider.
@@ -139,7 +145,7 @@ class ResolvedRoute:
     """The chosen primary/fallback for a node, with its route source.
 
     ``node_id`` is the flow node's id, carried for audit/logging only — it never selects the
-    provider (routing is node-based via the node's ``provider`` field, PRE.1).
+    provider (routing is node-based via the node's ``provider`` field).
     """
 
     node_id: str
@@ -157,6 +163,19 @@ class ProviderAttempt:
     status: RunStatus | None  # None when the run raised a ProviderError
     error_class: ErrorClass | None
     result: AgentRunResult | None
+    # What THIS attempt was launched with, resolved the way the adapter resolves it (a flow node's
+    # override, else the provider's configured default). Per attempt because a cross-provider
+    # fallback re-resolves against the substitute's own config: a stage that failed over from
+    # ``codex``/``gpt-5.5`` to ``claude`` did not run on ``gpt-5.5``, and one value for the stage
+    # would say it did. Defaulted so a row built without them (unit harnesses) stays valid.
+    model: str | None = None
+    reasoning: str | None = None
+    # Whether THIS attempt was launched against a live session. Per attempt for the same reason the
+    # two fields above are: the degradations below hand a substitute attempt a request with the
+    # session cleared, so a stage that began as a continuation of an existing conversation did not
+    # necessarily stay one. The prompt audit reads it to say which of a node's two prompt texts an
+    # attempt received; a node with only one text is unaffected either way.
+    resumed: bool = False
 
 
 @dataclass(frozen=True)
@@ -186,6 +205,7 @@ class AgentRouter:
         sleep: Callable[[float], None] = time.sleep,
         is_cancelled: Callable[[], bool] = lambda: False,
         isolation_checks: Mapping[ProviderId, IsolationCheck] | None = None,
+        shell_checks: Mapping[ProviderId, ShellCheck] | None = None,
     ) -> None:
         self._config = config
         self._providers = providers
@@ -194,21 +214,26 @@ class AgentRouter:
         # Set only by the watch daemon: True once an operator stop was requested. Checked before any
         # fallback/retry so a stop-killed agent is never respawned on another provider.
         self._is_cancelled = is_cancelled
-        # The offline ProviderId→isolation-check table (the same one composition binds), so
-        # a ``CAPABILITY_UNAVAILABLE`` fallback is allowed only to a provider that can itself
-        # isolate
-        # the node on this host. The router imports no concrete adapter — the table is injected.
+        # The offline ProviderId→isolation-check table (the same one composition binds), so a
+        # ``CAPABILITY_UNAVAILABLE`` fallback is allowed only to a provider whose own configuration
+        # is legal. The router imports no concrete adapter — the table is injected.
         self._isolation_checks = isolation_checks or {}
+        # The offline ProviderId→"does this attempt get a shell?" table (also injected, same
+        # reason). Empty means every answer is fail-closed ``True``: a caller that cannot classify
+        # an attempt brackets it rather than leaving it unwatched.
+        self._shell_checks = shell_checks or {}
         self._global_primary = _resolve_global_primary(config)
 
     def _can_isolate(self, pid: ProviderId) -> bool:
-        """Whether ``pid`` can enforce its required isolation on this host (offline; fail-closed).
+        """Whether ``pid``'s config permits isolating (offline, host-independent, fail-closed).
 
         Reuses the injected offline isolation check (``isolation_reasons``): an empty reason list
-        means the provider can isolate here. A missing check/config is treated as *cannot* isolate
-        (fail-closed), so a ``CAPABILITY_UNAVAILABLE`` fallback never silently reaches an
-        unverifiable
-        provider.
+        means nothing in that provider's config stands in the way. A missing check/config is treated
+        as *cannot* isolate (fail-closed), so a ``CAPABILITY_UNAVAILABLE`` fallback never silently
+        reaches an unverifiable provider. It asks nothing about the host: a host that cannot enforce
+        a floor is announced, not refused, and turning that into a denied fallback would resurrect
+        the refusal here — costing a legitimate hop (a read-only node needs no sandbox at all) while
+        the target provider already refuses the genuinely unsafe attempt itself.
         """
         check = self._isolation_checks.get(pid)
         cfg = self._config.agents.providers.get(pid)
@@ -216,22 +241,48 @@ class AgentRouter:
             return False
         return not check(cfg)
 
+    def route_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: str | None, git_evidence: bool
+    ) -> bool:
+        """Whether this attempt gets a shell on any provider it may land on (offline; fail-closed).
+
+        Both ends of the route are asked because the caller takes its detection bracket *before* the
+        run, and an infra failure on the primary can move the attempt to the fallback — a different
+        CLI with its own answer. Command execution, not the permission profile, is what makes a
+        working-tree write or a ``.git`` mutation reachable, so this is the question a bracket that
+        watches for one has to key on; the per-provider answers live in the adapters and reach here
+        through the injected table (see
+        :mod:`wastech_orchestrator.security.shell_reach`).
+        """
+        providers = [route.primary]
+        if route.fallback is not None:
+            providers.append(route.fallback)
+        return any_provider_grants_shell(
+            providers,
+            self._config.agents.providers,
+            self._shell_checks,
+            ShellQuery(
+                permission_profile=permission_profile,
+                git_evidence=git_evidence,
+                strict_isolation=self._config.security.strict_isolation,
+            ),
+        )
+
     def resolve_route(
         self,
         node_id: str,
         provider: ProviderId | None = None,
     ) -> ResolvedRoute:
-        """Resolve ``(primary, fallback)`` for a node from its declared ``provider`` (PRE.1).
+        """Resolve ``(primary, fallback)`` for a node from its declared ``provider``.
 
         A non-``None`` ``provider`` (the flow node's declared executor) runs the node; ``None``
         defaults to the config's global primary. When the resolved primary differs from the global
         primary, the fallback is that global primary. When the resolved primary already *is* the
         global primary, the fallback is the single *other* allowed+configured provider — symmetric
-        cross-provider failover (transient provider recovery, extending PRE.1's single fallback
-        target). With only one allowed provider there is no fallback (an infra failure on it is
-        handled by the same-provider retry budget, then the soft pause). ``node_id`` is carried for
-        audit/logging only; it no longer selects the provider. Raises :class:`ConfigError` on an
-        unknown or unavailable provider.
+        cross-provider failover. With only one allowed provider there is no fallback (an infra
+        failure on it is handled by the same-provider retry budget, then the soft pause).
+        ``node_id`` is carried for audit/logging only and never selects the provider. Raises
+        :class:`ConfigError` on an unknown or unavailable provider.
         """
         primary = provider if provider is not None else self._global_primary
         source = RouteSource.FLOW_NODE if provider is not None else RouteSource.CONFIG
@@ -336,12 +387,18 @@ class AgentRouter:
                     error_class=exc.error_class, message=str(exc), resets_at=exc.resets_at
                 )
                 attempts.append(
-                    ProviderAttempt(
-                        provider=pid,
-                        attempt=attempt_no,
+                    self._attempt_row(
+                        pid,
+                        req,
+                        attempt_no,
                         status=None,
                         error_class=exc.error_class,
-                        result=None,
+                        # The adapter's own result for the attempt that RAISED, when it built one.
+                        # ``status`` stays ``None`` — this row returned no verdict and nothing
+                        # downstream may read one off it — while the measured interval, the exit
+                        # code and the artifact directory become queryable instead of being
+                        # replaced by two identical reads of the row-write clock.
+                        result=exc.result,
                     )
                 )
                 log.info(
@@ -394,20 +451,22 @@ class AgentRouter:
                             resets_at=fresh_exc.resets_at,
                         )
                         attempts.append(
-                            ProviderAttempt(
-                                provider=pid,
-                                attempt=fresh_no,
+                            self._attempt_row(
+                                pid,
+                                fresh_req,
+                                fresh_no,
                                 status=None,
                                 error_class=fresh_exc.error_class,
-                                result=None,
+                                result=fresh_exc.result,
                             )
                         )
                         exc = fresh_exc  # the fallback decision below uses the fresh error
                     else:
                         attempts.append(
-                            ProviderAttempt(
-                                provider=pid,
-                                attempt=fresh_no,
+                            self._attempt_row(
+                                pid,
+                                fresh_req,
+                                fresh_no,
                                 status=result.status,
                                 error_class=result.error.error_class if result.error else None,
                                 result=result,
@@ -490,9 +549,10 @@ class AgentRouter:
                 continue
 
             attempts.append(
-                ProviderAttempt(
-                    provider=pid,
-                    attempt=attempt_no,
+                self._attempt_row(
+                    pid,
+                    req,
+                    attempt_no,
                     status=result.status,
                     error_class=result.error.error_class if result.error else None,
                     result=result,
@@ -577,12 +637,13 @@ class AgentRouter:
             except ProviderError as exc:
                 last_class = exc.error_class
                 attempts.append(
-                    ProviderAttempt(
-                        provider=pid,
-                        attempt=audit_attempt,
+                    self._attempt_row(
+                        pid,
+                        attempt_req,
+                        audit_attempt,
                         status=None,
                         error_class=exc.error_class,
-                        result=None,
+                        result=exc.result,
                     )
                 )
                 log.info(
@@ -601,9 +662,10 @@ class AgentRouter:
                     return None, last_class, audit_attempt  # non-transient → stop; fallback decides
                 continue
             attempts.append(
-                ProviderAttempt(
-                    provider=pid,
-                    attempt=audit_attempt,
+                self._attempt_row(
+                    pid,
+                    attempt_req,
+                    audit_attempt,
                     status=result.status,
                     error_class=result.error.error_class if result.error else None,
                     result=result,
@@ -635,7 +697,7 @@ class AgentRouter:
 
         A ``cross_provider`` fallback attempt (the substitute provider is a *different* CLI) drops
         provider-specific request fields: ``model``, most ``reasoning`` values, ``extra_args``,
-        and ``session_id``. A model id is provider-specific (codex ``gpt-5.4`` is not a Claude
+        and ``session_id``. A model id is provider-specific (codex ``gpt-5.5`` is not a Claude
         model), provider CLI flags in ``extra_args`` are not portable, and a durable session id
         belongs to one provider. Cleared values make the substitute re-resolve its own
         config/defaults while preserving portable context (prompt, paths, schema, permissions,
@@ -657,6 +719,38 @@ class AgentRouter:
                 session_id=None,
             )
         return req
+
+    def _attempt_row(
+        self,
+        pid: ProviderId,
+        req: AgentRunRequest,
+        attempt: int,
+        *,
+        status: RunStatus | None,
+        error_class: ErrorClass | None,
+        result: AgentRunResult | None,
+    ) -> ProviderAttempt:
+        """One ``provider_attempts`` row for an invocation of *pid* with *req*.
+
+        Every construction site goes through here so no attempt is recorded without the model,
+        reasoning and session state it ran at: the audit surface named for auditing carried the
+        flow-node override
+        (``None`` for a node that overrides nothing) while the effective value lived only in the
+        attempt's ``request.json``, so the two disagreed about the same run. Resolution is
+        :class:`ProviderConfig`'s, from the per-attempt request the adapter is handed — so a
+        cross-provider fallback, which clears the pinned model, records the substitute's own.
+        """
+        cfg = self._config.agents.providers[pid]
+        return ProviderAttempt(
+            provider=pid,
+            attempt=attempt,
+            status=status,
+            error_class=error_class,
+            result=result,
+            model=cfg.effective_model(req.model),
+            reasoning=cfg.effective_reasoning(req.reasoning),
+            resumed=req.session_id is not None,
+        )
 
     def _profile_of(self, pid: ProviderId) -> str:
         return self._config.agents.providers[pid].permission_profile

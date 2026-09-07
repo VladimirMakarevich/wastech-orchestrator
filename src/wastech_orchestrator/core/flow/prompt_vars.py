@@ -26,7 +26,8 @@ def node_output_vars(snapshot: FlowSnapshot) -> frozenset[str]:
     """The ``{<node_id>_path}`` names the flow's agent + tool nodes expose (node-output channel).
 
     Every **agent** node's output is persisted to ``<node_id>.out.md`` and every **tool** node's
-    stdout to ``tools/<node_id>/stdout.txt``; both are addressable downstream as
+    stdout to ``stdout.txt``, both under that pass's ``stages/<node_id>/run-<node_run_id>/`` dir;
+    both are addressable downstream as
     ``{<node_id>_path}`` (a path to a Core-written, redacted artifact, never inlined content). Only
     these two kinds *produce* the channel — an evaluator / checks / human node exposes nothing here
     and keeps its dedicated variable (``review_path`` / ``checks_path``). **Reading** it is not

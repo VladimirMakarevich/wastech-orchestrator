@@ -173,11 +173,10 @@ def test_session_id_scrub_does_not_shred_the_sinks(
     make_request: Callable[..., AgentRunRequest],
     tmp_path: Path,
 ) -> None:
-    # The raw session id is scrubbed from the on-disk sinks with a word-bounded replace. It used to
-    # be a bare `str.replace`, which is the unbounded-substring defect on a path it did not
-    # originally cover: a short id
-    # rewrites every occurrence of those characters INSIDE other words, so the sinks it rewrites
-    # stop being JSON. Harmless for a UUID, fatal for a short id — pin the short one.
+    # The raw session id is scrubbed from the on-disk sinks with a word-bounded replace, never a
+    # bare `str.replace`: an unbounded substring rewrite hits every occurrence of those characters
+    # INSIDE other words, so the sinks it rewrites stop being JSON. Harmless for a UUID, fatal for
+    # a short id — pin the short one.
     clone = _clone_with_env(tmp_path)
     payloads = (
         {"type": "user", "content": "result: session established, assessed"},

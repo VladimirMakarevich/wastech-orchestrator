@@ -5,9 +5,11 @@ from __future__ import annotations
 import logging
 
 from wastech_orchestrator.notify.interface import (
-    TRACE_READ_ONLY_GIT_DRIFT,
-    TRACE_READ_ONLY_WRITE,
+    TRACE_ADOPTED_COMMITS,
+    TRACE_FINDINGS_WITHOUT_A_PATH,
+    TRACE_GIT_CONTROL_DRIFT,
     TRACE_REWORK_EXHAUSTED,
+    TRACE_UNEXPECTED_WRITE,
     NullNotifier,
     TerminalDetails,
     TerminalFinding,
@@ -254,22 +256,43 @@ def test_send_trace_rework_exhausted_renders_warning(fake_client: FakeTelegramCl
     assert "⚠️" in text and TRACE_REWORK_EXHAUSTED in text
 
 
-def test_send_trace_read_only_write_renders_warning(fake_client: FakeTelegramClient) -> None:
+def test_send_trace_unexpected_write_renders_warning(fake_client: FakeTelegramClient) -> None:
     # A read-only node that wrote to the workspace renders ⚠️ too: the node finished, but the
     # read-only guarantee did not hold and the tree needs a look.
     n = _notifier(fake_client)
-    n.send_trace(task_id="t", node_id="audit", outcome=TRACE_READ_ONLY_WRITE)
+    n.send_trace(task_id="t", node_id="audit", outcome=TRACE_UNEXPECTED_WRITE)
     text = fake_client.sent[0]["text"]
-    assert "⚠️" in text and TRACE_READ_ONLY_WRITE in text
+    assert "⚠️" in text and TRACE_UNEXPECTED_WRITE in text
 
 
-def test_send_trace_read_only_git_drift_renders_warning(fake_client: FakeTelegramClient) -> None:
+def test_send_trace_git_control_drift_renders_warning(fake_client: FakeTelegramClient) -> None:
     # Same ⚠️, sharper event: the node finished and the run continues, but git control state drifted,
     # so a human has to stop the run before the clone is committed or pushed.
     n = _notifier(fake_client)
-    n.send_trace(task_id="t", node_id="audit", outcome=TRACE_READ_ONLY_GIT_DRIFT)
+    n.send_trace(task_id="t", node_id="audit", outcome=TRACE_GIT_CONTROL_DRIFT)
     text = fake_client.sent[0]["text"]
-    assert "⚠️" in text and TRACE_READ_ONLY_GIT_DRIFT in text
+    assert "⚠️" in text and TRACE_GIT_CONTROL_DRIFT in text
+
+
+def test_send_trace_findings_without_a_path_renders_warning(
+    fake_client: FakeTelegramClient,
+) -> None:
+    # A gating verdict none of whose gating findings names a source path: the fix step has nothing
+    # to open, so the round cannot end in a fix. ⚠️ rather than the plain 🔁 a rework renders, so
+    # the operator can tell a wasted round from a productive one in the live trace.
+    n = _notifier(fake_client)
+    n.send_trace(task_id="t", node_id="review", outcome=TRACE_FINDINGS_WITHOUT_A_PATH)
+    text = fake_client.sent[0]["text"]
+    assert "⚠️" in text and TRACE_FINDINGS_WITHOUT_A_PATH in text
+
+
+def test_send_trace_adopted_commits_renders_warning(fake_client: FakeTelegramClient) -> None:
+    # This label was missing from the emoji map, so the one case whose ⚠️ its own docstring calls
+    # "the only place it is said" rendered as a neutral ▶️ instead.
+    n = _notifier(fake_client)
+    n.send_trace(task_id="t", node_id="publish", outcome=TRACE_ADOPTED_COMMITS)
+    text = fake_client.sent[0]["text"]
+    assert "⚠️" in text and TRACE_ADOPTED_COMMITS in text
 
 
 def test_send_trace_failure_is_swallowed(fake_client: FakeTelegramClient) -> None:

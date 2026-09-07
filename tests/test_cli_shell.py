@@ -300,14 +300,18 @@ def test_start_watch_builds_argv_with_parent_flags_before_subcommand(
 
 
 def test_watch_launcher_prefers_console_script(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Patched on this module: the launcher resolves through the shared `resolve_launcher`, which is
+    # the same policy the orchestrator's other executables go through.
     monkeypatch.setattr(
-        cli_shell.shutil, "which", lambda name: "/usr/local/bin/worc" if name == "worc" else None
+        cli_shell,
+        "resolve_launcher",
+        lambda name: "/usr/local/bin/worc" if name == "worc" else None,
     )
     assert cli_shell._watch_launcher() == ["/usr/local/bin/worc"]
 
 
 def test_watch_launcher_falls_back_to_module(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli_shell.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(cli_shell, "resolve_launcher", lambda _name: None)
     assert cli_shell._watch_launcher() == [sys.executable, "-m", "wastech_orchestrator.cli"]
 
 

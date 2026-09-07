@@ -11,6 +11,7 @@ import pytest
 
 from wastech_orchestrator import cli
 from wastech_orchestrator.config.schema import OrchestratorConfig
+from wastech_orchestrator.task.parser import read_subtask_refs
 
 _ConfigFactory = Callable[..., OrchestratorConfig]
 
@@ -174,7 +175,7 @@ def test_read_subtask_refs_drops_traversal(make_git_config: _ConfigFactory, tmp_
         "subtasks:\n  - ../escape.md\n  - subtasks/01-ok.md\n---\n## Description\n\nx\n"
     )
     path = _stage(config, "epic.md", bad)
-    assert cli._read_subtask_refs(path) == ["subtasks/01-ok.md"]
+    assert read_subtask_refs(path) == ["subtasks/01-ok.md"]
 
 
 # --- enqueue atomic copy ----------------------------------------------------------------

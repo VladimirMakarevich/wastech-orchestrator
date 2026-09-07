@@ -42,12 +42,13 @@ flow:
     - id: fixing
       kind: agent
       role_file: merge/fixing.md
+      resume_role_file: merge/fixing.continue.md
       session_scope: editing_lineage
       lineage_affinity: conflict_resolution
       permission_profile: workspace-write
       # optional overrides (uncomment to pin this node):
       # provider: codex
-      # model: gpt-5.4
+      # model: gpt-5.5
       # reasoning: high
       # timeout_seconds: 7200
       # network_access: false

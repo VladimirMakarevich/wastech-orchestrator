@@ -2,10 +2,13 @@
 
 A ``tool`` node runs an operator's own program (any language) from ``<repo>/.worc/tools/`` through
 the same :func:`~wastech_orchestrator.providers.process.run_process` ceiling an ``agent`` node uses:
-an **argv list** (never a shell string), a **mandatory timeout**, and exactly the allowlisted child
-``env`` (the parent environment is never inherited). The program receives only the allowlisted path
-context + the flow's ``args`` on **stdin** — never secrets, the full environment, or a raw session
-id — and reports back through its **exit code** and an optional JSON object on stdout.
+an **argv list** (never a shell string), a **mandatory timeout**, and the policy-built child
+``env`` — under strict isolation the allowlist plus assignments, and under
+``security.strict_isolation: false`` the **parent environment whole** (minus the names loaded from
+``.worc/.env``), which is the mode's deliberate widening and reaches this call site like the other
+four. The program receives only the allowlisted path context + the flow's ``args`` on **stdin** —
+never a raw session id — and reports back through its **exit code** and an optional JSON object on
+stdout.
 
 Outcome contract (see :func:`parse_tool_output`), in priority order:
 
@@ -24,9 +27,13 @@ before another fix edge can be charged. This bounds a degenerate gate/fixer loop
 the same non-actionable thing after the fixer changed real content.
 
 The core **records** ``findings`` (→ ``NodeOutcome.findings``) and ``data`` (→
-``NodeOutcome.structured_output``) but never *applies* them: the orchestrator hands a tool no git
-credentials (env-allowlist) and has no code path where a returned value triggers a git / state write
-(the "git only the orchestrator" invariant). stdout / stderr are redacted before they are written
+``NodeOutcome.structured_output``) but never *applies* them: there is no code path where a returned
+value triggers a git / state write (the "git only the orchestrator" invariant). Note what that does
+and does not say about credentials: under strict isolation the env allowlist keeps them out of a
+tool's environment, but in the advanced mode the tool inherits the operator's environment whole, so
+what holds publication there is the mandate plus detection, not the absence of a token.
+
+stdout / stderr are redacted before they are written
 under the tool run's per-run dir (``stages/<node_id>/run-<id>/``), and the redacted stdout is
 exposed downstream as ``{<node_id>_path}``
 (symmetric with an agent node's output), so a tool → agent hand-off is pure flow wiring.
@@ -52,6 +59,7 @@ from wastech_orchestrator.core.flow.nodes.base import (
 from wastech_orchestrator.core.flow.nodes.exchange_publish import publish_node_run_file
 from wastech_orchestrator.core.flow.schema import FlowNode, ToolNode
 from wastech_orchestrator.core.flow.tools_registry import ToolResolutionError
+from wastech_orchestrator.git_manager import ChangedPath, GitControlState
 from wastech_orchestrator.providers.artifacts import (
     TOOL_STDERR_FILENAME,
     TOOL_STDOUT_FILENAME,
@@ -92,6 +100,14 @@ class ToolContract:
     data: Mapping[str, object] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _ControlBefore:
+    """What a tool run is judged against: Git control state plus the working-tree change set."""
+
+    control: GitControlState
+    tree: tuple[ChangedPath, ...]
+
+
 class ToolNodeRunner:
     """Run a ``tool`` node: resolve the operator executable, run it under the ceiling, gate on it.
 
@@ -126,10 +142,16 @@ class ToolNodeRunner:
         node_dir.mkdir(parents=True, exist_ok=True)
         stdout_path = node_dir / TOOL_STDOUT_FILENAME
 
+        # A tool node runs an operator program in the clone, so it has a shell by definition and no
+        # write access by design — the class the Git-control bracket exists for. Fingerprinted here
+        # like a shell-bearing agent attempt: the program is expected to report, not to rewrite a
+        # hook, `.git/config` or the index, and without this bracket nothing in the run would notice
+        # if it did. Reported, never parked, like every other node class — see the comparison below.
+        control_before = self._control_before(ctx.task_id)
         result = self._s.run_process(
             _launch_argv(tool_path),
             cwd=self._s.repo_dir,
-            env=dict(self._s.process_env),  # exactly the allowlisted child env — no secrets
+            env=dict(self._s.process_env),  # exactly the policy-built child environment
             timeout_seconds=node.timeout_seconds or self._s.tools_default_timeout_seconds,
             stdout_path=str(stdout_path),
             stdin_text=self._build_stdin(node, ctx),
@@ -198,15 +220,49 @@ class ToolNodeRunner:
             )
 
         self._complete(run_id, status=_run_status(contract.outcome), outcome=contract.outcome)
+        drift, wrote = self._control_drift(control_before, ctx.task_id)
         return NodeResult(
             node_id=node.id,
             outcome=NodeOutcome(
-                contract.outcome, findings=contract.findings, structured_output=contract.data
+                contract.outcome,
+                findings=contract.findings,
+                structured_output=contract.data,
+                unexpected_write=wrote,
+                git_control_drift=drift,
             ),
             node_run_id=run_id,
         )
 
     # -- helpers ---------------------------------------------------------------
+
+    def _control_before(self, task_id: str) -> _ControlBefore | None:
+        """The Git-control + working-tree fingerprint taken before the tool runs.
+
+        ``None`` when the unit has no Git Manager (a harness without a clone) — that is the signal
+        to skip the comparison entirely rather than to guess.
+        """
+        git = self._s.git
+        if git is None:
+            return None
+        return _ControlBefore(
+            control=git.capture_git_control_state(), tree=git.changed_code_entries(task_id)
+        )
+
+    def _control_drift(
+        self, before: _ControlBefore | None, task_id: str
+    ) -> tuple[str | None, bool]:
+        """``(redacted drift summary, wrote to the tree)`` for the run that just finished.
+
+        Before-vs-after rather than "is the tree dirty", so an earlier writing node's diff is never
+        blamed on this tool. Control state is compared first, so the ``git status`` behind the tree
+        comparison cannot land between the run and the fingerprint that judges it.
+        """
+        git = self._s.git
+        if before is None or git is None:
+            return None, False
+        control_drift = git.compare_git_control_state(before.control)
+        summary = control_drift.summary() if control_drift is not None else None
+        return summary, git.changed_code_entries(task_id) != before.tree
 
     def _resolve(self, node: ToolNode, run_id: int) -> Path:
         """Resolve the tool name → executable, fail-closed to manual if the registry can't.
@@ -285,9 +341,10 @@ def _launch_argv(tool_path: Path) -> list[str]:
 
     A Windows ``.bat``/``.cmd`` cannot be started directly by CreateProcess under ``shell=False``,
     so such a tool is launched through the command interpreter as ``[COMSPEC, "/c", <path>]``
-    (``COMSPEC`` is read only to locate the interpreter binary, never passed as child env — the
-    child still gets exactly the allowlisted env). Everything else — a POSIX ``+x`` script, a
-    Windows ``.exe`` — launches directly. Keeping it a list means no user string is shell-parsed.
+    (``COMSPEC`` is read only to locate the interpreter binary; the child's environment is the
+    policy-built one either way — see the module docstring on what that is per mode). Everything
+    else — a POSIX ``+x`` script, a Windows ``.exe`` — launches directly. Keeping it a list means
+    no user string is shell-parsed.
     """
     if os.name == "nt" and tool_path.suffix.lower() in _BATCH_SUFFIXES:
         return [os.environ.get("COMSPEC", "cmd.exe"), "/c", str(tool_path)]

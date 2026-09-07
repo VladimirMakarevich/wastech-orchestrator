@@ -1,6 +1,6 @@
 name: ci
 
-# Quality gate on every pull request and on pushes to any long-lived branch (dev / main / release).
+# Quality gate on every pull request and on pushes to any long-lived branch (dev / main / release / site).
 # `dev` matters most: all real work merges there, so without it in the push list those merge commits
 # would run no CI at all outside of pull requests. Nothing here reads docs/, so the docs-less `dev`
 # tree needs no special handling (see .agents/rules/git-workflow.md §A). The Markdown gate is
@@ -27,7 +27,7 @@ name: ci
 on:
   pull_request:
   push:
-    branches: ["main", "dev", "release"]
+    branches: ["main", "dev", "release", "site"]
   workflow_dispatch:
 
 permissions:

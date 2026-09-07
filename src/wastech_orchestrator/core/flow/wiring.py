@@ -6,7 +6,7 @@ checks / git / notifier / store) and the per-run ``_Pipeline`` into the data bun
 runners read. Keeping it here (not in ``orchestrator.py``) keeps the node layer free of any
 orchestrator import and makes the mapping unit-testable with fakes.
 
-Routing is node-based (a node's ``provider`` field, else the global primary — PRE.1); each node
+Routing is node-based (a node's ``provider`` field, else the global primary); each node
 runner uses the node's own id as its identity (the request ``node_id`` and the audit / interaction
 paths) and derives its typed-output contract from the node's declared fields. There is no
 ``Stage`` map: nothing here translates a node into a pipeline stage.
@@ -145,8 +145,6 @@ def build_node_inputs(
         diff_path=p.diff_path,
         checks_path=p.check_log,
         review_path=p.review_findings_path,
-        # ``skill_paths_by_node`` is populated by the orchestrator's task-start skill resolution
-        # (pins ∪ accepted proposal) after this builder runs — see ``_resolve_skill_layers``.
         subtask_count=p.decomposition.n if p.decomposition.accepted else None,
         subtask_spec_path=subtask_spec_path,
         check_sets=check_sets,

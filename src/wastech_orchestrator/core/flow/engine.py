@@ -133,19 +133,41 @@ class NodeOutcome:
     orchestrator's post-node hook surfaces it as an operator warning + Telegram trace so a human
     knows the stage moved on and may need follow-up.
 
-    ``read_only_write`` is the same shape of signal for a different event: a read-only node holding
-    the git-evidence grant changed the working tree, which the provider's sandbox is supposed to
-    make impossible. The outcome stays ``done`` and the run continues — the grant buys an audit node
-    real history, and parking a task over a stray file would trade that for a hypothetical — but the
-    post-node hook warns the operator through the same console + ⚠️ trace surface.
+    ``unexpected_write`` is the same shape of signal for a different event: a node that had a way to
+    run commands but no write access changed the working tree, which the provider's sandbox is
+    supposed to make impossible. Every runner that can produce it sets it — an agent node with a
+    shell and no write access, an evaluator, an operator ``tool`` node — because what makes the
+    write reachable is the shell, not the node kind. The outcome stays ``done`` and the run
+    continues — such a node exists to read, and parking a task over a stray file would trade that
+    for a hypothetical — but the post-node hook warns the operator through the same console + ⚠️
+    trace surface.
 
-    ``read_only_git_drift`` is the second, sharper event on that same never-park path (operator
-    decision 2, 2026-07-26): the same node class changed **Git control state** — a hook,
-    ``.git/config``, the index. It carries the redacted drift summary rather than a bool precisely
-    because the warning *is* the mitigation here — an operator told only "something changed" would
-    inspect the working tree, while the aspect that matters ("hooks: hook 'post-commit' added") is
-    the one that makes the next orchestrator git command execute provider-supplied code. The same
-    node on a ``workspace-write`` profile still parks the task; see the agent runner.
+    ``adopted_commits`` is the publish node's own report of the fourth publish case: the task
+    branch carried commits this orchestrator did not make, so publishing merged them in and re-ran
+    the checks over the combination before sending anything. The run is a success; what the operator
+    has to be told is that the task's reported diff — measured from the base — now covers that work
+    too. A pull request carries the same fact in its body, so this exists for the scopes that open
+    none (``publish: push`` / ``commit``), where the run's own trace is the only carrier.
+
+    ``git_control_drift`` is the second, sharper event on that same never-park path: the node
+    changed **Git control state** — a moved ``HEAD``, the index, a hook, ``.git/config``. Every node
+    class reports it and none parks on it: most of what this catches is the operator working in
+    their own repository, which is ordinary state and not evidence, and parking on it would throw
+    away finished work after the fact. It carries the redacted drift summary rather than a bool
+    precisely
+    because the warning *is* the mitigation for the rest — an operator told only "something changed"
+    would inspect the working tree, while the aspect that matters ("hooks: hook 'post-commit'
+    added") is the one that makes the next orchestrator git command execute provider-supplied
+    code.
+
+    ``gating_findings_name_no_path`` is the evaluator runner's report that its verdict gates but
+    not one of the gating findings says **where**. The node this routes to is ``fixing``, and a
+    path is what ``fixing`` acts on, so such a round can only end in a refusal — which is what a
+    reviewer reporting it *could not review* produces, an infrastructure fault the findings
+    contract has no way to express. Warned rather than parked, through the same console + ⚠️ trace
+    surface: the loop is still bounded by its named budget, and a verdict that gates for a real
+    reason but was written without a path must not be discarded. What the operator gets is the one
+    signal that tells a wasted round from a productive one while it is still running.
     """
 
     kind: str
@@ -153,8 +175,10 @@ class NodeOutcome:
     structured_output: Mapping[str, object] | None = None
     final_message: str | None = None
     rework_exhausted: bool = False
-    read_only_write: bool = False
-    read_only_git_drift: str | None = None
+    unexpected_write: bool = False
+    git_control_drift: str | None = None
+    adopted_commits: tuple[str, ...] = ()
+    gating_findings_name_no_path: bool = False
 
 
 def skip_outcome(node: FlowNode) -> NodeOutcome:

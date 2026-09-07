@@ -10,8 +10,8 @@ typed **candidate** records. Candidates are not stored records:
 * ``evidence`` entries are **pointers** (artifact path / commit / symbol), never raw content.
 
 All *semantic* validation (non-empty evidence, path/symbol existence, promotion) lives in
-``apply_delta`` (02.4), not here — this parser is purely structural. Following the codebase's
-``_parse_skill_map`` precedent it is best-effort: malformed entries are skipped, fully unusable
+``apply_delta`` (02.4), not here — this parser is purely structural. Like the codebase's other
+structured-output parsers it is best-effort: malformed entries are skipped, fully unusable
 input yields ``None``, and it **never raises**. The provider turn is constrained by
 :data:`DELTA_OUTPUT_SCHEMA` (``additionalProperties: False``), so extra fields are rejected at
 generation time and never reach the parser.
@@ -80,7 +80,7 @@ class CandidateDelta:
         return not (self.lessons or self.failures or self.entities)
 
 
-# The strict provider schema for the candidate delta (same family as ``_SKILL_MAP_SCHEMA``).
+# The strict provider schema for the candidate delta.
 # ``additionalProperties: False`` everywhere forbids unexpected fields at generation time. Task 02.2
 # nests this under a ``{summary, memory_delta}`` finalize schema so summary + delta ride one turn.
 _EVIDENCE_SCHEMA: dict[str, Any] = {

@@ -16,7 +16,7 @@ Speak in the **user's language** (default to the language they wrote in). Keep t
 Re-read them if the task touches any of these areas:
 
 - **Core knows no CLI syntax.** Provider-specific logic lives only in `src/wastech_orchestrator/providers/`; the core only calls the `AgentProvider` interface. See [architecture.md](../../../.agents/rules/architecture.md).
-- **Only the orchestrator does commit / push / PR** — never the provider. Providers do no fallback and do not touch the state machine.
+- **The orchestrator never delegates publication** — no node gets a mandate to commit / push / PR and no mechanism expects the agent to. Read it as a MANDATE, not as a mechanism: a finding that the mechanism does not hold — under `security.strict_isolation: false`, or on a host with no sandbox — is a valid finding, not a violation of this rule. Providers do no fallback and do not touch the state machine.
 - **No secrets** in logs, SQLite, or artifacts. Pass only allowlisted env vars to processes. See [security.md](../../../.agents/rules/security.md).
 - **Launch CLIs without shell interpolation** — an argv list, not a string.
 - **Cross-platform (Windows / Linux / macOS) is mandatory** for every feature: `pathlib` + `Path.as_posix()` for stored/compared/displayed paths; `newline=""` (or bytes) for committed/templated files; no `os.kill`/`signal` assumptions for cross-process control on Windows. Branch platform differences explicitly and test all three.

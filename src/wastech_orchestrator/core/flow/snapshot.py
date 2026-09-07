@@ -87,11 +87,14 @@ _AGENT_FIELDS = frozenset(
         "id",
         "kind",
         "role_file",
+        "resume_role_file",
         "session_scope",
         "lineage_affinity",
         "permission_profile",
         "network_access",
         "git_evidence",
+        "skills",
+        "allow_skills",
         "provider",
         "model",
         "reasoning",
@@ -102,7 +105,6 @@ _AGENT_FIELDS = frozenset(
         "best_effort",
         "hitl",
         "extra_args",
-        "skills",
         "when",
     }
 )
@@ -112,6 +114,7 @@ _EVALUATOR_FIELDS = frozenset(
         "kind",
         "role",
         "role_file",
+        "resume_role_file",
         "session_scope",
         "permission_profile",
         "network_access",
@@ -172,7 +175,7 @@ _OUTPUT_ARTIFACT_SLOTS = frozenset({"enriched_spec", "plan", "summary", "report"
 # ``{subtask_spec_path}``, …). A collision is a fatal load error. Evaluator/checks/human nodes do
 # not get ``{<id>_path}`` (so the packaged ``review`` evaluator and ``testing`` checks node are ok).
 _RESERVED_NODE_ID_NAMES = frozenset(
-    {"task", "plan", "diff", "checks", "review", "repo", "skills", "memory", "stage"}
+    {"task", "plan", "diff", "checks", "review", "repo", "memory", "stage"}
 )
 _RESERVED_NODE_ID_PREFIX = "subtask"
 
@@ -210,25 +213,6 @@ def _parse_tristate(raw: dict[str, Any], key: str) -> bool | None:
     """
     value = raw.get(key)
     return None if value is None else bool(value)
-
-
-def _parse_skills(raw: Any, ctx: str) -> tuple[str, ...]:
-    """Parse a node's ``skills:`` pin list — structure only (existence is a task-start check).
-
-    Each pin is a non-empty bounded string (a skill's unique ``name`` or repo-relative ``SKILL.md``
-    path); whether it resolves is checked against the discovered inventory at task start, since
-    skills live in the clone (absent at flow-load time). Order is preserved, blanks stripped.
-    """
-    if raw is None:
-        return ()
-    if not isinstance(raw, list):
-        raise FlowLoadError(f"'skills' must be a list in {ctx}")
-    pins: list[str] = []
-    for item in raw:
-        if not isinstance(item, str) or not item.strip() or len(item) > 512:
-            raise FlowLoadError(f"each 'skills' entry must be a non-empty bounded string in {ctx}")
-        pins.append(item.strip())
-    return tuple(pins)
 
 
 @dataclass(frozen=True, slots=True)
@@ -400,11 +384,14 @@ def _parse_agent_node(raw: dict[str, Any]) -> AgentNode:
         id=nid,
         kind="agent",
         role_file=role_file,
+        resume_role_file=raw.get("resume_role_file") or None,
         session_scope=_enum(SessionScope, ss_raw, ctx),
         lineage_affinity=raw.get("lineage_affinity") or None,
         permission_profile=permission_profile,
         network_access=_parse_tristate(raw, "network_access"),
         git_evidence=_parse_tristate(raw, "git_evidence"),
+        skills=_parse_skills(raw, ctx),
+        allow_skills=_parse_tristate(raw, "allow_skills"),
         provider=provider,
         model=raw.get("model") or None,
         reasoning=raw.get("reasoning") or None,
@@ -415,7 +402,6 @@ def _parse_agent_node(raw: dict[str, Any]) -> AgentNode:
         best_effort=bool(raw.get("best_effort", False)),
         hitl=_parse_hitl_settings(raw.get("hitl")),
         extra_args=tuple(str(a) for a in raw.get("extra_args", [])),
-        skills=_parse_skills(raw.get("skills"), ctx),
         when=_parse_when(raw.get("when")),
     )
 
@@ -449,6 +435,7 @@ def _parse_evaluator_node(raw: dict[str, Any], defaults: EvaluatorDefaults) -> E
         kind="evaluator",
         role=role,
         role_file=role_file,
+        resume_role_file=raw.get("resume_role_file") or None,
         session_scope=_enum(SessionScope, ss_raw, ctx),
         permission_profile=_enum(PermissionProfile, pp_raw, ctx),
         network_access=_parse_tristate(raw, "network_access"),
@@ -504,6 +491,48 @@ def _parse_output_file(value: Any, ctx: str, *, slot: str | None) -> str | None:
             "channel is its slot, so the produced file would never be read — choose one"
         )
     return name
+
+
+def _parse_skills(raw: dict[str, Any], ctx: str) -> tuple[str, ...]:
+    """Parse an agent node's ``skills`` as the repository skill names the node must invoke.
+
+    Each name addresses ``<repo>/.claude/skills/<name>/SKILL.md``, so it goes through the same
+    segment validator ``output_file`` and the citation manifest use: no separators, no ``..``, no
+    absolute path, no reserved name. Two shapes are fatal rather than tolerated. An empty list is a
+    key that does nothing — and here "does nothing" means the off-switch, the opposite of what
+    writing ``skills:`` asks for — so it is refused with the remedy. Declaring ``skills`` together
+    with ``allow_skills: false`` is a contradiction: neither CLI offers "these skills and no
+    others", so there is no reading of the pair that is not one half being silently discarded.
+    """
+    value = raw.get("skills")
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise FlowLoadError(f"'skills' must be a list in {ctx}, got {type(value).__name__}")
+    if not value:
+        raise FlowLoadError(
+            f"empty 'skills' in {ctx}: it would leave the node with skills switched off, which is "
+            "what omitting the key already does — drop the key, or name a skill"
+        )
+    names: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise FlowLoadError(
+                f"'skills' entries in {ctx} must be strings, got {type(item).__name__}"
+            )
+        if not is_portable_path_segment(item):
+            raise FlowLoadError(
+                f"invalid skill name {item!r} in {ctx}: must be a single portable directory name "
+                "(no path separators, no '..', not a reserved name)"
+            )
+        names.append(item)
+    if raw.get("allow_skills") is False:
+        raise FlowLoadError(
+            f"{ctx} declares both 'skills' and 'allow_skills: false': the switch is "
+            "all-or-nothing per node (neither CLI offers 'these skills and no others') — "
+            "drop one of the two"
+        )
+    return tuple(names)
 
 
 def _parse_manifest(value: Any, ctx: str) -> str:

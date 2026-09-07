@@ -249,7 +249,7 @@ def test_merge_audit_names_scope_key_and_single_id(service: MemoryService) -> No
 
 
 def test_entity_without_index_stores_any_named_path(service: MemoryService) -> None:
-    # Back-compat: a service built with no DerivedIndex (read-only/legacy callers) skips the
+    # A service built with no DerivedIndex (a read-only caller) skips the
     # existence check — a card naming >= 1 path is still stored, a path-less card quarantined.
     delta = CandidateDelta(
         entities=(

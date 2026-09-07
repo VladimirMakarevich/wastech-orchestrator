@@ -70,6 +70,15 @@ class LedgerRecord:
     # completed ledger's durable record of which runs edited their own rules. Old records omit it
     # harmlessly.
     governance_changed: tuple[str, ...] = ()
+    # Whether the run went through the operator's advanced mode (``security.strict_isolation:
+    # false``): the agent received the parent environment whole, and the controls that mode relaxes
+    # were not in effect. The one durable answer to "what was this run allowed to do" — the
+    # effective security posture is written nowhere else that survives the task, since the attempt's
+    # ``request.json`` (the only artifact carrying the permission profile and full ``argv``) is
+    # deleted at the end of every attempt under the shipped ``logging.artifacts`` levels. The ledger
+    # is append-only and never rewritten. Defaults to ``False`` so a record written by an older
+    # version reads as "not in the mode", which is what it was.
+    advanced_mode: bool = False
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -94,6 +103,7 @@ class LedgerRecord:
             "note": self.note,
             "outcome": self.outcome,
             "governance_changed": list(self.governance_changed),
+            "advanced_mode": self.advanced_mode,
         }
 
 

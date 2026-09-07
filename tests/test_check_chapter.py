@@ -225,9 +225,9 @@ def test_page_over_max_paragraphs_fails(tmp_path: Path) -> None:
 
 def test_reports_non_ascii_violations_under_a_legacy_child_encoding(tmp_path: Path) -> None:
     # A Windows host hands a piped child `cp1252`, which encodes neither `≤` (extra title) nor `→`
-    # (hierarchy). The script used to die on `print` and the tool node saw an empty stdout instead
-    # of the violation — a fail read as a launch error. The seam is forced here so the regression is
-    # caught on every host, not only on the Windows runner.
+    # (hierarchy). Unhandled, the script dies on `print` and the tool node sees an empty stdout
+    # instead of the violation — a fail that reads as a launch error. The seam is forced here so
+    # the regression is caught on every host, not only on the Windows runner.
     cases = (
         (
             _CLEAN.replace(

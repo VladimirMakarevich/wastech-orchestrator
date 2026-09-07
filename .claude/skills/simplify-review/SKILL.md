@@ -57,7 +57,7 @@ Priority order: **KISS > YAGNI > DRY**. When they pull in different directions, 
 
 - **KISS** — prefer the simplest thing that satisfies the request and the rules. Complexity must **earn its place** by being required, not merely by being possible.
 - **DRY — the lowest priority of the three.** Remove real, harmful duplication, but never at the cost of KISS or YAGNI: don't invent an abstraction to dedupe incidental similarity. Forcing DRY often **couples otherwise-independent code and adds indirection** — that complexity is usually worse than a little repetition. Two similar things are not always a pattern; prefer some duplication over the wrong abstraction.
-- **Respect mandated complexity.** The provider abstraction, orchestrator-only commit/push/PR, infra-only fallback, the security policy, the state machine — these are required by `.agents/rules/` and the hard invariants. They are **not** findings.
+- **Respect mandated complexity.** The provider abstraction, the orchestrator-only publication mandate, infra-only fallback, the security policy, the state machine — these are required by `.agents/rules/` and the hard invariants. They are **not** findings. Read it as a MANDATE, not as a mechanism: a finding that the mechanism does not hold — under `security.strict_isolation: false`, or on a host with no sandbox — is a valid finding, not a violation of this rule.
 
 ## Output
 

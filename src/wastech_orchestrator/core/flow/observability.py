@@ -1,28 +1,37 @@
 """Per-node observability — rendered-prompt, prompt-audit, and provider-attempt records.
 
-Writes the rendered prompt + prompt-audit JSON and the per-attempt provider-attempt rows so the
-engine path produces the same audit surfaces the integration suite asserts. The agent/evaluator
-runners call :func:`record_run_observability` after ``router.run_stage``; it is keyed by the
-``node_runs`` row id, so audit files still sort chronologically.
+Writes the rendered prompt + the prompt-audit records and the per-attempt provider-attempt
+rows so the engine path produces the same audit surfaces the integration suite asserts. The
+agent/evaluator runners call :func:`record_run_observability` after ``router.run_stage``; it is
+keyed by the ``node_runs`` row id, so audit files still sort chronologically.
 
 Gating: provider-attempt rows are always recorded (an audit surface). The on-disk
 rendered-prompt / prompt-audit artifacts are written only when the orchestrator wired a
-``register_artifact`` callback; the prompt-audit JSON additionally honors the per-task / global
+``register_artifact`` callback; the prompt-audit records additionally honor the per-task / global
 ``prompt_audit`` gate resolved into ``NodeServices.prompt_audit``.
+
+The prompt-audit directory carries the same content twice, one half per reader: the per-step ``.md``
+file an operator opens (metadata header + the prompt as readable text) and ``timeline.jsonl``, the
+machine-readable record of every step in order.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol
 
 from wastech_orchestrator.core.flow.usage_accounting import compute_usage_delta
 from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
-from wastech_orchestrator.providers.base import AgentRunResult, NormalizedUsage
+from wastech_orchestrator.providers.base import (
+    AgentRunRequest,
+    AgentRunResult,
+    NormalizedUsage,
+    build_effective_prompt,
+)
 from wastech_orchestrator.providers.redaction import redact_text
-from wastech_orchestrator.routing.router import ResolvedRoute, StageOutcome
+from wastech_orchestrator.routing.router import ProviderAttempt, ResolvedRoute, StageOutcome
 from wastech_orchestrator.state_store import ProviderAttemptRow
 
 if TYPE_CHECKING:
@@ -46,21 +55,31 @@ def record_run_observability(
     node_id: str,
     subtask: int | None,
     run_id: int,
-    prompt: str,
+    request: AgentRunRequest,
     route: ResolvedRoute,
     outcome: StageOutcome,
-    model: str | None,
-    reasoning: str | None,
+    configured_model: str | None,
+    configured_reasoning: str | None,
     started_at: str,
     usage_baseline: NormalizedUsage | None = None,
     baseline_session_id: str | None = None,
 ) -> None:
     """Record provider attempts + (when wired) the rendered prompt and the prompt-audit step.
 
+    Takes the *request* rather than a finished prompt string because the two artifacts below want
+    different texts, and deriving them apart is how they drift: ``rendered-prompt.md`` keeps its
+    documented meaning (the text this run was launched with), while the audit record holds the
+    node's full text plus its continuation text, so a reader can see both regardless of which one
+    the run selected. The seam renders each, so nothing here restates how the choice is made.
+
     ``usage_baseline`` / ``baseline_session_id`` are the resumed session's previous cumulative usage
     and the session it belongs to; the runner reads them from the lineage row (or, for an in-process
     HITL re-run, the first invocation's result) so the per-attempt usage can be reduced to a per-run
     delta. ``None`` for a fresh run.
+
+    ``configured_*`` are the flow node's own ``model`` / ``reasoning`` overrides — ``None`` for a
+    node that declares neither. The values the attempts actually ran with are carried by the
+    attempt rows themselves (:class:`ProviderAttempt`), which is where the audit reads them.
     """
     record_provider_attempts(
         services.store,
@@ -79,7 +98,7 @@ def record_run_observability(
         task_id=task_id,
         node_id=node_id,
         run_id=run_id,
-        prompt=prompt,
+        prompt=build_effective_prompt(request),
         secrets=services.prompt_secrets,
         register=register,
     )
@@ -90,11 +109,18 @@ def record_run_observability(
             node_id=node_id,
             subtask=subtask,
             run_id=run_id,
-            prompt=prompt,
+            prompt=build_effective_prompt(request, body=request.prompt),
+            continuation_prompt=(
+                build_effective_prompt(request, body=request.continuation_prompt)
+                if request.continuation_prompt is not None
+                else None
+            ),
             route=route,
             outcome=outcome,
-            model=model,
-            reasoning=reasoning,
+            configured_model=configured_model,
+            configured_reasoning=configured_reasoning,
+            skills_allowed=request.allow_skills,
+            skills_required=request.required_skills,
             started_at=started_at,
             secrets=services.prompt_secrets,
             register=register,
@@ -205,6 +231,20 @@ def write_rendered_prompt(
     register(task_id, "rendered_prompt", str(path))
 
 
+def _settled_attempt(outcome: StageOutcome) -> ProviderAttempt | None:
+    """The attempt whose run the stage settled on — the one that produced ``outcome.result``.
+
+    Identity, not provider equality: a stage can invoke the same provider more than once (a
+    session-unavailable retry, a transient retry), and only one of those rows is the run the node's
+    verdict came from. When every attempt raised, the last row is the one that decided the failure;
+    with no attempts at all (a unit harness) there is nothing to name.
+    """
+    for attempt in outcome.attempts:
+        if outcome.result is not None and attempt.result is outcome.result:
+            return attempt
+    return outcome.attempts[-1] if outcome.attempts else None
+
+
 def write_prompt_audit(
     *,
     artifacts_root: str,
@@ -215,13 +255,46 @@ def write_prompt_audit(
     prompt: str,
     route: ResolvedRoute,
     outcome: StageOutcome,
-    model: str | None,
-    reasoning: str | None,
+    configured_model: str | None,
+    configured_reasoning: str | None,
+    skills_allowed: bool,
+    skills_required: tuple[str, ...],
     started_at: str,
     secrets: tuple[str, ...],
     register: RegisterArtifact,
+    continuation_prompt: str | None = None,
 ) -> None:
-    """Write one prompt-audit step (who + redacted prompt) and append it to the timeline."""
+    """Write one prompt-audit step (who + redacted prompt) and append it to the timeline.
+
+    The step file is Markdown — a fenced-JSON metadata header, then the prompt verbatim as the
+    body — because it is the surface an operator opens: inside a JSON string every newline is an
+    escaped ``\n``, so a multi-page prompt reads as one flat line. Nothing is lost by moving the
+    prompt out of the JSON, since ``timeline.jsonl`` still carries each record whole and is the
+    machine-readable half of this directory.
+
+    ``model`` / ``reasoning`` are the **effective** values the settled attempt ran with, because
+    this is the artifact an operator opens to answer "what did this node actually run on"; the
+    ``configured_*`` pair beside them is the flow node's (or supervisor phase's) own override,
+    ``None`` whenever it overrode nothing. Recording only the override — which is what this
+    surface used to carry under the plain names — made the record named for auditing disagree
+    with the attempt's ``request.json`` on every node that took a provider default. Each row in
+    ``agents`` carries its own pair, so a stage that fell over to another provider does not report
+    one model for two different CLIs.
+
+    ``skills_allowed`` / ``skills_required`` are the node's declared skill posture. Declared, not
+    observed, and there is no effective counterpart to pair them with the way ``model`` has one:
+    neither CLI reports back which skill actually fired. ``skills_allowed`` is the fact worth
+    recording here — it is nowhere in the prompt, since it is carried by a CLI flag rather than by
+    text, so without it the audit could not say whether a node could invoke a skill at all.
+
+    ``continuation_prompt`` is the node's second text when it declares one — recorded beside
+    ``prompt`` (the full text) rather than in place of it, so the record holds both regardless of
+    which the run selected. Which one an attempt actually received is per attempt for the same
+    reason the model is: this record is built from the request the Core assembled, and an attempt
+    whose session the router dropped got the full text however the run began. ``resumed`` on each
+    row is that fact, and ``prompt_variant`` is stated only for a node that has two texts to
+    choose between.
+    """
     audit_dir = task_artifact_dir(artifacts_root, task_id) / "prompt-audit"
     audit_dir.mkdir(parents=True, exist_ok=True)
     agents = [
@@ -233,26 +306,80 @@ def write_prompt_audit(
             "error_class": attempt.error_class.value if attempt.error_class else None,
             "started_at": attempt.result.started_at if attempt.result else None,
             "finished_at": attempt.result.finished_at if attempt.result else None,
+            "model": attempt.model,
+            "reasoning": attempt.reasoning,
+            "resumed": attempt.resumed,
+            **(
+                {"prompt_variant": "continuation" if attempt.resumed else "full"}
+                if continuation_prompt is not None
+                else {}
+            ),
         }
         for attempt in outcome.attempts
     ]
+    settled = _settled_attempt(outcome)
     record: dict[str, object] = {
         "node_run_id": run_id,
         "node_id": node_id,
         "subtask": subtask,
         "route_primary": route.primary.value,
         "provider_used": outcome.provider_used.value if outcome.provider_used else None,
-        "model": model,
-        "reasoning": reasoning,
+        "model": settled.model if settled else None,
+        "reasoning": settled.reasoning if settled else None,
+        "model_configured": configured_model,
+        "reasoning_configured": configured_reasoning,
+        "skills_allowed": skills_allowed,
+        "skills_required": list(skills_required),
         "started_at": started_at,
         "agents": agents,
         "prompt": redact_text(prompt, extra_secrets=secrets),
+        **(
+            {"continuation_prompt": redact_text(continuation_prompt, extra_secrets=secrets)}
+            if continuation_prompt is not None
+            else {}
+        ),
     }
     sub = f"-sub{subtask:02d}" if subtask is not None else ""
-    step_path = audit_dir / f"{run_id:06d}-{node_id}{sub}.json"
-    step_path.write_text(json.dumps(record, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    title = f"{node_id} — run {run_id:06d}" + (f" — subtask {subtask:02d}" if sub else "")
+    step_path = audit_dir / f"{run_id:06d}-{node_id}{sub}.md"
+    step_path.write_text(_render_step(record, title=title), encoding="utf-8")
     timeline_path = audit_dir / "timeline.jsonl"
     with timeline_path.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
     register(task_id, "prompt_audit", str(step_path))
     register(task_id, "prompt_audit_timeline", str(timeline_path))
+
+
+#: Record keys whose value is a prompt, and therefore belongs in the document body rather than in
+#: the metadata block — the whole point of the Markdown step file. A node with a
+#: ``resume_role_file`` has two of them, and the second must not slide back into the JSON, where
+#: every newline would be an escaped ``\n`` again.
+_PROMPT_KEYS: tuple[tuple[str, str], ...] = (
+    ("prompt", "Prompt"),
+    ("continuation_prompt", "Continuation prompt"),
+)
+
+
+def _render_step(record: Mapping[str, object], *, title: str) -> str:
+    """Render one prompt-audit record as the readable step document.
+
+    Metadata goes into a fenced ``json`` block (still copy-pasteable into a parser); each prompt
+    the record carries follows as ordinary Markdown body text under its own heading. The prompts
+    are written last and unescaped, so one that contains its own fences or headings cannot break
+    anything above it.
+    """
+    meta = {
+        key: value
+        for key, value in record.items()
+        if key not in {name for name, _heading in _PROMPT_KEYS}
+    }
+    body = "".join(
+        f"## {heading}\n\n{str(record[key]).rstrip(chr(10))}\n\n"
+        for key, heading in _PROMPT_KEYS
+        if record.get(key) is not None
+    )
+    return (
+        f"# {title}\n\n"
+        f"```json\n{json.dumps(meta, indent=2, ensure_ascii=False)}\n```\n\n"
+        f"{body.rstrip()}\n"
+    )

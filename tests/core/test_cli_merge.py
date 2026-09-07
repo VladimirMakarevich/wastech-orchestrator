@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from wastech_orchestrator import cli
+from wastech_orchestrator import cli, process_control
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import GitManager
 from wastech_orchestrator.state_store import PublishOpRow, StateStore, TaskRow
@@ -148,3 +148,58 @@ def test_merge_task_dry_run_writes_nothing(
     store = StateStore.open_readonly(clone / ".worc" / "state.db")
     assert store.get_publish_op("task-1", "pr_merge", None) is None
     store.close()
+
+
+def _pretend_daemon_running(clone: Path, monkeypatch: pytest.MonkeyPatch, pid: int = 4242) -> None:
+    process_control.write_pid_file(process_control.pid_file_path(clone / ".worc"), pid=pid)
+    monkeypatch.setattr(process_control, "is_running", lambda pid, **kw: True)
+
+
+def test_merge_task_dry_run_reports_the_squash_message(
+    project, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The dry run printed status / branch / base / pr / state and "-> merge via 'squash'" — and
+    # said nothing about the one thing that lands in the base branch's history forever.
+    proj, clone = project
+    config = _write_config(proj, clone)
+    _seed_open_pr(clone)
+    monkeypatch.setattr(GitManager, "verify_pr_state", lambda self, url: "OPEN")
+
+    code = cli.main(["--config", str(config), "merge-task", "task-1", "--dry-run"])
+
+    assert code == 0
+    assert "feat(task-1): task-1 (#1)" in capsys.readouterr().out
+
+
+def test_merge_task_dry_run_is_allowed_while_the_daemon_runs(
+    project, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The guard's own reason — "the merge flow + git ops need the idle slot" — is right for a merge
+    # and wrong for a dry run, which mutates nothing. Under auto mode with a human merge gate, the
+    # plan is exactly what an operator wants to read without stopping the daemon first.
+    proj, clone = project
+    config = _write_config(proj, clone)
+    _seed_open_pr(clone)
+    monkeypatch.setattr(GitManager, "verify_pr_state", lambda self, url: "OPEN")
+    _pretend_daemon_running(clone, monkeypatch)
+
+    code = cli.main(["--config", str(config), "merge-task", "task-1", "--dry-run"])
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "merge-task plan for task-1" in out
+    assert "watch daemon is running" in out  # said as a note, not as a refusal
+
+
+def test_merge_task_still_refuses_a_real_merge_while_the_daemon_runs(
+    project, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    proj, clone = project
+    config = _write_config(proj, clone)
+    _seed_open_pr(clone)
+    _pretend_daemon_running(clone, monkeypatch)
+
+    code = cli.main(["--config", str(config), "merge-task", "task-1", "-y"])
+
+    assert code == 1
+    assert "watch daemon is running" in capsys.readouterr().out

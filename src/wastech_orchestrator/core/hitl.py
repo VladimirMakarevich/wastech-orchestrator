@@ -22,8 +22,7 @@ from wastech_orchestrator.providers.redaction import redact_text
 
 #: Which built-in typed-output contract a flow node's structured result must satisfy. Derived per
 #: node (never from a stage name): ``human_input`` = a question/approval round-trip; ``planning``
-#: adds the decomposition proposal; ``none`` = a plain author node. (Skill selection is no longer a
-#: planning concern — it is resolved by the Core from operator pins + the supervisor's proposal.)
+#: adds the decomposition proposal; ``none`` = a plain author node.
 OutputContract = Literal["none", "human_input", "planning"]
 
 _RISKS = frozenset({"clarification", "deletion", "dependency", "protected", "other"})
@@ -304,22 +303,10 @@ def interaction_id(task_id: str, node_id: str, subtask: int | None = None) -> st
     """Return a compact deterministic id that fits Telegram callback-data limits.
 
     ``node_id`` is the interaction key — the flow node id (embedded agent HITL / dangerous-diff
-    guard / check-discovery) or a standalone ``hitl`` gate node id.
+    guard) or a standalone ``hitl`` gate node id.
     """
     raw = f"{task_id}:{node_id}:{subtask if subtask is not None else '-'}"
     return "h" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
-
-
-def discovery_interaction_path(artifacts_root: str | Path, task_id: str) -> Path:
-    """The durable artifact for a check-command-set approval, under the task's ``hitl/``."""
-    return task_artifact_dir(artifacts_root, task_id) / "hitl" / "check-discovery.json"
-
-
-def discovery_interaction_id(task_id: str, signature: str) -> str:
-    """A compact deterministic id for a discovery approval, scoped to the command-set signature so a
-    *changed* set yields a fresh interaction (fits Telegram callback-data limits)."""
-    raw = f"{task_id}:check-discovery:{signature}"
-    return "d" + hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
 def iter_task_interactions(artifacts_root: str | Path, task_id: str) -> Iterator[dict[str, Any]]:
@@ -428,7 +415,8 @@ def mark_interaction_status(path: Path, status: str) -> None:
 
 
 # Statuses an interaction can carry while still un-answered: the delivered-but-unanswered "waiting"
-# plus every AskFailure (timeout / transport_error / invalid_response, persisted by write_answer).
+# plus every AskFailure (timeout / transport_error / invalid_response / cancelled, persisted by
+# write_answer).
 # Cleanup (reset / consume) acts on exactly these — derived from AskFailure so a new failure mode is
 # covered automatically and never silently skipped.
 _RESETTABLE_STATUSES: frozenset[str] = frozenset({"waiting", *get_args(AskFailure)})

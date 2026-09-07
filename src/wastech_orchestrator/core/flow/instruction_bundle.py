@@ -1,13 +1,12 @@
 """Frozen instruction bundle — a per-task immutable snapshot of the agent inputs.
 
 The control bundle freezes the *control plane* (flow YAML, role prompts, tool executables). This
-module freezes
-the *agent inputs* whose identity must stay stable for the task: the validated **task packet**, the
-selected **skill packages**, and the root **repository instruction files** (``AGENTS.md`` /
+module freezes the *agent inputs* whose identity must stay stable for the task: the validated
+**task packet** and the root **repository instruction files** (``AGENTS.md`` /
 ``AGENTS.override.md`` / ``CLAUDE.md``). Without this, a workspace-write node could edit its own
-task file, a selected ``SKILL.md``, or ``AGENTS.md`` mid-task and a *later* evaluator / supervisor /
-resumed / fallback call would receive different instructions than were validated at task start — the
-agent silently rewriting its own rules.
+task file or ``AGENTS.md`` mid-task and a *later* evaluator / supervisor / resumed / fallback call
+would receive different instructions than were validated at task start — the agent silently
+rewriting its own rules.
 
 At task start the orchestrator freezes these inputs into a private, immutable bundle under
 ``<private_home>/runs/instruction-bundles/<task-id>/`` (a provider deny target — see
@@ -36,7 +35,7 @@ import json
 import shutil
 from collections.abc import Iterable
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from wastech_orchestrator.core.flow.frozen_bundle import (
     FrozenBundleError,
@@ -50,7 +49,6 @@ from wastech_orchestrator.providers.exchange import FileInspector, default_file_
 
 #: Bundle layout (all under ``<private_home>/runs/instruction-bundles/<task-id>/``).
 _TASK_SUBDIR = "task"
-_SKILLS_SUBDIR = "skills"
 _INSTRUCTIONS_SUBDIR = "instructions"
 MANIFEST_NAME = "manifest.json"
 
@@ -87,12 +85,6 @@ def governance_changed_paths(paths: Iterable[str]) -> tuple[str, ...]:
     return tuple(sorted(hits))
 
 
-#: Skill-package closure caps (fail closed above these — an oversized package is a packaging error,
-#: never silently truncated). A skill is bounded documentation + small resources, not a code tree.
-MAX_SKILL_FILES = 64
-MAX_SKILL_FILE_BYTES = 262_144
-MAX_SKILL_TOTAL_BYTES = 2_097_152
-
 #: The synthetic composite-digest entry that folds the control-bundle digest into the
 #: instruction manifest digest (In-scope bullet #4) without re-freezing the control plane.
 _CONTROL_DIGEST_KEY = "control::bundle_digest"
@@ -103,24 +95,15 @@ class InstructionBundleError(FrozenBundleError):
 
 
 @dataclass(frozen=True)
-class FrozenSkillPackage:
-    """One frozen skill package: its node-facing ``SKILL.md`` key plus every closed-over file."""
-
-    name: str
-    skill_md_key: str  # bundle-relative POSIX key of the package's SKILL.md
-    entries: tuple[tuple[str, str], ...]  # (bundle-key, sha256) for every file in the package
-
-
-@dataclass(frozen=True)
 class LoadedInstructionBundle:
     """A verified handle returned by :func:`load_instruction_bundle` on continue/resume."""
 
     root: Path
     manifest_digest: str
-    #: Every frozen ``(bundle-key, sha256)`` file entry (task packet, repository instructions, and
-    #: skill packages) recomputed during verification — the synthetic control-digest entry is
-    #: excluded. Lets a resumed run repopulate ``instruction_entries`` so the lifecycle-vs-
-    #: packet audit check runs on resume exactly as on the fresh path.
+    #: Every frozen ``(bundle-key, sha256)`` file entry (task packet and repository instructions)
+    #: recomputed during verification — the synthetic control-digest entry is excluded. Lets a
+    #: resumed run repopulate ``instruction_entries`` so the lifecycle-vs-packet audit check runs
+    #: on resume exactly as on the fresh path.
     entries: tuple[tuple[str, str], ...] = ()
 
 
@@ -134,7 +117,7 @@ def instruction_bundle_dir(private_home: Path, task_id: str) -> Path:
 def assert_no_required_secret(text: str, *, extra_secrets: tuple[str, ...], label: str) -> None:
     """Fail closed if a *required* instruction input contains a KNOWN secret value.
 
-    A task/skill/repository-instruction input must not carry a real secret: if it did, the redacted
+    A task/repository-instruction input must not carry a real secret: if it did, the redacted
     exchange copy the agent reads would replace that secret with ``[REDACTED]`` — silently changing
     what the operator wrote — so we stop before launch instead. "Known" means a value from the
     orchestrator's secret set (resolved env / denied / memory secrets in ``extra_secrets``); this is
@@ -213,76 +196,6 @@ def freeze_repository_instructions(
     return entries
 
 
-def freeze_skill_package(
-    bundle_dir: Path,
-    skill_name: str,
-    skill_md_rel: str,
-    package_files_rel: list[str],
-    repo_root: Path,
-    *,
-    inspect: FileInspector | None = None,
-) -> FrozenSkillPackage:
-    """Freeze one selected skill's *package closure* into ``skills/<name>/...``.
-
-    ``skill_md_rel`` is the repo-relative POSIX path of the skill's ``SKILL.md``; its parent is the
-    package directory. ``package_files_rel`` is the tracked-file closure of that directory. Only
-    tracked regular files inside the package are copied, preserving relative layout; links/reparse
-    points/hard links/special files/ADS are refused (via the no-follow gate) and case-fold/NFC key
-    collisions are rejected. A root-level package (``SKILL.md`` at the repo root, whose closure is
-    the whole tree) or an over-cap package fails strict resolution rather than reading live docs.
-    """
-    inspector = inspect or default_file_inspector()
-    package_dir = PurePosixPath(skill_md_rel).parent
-    if str(package_dir) in ("", "."):
-        raise InstructionBundleError(
-            f"skill {skill_name!r} SKILL.md is at the repository root; its resource closure would "
-            "be the whole tree and cannot be represented as a bounded package (unsupported under "
-            "strict isolation)"
-        )
-    # Keep only the tracked files that actually live inside the package directory.
-    closure = sorted(
-        rel for rel in package_files_rel if PurePosixPath(rel).is_relative_to(package_dir)
-    )
-    if skill_md_rel not in closure:
-        raise InstructionBundleError(
-            f"skill {skill_name!r} SKILL.md {skill_md_rel!r} is not a tracked file in its package"
-        )
-    if len(closure) > MAX_SKILL_FILES:
-        raise InstructionBundleError(
-            f"skill {skill_name!r} package has {len(closure)} tracked files (cap {MAX_SKILL_FILES})"
-        )
-    entries: list[tuple[str, str]] = []
-    keys: list[str] = []
-    skill_md_key = ""
-    total_bytes = 0
-    for rel in closure:
-        rel_within = PurePosixPath(rel).relative_to(package_dir).as_posix()
-        key = f"{_SKILLS_SUBDIR}/{skill_name}/{rel_within}"
-        keys.append(key)
-        source = repo_root / rel
-        inspect_frozen_source(
-            source, inspector, label="skill file", error_cls=InstructionBundleError
-        )
-        size = source.stat().st_size
-        if size > MAX_SKILL_FILE_BYTES:
-            raise InstructionBundleError(
-                f"skill {skill_name!r} file {rel!r} is {size} bytes (cap {MAX_SKILL_FILE_BYTES})"
-            )
-        total_bytes += size
-        if total_bytes > MAX_SKILL_TOTAL_BYTES:
-            raise InstructionBundleError(
-                f"skill {skill_name!r} package exceeds {MAX_SKILL_TOTAL_BYTES} total bytes"
-            )
-        dest = assert_contained_path(bundle_dir, bundle_dir / key)
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, dest)
-        entries.append((key, sha256_file(dest)))
-        if rel == skill_md_rel:
-            skill_md_key = key
-    reject_key_collisions(keys, label="skill file", error_cls=InstructionBundleError)
-    return FrozenSkillPackage(name=skill_name, skill_md_key=skill_md_key, entries=tuple(entries))
-
-
 def write_instruction_manifest(
     bundle_dir: Path,
     *,
@@ -292,11 +205,10 @@ def write_instruction_manifest(
 ) -> str:
     """Write ``manifest.json`` and return the composite ``instruction_manifest_digest``.
 
-    ``entries`` are every frozen ``(bundle-key, sha256)`` pair (task packet, repository
-    instructions, and skill packages). The control bundle's ``control_digest`` is folded in as a
-    synthetic
-    entry so one digest binds all of the task's frozen context (In-scope bullet #4). The manifest is
-    an audit record — it never contains config/env contents.
+    ``entries`` are every frozen ``(bundle-key, sha256)`` pair (task packet and repository
+    instructions). The control bundle's ``control_digest`` is folded in as a synthetic entry so one
+    digest binds all of the task's frozen context (In-scope bullet #4). The manifest is an audit
+    record — it never contains config/env contents.
     """
     all_entries = list(entries)
     if control_digest is not None:

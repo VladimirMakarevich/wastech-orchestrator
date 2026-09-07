@@ -20,7 +20,7 @@ The argument is a document locator: a path, or a bare name (`readme`, `architect
    - `readme` → [README.md](../../../README.md) · `agents` → [AGENTS.md](../../../AGENTS.md)
    - a rule → [.agents/rules/](../../../.agents/rules/): `architecture`, `coding-style`, `git-workflow`, `security`, `testing`
    - the operator guide → `src/wastech_orchestrator/packaged/guide/…`: `guide` (its `README.md`), `best-practices`, `decision-guide`, `footprint`, `config/reference`, `config/best-practices`, `flows/reference`, `flows/roles`, `flows/prompt-variables`, a `skills/worc-*/SKILL.md`
-   - a derived doc (**`main` only**, see step 1) → `docs/`: `architecture` → `worc_architecture.md`, `configuration`, `cookbook`, `glossary`, `operations`, `how-it-works`, `how-to`, `index`, `telegram`, `task-authoring`, `flow-authoring`
+   - a derived doc (**`site` only**, see step 1) → `docs/`: `architecture` → `worc_architecture.md`, `configuration`, `cookbook`, `glossary`, `operations`, `how-it-works`, `how-to`, `index`, `telegram`, `task-authoring`, `flow-authoring`
    - a role prompt → `src/wastech_orchestrator/packaged/flows/<flow>/<node>.md`
 3. Two or more plausible matches, or a name that resolves to nothing → **ask the user**; do not guess. `architecture` is genuinely ambiguous (the rule vs. the derived architecture doc) — always confirm that one.
 4. The target must be **tracked**: verify with `git ls-files -- <path>` / `git check-ignore -v <path>`. A gitignored `.md` (e.g. under `.archive/`) is retired content and out of bounds — refuse and say why.
@@ -30,7 +30,7 @@ The argument is a document locator: a path, or a bare name (`readme`, `architect
 | Document | Why not |
 | --- | --- |
 | `docs/backlog/**` | A plan, not a description of code. Refreshing it "against the code" would erase intent that is not built yet. If the user wants to know whether an item is implemented, do that as an analysis and report — do not rewrite the item. |
-| [BRANCHING_MODEL.md](../../../BRANCHING_MODEL.md) | A historical design record, read as history and not as an operating manual. Its past tense is correct even where the tree has moved on. |
+| [BRANCHING_MODEL.md](../../../BRANCHING_MODEL.md) | The design record for the branch model — why it has its shape, not how to operate it. `.agents/rules/git-workflow.md` §A is the operating manual. |
 | `tests/**/*.md` | Role-prompt fixtures whose shape is asserted by the suite; change the test, not the fixture. |
 
 ## Step 1 — establish the scope: which branch are you on?
@@ -38,11 +38,11 @@ The argument is a document locator: a path, or a bare name (`readme`, `architect
 The repository carries two documentation shapes ([git-workflow.md](../../../.agents/rules/git-workflow.md) §A). Detect by **the marker file**, never by branch name — that stays correct in a worktree and in detached HEAD:
 
 ```bash
-test -f docs/worc_architecture.md && echo main-scope || echo dev-scope
+test -f docs/worc_architecture.md && echo site-scope || echo code-scope
 ```
 
-- **`dev-scope`** — the derived `docs/` tree is absent. Valid targets: [README.md](../../../README.md), [AGENTS.md](../../../AGENTS.md), [.agents/rules/](../../../.agents/rules/), `.claude/skills/`, and everything under `src/wastech_orchestrator/packaged/`. If the user named a derived doc, **stop**: it lives on `main` only, a CI guard rejects new `docs/` paths here, and creating a local copy is the one thing that breaks the branch split. Say so and offer to either run this on `main`, or produce the findings as a doc-impact note (step 7).
-- **`main-scope`** — the derived tree exists; `docs/*.md` are the targets. **Do not edit shared files here** ([AGENTS.md](../../../AGENTS.md), `.agents/rules/`, `.claude/skills/`, `README.md`, anything under `src/`) — those edits flow through `dev`, or the branches diverge in content and conflict on every merge. If the user named one, stop and point at `dev`.
+- **`code-scope`** — the derived `docs/` tree is absent. Valid targets: [README.md](../../../README.md), [AGENTS.md](../../../AGENTS.md), [.agents/rules/](../../../.agents/rules/), `.claude/skills/`, and everything under `src/wastech_orchestrator/packaged/`. If the user named a derived doc, **stop**: it lives on `site` only, `branch-guard` rejects new `docs/` paths here, and creating a local copy is the one thing that breaks the branch split. Say so and offer to either run this on `site`, or produce the findings as a doc-impact note (step 7).
+- **`site-scope`** — the derived tree exists; `docs/*.md` are the targets. **Do not edit shared files here** ([AGENTS.md](../../../AGENTS.md), `.agents/rules/`, `.claude/skills/`, `README.md`, anything under `src/`) — those edits flow through `dev`, or the branches diverge in content and conflict on every merge. If the user named one, stop and point at `dev`.
 
 ## Step 2 — inventory the claims
 
@@ -111,7 +111,7 @@ Add only what belongs to **this** document's charter. Drift that belongs to a di
 - **Minimal, surgical edits.** Change the sentence that is false; keep the doc's structure, ordering, headings, and voice. A refresh is not a rewrite, and never a restructure.
 - **No claim without a citation.** If you cannot name the `file:line` behind a sentence you are writing, do not write it.
 - **Examples come from the tree**, copied from packaged files or tests and re-validated — never composed from memory.
-- **Links**: relative paths must resolve on this branch; a `main`-only document is linked by its absolute `https://github.com/VladimirMakarevich/wastech-orchestrator/blob/main/docs/<file>` URL, never relatively — a relative path to it dangles on `dev` and fails the gate. Anchors must match a real heading slug.
+- **Links**: relative paths must resolve on this branch; never link a document that is not on this branch — name it in plain text instead. Anchors must match a real heading slug.
 - **Formatting**: Markdown here is not hard-wrapped — one paragraph per line. Run `npx prettier@3 --write <path>` afterwards, **except** for anything under `src/` (all of it is `.prettierignore`d): match the existing one-paragraph-per-line style there by hand.
 - **Size budgets are ratchets** ([wastech-mdlint.config.json](../../../wastech-mdlint.config.json)). Role prompts are the tightest — they are paid for on every node run of every task. A refresh that grows a doc past its budget is a refresh that did too much; cut before you raise a threshold, and never raise one to silence a finding. `AGENTS.md`/`CLAUDE.md` additionally carry the eager-import budget every agent pays.
 - **Never edit code in this skill.** If the code is what is wrong, say so in the report and let the user decide; do not "fix" the source to match the doc.
@@ -126,7 +126,7 @@ Report concisely, in the user's language:
 - **Verdict** — how many claims were checked, and the counts per verdict.
 - **What changed** — one line per edit: the claim, what it said, what it says now, and the `file:line` that decided it.
 - **Unverifiable** — claims no code decides, left as-is, so the user can rule on them.
-- **Findings that belong elsewhere** — drift you saw in other docs, and (in `dev-scope`) each derived `main` doc the audit implicates, as a one-line doc-impact note for the refresh task on `main`.
+- **Findings that belong elsewhere** — drift you saw in other docs, and (in `code-scope`) each derived `site` doc the audit implicates, as a one-line doc-impact note for the refresh task on `site`.
 - **Code smells surfaced** — places where the code, not the doc, looks wrong. Report; do not fix.
 - **Nothing to change is a valid result.** "Audited 41 claims, all confirmed" is a good outcome — say it plainly rather than manufacturing churn.
 

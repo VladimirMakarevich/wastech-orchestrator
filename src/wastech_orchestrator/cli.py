@@ -20,6 +20,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from importlib import resources
 from importlib.resources.abc import Traversable
@@ -28,7 +29,9 @@ from typing import NamedTuple, TextIO
 
 from wastech_orchestrator import __version__, preflight, process_control, runs_retention
 from wastech_orchestrator.composition import (
+    HOST_FLOOR_CHECKS,
     ISOLATION_CHECKS,
+    build_internal_deny_policy,
     build_orchestrator,
     build_providers,
 )
@@ -60,6 +63,8 @@ from wastech_orchestrator.git_manager import (
     GitManager,
     ManualActionRequired,
     append_runtime_excludes,
+    ensure_path_excluded,
+    gh_repo_pin,
 )
 from wastech_orchestrator.install import config_writer, detect, wizard
 from wastech_orchestrator.ledger import Ledger
@@ -78,12 +83,36 @@ from wastech_orchestrator.notify.telegram import check_telegram_preflight
 from wastech_orchestrator.observability.logging import configure_logging, set_log_level
 from wastech_orchestrator.preflight import preflight_gh
 from wastech_orchestrator.providers import process as agent_process
+from wastech_orchestrator.providers._adapter_base import IsolationCapabilityReport
 from wastech_orchestrator.providers.base import AuthProbe, AuthState, ProviderId
+from wastech_orchestrator.providers.claude import claude_config_home
+from wastech_orchestrator.providers.codex import codex_config_home
 from wastech_orchestrator.runtime_layout import CONTROL_HOME_DIRNAME, RuntimeLayout, runs_root
-from wastech_orchestrator.security.isolation import check_isolation
+from wastech_orchestrator.security.env import (
+    describe_expansions,
+    expand_allowed_environment,
+    launch_critical_env_issue,
+)
+from wastech_orchestrator.security.env_paths import (
+    assigned_path_elements,
+    canonical_collision,
+    denied_read_path_collision,
+    host_protected_paths,
+    is_inside,
+)
+from wastech_orchestrator.security.isolation import (
+    check_isolation,
+    describe_advanced_mode,
+    describe_host_floor,
+)
+from wastech_orchestrator.security.launchers import Which, resolve_launcher
 from wastech_orchestrator.state_store import IncompatibleStateError, StateStore, TaskRow
 from wastech_orchestrator.task.model import DEFAULT_QUEUE, priority_rank
-from wastech_orchestrator.task.parser import read_task_source, split_frontmatter
+from wastech_orchestrator.task.parser import (
+    read_subtask_refs,
+    read_task_source,
+    split_frontmatter,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -147,8 +176,11 @@ _ENV_EXAMPLE_TEMPLATE = """\
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_CHAT_ID=
 
-# Add any other variables the orchestrator process needs. A variable reaches a child process
-# (codex / claude / git / gh / checks) only if its name is also in security.allowed_environment.
+# Add any other variables the orchestrator process needs. In strict mode, an exact
+# security.allowed_environment entry may forward one to an agent child; a prefix match alone does
+# not. In advanced mode agent children withhold every name loaded here. Use non-secret
+# security.extra_environment assignments for an intentional agent-side value. Orchestrator git/gh
+# keeps the allowlist in both modes and also scrubs names that could retarget publication.
 # GH_TOKEN=
 """
 
@@ -345,8 +377,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="override orchestrator.queue for the new loop: only pick tasks whose `queue` is NAME",
     )
 
-    sub.add_parser(
-        "preflight", help="check both CLIs' health and the strict_isolation policy (read-only)"
+    preflight_cmd = sub.add_parser(
+        "preflight",
+        help="check both CLIs' health and the strict_isolation policy (runs no task)",
+    )
+    preflight_cmd.add_argument(
+        "--paid-isolation-probe",
+        action="store_true",
+        help="additionally spend ONE real model call per provider that supports it, letting an "
+        "agent try to write into .git and the control home; the verdict is read from the "
+        "filesystem (Claude has no no-model way to prove this)",
     )
     validate_flow_cmd = sub.add_parser(
         "validate-flow",
@@ -399,7 +439,11 @@ def build_parser() -> argparse.ArgumentParser:
         dest="tail_file",
         default=None,
         metavar="PATH",
-        help="the daemon log file to tail (the path passed to 'watch --log-file')",
+        # `--log-file` is a parent-parser flag, so it goes BEFORE the subcommand
+        # (`worc --log-file PATH watch`). Naming the wrong form here sent an operator to an argv
+        # argparse rejects — the same mistake `cli_shell.start_watch` records having made in the
+        # auto-spawn path, where it died on an argparse error to a DEVNULL'd stderr.
+        help="the daemon log file to tail (the path given as 'worc --log-file PATH watch')",
     )
     top_cmd.add_argument(
         "--recent",
@@ -466,10 +510,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     upgrade_cfg_cmd = sub.add_parser(
         "upgrade-config",
-        help="add config keys introduced by the current version, preserving existing values",
+        help="add config keys introduced by the current version, preserving existing values "
+        "(confirms first — it also re-adds every key you left at its default)",
     )
     upgrade_cfg_cmd.add_argument(
         "--dry-run", action="store_true", help="print what would change; write nothing"
+    )
+    upgrade_cfg_cmd.add_argument(
+        "-y", "--yes", action="store_true", help="skip the confirmation prompt"
     )
 
     upgrade_docs_cmd = sub.add_parser(
@@ -1029,6 +1077,12 @@ def cmd_upgrade_config(args: argparse.Namespace) -> int:
     config (add-missing-only), stamp the current ``schema_version``, back up the original, and write
     atomically. Idempotent — a config that is already current is left untouched (no rewrite, so its
     comments survive). Refuses a config that is unparsable or already newer than this orchestrator.
+
+    Confirms before writing (``-y/--yes`` skips it, ``--dry-run`` never asks). The prompt is not
+    ceremony: ``install`` delivers a deliberately small ``config.yaml`` that omits every key it
+    would only have written at its default, and this command's add-missing-only merge takes those
+    keys back from the packaged template — so the file grows, and hand-written comments in it are
+    lost, even when nothing about the run changes. The operator should see that before it happens.
     """
     path_str = resolve_config_path(args)
     if path_str is None or not Path(path_str).is_file():
@@ -1080,6 +1134,17 @@ def cmd_upgrade_config(args: argparse.Namespace) -> int:
     if args.dry_run:
         _report("upgrade-config (dry-run): would update")
         return 0
+
+    if not args.yes:
+        _report("upgrade-config: would update")
+        print(
+            "  note: every key above is written at the packaged template's value, and the file is "
+            "re-emitted from parsed YAML — your own comments in it are not preserved (a backup is "
+            "written first). A key you deliberately left out to keep the config small comes back."
+        )
+        if not _confirm("Proceed? [y/N] "):
+            print("upgrade-config: aborted (nothing written); re-run with --yes to skip this")
+            return 0
 
     backup = _install_backup_config(path)
     _install_atomic_write(path, rendered)
@@ -1242,17 +1307,67 @@ def _daemon_alive(config: OrchestratorConfig) -> bool:
     )
 
 
-def _display_status(row: TaskRow, *, daemon_alive: bool) -> str:
+def _runner_alive(config: OrchestratorConfig) -> bool:
+    """Read-only: is a ``worc run`` executor working in this worc home (marker present + alive)?"""
+    return (
+        process_control.running_daemon_pid(process_control.runner_file_path(worc_home_for(config)))
+        is not None
+    )
+
+
+def _executor_alive(config: OrchestratorConfig) -> bool:
+    """Read-only: is ANY executor live for this worc home — the watch daemon **or** a ``worc run``?
+
+    The question every liveness probe actually means, and for a long time only half of it was
+    asked: ``run`` is a first-class entry point that recorded nothing about itself, so a task it was
+    executing read as ``parked (no daemon)`` for its whole duration — which is not merely a wrong
+    label but the exact prompt that sends an operator to ``rerun --continue``.
+    """
+    return _daemon_alive(config) or _runner_alive(config)
+
+
+def _executor_owner(config: OrchestratorConfig) -> str | None:
+    """Who owns this worc home right now and what to do about it, or ``None`` when it is free.
+
+    Every command that drives the pipeline or git in the shared clone needs the slot idle, and two
+    processes can hold it. The advice differs: the daemon is stoppable, while a ``run`` is not — it
+    installs no stop wiring, so the only honest instruction is to wait for it or interrupt it where
+    it runs.
+
+    Verb-free because the sentence is needed in two moods: a refusal (`<verb>: <owner>`) from a
+    command that would mutate the clone, and a note (`<verb>: note: <owner>`) beside a plan that
+    would not. A read-only plan is never refused for a busy clone — inspecting it is exactly what
+    an operator wants before deciding whether to stop the daemon at all — but it says who owns the
+    clone, so the plan is not read as executable right now.
+    """
+    root = worc_home_for(config)
+    daemon = process_control.running_daemon_pid(process_control.pid_file_path(root))
+    if daemon is not None:
+        return (
+            f"the watch daemon is running (pid {daemon}); stop it first with "
+            "'wastech-orchestrator stop'"
+        )
+    runner = process_control.running_daemon_pid(process_control.runner_file_path(root))
+    if runner is not None:
+        return (
+            f"a 'run' is executing a task in this clone (pid {runner}); wait for it to finish, "
+            "or interrupt it where it runs"
+        )
+    return None
+
+
+def _display_status(row: TaskRow, *, executor_alive: bool) -> str:
     """The human status label for a task row (the single source of truth for all read-only views).
 
-    A ``running`` row with no live daemon is parked at its checkpoint, awaiting resume — not
-    executing — so it reads as ``parked (no daemon)``. This dominates the B-lite ``(paused)``
-    marker, which only makes sense while the daemon is alive and waiting out a provider outage.
+    A ``running`` row with no live executor — neither the watch daemon nor a ``run`` — is parked at
+    its checkpoint, awaiting resume, not executing, so it reads as ``parked (no daemon)``. This
+    dominates the B-lite ``(paused)`` marker, which only makes sense while the daemon is alive and
+    waiting out a provider outage.
 
     A pause carrying a provider-reported wake instant names it, because otherwise a daemon correctly
     waiting out a limit is indistinguishable from a hung one.
     """
-    if row.status is Status.RUNNING and not daemon_alive:
+    if row.status is Status.RUNNING and not executor_alive:
         return "parked (no daemon)"
     if row.status is Status.RUNNING and row.blocked_since:
         if row.blocked_until:
@@ -1267,7 +1382,19 @@ def _parked_slot_note(config: OrchestratorConfig) -> str | None:
     Read-only, reopening ``state.db`` like :func:`has_active_task`. The task is parked at its
     checkpoint (the recovery invariant), not executing — so point the operator at the levers that
     actually clear or continue it, rather than leaving a silent, queue-blocking ``running`` row.
+
+    Unless it *is* executing: a ``worc run`` in another terminal holds the same slot, and there the
+    advice inverts — ``rerun --continue`` is precisely what must not be run — so the note says who
+    owns it and that ``stop`` does not reach that process.
     """
+    runner = process_control.running_daemon_pid(
+        process_control.runner_file_path(worc_home_for(config))
+    )
+    if runner is not None:
+        return (
+            f"stop: note: a 'run' is executing a task in this clone (pid {runner}); the stop "
+            "ladder does not reach it — wait for it to finish, or interrupt it where it runs"
+        )
     db_path = Path(worc_home_for(config)) / "state.db"
     if not db_path.is_file():
         return None
@@ -1450,34 +1577,6 @@ def _atomic_copy(src: Path, dest: Path) -> None:
         raise
 
 
-def _read_subtask_refs(task_file: Path) -> list[str]:
-    """Repo-relative ``subtasks:`` spec paths declared in a root task's front matter (else empty).
-
-    Best-effort: a read/parse problem or a non-list value yields no refs, so a single-file promote
-    simply moves the one file (the validation gate rejects a genuinely broken file if it later lands
-    in ``pending/``). Refs that escape the staging dir (absolute or containing ``..``) are dropped.
-    """
-    try:
-        source = read_task_source(task_file)
-        parse = split_frontmatter(source.raw_bytes.decode("utf-8"), source.suffix)
-    except (OSError, UnicodeDecodeError):
-        return []
-    if not parse.present or parse.malformed:
-        return []
-    raw = parse.frontmatter.get("subtasks", [])
-    if not isinstance(raw, (list, tuple)):
-        return []
-    refs: list[str] = []
-    for entry in raw:
-        if not isinstance(entry, str) or not entry.strip():
-            continue
-        ref = entry.strip()
-        if Path(ref).is_absolute() or ".." in Path(ref).parts:
-            continue
-        refs.append(ref)
-    return refs
-
-
 def _promote_one(src: Path, dest: Path, moved: list[str], errors: list[str]) -> None:
     """Atomically move one staged file into ``dest``; record the outcome in ``moved``/``errors``.
 
@@ -1529,10 +1628,36 @@ def promote_tasks(
     if match is None:
         errors.append(f"{target!r} is not a staged file in {preparing.name}/")
         return moved, errors
-    for ref in _read_subtask_refs(match):  # deco root: specs first, then the root
+    for ref in read_subtask_refs(match):  # deco root: specs first, then the root
         _promote_one(preparing / ref, pending / Path(ref), moved, errors)
     _promote_one(match, pending / match.name, moved, errors)
     return moved, errors
+
+
+@dataclass
+class WatchNotes:
+    """The bookkeeping one ``watch`` pass carries in and hands back out.
+
+    ``declined`` is the claim gate's per-task cool-off, owned by :func:`watch_loop` for the
+    daemon's lifetime so a refusal is not re-asked on every tick. ``withheld`` is what a pass
+    deliberately did not claim — a gate refusal, or a dependency that is not merged yet — which no
+    ``PipelineResult`` records, so without it the operator-facing summary cannot tell an empty queue
+    from one nobody was allowed to take from, and says the former.
+
+    One object rather than two keyword arguments because they are one thing: what the pass decided
+    about tasks it did not run, kept for the next tick and for the operator.
+    """
+
+    declined: dict[str, float] = field(default_factory=dict)
+    withheld: list[str] = field(default_factory=list)
+
+
+# How long a refused claim is left alone before the gate asks about that task again. A refusal
+# ("not now") must not become "never" — a daemon runs for days and the operator would have no way
+# back other than a restart — but re-asking on the next tick is worse: `break` ends only the
+# current cycle, so a poll interval of 60s means a Telegram prompt every 60s, forever, with no
+# backoff. An hour is long enough to be quiet and short enough that a change of mind is cheap.
+_DECLINE_COOLOFF_S = 3600.0
 
 
 def _confirm_next_task(
@@ -1543,10 +1668,16 @@ def _confirm_next_task(
 ) -> bool:
     """Ask the operator (Telegram) to approve claiming the next pending task.
 
-    Returns ``True`` only on an explicit approval; deny / timeout / no transport → ``False``
-    (fail-closed STOP — the task stays pending, the operator decides later). Non-durable by design:
-    a daemon restart mid-prompt simply re-asks next tick. Carries the task id + title only — never
-    diff or prompt content. Preflight guarantees ``telegram.enabled`` when this gate is on.
+    Returns ``True`` only on an explicit approval; deny / timeout / no transport / a stop arriving
+    mid-wait → ``False`` (fail-closed STOP — the task stays pending, the operator decides later).
+    Non-durable by design: a daemon restart mid-prompt simply re-asks next tick. Carries the task id
+    + title only — never diff or prompt content. Preflight guarantees ``telegram.enabled`` when this
+    gate is on.
+
+    The wait is bounded by ``auto_mode.confirm_timeout_s``, this gate's own key. Borrowing
+    ``telegram.ask_timeout_s`` (8h on the shipped-style value) conflated two different questions:
+    that one is the ceiling for a node asking a human to decide something mid-run, while this one
+    holds the processing slot idle and gets another chance on the next tick.
     """
     label = task_id or "(unknown id)"
     context = f"Task {label}" + (f" — {title}" if title else "")
@@ -1555,7 +1686,7 @@ def _confirm_next_task(
         context=context,
         task_id=task_id or "next-task",
         kind="approval",
-        timeout_s=config.telegram.ask_timeout_s,
+        timeout_s=config.orchestrator.auto_mode.confirm_timeout_s,
         interaction_id="next-task-" + uuid.uuid4().hex[:16],
     )
     approved = result.failure is None and result.answered and result.approved is True
@@ -1566,6 +1697,32 @@ def _confirm_next_task(
             result.failure or ("denied" if result.answered else "no answer"),
         )
     return approved
+
+
+def _claim_allowed(
+    orchestrator: Orchestrator,
+    config: OrchestratorConfig,
+    task_id: str | None,
+    title: str | None,
+    notes: WatchNotes | None,
+) -> bool:
+    """The claim gate with its memory: ask, unless this task was refused inside the cool-off.
+
+    ``notes.declined`` maps a task id to the monotonic instant its cool-off ends; the daemon owns
+    the notes for its lifetime and a single-pass caller may pass ``None`` (one tick has nothing to
+    remember). A refusal for an unidentified task is not remembered — there is no key to remember it
+    under, and such a file is rejected loudly by the gate it never reaches.
+    """
+    if notes is not None and task_id is not None:
+        until = notes.declined.get(task_id)
+        if until is not None and time.monotonic() < until:
+            _LOG.debug("next-task gate: %s was refused recently; not asking again yet", task_id)
+            return False
+    if _confirm_next_task(orchestrator, config, task_id, title):
+        return True
+    if notes is not None and task_id is not None:
+        notes.declined[task_id] = time.monotonic() + _DECLINE_COOLOFF_S
+    return False
 
 
 def _already_settled(orchestrator: Orchestrator, task_id: str, task_file: Path) -> bool:
@@ -1592,6 +1749,7 @@ def watch_once(
     folder: Path,
     *,
     queue: str | None = None,
+    notes: WatchNotes | None = None,
 ) -> list[PipelineResult]:
     """Resume any in-flight task, then process pending tasks per the auto-mode rule.
 
@@ -1609,6 +1767,10 @@ def watch_once(
     task can run instead — the slot never idles on CI; a dependency-broken task (cycle / unknown /
     self-ref) is terminally rejected. The skip does **not** consume the auto-mode-off "one task"
     budget, so the slot still runs one real eligible task per tick.
+
+    ``notes`` carries the claim gate's per-task refusals across ticks and collects what this pass
+    deliberately did not claim (see :class:`WatchNotes`); ``None`` means neither is kept, which is
+    all a single pass with no operator summary needs.
 
     A pending file whose id already reached a terminal status and is that task's own leftover is
     also skipped (:func:`_already_settled`): a ``manual_action_required`` task keeps its file in
@@ -1651,14 +1813,18 @@ def watch_once(
             verdict = orchestrator.dependency_eligibility(task_id, depends_on, pending=pending_map)
             if verdict.state is Eligibility.WAITING:
                 _LOG.info("task %s waiting: %s", task_id, verdict.detail)
+                if notes is not None:
+                    notes.withheld.append(task_id)
                 continue  # non-blocking skip — try the next eligible task
             if verdict.state is Eligibility.BROKEN:
                 results.append(orchestrator.reject_dependency(str(task_file), verdict.detail))
                 continue  # fail-closed terminal reject; the slot stays free
-        if config.orchestrator.auto_mode.confirm_next_task and not _confirm_next_task(
-            orchestrator, config, task_id, scan.title
+        if config.orchestrator.auto_mode.confirm_next_task and not _claim_allowed(
+            orchestrator, config, task_id, scan.title, notes
         ):
-            break  # operator denied / silent → leave pending, stop chaining this cycle
+            if notes is not None and task_id is not None:
+                notes.withheld.append(task_id)
+            break  # operator denied / silent / refused recently → leave pending, stop this cycle
         result = orchestrator.run_task(str(task_file))
         results.append(result)
         if result.final_status is Status.MANUAL_ACTION_REQUIRED:
@@ -1711,6 +1877,25 @@ def _build_cleanup_hook(config: OrchestratorConfig) -> Callable[[], None] | None
     return _run
 
 
+class StopChannels(NamedTuple):
+    """How a graceful stop reaches :func:`watch_loop` — one concept, two carriers.
+
+    ``event`` is set by the POSIX ``SIGTERM`` handler; ``file`` is the cross-platform sentinel
+    ``stop`` writes, and on Windows (where a signal cannot cross processes) it is the only one that
+    ever fires. They are checked together everywhere, and the interruptible poll sleep needs the
+    event's own ``wait`` — which is why this is a pair rather than one predicate.
+    """
+
+    event: threading.Event | None = None
+    file: Path | None = None
+
+
+#: No stop wiring at all — the default for a caller that runs the loop without a stop ladder
+#: (a single pass, or a test). A module-level singleton because it is immutable and a call in an
+#: argument default is its own hazard.
+NO_STOP_CHANNELS = StopChannels()
+
+
 # Granularity for noticing a stop request during the between-tick poll sleep. Bounds how long a
 # stop takes to be seen on Windows, where the SIGTERM event never fires cross-process and the
 # stop-file is the only channel (see watch_loop's poll-sleep loop). Kept small so shutdown lands
@@ -1727,9 +1912,9 @@ def watch_loop(
     queue: str | None = None,
     max_iterations: int | None = None,
     sleep_fn: Callable[[float], None] = time.sleep,
-    stop_event: threading.Event | None = None,
-    stop_file: Path | None = None,
+    stop: StopChannels = NO_STOP_CHANNELS,
     cleanup_hook: Callable[[], None] | None = None,
+    notes: WatchNotes | None = None,
 ) -> list[PipelineResult]:
     """Run ``watch_once`` on a loop, refreshing the repo each tick (periodic discovery).
 
@@ -1738,25 +1923,29 @@ def watch_loop(
     ``poll_interval <= 0`` runs exactly one tick (single pass, no sleep). ``max_iterations`` bounds
     the loop for tests; in production the loop runs until interrupted.
 
-    Two stop channels are checked around ticks and during idle sleep: a ``stop_event`` (set by a
-    POSIX ``SIGTERM`` handler) and the cross-platform ``stop_file`` sentinel. During an active tick,
-    ``cmd_watch`` injects the same predicate into the FlowEngine, which parks before the next node;
-    this loop then sees the still-present channel and exits. The ``sleep_fn`` path is kept for
+    Both :class:`StopChannels` are checked around ticks and during idle sleep. During an active
+    tick, ``cmd_watch`` injects the same predicate into the FlowEngine, which parks before the next
+    node; this loop then sees the still-present channel and exits. The ``sleep_fn`` path is kept for
     callers without an event (existing tests).
     """
 
     def _stop_requested() -> bool:
-        if stop_event is not None and stop_event.is_set():
+        if stop.event is not None and stop.event.is_set():
             return True
-        return stop_file is not None and process_control.stop_file_requested(stop_file)
+        return stop.file is not None and process_control.stop_file_requested(stop.file)
 
     results: list[PipelineResult] = []
     iteration = 0
+    # The gate's refusal memory lives exactly as long as this loop: a restart is the operator's own
+    # "ask me again". Deliberately not persisted — a decline is about this moment, and a durable one
+    # would need its own expiry story and an operator command to clear it. A caller that wants to
+    # report what was withheld passes its own notes in.
+    notes = notes if notes is not None else WatchNotes()
     while True:
         if _stop_requested():
             break
         orchestrator.refresh_repo()
-        results.extend(watch_once(orchestrator, config, folder, queue=queue))
+        results.extend(watch_once(orchestrator, config, folder, queue=queue, notes=notes))
         iteration += 1
         # Idle-gap memory cleanup: the single-slot invariant guarantees no active task here, but
         # double-check (a RUNNING soft-pause still holds the slot) so cleanup never races a task or
@@ -1767,9 +1956,9 @@ def watch_loop(
             break
         if max_iterations is not None and iteration >= max_iterations:
             break
-        if stop_event is not None:
+        if stop.event is not None:
             # Interruptible poll sleep: wait in _STOP_POLL_SECONDS chunks, re-checking both stop
-            # channels each chunk. On POSIX stop_event.wait wakes the instant SIGTERM fires; on
+            # channels each chunk. On POSIX the event's wait wakes the instant SIGTERM fires; on
             # Windows the event never fires cross-process, so the stop-file (checked by
             # _stop_requested) is the only channel — a monolithic wait(poll_interval) would delay
             # shutdown by up to poll_interval (300s), far past `stop --timeout` (30s), orphaning the
@@ -1777,7 +1966,7 @@ def watch_loop(
             remaining = float(poll_interval)
             while remaining > 0 and not _stop_requested():
                 chunk = min(_STOP_POLL_SECONDS, remaining)
-                if stop_event.wait(chunk):  # returns True the instant SIGTERM fires (POSIX)
+                if stop.event.wait(chunk):  # returns True the instant SIGTERM fires (POSIX)
                     break
                 remaining -= chunk
         else:
@@ -1793,13 +1982,22 @@ def cmd_run(args: argparse.Namespace) -> int:
     config = load_config_for(args)
     if config is None:
         return 2
+    require_launch_environment(config, env_file=resolve_env_file_path(args)[0])
     preflight.require_git_control()  # git must honor `core.hooksPath` (>= 2.9)
     if config.git.create_pull_request:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
-        preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
+        # Non-blocking advisory if gh is present but logged out. The policy travels with it so
+        # the probe sees the same environment (a proxy, a token) every other gh call gets.
+        preflight.warn_if_gh_logged_out(security=config.security)
     # A node may route to ANY allowed provider, so one that cannot start is refused up front
     # rather than discovered at the first fallback with a stage's work already spent.
     require_provider_auth(config)
+    # The single slot is per worc home, not per process: a second `run` (or one beside a daemon)
+    # would drive two engines over the same branch in the same clone.
+    owner = _executor_owner(config)
+    if owner is not None:
+        print(f"run: {owner}")
+        return 1
     orchestrator = build_orchestrator(
         config,
         layout=layout_for(config),
@@ -1816,7 +2014,16 @@ def cmd_run(args: argparse.Namespace) -> int:
         if verdict.state is not Eligibility.ELIGIBLE:
             print(f"error: refusing to run {task_id}: {verdict.detail}", file=sys.stderr)
             return 2
-    result = orchestrator.run_task(args.task_file)
+    # Record this executor for the duration, the way the daemon records itself: `status`/`list`/
+    # `top` need it to tell "executing now" from "parked at a checkpoint", and every command that
+    # needs the clone idle needs it to refuse. Reaped in `finally` — a marker left behind by a
+    # crash would refuse those commands forever.
+    runner_path = process_control.runner_file_path(worc_home_for(config))
+    process_control.write_pid_file(runner_path)
+    try:
+        result = orchestrator.run_task(args.task_file)
+    finally:
+        runner_path.unlink(missing_ok=True)
     if result.final_status is Status.RUNNING:
         # B-lite soft pause: every provider was transiently unavailable. The task is left resumable;
         # the next `run`/`watch`/restart continues it from the checkpoint (until max_blocked_s).
@@ -1959,13 +2166,13 @@ def cmd_rerun(args: argparse.Namespace) -> int:
         return 2
     root = worc_home_for(config)
 
-    # Rerun drives the pipeline in the shared clone; refuse while a live watch daemon owns it.
-    pid = process_control.running_daemon_pid(process_control.pid_file_path(root))
-    if pid is not None:
-        print(
-            f"rerun: the watch daemon is running (pid {pid}); stop it first with "
-            "'wastech-orchestrator stop'"
-        )
+    # Rerun drives the pipeline in the shared clone; refuse while any executor owns it. The
+    # ``--dry-run`` plan is read-only and passes, carrying the owner as a note below —
+    # ``plan_rerun`` treats a ``running`` row as recoverable *because* this guard refused a live
+    # executor, so a plan printed past it must say who is holding the clone.
+    owner = _executor_owner(config)
+    if owner is not None and not args.dry_run:
+        print(f"rerun: {owner}")
         return 1
 
     if not (Path(root) / "state.db").is_file():
@@ -1994,12 +2201,17 @@ def cmd_rerun(args: argparse.Namespace) -> int:
 
     if args.dry_run:
         _report_rerun_plan(plan)
+        if owner is not None:
+            print(f"rerun: note: {owner}")
         return 0
 
+    require_launch_environment(config, env_file=resolve_env_file_path(args)[0])
     preflight.require_git_control()  # git must honor `core.hooksPath` (>= 2.9)
     if config.git.create_pull_request:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
-        preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
+        # Non-blocking advisory if gh is present but logged out. The policy travels with it so
+        # the probe sees the same environment (a proxy, a token) every other gh call gets.
+        preflight.warn_if_gh_logged_out(security=config.security)
     # A node may route to ANY allowed provider, so one that cannot start is refused up front
     # rather than discovered at the first fallback with a stage's work already spent.
     require_provider_auth(config)
@@ -2064,7 +2276,28 @@ _FINALIZE_STATUS: dict[str, Status] = {
 }
 
 
-def _report_finalize_plan(plan: FinalizePlan, *, as_: str) -> None:
+def _move_line(config: OrchestratorConfig, move: tuple[str, str]) -> str:
+    """``<from> -> <to>`` for a task-file move, repo-relative when the paths are in the repo."""
+
+    def show(path: str) -> str:
+        try:
+            return (
+                Path(path).resolve().relative_to(Path(config.repo.local_path).resolve()).as_posix()
+            )
+        except (OSError, ValueError):
+            return path
+
+    return f"{show(move[0])} -> {show(move[1])}"
+
+
+def _spec_suffix(moves: tuple[tuple[str, str], ...]) -> str:
+    """`` (+N subtask specs)`` when a decomposition root takes its specs along, else empty."""
+    if not moves:
+        return ""
+    return f" (+{len(moves)} subtask spec{'s' if len(moves) != 1 else ''})"
+
+
+def _report_finalize_plan(plan: FinalizePlan, config: OrchestratorConfig, *, as_: str) -> None:
     """Print the planned reconciliation for ``finalize --dry-run``; writes nothing."""
     print(f"finalize (dry-run): would finalize {plan.task_id} as {as_}")
     print(
@@ -2082,6 +2315,11 @@ def _report_finalize_plan(plan: FinalizePlan, *, as_: str) -> None:
     print(f"  branch:    {plan.branch or '(none)'}")
     abandoned = ", outcome=abandoned" if plan.declared is Status.MANUAL_ACTION_REQUIRED else ""
     print(f"  ledger:    append a manual record{abandoned}")
+    if plan.task_file_move is not None:
+        print(
+            f"  file:      {_move_line(config, plan.task_file_move)}"
+            f"{_spec_suffix(plan.subtask_spec_moves)} (not committed)"
+        )
     for warning in plan.warnings:
         print(f"  WARNING:   {warning}")
 
@@ -2094,14 +2332,12 @@ def cmd_finalize(args: argparse.Namespace) -> int:
         return 2
     root = worc_home_for(config)
 
-    # Finalize runs terminal cleanup (`git checkout base`) in the shared clone; refuse while a live
-    # watch daemon owns it. An orphaned-active task (dead PID) is exactly what finalize reconciles.
-    pid = process_control.running_daemon_pid(process_control.pid_file_path(root))
-    if pid is not None:
-        print(
-            f"finalize: the watch daemon is running (pid {pid}); stop it first with "
-            "'wastech-orchestrator stop'"
-        )
+    # Finalize runs terminal cleanup (`git checkout base`) in the shared clone; refuse while any
+    # executor owns it. An orphaned-active task (dead PID) is exactly what finalize reconciles.
+    # ``--dry-run`` is read-only (``plan_finalize`` mutates nothing) and passes with a note.
+    owner = _executor_owner(config)
+    if owner is not None and not args.dry_run:
+        print(f"finalize: {owner}")
         return 1
 
     if not (Path(root) / "state.db").is_file():
@@ -2124,7 +2360,9 @@ def cmd_finalize(args: argparse.Namespace) -> int:
         return 1
 
     if args.dry_run:
-        _report_finalize_plan(plan, as_=args.as_)
+        _report_finalize_plan(plan, config, as_=args.as_)
+        if owner is not None:
+            print(f"finalize: note: {owner}")
         return 0
 
     if not args.yes:
@@ -2145,6 +2383,14 @@ def cmd_finalize(args: argparse.Namespace) -> int:
     )
     suffix = f" → {result.pr_url}" if result.pr_url else ""
     print(f"{result.task_id}: {result.final_status.value}{suffix} (finalized)")
+    # `finalize` makes no commit, so the move it just made is sitting in the operator's working
+    # tree. Unannounced it was found later in `git status` — or not found, and carried into the next
+    # task's review diff, where a stray path costs a rework round that can do nothing about it.
+    if plan.task_file_move is not None and Path(plan.task_file_move[1]).exists():
+        print(
+            f"finalize: moved {_move_line(config, plan.task_file_move)}"
+            f"{_spec_suffix(plan.subtask_spec_moves)} (not committed)"
+        )
     return _EXIT_BY_STATUS.get(result.final_status, 1)
 
 
@@ -2206,12 +2452,12 @@ def cmd_prs(args: argparse.Namespace) -> int:
 
 def _cmd_prs_sync(args: argparse.Namespace, config: OrchestratorConfig, root: Path) -> int:
     """The ``prs --sync`` reconcile path: dry-run by default, writes only with ``-y/--yes``."""
-    # A write run touches the shared clone/DB; refuse while a live watch daemon owns it (like
-    # finalize). The read-only dry-run is always safe.
+    # A write run touches the shared clone/DB; refuse while any executor owns it (like finalize).
+    # The read-only dry-run is always safe.
     if args.yes:
-        pid = process_control.running_daemon_pid(process_control.pid_file_path(root))
-        if pid is not None:
-            print(f"prs --sync: the watch daemon is running (pid {pid}); stop it first")
+        owner = _executor_owner(config)
+        if owner is not None:
+            print(f"prs --sync: {owner}")
             return 1
     orchestrator = build_orchestrator(
         config,
@@ -2257,6 +2503,11 @@ def _report_merge_plan(
         wait = " (wait for checks)" if wait_for_checks else ""
         resolve_note = "" if resolve else "; --no-resolve: abort on conflict"
         print(f"  -> update branch w/ base, then merge via '{strategy.value}'{wait}{resolve_note}")
+        # The one thing this leaves in the base branch's history forever, and the one thing the
+        # plan used to omit. A rebase writes no commit, so there is nothing to report for it.
+        if plan.commit_subject and strategy is not MergeStrategy.REBASE:
+            print(f"  message:  {plan.commit_subject}")
+            print("            (empty body — the branch's own commits are not the merge message)")
     for warning in plan.warnings:
         print(f"  WARNING — {warning}")
 
@@ -2268,14 +2519,13 @@ def cmd_merge_task(args: argparse.Namespace) -> int:
     if config is None:
         return 2
     root = worc_home_for(config)
-    # merge-task updates the branch + runs gh/merge in the shared clone; refuse while the daemon
-    # owns it (like finalize). The merge flow + git ops need the idle slot.
-    pid = process_control.running_daemon_pid(process_control.pid_file_path(root))
-    if pid is not None:
-        print(
-            f"merge-task: the watch daemon is running (pid {pid}); stop it first with "
-            "'wastech-orchestrator stop'"
-        )
+    # merge-task updates the branch + runs gh/merge in the shared clone; refuse while any executor
+    # owns it (like finalize). The merge flow + git ops need the idle slot — a ``--dry-run`` needs
+    # neither, and under auto mode with `git.auto_merge: false` reading the plan is the operator's
+    # normal move between two linked tasks, which is precisely when the daemon is up.
+    owner = _executor_owner(config)
+    if owner is not None and not args.dry_run:
+        print(f"merge-task: {owner}")
         return 1
     if not (Path(root) / "state.db").is_file():
         print(f"merge-task: no state database at {Path(root) / 'state.db'}")
@@ -2303,6 +2553,8 @@ def cmd_merge_task(args: argparse.Namespace) -> int:
         _report_merge_plan(
             plan, strategy=strategy, wait_for_checks=wait_for_checks, resolve=args.resolve
         )
+        if owner is not None:
+            print(f"merge-task: note: {owner}")
         return 0
 
     if not args.yes:
@@ -2808,7 +3060,7 @@ def _logged_out_refusal(pid: ProviderId, auth: AuthProbe) -> str:
     provider is anyone's primary, so a host that only ever uses one CLI has to say so in the config
     rather than leaving a provider listed that no node can actually reach. And it names the
     environment allowlist because that list *replaces* its default — a host whose CLI resolves
-    credentials through a variable the allowlist no longer passes reports logged out while being
+    credentials through a variable the allowlist does not pass reports logged out while being
     logged in, and that failure looks identical to a real one.
     """
     return (
@@ -2862,10 +3114,312 @@ def require_provider_auth(config: OrchestratorConfig) -> None:
             raise preflight.ProviderNotLoggedInError(_logged_out_refusal(pid, auth))
 
 
-def run_preflight(
-    config: OrchestratorConfig, *, env_file: Path | None = None, capability_smoke: bool = False
+def require_launch_environment(
+    config: OrchestratorConfig,
+    *,
+    env_file: Path | None,
+    system: str | None = None,
+) -> None:
+    """Refuse a task launch when host-specific environment safety checks fail.
+
+    ``worc preflight`` remains the full diagnostic surface, but a daemon or explicit run must not
+    depend on the operator remembering to invoke it after every config edit. This repeats only the
+    launch-critical checks whose damage occurs during a run: the Windows ``SystemRoot`` floor and
+    canonical assigned-path collisions (symlinks, case aliases, and the env-file).
+    Values are never included in the error.
+
+    :raises ConfigError: the current host cannot safely use the configured environment.
+    """
+    issues: list[str] = []
+    launch_issue = launch_critical_env_issue(config.security.allowed_environment, system=system)
+    if launch_issue is not None:
+        issues.append(launch_issue)
+
+    clone = Path(config.repo.local_path)
+    protected = host_protected_paths(
+        config,
+        build_internal_deny_policy(layout_for(config), env_file=env_file),
+    )
+    for name, value in config.security.extra_environment.items():
+        entry = canonical_collision(value, protected, system=system)
+        if entry is None:
+            entry = denied_read_path_collision(
+                value,
+                clone,
+                config.security.denied_read_paths,
+                canonical=True,
+                system=system,
+            )
+        if entry is not None:
+            issues.append(
+                f"security.extra_environment.{name}: the assigned path resolves onto "
+                f"{entry.label} ({entry.path.as_posix()}); choose a separate toolchain directory"
+            )
+    if issues:
+        raise ConfigError(issues)
+
+
+def _allowed_environment_pattern_lines(config: OrchestratorConfig) -> list[str]:
+    """Preflight report lines for the ``allowed_environment`` prefix patterns (empty when none).
+
+    Host-specific by nature — the same pattern resolves to different names on different machines —
+    which is exactly why this belongs to preflight and not to ``validate_config``. The run itself
+    announces the same expansion once at start of flow, from the same formatter.
+    """
+    _, expansions = expand_allowed_environment(config.security.allowed_environment)
+    described = describe_expansions(expansions)
+    if not described:
+        return []
+    forwarded = sum(len(item.kept) for item in expansions)
+    dropped = sum(len(item.dropped) for item in expansions)
+    header = (
+        f"allowed-environment: {len(expansions)} prefix pattern(s) — {forwarded} name(s) forwarded"
+    )
+    if dropped:
+        header += f", {dropped} dropped as secret-named"
+    if config.security.strict_isolation:
+        header += (
+            "; applies to orchestrator git/gh and strict-mode agent children (agent children also "
+            "withhold env-file names matched only by a prefix pattern)"
+        )
+    else:
+        header += (
+            "; gates orchestrator git/gh only — advanced-mode agent/check/tool children receive "
+            "the parent environment whole except variables loaded from the env-file"
+        )
+    return [header, *(f"  - {line}" for line in described)]
+
+
+def _assigned_path_lines(
+    config: OrchestratorConfig, *, env_file: Path | None
 ) -> tuple[bool, list[str]]:
-    """Compute the read-only preflight verdict + report lines; no task is processed.
+    """The host-specific verdict on where ``security.extra_environment`` values point.
+
+    Three things only this side of the gate can decide, because each needs the filesystem or the
+    environment of *this* machine:
+
+    * a value that reaches a protected directory through a **symlink**, a Windows case variant, or a
+      drive-letter/UNC alias of the same path — and the resolved env-file, which is host state, not
+      config. The
+      plain-path half of this is a load error already, so a config cannot be valid-here-only;
+    * a value pointing **into the clone**, which is the recipe that makes a toolchain cache work at
+      all: the orchestrator excludes it from git itself, and only reports a failure if the path is
+      still not ignored afterwards. Without that the cache's thousands of files land in the next
+      task's diff and trip a gate that has nothing to do with caches. No clone on disk yet, nothing
+      to exclude — the step is skipped, and says so;
+    * a value pointing **outside** the clone, which is a warning rather than a failure: the path may
+      be perfectly deliberate, but a sandboxed node cannot write there, so a build using it fails
+      with a permission error that reads like a broken toolchain.
+
+    Every line names the *variable*, never its value — an operator reads the value in their own
+    config file, and a value holding a secret against the guide's advice must not gain a terminal or
+    a CI log to leak from. A line does name the protected path it collided with, which is
+    orchestrator-owned and is the one thing the operator cannot infer.
+    """
+    protected = host_protected_paths(
+        config,
+        build_internal_deny_policy(layout_for(config), env_file=env_file),
+    )
+    clone = Path(config.repo.local_path)
+    clone_present = clone.is_dir()
+    ok = True
+    lines: list[str] = []
+    for name, value in config.security.extra_environment.items():
+        entry = canonical_collision(value, protected)
+        if entry is None:
+            entry = denied_read_path_collision(
+                value,
+                clone,
+                config.security.denied_read_paths,
+                canonical=True,
+            )
+        if entry is not None:
+            ok = False
+            lines.append(
+                f"assigned-paths: FAIL — {name} resolves onto {entry.label} "
+                f"({entry.path.as_posix()}), or inside it; the orchestrator's own state lives "
+                "there and a toolchain writing into it corrupts the run or the repository"
+            )
+            continue
+        elements = assigned_path_elements(value, include_unsplit=False)
+        inside = [element for element in elements if is_inside(element, clone)]
+        outside = len(elements) - len(inside)
+        if outside and config.security.strict_isolation:
+            lines.append(
+                f"assigned-paths: WARN — {name} points outside the clone; a node running under the "
+                "sandbox can only write inside the clone, so a build using that path fails with a "
+                "permission error that looks like a broken toolchain"
+            )
+        if not inside:
+            continue
+        if not clone_present:
+            lines.append(
+                f"assigned-paths: SKIP — {name} points into the clone, which is not on disk yet, "
+                "so it cannot be excluded from git; re-run this check once the first task has "
+                "cloned the repository"
+            )
+            continue
+        excluded = [
+            element
+            for element in inside
+            if not ensure_path_excluded(clone, Path(element).expanduser(), security=config.security)
+        ]
+        if excluded:
+            ok = False
+            lines.append(
+                f"assigned-paths: FAIL — {name} points into the clone but git still does not "
+                "ignore it, so a filled cache would land in the task's diff. A tracked path, or a "
+                "negation rule in the repository's ignore files, overrides the exclusion — move "
+                "the cache to a path of its own"
+            )
+        else:
+            lines.append(
+                f"assigned-paths: OK — {name} points into the clone and git ignores it (excluded "
+                "via .git/info/exclude), so a filled cache stays out of the task's diff"
+            )
+    return ok, lines
+
+
+def _append_isolation_probe_lines(
+    lines: list[str],
+    pid: ProviderId,
+    report: IsolationCapabilityReport | None,
+    ok: bool,
+    *,
+    has_fallback: bool,
+    advanced_mode: bool,
+) -> bool:
+    """Render one isolation-probe verdict (free smoke or paid probe) and return the new ``ok``.
+
+    Shared by both so the two probes cannot drift into different severities for the same answer: a
+    proven policy leak is unconditionally fatal (a non-fallback security result), while a probe that
+    could not demonstrate the policy degrades like a capability gap. ``None`` means the provider
+    offers no such probe — not a verdict, so nothing is printed.
+
+    In the advanced mode an undemonstrable probe is a warning even with no fallback provider, and
+    the per-attempt canary applies the same rule: the host class that answers "cannot demonstrate" —
+    native Windows without the elevated Codex backend — is exactly the one the mode exists to keep
+    working, so stopping preflight there makes the mode unavailable on that host while proving
+    nothing. Under strict isolation the stricter rule holds: with no fallback to cover the gap, an
+    unprovable sandbox fails preflight.
+    """
+    if report is None:
+        return ok
+    if report.ok:
+        lines.append(f"{pid.value}: isolation probe OK — {report.detail}")
+        return ok
+    if report.fatal:
+        lines.append(f"{pid.value}: FAIL — isolation probe: {report.detail}")
+        return False
+    if not has_fallback and not advanced_mode:
+        lines.append(f"{pid.value}: FAIL — isolation probe: {report.detail}")
+        return False
+    cover = (
+        "a fallback provider will cover"
+        if has_fallback
+        else "strict_isolation is off, so the run continues with the floor unproven"
+    )
+    lines.append(f"{pid.value}: WARN — isolation probe: {report.detail} ({cover})")
+    return ok
+
+
+def _provider_binary_lines(config: OrchestratorConfig, *, which: Which = shutil.which) -> list[str]:
+    """One diagnostic line per configured provider: where its CLI binary really lies.
+
+    Prints the launch path (the same ``resolve_launcher`` answer the run pins into ``argv[0]``),
+    the real file behind it after following symlinks, and whether that file falls inside the
+    provider's own config home. The standalone-package layout is the one fact that explains why the
+    same build behaves differently on two hosts — Codex keeps its binary inside ``$CODEX_HOME``
+    there — and learning it must not require reading a failed attempt's stderr. Diagnostic
+    only: no line is a verdict, and nothing here fails preflight. On Windows ``which`` may answer
+    with a ``.cmd`` shim whose contents ``resolve()`` does not chase; the line then truthfully
+    reports the shim, which is the file the OS executes.
+    """
+    resolvers: dict[ProviderId, Callable[[], Path]] = {
+        ProviderId.CLAUDE: claude_config_home,
+        ProviderId.CODEX: codex_config_home,
+    }
+    lines: list[str] = []
+    for pid, provider_cfg in config.agents.providers.items():
+        subject = f"{pid.value}-binary"
+        resolved = resolve_launcher(provider_cfg.command, which=which)
+        if resolved is None:
+            lines.append(f"{subject}: {provider_cfg.command!r} does not resolve on PATH")
+            continue
+        try:
+            real = Path(resolved).resolve()
+        except OSError:
+            real = Path(resolved)
+        head = f"{subject}: {resolved} — "
+        if real != Path(resolved):
+            head = f"{subject}: {resolved} — the file it runs is {real}, "
+        resolver = resolvers.get(pid)
+        if resolver is None:  # defensive: a provider id with no home resolver bound
+            lines.append(f"{subject}: {resolved}")
+            continue
+        try:
+            home = resolver()
+        except (RuntimeError, OSError) as exc:
+            lines.append(
+                f"{head}the provider's config home could not be resolved ({exc}), so whether "
+                "the binary lies inside it is unknown"
+            )
+            continue
+        if real.is_relative_to(home):
+            lines.append(
+                f"{head}inside the provider's config home ({home}): whatever covers that home "
+                "covers the binary itself"
+            )
+        else:
+            lines.append(f"{head}outside the provider's config home ({home})")
+    return lines
+
+
+def _gh_repo_pin_line(config: OrchestratorConfig) -> tuple[bool, str]:
+    """``(ok, line)`` for the ``gh --repo`` pin verdict.
+
+    Fatal only where the configuration actually needs GitHub: with ``create_pull_request`` on, an
+    unpinnable repository means the run would open its pull request against whatever ``gh`` infers,
+    so learning that here costs nothing and learning it at publish time costs a PR. Otherwise it is
+    a warning that says plainly which promise is off, rather than a refusal over a capability this
+    configuration never uses.
+    """
+    slug, source = gh_repo_pin(config.repo.url, config.repo.local_path, security=config.security)
+    if slug is not None:
+        return True, (
+            f"gh-repo-pin: OK ({source}) — every gh call names {slug} outright, so a planted "
+            "gh config or an insteadOf rewrite cannot retarget it"
+        )
+    detail = (
+        "repo.url names no hosted OWNER/REPO (an ssh alias, a file:// URL or a local path), so no "
+        "gh call can be pinned with --repo: gh would infer the repository from the clone, which is "
+        "the surface the control-state fingerprint exists to watch — the probe that decides which "
+        "pull request this task appends to included"
+    )
+    if config.git.create_pull_request:
+        return False, (
+            f"gh-repo-pin: FAIL — {detail}. This configuration opens pull requests "
+            "(git.create_pull_request: true), so set repo.url to the https://host/owner/name form"
+        )
+    return True, (
+        f"gh-repo-pin: WARN — {detail}. This configuration opens no pull requests, so nothing is "
+        "blocked; floor 4's 'every gh call names its repository outright' does not hold here"
+    )
+
+
+def run_preflight(
+    config: OrchestratorConfig,
+    *,
+    env_file: Path | None = None,
+    capability_smoke: bool = False,
+    paid_isolation_probe: bool = False,
+) -> tuple[bool, list[str]]:
+    """Compute the preflight verdict + report lines; no task is processed.
+
+    Read-only with one deliberate exception: an assigned toolchain cache inside the clone has its
+    exclusion repaired in that clone's untracked ``.git/info/exclude``. Reporting "your cache will
+    pollute the diff" without fixing what the orchestrator can fix would put the work on the
+    operator for no reason. Nothing tracked is touched, so no diff or pull request changes.
 
     Runs every allowed provider's ``preflight()`` (``<cli> --version``) and the deterministic
     ``check_isolation`` policy check. Returns ``(ready, lines)`` where ``ready`` is true iff every
@@ -2914,24 +3468,41 @@ def run_preflight(
                 ok = False
                 lines.append(f"{pid.value}: FAIL — {reason} (no fallback provider)")
 
-        # Live no-model isolation capability smoke (Codex ``codex sandbox``), opt-in via
-        # ``worc preflight`` and only for a healthy provider under strict isolation. A proven leak
-        # is unconditionally fatal (non-fallback security result); an undemonstrable sandbox
-        # degrades like a capability gap (fatal only with no fallback provider).
-        if capability_smoke and healthy and config.security.strict_isolation:
+        # Live no-model isolation capability smoke (Codex ``codex sandbox``), opt-in via ``worc
+        # preflight`` for any healthy provider — including one under `strict_isolation: false`,
+        # where the generated profile is what the local floor rests on. A proven leak is
+        # unconditionally fatal (non-fallback security result); an undemonstrable sandbox degrades
+        # like a capability gap (fatal only with no fallback provider).
+        if capability_smoke and healthy:
             smoke = getattr(provider, "isolation_capability_smoke", None)
             report = smoke(home_dir=Path.home()) if callable(smoke) else None
-            if report is not None:
-                if report.ok:
-                    lines.append(f"{pid.value}: isolation smoke OK — {report.detail}")
-                elif report.fatal or not has_fallback:
-                    ok = False
-                    lines.append(f"{pid.value}: FAIL — isolation smoke: {report.detail}")
-                else:
-                    lines.append(
-                        f"{pid.value}: WARN — isolation smoke: {report.detail} "
-                        "(a fallback provider will cover)"
-                    )
+            ok = _append_isolation_probe_lines(
+                lines,
+                pid,
+                report,
+                ok,
+                has_fallback=has_fallback,
+                advanced_mode=not config.security.strict_isolation,
+            )
+
+        # The paid probe (Claude): a separate opt-in because it spends a real model call. Same
+        # verdict handling as the free smoke — a proven leak is fatal, an undemonstrable probe is
+        # advisory — and, crucially, "the agent wrote nothing at all" reports as undemonstrable
+        # rather than as a pass. Ungated on `strict_isolation` for the same reason as the smoke.
+        if paid_isolation_probe and healthy:
+            paid = getattr(provider, "paid_isolation_probe", None)
+            report = paid(home_dir=Path.home()) if callable(paid) else None
+            ok = _append_isolation_probe_lines(
+                lines,
+                pid,
+                report,
+                ok,
+                has_fallback=has_fallback,
+                advanced_mode=not config.security.strict_isolation,
+            )
+
+    # Where each provider binary really lies: informational lines, never a verdict.
+    lines.extend(_provider_binary_lines(config))
 
     reasons = check_isolation(config, ISOLATION_CHECKS)
     if reasons:
@@ -2942,28 +3513,83 @@ def run_preflight(
         enforced = "enforced" if config.security.strict_isolation else "strict_isolation=false"
         lines.append(f"isolation: OK ({enforced})")
 
-    # Loudly surface the operator's read-isolation escape hatch — never a silent weakening.
+    # Loudly surface the operator's read-isolation escape hatch — never a silent weakening. One
+    # line: what it does and does not open is `guide/config/security.md`'s job, not every report's.
     if config.security.read_isolation_off:
         why = (
             "security.disable_read_isolation=true"
             if config.security.strict_isolation
             else "strict_isolation=false"
         )
+        lines.append(f"read-isolation: OFF ({why})")
+
+    # What this host cannot enforce, whatever the config says. Deliberately not a FAIL: the floor
+    # is missing either way, and refusing to run would leave the operator without the guarantee AND
+    # without the work. The same text lands in the run log, from the same formatter.
+    floor_gaps = describe_host_floor(config, HOST_FLOOR_CHECKS)
+    lines.extend(f"isolation-floor: NONE — {gap}" for gap in floor_gaps)
+    # The price of keeping that verdict advisory: "a node can still fall back to the other
+    # provider" is the compensation that makes it advisory, and it does not exist when only one
+    # provider is allowed. Under strict isolation the attempt that needs a sandboxed shell is then
+    # refused mid-run with nothing to cover it, after preflight said `ready`. Still not a FAIL — the
+    # host verdict stays advisory — but said out loud here.
+    if floor_gaps and len(config.agents.allowed) == 1 and config.security.strict_isolation:
         lines.append(
-            f"read-isolation: OFF ({why}) — providers use native project-instruction/config "
-            "discovery (Claude CLAUDE.md + project settings/hooks/MCP/skills; Codex user + .codex "
-            "config/hooks/rules) and the private read-deny projection is lifted; the write-guard, "
-            "commit/staging gates, PR control, and denied_read_paths blacklist stay in force"
+            "isolation-floor: WARN — this host cannot enforce the write floor and "
+            f"{config.agents.allowed[0].value} is the only allowed provider, so a node needing a "
+            "sandboxed shell will be refused mid-run (CAPABILITY_UNAVAILABLE) with no fallback to "
+            "cover it. Allow a second provider, or install the missing sandbox dependencies. "
+            "security.strict_isolation: false also gets the run moving, but it is not a remedy for "
+            "this: it keeps the shell by giving up the write floor everywhere rather than here — "
+            "read guide/config/security.md for what that mode holds instead"
         )
 
+    # The mode itself: the loudest line in the report, from the shared formatter so the run log
+    # says the same thing. Placed after the host-floor lines because the floor those lines qualify
+    # is the one the mode's line points at, and never a FAIL — the operator chose this, and
+    # refusing to report on a configuration the run accepts is what produced the `isolation:`
+    # disagreement this phase also fixed.
+    mode_lines = describe_advanced_mode(config)
+    lines.extend(mode_lines)
+
     # Same principle for the git-evidence grant: an operator reading preflight should see which
-    # optional capabilities are live, not have to infer them from the config file.
+    # optional capabilities are live, not have to infer them from the config file. The mode makes
+    # the grant inert (every node has an unscoped shell there), which the line has to say — else it
+    # announces a capability it did not add.
     if config.security.allow_git_evidence:
+        inert = "" if config.security.strict_isolation else " — inert under strict_isolation=false"
+        lines.append(f"git-evidence: ON (security.allow_git_evidence=true){inert}")
+
+    # The host-dependent half of the ``allowed_environment`` gate — its host-independent half
+    # (``PATH`` is mandatory) is a validator error, because one config file must get the same
+    # verdict on every machine. FAIL rather than WARN: the CLI would not start at all, and this is
+    # the one place where learning that costs nothing.
+    #
+    # Advanced mode widens agent-side children only. Orchestrator-owned git/gh keeps this allowlist,
+    # so the Windows launch floor is checked at both strict-isolation values.
+    env_issue = launch_critical_env_issue(config.security.allowed_environment)
+    if env_issue is not None:
+        ok = False
+        lines.append(f"allowed-environment: FAIL — {env_issue}")
+
+    # What each prefix pattern actually matched ON THIS HOST — the one place the width of a pattern
+    # is visible before it is used. A pattern that resolved to nothing is the interesting case and
+    # is printed like the others; never a FAIL, since an uninstalled toolchain is legitimate.
+    lines.extend(_allowed_environment_pattern_lines(config))
+
+    # Assigned variables are announced by NAME only. The values are in the operator's own config
+    # already, and printing them would hand a secret that landed there against the guide's advice a
+    # second surface (a terminal, a CI log) to leak from.
+    if config.security.extra_environment:
+        names = ", ".join(config.security.extra_environment)
         lines.append(
-            "git-evidence: ON (security.allow_git_evidence=true) — a flow node declaring "
-            "git_evidence may run the read-only git verbs to inspect delivery history; the "
-            "repository stays unwritable (sandbox) and commit/push/PR stay the orchestrator's"
+            f"extra-environment: {len(config.security.extra_environment)} assigned "
+            f"({names}) — agent/check/tool children receive these; orchestrator git/gh receives "
+            "only names not removed by its publication-retargeting scrub. Values are not printed"
         )
+        paths_ok, path_lines = _assigned_path_lines(config, env_file=env_file)
+        ok = ok and paths_ok
+        lines.extend(path_lines)
 
     lines.extend(_summarize_command_sets(config))
 
@@ -2973,10 +3599,19 @@ def run_preflight(
     # ``FlowRegistry.resolve`` regardless (a broken flow fails that task, not the whole gate).
 
     if config.git.create_pull_request:
-        gh_ok, gh_line = preflight_gh()
+        gh_ok, gh_line = preflight_gh(config.security)
         if not gh_ok:
             ok = False
         lines.append(gh_line)
+
+    # Whether every `gh` call can actually name its repository — the second half of floor 4, which
+    # switches off silently when the configured URL names no hosted repository (an ssh alias, a
+    # `file://` URL, a local path). Without the pin `gh` infers the repository from the clone, i.e.
+    # from the very surface the fingerprint exists to watch, the pull-request reuse probe included.
+    # Printed at every isolation setting: the pin is not a mode feature.
+    pin_ok, pin_line = _gh_repo_pin_line(config)
+    ok = ok and pin_ok
+    lines.append(pin_line)
 
     tg_ok, tg_line = check_telegram_preflight(config.telegram)
     if not tg_ok:
@@ -2988,15 +3623,21 @@ def run_preflight(
 
 
 def cmd_preflight(args: argparse.Namespace) -> int:
-    """Report each CLI's health and the strict_isolation verdict (read-only diagnostics)."""
+    """Report readiness without running a task (may repair clone-local ignore rules)."""
     _configure_runtime_logging(args)
     config = load_config_for(args)
     if config is None:
         return 2
     env_file, _ = resolve_env_file_path(args)
     # ``worc preflight`` opts into the live no-model capability smoke; the installer's
-    # auto-preflight (``_install_run_preflight``) keeps the default (offline) to stay fast.
-    ok, lines = run_preflight(config, env_file=env_file, capability_smoke=True)
+    # auto-preflight (``_install_run_preflight``) keeps the default (offline) to stay fast. The paid
+    # probe is a second, explicit opt-in: it spends a real model call, so nothing may imply it.
+    ok, lines = run_preflight(
+        config,
+        env_file=env_file,
+        capability_smoke=True,
+        paid_isolation_probe=bool(getattr(args, "paid_isolation_probe", False)),
+    )
     for line in lines:
         print(line)
     return 0 if ok else 1
@@ -3084,9 +3725,23 @@ def cmd_telegram_test(args: argparse.Namespace) -> int:
     return 0
 
 
-def _summarize_watch(results: list[PipelineResult]) -> int:
-    """Print one line per processed task and return the worst exit code (0 when nothing ran)."""
+def _summarize_watch(results: list[PipelineResult], *, withheld: Sequence[str] = ()) -> int:
+    """Print one line per processed task and return the worst exit code (0 when nothing ran).
+
+    ``withheld`` are pending tasks the tick deliberately did not claim (see :func:`watch_once`).
+    They produce no result, so an empty result list alone cannot tell an empty queue from a queue
+    nobody was allowed to take from — and the summary used to print "no pending tasks" directly
+    under a gate line naming the pending task it had just declined. Still exit 0: a fail-closed
+    decline is the gate working, not a failure.
+    """
     if not results:
+        held = sorted(set(withheld))
+        if held:
+            print(
+                f"watch: nothing claimed ({len(held)} pending task(s) held back: "
+                f"{', '.join(held)}) — the log says why"
+            )
+            return 0
         print("watch: nothing to do (slot free, no pending tasks)")
         return 0
     for result in results:
@@ -3117,10 +3772,13 @@ def cmd_watch(args: argparse.Namespace) -> int:
     config = load_config_for(args)
     if config is None:
         return 2
+    require_launch_environment(config, env_file=resolve_env_file_path(args)[0])
     preflight.require_git_control()  # git must honor `core.hooksPath` (>= 2.9)
     if config.git.create_pull_request:
         preflight.require_gh()  # fail fast on a missing GitHub CLI, not mid-publish
-        preflight.warn_if_gh_logged_out()  # non-blocking advisory if gh is present but logged out
+        # Non-blocking advisory if gh is present but logged out. The policy travels with it so
+        # the probe sees the same environment (a proxy, a token) every other gh call gets.
+        preflight.warn_if_gh_logged_out(security=config.security)
     # A node may route to ANY allowed provider, so one that cannot start is refused up front
     # rather than discovered at the first fallback with a stage's work already spent.
     require_provider_auth(config)
@@ -3145,6 +3803,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
             env_file=resolve_env_file_path(args)[0],
             heartbeat_seconds=args.heartbeat_seconds,
         )
+        notes = WatchNotes()
         return _summarize_watch(
             watch_loop(
                 orchestrator,
@@ -3153,7 +3812,9 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 poll_interval=poll,
                 queue=args.queue,
                 cleanup_hook=cleanup_hook,
-            )
+                notes=notes,
+            ),
+            withheld=notes.withheld,
         )
 
     # Daemon: refuse a second watcher for the same artifact root. A stale PID file (process gone) is
@@ -3163,6 +3824,17 @@ def cmd_watch(args: argparse.Namespace) -> int:
         print(
             f"watch: already running (pid {existing}); stop it first with "
             f"'wastech-orchestrator stop', or use 'restart' ({pid_path})"
+        )
+        return 1
+    # A `run` holds the same single slot in the same clone, and it is not a watcher — so it is not
+    # covered by the PID file above and cannot be stopped by the advice that goes with it.
+    runner = process_control.running_daemon_pid(
+        process_control.runner_file_path(worc_home_for(config))
+    )
+    if runner is not None:
+        print(
+            f"watch: a 'run' is executing a task in this clone (pid {runner}); wait for it to "
+            "finish, or interrupt it where it runs"
         )
         return 1
 
@@ -3188,6 +3860,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
 
     print(f"watch: polling every {poll}s for git-pushed tasks (Ctrl-C or 'stop' to exit)")
     results: list[PipelineResult] = []
+    daemon_notes = WatchNotes()
     stopped = False
     try:
         with controller:
@@ -3204,9 +3877,9 @@ def cmd_watch(args: argparse.Namespace) -> int:
                 folder,
                 poll_interval=poll,
                 queue=args.queue,
-                stop_event=controller.event,
-                stop_file=stop_path,
+                stop=StopChannels(controller.event, stop_path),
                 cleanup_hook=cleanup_hook,
+                notes=daemon_notes,
             )
             # Graceful stop arrived via SIGTERM (event) or the stop-file (Windows / cross-shell).
             stopped = controller.event.is_set() or process_control.stop_file_requested(stop_path)
@@ -3227,7 +3900,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     if stopped:
         print("watch: stopped")  # graceful shutdown (SIGTERM or stop-file)
         return 0
-    return _summarize_watch(results)
+    return _summarize_watch(results, withheld=daemon_notes.withheld)
 
 
 class _StopDecision(NamedTuple):
@@ -3513,13 +4186,13 @@ def cmd_status(args: argparse.Namespace) -> int:
         return 1 if args.task_id else 0
 
     now = datetime.now(UTC)
-    daemon_alive = _daemon_alive(config)
+    executor_alive = _executor_alive(config)
     for index, task in enumerate(tasks):
         if index:
             print()
         print(f"task_id={task.task_id}")
         print(f"title={task.title}")
-        print(f"status={_display_status(task, daemon_alive=daemon_alive)}")
+        print(f"status={_display_status(task, executor_alive=executor_alive)}")
         node = current_nodes.get(task.task_id)
         if node:
             print(f"node={node}")  # the flow checkpoint: where the engine will resume
@@ -3543,13 +4216,13 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def _task_entry(row: TaskRow, *, daemon_alive: bool = True) -> dict[str, str | None]:
-    # Status label via the shared renderer: a RUNNING row shows "parked (no daemon)" with no live
-    # daemon, else "(paused)" on a B-lite provider-outage park, else the plain status. The
-    # daemon_alive default keeps terminal rows (recent/all) and any direct caller unchanged.
+def _task_entry(row: TaskRow, *, executor_alive: bool = True) -> dict[str, str | None]:
+    # Status label via the shared renderer: a RUNNING row shows "parked (no daemon)" when neither
+    # the daemon nor a `run` is alive, else "(paused)" on a B-lite provider-outage park, else the
+    # plain status. The default keeps terminal rows (recent/all) and any direct caller unchanged.
     return {
         "task_id": row.task_id,
-        "status": _display_status(row, daemon_alive=daemon_alive),
+        "status": _display_status(row, executor_alive=executor_alive),
         "title": row.title,
         "branch": row.branch,
     }
@@ -3687,7 +4360,7 @@ def build_top_snapshot(
     ``store`` is ``None`` when no database exists yet (fresh install), yielding empty task sections.
     """
     worc_home = worc_home_for(config)
-    daemon_alive = _daemon_alive(config)
+    executor_alive = _executor_alive(config)
     active: list[_ActiveView] = []
     for row in store.find_active_tasks() if store is not None else []:
         try:
@@ -3704,7 +4377,7 @@ def build_top_snapshot(
         active.append(
             _ActiveView(
                 task_id=row.task_id,
-                status_label=_task_entry(row, daemon_alive=daemon_alive)["status"]
+                status_label=_task_entry(row, executor_alive=executor_alive)["status"]
                 or row.status.value,
                 title=row.title,
                 branch=row.branch,
@@ -3949,12 +4622,12 @@ def _list_sections(
             scan_pending_sorted(pending_dir(config), config.orchestrator.queue), start=1
         )
     ]
-    # Only RUNNING rows are relabelled by daemon liveness; probe once and pass it to the sections
+    # Only RUNNING rows are relabelled by executor liveness; probe once and pass it to the sections
     # that can contain a RUNNING row (active/all). recent/pending are terminal/file-only.
-    daemon_alive = _daemon_alive(config)
+    executor_alive = _executor_alive(config)
     if args.all:
         rows = store.all_tasks() if store else []
-        return [("all", [_task_entry(r, daemon_alive=daemon_alive) for r in rows])]
+        return [("all", [_task_entry(r, executor_alive=executor_alive) for r in rows])]
     if args.pending:
         return [("pending", pending)]
     if args.recent is not None:
@@ -3963,7 +4636,7 @@ def _list_sections(
     active = store.find_active_tasks() if store else []
     recent = store.recent_tasks(_LIST_RECENT_DEFAULT) if store else []
     return [
-        ("active", [_task_entry(r, daemon_alive=daemon_alive) for r in active]),
+        ("active", [_task_entry(r, executor_alive=executor_alive) for r in active]),
         ("pending", pending),
         ("recent", [_task_entry(r) for r in recent]),
     ]

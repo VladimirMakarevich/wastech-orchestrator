@@ -33,6 +33,7 @@ from typing import Protocol, TextIO
 from wastech_orchestrator import cli, process_control
 from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.providers import process as agent_process
+from wastech_orchestrator.security.launchers import resolve_launcher
 from wastech_orchestrator.state_store import StateStore
 
 _TAIL_INTERVAL_SECONDS = 1.0
@@ -144,9 +145,13 @@ def _watch_launcher() -> list[str]:
     ``sys.executable -m wastech_orchestrator.cli`` — the fragile path across pipx-venv /
     framework-python / ``--user`` layouts. Falls back to ``-m`` only when no console-script is on
     PATH (e.g. an editable checkout run without an entry point).
+
+    The resolution is already absolute, which is the half that matters here: the daemon does not
+    re-invoke a bare name. What it does NOT cover, and what no launcher pin can, is an edit to the
+    installed package's own code — this answers "which ``worc``", never "whose ``git_manager.py``".
     """
     for script in ("worc", "wastech-orchestrator"):
-        resolved = shutil.which(script)
+        resolved = resolve_launcher(script)
         if resolved:
             return [resolved]
     return [sys.executable, "-m", "wastech_orchestrator.cli"]
@@ -237,6 +242,13 @@ def start_watch(
         argv += ["--config", config_path]  # parent flag → before the subcommand
     argv += ["--log-file", str(log_path)]  # parent flag → before the subcommand (the argparse fix)
     argv += ["watch", "--queue", selector]
+    # Spawned with the parent environment, deliberately. Narrowing it to the orchestrator's own
+    # allowlist was tried and reverted: the daemon is a Python process, not a git one, and the
+    # allowlist carries neither the interpreter's locale nor the `VIRTUAL_ENV`/`PYTHONPATH` the `-m`
+    # fallback launcher needs in an editable checkout — so narrowing risked a daemon that cannot
+    # start, or one whose log cannot encode its own text. Little is lost: a name that would retarget
+    # publication does not survive into a git process anyway, because the Git Manager this daemon
+    # builds scrubs those out of its own environment (see `_GIT_ENV_SCRUB`).
     proc = spawn_fn(argv, capture_path=str(startup_log))
     pid_path = process_control.pid_file_path(cli.worc_home_for(config))
     probe = ready_probe or (lambda: process_control.running_daemon_pid(pid_path))

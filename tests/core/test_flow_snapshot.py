@@ -933,3 +933,85 @@ def test_evaluator_git_evidence_tristate(tmp_path: Path) -> None:
         ev = load_flow(p).nodes_by_id["check"]
         assert isinstance(ev, EvaluatorNode)
         assert ev.git_evidence is expected
+
+
+# -- agent nodes: skills / allow_skills ---------------------------------------------------------
+
+
+def test_agent_skills_parse_preserves_the_authors_order(tmp_path: Path) -> None:
+    # The block the agent receives says "invoke each of these"; the order it says them in is the
+    # operator's, so the tuple is not sorted or de-duplicated on the way through.
+    body = _VALID_BODY.replace(_RF, _RF + "      skills: [acme-tdd, acme-implement]\n")
+    node = load_flow(_write(tmp_path, body)).nodes_by_id["a"]
+    assert isinstance(node, AgentNode)
+    assert node.skills == ("acme-tdd", "acme-implement")
+
+
+def test_agent_skills_default_is_empty(tmp_path: Path) -> None:
+    node = load_flow(_write(tmp_path, _VALID_BODY)).nodes_by_id["a"]
+    assert isinstance(node, AgentNode)
+    assert node.skills == ()
+
+
+def test_agent_allow_skills_tristate(tmp_path: Path) -> None:
+    # Tri-state for the same reason as network_access, but the stakes are reversed: here `None` is
+    # what an ordinary flow writes, and it must stay distinguishable from an explicit `true` —
+    # that explicit one is a request the validator refuses under strict isolation, while silence
+    # never is.
+    def _as(value: str) -> str:
+        return _VALID_BODY.replace(_RF, _RF + f"      allow_skills: {value}\n")
+
+    for body, expected in ((_as("true"), True), (_as("false"), False), (_VALID_BODY, None)):
+        node = load_flow(_write(tmp_path, body)).nodes_by_id["a"]
+        assert isinstance(node, AgentNode)
+        assert node.allow_skills is expected
+
+
+def test_empty_skills_list_rejected(tmp_path: Path) -> None:
+    # `skills: []` resolves to the off-switch, i.e. the opposite of what writing the key asks for.
+    # Refused rather than tolerated, like every other declaration here that would silently do
+    # nothing.
+    body = _VALID_BODY.replace(_RF, _RF + "      skills: []\n")
+    with pytest.raises(FlowLoadError, match=r"empty 'skills'"):
+        load_flow(_write(tmp_path, body))
+
+
+def test_non_list_skills_rejected(tmp_path: Path) -> None:
+    body = _VALID_BODY.replace(_RF, _RF + "      skills: acme-tdd\n")
+    with pytest.raises(FlowLoadError, match=r"'skills' must be a list"):
+        load_flow(_write(tmp_path, body))
+
+
+def test_non_string_skill_entry_rejected(tmp_path: Path) -> None:
+    body = _VALID_BODY.replace(_RF, _RF + "      skills: [7]\n")
+    with pytest.raises(FlowLoadError, match=r"'skills' entries .* must be strings"):
+        load_flow(_write(tmp_path, body))
+
+
+@pytest.mark.parametrize(
+    "name",
+    ['"../escape"', '"nested/skill"', '"nested\\\\skill"', '".."', '"."', '"CON"', '""'],
+)
+def test_invalid_skill_name_rejected(tmp_path: Path, name: str) -> None:
+    # A name is joined onto <repo>/.claude/skills/, so it goes through the same portable-segment
+    # validator as every other flow-authored path component: a traversal must not resolve.
+    body = _VALID_BODY.replace(_RF, _RF + f"      skills: [{name}]\n")
+    with pytest.raises(FlowLoadError, match=r"invalid skill name"):
+        load_flow(_write(tmp_path, body))
+
+
+def test_skills_with_allow_skills_false_rejected(tmp_path: Path) -> None:
+    # Neither CLI offers "these skills and no others", so the pair has no honest reading — one half
+    # would be discarded silently.
+    body = _VALID_BODY.replace(_RF, _RF + "      skills: [acme-tdd]\n      allow_skills: false\n")
+    with pytest.raises(FlowLoadError, match=r"declares both 'skills' and 'allow_skills: false'"):
+        load_flow(_write(tmp_path, body))
+
+
+def test_skills_with_allow_skills_true_accepted(tmp_path: Path) -> None:
+    # Redundant but not contradictory: naming a skill already turns them on, and restating it is
+    # not the kind of declaration that silently does nothing.
+    body = _VALID_BODY.replace(_RF, _RF + "      skills: [acme-tdd]\n      allow_skills: true\n")
+    node = load_flow(_write(tmp_path, body)).nodes_by_id["a"]
+    assert isinstance(node, AgentNode)
+    assert node.skills == ("acme-tdd",) and node.allow_skills is True

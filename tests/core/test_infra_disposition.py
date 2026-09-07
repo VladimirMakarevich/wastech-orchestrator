@@ -50,8 +50,9 @@ def test_containment_class_anywhere_is_always_manual(
 def test_park_eligible_class_parks_whatever_the_other_attempt_reported(
     park_class: ErrorClass, order: str
 ) -> None:
-    # The incident's shape: one attempt reports something resumable, the other fails on a class that
-    # is not. The representative is always the LAST attempt's class, which is what used to decide.
+    # The interesting shape: one attempt reports something resumable, the other fails on a class
+    # that is not. The representative is always the LAST attempt's class, so deciding on it alone
+    # would lose the resumable one.
     other = ErrorClass.AUTHENTICATION_FAILED
     classes = (park_class, other) if order == "primary" else (other, park_class)
     assert classify_exhaustion(classes, representative=classes[-1]) is InfraDisposition.PARK

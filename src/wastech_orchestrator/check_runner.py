@@ -2,9 +2,10 @@
 
 Runs the operator's selected ``checks.command_sets`` — normalized to ``checks.model.ResolvedCheck``
 argv lists, never shell strings — through the shared safe process runner, each in its set's ``cwd``
-with
-an allowlisted environment and the set's (or global) timeout. Each run is written to
-``checks/<run-id>.log``.
+with the environment built by the operator's security policy (the allowlist plus assignments under
+strict isolation; the parent environment whole, minus ``.worc/.env`` names, under
+``security.strict_isolation: false``) and the set's (or global) timeout.
+Each run is written to ``checks/<run-id>.log``.
 
 Every selected check runs (no fail-fast): the runner aggregates the results so the human sees the
 full picture and ``fixing`` can address all quality failures in one cycle. A check failure is a
@@ -137,7 +138,7 @@ class CheckRunner:
         else:
             sets = list(normalize_command_sets(self._config.checks.command_sets))
         global_timeout = self._config.checks.timeout_seconds
-        env = build_child_env(self._config.security.allowed_environment)
+        env = build_child_env(self._config.security)
         checks_dir = task_artifact_dir(artifacts_root, task_id) / "checks"
         checks_dir.mkdir(parents=True, exist_ok=True)
 

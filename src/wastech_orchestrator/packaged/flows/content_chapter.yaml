@@ -118,6 +118,7 @@ flow:
     - id: fixing
       kind: agent
       role_file: content_chapter/fixing.md
+      resume_role_file: content_chapter/fixing.continue.md
       session_scope: editing_lineage
       lineage_affinity: revise
       permission_profile: workspace-write

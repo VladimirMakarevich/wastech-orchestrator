@@ -4,9 +4,11 @@ and that a quality failure never triggers fallback (phase doc 4.3)."""
 from __future__ import annotations
 
 from collections.abc import Callable
+from dataclasses import replace
 
 import pytest
 
+from wastech_orchestrator.composition import ISOLATION_CHECKS
 from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.providers.base import (
     FALLBACK_ELIGIBLE,
@@ -116,6 +118,40 @@ def test_capability_unavailable_needs_same_or_stricter_and_isolable(
         )
         is expected
     )
+
+
+def test_can_isolate_reads_the_real_isolation_checks_table(
+    config: OrchestratorConfig,
+    make_fake_provider: Callable[..., object],
+) -> None:
+    # Every other test here injects a stub table, so nothing pins the real one — and the real one is
+    # what the fallback decision consults after the full-access half left `isolation_reasons`. A
+    # legal provider config still answers "can isolate"; an illegal flag still answers "cannot".
+    router = AgentRouter(
+        config,
+        {
+            ProviderId.CODEX: make_fake_provider(ProviderId.CODEX),
+            ProviderId.CLAUDE: make_fake_provider(ProviderId.CLAUDE),
+        },
+        isolation_checks=ISOLATION_CHECKS,
+    )
+    assert router._can_isolate(ProviderId.CLAUDE) is True
+    assert router._can_isolate(ProviderId.CODEX) is True
+
+    providers = dict(config.agents.providers)
+    providers[ProviderId.CLAUDE] = replace(
+        providers[ProviderId.CLAUDE], extra_args=("--permission-mode", "bypassPermissions")
+    )
+    tampered = replace(config, agents=replace(config.agents, providers=providers))
+    router = AgentRouter(
+        tampered,
+        {
+            ProviderId.CODEX: make_fake_provider(ProviderId.CODEX),
+            ProviderId.CLAUDE: make_fake_provider(ProviderId.CLAUDE),
+        },
+        isolation_checks=ISOLATION_CHECKS,
+    )
+    assert router._can_isolate(ProviderId.CLAUDE) is False
 
 
 def test_capability_unavailable_falls_over_only_to_an_isolable_provider(

@@ -1,28 +1,29 @@
 # What the orchestrator leaves in your repository
 
-Everything the orchestrator writes for itself lives in two places: the gitignored `.worc/` home (its own state, never committed) and the `tasks/` lifecycle tree at the repository root (committed, because it is the audit trail). A third place is not the orchestrator's own state but a flow's deliverable: a flow whose `output_policy` is `repository_document` — the built-in `deep_research` — writes `docs/research/<task-id>/report.md` and `sources.json`, and those are committed like any other change. (`code_change` flows have no dedicated directory: the diff itself is the deliverable. `private_control_workspace_report` keeps its report inside `.worc/` — see `security-reports/` below.) This page says what each directory is, when it appears, whether its presence is normal, and what may be deleted.
+Everything the orchestrator writes for itself lives in two places: the `.worc/` home, gitignored by default (its own state, never committed) and the `tasks/` lifecycle tree at the repository root (committed, because it is the audit trail). A third place is not the orchestrator's own state but a flow's deliverable: a flow whose `output_policy` is `repository_document` — the built-in `deep_research` — writes `docs/research/<task-id>/report.md` and `sources.json`, and those are committed like any other change. (`code_change` flows have no dedicated directory: the diff itself is the deliverable. `private_control_workspace_report` keeps its report inside `.worc/` — see `security-reports/` below.) This page says what each directory is, when it appears, whether its presence is normal, and what may be deleted.
 
 Two rules hold for the whole `.worc/` home:
 
 - **The agent can never read it.** Every path below is in the orchestrator's internal read-deny set, projected into each provider's own sandbox/tool policy. The agent sees only the curated `.worc-io/` exchange.
-- **It is gitignored as a whole**, so nothing here shows up in `git status` or reaches a commit.
+- **Nothing here reaches a commit or a review diff**, whichever way you have it ignored. `install` gitignores the home as one unit, so by default nothing under it shows up in `git status` either. But that is a default you are invited to change: the recipe for tracking your flows (`.worc/*` plus `!.worc/flows/`, in `flows/README.md`) deliberately makes part of the home **tracked**, and operators extend it to `!.worc/tools/` and `!.worc/config.yaml` so flow and config changes are reviewable in history. Those files do appear in `git status`. They still never enter an orchestrator commit and never appear in the diff a review step is given — the orchestrator excludes the whole home from both by path, not by trusting the ignore rule — so an edit you make to a flow or the config while a task is running cannot ride into that task's commit, and cannot be mistaken for the task's work by the reviewer.
 
 ## `.worc/` at a glance
 
 | Path | What it is | Safe to delete? |
 | --- | --- | --- |
-| `config.yaml` | Your configuration. The one file you edit by hand. | No — it is the install. |
+| `config.yaml` | Your configuration. The one file you edit by hand — deliberately small: it carries what the install resolved plus the few things you author, and everything absent from it runs at its documented default. | No — it is the install. |
 | `config.example.yaml` | Commented reference copy, never read at runtime. | Yes (`worc install --reconfigure` restores it). |
 | `flows/`, `tools/` | Editable copies of the built-in flows, their role prompts, and the executables `tool` nodes resolve against. Yours to edit. | No — a flow a task names must exist here. |
 | `guide/` | This documentation, copied in by `install`. | Yes (`worc upgrade-docs` restores it). |
 | `follow-ups.md` | The accumulating list of what tasks noticed and did not fix — one section per finished task. Yours to curate; see below. | Entry by entry, by hand. |
 | `logs/<task-id>/` | Per-task artifacts: the rendered prompts, per-attempt provider output, `current.diff`, `summary.md`, the local-only `summary.json` (the same summary plus follow-ups and what the supervisor layer spent), check logs, HITL records. The biggest thing here by far — megabytes per task. | Yes — `worc logs clean`. |
 | `logs/daemon.log`, `logs/daemon-startup.log` | The `watch` daemon's operator trace (rotating, 10 MB × 5 backups) and the raw stream of a console-spawned daemon, kept so a startup crash is recoverable. | Yes — `worc logs clean` takes them, once no daemon is running. |
-| `logs/completed.jsonl` | The **ledger**: one append-only JSON record per terminal task. The audit index of everything that has run. | Only with `worc logs clean --all`. See below. |
+| `logs/completed.jsonl` | The **ledger**: one append-only JSON record per terminal task. The audit index of everything that has run. Per-attempt rows in `state.db` carry each attempt's own measured interval, a failed attempt included, so `finished_at - started_at` is a duration rather than two reads of the same clock. | Only with `worc logs clean --all`. See below. |
 | `runs/` | Per-task private runtime state, keyed by task id. Four roots — the section below explains each. | Automatically, or with `worc runs clean`. |
 | `memory/` | The persistent, repo-scoped memory store (when `memory.enabled`). | Curate it with `worc memory compact` / `worc memory clear`, not by hand. |
 | `security-reports/<task-id>/` | Deliverables of a flow whose output policy keeps its report private (`private_control_workspace_report` — the built-in `security_audit`) rather than committing it: one directory per task, each holding at least the `report.md` the policy requires. | Yours — read them first; nothing else reclaims them. |
 | `workspace/`, `tasks/rejected/`, `state.db*` | Scratch space, quarantined task files that failed the validation gate, and the authoritative task database. | `state.db` is the source of truth — never delete it while tasks are in flight. |
+| `orchestrator.run` | Liveness marker for a `worc run` executor: present with its PID for exactly as long as that command is working. It is what makes `status`/`list`/`top` say `running` rather than `parked (no daemon)` while a `run` is in flight, and what makes `rerun`/`finalize`/`merge-task`/`watch` refuse instead of starting a second engine on the same clone. Deliberately not the daemon's `.pid`: `run` has no cooperative stop, so `worc stop` must not believe it can ask it to finish. | No — `run` writes it on start and removes it on exit, a crash included. |
 | `orchestrator.pid`, `orchestrator.stop`, `orchestrator.children` | Process control for the `watch` daemon: its recorded PID, the stop sentinel `worc stop` writes, and the agent handles a hard stop needs to reap. | No — `worc stop` manages them. A stale `.pid` after a crash is cleared by the next `stop`. If a `stop` times out the `.pid` is **kept on purpose** (the stop is still pending, and it blocks a second watcher) — see below. |
 | `git-null-hooks/` | A deliberately empty directory every orchestrator-run `git` command uses as its hooks path, so no repository hook runs in an orchestrator git process. | No — it must exist and stay empty. |
 | `.env` | Your secrets. Never committed, never logged, never passed to an agent. | No. |
@@ -65,7 +66,7 @@ Each of these is a directory of `<task-id>/` subdirectories. They exist so a tas
 
 ### `runs/instruction-bundles/<task-id>/`
 
-**What writes it:** the orchestrator, at task start. Same idea for the *agent inputs*: the validated task file, the skill packages the task selected, and the repository instruction files (`AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`). The agent receives redacted copies through the exchange; this is the unredacted original the orchestrator verifies against.
+**What writes it:** the orchestrator, at task start. Same idea for the *agent inputs*: the validated task file and the repository instruction files (`AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md`). The agent receives redacted copies through the exchange; this is the unredacted original the orchestrator verifies against.
 
 **Normal?** Yes, one per task that ran.
 

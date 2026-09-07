@@ -24,16 +24,45 @@ from pathlib import Path
 
 from dotenv import dotenv_values, load_dotenv
 
+#: Every variable name the loaded file DEFINES — not merely the ones it managed to set. Recorded
+#: at load time because this is the only moment the path is in hand: the child-environment builder
+#: runs deep inside the adapters, which hold a ``SecurityConfig`` and nothing else. Process-global
+#: for the same reason the environment it describes is, and no more surprising: this module already
+#: writes to ``os.environ``, so remembering what it wrote there is the smaller of the two effects.
+#:
+#: Defined rather than newly-set, deliberately. A name the operator also exported is skipped by
+#: ``override=False``, so the *value* in play is the shell's — but the orchestrator cannot tell one
+#: from the other later, and withholding the name either way costs an operator who genuinely wants
+#: it forwarded one explicit ``security.extra_environment`` line. (The two counts are not
+#: interchangeable: a bare ``KEY`` line with no ``=`` is defined and never set.)
+_DEFINED_NAMES: frozenset[str] = frozenset()
+
 
 def load_env_file(path: Path) -> int:
     """Load ``KEY=value`` pairs from ``path`` into ``os.environ`` without overriding existing vars.
 
     The caller guarantees ``path`` exists. Returns the number of variables **newly** set (vars
-    already present win, so the file only fills gaps). Never logs names or values.
+    already present win, so the file only fills gaps). Never logs names or values. Also records the
+    names the file defines, for :func:`env_file_names`.
     """
+    global _DEFINED_NAMES
     before = set(os.environ)
+    _DEFINED_NAMES = frozenset(dotenv_values(dotenv_path=path))
     load_dotenv(dotenv_path=path, override=False)
     return sum(1 for key in os.environ if key not in before)
+
+
+def env_file_names() -> frozenset[str]:
+    """The names the loaded env-file defines — empty when no file was loaded this process.
+
+    These are the orchestrator's **own** secrets (the Telegram token out of the shipped
+    ``.env.example``, whatever else the operator keeps there), and the agent is denied reading the
+    file itself. So they are withheld from a child environment even where every other name is
+    forwarded: a full pass-through would otherwise hand over the contents of a file the deny policy
+    exists to protect. An operator who wants one of them in a child names it in
+    ``security.extra_environment``, which is assignment — a decision, not a default.
+    """
+    return _DEFINED_NAMES
 
 
 def count_env_file(path: Path) -> int:

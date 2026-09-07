@@ -12,6 +12,7 @@ from wastech_orchestrator.core.flow.contracts import (
     RunKind,
     SessionScope,
     fingerprint,
+    resolve_allow_skills,
     resolve_network_access,
 )
 
@@ -85,3 +86,14 @@ def test_resolve_network_access_inherits_granting_flow() -> None:
 
 def test_resolve_network_access_inherits_policyless_flow() -> None:
     assert resolve_network_access(None, None) is False
+
+
+def test_resolve_allow_skills_is_off_unless_the_flow_asks() -> None:
+    # Off is the default, and naming a skill is itself the request — so no flow has to write both
+    # keys. A skill the flow never asked for can fire on its own description, and a graph whose
+    # steps are chosen by a description in the target repository is not a deterministic graph.
+    assert resolve_allow_skills(None, ()) is False
+    assert resolve_allow_skills(None, ("acme-tdd",)) is True
+    # An explicit value wins over both, in either direction.
+    assert resolve_allow_skills(True, ()) is True
+    assert resolve_allow_skills(False, ()) is False

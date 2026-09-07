@@ -46,6 +46,7 @@ flow:
     - id: fixing
       kind: agent
       role_file: content_translate/fixing.md
+      resume_role_file: content_translate/fixing.continue.md
       session_scope: editing_lineage
       lineage_affinity: adapt_en
       permission_profile: workspace-write

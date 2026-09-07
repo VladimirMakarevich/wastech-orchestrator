@@ -93,6 +93,16 @@ class _Router:
             node_id=node_id, primary=ProviderId.CODEX, fallback=None, source=RouteSource.CONFIG
         )
 
+    def route_grants_shell(
+        self, route: ResolvedRoute, *, permission_profile: Any = None, git_evidence: bool = False
+    ) -> bool:
+        # The real Router asks the adapters whether this attempt gets a shell. The double answers
+        # from the node's grant — a Claude-shaped answer — unless a test sets ``grants_shell`` to
+        # model a provider whose profile carries a shell on its own (Codex ``read-only``) or a host
+        # where it was dropped.
+        override = getattr(self, "grants_shell", None)
+        return git_evidence if override is None else bool(override)
+
     def run_stage(
         self, request: Any, route: ResolvedRoute, *, snapshot: Any = None
     ) -> StageOutcome:
@@ -501,3 +511,25 @@ def test_critic_resume_own_lineage_across_rounds(tmp_path: Path) -> None:
     assert ("t", "critical_review", -1) in store.node_lineage
     resumed = [r.session_id for r in critic_requests if r.session_id is not None]
     assert resumed, "a later critic round should resume the stored session id"
+
+
+def test_critic_states_its_rules_once_then_continues(tmp_path: Path) -> None:
+    # The evaluator half of the continuation predicate, and why it needs no store read: the
+    # critic's session is keyed by its own id and written only by its own successful pass, so a
+    # session in hand already means this role has spoken there. Round 1 therefore gets the whole
+    # of critic.md; every later round gets the short text.
+    _, _store, _, router = _drive(
+        tmp_path,
+        findings=[{"severity": "high", "reason": "again"}],
+        sources=_GOOD_SOURCE,
+        session_id="critic-sess",
+    )
+    critic = [r for r in router.requests if getattr(r, "node_id", None) == "critical_review"]
+    assert len(critic) >= 2, "a blocking critic should run more than one round here"
+    assert critic[0].session_id is None
+    assert critic[0].continuation_prompt is None  # first pass: the full text
+    resumed = [r for r in critic if r.session_id is not None]
+    assert resumed, "a later critic round should resume the stored session id"
+    assert all(r.continuation_prompt is not None for r in resumed)
+    # Both texts ride the request, so the seam still has the full one if the session is dropped.
+    assert all(r.prompt for r in resumed)

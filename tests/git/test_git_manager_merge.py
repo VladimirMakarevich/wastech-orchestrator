@@ -18,6 +18,8 @@ from wastech_orchestrator.git_manager import (
     KIND_PR_MERGE,
     GitCommandError,
     GitManager,
+    GitResult,
+    ManualActionRequired,
 )
 from wastech_orchestrator.state_store import StateStore, TaskRow
 
@@ -33,11 +35,32 @@ def store(tmp_path: Path) -> StateStore:
     return StateStore.open(tmp_path / "state.db")
 
 
+def _offline_gh(argv: Sequence[str]) -> GitResult:
+    """Default ``gh`` for these tests: answers the fingerprint's PR probe, refuses anything else.
+
+    The per-attempt fingerprint asks ``gh pr list`` whether the task branch has an open PR, so
+    without a stub every capture would launch the real ``gh`` against whatever ``repo.url`` the
+    test config names — a network call inside a unit test. Any other verb fails loudly so a test
+    that actually needs ``gh`` wires its own runner instead of leaning on this one.
+    """
+    if list(argv[:2]) == ["pr", "list"]:
+        return GitResult(exit_code=0, stdout="[]", stderr="", timed_out=False, launch_error=None)
+    return GitResult(
+        exit_code=1,
+        stdout="",
+        stderr="no gh runner wired in this test",
+        timed_out=False,
+        launch_error=None,
+    )
+
+
 def _manager(
     git_repo, store: StateStore, artifacts_root: Path, make_git_config: ConfigFactory
 ) -> GitManager:
     config = make_git_config(git_repo.clone)
-    return GitManager(config, store=store, artifacts_root=str(artifacts_root))
+    return GitManager(
+        config, store=store, artifacts_root=str(artifacts_root), gh_runner=_offline_gh
+    )
 
 
 def _task(store: StateStore, task_id: str = "task-001") -> None:
@@ -138,6 +161,71 @@ def test_commit_merge_resolution_commits_and_is_idempotent(
     assert gm.commit_merge_resolution("task-001", "merge(task-001): resolve") == sha
 
 
+def test_commit_merge_resolution_leaves_a_tracked_runtime_file_out_of_the_merge(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # The base merge is the one publishing path that stages the whole tree (`git add -A`), and an
+    # installed repo re-includes part of `.worc/` on purpose (`.worc/*` + `!.worc/config.yaml`, so
+    # config changes are reviewable in history) — which makes that file TRACKED. Nothing leaked
+    # without the exclusion: `assert_exchange_never_staged` refuses the commit. But it refused on an
+    # ordinary operator edit, so a routine config change hard-blocked the base merge as a
+    # runtime-artifact violation. Excluded, the merge just proceeds without it.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    _task(store)
+    (git_repo.clone / ".gitignore").write_text(".worc/*\n!.worc/config.yaml\n", encoding="utf-8")
+    worc_home = git_repo.clone / ".worc"
+    worc_home.mkdir()
+    (worc_home / "config.yaml").write_text("poll_interval_seconds: 60\n", encoding="utf-8")
+    (worc_home / "state.db").write_text("ignored runtime state\n", encoding="utf-8")
+    git_run(["add", ".gitignore", ".worc/config.yaml"], git_repo.clone)
+    git_run(["commit", "-m", "track the orchestrator config"], git_repo.clone)
+    git_run(["push", "origin", "main"], git_repo.clone)
+    _branch_with_change(git_run, git_repo.clone, "worc/t1", "README.md", "branch side\n")
+    _advance_base(git_run, git_repo.clone, "README.md", "base side\n")
+    assert gm.update_branch_with_base("worc/t1", "main") is True
+    (git_repo.clone / "README.md").write_text("resolved\n", encoding="utf-8")
+    # The operator edits the orchestrator config while the task is in flight.
+    (worc_home / "config.yaml").write_text("poll_interval_seconds: 30\n", encoding="utf-8")
+
+    sha = gm.commit_merge_resolution("task-001", "merge(task-001): resolve")
+
+    assert sha
+    committed = git_run(["show", "--pretty=format:", "--name-only", sha], git_repo.clone).split()
+    assert "README.md" in committed
+    assert not [path for path in committed if path.startswith(".worc/")]
+    # The edit is untouched in the working tree — excluded from the commit, not reverted.
+    assert (worc_home / "config.yaml").read_text(encoding="utf-8") == "poll_interval_seconds: 30\n"
+
+
+def test_commit_merge_resolution_still_commits_when_the_runtime_home_is_fully_ignored(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # The default `worc install` shape ignores the whole `.worc/` dir. `git add` refuses (exit 1,
+    # "The following paths are ignored … use -f") when a pathspec names a root that exists on disk
+    # and is entirely ignored, so a blanket `:(exclude)` would break every base merge on a default
+    # install — the same trap `staged_pathspec` documents for the task lifecycle dir.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    _task(store)
+    (git_repo.clone / ".gitignore").write_text(".worc/\n.worc-io/\n", encoding="utf-8")
+    for dirname in (".worc", ".worc-io"):
+        (git_repo.clone / dirname).mkdir()
+        (git_repo.clone / dirname / "runtime.txt").write_text("ignored\n", encoding="utf-8")
+    git_run(["add", ".gitignore"], git_repo.clone)
+    git_run(["commit", "-m", "ignore the runtime home"], git_repo.clone)
+    git_run(["push", "origin", "main"], git_repo.clone)
+    _branch_with_change(git_run, git_repo.clone, "worc/t1", "README.md", "branch side\n")
+    _advance_base(git_run, git_repo.clone, "README.md", "base side\n")
+    assert gm.update_branch_with_base("worc/t1", "main") is True
+    (git_repo.clone / "README.md").write_text("resolved\n", encoding="utf-8")
+
+    sha = gm.commit_merge_resolution("task-001", "merge(task-001): resolve")
+
+    assert sha
+    committed = git_run(["show", "--pretty=format:", "--name-only", sha], git_repo.clone).split()
+    assert "README.md" in committed
+    assert not [path for path in committed if path.startswith((".worc/", ".worc-io/"))]
+
+
 def test_commit_merge_resolution_refuses_leftover_markers(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
 ) -> None:
@@ -161,12 +249,62 @@ def test_push_branch_update_fast_forwards_remote(
     assert gm.update_branch_with_base("worc/t1", "main") is False
     local_head = git_run(["rev-parse", "refs/heads/worc/t1"], git_repo.clone)
 
-    gm.push_branch_update("worc/t1")
+    gm.push_branch_update("task-001", "worc/t1")
 
     # Query the remote from the clone (the bare repo refuses in-repo git under safe.bareRepository).
     remote_line = git_run(["ls-remote", "origin", "refs/heads/worc/t1"], git_repo.clone)
     assert remote_line.split()[0] == local_head
-    gm.push_branch_update("worc/t1")  # idempotent: re-push of the same commit is a git no-op
+    # Idempotent: a re-push of the same commit is a git no-op.
+    gm.push_branch_update("task-001", "worc/t1")
+
+
+def test_push_branch_update_refuses_a_destination_changed_since_branch_prep(
+    git_repo,
+    store: StateStore,
+    tmp_path: Path,
+    make_git_config: ConfigFactory,
+    git_run: GitRunner,
+) -> None:
+    # The destination is re-read before EVERY push, and this is the push that happens after the
+    # agent has had its run at the clone — in a later process that prepares no branch. With the
+    # baseline held only in memory the gate would find nothing to compare and let the branch go to
+    # a rewritten `pushurl`, carrying this orchestrator's credentials with it.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    _task(store)
+    gm.prepare_branch("task-001", "slug", epoch=1)  # stamps the baseline, pre-provider
+    _branch_with_change(git_run, git_repo.clone, "worc/t1", "feature.txt", "feature\n")
+    elsewhere = tmp_path / "elsewhere.git"
+    git_run(["init", "--bare", str(elsewhere)], git_repo.clone)
+    git_run(["remote", "set-url", "--push", "origin", str(elsewhere)], git_repo.clone)
+
+    with pytest.raises(ManualActionRequired, match="push destination"):
+        gm.push_branch_update("task-001", "worc/t1")
+
+    # Nothing was sent: the refusal happens before the push, not after it.
+    assert git_run(["ls-remote", str(elsewhere), "refs/heads/worc/t1"], git_repo.clone) == ""
+
+
+def test_push_branch_update_uses_the_persisted_baseline_in_a_later_process(
+    git_repo,
+    store: StateStore,
+    tmp_path: Path,
+    make_git_config: ConfigFactory,
+    git_run: GitRunner,
+) -> None:
+    # The half that makes the refusal above reachable at all: `merge-task` runs with a fresh Git
+    # Manager, so the comparison has to come from the task's own record rather than from memory.
+    prep = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    _task(store)
+    prep.prepare_branch("task-001", "slug", epoch=1)
+    assert store.get_push_url_digest("task-001") is not None
+    _branch_with_change(git_run, git_repo.clone, "worc/t1", "feature.txt", "feature\n")
+    elsewhere = tmp_path / "elsewhere2.git"
+    git_run(["init", "--bare", str(elsewhere)], git_repo.clone)
+    git_run(["remote", "set-url", "--push", "origin", str(elsewhere)], git_repo.clone)
+
+    later = _manager(git_repo, store, tmp_path / "art", make_git_config)  # no branch prep here
+    with pytest.raises(ManualActionRequired, match="push destination"):
+        later.push_branch_update("task-001", "worc/t1")
 
 
 def test_record_external_merge_writes_op_and_is_idempotent(

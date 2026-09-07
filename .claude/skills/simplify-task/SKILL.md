@@ -56,7 +56,7 @@ You asked for maintainability and extensibility; here is how to get them **witho
 - Add an extension point only when a **concrete, known** requirement needs it. Otherwise keep it simple and refactor when the _second real_ case arrives (rule of three).
 - "We might need it later" is **not** a reason to add it now.
 - Favour small focused functions, narrow interfaces, single responsibility, and the existing repo patterns. These raise quality _and_ extensibility at zero speculative cost.
-- Respect mandated structure: the provider abstraction, orchestrator-only commit/push/PR, infra-only fallback, the security policy, the state machine — these are required by `.agents/rules/` and are part of the simplest _correct_ design, not over-engineering.
+- Respect mandated structure: the provider abstraction, the orchestrator-only publication mandate, infra-only fallback, the security policy, the state machine — these are required by `.agents/rules/` and are part of the simplest _correct_ design, not over-engineering. Read it as a MANDATE, not as a mechanism: a finding that the mechanism does not hold — under `security.strict_isolation: false`, or on a host with no sandbox — is a valid finding, not a violation of this rule.
 
 ## Output
 

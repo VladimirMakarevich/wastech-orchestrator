@@ -7,13 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from wastech_orchestrator import cli
+from wastech_orchestrator import cli, process_control
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.loop_control import LoopCounters
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import GitManager
 from wastech_orchestrator.ledger import Ledger, LedgerRecord
 from wastech_orchestrator.state_store import NodeRunRow, PublishOpRow, StateStore, TaskRow
+from wastech_orchestrator.task.parser import read_subtask_refs
 
 # Every test here is a slow integration test (real git / subprocess / process tree).
 pytestmark = pytest.mark.slow
@@ -401,3 +402,260 @@ def test_finalize_dry_run_stays_on_branch_when_disabled(
     assert code == 0
     out = capsys.readouterr().out
     assert "stay on branch" in out and "checkout base" not in out
+
+
+def test_finalize_dry_run_is_allowed_while_the_daemon_runs(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `plan_finalize` is read-only ("mutates nothing"), so the guard that protects the shared clone
+    # has nothing to protect here — the same line `prs --sync` already draws for its dry run.
+    project = tmp_path / "p"
+    project.mkdir()
+    config = _seed(project, git_repo.clone, pr_url="https://example/pull/9")
+    process_control.write_pid_file(
+        process_control.pid_file_path(git_repo.clone / ".worc"), pid=4242
+    )
+    monkeypatch.setattr(process_control, "is_running", lambda pid, **kw: True)
+
+    code = cli.main(
+        [
+            "--config",
+            str(config),
+            "finalize",
+            "task-1",
+            "--as",
+            "done",
+            "--dry-run",
+            "--no-verify-pr",
+        ]
+    )
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "dry-run" in out
+    assert "watch daemon is running" in out  # a note, so the plan is not read as executable now
+
+
+# --- the task-file move ------------------------------------------------------------------
+
+
+def _seed_tracked_task_file(git_repo, git_run, project: Path) -> Path:
+    """Commit ``tasks/pending/task-1.md`` inside the clone, the way a git-distributed task arrives.
+
+    The default harness keeps the task file outside the repository, where a move is invisible to
+    git. This is the shape an operator actually has: the lifecycle folders are deliberately tracked
+    (a finished task's file and its summary are the human-readable audit trail), so moving one is a
+    tracked change in their working tree.
+    """
+    pending = git_repo.clone / "tasks" / "pending"
+    pending.mkdir(parents=True, exist_ok=True)
+    source = pending / "task-1.md"
+    source.write_text("---\nid: task-1\ntitle: T\n---\n\nbody\n", encoding="utf-8")
+    git_run(["add", "tasks/pending/task-1.md"], git_repo.clone)
+    git_run(["commit", "-m", "chore: queue task-1"], git_repo.clone)
+    return source
+
+
+def _seed_decomposition_root(git_repo, git_run, project: Path, *, n: int = 2) -> Path:
+    """Commit a ``subtasks:`` root plus its spec files, the shape ``promote`` puts in ``pending/``.
+
+    Mirrors the promote contract deliberately: the specs live in a ``subtasks/`` subfolder (never
+    beside the root, where the queue scan would claim them as standalone tasks) and the refs are
+    relative to the root file's own directory, which is what the relocation has to preserve.
+    """
+    pending = git_repo.clone / "tasks" / "pending"
+    (pending / "subtasks").mkdir(parents=True, exist_ok=True)
+    refs = [f"subtasks/{i:02d}-step.md" for i in range(1, n + 1)]
+    root = pending / "epic.md"
+    manifest = "".join(f"  - {ref}\n" for ref in refs)
+    root.write_text(
+        f"---\nid: epic\ntitle: Epic\nsubtasks:\n{manifest}---\n\nbody\n", encoding="utf-8"
+    )
+    for i, ref in enumerate(refs, start=1):
+        (pending / ref).write_text(
+            f"---\ntitle: Step {i}\nslug: step-{i}\n---\n\nAcceptance criteria\n\n- ok\n",
+            encoding="utf-8",
+        )
+    git_run(["add", "tasks/pending"], git_repo.clone)
+    git_run(["commit", "-m", "chore: queue epic"], git_repo.clone)
+    return root
+
+
+def test_finalize_carries_the_subtask_specs_with_the_root(
+    git_repo, git_run, tmp_path: Path
+) -> None:
+    # The defect this pins: the root reached `done/` and its specs stayed in `pending/subtasks/`,
+    # so the finished root could no longer resolve its own manifest — every `subtasks:` ref is
+    # relative to the root file's directory. `promote` carries the pair in together and states the
+    # invariant ("a root never appears in pending/ without its specs"); the terminal move has to be
+    # the same operation in reverse, or the orchestrator separates a set its own code calls
+    # inseparable. Fails against the previous relocation, which moved exactly one file.
+    project = tmp_path / "p"
+    project.mkdir()
+    root = _seed_decomposition_root(git_repo, git_run, project)
+    config = _seed(project, git_repo.clone, status=Status.MANUAL_ACTION_REQUIRED)
+    store = StateStore.open(git_repo.clone / ".worc" / "state.db")
+    store.update_task("task-1", source_path=str(root))
+    store.close()
+
+    assert cli.main(["--config", str(config), "finalize", "task-1", "--as", "failed", "-y"]) == 1
+
+    failed = git_repo.clone / "tasks" / "failed"
+    assert (failed / "epic.md").is_file()
+    # Beside the root in its new home, under the same relative path the manifest names…
+    assert (failed / "subtasks" / "01-step.md").is_file()
+    assert (failed / "subtasks" / "02-step.md").is_file()
+    # …and gone from the queue, which is what "pending" is supposed to mean.
+    assert not (git_repo.clone / "tasks" / "pending" / "subtasks" / "01-step.md").exists()
+    # The point of the move, not a side effect: the manifest resolves from where the root now is.
+    for ref in read_subtask_refs(failed / "epic.md"):
+        assert (failed / ref).is_file(), ref
+
+
+def test_finalize_does_not_nest_a_lifecycle_folder_inside_the_queue(
+    git_repo, git_run, tmp_path: Path
+) -> None:
+    # The trap in the obvious implementation: `lifecycle_destination` is single-file and derives the
+    # tasks root from the file's parent, so asking it where a spec belongs answers
+    # `tasks/pending/subtasks/failed/01-step.md` — a lifecycle folder nested inside the queue. The
+    # destination has to come from the root's move instead.
+    project = tmp_path / "p"
+    project.mkdir()
+    root = _seed_decomposition_root(git_repo, git_run, project, n=1)
+    config = _seed(project, git_repo.clone, status=Status.MANUAL_ACTION_REQUIRED)
+    store = StateStore.open(git_repo.clone / ".worc" / "state.db")
+    store.update_task("task-1", source_path=str(root))
+    store.close()
+
+    assert cli.main(["--config", str(config), "finalize", "task-1", "--as", "failed", "-y"]) == 1
+
+    pending = git_repo.clone / "tasks" / "pending"
+    assert not (pending / "subtasks" / "failed").exists()
+    assert not (pending / "subtasks" / "done").exists()
+
+
+def test_finalize_announces_the_specs_that_travel_with_the_root(
+    git_repo, git_run, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Same reason the root's own move is announced: these are tracked files the finalize dirties
+    # and deliberately does not commit, and several of them appearing in `git status` unannounced
+    # is worse than one. The dry run must predict the same count it will move.
+    project = tmp_path / "p"
+    project.mkdir()
+    root = _seed_decomposition_root(git_repo, git_run, project, n=3)
+    config = _seed(project, git_repo.clone, status=Status.MANUAL_ACTION_REQUIRED)
+    store = StateStore.open(git_repo.clone / ".worc" / "state.db")
+    store.update_task("task-1", source_path=str(root))
+    store.close()
+
+    assert (
+        cli.main(["--config", str(config), "finalize", "task-1", "--as", "failed", "--dry-run"])
+        == 0
+    )
+    assert "+3 subtask specs" in capsys.readouterr().out
+
+    assert cli.main(["--config", str(config), "finalize", "task-1", "--as", "failed", "-y"]) == 1
+    assert "+3 subtask specs" in capsys.readouterr().out
+
+
+def test_finalize_of_an_ordinary_task_announces_no_specs(
+    git_repo, git_run, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A task with no `subtasks:` manifest must read exactly as it did before: one file, no suffix.
+    project = tmp_path / "p"
+    project.mkdir()
+    source = _seed_tracked_task_file(git_repo, git_run, project)
+    config = _seed(project, git_repo.clone, status=Status.MANUAL_ACTION_REQUIRED)
+    store = StateStore.open(git_repo.clone / ".worc" / "state.db")
+    store.update_task("task-1", source_path=str(source))
+    store.close()
+
+    assert cli.main(["--config", str(config), "finalize", "task-1", "--as", "failed", "-y"]) == 1
+
+    out = capsys.readouterr().out
+    assert "tasks/failed/task-1.md" in out
+    assert "subtask spec" not in out
+
+
+def test_finalize_leaves_the_task_file_move_uncommitted(git_repo, git_run, tmp_path: Path) -> None:
+    # The observation the finding rests on, pinned as behavior rather than as a defect: finalize
+    # moves the file and commits nothing ("Runs no pipeline and never commits/pushes/PRs"), so the
+    # move lands in the operator's working tree. That contract is right — the operator may be on
+    # `main`, and committing there behind their back is worse than a change they can see — which is
+    # why the fix is to SAY so, not to commit it.
+    project = tmp_path / "p"
+    project.mkdir()
+    source = _seed_tracked_task_file(git_repo, git_run, project)
+    config = _seed(project, git_repo.clone, status=Status.MANUAL_ACTION_REQUIRED)
+    store = StateStore.open(git_repo.clone / ".worc" / "state.db")
+    store.update_task("task-1", source_path=str(source))
+    store.close()
+
+    assert cli.main(["--config", str(config), "finalize", "task-1", "--as", "failed", "-y"]) == 1
+
+    assert (git_repo.clone / "tasks" / "failed" / "task-1.md").exists()
+    status = git_run(["status", "--porcelain"], git_repo.clone)
+    assert "tasks/pending/task-1.md" in status  # the tracked deletion is uncommitted…
+    assert "tasks/failed" in status  # …and the arrival is untracked (porcelain folds the dir)
+
+
+def test_finalize_names_the_move_it_makes(
+    git_repo, git_run, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # It was invisible on every surface: the plan reported status / pr url / cleanup / branch /
+    # ledger, the result reported the status, and neither mentioned a file move that had just
+    # dirtied the operator's tree — and that rides into the next task's review diff.
+    project = tmp_path / "p"
+    project.mkdir()
+    source = _seed_tracked_task_file(git_repo, git_run, project)
+    config = _seed(project, git_repo.clone, status=Status.MANUAL_ACTION_REQUIRED)
+    store = StateStore.open(git_repo.clone / ".worc" / "state.db")
+    store.update_task("task-1", source_path=str(source))
+    store.close()
+
+    assert cli.main(["--config", str(config), "finalize", "task-1", "--as", "failed", "-y"]) == 1
+
+    out = capsys.readouterr().out
+    assert "tasks/failed/task-1.md" in out
+    assert "not committed" in out
+
+
+def test_finalize_dry_run_announces_the_move(
+    git_repo, git_run, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "p"
+    project.mkdir()
+    source = _seed_tracked_task_file(git_repo, git_run, project)
+    config = _seed(project, git_repo.clone, status=Status.MANUAL_ACTION_REQUIRED)
+    store = StateStore.open(git_repo.clone / ".worc" / "state.db")
+    store.update_task("task-1", source_path=str(source))
+    store.close()
+
+    assert (
+        cli.main(["--config", str(config), "finalize", "task-1", "--as", "failed", "--dry-run"])
+        == 0
+    )
+
+    out = capsys.readouterr().out
+    assert "tasks/pending/task-1.md" in out and "tasks/failed/task-1.md" in out
+    assert (git_repo.clone / "tasks" / "pending" / "task-1.md").exists()  # dry run moved nothing
+
+
+def test_finalize_abandoned_announces_no_move(
+    git_repo, git_run, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `--as abandoned` leaves the file in `pending/` for the operator to resolve, so there is no
+    # move to report and the line must not appear at all.
+    project = tmp_path / "p"
+    project.mkdir()
+    source = _seed_tracked_task_file(git_repo, git_run, project)
+    config = _seed(project, git_repo.clone, status=Status.FAILED)
+    store = StateStore.open(git_repo.clone / ".worc" / "state.db")
+    store.update_task("task-1", source_path=str(source))
+    store.close()
+
+    cli.main(["--config", str(config), "finalize", "task-1", "--as", "abandoned", "-y"])
+
+    out = capsys.readouterr().out
+    assert "not committed" not in out
+    assert (git_repo.clone / "tasks" / "pending" / "task-1.md").exists()

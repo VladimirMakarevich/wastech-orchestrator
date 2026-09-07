@@ -1,42 +1,46 @@
 """The Core-owned, provider-neutral orchestrator security contract.
 
-A short, fixed security block the orchestrator prepends to *every* provider prompt — agent,
-evaluator, and each supervisor turn — as defense-in-depth. It tells the agent up-front not to read
-or mutate the orchestrator's service files (``.worc``/``.worc-io``/``.git``/``tasks/`` and
-credential/environment files) and never to commit/push.
+A short, fixed security block the orchestrator prepends to provider prompts — agent, evaluator, and
+each supervisor turn — as defense-in-depth. It tells the agent up-front not to read or mutate the
+orchestrator's service files (``.worc``/``.git``/``tasks/`` and credential/environment files) and
+never to publish. ``.worc-io`` is the one asymmetric root: the paths handed to a node there are what
+it is *for* reading, so only writing it is banned. Saying that plainly is not a nicety — the wording
+that folded it into the read ban made reviewers refuse to review, filing a blocking finding that
+their context files were forbidden reading, and the refusal then travelled to ``fixing`` as if it
+were rework.
 
-It is **advisory only** — it does NOT replace the filesystem sandbox + deny projection, which
-remain the enforcement. It matters most when the operator relaxes read-isolation: then the sandbox
-no longer blocks those reads and this soft barrier is the only thing left, so an explicit
-read-restraint paragraph is appended in that case.
+It is **advisory only** — the filesystem sandbox + deny projection remain the enforcement. One
+unconditional block, identical on every run: nothing here varies with the configuration, so the
+text cannot overstate on one run what it understates on another. The publication ban is stated in
+its widest form (any address, any route) because that half of the floor is never mechanically
+prevented — on a run with the network and credentials the CLI picks up by itself it is detection
+after the fact, so it has to be asked for outright rather than left implied by "the orchestrator's
+job".
 
 Provider-neutral by construction: this module builds only text. The orchestrator resolves the string
-once (config-derived, not per-node) and carries it on
+once and carries it on
 :attr:`~wastech_orchestrator.providers.base.AgentRunRequest.security_preamble`, which the single
-neutral choke point :func:`~wastech_orchestrator.providers.base.build_effective_prompt` prepends.
-No CLI syntax, no provider branch, no secret. The path tokens are emitted from the layout constants
-so the text cannot drift from the enforced denies.
+neutral choke point :func:`~wastech_orchestrator.providers.base.build_effective_prompt` prepends —
+on a turn that opens a session, never on one that resumes a live one, where it is already in the
+conversation. No CLI syntax, no provider branch, no secret. The path tokens are emitted from the
+layout constants so the text cannot drift from the enforced denies.
 """
 
 from __future__ import annotations
 
-from wastech_orchestrator.core.flow.instruction_bundle import REPO_INSTRUCTION_NAMES
 from wastech_orchestrator.runtime_layout import CONTROL_HOME_DIRNAME, EXCHANGE_HOME_DIRNAME
 
 
-def build_orchestrator_security_preamble(*, read_isolation_off: bool) -> str:
-    """Build the orchestrator security contract prepended to every provider prompt.
+def build_orchestrator_security_preamble() -> str:
+    """Build the orchestrator security contract prepended to a session-opening provider prompt.
 
-    ``read_isolation_off`` is the effective read-isolation state
-    (:attr:`~wastech_orchestrator.config.schema.SecurityConfig.read_isolation_off`): when true the
-    sandbox may not block the private-path reads, so an explicit read-restraint paragraph is
-    appended. The baseline is always present. Advisory, secret-free, and derived from the layout
-    constants so it cannot drift from the deny policies.
+    Takes no arguments on purpose: the block is the same on every run, so no task, flow, or
+    configuration value can soften what the agent is told. Advisory, secret-free, and derived from
+    the layout constants so it cannot drift from the deny policies.
     """
-    instruction_files = ", ".join(f"`{name}`" for name in REPO_INSTRUCTION_NAMES)
-    baseline = "\n".join(
+    return "\n".join(
         (
-            "[Orchestrator security contract — defense in depth; it does not replace the sandbox.]",
+            "[Orchestrator security contract — defense in depth.]",
             (
                 "You run inside an orchestrator-managed workspace. In addition to your built-in "
                 "safety policy and this repo's instructions, these orchestrator rules always "
@@ -51,22 +55,20 @@ def build_orchestrator_security_preamble(*, read_isolation_off: bool) -> str:
                 "logs, database, secrets, frozen bundles): do not read it and do not write it."
             ),
             (
-                f"- `{EXCHANGE_HOME_DIRNAME}/` is read-only input context: read only the paths "
-                "you are given; never create, modify, move, or delete anything under it."
+                f"- `{EXCHANGE_HOME_DIRNAME}/` is your read-only input context: the paths you are "
+                "given under it are yours to read — that is what it is for, and nothing below "
+                "takes that back. Read no other path under it, and never create, modify, move, or "
+                "delete anything there."
             ),
+            "- Do not touch Git control state (`.git/`, its config, hooks, HEAD, refs).",
             (
-                "- Do not touch Git control state (`.git/`, its config, hooks, HEAD, refs); "
-                "never run git commit/push/merge or open a PR — publishing is the "
-                "orchestrator's job."
+                "- Do not publish anything: no commit, push, merge, tag or pull request — not to "
+                "this repository's remote and not to any other address, by any route, including a "
+                "second clone assembled elsewhere; publishing is the orchestrator's job."
             ),
             (
                 "- Do not modify anything under `tasks/` (the task lifecycle tree); never add, "
                 "edit, or remove task files."
-            ),
-            (
-                f"- {instruction_files} are ordinary repository files: change them when the "
-                "task calls for it (as an ordinary diff); do not opportunistically rewrite your "
-                "own rules."
             ),
             (
                 "- Never read credential/environment files (e.g. `.env`) or provider auth "
@@ -74,11 +76,3 @@ def build_orchestrator_security_preamble(*, read_isolation_off: bool) -> str:
             ),
         )
     )
-    if not read_isolation_off:
-        return baseline
-    reinforcement = (
-        "Read-isolation is relaxed for this run, so the filesystem sandbox may not block the paths "
-        f"above. Honor these rules by choice: in particular do not read `{CONTROL_HOME_DIRNAME}/`, "
-        "`.env`, or any orchestrator-private file even though you may be technically able to."
-    )
-    return f"{baseline}\n\n{reinforcement}"

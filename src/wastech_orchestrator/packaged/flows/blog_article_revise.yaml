@@ -20,7 +20,8 @@
 # `git.create_pull_request: false` (install `--no-create-pr`) to land the revision as a local commit
 # with no PR. network_policy: research grants the external-research node (read-only) web access;
 # every writing node stays offline and workspace-write, so a Codex writer with network is never
-# constructed. The deterministic gate `check_length` here is a sanity floor against the edit
+# constructed — on the shipped default. Under `security.strict_isolation: false` (advanced mode)
+# every node is online whatever this flow declares, and the validator stops refusing that shape. The deterministic gate `check_length` here is a sanity floor against the edit
 # accidentally gutting the piece, not a growth mandate — its defaults are intentionally low (see the
 # node below); there is no structural gate like `check_chapter` here — a free-form blog post has no
 # fixed structure, so all remaining quality is evaluator-driven.
@@ -75,7 +76,7 @@ flow:
       # Same tuning note as blog_article's draft node — for voice consistency across both flows, use
       # the same pin here if you pin one there (uncomment to pin):
       # provider: codex
-      # model: gpt-5.4
+      # model: gpt-5.5
       # reasoning: xhigh
     - id: length
       kind: tool
@@ -105,14 +106,15 @@ flow:
       # Language polish is a bounded pass, not fresh reasoning, so it runs at medium regardless of
       # the flow-wide default — less wall-time on the tail, no quality loss. It is a fresh session
       # (it gets the diff and the reviewer findings as artifacts), so it does NOT re-read revise's
-      # whole transcript — cheaper input. It no longer needs revise's model/provider; pin it to the
+      # whole transcript — cheaper input. It does not need revise's model/provider; pin it to the
       # same as revise only for voice consistency if you pin revise above.
       reasoning: medium
       # provider: codex
-      # model: gpt-5.4
+      # model: gpt-5.5
     - id: fixing
       kind: agent
       role_file: blog_article_revise/fixing.md
+      resume_role_file: blog_article_revise/fixing.continue.md
       session_scope: editing_lineage
       lineage_affinity: revise
       permission_profile: workspace-write
@@ -120,7 +122,7 @@ flow:
       # fixing resumes revise's editing lineage (rework genuinely builds on the revision), so it
       # MUST carry the same model/provider if you pin one on revise above (uncomment to match):
       # provider: codex
-      # model: gpt-5.4
+      # model: gpt-5.5
     - id: publish
       kind: publish
       policy: documentation_pull_request

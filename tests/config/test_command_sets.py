@@ -103,7 +103,7 @@ def test_empty_set_name_rejected() -> None:
 
 
 def test_stale_discovery_and_commands_keys_are_tolerated() -> None:
-    # v15 removed both; an old config still loads fail-open (the keys are ignored, not rejected).
+    # Both are dead keys; a config carrying them still loads fail-open (ignored, not rejected).
     cfg = loads_config(
         _BASE + 'checks:\n  discovery: { mode: auto }\n  commands: ["pytest"]\n  command_sets: {}\n'
     ).config

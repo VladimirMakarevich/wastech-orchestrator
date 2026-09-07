@@ -1,10 +1,10 @@
 """Frozen control bundle — a per-task immutable snapshot of the effective control plane.
 
 The operator control plane (``<repo>/.worc`` = ``control_home``: the flow YAML, role/supervisor
-prompts, and ``tools/`` executables) lives under the provider working directory. Every consumer
-historically re-read it **live** on each call, so a workspace-write agent could rewrite a later role
-prompt or a tool executable mid-run and a *later* orchestrator node would then read/execute those
-provider-chosen bytes outside the provider sandbox with the orchestrator's own authority.
+prompts, and ``tools/`` executables) lives under the provider working directory. Re-reading it
+**live** on each call would let a workspace-write agent rewrite a later role prompt or a tool
+executable mid-run, and a *later* orchestrator node would then read/execute those provider-chosen
+bytes outside the provider sandbox with the orchestrator's own authority.
 
 At task start the orchestrator freezes the exact effective control inputs referenced by the task's
 flow into a private, immutable bundle under ``<private_home>/runs/control-bundles/<task-id>/`` and
@@ -98,7 +98,8 @@ class _Ref:
 def _referenced_inputs(snapshot: FlowSnapshot, flow_dir: Path, tools: ToolRegistry) -> list[_Ref]:
     """Enumerate the exact control inputs the flow references, in a deterministic order.
 
-    The flow YAML, every node ``role_file``, the supervisor block's three role files, and the
+    The flow YAML, every node ``role_file`` and ``resume_role_file``, the supervisor block's three
+    role files, and the
     complete supported launch set for each ``tool`` node (via the **live** registry — a resolution
     failure is a mutation/misconfig and fails closed). Role files are keyed by their flow-relative
     path so the frozen copy resolves identically under the bundle ``flows/`` dir; tools by their
@@ -120,6 +121,11 @@ def _referenced_inputs(snapshot: FlowSnapshot, flow_dir: Path, tools: ToolRegist
 
     for node in snapshot.doc.nodes:
         _add_role(getattr(node, "role_file", None))
+        # A node's continuation prompt is a control input like any other role file: frozen at task
+        # start, in the manifest digest, and re-checked for drift. So a resumed session cannot be
+        # handed a prompt the task was never validated against — and a missing one fails here, at
+        # task start, rather than at the node run that first needs it.
+        _add_role(getattr(node, "resume_role_file", None))
     supervisor = snapshot.doc.supervisor
     if supervisor is not None:
         _add_role(supervisor.role_file)
@@ -279,6 +285,32 @@ def digest_live_control_inputs(
     refs = _referenced_inputs(snapshot, flow_dir, tools)
     entries = [(ref.key, sha256_file(_checked(ref.source, inspector))) for ref in refs]
     return digest_entries(entries)
+
+
+def diverged_control_inputs(
+    snapshot: FlowSnapshot,
+    flow_dir: Path,
+    tools: ToolRegistry,
+    bundle_dir: Path,
+    *,
+    inspect: FileInspector | None = None,
+) -> tuple[str, ...]:
+    """The bundle-relative keys whose live bytes no longer match the frozen copy.
+
+    Names what :func:`digest_live_control_inputs` can only report as a single mismatched digest. It
+    is for the *message*, not for the verdict: the verdict compares against the parent-held digest,
+    which is what catches a provider that rewrote a live file and the frozen copy together, while
+    this reads the frozen copies off disk and so cannot. An empty tuple next to a mismatched digest
+    therefore means exactly that case, and the caller says so rather than naming nothing.
+    """
+    inspector = inspect or default_file_inspector()
+    diverged: list[str] = []
+    for ref in _referenced_inputs(snapshot, flow_dir, tools):
+        frozen = bundle_dir / ref.key
+        frozen_sha = sha256_file(frozen) if frozen.is_file() else None
+        if sha256_file(_checked(ref.source, inspector)) != frozen_sha:
+            diverged.append(ref.key)
+    return tuple(diverged)
 
 
 def _checked(path: Path, inspector: FileInspector) -> Path:

@@ -205,7 +205,7 @@ def test_queue_whitespace_only_rejected(config: OrchestratorConfig) -> None:
 
 
 def test_refined_is_now_an_unknown_field(config: OrchestratorConfig) -> None:
-    # PRE.3: the clean task dropped ``refined`` (refinement-skip is completeness-driven). The key
+    # The clean task dropped ``refined`` (refinement-skip is completeness-driven). The key
     # is no longer in the allowlist → fail-closed UNKNOWN_TOP_LEVEL_FIELD.
     text = "---\nid: task-001\ntitle: T\nrefined: true\n---\n\n## Description\n\nx\n"
     result = _gate(config).validate(_src(text))
@@ -378,7 +378,7 @@ def test_recovery_rerun_allowance_is_scoped_to_the_named_id(config: Orchestrator
 
 
 def test_agents_route_override_is_now_an_unknown_field(config: OrchestratorConfig) -> None:
-    # PRE.3: per-task provider routing is gone — a node declares its own ``provider``. The
+    # Per-task provider routing is gone — a node declares its own ``provider``. The
     # front-matter ``agents`` key is no longer in the allowlist → fail-closed.
     text = "---\nid: task-001\ntitle: T\nagents:\n  review: codex\n---\n\n## Description\n\nx\n"
     result = _gate(config).validate(_src(text))
@@ -425,7 +425,7 @@ def test_phase_b_acceptance_prose_without_section_needs_enrichment(
 
 
 def test_phase_b_complete_with_acceptance_criteria(config: OrchestratorConfig) -> None:
-    # PRE.3: completeness is the only input to the refinement-skip — a description + acceptance
+    # Completeness is the only input to the refinement-skip — a description + acceptance
     # criteria classifies COMPLETE (no ``refined`` flag).
     text = (
         "---\nid: task-001\ntitle: T\n---\n\n"
@@ -508,6 +508,36 @@ def test_trust_level_invalid_value_is_rejected(config: OrchestratorConfig) -> No
     assert "trust_level" in result.detail
 
 
+def test_commit_type_passes_and_is_stored(config: OrchestratorConfig) -> None:
+    # The task file is the ONLY channel into its own commit subject — no node can write a commit
+    # message — so this key is what makes a task's commits anything other than ``feat``.
+    text = "---\nid: task-001\ntitle: T\ncommit_type: fix\n---\n\n## Description\n\nDo it.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.commit_type == "fix"
+
+
+def test_commit_type_absent_normalizes_to_none(config: OrchestratorConfig) -> None:
+    # Absent stays ``None`` rather than the literal default, so the subject builder owns the
+    # fallback and every task written before the key existed still commits as ``feat``.
+    text = "---\nid: task-001\ntitle: T\n---\n\n## Description\n\nDo it.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.commit_type is None
+
+
+def test_commit_type_unknown_value_is_rejected(config: OrchestratorConfig) -> None:
+    # Fail-closed, unlike ``priority``: the value lands in permanent history on the base branch,
+    # where a typo silently deferring to ``feat`` is only discovered after the merge.
+    text = "---\nid: task-001\ntitle: T\ncommit_type: feet\n---\n\n## Description\n\nx.\n"
+    result = _gate(config).validate(_src(text))
+    assert result.passed is False
+    assert result.reason is ValidationReason.INVALID_FIELD_TYPE
+    assert "commit_type" in result.detail
+
+
 def test_prompt_audit_true_passes_and_is_stored(config: OrchestratorConfig) -> None:
     text = "---\nid: task-001\ntitle: T\nprompt_audit: true\n---\n\n## Description\n\nx.\n"
     result = _gate(config).validate(_src(text))
@@ -574,7 +604,7 @@ def test_decomposition_non_boolean_is_rejected(config: OrchestratorConfig) -> No
 
 @pytest.mark.parametrize("field", ["model", "reasoning"])
 def test_model_and_reasoning_are_now_unknown_fields(config: OrchestratorConfig, field: str) -> None:
-    # PRE.3: model/reasoning live on the flow node, never the task → unknown top-level fields now.
+    # Model/reasoning live on the flow node, never the task → unknown top-level fields now.
     text = f"---\nid: task-001\ntitle: T\n{field}: x\n---\n\n## Description\n\nDo it.\n"
     result = _gate(config).validate(_src(text))
     assert result.reason is ValidationReason.UNKNOWN_TOP_LEVEL_FIELD

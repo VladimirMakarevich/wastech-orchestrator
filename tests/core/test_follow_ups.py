@@ -96,9 +96,9 @@ def test_finding_to_follow_up_truncates_long_reason_and_drops_empty() -> None:
 
 
 def test_split_reason_gives_a_title_that_is_not_its_own_rationale() -> None:
-    # The title used to be reason[:120] + "…" with the WHOLE reason repeated as the rationale, so
-    # every long finding arrived as a mid-word truncation of the text printed right beside it — a
-    # queue whose titles duplicate their own bodies cannot be triaged without opening every item.
+    # A blind reason[:120] + "…" with the WHOLE reason repeated as the rationale would give every
+    # long finding a mid-word title duplicating the text printed right beside it — and a queue whose
+    # titles duplicate their own bodies cannot be triaged without opening every item.
     short = "The gate is not enforced."
     assert _split_reason(short) == (short, "")  # short reasons are unchanged: title only
 
@@ -123,9 +123,8 @@ def test_split_reason_gives_a_title_that_is_not_its_own_rationale() -> None:
 
 
 def test_evaluator_fix_becomes_the_action_hint() -> None:
-    # The reviewer's `fix` is where the remedy lives. It used to be dropped by the typed
-    # projection, so every mechanically derived follow-up reached the operator without its fix
-    # (measured: null on all 98 follow-ups of a 20-run campaign).
+    # The reviewer's `fix` is where the remedy lives, so the typed projection has to carry it —
+    # dropped there, every mechanically derived follow-up reaches the operator with no fix at all.
     row = _verdict(
         [
             {
