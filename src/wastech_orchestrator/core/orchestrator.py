@@ -4856,22 +4856,15 @@ class Orchestrator:
         )
 
     def _security_preamble(self) -> str:
-        """The Core-owned orchestrator security contract prepended to every provider prompt.
+        """The Core-owned orchestrator security contract prepended to a provider prompt.
 
         Defense-in-depth / advisory only — never enforcement (the sandbox + deny projection are the
-        enforcement). Resolved once here (config-derived, not per-node) and threaded to the agent/
-        evaluator via ``NodeServices`` and to the supervisor directly: an always-on baseline, a
-        read-restraint reinforcement when effective read-isolation is off, a paragraph naming the
-        advanced mode, and — only where this host truly has no OS sandbox — a paragraph saying that
-        the write floor is not enforced by anything but the agent's own compliance. The last one
-        asks the same host question the loud floor line does, through the same injected table, so
-        the prompt and the operator's report can never disagree about the machine.
+        enforcement). One unconditional block, the same on every run: threaded to the agent/
+        evaluator via ``NodeServices`` and to the supervisor directly, and prepended by the neutral
+        seam on a turn that opens a session — never on one that resumes a live session, which
+        already carries it.
         """
-        return build_orchestrator_security_preamble(
-            read_isolation_off=self._config.security.read_isolation_off,
-            advanced_mode=self._advanced_mode,
-            no_write_floor=bool(describe_host_floor(self._config, self._host_floor_checks)),
-        )
+        return build_orchestrator_security_preamble()
 
     def _log(self, task_id: str) -> logging.LoggerAdapter[logging.Logger]:
         """A task-scoped structured logger: every record carries ``task_id``."""

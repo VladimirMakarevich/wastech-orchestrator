@@ -275,8 +275,9 @@ class AgentRunRequest:
     # defense-in-depth (advisory, NOT enforcement — the sandbox + deny projection enforce). Neutral
     # text built once in Core (``core/flow/security_preamble``) and carried here; the single neutral
     # seam ``build_effective_prompt`` prepends it, so every request kind (agent/evaluator/
-    # supervisor) × both providers gets it without any adapter change. ``None`` prepends nothing
-    # (today's prompt byte-for-byte). Secret-free by contract.
+    # supervisor) × both providers gets it without any adapter change — on the attempt that OPENS a
+    # session, never on one resuming a live one, where the contract is already in the conversation.
+    # ``None`` prepends nothing. Secret-free by contract.
     security_preamble: str | None = None
     # The target repository's own harness skills this node must invoke, resolved from the flow
     # node's ``skills:``. Names only — the CLI does its own discovery, so nothing here is a path, a
@@ -368,6 +369,14 @@ def build_effective_prompt(request: AgentRunRequest, *, body: str | None = None)
     reference data it is. Pure text concatenation — no CLI syntax; both blocks are built in Core and
     carried on the request.
 
+    The preamble is prepended only on an attempt that OPENS a session (``session_id is None``): a
+    live session already contains it, since every session-opening request of the run carries it,
+    and restating it each round buys nothing while riding a history the provider re-sends every
+    turn. The predicate is read here, at the same seam and from the same field that decides the
+    resume argv, so an attempt whose session the router dropped (session-unavailable, transient
+    degrade, cross-provider fallback) gets the contract back with the full prompt. The footer and
+    the skills block are not conditional — the artifact paths change round to round.
+
     Which of the node's two texts is used follows :func:`uses_continuation`. *body* overrides that
     choice with a text of the caller's own, so the audit can render the variant this attempt did
     **not** get through the one function that assembles preamble + body + footer; it is never
@@ -378,7 +387,7 @@ def build_effective_prompt(request: AgentRunRequest, *, body: str | None = None)
         continuation = request.continuation_prompt
         if continuation is not None and uses_continuation(request):
             body = continuation
-    if request.security_preamble:
+    if request.security_preamble and request.session_id is None:
         body = f"{request.security_preamble}\n\n{body}"
     skills = build_skills_block(request)
     if skills:

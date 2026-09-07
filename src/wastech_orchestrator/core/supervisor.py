@@ -477,7 +477,9 @@ class Supervisor:
         self._default_timeout_seconds = default_timeout_seconds
         # Defense-in-depth: the Core-owned orchestrator security contract prepended to the
         # supervisor's own read-only turn (advisory, NOT enforcement). Resolved once by the
-        # orchestrator, like the graph-node NodeServices carrier. ``None`` → no preamble.
+        # orchestrator, like the graph-node NodeServices carrier. ``None`` → no preamble. Carried on
+        # every turn; the seam prepends it on the one that opens the supervisor's session and
+        # withholds it from each turn that resumes it, which already carries the contract.
         self._security_preamble = security_preamble
         # The supervisor's own session (resume_own_lineage). Held in-memory within a process run and
         # persisted to / hydrated from ``node_lineage`` so it survives a restart (independent of the

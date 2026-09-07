@@ -417,10 +417,11 @@ class NodeServices:
     #: when this is on, so a flow can ask for the capability but never grant it to itself. ``False``
     #: everywhere it is not wired (unit harnesses), which is also the production default.
     allow_git_evidence: bool = False
-    #: Defense-in-depth: the Core-owned orchestrator security contract prepended to every
-    #: provider prompt (advisory, NOT enforcement). Resolved once by the orchestrator
-    #: (``build_orchestrator_security_preamble``) and set on each request's ``security_preamble``.
-    #: ``None`` in a unit harness → no preamble (today's prompt byte-for-byte).
+    #: Defense-in-depth: the Core-owned orchestrator security contract prepended to a
+    #: session-opening provider prompt (advisory, NOT enforcement). Resolved once by the
+    #: orchestrator (``build_orchestrator_security_preamble``) and set on each request's
+    #: ``security_preamble``; the seam withholds it from an attempt that resumes a live session.
+    #: ``None`` in a unit harness → no preamble.
     security_preamble: str | None = None
     #: memory read path (phase 03): builds a per-node retrieval packet for any node whose role
     #: prompt references ``{memory_path}``. ``None`` when memory is disabled (the default) — then no
