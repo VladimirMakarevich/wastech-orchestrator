@@ -92,6 +92,22 @@ def test_task_round_trip(store: StateStore) -> None:
     assert row.created_at is not None and row.updated_at is not None
 
 
+def test_source_digest_round_trips_and_a_rerun_refreshes_it(store: StateStore) -> None:
+    # The digest is the identity a resurfaced task file is tested against, so a rerun of an edited
+    # file must overwrite it — a stale digest would call the operator's current file a stranger's.
+    store.insert_task(
+        TaskRow(task_id="task-001", title="A task", status=Status.NEW, source_sha256="a" * 64)
+    )
+    row = store.get_task("task-001")
+    assert row is not None and row.source_sha256 == "a" * 64
+
+    store.insert_task(
+        TaskRow(task_id="task-001", title="A task", status=Status.NEW, source_sha256="b" * 64)
+    )
+    row = store.get_task("task-001")
+    assert row is not None and row.source_sha256 == "b" * 64
+
+
 def test_task_id_exists(store: StateStore) -> None:
     assert store.task_id_exists("task-001") is False
     store.insert_task(_new_task())

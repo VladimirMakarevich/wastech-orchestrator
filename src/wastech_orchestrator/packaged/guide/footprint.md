@@ -31,6 +31,8 @@ Two rules hold for the whole `.worc/` home:
 
 At the repository root, outside `.worc/`: `tasks/pending/`, `tasks/preparing/`, `tasks/done/`, `tasks/failed/`. These are deliberately **not** in `.worc/` — a finished task's file and its `<task-id>.summary.md` are committed there as the human-readable audit trail. Nothing prunes them; they are yours to curate.
 
+One consequence is worth knowing about, because it looks like a bug the first time you see it. With `git.footprint.audit_on_branch: task` (the default) the move into `tasks/done/` is committed on the **task** branch, while the file was committed into `tasks/pending/` on your base branch when you promoted it. Terminal cleanup returns the working tree to base, and git restores the pending copy along with it — so a finished task's file reappears in `tasks/pending/` and stays there until the pull request merges. That is expected, and the orchestrator recognises its own finished task by the file's content: the daemon skips it instead of re-running it, and `worc run` on it answers `duplicate_task_id` without moving, deleting or quarantining anything. A file that merely reuses a finished task's `id` is a different matter — that one is rejected and quarantined, because it is a real task that will never run until you give it a new id.
+
 ## When `worc stop` reports a timeout
 
 A soft `stop` asks the daemon to finish its current flow node and exit. If it does not confirm within the timeout, **nothing is killed and nothing is cleaned up** — that is deliberate: the request stays pending, the daemon still exits at its next node boundary, and the surviving `orchestrator.pid` is what stops a second watcher from starting on top of it. Two ways out, in order of cost:

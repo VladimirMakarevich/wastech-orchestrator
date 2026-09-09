@@ -60,6 +60,7 @@ from wastech_orchestrator.providers.base import (
 from wastech_orchestrator.providers.exchange import build_exchange_manifest
 from wastech_orchestrator.runtime_layout import RUNS_DIRNAME, RuntimeLayout
 from wastech_orchestrator.state_store import PublishOpRow, StateStore, TaskRow
+from wastech_orchestrator.task.parser import source_digest
 from wastech_orchestrator.task.validation_gate import ValidationGate
 
 # Every test here is a slow integration test (real git / subprocess / process tree).
@@ -3559,6 +3560,226 @@ def test_relative_quarantine_resolves_under_the_repo_not_the_cwd(
     assert orch.run_task(str(bad)).final_status is Status.FAILED
     assert (git_repo.clone / ".worc" / "tasks" / "rejected" / "task-010.md").exists()
     assert not (elsewhere / ".worc").exists()
+
+
+# --- a settled task's own file resurfacing in pending/ -------------------------------------
+#
+# With the lifecycle move committed on the task branch (the default), terminal cleanup checks the
+# base branch out again and git restores the copy it still carries at ``tasks/pending/``. The file
+# is back in the queue while the recorded ``source_path`` reads ``tasks/done/``, so identity has to
+# come from content.
+
+
+def _promoted(clone: Path, task_id: str) -> tuple[Path, str]:
+    """Write a task into ``tasks/pending/`` and return it with the digest a run would record."""
+    path = clone / "tasks" / "pending" / f"{task_id}.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f'---\nid: {task_id}\ntitle: "Add a thing"\n---\n\n'
+        "## Description\n\nDo the thing.\n\n## Acceptance criteria\n\n- works\n",
+        encoding="utf-8",
+        newline="",
+    )
+    return path, source_digest(path.read_bytes())
+
+
+def _settled_row(clone: Path, task_id: str, status: Status, digest: str | None) -> TaskRow:
+    """A terminal row shaped the way a finished run leaves it: the path already moved to done/."""
+    return TaskRow(
+        task_id=task_id,
+        title="Add a thing",
+        status=status,
+        source_path=str(clone / "tasks" / "done" / f"{task_id}.md"),
+        source_sha256=digest,
+    )
+
+
+@pytest.mark.parametrize("status", [Status.DONE, Status.FAILED])
+def test_a_settled_task_owns_its_file_after_the_lifecycle_move(
+    git_repo, make_git_config, tmp_path: Path, status: Status
+) -> None:
+    # The regression: the recorded path says done/, the file is back in pending/, and the two can
+    # never be equal — the terminal move is what rewrote the path. `failed` moves the same way, so
+    # it has the same hole.
+    orch, store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    path, digest = _promoted(git_repo.clone, "task-101")
+    store.insert_task(_settled_row(git_repo.clone, "task-101", status, digest))
+
+    assert orch.settled_own_file("task-101", path) is True
+
+
+def test_a_manual_action_task_owns_the_file_it_kept_in_pending(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # `manual_action_required` never moves its file, so its row still points at pending/. It has to
+    # keep working — the operator is meant to review and publish it by hand.
+    orch, store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    path, digest = _promoted(git_repo.clone, "task-102")
+    store.insert_task(
+        TaskRow(
+            task_id="task-102",
+            title="Add a thing",
+            status=Status.MANUAL_ACTION_REQUIRED,
+            source_path=str(path),
+            source_sha256=digest,
+        )
+    )
+
+    assert orch.settled_own_file("task-102", path) is True
+
+
+def test_a_checkout_that_rewrites_newlines_is_still_the_same_file(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # A clone with `core.autocrlf=true` (the Windows default) hands CRLF back for content committed
+    # as LF, so a raw byte digest would call every Windows operator's own task file a stranger's.
+    orch, store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    path, digest = _promoted(git_repo.clone, "task-103")
+    store.insert_task(_settled_row(git_repo.clone, "task-103", Status.DONE, digest))
+    path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+
+    assert orch.settled_own_file("task-103", path) is True
+
+
+def test_a_different_file_reusing_a_settled_id_is_not_the_tasks_own(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The risk that constrains the whole fix: a leftover test too permissive would silently skip a
+    # real task forever. A reworded body is a new file, and falls through to the gate.
+    orch, store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    path, digest = _promoted(git_repo.clone, "task-104")
+    store.insert_task(_settled_row(git_repo.clone, "task-104", Status.DONE, digest))
+    path.write_text(
+        '---\nid: task-104\ntitle: "Add a thing"\n---\n\n'
+        "## Description\n\nSomething else entirely.\n\n## Acceptance criteria\n\n- works\n",
+        encoding="utf-8",
+        newline="",
+    )
+
+    assert orch.settled_own_file("task-104", path) is False
+
+
+def test_an_unfinished_task_is_never_a_settled_leftover(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    orch, store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    path, digest = _promoted(git_repo.clone, "task-105")
+    store.insert_task(
+        TaskRow(
+            task_id="task-105",
+            title="Add a thing",
+            status=Status.RUNNING,
+            source_path=str(path),
+            source_sha256=digest,
+        )
+    )
+
+    assert orch.settled_own_file("task-105", path) is False
+
+
+def test_rejecting_a_settled_tasks_own_file_changes_nothing(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # `worc run` on a resurfaced file reaches the gate with no scanner guard in front of it, so the
+    # reject path itself has to be harmless: the finished task's outcome is already in the ledger,
+    # and its file is the operator's committed audit trail.
+    quarantine = tmp_path / "rejected"
+    notifier = RecordingNotifier()
+    orch, store, ledger, art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        config_kwargs={"quarantine": str(quarantine)},
+        notifier=notifier,
+    )
+    path, digest = _promoted(git_repo.clone, "task-106")
+    store.insert_task(_settled_row(git_repo.clone, "task-106", Status.DONE, digest))
+
+    result = orch.run_task(str(path))
+
+    assert result.final_status is Status.FAILED
+    assert result.validation_reason == "duplicate_task_id"
+    assert result.validation_detail is not None and "already done" in result.validation_detail
+    assert path.exists()  # the operator's tracked file was left exactly where it was
+    assert not (quarantine / "task-106.md").exists()
+    assert ledger.records() == []  # no second terminal record for an id already terminal
+    assert notifier.calls == []  # and no failure message for a task whose PR is green
+    assert (art / "logs" / "task-106" / "validation_report.json").exists()
+    assert git_run(["branch", "--list", "worc/*"], git_repo.clone) == ""
+
+
+def test_rejecting_a_different_file_on_a_settled_id_still_quarantines_it(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # A genuinely different task reusing a used id must leave the queue, or it is re-rejected on
+    # every tick and — with auto mode off — spends that tick's single-task budget forever.
+    quarantine = tmp_path / "rejected"
+    notifier = RecordingNotifier()
+    orch, store, ledger, _art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        config_kwargs={"quarantine": str(quarantine)},
+        notifier=notifier,
+    )
+    path, digest = _promoted(git_repo.clone, "task-107")
+    store.insert_task(_settled_row(git_repo.clone, "task-107", Status.DONE, digest))
+    path.write_text(
+        '---\nid: task-107\ntitle: "Add a thing"\n---\n\n'
+        "## Description\n\nSomething else entirely.\n\n## Acceptance criteria\n\n- works\n",
+        encoding="utf-8",
+        newline="",
+    )
+
+    result = orch.run_task(str(path))
+
+    assert result.validation_reason == "duplicate_task_id"
+    assert result.validation_detail is not None and "new id" in result.validation_detail
+    assert (quarantine / "task-107.md").exists() and not path.exists()
+    assert ledger.records() == []  # still no second record: the id's outcome is already written
+    assert notifier.calls == []
+
+
+def test_a_settled_id_whose_identity_cannot_be_checked_keeps_its_file(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # Nothing records a digest for this row, so the file cannot be proven to be a different task.
+    # Moving it would be the exact damage this fix exists to stop, so it stays put and is reported.
+    quarantine = tmp_path / "rejected"
+    notifier = RecordingNotifier()
+    orch, store, ledger, _art = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=_both(),
+        check_verdicts=[0],
+        config_kwargs={"quarantine": str(quarantine)},
+        notifier=notifier,
+    )
+    path, _digest = _promoted(git_repo.clone, "task-108")
+    store.insert_task(_settled_row(git_repo.clone, "task-108", Status.DONE, None))
+
+    result = orch.run_task(str(path))
+
+    assert orch.settled_own_file("task-108", path) is False  # unproven is never treated as own
+    assert result.validation_reason == "duplicate_task_id"
+    assert path.exists() and not (quarantine / "task-108.md").exists()
+    assert ledger.records() == []
+    assert notifier.calls == []
 
 
 def test_notifier_exception_does_not_change_terminal_outcome(

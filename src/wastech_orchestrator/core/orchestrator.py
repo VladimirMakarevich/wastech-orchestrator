@@ -148,7 +148,7 @@ from wastech_orchestrator.core.recovery import (
     RecoveryPlan,
     RecoveryReconciler,
 )
-from wastech_orchestrator.core.state_machine import Status, assert_transition
+from wastech_orchestrator.core.state_machine import TERMINAL, Status, assert_transition
 from wastech_orchestrator.core.summary_report import (
     SKIPPED_NODES_HEADING,
     SUMMARY_MD_FILENAME,
@@ -254,6 +254,7 @@ from wastech_orchestrator.task.parser import (
     read_subtask_spec,
     read_task_source,
     slugify,
+    source_digest,
     write_normalized,
 )
 from wastech_orchestrator.task.validation_gate import (
@@ -269,6 +270,39 @@ _LOG = logging.getLogger(__name__)
 # The lifecycle folders a task file moves between under ``tasks/`` (registration → done/failed).
 # "Currently running" is tracked by the task's ``state.db`` status, not a physical folder.
 _LIFECYCLE_FOLDERS = ("pending", "done", "failed")
+
+
+class _SettledFile(StrEnum):
+    """How a task file on disk relates to an already-terminal task carrying the same id.
+
+    Four states because each one buys a different decision, and collapsing any pair costs
+    correctness. ``NOT_SETTLED`` is an ordinary task and keeps the full reject machinery.
+    ``OWN`` is the operator's audit trail — it must never be moved, re-run, ledgered or notified
+    about. ``FOREIGN`` is a genuinely different task that reused a used id: it is still quarantined,
+    because leaving it in ``pending/`` would have it re-rejected on every poll tick and, with auto
+    mode off, spend the tick's single-task budget forever. ``UNVERIFIABLE`` is a settled id whose
+    file or recorded digest cannot be read: too uncertain to skip like ``OWN``, and too likely to be
+    the operator's own file to move like ``FOREIGN``, so it is left in place and reported.
+    """
+
+    NOT_SETTLED = "not_settled"
+    OWN = "own"
+    FOREIGN = "foreign"
+    UNVERIFIABLE = "unverifiable"
+
+
+def _classify_settled(row: TaskRow | None, task_file: str | Path) -> _SettledFile:
+    """Classify a task file against the stored row of a task carrying the same id."""
+    if row is None or row.status not in TERMINAL:
+        return _SettledFile.NOT_SETTLED
+    if not row.source_sha256:
+        return _SettledFile.UNVERIFIABLE
+    try:
+        found = source_digest(Path(task_file).read_bytes())
+    except OSError:
+        return _SettledFile.UNVERIFIABLE
+    return _SettledFile.OWN if found == row.source_sha256 else _SettledFile.FOREIGN
+
 
 # Node kinds the constant supervisor layer does NOT observe. ``publish`` is terminal (its finalize
 # hook already wrote the summary); ``tool`` and ``checks`` are deterministic, so their result is
@@ -838,7 +872,7 @@ class Orchestrator:
                 )
             raise SlotBusyError(f"another task is active; {task.id} must wait")
 
-        self._register_task(task, task_file, result)
+        self._register_task(task, task_file, result, source_digest(source.raw_bytes))
         pipeline = _Pipeline(
             task=task,
             task_file=task_file,
@@ -863,14 +897,24 @@ class Orchestrator:
         """True iff no *other* task currently owns the processing slot."""
         return not any(t.task_id != task_id for t in self._store.find_active_tasks())
 
-    def lookup_task(self, task_id: str) -> TaskRow | None:
-        """The persisted task row for ``task_id`` (read-only), or ``None`` if unknown.
+    def settled_own_file(self, task_id: str, task_file: str | Path) -> bool:
+        """True iff ``task_id`` is terminal and ``task_file`` is that task's own leftover file.
 
-        The scanner uses this to skip a pending file whose id already reached a terminal state (its
-        own leftover) instead of re-running it into a ``duplicate_task_id`` reject — a
-        ``manual_action_required`` task keeps its file in ``pending/`` by design.
+        The scanner consults this to skip a pending file instead of re-running it into a
+        ``duplicate_task_id`` reject that would also quarantine the operator's own file. A terminal
+        task's file can be sitting in ``tasks/pending/`` for two reasons: a
+        ``manual_action_required`` task keeps its file there by design (its branch is preserved for
+        the operator to review and publish), and a task whose lifecycle move was committed on the
+        task branch has the base branch's copy restored underneath it the moment terminal cleanup
+        checks base out again.
+
+        Identity is the file's **content**, never its path: the terminal move that causes the second
+        case is the very step that repoints the recorded ``source_path`` at ``tasks/done/``, so a
+        path comparison is guaranteed to disagree exactly when it matters most. A genuinely
+        different file that reuses a used id is deliberately *not* covered — it falls through to
+        the gate, which rejects it loudly, because silently skipping it would strand a real task.
         """
-        return self._store.get_task(task_id)
+        return _classify_settled(self._store.get_task(task_id), task_file) is _SettledFile.OWN
 
     # --- operator-authored decomposition (``subtasks:`` manifest) -------------------------
 
@@ -4786,32 +4830,70 @@ class Orchestrator:
                 continue
 
     def _reject(self, task_file: str, result: ValidationResult) -> PipelineResult:
-        """Handle a Phase-A reject: failed, quarantine, report, ledger — no branch."""
+        """Handle a Phase-A reject: failed, quarantine, report, ledger — no branch.
+
+        The single place that decides what a reject is allowed to *do*, so every entry path
+        (``run``, the watch scanner, a dependency reject) gets the same answer. An id that already
+        reached a terminal status is the exception it exists for: the task is finished, its outcome
+        is already in the ledger, and re-recording it there would contradict the run that actually
+        happened while a notification would tell the operator a green task failed. Such a reject is
+        a report plus a warning, and — when the file is that task's own committed audit trail — it
+        does not touch the file either.
+        """
         task_id = Path(task_file).stem
         reason = result.reason.value if result.reason else "unknown"
-        self._log(task_id).info("validation rejected", extra={"reason": reason})
         write_validation_report(result, task_id, self._artifacts_root)
-        self._quarantine(task_file)
-        self._ledger.append(
-            LedgerRecord(
-                id=task_id,
-                title=task_id,
-                final_status=Status.FAILED.value,
-                finished_at=self._clock(),
-                validation_reason=reason,
-                branch=None,
-                advanced_mode=self._advanced_mode,
+        row = self._store.get_task(task_id)
+        settled = _classify_settled(row, task_file)
+        detail = result.detail or None
+        if row is None or settled is _SettledFile.NOT_SETTLED:
+            self._log(task_id).info("validation rejected", extra={"reason": reason})
+            self._quarantine(task_file)
+            self._ledger.append(
+                LedgerRecord(
+                    id=task_id,
+                    title=task_id,
+                    final_status=Status.FAILED.value,
+                    finished_at=self._clock(),
+                    validation_reason=reason,
+                    branch=None,
+                    advanced_mode=self._advanced_mode,
+                )
             )
-        )
-        self._notify_terminal(
-            task_id=task_id, final_status=Status.FAILED, pr_url=None, reason=reason
-        )
+            self._notify_terminal(
+                task_id=task_id, final_status=Status.FAILED, pr_url=None, reason=reason
+            )
+        else:
+            detail = self._reject_settled(task_file, settled, row)
         return PipelineResult(
             task_id=task_id,
             final_status=Status.FAILED,
             validation_reason=reason,
-            validation_detail=result.detail or None,
+            validation_detail=detail,
         )
+
+    def _reject_settled(self, task_file: str, settled: _SettledFile, row: TaskRow) -> str:
+        """Report a reject of an already-terminal id without re-recording its outcome.
+
+        Returns the operator-facing detail for the result, so the console says what actually
+        happened rather than a bare reason code. Only a file proven to be a *different* task is
+        quarantined: left in the queue it would be re-rejected on every poll tick and, with auto
+        mode off, consume that tick's single-task budget forever. The settled task's own file — and
+        any file whose identity cannot be established — stays exactly where the operator has it.
+        """
+        status = row.status.value
+        if settled is _SettledFile.FOREIGN:
+            self._log(row.task_id).warning(
+                "rejected a different task file reusing a settled id",
+                extra={"status": status, "quarantined": True},
+            )
+            self._quarantine(task_file)
+            return f"id already used by a {status} task; give this file a new id"
+        self._log(row.task_id).warning(
+            "skipped a reject for an already-settled task; its file was left in place",
+            extra={"status": status, "verified": settled is _SettledFile.OWN},
+        )
+        return f"already {status}; its task file was left in place"
 
     def _quarantine(self, task_file: str) -> str | None:
         """Move the task file into ``.worc/tasks/rejected/`` (the quarantine) when it exists.
@@ -4885,13 +4967,16 @@ class Orchestrator:
 
     # --- store helpers --------------------------------------------------------------------
 
-    def _register_task(self, task: NormalizedTask, task_file: str, result: Any) -> None:
+    def _register_task(
+        self, task: NormalizedTask, task_file: str, result: Any, digest: str
+    ) -> None:
         self._store.insert_task(
             TaskRow(
                 task_id=task.id,
                 title=task.title,
                 status=Status.NEW,
                 source_path=task_file,
+                source_sha256=digest,
                 validation_passed=True,
             )
         )

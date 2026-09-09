@@ -1725,24 +1725,6 @@ def _claim_allowed(
     return False
 
 
-def _already_settled(orchestrator: Orchestrator, task_id: str, task_file: Path) -> bool:
-    """True iff ``task_id`` already reached a terminal status and ``task_file`` is its own leftover.
-
-    A ``manual_action_required`` task keeps its file in ``pending/`` by design (branch preserved,
-    the operator reviews/publishes); a committed-``tasks/`` done/failed move can also resurface in
-    ``pending/`` after a base-branch checkout. Either way the daemon must **not** re-run it — that
-    would re-reject it as ``duplicate_task_id`` and quarantine the operator's file. A *different*
-    file colliding on a used id is left to fall through to the gate, which rejects it loudly.
-    """
-    row = orchestrator.lookup_task(task_id)
-    if row is None or row.status not in TERMINAL or not row.source_path:
-        return False
-    try:
-        return Path(row.source_path).resolve() == task_file.resolve()
-    except OSError:
-        return False
-
-
 def watch_once(
     orchestrator: Orchestrator,
     config: OrchestratorConfig,
@@ -1773,9 +1755,9 @@ def watch_once(
     all a single pass with no operator summary needs.
 
     A pending file whose id already reached a terminal status and is that task's own leftover is
-    also skipped (:func:`_already_settled`): a ``manual_action_required`` task keeps its file in
-    ``pending/`` for the operator, and re-running it would only reject it as ``duplicate_task_id``
-    and quarantine the file. Resolving it (``rerun``/``finalize``) is the operator's call.
+    also skipped (:meth:`Orchestrator.settled_own_file`): re-running it would only reject it as
+    ``duplicate_task_id`` and quarantine the operator's own file. Resolving it
+    (``rerun``/``finalize``) is the operator's call.
 
     Eligible tasks are ranked by ``priority`` (high → mid → low), ties broken by the natural,
     platform-stable filename order from :func:`natural_sort_key`. ``depends_on`` is always stronger:
@@ -1803,10 +1785,11 @@ def watch_once(
         task_id, depends_on = scan.task_id, scan.depends_on
         if not orchestrator.acquire_slot(""):
             break  # the slot is not free (an active task remains)
-        if task_id is not None and _already_settled(orchestrator, task_id, task_file):
-            # A terminal task's own file lingering in pending/ (e.g. manual_action_required keeps
-            # it there for the operator). Never re-run it — that would reject it as a duplicate id
-            # and quarantine the file. Non-blocking skip, like a WAITING dependency.
+        if task_id is not None and orchestrator.settled_own_file(task_id, task_file):
+            # A terminal task's own file lingering in pending/ — either kept there for the operator
+            # (manual_action_required) or restored by the base-branch checkout that ends the run.
+            # Never re-run it: that would reject it as a duplicate id and quarantine the file.
+            # Non-blocking skip, like a WAITING dependency.
             _LOG.info("task %s already settled; leaving its file for the operator", task_id)
             continue
         if task_id is not None and depends_on:

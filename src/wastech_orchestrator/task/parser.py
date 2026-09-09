@@ -12,6 +12,7 @@ reported deterministically rather than silently taking the last value.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Hashable
@@ -68,6 +69,19 @@ def read_task_source(path: str | Path) -> ParsedSource:
     """Read a task file as raw bytes, recording its suffix. Decoding is the gate's concern."""
     p = Path(path)
     return ParsedSource(path=str(p), suffix=p.suffix.lower(), raw_bytes=p.read_bytes())
+
+
+def source_digest(raw: bytes) -> str:
+    """The content identity of a task file: sha256 over its bytes with newlines normalized to LF.
+
+    Persisted with the task and compared later against a file found on disk, to answer "is this the
+    same task I already ran?" when the recorded path can no longer answer it. The normalization is
+    load-bearing rather than cosmetic: the file being compared has usually been through a git
+    checkout, and a clone with ``core.autocrlf=true`` (the Windows default) hands back CRLF for
+    content that was committed as LF. A raw byte digest would therefore report every Windows
+    operator's own task file as a stranger's.
+    """
+    return hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest()
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
