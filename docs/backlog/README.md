@@ -20,6 +20,15 @@ Where to find the design detail:
 
 ## Open backlog
 
+### Defects
+
+Found in production use, with the evidence recorded in the linked document.
+
+| Item | Summary | Source / constraint |
+| --- | --- | --- |
+| [A settled task's own file is re-run, rejected as a duplicate, and quarantined out of Git](duplicate-rerun-of-settled-task.md) | Five minutes after a task succeeds, the daemon re-scans its file, the gate rejects `duplicate_task_id`, and the reject path writes a `failed` record, sends a failure notification, and moves a **git-tracked** file into `.worc/tasks/rejected/` — leaving a dangling deletion on the base branch for a task whose PR is green and open. The guard written for exactly this (`_already_settled`) cannot fire: it exact-matches `row.source_path`, which the same publish step rewrote from `pending/` to `done/`. Five defects (dead guard · `watch`-only guard · false `failed` + notification · quarantine of tracked content · zero test coverage). | Every element of the chain is a default (`audit_on_branch: task`, `poll_interval_seconds: 300`, `tasks/` tracked as the audit trail), so the trigger is the ordinary path: a task completed under `watch` whose PR is not merged before the next tick. Fix direction is constrained — a leftover test that is too permissive would silently skip a genuinely different file reusing a settled id, which is worse than today's noisy reject. Observed on `wastechlab-mobile-template`, `0.12.0a1`, PR #8. |
+| [`validate-flow` prints no violations](duplicate-rerun-of-settled-task.md#adjacent-unrelated-validate-flow-prints-no-violations) | `cmd_validate_flow` reports a failure as `check.error.splitlines()[0]`, but `FlowValidationError` puts the header on line 1 and every violation below it. The operator gets `FAIL — flow validation failed (2 violation(s)):` and nothing after the colon, at any `--log-level`; the findings are reachable only by calling `FlowRegistry.check_flows` from Python. | One-line fix (print the whole error, indented). Filed inside the document above but needs its own item — unrelated subsystem. |
+
 ### Other deferred features
 
 These are deferred by the v1 spec or described in architecture notes; not scheduled.
