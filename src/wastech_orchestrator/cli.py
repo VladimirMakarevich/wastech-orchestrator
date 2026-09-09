@@ -3668,7 +3668,13 @@ def cmd_validate_flow(args: argparse.Namespace) -> int:
             print(f"flow {check.name}: OK")
         else:
             ok = False
-            print(f"flow {check.name}: FAIL — {check.error.splitlines()[0]}")
+            # A flow validation error is a header line followed by one already-indented line per
+            # violation; printing only the first line leaves the operator a trailing colon and no
+            # way to reach the findings short of calling the registry from Python.
+            header, *violations = check.error.splitlines()
+            print(f"flow {check.name}: FAIL — {header}")
+            for violation in violations:
+                print(violation if violation.startswith(" ") else f"  {violation}")
         for warning in check.warnings:
             print(f"flow {check.name}: WARN — {warning} (renders verbatim to the agent)")
     return 0 if ok else 1
