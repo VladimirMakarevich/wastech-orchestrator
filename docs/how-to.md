@@ -209,3 +209,46 @@ If you do not use the Windows Codex app, uninstall it through Windows Settings /
 The same principle applies on Linux and macOS when Homebrew, npm, a version manager, and an IDE expose different Codex installations: compare `type -a codex` / `which -a codex` with `worc preflight`, then configure the absolute path to the intended executable. A POSIX launcher with a valid shebang can run without a shell; the Windows-specific requirement is to avoid `.cmd` and use the native `.exe`.
 
 For the supported native Windows sandbox modes and upstream troubleshooting guidance, see the [Codex Windows sandbox documentation](https://developers.openai.com/codex/windows).
+
+## 6. Track your task files (`tasks/`) in git
+
+**Problem:** `install` gitignores the task lifecycle tree — `tasks/preparing/`, `tasks/pending/`, `tasks/done/`, `tasks/failed/` — so your task files never appear in `git status`, never ride a task's branch or its pull request, and no audit commit is made. That is the right default for one operator on one machine, but it rules out three things you may want: a task file **reviewed** in a pull request before it runs, a task **handed to a teammate** (or to a daemon on another machine) by committing and pushing it, and a permanent **audit trail** of what was asked for, committed next to the change that answered it.
+
+**Solution — at install time**, answer yes to the wizard's question, or pass the flag:
+
+```bash
+worc install . --track-tasks
+```
+
+**Or on an existing install**, delete the one line `install` seeded in the repo's tracked `.gitignore`:
+
+```gitignore
+# wastech-orchestrator task lifecycle (auto-appended by `worc install`; delete this line to track tasks in git)
+/tasks/
+```
+
+Then track what you want to keep:
+
+```bash
+git add .gitignore tasks/
+git commit -m "chore: track the task lifecycle in git"
+```
+
+**What changes once the tree is tracked:**
+
+- **Each terminal outcome makes an audit commit.** The task file and its `<task-id>.summary.md` are committed on the task's branch (`git.footprint.audit_commit_message`, `git.footprint.audit_on_branch`) — separately from the code commit, and scoped to that one task, so a task pending beside it is never swept in.
+- **`git pull` becomes a queue.** A `watch` daemon fetches your base branch each tick, so a task file committed and pushed by anyone is picked up by whichever machine is watching. This is the only way to hand a task over through git.
+- **Drafts become visible.** A half-written file in `tasks/preparing/` shows up in `git status` like any other new file. The watcher never scans `preparing/`, so it is still safe to compose there — it is only your working tree that is no longer clean.
+- **One thing looks like a bug the first time.** With `audit_on_branch: task` (the default) the move into `tasks/done/` is committed on the **task** branch, while your own commit of the file sits on base — in `tasks/pending/`, or `tasks/preparing/` if you committed it there. Terminal cleanup returns the tree to base and git restores that copy, so the finished task's file reappears where you committed it and stays until the pull request merges. Expected: the orchestrator recognises its own finished task by content — the daemon skips it, and `worc run` on it answers `duplicate_task_id` without moving or deleting anything.
+
+**Details / caveats:**
+
+- **Delete the line, don't negate it.** A `!tasks/` negation after a `/tasks/` exclusion is a no-op — git never descends into an excluded directory — and there is nothing under the tree you would want to keep ignored. Remove the line (and its comment).
+- **Nothing re-adds it behind your back.** Only `install` writes that line, and it skips it in two cases: when the tree is already ignored, and when git **already tracks** something under it — which is exactly the state you are in after committing your task files, so a plain re-run and `install --reconfigure` both leave your choice alone and say `left tasks/ tracked (git already tracks files there)`. The per-run safety net that repairs ignore rules in the clone-local `.git/info/exclude` deliberately covers only `.worc/` and `.worc-io/`, never the lifecycle tree — an operator cannot be expected to find a rule in a file they never open.
+- **Delete the line before you commit anything, though.** The skip above is driven by tracked content, so between deleting the line and making that first `git add`, a `--reconfigure` would put it back. Do the two steps together.
+- **If you renamed `paths.tasks_dir`, the line names the old directory.** The orchestrator asks git about the directory in your config, so a stale `/tasks/` line leaves the renamed tree tracked whether you wanted that or not. Move the line with the rename (and create the four lifecycle subfolders yourself — `install` scaffolds only the directory it was given).
+- **The reverse direction works the same way.** To stop tracking a tree you already track, add the line back — and remember that an ignore rule does not untrack: `git rm -r --cached tasks/` and a commit are what remove the files from the index.
+- **Already-committed task files keep working after you switch to the default.** A tracked file under an ignored tree is still committed when a lifecycle move deletes it, so no dangling deletion is left on your base branch; the newly moved copies simply stop being added.
+- **What the orchestrator records either way.** Tracking task files is a convenience, not the record: `state.db`, `logs/completed.jsonl`, `logs/<task-id>/`, and the `<task-id>.summary.md` beside the task file are written whether or not git sees any of it.
+
+See also: [Configuration → `paths`](configuration.md#paths) for the key itself, [Operations → Installation](operations.md#1-installation) for what `install` writes, and [section 4](#4-track-your-operator-flows-worcflows-in-git) above for the same question asked of `.worc/flows/`.
