@@ -95,14 +95,14 @@ Keep publishing conservative by default:
 
 - `create_pull_request: true` when `gh` is available and the team reviews in GitHub.
 - `auto_merge: false` unless protected branches and required checks already enforce the right quality bar.
-- Leave `footprint.audit_on_branch: task` unless the team explicitly wants the audit trail on a sibling branch.
+- Leave `footprint.audit_on_branch: task` unless the team explicitly wants the audit trail on a sibling branch — and note the whole `footprint` audit block is inert while the task lifecycle tree is gitignored, which is what `install` seeds unless you asked to track it.
 
 ### 6. Optional blocks
 
 Touch these only when the operator asked for them (each field is documented in full in [reference.md](reference.md)). One is already on after `install` — `supervisor` (`enabled: true`) — so for that one the question is whether to turn it off, not on:
 
 - `orchestrator` — the `watch` loop cadence (`poll_interval_seconds`), the instance `queue` selector, and `auto_mode` task chaining.
-- `paths` — `tasks_dir`, the repo-relative home of the task lifecycle (rename only to avoid clashing with an existing `tasks/`).
+- `paths` — `tasks_dir`, the repo-relative home of the task lifecycle (rename only to avoid clashing with an existing `tasks/`; it is gitignored unless you asked `install` to track it).
 - `telegram` — real human-in-the-loop and notifications.
 - `supervisor` — the read-only oversight layer, **on by default**. This is where you turn it off (`enabled: false`) or set per-phase model/effort under `observe` / `finalize` / `handoff`.
 - `logging` — operator log `level` and per-attempt artifact retention (`artifacts`).

@@ -35,7 +35,7 @@ def test_preparing_dir_is_sibling_of_pending(
 ) -> None:
     config = make_git_config(tmp_path / "clone")
     assert cli.preparing_dir(config) == cli.pending_dir(config).parent / "preparing"
-    assert "tasks/preparing" in cli.REPO_TASK_DIRS
+    assert "tasks/preparing" in cli.repo_task_dirs("tasks")
 
 
 def test_audit_pathspec_covers_every_installed_lifecycle_dir() -> None:
@@ -44,7 +44,7 @@ def test_audit_pathspec_covers_every_installed_lifecycle_dir() -> None:
     # folders at once and leaving a dangling `D` on the base branch. A lifecycle folder `install`
     # scaffolds but the audit commit cannot stage is the whole defect, so adding a fifth folder
     # without teaching the pathspec about it must fail here rather than in a production run.
-    installed = {Path(rel).name for rel in cli.REPO_TASK_DIRS}
+    installed = {Path(rel).name for rel in cli.repo_task_dirs("tasks")}
     pathspec = audit_pathspec("tasks", "task-001")
     assert installed == {Path(rel).parent.name for rel in pathspec}
     for state in installed:

@@ -4235,11 +4235,14 @@ class Orchestrator:
     def _finalize_task_artifacts(
         self, p: _Pipeline, final: Status, *, degraded: bool = False
     ) -> Path | None:
-        """Move the task into its lifecycle folder; write the committed `<id>.summary.md` alongside.
+        """Move the task into its lifecycle folder; write the `<id>.summary.md` alongside.
 
-        Runs **before** the commit so both land in the task (audit) commit. Returns the
-        path to the committed `summary.md`, or ``None`` when there is no on-disk task file (e.g. a
-        synthetic ``run`` path). ``summary.json`` and the rest of ``logs/`` are never committed.
+        Runs **before** the commit so both land in the task (audit) commit — when the lifecycle tree
+        is tracked at all; with it gitignored (`install`'s default) there is no audit commit and
+        this pair is simply the on-disk record. Written either way, and written the same way, so
+        the operator's record does not depend on their ignore rules. Returns the path to that
+        `summary.md`, or ``None`` when there is no on-disk task file (e.g. a synthetic ``run``
+        path). ``summary.json`` and the rest of ``logs/`` are never committed.
 
         ``degraded`` (DONE path only) flows into the deterministic fallback body as a visible
         "fallback summary" callout when the supervisor synthesis was expected but failed.
@@ -4257,8 +4260,10 @@ class Orchestrator:
             return None
         summary_path = dest.with_name(f"{p.task.id}.summary.md")
         try:
-            # ``newline=""``: this copy is committed into the operator's repository, so the host's
-            # line separator must not decide what lands in their history.
+            # ``newline=""``: this copy may be committed into the operator's repository, so the
+            # host's line separator must not decide what lands in their history — and it is written
+            # the same way whether or not the tree is tracked, so turning tracking on later does
+            # not produce a diff made of line endings.
             summary_path.write_text(body, encoding="utf-8", newline="")
         except OSError:
             return None

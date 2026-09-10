@@ -584,6 +584,40 @@ def test_ensure_path_excluded_reports_failure_for_a_tracked_path(
     assert not ensure_path_excluded(git_repo.clone, tracked)
 
 
+def test_append_runtime_excludes_adds_an_anchored_line_for_the_configured_tasks_dir(
+    git_repo, git_run: GitRunner
+) -> None:
+    # `install` passes the configured `paths.tasks_dir`; the line is anchored at the repo root, or a
+    # bare `tasks/` would also ignore a `src/tasks/` package in the operator's own source tree.
+    appended = append_runtime_excludes(git_repo.clone, tasks_dir="ops/queue")
+    assert "/ops/queue/" in appended
+    assert any("delete this line to track tasks" in line for line in appended)
+    git_run(["check-ignore", "-q", "ops/queue/pending/t.md"], git_repo.clone)  # exit 0 = ignored
+    # Idempotent: `install --reconfigure` re-runs the append and must not duplicate the line.
+    assert append_runtime_excludes(git_repo.clone, tasks_dir="ops/queue") == []
+    # And without the argument the tree is left alone — that is how the default is opted out of.
+    fresh = git_repo.clone.parent / "fresh"
+    fresh.mkdir()
+    assert not any("tasks" in line for line in append_runtime_excludes(fresh))
+
+
+def test_ensure_runtime_excludes_never_re_ignores_a_tracked_tasks_tree(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # The per-run safety net repairs the runtime homes only. An operator who deleted the seeded
+    # `/tasks/` line to track their tasks must not find it re-added — least of all to
+    # `.git/info/exclude`, a file they would never think to look in.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.ensure_runtime_excludes()
+    exclude = (git_repo.clone / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    assert ".worc/" in exclude
+    assert "tasks" not in exclude
+    (git_repo.clone / "tasks" / "pending").mkdir(parents=True)
+    (git_repo.clone / "tasks" / "pending" / "task-001.md").write_text("t\n", encoding="utf-8")
+    porcelain = git_run(["status", "--porcelain", "-uall"], git_repo.clone)
+    assert "tasks/pending/task-001.md" in porcelain
+
+
 def test_append_runtime_excludes_respects_operators_flows_tracking_scheme(
     git_repo, git_run: GitRunner
 ) -> None:
@@ -752,6 +786,61 @@ def test_audit_commit_noop_when_no_tasks(
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
     gm.prepare_branch("task-001", "x", epoch=_EPOCH)
     assert gm.commit_audit("task-001") is None
+
+
+def test_audit_commit_is_a_noop_when_the_lifecycle_tree_is_gitignored(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # The shape `install` seeds by default. `git add` refuses an explicitly named ignored path
+    # ("use -f"), which used to make this fail *after* checking out a sibling audit branch; now
+    # nothing is staged, nothing is committed, and the branch is never touched.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    (git_repo.clone / ".gitignore").write_text("/tasks/\n", encoding="utf-8")
+    git_run(["add", ".gitignore"], git_repo.clone)
+    git_run(["commit", "-m", "ignore the task lifecycle tree"], git_repo.clone)
+    head_before = git_run(["rev-parse", "HEAD"], git_repo.clone)
+    done = git_repo.clone / "tasks" / "done"
+    done.mkdir(parents=True, exist_ok=True)
+    (done / "task-001.md").write_text("t\n", encoding="utf-8")
+    (done / "task-001.summary.md").write_text("s\n", encoding="utf-8")
+
+    assert gm.commit_audit("task-001") is None
+    assert git_run(["rev-parse", "HEAD"], git_repo.clone) == head_before
+    assert "tasks/" not in git_run(["ls-files"], git_repo.clone)
+
+
+def test_audit_commit_stages_the_tracked_half_of_a_move_under_an_ignored_tree(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # The mixed state an operator reaches by adopting the gitignored default over a tree whose task
+    # files are already committed. A tracked path under an ignored directory is still addable, and
+    # it must be added: skipping the whole commit would leave the deletion side of the move
+    # dangling as a `D` on the base branch — the regression the audit pathspec exists for.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    pending = git_repo.clone / "tasks" / "pending"
+    pending.mkdir(parents=True, exist_ok=True)
+    (pending / "task-001.md").write_text("t\n", encoding="utf-8")
+    git_run(["add", "tasks/pending/task-001.md"], git_repo.clone)
+    (git_repo.clone / ".gitignore").write_text("/tasks/\n", encoding="utf-8")
+    git_run(["add", ".gitignore"], git_repo.clone)
+    git_run(["commit", "-m", "tracked task file, then ignore the tree"], git_repo.clone)
+    # Lifecycle move: pending -> done.
+    (pending / "task-001.md").unlink()
+    done = git_repo.clone / "tasks" / "done"
+    done.mkdir(parents=True, exist_ok=True)
+    (done / "task-001.md").write_text("t\n", encoding="utf-8")
+
+    sha = gm.commit_audit("task-001")
+    assert sha is not None
+    tracked = git_run(["ls-files"], git_repo.clone)
+    assert "tasks/pending/task-001.md" not in tracked  # the deletion is committed
+    assert "tasks/done/task-001.md" not in tracked  # ignored + untracked: never force-added
+    # No dangling `D` to ride back onto base after terminal cleanup.
+    assert "tasks/pending" not in git_run(["status", "--porcelain"], git_repo.clone)
 
 
 def test_audit_commit_stages_lifecycle_move_deletion(

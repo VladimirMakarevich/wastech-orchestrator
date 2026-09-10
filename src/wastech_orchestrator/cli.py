@@ -65,6 +65,8 @@ from wastech_orchestrator.git_manager import (
     append_runtime_excludes,
     ensure_path_excluded,
     gh_repo_pin,
+    tasks_dir_has_tracked_files,
+    tasks_ignore_root,
 )
 from wastech_orchestrator.install import config_writer, detect, wizard
 from wastech_orchestrator.ledger import Ledger
@@ -89,6 +91,7 @@ from wastech_orchestrator.providers.claude import claude_config_home
 from wastech_orchestrator.providers.codex import codex_config_home
 from wastech_orchestrator.runtime_layout import (
     CONTROL_HOME_DIRNAME,
+    EXCHANGE_HOME_DIRNAME,
     TRACKED_LIFECYCLE_STATES,
     RuntimeLayout,
     runs_root,
@@ -144,21 +147,31 @@ _LIST_RECENT_DEFAULT = 10
 
 # The orchestrator's runtime home inside the target repo is named by `runtime_layout`
 # (`CONTROL_HOME_DIRNAME` / `PRIVATE_HOME_DIRNAME`, both `.worc` today). Everything the orchestrator
-# generates or installs lives under `<repo>/.worc/` — gitignored as a whole — except the audit
-# trail: the task lifecycle dirs below sit at the repo root and are audit-committed. Consumers reach
-# the home via `layout_for(config)` (private) / `.control_home`, never a rebuilt `.worc` literal.
+# generates or installs lives under `<repo>/.worc/` — gitignored as a whole. The task lifecycle dirs
+# below are the one exception to the *location*: they sit at the repo root, so an operator who wants
+# their task files reviewed or pushed can track them. They too are gitignored by default. Consumers
+# reach the home via `layout_for(config)` (private) / `.control_home`, never a rebuilt `.worc`
+# literal.
 
-# Task lifecycle dirs created at the repo root by `install` (tracked; the audit commit captures the
-# task file + its `<id>.summary.md` in done/failed). `tasks/rejected` is the quarantine and
-# lives under `.worc/` instead, so rejected tasks are never swept into the audit commit.
-# `tasks/preparing` is the staging area: the watch scanner never looks in it, so a task file can be
-# composed there without being picked up mid-write. `promote` moves a finished file into `pending`.
-# The state names are derived, never restated: a folder `install` scaffolds but the audit commit's
-# pathspec does not know about is a task file committed twice. The `tasks/` prefix is the
-# install-time *default* layout only (`paths.tasks_dir` defaults to "tasks"); the runtime reads
-# `config.paths.tasks_dir` (see `pending_dir`), and an operator who configures a different
-# directory creates its lifecycle subfolders themselves.
-REPO_TASK_DIRS: tuple[str, ...] = tuple(f"tasks/{state}" for state in TRACKED_LIFECYCLE_STATES)
+
+def repo_task_dirs(tasks_dir: str) -> tuple[str, ...]:
+    """The task lifecycle dirs `install` creates under *tasks_dir* at the repo root.
+
+    Gitignored by default (`install` seeds the rule) and tracked when the operator asks, in which
+    case the audit commit captures the task file + its `<id>.summary.md` in done/failed.
+    `.worc/tasks/rejected` is NOT here: the quarantine lives under the private home, so a rejected
+    task is never swept into a commit whichever way the tree is ignored. `preparing/` is the staging
+    area — the watch scanner never looks in it, so a task file can be composed there without being
+    picked up mid-write, and `promote` moves the finished file into `pending/`.
+
+    The state names are derived, never restated: a folder `install` scaffolds but the audit commit's
+    pathspec does not know about is a task file committed twice. The parent is the operator's to
+    name (`paths.tasks_dir`, `install --tasks-dir`), and the runtime reads it from the config (see
+    `pending_dir`), so an operator who renames it *after* installing creates the subfolders — and
+    moves the ignore line — themselves.
+    """
+    return tuple(f"{tasks_dir}/{state}" for state in TRACKED_LIFECYCLE_STATES)
+
 
 # Runtime dirs created under `<repo>/.worc/` by `install` (all gitignored).
 WORC_RUNTIME_DIRS: tuple[str, ...] = ("logs", "workspace", "tasks/rejected")
@@ -285,6 +298,21 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="process pending tasks back-to-back (default: no)",
+    )
+    install_cmd.add_argument(
+        "--track-tasks",
+        dest="track_tasks",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="commit task files as an audit trail (default: no — the lifecycle tree is gitignored)",
+    )
+    install_cmd.add_argument(
+        "--tasks-dir",
+        dest="tasks_dir",
+        default=None,
+        metavar="DIR",
+        help="repo-relative task lifecycle directory to scaffold and write as paths.tasks_dir "
+        f"(default: {config_writer.DEFAULT_TASKS_DIR})",
     )
     install_cmd.add_argument(
         "--non-interactive",
@@ -1259,10 +1287,12 @@ def worc_home_for(config: OrchestratorConfig) -> Path:
 
 
 def tasks_root_for(config: OrchestratorConfig) -> Path:
-    """The repo root that holds the tracked ``tasks/`` lifecycle dirs (the audit trail).
+    """The repo root that holds the ``paths.tasks_dir`` lifecycle dirs.
 
-    Unlike :func:`worc_home_for`, ``tasks/`` stays at the repo root so the task file and its
-    committed ``<id>.summary.md`` can be audit-committed into the repo's history.
+    Unlike :func:`worc_home_for`, the lifecycle tree stays at the repo root so the task file and
+    its ``<id>.summary.md`` *can* be audit-committed into the repo's history — the one root the
+    operator may choose to track. ``install`` gitignores it by default; the location is what makes
+    the choice available at all.
     """
     return Path(config.repo.local_path)
 
@@ -4869,14 +4899,15 @@ def _install_backup_config(path: Path) -> Path:
     return backup
 
 
-def _install_create_dirs(repo_local_path: Path) -> None:
-    """Create the tracked task dirs at the repo root and the gitignored ``.worc/`` runtime dirs.
+def _install_create_dirs(repo_local_path: Path, tasks_dir: str) -> None:
+    """Create the task lifecycle dirs at the repo root and the gitignored ``.worc/`` runtime dirs.
 
-    Idempotent. The repo task dirs are created empty, so they do not appear in ``git status`` until
-    a task writes into them; everything under ``.worc/`` is gitignored as a whole.
+    Idempotent. The lifecycle dirs are created empty, so they do not appear in ``git status`` until
+    a task writes into them (and not even then, unless the operator asked to track them);
+    everything under ``.worc/`` is gitignored as a whole.
     """
     worc_home = RuntimeLayout.default(repo_local_path).control_home
-    for rel in REPO_TASK_DIRS:
+    for rel in repo_task_dirs(tasks_dir):
         (repo_local_path / rel).mkdir(parents=True, exist_ok=True)
     for rel in WORC_RUNTIME_DIRS:
         (worc_home / rel).mkdir(parents=True, exist_ok=True)
@@ -4907,14 +4938,22 @@ def _install_print_plan(
     print("  checks:     command_sets (author in config.yaml)")
     print(f"  create_pr:  {spec.create_pull_request}")
     print(f"  auto_mode:  {spec.auto_mode}")
-    for rel in REPO_TASK_DIRS:
+    for rel in repo_task_dirs(spec.tasks_dir):
         print(f"  would create {spec.repo_local_path / rel}")
     for rel in WORC_RUNTIME_DIRS:
         print(f"  would create {worc_home / rel}")
     print(f"  would create {worc_home / 'guide'}/ (agent task-authoring docs)")
     print(f"  would create {worc_home / 'flows'}/ (built-in flows + node prompt templates)")
     print(f"  would create {worc_home / ENV_EXAMPLE_FILENAME} (secrets template)")
-    print(f"  would ignore {CONTROL_HOME_DIRNAME}/ via .gitignore")
+    roots = [f"{CONTROL_HOME_DIRNAME}/", f"{EXCHANGE_HOME_DIRNAME}/"]
+    ignore_tasks = not spec.track_tasks and not tasks_dir_has_tracked_files(
+        spec.repo_local_path, spec.tasks_dir
+    )
+    if ignore_tasks:
+        roots.append(tasks_ignore_root(spec.tasks_dir)[1])
+    print(f"  would ignore {', '.join(roots)} via .gitignore")
+    if not ignore_tasks:
+        print(f"  would leave {spec.tasks_dir}/ tracked (task files committed as an audit trail)")
     if missing:
         print(f"  note: provider(s) not on PATH: {', '.join(p.value for p in missing)}")
 
@@ -4941,8 +4980,10 @@ def cmd_install(args: argparse.Namespace) -> int:
     Runs the wizard to resolve settings, then idempotently writes a validated ``config.yaml`` into
     ``<repo>/.worc/``, scaffolds the runtime + task dirs, copies the task-authoring guide and
     editable copies of the built-in flows + their per-node prompt templates into ``.worc/flows/``,
-    and gitignores ``.worc/``. Re-running is a no-op unless ``--reconfigure`` (which backs up and
-    regenerates). After a successful write it auto-runs preflight.
+    and gitignores ``.worc/`` — plus the task lifecycle tree, unless ``--track-tasks`` (or a yes to
+    the wizard's question) asks for the task files to be committed. Re-running is a no-op unless
+    ``--reconfigure`` (which backs up and regenerates). After a successful write it auto-runs
+    preflight.
     """
     _configure_runtime_logging(args)
     try:
@@ -4951,6 +4992,8 @@ def cmd_install(args: argparse.Namespace) -> int:
             provider=args.provider,
             create_pr=args.create_pr,
             auto_mode=args.auto_mode,
+            track_tasks=args.track_tasks,
+            tasks_dir=args.tasks_dir,
             non_interactive=args.non_interactive,
             prompter=wizard.ConsolePrompter(),
         )
@@ -4973,7 +5016,7 @@ def cmd_install(args: argparse.Namespace) -> int:
         print(f"install: backed up existing config to {_install_backup_config(config_path)}")
 
     text = config_writer.build_and_validate(spec)
-    _install_create_dirs(spec.repo_local_path)
+    _install_create_dirs(spec.repo_local_path, spec.tasks_dir)
     _install_atomic_write(config_path, text)
     print(f"install: wrote {config_path}")
     # An editable copy of the task-authoring guide lives in .worc/. --reconfigure refreshes it to
@@ -5007,9 +5050,29 @@ def cmd_install(args: argparse.Namespace) -> int:
         print(f"install: wrote {worc_home / 'config.example.yaml'} (commented reference)")
     if _install_write_env_example(worc_home):
         print(f"install: wrote {worc_home / ENV_EXAMPLE_FILENAME} (copy to .worc/.env, fill in)")
-    # Gitignore the whole .worc/ runtime home so the operator's `git status` stays clean.
-    if append_runtime_excludes(spec.repo_local_path):
-        print(f"install: ignored {CONTROL_HOME_DIRNAME}/ via .gitignore")
+    # Gitignore the whole .worc/ runtime home so the operator's `git status` stays clean, and the
+    # task lifecycle tree with it unless the operator asked to track their tasks — or git already
+    # tracks something there, which overrules the answer rather than quietly ignoring a directory
+    # somebody is keeping in git. The answer is recorded nowhere else: from here on git's own ignore
+    # state is what the runtime reads, so the operator changes their mind by editing that one line.
+    already_tracked = tasks_dir_has_tracked_files(spec.repo_local_path, spec.tasks_dir)
+    ignore_tasks = not spec.track_tasks and not already_tracked
+    appended = append_runtime_excludes(
+        spec.repo_local_path, tasks_dir=spec.tasks_dir if ignore_tasks else None
+    )
+    if appended:
+        roots = ", ".join(line for line in appended if not line.startswith("#"))
+        print(f"install: ignored {roots} via .gitignore")
+    if not ignore_tasks:
+        why = (
+            "git already tracks files there"
+            if already_tracked and not spec.track_tasks
+            else "you asked to track your tasks"
+        )
+        print(
+            f"install: left {spec.tasks_dir}/ tracked ({why}) — the task file and its summary are "
+            "committed as an audit trail on the task's branch"
+        )
     if outcome.missing_providers:
         names = ", ".join(p.value for p in outcome.missing_providers)
         print(f"install: note — selected provider(s) not on PATH yet: {names}")

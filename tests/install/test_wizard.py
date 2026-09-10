@@ -166,8 +166,74 @@ def test_aborted_final_confirm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
             non_interactive=False,
             create_pr=False,
             auto_mode=False,
+            track_tasks=False,  # a flag, so this one does not consume the scripted confirm
             prompter=prompter,
         )
+
+
+# --- the task lifecycle tree: gitignored unless asked for -------------------------------------
+
+
+def test_tasks_are_not_tracked_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The whole point of the default: a fresh install leaves task files out of git, so an operator
+    # gets a clean `git status` and no lifecycle file in their first pull request.
+    root = tmp_path / "repo"
+    _patch_detect(monkeypatch, root=root, providers=("codex",))
+    spec = _run(monkeypatch, root).spec
+    assert spec.track_tasks is False
+    assert spec.tasks_dir == "tasks"
+
+
+@pytest.mark.parametrize("answer", [True, False])
+def test_interactive_track_tasks_answer_is_honored(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: bool
+) -> None:
+    # Two confirms in this order: track tasks?, then the final "write this configuration?".
+    root = tmp_path / "repo"
+    _patch_detect(monkeypatch, root=root, providers=("codex",))
+    prompter = _ScriptedPrompter(confirms=[answer, True])
+    outcome = _run(
+        monkeypatch,
+        root,
+        non_interactive=False,
+        create_pr=False,
+        auto_mode=False,
+        prompter=prompter,
+    )
+    assert outcome.spec.track_tasks is answer
+
+
+def test_track_tasks_flag_wins_over_the_prompt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `--track-tasks` is answered without asking, so the scripted confirm goes to the final one.
+    root = tmp_path / "repo"
+    _patch_detect(monkeypatch, root=root, providers=("codex",))
+    prompter = _ScriptedPrompter(confirms=[True])
+    outcome = _run(
+        monkeypatch,
+        root,
+        non_interactive=False,
+        create_pr=False,
+        auto_mode=False,
+        track_tasks=True,
+        prompter=prompter,
+    )
+    assert outcome.spec.track_tasks is True
+
+
+@pytest.mark.parametrize(
+    ("passed", "expected"),
+    [("ops/queue", "ops/queue"), (None, "tasks"), ("", "tasks"), ("  ", "tasks")],
+)
+def test_tasks_dir_override_falls_back_to_the_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, passed: str | None, expected: str
+) -> None:
+    # The operator names the lifecycle tree; a blank value is the same as not passing one, because
+    # an empty `paths.tasks_dir` is a config error and the installer must not manufacture it.
+    root = tmp_path / "repo"
+    _patch_detect(monkeypatch, root=root, providers=("codex",))
+    assert _run(monkeypatch, root, tasks_dir=passed).spec.tasks_dir == expected
 
 
 def test_install_does_not_seed_checks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

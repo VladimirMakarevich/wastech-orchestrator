@@ -90,9 +90,9 @@ _PUSH_RETRY_BACKOFF_SECONDS = 1.5
 
 # The gitignored runtime home that must never enter a code commit (state.db, logs/, workspace/,
 # checks/, config.yaml, orchestrator.pid, …). The configured task lifecycle directory
-# (`paths.tasks_dir`, default "tasks") is also excluded from the code commit — it is tracked but
-# rides the separate audit commit — but that name is per-config, so it is added per instance (see
-# `__init__`). Together they form `self._excluded_dirs`.
+# (`paths.tasks_dir`, default "tasks") is also excluded from the code commit — it rides the
+# separate audit commit when it is tracked at all — but that name is per-config, so it is added per
+# instance (see `__init__`). Together they form `self._excluded_dirs`.
 RUNTIME_EXCLUDED_DIRS = (CONTROL_HOME_DIRNAME, EXCHANGE_HOME_DIRNAME)
 
 
@@ -137,10 +137,22 @@ _RUNTIME_IGNORE_COMMENT = (
 # `.worc/` (e.g. an operator's `.worc/*` + `!.worc/flows/` scheme) still gets the `.worc-io/`
 # exchange line without a blanket `.worc/` re-append that would defeat the operator's negation.
 # `.worc-io/` is the provider-readable exchange — a sibling runtime root that must also
-# never enter a commit. `tasks/` is intentionally NOT ignored — it holds the committed audit trail.
+# never enter a commit. The task lifecycle tree is NOT here: it is per-config (`paths.tasks_dir`)
+# and, unlike these two, it is the operator's to track — see `_TASKS_IGNORE_COMMENT`.
 _RUNTIME_IGNORE_ROOTS: tuple[tuple[str, str], ...] = (
     (f"{CONTROL_HOME_DIRNAME}/state.db", f"{CONTROL_HOME_DIRNAME}/"),
     (f"{EXCHANGE_HOME_DIRNAME}/probe", f"{EXCHANGE_HOME_DIRNAME}/"),
+)
+
+# Header for the task-lifecycle ignore line `install` seeds by default. It names the command that
+# wrote it and, unlike the runtime-home block above, says out loud that deleting it is a supported
+# choice: the lifecycle tree is the one root an operator may legitimately want in git (a task file
+# reviewed in a PR, pushed to a teammate's clone, discovered by a `watch` daemon on `git pull`).
+# The default is the other way round because the common case is a single operator on one machine,
+# for whom a tracked `tasks/` only adds a dirty `git status` and one more thing to get wrong.
+_TASKS_IGNORE_COMMENT = (
+    "# wastech-orchestrator task lifecycle (auto-appended by `worc install`; "
+    "delete this line to track tasks in git)"
 )
 
 # Header for the exclude lines the orchestrator appends for an assigned toolchain cache living
@@ -156,6 +168,25 @@ RUNTIME_GITIGNORE_LINES: tuple[str, ...] = (
     f"{CONTROL_HOME_DIRNAME}/",
     f"{EXCHANGE_HOME_DIRNAME}/",
 )
+
+
+def tasks_ignore_root(tasks_dir: str) -> tuple[str, str]:
+    """The ``(probe, ignore line)`` pair for the configured task lifecycle tree.
+
+    Derived from ``paths.tasks_dir`` rather than a literal, because the operator names that
+    directory (and may nest it: ``ops/queue``). The probe is a path *under* the root — a directory
+    has no ignorable entry of its own — and is what decides whether the line is still missing.
+
+    The line is **anchored** with a leading ``/``, unlike the two runtime roots. ``.worc`` and
+    ``.worc-io`` are orchestrator-invented names that appear nowhere else in a source tree, so an
+    unanchored pattern is harmless for them; ``tasks`` is one of the most common directory names
+    there is, and an unanchored ``tasks/`` would also ignore ``src/tasks/`` — silently dropping a
+    whole package out of the operator's own repository. A pattern that contains a slash is anchored
+    to the ``.gitignore`` that holds it, which is the repo root here.
+    """
+    rel = tasks_dir.replace("\\", "/").strip().strip("/")
+    return f"{rel}/probe", f"/{rel}/"
+
 
 # The private, empty hooks directory every orchestrator git command points at via
 # `-c core.hooksPath`, so a target-repo hook (or an agent-set `core.hooksPath`) can never execute in
@@ -508,8 +539,10 @@ def ensure_path_excluded(
     return _git_path_ignored(root, probe, security=security)
 
 
-def _missing_runtime_ignore_lines(is_ignored: Callable[[str], bool]) -> list[str]:
-    """The ignore lines for the runtime roots not yet covered, per root (empty when all covered).
+def _missing_runtime_ignore_lines(
+    is_ignored: Callable[[str], bool], *, tasks_dir: str | None = None
+) -> list[str]:
+    """The ignore lines for the roots not yet covered, per root (empty when all covered).
 
     Each root (``.worc/``, ``.worc-io/``) is decided independently against its own probe, so an
     operator's own ``.worc/*`` + ``!.worc/flows/`` scheme is never stomped:
@@ -517,19 +550,55 @@ def _missing_runtime_ignore_lines(is_ignored: Callable[[str], bool]) -> list[str
     would silently re-exclude ``.worc/flows/`` — a parent-dir exclusion from any source blocks
     re-inclusion of its children), while the ``.worc-io/`` exchange line is still added if missing
     The comment header rides along only when at least one root line is added.
+
+    ``tasks_dir`` adds the task lifecycle tree as a third root, in its own commented block. It is
+    opt-in per call rather than a member of :data:`_RUNTIME_IGNORE_ROOTS` because only ``install``
+    seeds it: the caller that repairs a clone on every run
+    (:meth:`GitManager.ensure_runtime_excludes`) must never add it, or an operator who deliberately
+    tracks their tasks would find them re-ignored behind their back — and ``.git/info/exclude``,
+    where that repair writes, is not even a file they would think to look in.
     """
     lines = [line for probe, line in _RUNTIME_IGNORE_ROOTS if not is_ignored(probe)]
-    return [_RUNTIME_IGNORE_COMMENT, *lines] if lines else []
+    block = [_RUNTIME_IGNORE_COMMENT, *lines] if lines else []
+    if tasks_dir is not None:
+        probe, line = tasks_ignore_root(tasks_dir)
+        if not is_ignored(probe):
+            block += [_TASKS_IGNORE_COMMENT, line]
+    return block
 
 
-def append_runtime_excludes(repo_root: str | Path) -> list[str]:
+def tasks_dir_has_tracked_files(repo_root: str | Path, tasks_dir: str) -> bool:
+    """Whether git already tracks anything under *tasks_dir* in *repo_root*.
+
+    The one question ``install`` must ask before it seeds an ignore rule for that tree, and it is
+    about safety rather than tidiness. ``tasks`` is a directory name a repository may already use
+    for something entirely unrelated, and a repository that already runs the orchestrator with the
+    tree tracked has deliberately deleted the seeded line. In both cases appending it back ignores
+    a directory whose contents somebody is tracking on purpose: the committed files stay tracked
+    (an ignore rule cannot untrack), but every *new* file there silently stops appearing in ``git
+    status`` — a change nobody asked for, in a directory ``install`` was only passing through.
+
+    ``False`` when git cannot be asked at all, which is the right way round: the caller then
+    proceeds to seed the rule for what looks like an untracked tree, and an ignore line in the
+    tracked ``.gitignore`` is visible and one deletion away from undone.
+    """
+    rel = tasks_dir.replace("\\", "/").strip().strip("/")
+    if not rel:
+        return False
+    return bool(_git_stdout(repo_root, "ls-files", "--", f"{rel}/").strip())
+
+
+def append_runtime_excludes(repo_root: str | Path, *, tasks_dir: str | None = None) -> list[str]:
     """Idempotently add the ``.worc/`` + ``.worc-io/`` ignore lines to the tracked ``.gitignore``.
 
-    Adds only the runtime roots not already covered by an existing rule (per root — see
-    :func:`_missing_runtime_ignore_lines`). Returns the lines actually appended — empty when every
-    root was already ignored.
+    With ``tasks_dir`` the configured task lifecycle tree is ignored too — what ``install`` passes
+    unless the operator asked to track their tasks in git. Adds only the roots not already covered
+    by an existing rule (per root — see :func:`_missing_runtime_ignore_lines`). Returns the lines
+    actually appended — empty when every root was already ignored.
     """
-    lines = _missing_runtime_ignore_lines(lambda probe: _git_path_ignored(repo_root, probe))
+    lines = _missing_runtime_ignore_lines(
+        lambda probe: _git_path_ignored(repo_root, probe), tasks_dir=tasks_dir
+    )
     if not lines:
         return []
     return _append_missing_lines(Path(repo_root) / ".gitignore", lines)
@@ -1011,8 +1080,9 @@ class GitManager:
         self._store = store
         self._artifacts_root = artifacts_root
         self._clone = config.repo.local_path
-        # The configured task lifecycle dir is tracked but rides the audit commit, so it is excluded
-        # from the code commit alongside the gitignored `.worc/` runtime home.
+        # The configured task lifecycle dir never rides the code commit: it goes in the separate
+        # audit commit when tracked, and is gitignored (`install`'s default) when not. Either way it
+        # is excluded here, alongside the gitignored `.worc/` runtime home.
         self._tasks_dir = config.paths.tasks_dir
         self._excluded_dirs = (*RUNTIME_EXCLUDED_DIRS, self._tasks_dir)
         # The allowlist, scrubbed of the publication-retargeting names and hardened; applies to both
@@ -1609,7 +1679,10 @@ class GitManager:
         runtime-home ignore is guaranteed however the clone was scaffolded, yet never rides into a
         task's code commit or PR diff (the tracked ``.gitignore`` is left untouched). Keeps
         ``.worc/`` (state.db, logs/, workspace/, checks/, config.yaml, …) out of the operator's
-        ``git status``; ``tasks/`` stays trackable — it carries the audit trail. Idempotent.
+        ``git status``. The task lifecycle tree is deliberately **not** repaired here: ``install``
+        seeds its ignore line in the tracked ``.gitignore``, where the operator can see and delete
+        it to track their tasks, and re-adding it from a run — into a file nobody thinks to read —
+        would undo that choice invisibly. Idempotent.
         Resolved via ``rev-parse --git-path`` so it is correct for clones and linked worktrees.
 
         Adds only the runtime roots not already covered per root (see
@@ -2284,15 +2357,26 @@ class GitManager:
         )
 
     def _tasks_dir_ignored(self) -> bool:
-        """Whether the task lifecycle dir is gitignored (cached ``git check-ignore``).
+        """Whether the repository's ignore rules cover the task lifecycle tree (cached).
 
-        Probes with a trailing slash (``tasks/``) so a directory-only ignore pattern matches whether
-        or not the dir currently exists on disk (a bare ``tasks`` probe only matches an existing
-        directory).
+        The question is about the *rules*, not about what happens to be tracked — which is why both
+        halves of the probe are deliberate, and why the obvious spelling gets it wrong:
+
+        * the probe is a path **under** the root (:func:`tasks_ignore_root`, the same one the ignore
+          writer decides against, so a rule ``install`` seeds and the rule read back here can never
+          be judged by different questions). A directory has no ignorable entry of its own, and the
+          ``tasks/*``-plus-negation schemes an operator writes match children only;
+        * ``--no-index``, because ``git check-ignore`` otherwise reports any path whose subtree
+          holds a tracked entry as **not** ignored. Without it a single committed task file flips
+          this answer for the whole tree, and both callers then take the branch meant for a tracked
+          tree: the audit commit stops force-adding the tracked half of a lifecycle move, and the
+          code commit re-adds a ``:(exclude)`` guard that makes ``git add`` abort outright (exit 1,
+          verified on real git). That is precisely the mixed state an operator reaches by adopting
+          the gitignored default over a tree whose task files are already committed.
         """
         if self._tasks_dir_ignored_cache is None:
-            probe = f"{self._tasks_dir}/"
-            self._tasks_dir_ignored_cache = self._git("check-ignore", "-q", probe).ok
+            probe, _line = tasks_ignore_root(self._tasks_dir)
+            self._tasks_dir_ignored_cache = self._git("check-ignore", "-q", "--no-index", probe).ok
         return self._tasks_dir_ignored_cache
 
     # --- staged-set / index gates --------------------------------------------------
@@ -2600,13 +2684,20 @@ class GitManager:
                 )
 
     def commit_audit(self, task_id: str, *, task_packet_digest: str | None = None) -> str | None:
-        """Make the orchestrator-only commit of the task lifecycle.
+        """Make the orchestrator-only commit of the task lifecycle, or nothing to commit.
 
         Stages **only this task's** moved task file plus its `<id>.summary.md` (in ``tasks/done`` or
         ``tasks/failed``) — never the whole ``tasks/`` tree, so a concurrently-pending task is never
         swept into this commit. Working artifacts (plan, review, stage logs, diffs, summary.json)
         live under the gitignored ``.worc/`` home and are never committed. The code change rides in
         the separate scoped code commit, so this never touches code paths.
+
+        There is nothing to commit whenever the lifecycle tree is gitignored and holds no tracked
+        file — the shape ``install`` seeds by default — and that case returns ``None`` before any
+        branch is touched, rather than after creating an empty ``<branch>-audit`` sibling. What
+        decides it is :meth:`_stageable_audit_paths`, per path, so the mixed state an operator
+        reaches by adopting the default over an already-tracked tree still commits the *tracked*
+        halves of the move.
 
         The lifecycle ``<id>.md`` is verified byte-identical to the frozen task
         packet (``task_packet_digest``) before staging — a rewritten task file is a security
@@ -2616,6 +2707,10 @@ class GitManager:
         existing = self._store.get_publish_op(task_id, KIND_AUDIT_COMMIT, None)
         if existing is not None and existing.status == _STATUS_COMPLETED:
             return existing.result_ref
+        stageable = self._stageable_audit_paths(audit_pathspec(self._tasks_dir, task_id))
+        if not stageable:
+            self._record_audit_op(task_id, None)
+            return None
         self._assert_no_untrusted_filters()  # `git add -A` runs clean filters
 
         code_branch = self._git("rev-parse", "--abbrev-ref", "HEAD").stdout.strip()
@@ -2628,21 +2723,17 @@ class GitManager:
                 self._git_checked("checkout", audit_branch)
 
         message = footprint.audit_commit_message.format(task_id=task_id)
-        audit_files = audit_pathspec(self._tasks_dir, task_id)
-        # Stage the task file's *appearance* in its new lifecycle folder AND its *removal* from the
-        # old one. A lifecycle move deletes the source path; a plain `git add` of only the files
-        # that still exist would miss that deletion when the source is tracked in the branch's base
-        # — leaving the base working tree dirty (a dangling `D`) after terminal cleanup. `git add
-        # -A` over the candidate pathspecs stages both adds and deletes. Pass only paths that exist
-        # on disk or are tracked, so an unmatched pathspec can never abort the whole add.
-        tracked = set(self._git("ls-files", "--", *audit_files).stdout.splitlines())
-        stageable = [
-            rel for rel in audit_files if (Path(self._clone) / rel).exists() or rel in tracked
-        ]
         sha: str | None = None
         if task_packet_digest is not None:
             self._assert_lifecycle_matches_packet(task_id, stageable, task_packet_digest)
-        if stageable and self._git("add", "-A", "--", *stageable).ok:
+        # `-f` only under an ignored tree, where `stageable` holds *tracked* paths exclusively (see
+        # :meth:`_stageable_audit_paths`) — so it can only re-record what git already tracks, never
+        # introduce an ignored file. It is needed because `git add -A` reports exit 1 ("The
+        # following paths are ignored … use -f") when the pathspec's parent directory is ignored,
+        # *after* correctly staging the entry: without `-f` the perfectly good deletion is staged
+        # and then thrown away by the failed-add branch below, leaving the dangling `D` on base.
+        force = ("-f",) if self._tasks_dir_ignored() else ()
+        if self._git("add", "-A", *force, "--", *stageable).ok:
             # Only this task's lifecycle files may be in the index at the audit commit.
             self.assert_staged_allowed(set(stageable))
             commit = self._git("commit", "-m", message)
@@ -2652,6 +2743,15 @@ class GitManager:
         if footprint.audit_on_branch is AuditBranch.SIBLING:
             self._git_checked("checkout", code_branch)
 
+        self._record_audit_op(task_id, sha)
+        return sha
+
+    def _record_audit_op(self, task_id: str, sha: str | None) -> None:
+        """Record the audit commit's idempotency row — ``sha``, or ``noop`` when nothing committed.
+
+        One writer for both exits, so the early "nothing to stage" return and the committed path
+        cannot drift into recording the outcome differently.
+        """
         self._store.record_publish_op(
             PublishOpRow(
                 task_id=task_id,
@@ -2661,7 +2761,38 @@ class GitManager:
                 result_ref=sha,
             )
         )
-        return sha
+
+    def _stageable_audit_paths(self, audit_files: Sequence[str]) -> list[str]:
+        """The audit candidates ``git add`` will actually accept, out of every lifecycle state.
+
+        Stage the task file's *appearance* in its new lifecycle folder AND its *removal* from the
+        old one. A lifecycle move deletes the source path; a plain ``git add`` of only the files
+        that still exist would miss that deletion when the source is tracked in the branch's base —
+        leaving the base working tree dirty (a dangling ``D``) after terminal cleanup. ``git add
+        -A`` over these pathspecs stages both adds and deletes.
+
+        Two filters, both of them about what ``git add`` refuses rather than about policy — one
+        unmatched or ignored pathspec aborts the whole add, taking the legitimate paths beside it
+        down with it:
+
+        * **exists on disk, or is tracked** — an unmatched pathspec is a fatal error;
+        * **not ignored-and-untracked** — ``git add`` refuses an explicitly named ignored path
+          ("use -f"), which is every lifecycle file under the gitignored tree ``install`` seeds by
+          default. A *tracked* path under an ignored directory is still addable, and is kept: an
+          operator who adopts the default over a tree whose files are already committed must still
+          get the deletion side of the move, or that dangling ``D`` comes straight back.
+
+        ``git add -f`` is therefore used for what survives this filter under an ignored tree, and
+        only there — force-adding what the filter *dropped* is what would commit the audit trail of
+        an operator who asked for it not to be in git.
+        """
+        tracked = set(self._git("ls-files", "--", *audit_files).stdout.splitlines())
+        untracked_ok = not self._tasks_dir_ignored()
+        return [
+            rel
+            for rel in audit_files
+            if rel in tracked or (untracked_ok and (Path(self._clone) / rel).exists())
+        ]
 
     # --- publish (idempotent) --------------------------------------------------------
 
