@@ -75,7 +75,7 @@ Verifies [requirements.md](requirements.md). `AC-C*` run in the connector reposi
 
 ### AC-12 — status from the sources of truth (FR-C12)
 
-- **Given** a state database deleted between ticks, an item carrying `worc:pr-open`, and `worc list --format json` reporting `gh-142` as `done`
+- **Given** a state database deleted between ticks, an item carrying `worc:pr-open`, and `worc list --format json --all` reporting `gh-142` as `done`
 - **When** the connector ticks
 - **Then** the row is rebuilt from the label and `worc list`, the PR is looked up by `gh pr list --head worc/gh-142-...`, and no duplicate task is created.
 
@@ -114,21 +114,32 @@ Verifies [requirements.md](requirements.md). `AC-C*` run in the connector reposi
 
 - **Given** a task with `references: ["Fixes #142", "https://example.test/AB-7"]`
 - **When** the flow reaches `publish` with a PR to open
-- **Then** the body handed to `gh pr create` ends with a `## References` section listing both lines verbatim, and the committed `<id>.summary.md` is byte-identical to the summary before publishing.
-- **And given** `references: "Fixes #142"` (not a list), `[""]`, `["a\nb"]`, a 201-character entry, 17 entries, or `["-flag"]` → the gate rejects the task with `INVALID_REFERENCES` (or the injection-scan reason for `-flag`), the file is quarantined, no branch is created.
+- **Then** the body handed to `gh pr create` ends with a `## References` section listing both lines verbatim, and the `<id>.summary.md` finalize wrote is byte-identical to the summary before publishing.
+- **And given** `references: "Fixes #142"` (not a list), `[]`, `[""]`, `["a\nb"]`, a 201-character entry, or 17 entries → the gate rejects the task with `INVALID_REFERENCES` (the shape check in `_check_field_types` runs before the injection scan); **given** `["-flag"]` or `["a; b"]` → `INJECTION_SUSPECTED` from the scan; in every case the file is quarantined and no branch is created.
+- **And given** an open PR already on the task head (the chain-PR case) → the body appended by the reuse path carries the block too.
 - **And given** a task with `publish: push` → no references block is built and no PR is opened.
 
 ### AC-W2 — `pr_url` in the JSON listing (FR-W2)
 
-- **Given** a store with one task that opened a PR and one that did not
+- **Given** a store with one task that opened a PR (a completed `pr` publish-op row with the URL as `result_ref`) and one that did not, plus one file in `tasks/pending/`
 - **When** `worc list --format json --all` runs
-- **Then** the first entry carries `"pr_url": "<url>"`, the second `"pr_url": null`, and pending file-derived entries carry `"pr_url": null`.
+- **Then** the first entry carries `"pr_url": "<url>"` and the second `"pr_url": null`;
+- **When** `worc list --format json` (default view) or `--pending` runs
+- **Then** the file-derived pending entry carries `"pr_url": null` (the `--all` view holds DB rows only, so the pending entry is asserted where it appears).
+
+### AC-W3 — `rejected` section in the `--all` listing (FR-W3)
+
+- **Given** a ledger with two validation-reject records for `gh-9` (the latest with `validation_reason: injection_suspected`) and no `tasks` row for it, a task `gh-10` with one reject record **and** a `tasks` row (re-submitted under the same id and run), and a task `gh-11` with a row only
+- **When** `worc list --format json --all` runs
+- **Then** exactly one `rejected` entry exists, for `gh-9`: `status: "rejected"`, `validation_reason: "injection_suspected"`, `rejected_at` equal to the latest record's `finished_at`, `title`, `branch` and `pr_url` all `null`; `gh-10` and `gh-11` appear only as ordinary rows.
+- **And when** `worc list --all` (table) runs → a `rejected:` section lists `gh-9` with its reason; **and when** the default view or `--format ids` runs → no rejected id is printed.
+- **And given** no ledger file → the `--all` listing has no `rejected` entries and exits 0.
 
 ## Edge cases & error states
 
 - **AC-E1** — `gh` exits with an auth error → the tick is skipped, logged as `TrackerAuth`, no state changes, the process stays up for the next tick.
 - **AC-E2** — `worc promote` reports "already in pending — not overwriting" → the row becomes `queued`, no error is surfaced to the tracker.
-- **AC-E3** — worc quarantines the task (`.worc/tasks/rejected/<id>.md` with `validation_report.json`) → the row becomes `failed`, the comment carries the report's `reason` string only, the label is `worc:failed`.
+- **AC-E3** — worc's gate rejects the task (the fake `worc` moves the file out of `pending/` and its `list --format json --all` fixture has no row for the id — which is what a real reject looks like from outside `.worc/`) → the row becomes `failed`, the label is `worc:failed`, and the comment names the task id and `worc status <id>` and contains no worc text. With a fake `worc` whose `--all` listing carries a `rejected` entry for the id (FR-W3, adopted in phase 06) the comment additionally names its `validation_reason` — that string and nothing else from the entry.
 - **AC-E4** — the PR is closed without merge → `failed` with a comment; nothing is re-queued automatically.
 - **AC-E5** — the item loses the trigger label while `queued` → nothing changes on the task; a log line notes it.
 - **AC-E6** — the watermark is ahead of an item's `updatedAt` because of clock skew inside the overlap window → the item is still listed and, having a row, is not duplicated.
@@ -160,7 +171,7 @@ Verifies [requirements.md](requirements.md). `AC-C*` run in the connector reposi
 | AC-14 | packaging test with and without the extra | connector CI |
 | AC-15 | fake-`worc` integration test with a fixture report | connector `tests/` |
 | AC-W1 | gate unit tests; publish-node + `GitManager` test with a recorded `gh` runner | `tests/` here |
-| AC-W2 | `cmd_list` test with a seeded store | `tests/` here |
+| AC-W2, AC-W3 | `cmd_list` tests with a seeded store and a seeded ledger | `tests/` here |
 | AC-N1 | CI matrix (Windows + Linux) | connector CI; worc CI already runs both |
 | AC-N2 … AC-N6, AC-N8 | targeted unit tests and a dependency check | connector `tests/`, connector CI |
 | End to end | one real run: a labelled issue on a throwaway repository, `worc watch` and `worc-connect watch` side by side, through merge and close | manual, recorded in the connector README |

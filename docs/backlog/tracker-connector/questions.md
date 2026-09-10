@@ -1,13 +1,12 @@
 # Open questions — Tracker connector
 
-Living document. The draft was written in one pass, so every question carried the default the design assumed; on 2026-09-10 the user answered Q-1 and Q-2 explicitly and accepted the recorded default for every other question then open. Two questions remain, neither blocking.
+Living document. The draft was written in one pass, so every question carried the default the design assumed; on 2026-09-10 the user answered Q-1 and Q-2 explicitly and accepted the recorded default for every other question then open. The same day the documents were verified against the code (`dev` at `ea8467d`), which resolved the two "verify in phase 02" items and opened Q-12; the user then decided Q-11 (yes) and Q-12 (option b). One question remains, Q-6, deferred to phase 07 by design.
 
 ## Open
 
 | # | Question | Default assumed in the design | Blocking? | Raised in | Owner |
 | --- | --- | --- | --- | --- | --- |
 | Q-6 | Triage report channel (phase 07): `private_control_workspace_report` lands under `.worc/`, which the connector should not read as a contract; `repository_document` lands in `docs/research/<task_id>/` and is committed and pushed. Neither is a clean fit; the "configurable report directory" backlog item would let the flow name a directory the connector owns. | undecided — decided in phase 07 | no (triage is off in v1) | design D12 | spec |
-| Q-11 | When an item is re-triggered while the previous task's PR is **still open** (the owner asked for more on the same issue), should the follow-up task continue on the same branch and PR (`branch_mode: existing` + `branch_ref`, which worc's publishing reuses and whose body it appends to) instead of opening a second PR from a fresh branch? | yes — reuse the open PR; a fresh branch only once the PR is merged or closed | no | design D14 | user |
 
 ## Resolved
 
@@ -22,6 +21,8 @@ Living document. The draft was written in one pass, so every question carried th
 | Q-8 | Default `commit_type` mapping from labels. | Default accepted: `bug → fix`, `documentation → docs`, else `feat`. | 2026-09-10 (user, default) |
 | Q-9 | May the connector create the trigger and state labels on `init`? | Default accepted: create on `init`, skip those already present. | 2026-09-10 (user, default) |
 | Q-10 | Where does the connector half of this spec live once its repository exists? | Default accepted: copied there as its backlog; this folder keeps the worc-side items (phases 01–02). | 2026-09-10 (user, default) |
+| Q-11 | When an item is re-triggered while the previous task's PR is **still open**, should the follow-up task continue on the same branch and PR instead of opening a second PR from a fresh branch? | **Yes.** The follow-up task is built with `branch_mode: existing` + `branch_ref: <the same branch>`, which worc's publishing reuses and whose body it appends to; a fresh branch only once the PR is merged or closed (D14, FR-C17, AC-17). | 2026-09-10 (user) |
+| Q-12 | Where does the connector read a **gate rejection and its reason** from? Verified: a Phase-A reject creates no `tasks` row, so the id is invisible to `worc list`; the file goes to `.worc/tasks/rejected/`, the `reason` to `.worc/logs/<id>/validation_report.json` and to the ledger — all under worc's private home, which the connector must not read as a contract. | **Option (b): a third worc-side item.** `worc list --format json --all` gains a `rejected` section derived read-only from the ledger's validation-reject records (`task_id`, `status: "rejected"`, `validation_reason`, `rejected_at`, `pr_url: null`) — FR-W3, D15, AC-W3, built in phase 02 and adopted by the connector in phase 06. Until then the connector reports a reject as `failed` without a reason. Rejected: reading the quarantine folder from the connector (non-contract), and giving rejects a `tasks` row (it would break the operator's "rejected → fix → resubmit under the same id" loop, which rests on the duplicate-id exemption). | 2026-09-10 (user) |
 | R-1 | Inside worc or a separate repository? | Separate repository; worc gets only contract items. | 2026-09-10 (conversation) |
 | R-2 | One connector per tracker, or one core with adapters? | One core that knows no tracker API; adapters behind optional dependencies, discovered through an entry-point group; one repository for v1, split later if the interface stabilises. | 2026-09-10 |
 | R-3 | Is triage (analyse, reproduce) part of v1? | Optional mechanic behind `triage.enabled`, **off** in v1, so the connector mechanics can be proven fast; both paths converge on one task builder. | 2026-09-10 |

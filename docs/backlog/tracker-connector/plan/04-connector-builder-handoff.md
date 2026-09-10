@@ -11,9 +11,9 @@ Cross the boundary into worc through its public ingress and nothing else. Moves 
 ## Steps
 
 1. `core/builder.py` — id allocation (`<id_prefix>-<number>[.<seq>]`, worc grammar), branch allocation (`<branch_prefix>/<task-id>-<slug>` ≤ 50 chars, valid ref, ≠ base branch), title sanitizer (D8), body assembly (provenance line + verbatim body), truncation to worc's three limits with a marker and the URL, front matter emitted only for configured keys, `commit_type_by_label`.
-2. `core/handoff.py` — read `paths.tasks_dir` from worc's `config.yaml` if present (default `tasks`); ensure `tasks/preparing/` exists; atomic write (temp + `os.replace`, UTF-8, `newline=""`); run `worc promote <id>` as argv (`shutil.which("worc")`); interpret "already in pending" as success.
+2. `core/handoff.py` — read `paths.tasks_dir` and the three `validation.max_*` limits from worc's `config.yaml` if present (defaults `tasks`, 262 144 / 5 000 / 8 192); ensure `tasks/preparing/` exists; atomic write (temp + `os.replace`, UTF-8, `newline=""`); run `worc promote <id>` as argv (`shutil.which("worc")`). `cmd_promote` prints each outcome to **stdout** as `promote: …` and exits 1 on any error — treat exit 1 with a stdout line containing `already in pending` as success (the file is worc's), any other non-zero exit as "keep `staged`, retry".
 3. `core/state.py` — phases `gated → staged → queued`; re-trigger allocates `seq + 1`.
-4. `core/reconcile.py` (first half) — on tick, a `staged` row re-runs promote; a file missing from both folders is resolved through `worc list --format json` (row present → queued; absent → failed).
+4. `core/reconcile.py` (first half) — on tick, a `staged` row re-runs promote; a file missing from both folders is resolved through `worc list --format json --all` (row present → queued; absent → failed — this is also what a gate reject looks like from outside `.worc/`; the `rejected` section of the same listing names the reason once phase 06 adopts FR-W3).
 5. Fake `worc` executable for tests: `promote` moves the file (refusing an existing target), `list --format json` returns a fixture.
 6. Add worc as a **test** dependency so AC-4 can run the generated file through the real `task.validation_gate`.
 

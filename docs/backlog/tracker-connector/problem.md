@@ -18,7 +18,7 @@ Two decisions were taken in that conversation and are inputs here, not open ques
 
 ## Current situation (the pain)
 
-worc's intake is a Markdown task file. The operator writes it in `tasks/preparing/`, runs `worc promote <id>`, and `worc watch` claims it from `tasks/pending/` — or a teammate commits the file to the base branch and the watch tick's fetch/pull discovers it (`src/wastech_orchestrator/cli.py`, `cmd_watch` and `promote_tasks`). Nothing reads an issue tracker. The orchestrator otherwise runs unattended end to end — branch, agent, checks, review, commit, push, PR, optional auto-merge — so the one manual step left in the loop is the one at the very front: turning an issue into a task.
+worc's intake is a Markdown task file. The operator writes it in `tasks/preparing/`, runs `worc promote <id>`, and `worc watch` claims it from `tasks/pending/` — or, when the operator chose to track the lifecycle tree (`worc install` gitignores it by default since 2026-09-10), a teammate commits the file to the base branch and the watch tick's fetch/pull discovers it (`src/wastech_orchestrator/cli.py`, `cmd_watch` and `promote_tasks`). Nothing reads an issue tracker. The orchestrator otherwise runs unattended end to end — branch, agent, checks, review, commit, push, PR, optional auto-merge — so the one manual step left in the loop is the one at the very front: turning an issue into a task.
 
 Concretely, for every issue the operator today:
 
@@ -38,9 +38,9 @@ The backlog already names the gap twice, as one-line items with no design behind
 ## Signals & evidence
 
 - Ingress contract that already exists: `preparing_dir` / `pending_dir` / `promote_tasks` in `src/wastech_orchestrator/cli.py`; the fail-closed task gate in `src/wastech_orchestrator/task/validation_gate.py` (required `id` / `title` / `## Description`, unknown front-matter key → reject, injection scan over front-matter values); the allowed key set in `src/wastech_orchestrator/task/model.py` (`ALLOWED_TASK_KEYS`, including `branch_name`, `priority`, `queue`, `commit_type`, `auto_merge`, `publish`).
-- Egress that already exists: `worc list --format json` (`cmd_list` in `cli.py`) returns `task_id`, `status`, `title`, `branch` per known task and a file-derived entry per pending task — but no PR URL; the PR body is the committed `<id>.summary.md`, with an optional notice prepended by `GitManager._body_with_notice` (`src/wastech_orchestrator/git_manager.py`).
+- Egress that already exists: `worc list --format json` (`cmd_list` in `cli.py`) returns `task_id`, `status`, `title`, `branch` per known task and a file-derived entry per pending task — but no PR URL, although the URL is already in `state.db` as the completed `pr` publish-op's `result_ref` (`_recorded_pr_url` reads it for `worc prs`); the PR body is the `<id>.summary.md` finalize writes, with an optional notice prepended by `GitManager._body_with_notice` (`src/wastech_orchestrator/git_manager.py`). A gate reject leaves no `tasks` row: the file goes to `.worc/tasks/rejected/`, the reason to `.worc/logs/<id>/validation_report.json` and the ledger — none of it reachable through `worc list`.
 - GitHub is already the only code host worc speaks to, through `gh` with a `--repo` pin resolved from `repo.url` (`GitManager._gh`, `gh_repo_pin`). No other host appears anywhere in `src/`.
-- The audit commit stages **only** the task's own lifecycle file and summary — never the whole `tasks/` tree — so a file the connector leaves in `tasks/preparing/` can never be swept into a task's commit (`GitManager.commit_audit`).
+- The audit commit stages **only** the task's own lifecycle file and summary — never the whole `tasks/` tree — so a file the connector leaves in `tasks/preparing/` can never be swept into a task's commit (`GitManager.commit_audit`); under the default gitignored tree it is skipped altogether.
 - Backlog rows "GitHub Issues integration", "Richer task parsing", "Multi-repo/project binding" in `docs/backlog/README.md`.
 
 ## Constraints given up front
