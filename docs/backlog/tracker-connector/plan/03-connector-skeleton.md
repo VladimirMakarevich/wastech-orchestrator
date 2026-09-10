@@ -1,7 +1,7 @@
 # Phase 03 — Connector skeleton: core, GitHub adapter (read side), gate, state, dry run
 
 - **Status:** ☐
-- **Depends on:** none (runs in the connector repository `worc-connect`; the home is `.worc-connect/` — Q-1 and Q-2 are settled)
+- **Depends on:** none (runs in the connector repository `VladimirMakarevich/worc-connect`, created empty and private on 2026-09-11; the home is `.worc-connect/` — Q-1 and Q-2 are settled)
 - **Delivers:** FR-C1, FR-C2, FR-C8, FR-C13, FR-C14 — a `worc-connect watch --once --dry-run` that lists the gated items of a real repository and prints what it would do, with the package, gates, config loader, `TrackerAdapter`, `WorkItem`, gate, state store and loop in place.
 
 ## Goal

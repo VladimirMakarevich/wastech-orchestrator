@@ -96,7 +96,17 @@ Verifies [requirements.md](requirements.md). `AC-C*` run in the connector reposi
 - **Given** `triage.enabled: false` (default)
 - **When** a gated item is processed → one task is created and no flow file is written into `.worc/flows/`.
 - **Given** `triage.enabled: true` and `install-flow` has been run
-- **When** a gated item is processed → the first task carries the triage `task_type` and `priority: high`; when the fake `worc` reports it `done` with a report whose verdict is `actionable`, the same builder produces the implementation task; with verdict `needs-info` no implementation task is created and the item receives `worc:needs-info` and a comment.
+- **When** a gated item is processed → the first task carries the triage `task_type` and `priority: high`; when the fake `worc` reports it `done` and a report exists at `.worc-connect/triage/<task_id>/report.md` whose verdict is `actionable`, the same builder produces the implementation task; with verdict `needs-info` no implementation task is created and the item receives `worc:needs-info` and a comment; with the task `done` and no report file the item receives `worc:failed` and a comment naming the missing report — nothing under `.worc/` is read.
+
+### AC-W4 — configurable report directory (FR-W4)
+
+- **Given** a flow with `output_policy: private_control_workspace_report`, `publishing: none`, `report_dir: .worc-connect/triage`, and `.worc-connect/` gitignored
+- **When** the flow runs a task
+- **Then** `{report_dir}` renders to `.worc-connect/triage/<task_id>` in the role prompts, the after-stage guard confines the writing node to that directory, the report is registered as an artifact, and git is untouched.
+- **And given** the same flow with `.worc-connect/` **not** gitignored → the publish node fails closed with the existing leak refusal (`manual_action_required`), nothing is staged or committed.
+- **And given** `report_dir` set to `.worc/x`, `.worc-io/x`, `tasks/x`, `.git/x`, `/abs`, `C:\\x`, `a/../b`, `a\\b`, or `con/x` → the flow is refused at load with a message naming the key and the rule.
+- **And given** `output_policy: repository_document` with `report_dir: docs/adr` → the deliverables land under `docs/adr/<task_id>/` (`report.md` + `sources.json`) and the documentation-PR path commits them as it does today under `docs/research/`.
+- **And given** no `report_dir` → today's directories, unchanged; the packaged `deep_research` prompts, now reading `{report_dir}`, resolve to `docs/research/<task_id>/` and its existing tests pass unchanged.
 
 ### AC-16 — the owner edits and merges the PR by hand (FR-C16)
 
@@ -172,6 +182,7 @@ Verifies [requirements.md](requirements.md). `AC-C*` run in the connector reposi
 | AC-15 | fake-`worc` integration test with a fixture report | connector `tests/` |
 | AC-W1 | gate unit tests; publish-node + `GitManager` test with a recorded `gh` runner | `tests/` here |
 | AC-W2, AC-W3 | `cmd_list` tests with a seeded store and a seeded ledger | `tests/` here |
+| AC-W4 | flow validator, output-policy resolution and snapshot tests; a publish-node test with a gitignored and a trackable report dir; the existing `deep_research` tests | `tests/` here |
 | AC-N1 | CI matrix (Windows + Linux) | connector CI; worc CI already runs both |
 | AC-N2 … AC-N6, AC-N8 | targeted unit tests and a dependency check | connector `tests/`, connector CI |
 | End to end | one real run: a labelled issue on a throwaway repository, `worc watch` and `worc-connect watch` side by side, through merge and close | manual, recorded in the connector README |

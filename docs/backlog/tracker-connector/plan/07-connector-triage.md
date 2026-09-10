@@ -1,7 +1,7 @@
 # Phase 07 — Optional triage
 
 - **Status:** ☐
-- **Depends on:** 04, 05 (and, for the report channel, possibly worc's "configurable report directory" backlog item — Q-6)
+- **Depends on:** 04, 05, and worc phase 08 (the report directory the flow declares; Q-6 decided 2026-09-11)
 - **Delivers:** FR-C15 — `triage.enabled: true` turns a gated item into a triage task first; the connector reads the report and either runs the same task builder (verdict `actionable`) or writes back `needs-info` / `duplicate` / `declined`. The flow and its role prompts ship in the connector repository and are installed into `.worc/flows/` by `install-flow`, only when the switch is on.
 
 ## Goal
@@ -10,11 +10,11 @@ Add the analyse-and-reproduce mechanic the operator originally described, as a s
 
 ## Steps
 
-1. **Decide the report channel (Q-6)** before writing the flow: (a) `output_policy: repository_document` + `publishing: documentation_pull_request` ships the report as a committed document — visible, but each triage opens a PR; (b) `private_control_workspace_report` keeps it under `.worc/`, which the connector would have to read as a contract; (c) worc's "configurable report directory" item lets the flow name a directory the connector owns. Record the decision in `questions.md`.
-2. `packaged/flows/issue_triage.yaml` + role prompts — read-only scoping and analysis nodes, an optional `workspace-write` reproduction node whose deliverable is a failing test (its fate — text in the report, or `publish: push` of a branch the implementation task then starts from via `branch_mode: existing` / `branch_ref` — is decided here too), a non-blocking evaluator, and a report node whose output carries a machine-readable verdict block (`verdict: actionable | needs-info | duplicate | declined`, `reason`, optional `duplicate_of`, optional draft acceptance criteria). The flow passes worc's flow validator; it can weaken nothing.
+1. **Report channel (Q-6, decided):** the flow declares `output_policy: private_control_workspace_report`, `publishing: none`, `report_dir: .worc-connect/triage` (worc phase 08, D16). The report lands at `<repo>/.worc-connect/triage/<task_id>/report.md`; the connector reads it from its own home and never from `.worc/`. `install-flow` refuses to install on a worc whose flow validator does not know `report_dir` (detected by `worc --version` against the phase 08 release) and says which worc is needed.
+2. `packaged/flows/issue_triage.yaml` + role prompts — read-only scoping and analysis nodes, an optional `workspace-write` reproduction node whose deliverable is a failing test carried **as text in the report** (the private policy confines every write to `{report_dir}`, so a test file cannot be left in the tree and no branch is pushed), a non-blocking evaluator, and a report node whose output carries a machine-readable verdict block (`verdict: actionable | needs-info | duplicate | declined`, `reason`, optional `duplicate_of`, optional draft acceptance criteria, optional `failing_test` with a suggested path and body). Prompts name the directory only through `{report_dir}`. The flow passes worc's flow validator; it can weaken nothing.
 3. `cli.py install-flow` — copies the flow and prompts into `.worc/flows/`, refusing to overwrite an operator-edited copy without `--force` (the same edge the `upgrade-flows` backlog item names).
 4. `core/builder.py` — the triage task: `task_type: <triage flow>`, `priority: high`, the item as body; the implementation task from a report: same builder, body = report's draft + provenance, acceptance criteria from the report when present.
-5. `core/reconcile.py` — the triage task's `done` → read the report through the decided channel → dispatch on the verdict; `needs-info` posts the report's question as a comment and labels `worc:needs-info`; a later author reply (item `updatedAt` advances, gate still satisfied) re-triggers triage with `seq + 1`.
+5. `core/reconcile.py` — the triage task's `done` → read `.worc-connect/triage/<task_id>/report.md` (missing file → `worc:failed` with a comment naming the missing report; never a fallback to another location) → dispatch on the verdict; `needs-info` posts the report's question as a comment and labels `worc:needs-info`; a later author reply (item `updatedAt` advances, gate still satisfied) re-triggers triage with `seq + 1`. The implementation task built from an `actionable` report carries the `failing_test` block, when present, in its body under a fixed heading — the builder, not the agent, decides that.
 6. Tests with a fixture report per verdict.
 
 ## Files touched

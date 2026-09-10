@@ -80,7 +80,7 @@ The shape mirrors worc's own architecture on purpose: a core that knows no exter
 
 ### D12 — Triage is optional and converges on one builder
 
-**Decision.** `triage.enabled: false` by default. When on: the item becomes a triage task (`task_type: <triage flow name>`, `priority: high` so it does not wait behind long implementation tasks), the connector waits for it to end, reads its report, and either runs the **same** task builder on the report (verdict `actionable`) or writes back `needs-info` / `duplicate` / `declined` with the report's one-paragraph reason. The flow YAML and its role prompts are shipped in the connector repository and copied into `.worc/flows/` by `worc-connect install-flow`, only when the switch is on. The report's delivery channel is an open question (Q-6): `private_control_workspace_report` lands under worc's private home, which the connector should not read as a contract; `repository_document` lands in the working tree under `docs/research/<task_id>/`, which is committed. The channel is decided in phase 07, when the flow itself is designed.
+**Decision.** `triage.enabled: false` by default. When on: the item becomes a triage task (`task_type: <triage flow name>`, `priority: high` so it does not wait behind long implementation tasks), the connector waits for it to end, reads its report, and either runs the **same** task builder on the report (verdict `actionable`) or writes back `needs-info` / `duplicate` / `declined` with the report's one-paragraph reason. The flow YAML and its role prompts are shipped in the connector repository and copied into `.worc/flows/` by `worc-connect install-flow`, only when the switch is on. The report's delivery channel (Q-6, decided 2026-09-11) is the connector's own home: the flow declares `output_policy: private_control_workspace_report`, `publishing: none` and `report_dir: .worc-connect/triage` (D16, worc phase 08), so the report lands at `<repo>/.worc-connect/triage/<task_id>/report.md` — confined there by worc's after-stage guard, never committed, and read by the connector from a directory it owns. The reproduction node's failing test travels as text inside the report (the private policy confines every write to the report directory), and the deterministic builder decides what of it reaches the implementation task.
 
 ### D13 — v1 closes the item itself; `references:` makes that optional
 
@@ -106,10 +106,18 @@ The shape mirrors worc's own architecture on purpose: a core that knows no exter
 
 **Rejected.** Reading `.worc/tasks/rejected/` from the connector: a non-contract dependency on worc's private layout. Giving rejects a `tasks` row: it would reserve the id and break the resubmit loop.
 
+### D16 — The report directory becomes a flow property, and the private policy may name one outside `.worc/`
+
+**Context.** Both report output policies resolve to hard-coded directories (`docs/research/<task_id>/`, `.worc/security-reports/<task_id>/`, `core/flow/output_policy.py`), and the packaged `deep_research` prompts carry the path as literal text. The "configurable report directory" backlog item (2026-07-25) already proposes `flow.report_dir: <base>` with the engine appending `/<task_id>`, a `{report_dir}` prompt variable, and path validation — and proposes rejecting the override for the private policy outright.
+
+**Decision (worc side, Q-6).** Implement that item as phase 08 of this folder, with one extension: the override is **allowed** for `private_control_workspace_report` when the base lies outside the reserved roots (`.worc/`, `.worc-io/`, the configured `tasks/` tree, `.git/`); a dot-directory such as `.worc-connect/` is an ordinary base. The "never enters git" invariant does not move to the validator (it cannot see the ignore state): it stays where it is enforced today, at publish, where `_store_private_report` refuses a report with any git-trackable file (`NodeManualRequired`) — so a connector home that is not gitignored fails the triage task closed rather than leaking the report. Everything else is the backlog item as written: `report_dir` on `FlowDoc` (covered by the flow fingerprint for free), the override on `resolve_output_policy`, validation reusing `security/identifiers.py`, the `{report_dir}` prompt variable, the four `deep_research` prompts switched from the literal path to the variable, `required_files` unchanged (`report.md` for the private policy).
+
+**Why.** It gives the connector a report it can read without touching `.worc/` (the Q-12 principle), keeps the agent that reads untrusted issue text confined to one directory, commits nothing, and pays a debt the backlog already carries for `deep_research` operators. **Rejected.** A `code_change` triage flow with a `publish: push` cap and the connector reading the pushed branch through `gh`: no containment for that agent, dead branches for `declined` / `needs-info`, the report in repository history.
+
 ## Connector layout (its own repository)
 
 ```text
-worc-connect/
+worc-connect/                   # VladimirMakarevich/worc-connect, created 2026-09-11
   src/worc_connect/
     cli.py                 init · watch [--once] [--dry-run] · status · install-flow
     config.py              schema + loader (YAML, fail-closed)
@@ -142,9 +150,11 @@ worc-connect/
 | `core/flow/nodes/base.py`, `core/flow/wiring.py` | `NodeInputs.references: tuple[str, ...] = ()`, filled from `p.task.references` in `build_node_inputs`. |
 | `cli.py` | `_task_entry` gains `pr_url` (via the existing `_recorded_pr_url`); `_pending_entry` gains `pr_url: None`; `_list_sections` appends the `rejected` section under `--all` from the ledger (D15); `_entry_line` renders a rejected entry with its reason. |
 | `packaged/guide/README.md`, `packaged/guide/tasks/task-rich.md` | the "Front-matter fields" table and the all-fields example gain `references:`; the same README gains a short "scripting" note naming `worc list --format json` and its entry keys (there is no separate operations page — `worc list` is mentioned only there today). |
-| `tests/task/test_validation_gate.py`, `tests/core/test_flow_node_runners.py`, `tests/git/test_git_manager.py`, `tests/core/test_cli_pipeline.py` | gate tests for `references:` (the `depends_on` tests are the template); publish-runner test on the fake git that already records `pr_notice`; git-manager test asserting the body file ends with the block and `summary.md` is byte-identical; `cmd_list` JSON tests for `pr_url` and for the `rejected` section next to `test_cmd_list_format_json` (`_seed_list_db`, plus a seeded ledger). |
+| `core/flow/schema.py`, `core/flow/snapshot.py`, `core/flow/output_policy.py`, `core/flow/validator.py`, `core/prompts.py`, `core/flow/context_paths.py`, the four `resolve_output_policy` call sites | phase 08 (D16): optional `flow.report_dir`, the override on resolution, path validation with the reserved-root list and the private-policy allowance, the `{report_dir}` prompt variable. |
+| `packaged/flows/deep_research/*.md`, `packaged/guide/flows/`, `packaged/guide/skills/worc-flow/SKILL.md` | phase 08: literal `docs/research/{task_id}` → `{report_dir}`; the flow-authoring pages document `report_dir`. |
+| `tests/task/test_validation_gate.py`, `tests/core/test_flow_node_runners.py`, `tests/git/test_git_manager.py`, `tests/core/test_cli_pipeline.py`, `tests/core/test_flow_{output_policy,snapshot,validator,deep_research}.py` | gate tests for `references:` (the `depends_on` tests are the template); publish-runner test on the fake git that already records `pr_notice`; git-manager test asserting the body file ends with the block and `summary.md` is byte-identical; `cmd_list` JSON tests for `pr_url` and for the `rejected` section next to `test_cmd_list_format_json` (`_seed_list_db`, plus a seeded ledger). |
 
-No change to `providers/`, `routing/`, `config/`, `security/`, the flow schema, or `state.db`; the ledger is read, never written.
+No change to `providers/`, `routing/`, `config/`, `security/` or `state.db`; the ledger is read, never written; the flow schema gains exactly one optional key, `report_dir` (D16).
 
 ## Control flow & state
 
@@ -222,7 +232,7 @@ Only keys the operator configured are emitted; `references: ["Fixes #142"]` join
 
 ## Provider & prompt surface
 
-None in the connector. With triage on, the connector-shipped flow is an ordinary operator flow in `.worc/flows/`: read-only analysis nodes, an optional `workspace-write` reproduction node whose deliverable is a failing test, an evaluator, and a report node; it goes through worc's flow validator like any other flow and can weaken nothing. Its content is phase 07.
+None in the connector. With triage on, the connector-shipped flow is an ordinary operator flow in `.worc/flows/`: read-only analysis nodes, an optional `workspace-write` reproduction node whose deliverable is a failing test carried as text in the report (under the private policy every write is confined to the report directory, `.worc-connect/triage/<task_id>/`), an evaluator, and a report node whose prompts name the directory through `{report_dir}`; it goes through worc's flow validator like any other flow and can weaken nothing. Its content is phase 07.
 
 ## Failure classes & routing
 

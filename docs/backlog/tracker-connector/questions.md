@@ -1,22 +1,23 @@
 # Open questions — Tracker connector
 
-Living document. The draft was written in one pass, so every question carried the default the design assumed; on 2026-09-10 the user answered Q-1 and Q-2 explicitly and accepted the recorded default for every other question then open. The same day the documents were verified against the code (`dev` at `ea8467d`), which resolved the two "verify in phase 02" items and opened Q-12; the user then decided Q-11 (yes) and Q-12 (option b). One question remains, Q-6, deferred to phase 07 by design.
+Living document. The draft was written in one pass, so every question carried the default the design assumed; on 2026-09-10 the user answered Q-1 and Q-2 explicitly and accepted the recorded default for every other question then open. The same day the documents were verified against the code (`dev` at `ea8467d`), which resolved the two "verify in phase 02" items and opened Q-12; the user then decided Q-11 (yes) and Q-12 (option b), and on 2026-09-11 Q-6 (the configurable report directory, pointed at the connector's own home). **No question is open**; the folder is `ready-to-implement`.
 
 ## Open
 
 | # | Question | Default assumed in the design | Blocking? | Raised in | Owner |
 | --- | --- | --- | --- | --- | --- |
-| Q-6 | Triage report channel (phase 07): `private_control_workspace_report` lands under `.worc/`, which the connector should not read as a contract; `repository_document` lands in `docs/research/<task_id>/` and is committed and pushed. Neither is a clean fit; the "configurable report directory" backlog item would let the flow name a directory the connector owns. | undecided — decided in phase 07 | no (triage is off in v1) | design D12 | spec |
+| — | none |  |  |  |  |
 
 ## Resolved
 
 | # | Question | Answer | Decided on |
 | --- | --- | --- | --- |
-| Q-1 | Package and repository name (`worc-connect` vs the operator's first name `gith-worc`). | **`worc-connect`.** Fixes the CLI verb, the extras (`worc-connect[github]`), the entry-point group `worc_connect.trackers`, and the home directory name. | 2026-09-10 (user) |
+| Q-1 | Package and repository name (`worc-connect` vs the operator's first name `gith-worc`). | **`worc-connect`.** Fixes the CLI verb, the extras (`worc-connect[github]`), the entry-point group `worc_connect.trackers`, and the home directory name. Repository `VladimirMakarevich/worc-connect` created 2026-09-11 (private, empty); a per-tracker name, `worc-connect-github`, was considered and dropped the same day — D1's one repository for the core and its adapters stands. | 2026-09-10 (user); repository 2026-09-11 |
 | Q-2 | Connector home: own gitignored `.worc-connect/` or a subfolder of worc's private control home `.worc/`. | **Own `.worc-connect/`**, appended to the tracked `.gitignore` by `worc-connect init`, the way `worc install` adds `.worc/` and `.worc-io/`. | 2026-09-10 (user) |
 | Q-3 | Trigger label and state-label vocabulary. | Default accepted: trigger `worc`, states `worc:queued` … `worc:done`; prefix configurable. | 2026-09-10 (user, default) |
 | Q-4 | Include issue comments in the task body in v1? | Default accepted: body only; comments deferred, policy to be decided when triage lands. | 2026-09-10 (user, default) |
 | Q-5 | Own process or a worc plugin? | Default accepted: own process, `worc-connect watch` beside `worc watch`. | 2026-09-10 (user, default) |
+| Q-6 | Triage report channel (phase 07): `private_control_workspace_report` lands under `.worc/`, which the connector must not read as a contract; `repository_document` lands in `docs/research/<task_id>/` and opens a documentation PR per triage. | **The configurable report directory, pointed at the connector's home.** worc's "configurable report directory" backlog item becomes phase 08 of this folder (FR-W4, D16, AC-W4), extended in one respect: the `report_dir` override is allowed for `private_control_workspace_report` too when the base lies outside the reserved roots (`.worc/`, `.worc-io/`, `tasks/`, `.git/`), because the "never enters git" invariant is already enforced fail-closed at publish (`_store_private_report` refuses a git-trackable report). The triage flow declares `output_policy: private_control_workspace_report`, `publishing: none`, `report_dir: .worc-connect/triage`; the report lands at `<repo>/.worc-connect/triage/<task_id>/report.md`, confined by the after-stage guard, never committed, in a directory the connector owns. The failing test travels as text inside the report. Rejected: the connector reading `.worc/security-reports/` (breaks the connector's own invariant and the Q-12 principle); a `code_change` triage flow pushing a branch without a PR and the connector reading it through `gh` (no containment for an agent fed untrusted text, dead branches for `declined` / `needs-info`, the report enters repository history). | 2026-09-11 (user) |
 | Q-7 | Same host and clone as `worc watch` in v1? | Default accepted: yes (assumption A-1); a remote connector is deferred. | 2026-09-10 (user, default) |
 | Q-8 | Default `commit_type` mapping from labels. | Default accepted: `bug → fix`, `documentation → docs`, else `feat`. | 2026-09-10 (user, default) |
 | Q-9 | May the connector create the trigger and state labels on `init`? | Default accepted: create on `init`, skip those already present. | 2026-09-10 (user, default) |

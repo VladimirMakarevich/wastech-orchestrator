@@ -29,11 +29,12 @@ Two repositories are involved, so the baseline applies twice: this repository's 
 - [ ] Every blocking question in [questions.md](questions.md) is resolved (there are none at drafting time; the non-blocking ones have a recorded default).
 - [ ] One real end-to-end run is recorded: a labelled issue on a throwaway GitHub repository, `worc watch` and `worc-connect watch` side by side, from label to merged PR to closed issue, with `triage.enabled: false`.
 - [ ] `references:` is exercised by that run once phase 06 lands: the PR body ends with `Fixes #<n>` and GitHub closes the issue on merge with `close_on_merge: false`.
+- [ ] A triage run (`triage.enabled: true`, phase 07) reads its report from `.worc-connect/triage/<task_id>/report.md` and nothing under `.worc/`; with the connector home deliberately un-ignored the triage task ends `manual_action_required` at publish and the item is labelled `worc:failed`.
 - [ ] A run on Windows completes the same cycle against the fake `gh` and fake `worc` (the CI matrix) — a real Windows run is recorded if a host is available.
 
 ## When it lands
 
-- [ ] The connector repository exists and carries the connector half of this spec (problem, requirements, design, plan phases 03–07) as its own backlog; this folder shrinks to the worc-side items or leaves `docs/backlog/` entirely once phases 01–02 have merged, and its row is removed from the backlog index — the code, the tests and the history become its record.
+- [ ] The connector repository (`VladimirMakarevich/worc-connect`, created 2026-09-11) carries the connector half of this spec (problem, requirements, design, plan phases 03–07) as its own backlog; this folder shrinks to the worc-side items or leaves `docs/backlog/` entirely once phases 01, 02 and 08 have merged, and its row is removed from the backlog index — the code, the tests and the history become its record.
 - [ ] A "code host adapters" row is added to the backlog index when this folder leaves it, so the other axis is not lost.
 
 ## Sign-off
