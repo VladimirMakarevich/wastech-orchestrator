@@ -24,7 +24,7 @@ Speak in the user's language (default to the language they wrote in).
    - `## Acceptance criteria` — a testable checklist (see below). Include it unless you deliberately want refinement to enrich the task.
    - `## Constraints` — do-not-touch areas, dependency limits, compatibility/migration limits.
 3. **Set optional front-matter fields only when clearly warranted.** Default to omitting them — the defaults are almost always right.
-4. **Write the file** to `tasks/preparing/<id>.md` — the staging folder the watch daemon never scans, so a half-written draft is never picked up mid-edit. When it is complete, promote it into the queue with `worc promote <id>` (or the `promote` verb inside `worc shell`), which atomically moves it into `tasks/pending/` (the canonical, git-tracked location). If you cannot find a `tasks/preparing/` directory, confirm where the task lifecycle lives or fall back to the repo root, and tell the user.
+4. **Write the file** to `tasks/preparing/<id>.md` — the staging folder the watch daemon never scans, so a half-written draft is never picked up mid-edit. When it is complete, promote it into the queue with `worc promote <id>` (or the `promote` verb inside `worc shell`), which atomically moves it into `tasks/pending/` (the canonical location — gitignored by default, committed as an audit trail if the operator asked for that). If you cannot find a `tasks/preparing/` directory, confirm where the task lifecycle lives or fall back to the repo root, and tell the user.
 5. **Self-check** against the hard rules below before finishing.
 
 ## Write testable acceptance criteria
