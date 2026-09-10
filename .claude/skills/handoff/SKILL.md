@@ -139,7 +139,7 @@ Once the user allows you to continue:
 - **The state of the gates is a fact worth recording.** Which of `ruff check .`, `ruff format --check .`, `mypy src`, `lint-imports`, `pytest`, `python tools/mdlint.py` actually ran in this session and what they returned — see [/run-checks](../run-checks/SKILL.md). "Not run" is said plainly; never imply green. An unset `WASTECH_MDLINT_HOME` means the Markdown hook passed without checking anything — that too is worth one line.
 - **Docs are half of Done.** If behavior, the CLI, config, or the architecture changed, say whether this branch's docs were synced ([/sync-docs](../sync-docs/SKILL.md)) — the rules, `README.md`, `docs/backlog/`, and above all the shipped operator docs under `src/wastech_orchestrator/packaged/`, the half forgotten most often. Carry a drafted doc-impact note over verbatim.
 - **Uncommitted work is normal — but explain it.** Say whether the commit is deliberately withheld until the checks are green or until the user confirms, or the new session will "tidy up" the index or commit early. Staging here is always scoped to explicit paths, never `git add .`.
-- **Carry over what the sibling skills already settled** into `DECISIONS` instead of leaving it to be re-derived: the phase [/implement](../implement/SKILL.md) reached, and the outcomes of [/clarify-task](../clarify-task/SKILL.md), [/assess-refactor](../assess-refactor/SKILL.md), [/simplify-task](../simplify-task/SKILL.md), [/simplify-review](../simplify-review/SKILL.md).
+- **Carry over what earlier phases already settled** into `DECISIONS` instead of leaving it to be re-derived: the phase [/implement](../implement/SKILL.md) reached, the scope agreed with the user, and the approaches weighed and rejected along the way.
 
 ## Output
 

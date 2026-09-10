@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Protocol
 
 from wastech_orchestrator.install import detect
-from wastech_orchestrator.install.config_writer import InstallSpec
+from wastech_orchestrator.install.config_writer import DEFAULT_TASKS_DIR, InstallSpec
 from wastech_orchestrator.providers.base import ProviderId
 from wastech_orchestrator.runtime_layout import RuntimeLayout
 
@@ -74,6 +74,8 @@ def run_wizard(
     auto_mode: bool | None,
     non_interactive: bool,
     prompter: Prompter,
+    track_tasks: bool | None = None,
+    tasks_dir: str | None = None,
 ) -> WizardOutcome:
     """Resolve an :class:`InstallSpec` from flags, detection, and (interactively) operator input."""
     if detect.find_executable("git") is None:
@@ -99,6 +101,10 @@ def run_wizard(
     providers, missing = _resolve_providers(provider, prompter)
     resolved_create_pr = _resolve_create_pr(create_pr, non_interactive, prompter)
     resolved_auto = _resolve_auto_mode(auto_mode, non_interactive, prompter)
+    resolved_tasks_dir = (tasks_dir or DEFAULT_TASKS_DIR).strip() or DEFAULT_TASKS_DIR
+    resolved_track_tasks = _resolve_track_tasks(
+        track_tasks, non_interactive, prompter, tasks_dir=resolved_tasks_dir
+    )
 
     # Checks are not seeded at install: the gate is named ``checks.command_sets`` (with paths/cwd),
     # which a flat list can't express. ``init`` writes an empty mapping; the operator authors it
@@ -110,6 +116,8 @@ def run_wizard(
         providers=providers,
         create_pull_request=resolved_create_pr,
         auto_mode=resolved_auto,
+        track_tasks=resolved_track_tasks,
+        tasks_dir=resolved_tasks_dir,
     )
     prompter.info(_summary(spec, missing))
     if not non_interactive and not prompter.confirm("Write this configuration?", default=True):
@@ -173,6 +181,27 @@ def _resolve_auto_mode(auto_mode: bool | None, non_interactive: bool, prompter: 
     return prompter.confirm("Enable auto mode (process pending tasks back-to-back)?", default=False)
 
 
+def _resolve_track_tasks(
+    track_tasks: bool | None, non_interactive: bool, prompter: Prompter, *, tasks_dir: str
+) -> bool:
+    """Whether ``install`` leaves the lifecycle tree trackable instead of gitignoring it.
+
+    Defaults to **no** in both the flagless interactive answer and ``--non-interactive``. Tracking
+    the tree is the more involved arrangement — the task file and its summary land in the branch's
+    diff and its pull request, and a stray draft in ``preparing/`` shows up in every ``git
+    status`` — and it only pays off for a team that wants task files reviewed or pushed between
+    clones. Nothing is lost by starting off: the run's own record lives in ``.worc/`` either way,
+    and turning it on later is deleting one line from ``.gitignore``.
+    """
+    if track_tasks is not None:
+        return track_tasks
+    if non_interactive:
+        return False
+    return prompter.confirm(
+        f"Track task files in git (commit {tasks_dir}/ as an audit trail)?", default=False
+    )
+
+
 def _summary(spec: InstallSpec, missing: tuple[ProviderId, ...]) -> str:
     providers = ", ".join(pid.value for pid in spec.providers)
     lines = [
@@ -185,6 +214,8 @@ def _summary(spec: InstallSpec, missing: tuple[ProviderId, ...]) -> str:
         "  checks:      command_sets (author in config.yaml)",
         f"  create PR:   {spec.create_pull_request}",
         f"  auto mode:   {spec.auto_mode}",
+        f"  tasks:       {spec.tasks_dir}/ "
+        + ("tracked in git" if spec.track_tasks else "gitignored"),
     ]
     if missing:
         lines.append(f"  (not on PATH: {', '.join(pid.value for pid in missing)})")

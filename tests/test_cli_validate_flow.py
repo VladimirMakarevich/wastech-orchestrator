@@ -103,6 +103,31 @@ def test_validate_flow_fail_on_broken_flow(
     assert "flow bad: FAIL" in out
 
 
+def test_validate_flow_prints_every_violation_not_just_the_header(
+    monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A validation error is a header line plus one line per finding. Printing only the header leaves
+    # the operator a trailing colon promising a list that never comes, and the findings reachable
+    # only by calling the registry from Python.
+    broken = _FLOW_YAML.replace("NAME", "broken").replace(
+        "    - { from: work, to: out }",
+        "    - { from: work, to: out }\n"
+        "    - { from: work, to: ghost_one }\n"
+        "    - { from: out, to: ghost_two }",
+    )
+    (_flows_dir(git_repo.clone) / "broken.yaml").write_text(broken)
+    _patch_config(monkeypatch, make_git_config(git_repo.clone))
+
+    rc = cli.cmd_validate_flow(_args("broken"))
+
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "flow broken: FAIL — flow validation failed (3 violation(s)):" in out
+    assert "  [graph] edge references unknown target node: 'ghost_one'" in out
+    assert "  [graph] edge references unknown target node: 'ghost_two'" in out
+    assert "  [graph] no terminal node (every node has at least one outgoing edge)" in out
+
+
 def test_validate_flow_name_not_found(
     monkeypatch: pytest.MonkeyPatch, git_repo, make_git_config, capsys: pytest.CaptureFixture[str]
 ) -> None:
