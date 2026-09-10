@@ -223,6 +223,7 @@ from wastech_orchestrator.routing.router import AgentRouter
 from wastech_orchestrator.runs_retention import remove_task_runs
 from wastech_orchestrator.runtime_layout import (
     CONTROL_BUNDLE_DIRNAME,
+    TRACKED_LIFECYCLE_STATES,
     InternalDenyPolicy,
     RuntimeLayout,
 )
@@ -266,10 +267,6 @@ from wastech_orchestrator.task.validation_gate import (
 )
 
 _LOG = logging.getLogger(__name__)
-
-# The lifecycle folders a task file moves between under ``tasks/`` (registration → done/failed).
-# "Currently running" is tracked by the task's ``state.db`` status, not a physical folder.
-_LIFECYCLE_FOLDERS = ("pending", "done", "failed")
 
 
 class _SettledFile(StrEnum):
@@ -376,7 +373,11 @@ def lifecycle_destination(task_file: str | None, final: Status) -> Path | None:
         return None
     src = Path(task_file)
     parent = src.parent
-    tasks_root = parent.parent if parent.name in _LIFECYCLE_FOLDERS else parent
+    # A file already in a lifecycle folder moves *beside* it, never into a folder nested under it;
+    # anywhere else (an external path handed to `worc run`) is itself the tasks root. Recognising
+    # every tracked state matters: miss one and a task run straight out of the staging folder is
+    # filed into `<tasks_dir>/preparing/done/`, a lifecycle folder inside the staging area.
+    tasks_root = parent.parent if parent.name in TRACKED_LIFECYCLE_STATES else parent
     return tasks_root / folder_name / src.name
 
 
@@ -1206,7 +1207,7 @@ class Orchestrator:
         The stored ``source_path`` can point at a stale lifecycle folder (e.g. ``tasks/failed/``)
         while the file now lives in another (``tasks/pending/``) — a manual or external move then
         makes the task un-rerunnable if we trust the single stored path. So: if the stored path is
-        a file, use it; otherwise search ``tasks/{pending,done,failed}/`` for the task by
+        a file, use it; otherwise search every tracked lifecycle folder for the task by
         id (``<id>.md``/``<id>.json``), then by slug. Returns ``(path, ())`` on a unique resolution,
         ``(None, ())`` when nothing matches, and ``(None, candidates)`` when more than one file
         matches (never guessed — the caller surfaces the ambiguity). Read-only.
@@ -1217,7 +1218,7 @@ class Orchestrator:
         if not stored:
             return None, ()
         parent = Path(stored).parent
-        tasks_root = parent.parent if parent.name in _LIFECYCLE_FOLDERS else parent
+        tasks_root = parent.parent if parent.name in TRACKED_LIFECYCLE_STATES else parent
         stems = [row.task_id]
         slug = row.slug or (slugify(row.title) if row.title else "")
         if slug and slug != row.task_id:
@@ -1225,7 +1226,7 @@ class Orchestrator:
         matches: list[str] = []
         seen: set[str] = set()
         for stem in stems:
-            for folder in _LIFECYCLE_FOLDERS:
+            for folder in TRACKED_LIFECYCLE_STATES:
                 for suffix in (".md", ".json"):
                     candidate = tasks_root / folder / f"{stem}{suffix}"
                     key = str(candidate.resolve())

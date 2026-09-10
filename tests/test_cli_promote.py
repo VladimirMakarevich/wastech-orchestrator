@@ -11,6 +11,7 @@ import pytest
 
 from wastech_orchestrator import cli
 from wastech_orchestrator.config.schema import OrchestratorConfig
+from wastech_orchestrator.git_manager import audit_pathspec
 from wastech_orchestrator.task.parser import read_subtask_refs
 
 _ConfigFactory = Callable[..., OrchestratorConfig]
@@ -35,6 +36,22 @@ def test_preparing_dir_is_sibling_of_pending(
     config = make_git_config(tmp_path / "clone")
     assert cli.preparing_dir(config) == cli.pending_dir(config).parent / "preparing"
     assert "tasks/preparing" in cli.REPO_TASK_DIRS
+
+
+def test_audit_pathspec_covers_every_installed_lifecycle_dir() -> None:
+    # The drift guard. Both lists used to be hand-maintained restatements of each other and the
+    # audit pathspec fell behind three times, each miss committing a task file into two lifecycle
+    # folders at once and leaving a dangling `D` on the base branch. A lifecycle folder `install`
+    # scaffolds but the audit commit cannot stage is the whole defect, so adding a fifth folder
+    # without teaching the pathspec about it must fail here rather than in a production run.
+    installed = {Path(rel).name for rel in cli.REPO_TASK_DIRS}
+    pathspec = audit_pathspec("tasks", "task-001")
+    assert installed == {Path(rel).parent.name for rel in pathspec}
+    for state in installed:
+        assert f"tasks/{state}/task-001.md" in pathspec
+        assert f"tasks/{state}/task-001.summary.md" in pathspec
+    # The quarantine is in neither: it lives under the private home and is never committed.
+    assert "rejected" not in installed
 
 
 # --- scanner blindness ------------------------------------------------------------------

@@ -47,6 +47,7 @@ from wastech_orchestrator.routing.snapshots import PartialChange, WorkingTreeSna
 from wastech_orchestrator.runtime_layout import (
     CONTROL_HOME_DIRNAME,
     EXCHANGE_HOME_DIRNAME,
+    TRACKED_LIFECYCLE_STATES,
     ProviderWriteGuardPolicy,
 )
 from wastech_orchestrator.security.env import build_orchestrator_env, default_allowed_environment
@@ -93,6 +94,25 @@ _PUSH_RETRY_BACKOFF_SECONDS = 1.5
 # rides the separate audit commit — but that name is per-config, so it is added per instance (see
 # `__init__`). Together they form `self._excluded_dirs`.
 RUNTIME_EXCLUDED_DIRS = (CONTROL_HOME_DIRNAME, EXCHANGE_HOME_DIRNAME)
+
+
+def audit_pathspec(tasks_dir: str, task_id: str) -> list[str]:
+    """One task's lifecycle file and ``<id>.summary.md`` in **every** tracked lifecycle state.
+
+    The candidate set the audit commit stages over. Every state belongs in it because the one the
+    file came *from* is not knowable here: an operator may commit a task file to the base branch
+    in any of them — composing a batch in ``preparing/`` and committing it for review before any
+    of it runs, or hand-committing into ``pending/``. The destination states stage the file's
+    *appearance* and the state it came from stages its *removal*, so a state missing from this
+    list is a tracked deletion ``git add -A`` can never see: the task file is then committed in
+    two lifecycle folders at once and a dangling ``D`` is left in the base working tree after
+    terminal cleanup. Scoped to one ``task_id``, so a concurrently pending task is never swept in.
+    """
+    return [
+        f"{tasks_dir}/{state}/{task_id}{suffix}"
+        for state in TRACKED_LIFECYCLE_STATES
+        for suffix in (".md", ".summary.md")
+    ]
 
 
 def _runtime_exclude_pathspecs(roots: Sequence[str]) -> tuple[str, ...]:
@@ -2563,6 +2583,10 @@ class GitManager:
         task file was rewritten under the running task — a security violation, never a commit input.
         Only the task packet is checked; ``<id>.summary.md`` is orchestrator-authored.
         """
+        # Destination states only, deliberately not the full lifecycle enumeration the pathspec is
+        # built from: a source state is staged for its file's *removal*, and a stale source file an
+        # interrupted run left on disk would be digested here and refuse a commit over a path that
+        # is on its way out.
         for state in ("done", "failed"):
             rel = f"{self._tasks_dir}/{state}/{task_id}.md"
             path = Path(self._clone) / rel
@@ -2604,22 +2628,13 @@ class GitManager:
                 self._git_checked("checkout", audit_branch)
 
         message = footprint.audit_commit_message.format(task_id=task_id)
-        audit_files = [
-            f"{self._tasks_dir}/{state}/{task_id}{suffix}"
-            # Destination states (``done``/``failed``) stage the file's *appearance*; the source
-            # state (``pending``) stages its *removal* on a lifecycle move — without the source
-            # path a ``pending→failed`` / ``pending→done`` move of a base-tracked task file leaves
-            # a dangling ``D`` on the base branch after terminal cleanup.
-            for state in ("done", "failed", "pending")
-            for suffix in (".md", ".summary.md")
-        ]
+        audit_files = audit_pathspec(self._tasks_dir, task_id)
         # Stage the task file's *appearance* in its new lifecycle folder AND its *removal* from the
-        # old one. A lifecycle move (failed -> done) deletes the source path; a plain `git add` of
-        # only the files that still exist would miss that deletion when the source is tracked in the
-        # branch's base (e.g. committed to base by hand) — leaving the base working tree dirty (a
-        # dangling `D`) after terminal cleanup. `git add -A` over the candidate pathspecs stages
-        # both adds and deletes. Pass only paths that exist on disk or are tracked, so an unmatched
-        # pathspec can never abort the whole add.
+        # old one. A lifecycle move deletes the source path; a plain `git add` of only the files
+        # that still exist would miss that deletion when the source is tracked in the branch's base
+        # — leaving the base working tree dirty (a dangling `D`) after terminal cleanup. `git add
+        # -A` over the candidate pathspecs stages both adds and deletes. Pass only paths that exist
+        # on disk or are tracked, so an unmatched pathspec can never abort the whole add.
         tracked = set(self._git("ls-files", "--", *audit_files).stdout.splitlines())
         stageable = [
             rel for rel in audit_files if (Path(self._clone) / rel).exists() or rel in tracked

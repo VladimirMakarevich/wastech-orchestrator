@@ -29,7 +29,12 @@ from wastech_orchestrator.core.flow.exchange_seal import (
 from wastech_orchestrator.core.flow.nodes.base import NodeInfraError
 from wastech_orchestrator.core.flow.nodes.exchange_publish import ExchangeMutationManual
 from wastech_orchestrator.core.follow_ups import FOLLOW_UPS_FILENAME
-from wastech_orchestrator.core.orchestrator import Eligibility, Orchestrator, SlotBusyError
+from wastech_orchestrator.core.orchestrator import (
+    Eligibility,
+    Orchestrator,
+    SlotBusyError,
+    lifecycle_destination,
+)
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import (
     KIND_PR,
@@ -435,6 +440,19 @@ def _both(*, claude=None, codex=None, **kwargs) -> dict[ProviderId, FakeProvider
 def _impl_writes_file(provider_id: str) -> FakeProvider:
     # Implementation must actually change the working tree so there is something to commit.
     return FakeProvider(provider_id, outputs={"implementation": ("implemented", None)})
+
+
+@pytest.mark.parametrize("source_state", ["preparing", "pending", "done", "failed"])
+def test_terminal_move_files_beside_the_lifecycle_folder_never_inside_it(
+    source_state: str,
+) -> None:
+    # Whichever lifecycle folder a task file is run out of, its terminal home is a sibling of that
+    # folder. A state the destination logic does not recognise is read as the tasks root itself,
+    # which files the finished task into e.g. `tasks/preparing/done/` — a lifecycle folder nested
+    # inside the staging area, where neither the scanner nor the audit commit looks for it.
+    dest = lifecycle_destination(f"tasks/{source_state}/task-001.md", Status.DONE)
+    assert dest is not None
+    assert dest.as_posix() == "tasks/done/task-001.md"
 
 
 def test_notify_terminal_enriches_manual_from_failure_report(
