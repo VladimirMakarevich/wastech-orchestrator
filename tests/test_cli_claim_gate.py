@@ -105,8 +105,8 @@ class _GateOrch:
     def acquire_slot(self, _task_id: str) -> bool:
         return True
 
-    def lookup_task(self, _task_id: str) -> None:
-        return None
+    def settled_own_file(self, _task_id: str, _task_file: Path) -> bool:
+        return False
 
     def run_task(self, task_file: str) -> PipelineResult:
         self.ran.append(task_file)

@@ -189,10 +189,17 @@ def validate_config(config: OrchestratorConfig) -> list[str]:
 
 
 def _validate_paths(config: OrchestratorConfig, issues: list[str]) -> None:
-    """The task lifecycle directory must live inside the repo working tree. The git audit commit
-    stages files under ``<tasks_dir>/<state>/<id>.md`` and relies on git tracking them, so the value
-    must be repo-relative (no absolute path, no ``~``, no ``..`` traversal). It must also not live
-    under the gitignored ``.worc/`` home — that would silently drop the audit trail from git."""
+    """The task lifecycle directory must live inside the repo working tree.
+
+    The value must be repo-relative (no absolute path, no ``~``, no ``..`` traversal): ``install``
+    scaffolds the lifecycle folders there, the audit commit stages
+    ``<tasks_dir>/<state>/<id>.md`` under it, and the ignore rule seeded for it is a repo-root
+    anchored gitignore pattern — none of which a path outside the working tree can express.
+
+    It must also not live under the ``.worc/`` home. That home is the agent's read-deny root and is
+    excluded from every commit by path, so a lifecycle tree there could never be read by a node nor
+    committed as an audit trail even if the operator asked for tracking — and it would collide with
+    the runtime quarantine at ``.worc/tasks/rejected``."""
     tasks_dir = config.paths.tasks_dir
     where = "paths.tasks_dir"
     if not tasks_dir.strip():
@@ -207,8 +214,8 @@ def _validate_paths(config: OrchestratorConfig, issues: list[str]) -> None:
     normalized = tasks_dir.replace("\\", "/").strip().strip("/")
     if normalized == ".worc" or normalized.startswith(".worc/"):
         issues.append(
-            f"{where} {tasks_dir!r} must not live under the gitignored '.worc/' home "
-            "(the task lifecycle would be excluded from the git audit trail)"
+            f"{where} {tasks_dir!r} must not live under the '.worc/' home "
+            "(the agent's read-deny root, excluded from every commit by path)"
         )
 
 

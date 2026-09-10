@@ -21,10 +21,10 @@ The agents do the editing. The orchestrator owns the process and the Git lifecyc
 - **Tasks in, PRs out.** Author a task in Markdown; get a branch, the change, your checks run, and a PR with a written summary — no babysitting.
 - **Two agents, one interface.** Codex and Claude Code are interchangeable. If one fails for an infrastructure reason (missing binary, timeout, rate limit), the orchestrator automatically falls back to the other.
 - **The orchestrator owns Git.** Agents are never asked to commit or push — the mandate is the orchestrator's, and it is backed by an immutable `.git` — mechanically wherever `security.strict_isolation` is on and the host can sandbox, and by the agent CLI's own write denies plus a stated contract in the advanced mode — plus detection that reports on your `origin` rather than a wall around the whole network. Branch naming, staging, commit, push, PR, and the safe return to your base branch are all handled for you.
-- **Your work stays in your repo.** The task file and its summary are committed alongside your code as an audit trail; everything else lives in a single gitignored home and never touches Git history.
+- **Your work stays in your repo, and out of your history.** Everything the orchestrator writes lives in a single gitignored home, and the task lifecycle tree is gitignored too — a fresh install leaves your `git status` exactly as clean as it was. Want the task file and its summary committed alongside your code as an audit trail? Say yes to one install question (`--track-tasks`), or delete one line from `.gitignore` later.
 - **Debt does not scatter.** What a task noticed but did not fix — the supervisor's technical-debt notes and the review findings below your gate — is appended to one growing `.worc/follow-ups.md`. "What has this orchestrator not fixed here?" is one file, not thirty pull-request bodies. Nothing rewrites it: you close an item by deleting its entry.
 - **Your harness, our graph.** If your repository already has Claude Code skills your team wrote and maintains, a flow node can name them (`skills: [acme-tdd]`) instead of asking you to re-author that knowledge as a prompt where the copy immediately drifts. Skills stay **off** unless a node asks for them, so a step the flow never requested cannot fire on its own — and a node whose turn must be exactly what the flow says can refuse them outright with a real CLI switch.
-- **Runs unattended.** A watch loop periodically syncs your base branch, so a teammate can hand off a task just by committing it and pushing.
+- **Runs unattended.** A watch loop periodically syncs your base branch, so a teammate can hand off a task just by committing it and pushing (that route needs the task lifecycle tree tracked — one install answer).
 - **Crash-safe and idempotent.** Every step is checkpointed. A restart resumes the in-flight task and never double-commits, double-pushes, or re-opens a PR.
 - **Secure by default.** The sandbox policy and environment allowlist are locked at the config level — no task can weaken them, and no secrets are ever written to logs or artifacts.
 - **Optional human-in-the-loop.** With Telegram configured, the orchestrator can ask a clarifying question or request approval before risky changes; routine work stays fully automatic.
@@ -68,7 +68,8 @@ You authorize the tools yourself, once, in the environment the orchestrator runs
 # 1. Install
 pipx install "git+https://github.com/VladimirMakarevich/wastech-orchestrator.git"
 
-# 2. Set up your repo (interactive wizard: detects origin, branch, agents)
+# 2. Set up your repo (interactive wizard: detects origin, branch, agents; asks whether to
+#    track task files in git — the default is no, so nothing new shows up in `git status`)
 cd /path/to/my-repo
 worc install .
 
@@ -112,7 +113,7 @@ worc watch
 worc status
 ```
 
-The orchestrator creates a branch, runs the pipeline and your checks, commits the change plus an audit commit for the task and its summary, pushes, and (with `gh` present) opens a PR whose body is the summary.
+The orchestrator creates a branch, runs the pipeline and your checks, commits the change, pushes, and (with `gh` present) opens a PR whose body is the summary. Install with `--track-tasks` and the task file and its summary ride along in a separate audit commit.
 
 ## Configuration
 

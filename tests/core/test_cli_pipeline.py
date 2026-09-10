@@ -53,7 +53,7 @@ class _FakeOrch:
         self.resume_calls = 0
         self.refresh_calls = 0
         self.notifier = notifier  # the next-task gate reads this
-        self._settled = dict(settled or {})  # task_id -> TaskRow (scanner terminal-skip guard)
+        self._settled = set(settled or ())  # ids the orchestrator calls their own leftover file
 
     def resume(self):
         self.resume_calls += 1
@@ -62,8 +62,8 @@ class _FakeOrch:
     def acquire_slot(self, task_id: str) -> bool:
         return True
 
-    def lookup_task(self, task_id: str):
-        return self._settled.get(task_id)
+    def settled_own_file(self, task_id: str, _task_file: Path) -> bool:
+        return task_id in self._settled
 
     def refresh_repo(self) -> None:
         self.refresh_calls += 1
@@ -125,18 +125,13 @@ def test_watch_manual_blocks_continuation(make_git_config, git_repo, tmp_path: P
 
 
 def test_watch_skips_settled_own_file(make_git_config, git_repo, tmp_path: Path) -> None:
-    # A manual_action_required task keeps its file in pending/ (branch preserved for the operator).
-    # The daemon must skip it, not re-run it into a duplicate_task_id reject; an independent pending
-    # task still runs.
+    # A settled task's own file lingering in pending/ must be skipped, not re-run into a
+    # duplicate_task_id reject; an independent pending task still runs. Which files count as a
+    # settled task's own is the orchestrator's decision (Orchestrator.settled_own_file); this pins
+    # that the scanner honors it and keeps going.
     config = make_git_config(git_repo.clone, auto_mode=True)
     folder = _pending_fm(tmp_path, "a", "b")
-    row = TaskRow(
-        task_id="a",
-        title="a",
-        status=Status.MANUAL_ACTION_REQUIRED,
-        source_path=str(folder / "a.md"),
-    )
-    orch = _FakeOrch(runs=[_done("b")], settled={"a": row})
+    orch = _FakeOrch(runs=[_done("b")], settled={"a"})
     results = cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
     assert orch.run_calls == [str(folder / "b.md")]  # 'a' skipped, 'b' still runs
     assert [r.task_id for r in results] == ["b"]
@@ -147,13 +142,7 @@ def test_watch_reruns_when_settled_file_differs(make_git_config, git_repo, tmp_p
     # fall through to run_task (the gate then rejects it loudly as a duplicate id).
     config = make_git_config(git_repo.clone, auto_mode=False)
     folder = _pending_fm(tmp_path, "a")
-    row = TaskRow(
-        task_id="a",
-        title="a",
-        status=Status.FAILED,
-        source_path=str(tmp_path / "elsewhere" / "a.md"),
-    )
-    orch = _FakeOrch(runs=[_done("a")], settled={"a": row})
+    orch = _FakeOrch(runs=[_done("a")], settled=())
     cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
     assert orch.run_calls == [str(folder / "a.md")]  # collision falls through to the gate
 
@@ -1086,3 +1075,57 @@ def test_cmd_watch_auto_mode_two_tasks(
         tracked = git_run(["ls-tree", "-r", "--name-only", branch], git_repo.clone)
         assert f"tasks/done/{tid}.md" in tracked
         assert f"tasks/done/{tid}.summary.md" in tracked
+
+
+def test_a_settled_tasks_own_file_survives_the_next_watch_tick(
+    git_repo,
+    fake_cli,
+    git_run,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The full default-configuration chain that made a successful task report as failed.
+
+    ``tasks/`` is tracked (that is what makes it the audit trail), so promote commits the file on
+    base while the terminal move is committed on the task branch. Returning to base then restores
+    the pending copy underneath the finished task, and the next poll tick finds it again. Nothing
+    about that is exotic — every element of it is a default — so the second tick, and an explicit
+    ``run`` on the same file, must both leave the operator's tree and ledger exactly as they were.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    pending = git_repo.clone / "tasks" / "pending"
+    pending.mkdir(parents=True)
+    claude_cmd = fake_cli("success_edit", "claude")
+    codex_cmd = fake_cli("success_edit", "codex")
+    config = _write_cli_config(project, git_repo.clone, claude_cmd=claude_cmd, codex_cmd=codex_cmd)
+    task_file = pending / "task-301.md"
+    _complete_task_file(task_file, "task-301")
+    # The promote commit: without it the file cannot come back, and the defect cannot reproduce.
+    git_run(["add", "tasks/pending/task-301.md"], git_repo.clone)
+    git_run(["commit", "-m", "promote task-301"], git_repo.clone)
+    monkeypatch.chdir(project)
+
+    assert cli.main(["--config", str(config), "watch"]) == 0
+    ledger_path = git_repo.clone / ".worc" / "logs" / "completed.jsonl"
+    records = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
+    assert [r["final_status"] for r in records] == ["done"]
+    assert task_file.exists()  # restored by the base-branch checkout that ends the run
+
+    assert cli.main(["--config", str(config), "watch"]) == 0
+
+    records = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
+    assert [r["final_status"] for r in records] == ["done"]  # no second, contradicting record
+    assert task_file.exists()
+    assert not (project / "rejected").exists()  # the tracked file was never moved out of the tree
+    assert git_run(["status", "--porcelain", "--", "tasks"], git_repo.clone) == ""
+
+    # An explicit run has no scanner guard in front of it: it still answers loudly, but the reject
+    # path must not touch the file, the ledger or the operator's notifications either.
+    assert cli.main(["--config", str(config), "run", str(task_file)]) != 0
+    assert "duplicate_task_id" in capsys.readouterr().err
+    records = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
+    assert [r["final_status"] for r in records] == ["done"]
+    assert task_file.exists()
+    assert not (project / "rejected").exists()
