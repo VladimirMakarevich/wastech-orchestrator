@@ -87,7 +87,12 @@ from wastech_orchestrator.providers._adapter_base import IsolationCapabilityRepo
 from wastech_orchestrator.providers.base import AuthProbe, AuthState, ProviderId
 from wastech_orchestrator.providers.claude import claude_config_home
 from wastech_orchestrator.providers.codex import codex_config_home
-from wastech_orchestrator.runtime_layout import CONTROL_HOME_DIRNAME, RuntimeLayout, runs_root
+from wastech_orchestrator.runtime_layout import (
+    CONTROL_HOME_DIRNAME,
+    TRACKED_LIFECYCLE_STATES,
+    RuntimeLayout,
+    runs_root,
+)
 from wastech_orchestrator.security.env import (
     describe_expansions,
     expand_allowed_environment,
@@ -148,15 +153,12 @@ _LIST_RECENT_DEFAULT = 10
 # lives under `.worc/` instead, so rejected tasks are never swept into the audit commit.
 # `tasks/preparing` is the staging area: the watch scanner never looks in it, so a task file can be
 # composed there without being picked up mid-write. `promote` moves a finished file into `pending`.
-# These are the install-time *default* layout (`paths.tasks_dir` defaults to "tasks"); the runtime
-# reads `config.paths.tasks_dir` (see `pending_dir`). An operator who configures a different
+# The state names are derived, never restated: a folder `install` scaffolds but the audit commit's
+# pathspec does not know about is a task file committed twice. The `tasks/` prefix is the
+# install-time *default* layout only (`paths.tasks_dir` defaults to "tasks"); the runtime reads
+# `config.paths.tasks_dir` (see `pending_dir`), and an operator who configures a different
 # directory creates its lifecycle subfolders themselves.
-REPO_TASK_DIRS: tuple[str, ...] = (
-    "tasks/preparing",
-    "tasks/pending",
-    "tasks/done",
-    "tasks/failed",
-)
+REPO_TASK_DIRS: tuple[str, ...] = tuple(f"tasks/{state}" for state in TRACKED_LIFECYCLE_STATES)
 
 # Runtime dirs created under `<repo>/.worc/` by `install` (all gitignored).
 WORC_RUNTIME_DIRS: tuple[str, ...] = ("logs", "workspace", "tasks/rejected")

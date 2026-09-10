@@ -817,6 +817,46 @@ def test_audit_commit_stages_pending_to_failed_move_deletion(
     assert "tasks/pending/task-001.md" not in git_run(["status", "--porcelain"], git_repo.clone)
 
 
+@pytest.mark.parametrize("destination", ["done", "failed"])
+def test_audit_commit_stages_preparing_move_deletion(
+    git_repo,
+    store: StateStore,
+    tmp_path: Path,
+    make_git_config: ConfigFactory,
+    git_run: GitRunner,
+    destination: str,
+) -> None:
+    # A task file committed to base while it was still staged in tasks/preparing/ — an operator
+    # authoring a batch of task files and committing them for review before any of them runs —
+    # and then promoted and moved to its terminal folder must have its *deletion* from preparing
+    # staged too. Without it the branch carries the task file in two lifecycle folders at once and
+    # a dangling `D` rides back onto the base branch after terminal cleanup. Both terminal folders
+    # are covered because the source state, not the destination, is what the pathspec was missing.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    preparing = git_repo.clone / "tasks" / "preparing"
+    preparing.mkdir(parents=True, exist_ok=True)
+    (preparing / "task-001.md").write_text("t\n", encoding="utf-8")
+    git_run(["add", "tasks/preparing/task-001.md"], git_repo.clone)
+    git_run(["commit", "-m", "track staged task file"], git_repo.clone)
+    # `promote` renames preparing -> pending and the terminal move renames pending -> done/failed;
+    # neither touches the index, so git sees only the source path vanish.
+    (preparing / "task-001.md").unlink()
+    terminal = git_repo.clone / "tasks" / destination
+    terminal.mkdir(parents=True, exist_ok=True)
+    (terminal / "task-001.md").write_text("t\n", encoding="utf-8")
+    (terminal / "task-001.summary.md").write_text("s\n", encoding="utf-8")
+
+    sha = gm.commit_audit("task-001")
+    assert sha is not None
+    tracked = git_run(["ls-files"], git_repo.clone)
+    assert "tasks/preparing/task-001.md" not in tracked
+    assert f"tasks/{destination}/task-001.md" in tracked
+    # The working tree is clean: no dangling `D tasks/preparing/task-001.md` to ride back to base.
+    assert "tasks/preparing/task-001.md" not in git_run(["status", "--porcelain"], git_repo.clone)
+
+
 def test_snapshot_capture_and_partial_change(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
 ) -> None:

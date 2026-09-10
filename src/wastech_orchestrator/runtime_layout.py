@@ -13,6 +13,10 @@ from a single seam instead of each reconstructing the literal:
 * **exchange_root** — the agent-facing exchange ``<repo>/.worc-io``. Named here only; the exchange
   builders/publisher still take the root as an argument.
 
+One surface sits outside that home and is named here for the same reason: the **tracked task
+lifecycle tree** at the repository root, whose parent directory the operator names
+(``paths.tasks_dir``) but whose subfolder names are fixed — :data:`TRACKED_LIFECYCLE_STATES`.
+
 :class:`RuntimeLayout` is **provider-neutral** (paths only) and **immutable**. It is constructed
 once at the composition/CLI boundary and injected into consumers, so each consumer declares the
 surface it owns instead of rebuilding ``repo_root / ".worc"``. Today ``control_home`` and
@@ -38,6 +42,18 @@ from pathlib import Path
 CONTROL_HOME_DIRNAME = ".worc"
 PRIVATE_HOME_DIRNAME = ".worc"
 EXCHANGE_HOME_DIRNAME = ".worc-io"
+
+# The task-lifecycle subfolders of the configured ``paths.tasks_dir``, in the order a task file
+# travels them. Only the parent directory is the operator's to name; these are fixed, and this is
+# the single enumeration every consumer derives from rather than restating — ``install`` scaffolds
+# them, the terminal move files a task into one, and the audit commit's pathspec has to cover them
+# *all*: the destination states stage the file's appearance and whichever state it came from stages
+# its removal, so a state left out of a derived set is a tracked deletion nothing can ever stage.
+# That is what a hand-maintained restatement gets wrong, one folder at a time. Two names are
+# deliberately absent: ``rejected`` (the quarantine lives under the private home and is never
+# committed) and any "running" folder — a task in flight is tracked by its ``state.db`` status, so
+# a physical folder for it would be a second, divergent copy of that fact.
+TRACKED_LIFECYCLE_STATES: tuple[str, ...] = ("preparing", "pending", "done", "failed")
 
 # The one private-home subdirectory that parents every per-task runtime root below. They all share
 # the same defining property — private state keyed by task id, written by one run, never
