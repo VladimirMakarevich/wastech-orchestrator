@@ -260,6 +260,7 @@ def test_tool_stdin_has_no_secrets_or_full_env(tmp_path: Path) -> None:
         "diff_path",
         "checks_path",
         "review_path",
+        "report_dir",
     }
     assert "env" not in ctx and "session_id" not in ctx
 

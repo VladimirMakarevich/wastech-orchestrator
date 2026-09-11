@@ -6503,3 +6503,170 @@ def test_assigned_environment_reaches_node_services(
     services = orch._build_engine_services(pipeline, finalize=None)
     assert services.process_env["NUGET_PACKAGES"] == "/repo/.toolcache/nuget"
     assert services.process_env == build_child_env(orch._config.security)
+
+
+# -- a private report under an operator-declared base -------------------------
+#
+# A ``private_control_workspace_report`` flow may point ``report_dir`` at any repo-relative base,
+# including one outside the gitignored runtime home. Two properties are pinned end to end: the
+# resolved base is where the ``report`` output-artifact slot actually writes, and the report never
+# reaches git — on the publish terminal *or* on an infra ``failed`` one, where the publish node's
+# leak refusal never runs but the branch is still committed and pushed.
+
+_TRIAGE_FLOW = """\
+flow:
+  name: triage
+  task_type: triage
+  permission_ceiling: workspace-write
+  output_policy: private_control_workspace_report
+  report_dir: .worc-connect/triage
+  publishing: none
+  nodes:
+    - id: analysis
+      kind: agent
+      role_file: triage/analysis.md
+      session_scope: fresh_disposable
+      permission_profile: read-only
+      output_artifact: report
+    - id: verdict
+      kind: agent
+      role_file: triage/verdict.md
+      session_scope: fresh_disposable
+      permission_profile: read-only
+    - id: private_storage
+      kind: publish
+      policy: private_control_workspace_report
+  edges:
+    - { from: analysis, to: verdict }
+    - { from: verdict, to: private_storage }
+"""
+
+
+def _seed_triage_flow(clone: Path) -> None:
+    """Deliver a private-report flow whose ``report_dir`` sits outside the runtime home."""
+    flows = clone / ".worc" / "flows"
+    (flows / "triage").mkdir(parents=True, exist_ok=True)
+    (flows / "triage.yaml").write_text(_TRIAGE_FLOW, encoding="utf-8")
+    (flows / "triage" / "analysis.md").write_text("Analyze and report.\n", encoding="utf-8")
+    (flows / "triage" / "verdict.md").write_text("State the verdict.\n", encoding="utf-8")
+
+
+def _triage_task(tmp_path: Path, task_id: str) -> str:
+    return _complete_task(tmp_path, task_id, front_extra="task_type: triage\n")
+
+
+def test_report_slot_writes_under_the_declared_report_dir(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # The `report` output-artifact slot resolves its directory from the flow: with `report_dir`
+    # declared, the orchestrator captures the agent's structured report under
+    # `<base>/<task_id>/report.md` rather than the policy's built-in home. The base is gitignored
+    # here (what an operator declaring one must do), so the publish stores it and touches no git.
+    _seed_triage_flow(git_repo.clone)
+    exclude = git_repo.clone / ".git" / "info" / "exclude"
+    exclude.write_text(exclude.read_text(encoding="utf-8") + ".worc-connect/\n", encoding="utf-8")
+    providers = _both(outputs={"analysis": ("reported", {"content": "# Triage\n\nactionable\n"})})
+    orch, _store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+
+    result = orch.run_task(_triage_task(tmp_path, "task-tri-ok"))
+
+    assert result.final_status is Status.DONE
+    report = git_repo.clone / ".worc-connect" / "triage" / "task-tri-ok" / "report.md"
+    assert report.is_file() and "actionable" in report.read_text(encoding="utf-8")
+    # The policy's built-in home is not written at all — the declaration moved the directory.
+    assert not (git_repo.clone / ".worc" / "security-reports").exists()
+    # A private deliverable never enters git: the base is ignored, so the tree is clean.
+    assert git_run(["status", "--porcelain"], git_repo.clone).strip() == ""
+
+
+def test_private_report_under_an_unignored_base_survives_a_failed_terminal(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # The leak path the publish node cannot see: an infra `failed` terminal commits and pushes the
+    # task branch (`_fail`) without ever reaching the publish node's leak refusal. With the
+    # declared base NOT gitignored the report is an ordinary untracked file, so nothing but the
+    # staging-set exclusion keeps it out of that commit.
+    _seed_triage_flow(git_repo.clone)
+    # `worc install`'s default shape: the lifecycle tree is gitignored, so the code commit's
+    # pathspec carries no `:(exclude)tasks/` guard — the shape in which `git add` accepts the
+    # whole untracked `.worc-connect/` directory entry.
+    exclude = git_repo.clone / ".git" / "info" / "exclude"
+    exclude.write_text(exclude.read_text(encoding="utf-8") + "tasks/\n", encoding="utf-8")
+    providers = _both(
+        outputs={"analysis": ("reported", {"content": "# Triage\n\nactionable\n"})},
+        infra_fail={"verdict"},
+        infra_error_class=ErrorClass.AGENT_NO_PROGRESS,
+    )
+    orch, store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+
+    result = orch.run_task(_triage_task(tmp_path, "task-tri-leak"))
+
+    assert result.final_status is Status.FAILED
+    row = store.get_task("task-tri-leak")
+    assert row is not None and row.branch is not None
+    # The report was written to the un-ignored base (so this is the real leak setup, not a
+    # vacuous pass) and git never saw it: not staged, not in any commit, not on the remote.
+    report = git_repo.clone / ".worc-connect" / "triage" / "task-tri-leak" / "report.md"
+    assert report.is_file()
+    assert ".worc-connect/" in git_run(["status", "--porcelain"], git_repo.clone)
+    assert git_run(["diff", "--cached", "--name-only"], git_repo.clone).strip() == ""
+    local = git_run(["log", "--name-only", "--format=", "--all"], git_repo.clone)
+    remote = git_run(["log", "--name-only", "--format=", "--all"], git_repo.remote)
+    assert ".worc-connect" not in local
+    assert ".worc-connect" not in remote
+
+
+def test_private_report_survives_a_park_ceiling_terminal_in_a_fresh_process(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # The same leak, on the route that never enters the engine. A task parked on
+    # PROVIDER_UNAVAILABLE resumes through `_resume_via_engine`, whose B-lite park-ceiling check
+    # goes straight to `_fail` — which commits and pushes — *before* `_engine_run` runs at all. The
+    # resume is a fresh `Orchestrator`/`GitManager` over the same durable state, the way an
+    # ordinary `worc resume` tick is, so nothing declared during the first process survives into
+    # it: the declaration has to be re-made from the frozen flow at the point of use.
+    clock = _Clock()
+    _seed_triage_flow(git_repo.clone)
+    # `worc install`'s default shape (gitignored lifecycle tree), with the declared report base
+    # deliberately NOT ignored — the operator's mistake this guards.
+    exclude = git_repo.clone / ".git" / "info" / "exclude"
+    exclude.write_text(exclude.read_text(encoding="utf-8") + "tasks/\n", encoding="utf-8")
+    providers = _both(
+        outputs={"analysis": ("reported", {"content": "# Triage\n\nactionable\n"})},
+        infra_fail={"verdict"},
+        infra_error_class=ErrorClass.PROVIDER_UNAVAILABLE,
+    )
+    orch, _store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0], clock=clock
+    )
+
+    first = orch.run_task(_triage_task(tmp_path, "task-tri-park"))
+    assert first.final_status is Status.RUNNING  # parked, report already on disk
+    report = git_repo.clone / ".worc-connect" / "triage" / "task-tri-park" / "report.md"
+    assert report.is_file()
+
+    clock.advance(21600 + 60)  # past the default max_blocked_s
+    # A brand-new orchestrator + git manager over the same state.db / artifacts / clone.
+    resumed_orch, store, ledger, _art2 = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0], clock=clock
+    )
+    result = resumed_orch.resume()
+
+    assert result is not None and result.final_status is Status.FAILED
+    assert ledger.records()[0]["final_status"] == "failed"
+    row = store.get_task("task-tri-park")
+    assert row is not None and row.branch is not None
+    # The report entered no commit, here or on the remote — and is therefore still on disk,
+    # untracked, after the terminal cleanup checkout (a committed one would have been carried
+    # away by it).
+    local = git_run(["log", "--name-only", "--format=", "--all"], git_repo.clone)
+    remote = git_run(["log", "--name-only", "--format=", "--all"], git_repo.remote)
+    assert ".worc-connect" not in local
+    assert ".worc-connect" not in remote
+    assert report.is_file()
+    assert ".worc-connect/" in git_run(["status", "--porcelain"], git_repo.clone)
+    assert git_run(["diff", "--cached", "--name-only"], git_repo.clone).strip() == ""

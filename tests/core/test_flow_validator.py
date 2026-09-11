@@ -10,12 +10,15 @@ from pathlib import Path
 
 import pytest
 
+from wastech_orchestrator.config.loader import loads_config
+from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.core.flow.snapshot import load_flow
 from wastech_orchestrator.core.flow.validator import (
     FlowValidationError,
     Violation,
     validate_disabled_nodes,
     validate_flow,
+    validate_flow_against_config,
 )
 
 CODESIGN = (
@@ -1019,3 +1022,182 @@ def test_continuation_prompt_path_traversal_is_fatal(tmp_path: Path) -> None:
 
     vs = _violations(_continuation_flow(eval_resume="/etc/passwd"), tmp_path)
     assert _has(vs, "ceiling", "node 'r': resume_role_file '/etc/passwd' contains path traversal")
+
+
+# -- report_dir: the path rule ------------------------------------------------
+#
+# ``flow.report_dir`` names the one directory a report flow's writing node is told to write into,
+# so it is validated as a path-identity value. Each refusal below is one rule of the path rule; the
+# accepted cases pin what must stay ordinary (a leading-dot directory outside the reserved roots).
+
+
+def _report_flow(value: str | None, *, policy: str = "private_control_workspace_report") -> str:
+    line = "" if value is None else f"  report_dir: '{value}'\n"
+    return f"""\
+flow:
+  name: t
+  task_type: t
+  permission_ceiling: workspace-write
+  output_policy: {policy}
+  publishing: none
+{line}  nodes:
+    - id: work
+      kind: agent
+      role_file: t/work.md
+    - id: out
+      kind: publish
+      policy: none
+  edges:
+    - {{ from: work, to: out }}
+"""
+
+
+@pytest.mark.parametrize(
+    ("value", "rule"),
+    [
+        (".worc/x", "must not overlap the orchestrator's control/private home"),
+        (".worc", "must not overlap the orchestrator's control/private home"),
+        (".WORC/x", "must not overlap the orchestrator's control/private home"),
+        (".worc-io/x", "must not overlap the agent exchange"),
+        (".git/x", "must not overlap git's own directory"),
+        ("/abs", "must be repo-relative — an absolute path is not allowed"),
+        ("C:/x", "must be repo-relative — a drive letter is not a repo-relative path"),
+        ("C:\\x", "must use '/' separators"),
+        ("a/../b", "must not contain a '..' segment"),
+        ("a/./b", "must not contain a '.' segment"),
+        ("a\\b", "must use '/' separators"),
+        ("con/x", "segment 'con' is a reserved Windows device name"),
+        ("docs/COM1", "segment 'COM1' is a reserved Windows device name"),
+        ("docs/a:b", "segment 'a:b' is not a portable path segment"),
+        ("docs/adr ", "must not carry leading or trailing whitespace"),
+        ("docs/adr/", "must not contain an empty path segment"),
+        ("docs//adr", "must not contain an empty path segment"),
+        ("  ", "must be a non-empty repo-relative POSIX directory"),
+    ],
+)
+def test_report_dir_refusals(value: str, rule: str, tmp_path: Path) -> None:
+    vs = _violations(_report_flow(value), tmp_path)
+    assert _has(vs, "ceiling", "report_dir"), vs  # the message always names the key…
+    assert _has(vs, "ceiling", rule), vs  # …and the rule it broke
+
+
+@pytest.mark.parametrize("policy", ["private_control_workspace_report", "repository_document"])
+def test_report_dir_accepted_for_both_report_policies(policy: str, tmp_path: Path) -> None:
+    # A leading-dot directory outside the reserved roots is an ordinary base — including for the
+    # private policy, which is deliberately not refused an override: the "a private report never
+    # enters git" invariant is carried at run time, in two places that together cover every
+    # terminal — the publish node refuses a report with any git-trackable file, and the resolved
+    # private directory is dropped from the code commit's staging set.
+    validate_flow(_snap(_report_flow(".worc-connect/triage", policy=policy), tmp_path))
+    validate_flow(_snap(_report_flow("docs/adr", policy=policy), tmp_path))
+
+
+def test_report_dir_absent_is_valid(tmp_path: Path) -> None:
+    validate_flow(_snap(_report_flow(None), tmp_path))
+
+
+def test_report_dir_on_code_change_is_refused(tmp_path: Path) -> None:
+    # code_change resolves no report directory, so the key would be accepted and inert.
+    vs = _violations(_report_flow("docs/adr", policy="code_change"), tmp_path)
+    assert _has(vs, "ceiling", "output_policy 'code_change' resolves no report directory")
+
+
+def test_report_dir_variable_in_a_code_change_prompt_is_refused(tmp_path: Path) -> None:
+    # It would render EMPTY there — turning "write {report_dir}/report.md" into "/report.md".
+    (tmp_path / "t").mkdir()
+    (tmp_path / "t" / "work.md").write_text("write {report_dir}/report.md", encoding="utf-8")
+    vs = _violations(_report_flow(None, policy="code_change"), tmp_path)
+    assert _has(vs, "ceiling", "node 'work': role prompt references {report_dir}")
+
+
+def test_report_dir_conditional_block_in_a_code_change_prompt_is_refused(tmp_path: Path) -> None:
+    # The conditional form drops cleanly, but a block that can never be kept is dead prose whose
+    # author believes it works — refused on the same reasoning as an inert field.
+    (tmp_path / "t").mkdir()
+    (tmp_path / "t" / "work.md").write_text("{?report_dir}see {report_dir}{/report_dir}", "utf-8")
+    vs = _violations(_report_flow(None, policy="code_change"), tmp_path)
+    assert _has(vs, "ceiling", "node 'work': role prompt references {report_dir}")
+
+
+def test_report_dir_variable_is_fine_in_a_report_flow_prompt(tmp_path: Path) -> None:
+    (tmp_path / "t").mkdir()
+    (tmp_path / "t" / "work.md").write_text("write {report_dir}/report.md", encoding="utf-8")
+    validate_flow(_snap(_report_flow(".worc-connect/triage"), tmp_path))
+
+
+# -- report_dir: the configured task lifecycle tree (config-aware layer) -------
+
+
+def _config(tmp_path: Path, *, tasks_dir: str | None = None) -> OrchestratorConfig:
+    paths = "" if tasks_dir is None else f"paths:\n  tasks_dir: {tasks_dir!r}\n"
+    return loads_config(f"""
+repo:
+  url: "git@example.com:o/r.git"
+  local_path: {str(tmp_path)!r}
+  base_branch: "main"
+  branch_prefix: "worc"
+agents:
+  allowed: [claude]
+  max_fix_cycles: 3
+  max_total_fix_iterations: 5
+  decomposition:
+    enabled: false
+  providers:
+    claude:
+      command: "claude"
+      permission_profile: workspace-write
+      primary: true
+security:
+  strict_isolation: true
+  allowed_environment:
+    - PATH
+checks:
+  commands: []
+  timeout_seconds: 30
+git:
+  create_pull_request: true
+  pr_base: "main"
+{paths}""").config
+
+
+def _config_violations(value: str, tmp_path: Path, **kwargs: str) -> list[Violation]:
+    snap = _snap(_report_flow(value), tmp_path)
+    validate_flow(snap)  # the path rule itself passes; the lifecycle tree is config-aware
+    with pytest.raises(FlowValidationError) as exc_info:
+        validate_flow_against_config(snap, _config(tmp_path, **kwargs))
+    return exc_info.value.violations
+
+
+def test_report_dir_under_the_default_tasks_dir_is_refused(tmp_path: Path) -> None:
+    vs = _config_violations("tasks/x", tmp_path)
+    assert _has(vs, "config", "report_dir 'tasks/x': must not overlap the task lifecycle tree")
+
+
+def test_report_dir_under_a_renamed_tasks_dir_is_refused(tmp_path: Path) -> None:
+    # The reserved root is the CONFIGURED tree, which only this layer can see.
+    vs = _config_violations("work/queue/reports", tmp_path, tasks_dir="work/queue")
+    assert _has(vs, "config", "must not overlap the task lifecycle tree")
+
+
+@pytest.mark.parametrize("tasks_dir", ["tasks", "./tasks", "tasks/.", "tasks/", " tasks "])
+def test_report_dir_under_an_untidily_spelled_tasks_dir_is_refused(
+    tasks_dir: str, tmp_path: Path
+) -> None:
+    # The config validator's safety rule accepts every one of these spellings, and they all name
+    # the directory `tasks` resolves to. The overlap test compares the normalized root, so an
+    # untidy-but-legal config cannot buy a flow write access to the real lifecycle tree.
+    vs = _config_violations("tasks/x", tmp_path, tasks_dir=tasks_dir)
+    assert _has(vs, "config", "report_dir 'tasks/x': must not overlap the task lifecycle tree")
+
+
+def test_report_dir_containing_the_tasks_dir_is_refused(tmp_path: Path) -> None:
+    # The other direction: the lifecycle tree must not end up inside the flow's deliverable.
+    vs = _config_violations("work", tmp_path, tasks_dir="work/queue")
+    assert _has(vs, "config", "must not overlap the task lifecycle tree")
+
+
+def test_report_dir_beside_a_renamed_tasks_dir_is_accepted(tmp_path: Path) -> None:
+    # 'tasks' is not intrinsically reserved — the operator's configured tree is.
+    snap = _snap(_report_flow("tasks/reports"), tmp_path)
+    validate_flow(snap)
+    validate_flow_against_config(snap, _config(tmp_path, tasks_dir="work/queue"))

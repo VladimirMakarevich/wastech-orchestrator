@@ -13,7 +13,7 @@
 - **[config/best-practices.md](config/best-practices.md)** — safe defaults, checks layout, and common config mistakes.
 - **[skills/worc-config/SKILL.md](skills/worc-config/SKILL.md)** — a copy-ready skill that interviews the operator and assembles a project-specific config.
 - **[flows/README.md](flows/README.md)** — author a _custom flow_ (a new `task_type`): the graph of steps, where the flow YAML + its prompts live, registration, and validation.
-- **[flows/reference.md](flows/reference.md)** — the **complete field reference** for flows: every flow-level and node-level field (including `output_policy`, `publishing`, `permission_ceiling`, `network_policy`), plus edges and validation.
+- **[flows/reference.md](flows/reference.md)** — the **complete field reference** for flows: every flow-level and node-level field (including `output_policy`, `report_dir`, `publishing`, `permission_ceiling`, `network_policy`), plus edges and validation.
 - **[flows/roles.md](flows/roles.md)** — author a flow's **role prompts**: the built-in evaluator roles, the per-node output contract, output slots, and the supervisor layer.
 - **[flows/prompt-variables.md](flows/prompt-variables.md)** — the `{name}` variable allowlist role prompts may reference.
 - **[skills/worc-flow/SKILL.md](skills/worc-flow/SKILL.md)** — a copy-ready skill that authors a new custom flow (graph, output kind, route) end-to-end.

@@ -1,8 +1,8 @@
 # Phase 08 — Configurable report directory, private policy included
 
-- **Status:** ☐
+- **Status:** ☑
 - **Depends on:** none (worc, this repository; independent of phases 01 and 02)
-- **Delivers:** FR-W4 — a flow may declare `report_dir: <base>` for both report output policies, `{report_dir}` becomes a prompt variable, the path is validated at flow load, and `private_control_workspace_report` may name a base outside `.worc/` with the existing publish-time leak check as the guard. Absorbs the [configurable report directory](../../configurable-report-dir.md) backlog item; the one extension over it is the private-policy allowance (D16).
+- **Delivers:** FR-W4 — a flow may declare `report_dir: <base>` for both report output policies, `{report_dir}` becomes a prompt variable, the path is validated at flow load, and `private_control_workspace_report` may name a base outside `.worc/` with the existing publish-time leak check as the guard. Absorbs the standalone "configurable report directory" backlog item, which this phase removes from the index; the one extension over it is the private-policy allowance (D16).
 
 ## Goal
 
@@ -53,5 +53,5 @@ Give the optional triage flow (phase 07) a report home the connector may read wi
 
 ## Acceptance for this phase
 
-- [ ] AC-W4 passes in full.
-- [ ] `ruff check .`, `ruff format --check .`, `mypy src`, `lint-imports` and `pytest` are green; `python tools/mdlint.py` is green.
+- [x] AC-W4 passes in full.
+- [x] `ruff check .`, `ruff format --check .`, `mypy src`, `lint-imports` and `pytest` are green; `python tools/mdlint.py` is green.

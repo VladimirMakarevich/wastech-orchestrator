@@ -172,6 +172,7 @@ def _snapshot(
     *,
     output_policy: OutputPolicy,
     network_policy: NetworkPolicy | None = None,
+    report_dir: str | None = None,
 ) -> FlowSnapshot:
     doc = FlowDoc(
         name="t",
@@ -182,6 +183,7 @@ def _snapshot(
         nodes=(node,),
         edges=(),
         budgets=MappingProxyType({}),
+        report_dir=report_dir,
         network_policy=network_policy,
     )
     return FlowSnapshot(
@@ -192,12 +194,21 @@ def _snapshot(
     )
 
 
-def _services(tmp_path: Path, git: _Git, router: _Router | None = None) -> NodeServices:
+def _services(
+    tmp_path: Path,
+    git: _Git,
+    router: _Router | None = None,
+    registered: list[tuple[str, str, str]] | None = None,
+) -> NodeServices:
     from wastech_orchestrator.check_runner import CheckOutcome
 
     class _Checks:
         def run(self, **kwargs: Any) -> CheckOutcome:
             return CheckOutcome(passed=True, runs=())
+
+    def _register(task_id: str, kind: str, path: str) -> None:
+        if registered is not None:
+            registered.append((task_id, kind, path))
 
     return NodeServices(
         router=router or _Router(),  # type: ignore[arg-type]
@@ -207,6 +218,7 @@ def _services(tmp_path: Path, git: _Git, router: _Router | None = None) -> NodeS
         artifacts_root=str(tmp_path / "art"),
         clock=lambda: "ts",
         git=git,  # type: ignore[arg-type]
+        register_artifact=_register,
     )
 
 
@@ -250,6 +262,50 @@ def test_resolve_output_policy_shapes() -> None:
     assert code.report_subdir is None and code.required_files == ()
 
 
+def test_resolve_output_policy_report_dir_override() -> None:
+    # The flow's ``report_dir`` moves the base for BOTH report policies; the engine still appends
+    # ``/<task_id>``, and neither the required files nor the privacy flag move with it.
+    research = resolve_output_policy(OutputPolicy.REPOSITORY_DOCUMENT, "t1", "docs/adr")
+    assert research.report_subdir == "docs/adr/t1"
+    assert research.required_files == ("report.md", "sources.json")
+    assert research.private is False
+
+    private = resolve_output_policy(
+        OutputPolicy.PRIVATE_CONTROL_WORKSPACE_REPORT, "t1", ".worc-connect/triage"
+    )
+    assert private.report_subdir == ".worc-connect/triage/t1"
+    assert private.required_files == ("report.md",)
+    assert private.private is True
+
+
+def test_resolved_policy_report_base_strips_the_task_segment() -> None:
+    # ``report_base`` is the directory the flow named, which is what the tree-sweeping merge
+    # commit has to keep out of its staging set — the sweep cannot tell this task's report from a
+    # sibling task's leftover beside it. Declared base or built-in home, the answer is the base.
+    private = resolve_output_policy(
+        OutputPolicy.PRIVATE_CONTROL_WORKSPACE_REPORT, "t1", ".worc-connect/triage"
+    )
+    assert private.report_base == ".worc-connect/triage"
+    assert resolve_output_policy(OutputPolicy.PRIVATE_CONTROL_WORKSPACE_REPORT, "t1").report_base
+    assert resolve_output_policy(OutputPolicy.REPOSITORY_DOCUMENT, "t1").report_base == (
+        "docs/research"
+    )
+    assert resolve_output_policy(OutputPolicy.CODE_CHANGE, "t1").report_base is None
+
+
+def test_resolve_output_policy_code_change_ignores_report_dir() -> None:
+    # ``code_change`` has no report directory: the deliverable is the diff, so there is nothing to
+    # move. (The flow validator refuses the key on such a flow rather than leaving it inert.)
+    code = resolve_output_policy(OutputPolicy.CODE_CHANGE, "t1", "docs/adr")
+    assert code.report_subdir is None and code.required_files == ()
+
+
+def test_resolve_output_policy_without_report_dir_is_unchanged() -> None:
+    # Greenfield: no ``report_dir`` ⇒ byte-for-byte today's directories, for every policy.
+    for policy in OutputPolicy:
+        assert resolve_output_policy(policy, "t1") == resolve_output_policy(policy, "t1", None)
+
+
 def test_within_subdir_and_is_within(tmp_path: Path) -> None:
     assert within_subdir("docs/research/t1/report.md", "docs/research/t1")
     assert not within_subdir("src/app.py", "docs/research/t1")
@@ -272,6 +328,33 @@ def test_research_writes_only_research_dir(tmp_path: Path) -> None:
         _run_agent(tmp_path, snap, _Router(), outside)
 
 
+def test_report_dir_override_moves_the_write_containment(tmp_path: Path) -> None:
+    # The override moves the guarded directory; it does not widen it. A write into the declared
+    # base is accepted, and the directory the policy would have used by default is now outside.
+    snap = _snapshot(
+        _ws_node(), output_policy=OutputPolicy.REPOSITORY_DOCUMENT, report_dir="docs/adr"
+    )
+    inside = _Git(changed=(ChangedPath(status="??", path="docs/adr/t/report.md"),))
+    assert _run_agent(tmp_path, snap, _Router(), inside).outcome.kind == "done"
+    old_default = _Git(changed=(ChangedPath(status="??", path="docs/research/t/report.md"),))
+    with pytest.raises(NodeManualRequired):
+        _run_agent(tmp_path, snap, _Router(), old_default)
+
+
+def test_private_report_dir_outside_worc_is_guarded_not_refused(tmp_path: Path) -> None:
+    # With the base gitignored the writing node leaves no git-visible change and passes;
+    # an escape from the declared base is still refused by the after-stage guard.
+    snap = _snapshot(
+        _ws_node(),
+        output_policy=OutputPolicy.PRIVATE_CONTROL_WORKSPACE_REPORT,
+        report_dir=".worc-connect/triage",
+    )
+    assert _run_agent(tmp_path, snap, _Router(), _Git(changed=())).outcome.kind == "done"
+    escaped = _Git(changed=(ChangedPath(status="M", path="src/app.py"),))
+    with pytest.raises(NodeManualRequired):
+        _run_agent(tmp_path, snap, _Router(), escaped)
+
+
 def test_audit_leaves_repo_byte_for_byte(tmp_path: Path) -> None:
     # The private report lives under the gitignored .worc/, so it never appears in the tracked
     # tree: an audit writing node leaves no git-visible change. Any tracked change → refusal.
@@ -285,16 +368,24 @@ def test_audit_leaves_repo_byte_for_byte(tmp_path: Path) -> None:
 # -- private-report publish ---------------------------------------------------
 
 
-def _private_publish(tmp_path: Path, git: _Git) -> Any:
+def _private_publish(
+    tmp_path: Path,
+    git: _Git,
+    *,
+    report_dir: str | None = None,
+    registered: list[tuple[str, str, str]] | None = None,
+) -> Any:
     node = PublishNode(
         id="private_storage",
         kind="publish",
         policy=PublishingPolicy.PRIVATE_CONTROL_WORKSPACE_REPORT,
     )
-    snap = _snapshot(node, output_policy=OutputPolicy.PRIVATE_CONTROL_WORKSPACE_REPORT)
-    return PublishNodeRunner(_services(tmp_path, git), NodeInputs(flow_dir=tmp_path)).run(
-        node, _ctx(snap, node)
+    snap = _snapshot(
+        node, output_policy=OutputPolicy.PRIVATE_CONTROL_WORKSPACE_REPORT, report_dir=report_dir
     )
+    return PublishNodeRunner(
+        _services(tmp_path, git, registered=registered), NodeInputs(flow_dir=tmp_path)
+    ).run(node, _ctx(snap, node))
 
 
 def test_private_report_not_in_staging_commit_pr(tmp_path: Path) -> None:
@@ -311,6 +402,33 @@ def test_private_report_fail_closed_if_config_in_repo(tmp_path: Path) -> None:
     git = _Git(changed=(ChangedPath(status="??", path=".worc/security-reports/t/report.md"),))
     with pytest.raises(NodeManualRequired):
         _private_publish(tmp_path, git)
+
+
+def test_private_report_dir_override_gitignored_registers_and_skips_git(tmp_path: Path) -> None:
+    # A private report under a declared base outside .worc/ that IS gitignored — the report
+    # is registered as an artifact from the overridden directory and git is not touched at all.
+    report = tmp_path / ".worc-connect" / "triage" / "t" / "report.md"
+    report.parent.mkdir(parents=True)
+    report.write_text("verdict: actionable", encoding="utf-8")
+    git, registered = _Git(changed=()), []
+    result = _private_publish(
+        tmp_path, git, report_dir=".worc-connect/triage", registered=registered
+    )
+    assert result.outcome.kind == "done"
+    assert git.calls == []  # no commit_code / commit_audit / push / create_pr
+    assert registered == [("t", "report", str(report))]
+
+
+def test_private_report_dir_override_not_ignored_fails_closed(tmp_path: Path) -> None:
+    # The same flow with the base NOT gitignored. The validator cannot see the ignore state,
+    # so the guarantee is carried here: the publish refuses, nothing is staged, nothing registered.
+    git, registered = (
+        _Git(changed=(ChangedPath(status="??", path=".worc-connect/triage/t/report.md"),)),
+        [],
+    )
+    with pytest.raises(NodeManualRequired, match="git-trackable"):
+        _private_publish(tmp_path, git, report_dir=".worc-connect/triage", registered=registered)
+    assert git.calls == [] and registered == []
 
 
 # -- network grant ------------------------------------------------------------

@@ -19,7 +19,7 @@ The critical path is 03 → 04 → 05 → a real end-to-end run. The biggest ris
 | 05 | [Write-back and reconciliation](05-connector-writeback.md) | connector | FR-C9, C10, C11, C12: labels, comments, PR link, close on merge, failure path; first real end-to-end run | 04 | ☐ |
 | 06 | [Adopt the worc contract](06-connector-adopt-contract.md) | connector | `Fixes #<n>` via `references:`, `pr_url` and the rejection reason from `worc list --all`, `close_on_merge` becomes a real choice | 01, 02, 05 | ☐ |
 | 07 | [Optional triage](07-connector-triage.md) | connector (+ flow data) | FR-C15: `triage.enabled`, `install-flow`, the two-step path, the report read from `.worc-connect/triage/<id>/` | 04, 05, 08 | ☐ |
-| 08 | [Configurable report directory, private policy included](08-worc-report-dir.md) | worc (here) | FR-W4: `flow.report_dir`, `{report_dir}` prompt variable, path validation, the private-policy allowance, `deep_research` prompts switched to the variable | — | ☐ |
+| 08 | [Configurable report directory, private policy included](08-worc-report-dir.md) | worc (here) | FR-W4: `flow.report_dir`, `{report_dir}` prompt variable, path validation, the private-policy allowance, `deep_research` prompts switched to the variable | — | ☑ |
 
 Phases 01, 02 and 08 are independent of each other and can run in parallel with 03–05.
 

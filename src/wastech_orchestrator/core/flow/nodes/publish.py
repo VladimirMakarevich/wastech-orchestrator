@@ -375,7 +375,9 @@ class PublishNodeRunner:
         git-trackable: a report that could enter staging / a commit / a PR is a leak, so we refuse
         rather than risk publishing it. The report files are registered as audit artifacts.
         """
-        resolved = resolve_output_policy(ctx.snapshot.doc.output_policy, ctx.task_id)
+        resolved = resolve_output_policy(
+            ctx.snapshot.doc.output_policy, ctx.task_id, ctx.snapshot.doc.report_dir
+        )
         if resolved.report_subdir is None:  # defensive: a non-report output_policy on this node
             return None
         if self._s.git is not None:
