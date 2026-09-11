@@ -32,6 +32,7 @@ from wastech_orchestrator.core.dangerous_diff import (
 from wastech_orchestrator.core.flow.context_paths import (
     build_node_output_paths,
     build_path_context,
+    resolve_report_dir,
 )
 from wastech_orchestrator.core.flow.contracts import (
     PermissionProfile,
@@ -674,14 +675,23 @@ class AgentNodeRunner:
     def _apply_output_containment_guard(self, node: AgentNode, ctx: NodeContext) -> None:
         """After a workspace-write edit, enforce the flow's ``output_policy`` write containment.
 
-        For a document/report flow the only writable area is the resolved report directory: a write
-        anywhere else (a tracked or untracked code change outside it) fails closed to manual review.
-        For ``private_control_workspace_report`` the report lives under the gitignored ``.worc/``
-        home, so it never appears in ``changed_code_entries`` — the guard then requires the tracked
-        tree to be byte-for-byte unchanged (any tracked/untracked code change is an escape).
-        ``code_change`` flows have no report directory and rely on the dangerous-diff guard instead.
+        One rule for every report policy: the only writable area is the *resolved* report directory
+        — the policy's own home, or the base the flow's ``report_dir`` names — and a write anywhere
+        else (a tracked or untracked change outside it) fails closed to manual review.
+
+        What differs between the two report policies is only how much of that rule the git view can
+        see. A ``private_control_workspace_report`` under a gitignored base (the default ``.worc/``
+        home, or an ignored ``report_dir``) produces no entry in ``changed_code_entries`` at all,
+        so the guard reduces to "the tracked tree is byte-for-byte unchanged"; the same policy
+        under a base the operator did not gitignore reports its own report files, and they pass
+        here because they are inside the resolved directory — the publish node is where *that*
+        case is refused, and the code commit never stages them (see
+        ``GitManager.set_private_report_dir``). ``code_change`` flows have no report directory and
+        rely on the dangerous-diff guard instead.
         """
-        policy = resolve_output_policy(ctx.snapshot.doc.output_policy, ctx.task_id)
+        policy = resolve_output_policy(
+            ctx.snapshot.doc.output_policy, ctx.task_id, ctx.snapshot.doc.report_dir
+        )
         if policy.report_subdir is None or self._s.git is None:
             return
         offenders = [
@@ -861,7 +871,9 @@ class AgentNodeRunner:
     def _prompt_variables(self, ctx: NodeContext, node: AgentNode) -> dict[str, object | None]:
         # The allowlisted artifact paths come from the shared collector so the agent
         # prompt and the tool-node stdin never drift; the rest (ids, memory) is prompt-only.
-        paths = build_path_context(self._in, self._s.repo_dir)
+        paths = build_path_context(
+            self._in, self._s.repo_dir, resolve_report_dir(ctx.snapshot, ctx.task_id)
+        )
         variables: dict[str, object | None] = {
             "task_id": ctx.task_id,
             "stage": node.id,

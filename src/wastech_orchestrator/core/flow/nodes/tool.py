@@ -49,7 +49,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from wastech_orchestrator.core.flow.context_paths import build_path_context
+from wastech_orchestrator.core.flow.context_paths import build_path_context, resolve_report_dir
 from wastech_orchestrator.core.flow.engine import Finding, NodeContext, NodeOutcome, NodeResult
 from wastech_orchestrator.core.flow.nodes.base import (
     NodeInputs,
@@ -289,7 +289,9 @@ class ToolNodeRunner:
             "task_id": ctx.task_id,
             "node_id": node.id,
             "subtask_order": ctx.subtask_order,
-            "paths": build_path_context(self._in, self._s.repo_dir),
+            "paths": build_path_context(
+                self._in, self._s.repo_dir, resolve_report_dir(ctx.snapshot, ctx.task_id)
+            ),
             "args": dict(node.args),
         }
         return json.dumps(context, ensure_ascii=False)

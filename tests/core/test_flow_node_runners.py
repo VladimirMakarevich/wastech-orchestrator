@@ -2224,6 +2224,98 @@ def test_evaluator_subtask_variables_drop_outside_a_decompose_region(tmp_path: P
     assert router.requests[0].prompt == "Review."
 
 
+def _report_snapshot(
+    nodes: tuple[FlowNode, ...], *, output_policy: OutputPolicy, report_dir: str | None
+) -> FlowSnapshot:
+    doc = FlowDoc(
+        name="t",
+        task_type="t",
+        permission_ceiling=PermissionProfile.WORKSPACE_WRITE,
+        output_policy=output_policy,
+        publishing=PublishingPolicy.NONE,
+        nodes=nodes,
+        edges=(),
+        budgets=MappingProxyType({}),
+        report_dir=report_dir,
+    )
+    return FlowSnapshot(
+        doc=doc,
+        nodes_by_id=MappingProxyType({n.id: n for n in nodes}),
+        adjacency=MappingProxyType({}),
+        flow_fingerprint="fp",
+    )
+
+
+@pytest.mark.parametrize(
+    ("output_policy", "report_dir", "expected"),
+    [
+        # The default home of each report policy, and the same policy pointed elsewhere. The
+        # variable is the repo-relative directory INCLUDING the per-task segment — exactly what
+        # the after-stage guard confines the node to.
+        (OutputPolicy.REPOSITORY_DOCUMENT, None, "docs/research/task-1"),
+        (OutputPolicy.REPOSITORY_DOCUMENT, "docs/adr", "docs/adr/task-1"),
+        (
+            OutputPolicy.PRIVATE_CONTROL_WORKSPACE_REPORT,
+            None,
+            ".worc/security-reports/task-1",
+        ),
+        (
+            OutputPolicy.PRIVATE_CONTROL_WORKSPACE_REPORT,
+            ".worc-connect/triage",
+            ".worc-connect/triage/task-1",
+        ),
+    ],
+)
+def test_report_dir_variable_renders_the_resolved_directory(
+    output_policy: OutputPolicy, report_dir: str | None, expected: str, tmp_path: Path
+) -> None:
+    (tmp_path / "w.md").write_text("Write {report_dir}/report.md", "utf-8")
+    node = AgentNode(id="synthesis", kind="agent", role_file="w.md")
+    router, store = FakeRouter(_result()), FakeStore()
+    snapshot = _report_snapshot((node,), output_policy=output_policy, report_dir=report_dir)
+    ctx = NodeContext(
+        snapshot=snapshot,
+        run_state=FlowRunState(flow_fingerprint="fp"),
+        node=node,
+        task_id="task-1",
+    )
+    AgentNodeRunner(_services(router, store, None), _inputs(tmp_path)).run(node, ctx)
+    assert router.requests[0].prompt == f"Write {expected}/report.md"
+
+
+def test_report_dir_variable_is_empty_without_a_report_directory(tmp_path: Path) -> None:
+    # A code_change flow resolves no report directory, so the variable is None and would render
+    # empty — which is exactly why the flow validator refuses a prompt that references it.
+    (tmp_path / "w.md").write_text("Build.", "utf-8")
+    node = AgentNode(id="impl", kind="agent", role_file="w.md")
+    services = _services(FakeRouter(_result()), FakeStore(), None)
+    variables = AgentNodeRunner(services, _inputs(tmp_path))._prompt_variables(_ctx(node), node)
+    assert variables["report_dir"] is None
+
+
+def test_evaluator_sees_the_same_report_dir_as_the_author(tmp_path: Path) -> None:
+    # A gate judging the deliverable has to be able to name where it was written.
+    (tmp_path / "w.md").write_text("Write it.", "utf-8")
+    (tmp_path / "r.md").write_text("Review {report_dir}/report.md", "utf-8")
+    author = AgentNode(id="synthesis", kind="agent", role_file="w.md")
+    reviewer = _evaluator("critic")
+    router, store = FakeRouter(_result(structured={"findings": []})), FakeStore()
+    snapshot = _report_snapshot(
+        (author, reviewer),
+        output_policy=OutputPolicy.REPOSITORY_DOCUMENT,
+        report_dir="docs/adr",
+    )
+    ctx = NodeContext(
+        snapshot=snapshot,
+        run_state=FlowRunState(flow_fingerprint="fp"),
+        node=reviewer,
+        task_id="task-1",
+    )
+    services = _services(router, store, None, artifacts_root=str(tmp_path))
+    EvaluatorNodeRunner(services, _inputs(tmp_path)).run(reviewer, ctx)
+    assert router.requests[0].prompt == "Review docs/adr/task-1/report.md"
+
+
 def test_the_agent_and_evaluator_runners_publish_the_same_variable_names(tmp_path: Path) -> None:
     """Anti-drift, because this is the third time the two runners diverged on one channel.
 

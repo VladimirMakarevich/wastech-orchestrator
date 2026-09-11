@@ -471,6 +471,79 @@ def test_resolved_profile_not_in_code_commit(
     assert ".worc/checks/resolved-profile.json" not in gm.changed_code_paths()
 
 
+def test_declared_private_report_dir_is_never_in_the_staging_set(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # A private report under a base the operator did NOT gitignore is an ordinary untracked file:
+    # `git status --porcelain` reports the whole untracked tree as one `.worc-connect/` entry, and
+    # staging that entry stages the report with it. Declaring the directory keeps it out of the
+    # staging set and out of the commit, while ordinary code beside it still commits.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    report = git_repo.clone / ".worc-connect" / "triage" / "task-001" / "report.md"
+    report.parent.mkdir(parents=True)
+    report.write_text("verdict: actionable\n", encoding="utf-8")
+    (git_repo.clone / "real.py").write_text("code\n", encoding="utf-8")
+
+    # Undeclared, the porcelain directory entry that contains it is an ordinary code path.
+    assert ".worc-connect/" in gm.changed_code_paths()
+
+    gm.set_private_report_dir(".worc-connect/triage/task-001")
+    assert gm.changed_code_paths() == ["real.py"]
+    sha = gm.commit_code("task-001", "feat: real")
+    assert sha is not None
+    committed = git_run(["show", "--name-only", "--format=", "HEAD"], git_repo.clone).split()
+    assert committed == ["real.py"]
+    # Still on disk and still untracked — withheld from the commit, not deleted or hidden.
+    assert report.is_file()
+    assert ".worc-connect/" in git_run(["status", "--porcelain"], git_repo.clone)
+
+    # Cleared again (the next task's flow declares none), the directory is ordinary once more.
+    gm.set_private_report_dir(None)
+    assert ".worc-connect/" in gm.changed_code_paths()
+
+
+def test_declared_private_report_dir_is_excluded_from_the_merge_sweep(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # `commit_merge_resolution` is the one staging path that sweeps the whole tree (`git add -A`),
+    # so the scoped pathspec cannot protect it; the declared report directory joins the runtime
+    # roots it excludes. Probed through the same helper the merge commit uses.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    assert ":(exclude,top).worc-connect/triage/task-001/" not in gm._runtime_add_excludes()
+    gm.set_private_report_dir(".worc-connect/triage/task-001")
+    assert ":(exclude,top).worc-connect/triage/task-001/" in gm._runtime_add_excludes()
+
+
+def test_merge_sweep_excludes_the_whole_declared_report_base(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # `git add -A` cannot tell this task's report directory from a *sibling* task's leftover under
+    # the same base, so the base — not just `<base>/<task_id>` — is what the merge sweep excludes
+    # and what its staged-set gate rejects. A leftover from an earlier run under an un-ignored base
+    # is exactly the thing a later task's base merge would otherwise sweep in.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    gm.set_private_report_dir(".worc-connect/triage/task-001", ".worc-connect/triage")
+
+    assert ":(exclude,top).worc-connect/triage/" in gm._runtime_add_excludes()
+    # The scoped commit still speaks only for this task's own directory…
+    assert not gm._is_private_report_path(".worc-connect/triage/task-002/report.md")
+    # …while the sweep's question covers every report under the base.
+    assert gm._is_private_report_base_path(".worc-connect/triage/task-002/report.md")
+
+    # The merge-mode gate refuses a sibling report that reached the index some other way.
+    sibling = git_repo.clone / ".worc-connect" / "triage" / "task-002" / "report.md"
+    sibling.parent.mkdir(parents=True)
+    sibling.write_text("an earlier task's verdict\n", encoding="utf-8")
+    gm._git("add", "-f", "--", ".worc-connect/triage/task-002/report.md")
+    with pytest.raises(ManualActionRequired) as excinfo:
+        gm.assert_staged_allowed(None)
+    assert "task-002/report.md" in str(excinfo.value)
+
+
 def test_ensure_runtime_excludes_writes_worc_line_to_local_exclude(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:

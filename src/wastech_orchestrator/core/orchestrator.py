@@ -113,7 +113,7 @@ from wastech_orchestrator.core.flow.registry import FlowRegistry, FlowResolution
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import AgentNode, EvaluatorNode, FlowNode
 from wastech_orchestrator.core.flow.security_preamble import build_orchestrator_security_preamble
-from wastech_orchestrator.core.flow.snapshot import FlowSnapshot, load_flow
+from wastech_orchestrator.core.flow.snapshot import FlowLoadError, FlowSnapshot, load_flow
 from wastech_orchestrator.core.flow.tools_registry import ToolRegistry
 from wastech_orchestrator.core.flow.validator import (
     FlowValidationError,
@@ -1889,6 +1889,10 @@ class Orchestrator:
             raise PipelineFailed(f"task '{task_id}' has no recorded branch to merge")
 
         log = self._log(task_id)
+        # The merge routine commits (`commit_merge_resolution` sweeps the tree with `git add -A`)
+        # without ever entering the engine, and it typically runs in its own process long after
+        # the task finished — so the private report directory is declared before any of it.
+        self._declare_private_report_dir(self._degraded_pipeline(row))
         self._git.merge_abort()  # clear a stale merge from a prior crash before starting
         try:
             conflicted = self._git.update_branch_with_base(branch, self._config.repo.base_branch)
@@ -2344,6 +2348,51 @@ class Orchestrator:
     def _control_bundle_dir(self, task_id: str) -> Path:
         """The private per-task frozen-control-bundle dir (a provider deny target)."""
         return self._layout.runs_home / CONTROL_BUNDLE_DIRNAME / task_id
+
+    def _declare_private_report_dir(self, p: _Pipeline) -> None:
+        """Declare this task's private report directory on the git manager, or clear it.
+
+        A ``private_control_workspace_report`` deliverable must never enter git, and the staging-set
+        exclusion that carries that off the publish path
+        (:meth:`~wastech_orchestrator.git_manager.GitManager.set_private_report_dir`) is worth
+        exactly as much as the declaration being in place *before* the commit runs. The engine
+        cannot be the only place it is made, because the engine is not the only thing that commits:
+        :meth:`_fail` commits and pushes from routes that never enter :meth:`_engine_run` — the
+        B-lite park ceiling in :meth:`_resume_via_engine`, ``run_task``'s infra-error handler — and
+        :meth:`merge_task` finalizes a base merge with its own tree-sweeping commit. On each of
+        those, in the fresh process an ordinary resume runs in, the git manager would still be
+        holding ``None``. So every route that can reach a commit re-declares here, from state that
+        outlives the process rather than from one seam inside the run.
+
+        The source is the task's **frozen** flow — the bytes the run actually executed — so an
+        operator edit to ``report_dir`` between the report being written and the terminal cannot
+        move the exclusion off the report already on disk. The live flow is the fallback for a task
+        that never froze one, and clearing is the fallback when neither resolves: a flow that
+        cannot be read has produced no private report either.
+        """
+        snapshot: FlowSnapshot | None = None
+        digest = self._store.get_control_bundle_digest(p.task.id)
+        if digest is not None:
+            try:
+                bundle = load_control_bundle(self._control_bundle_dir(p.task.id), digest)
+                snapshot = load_flow(bundle.flow_source_path)
+            except (ControlBundleError, FlowLoadError, PathIdentityError, OSError):
+                # An unreadable/unverifiable/tampered bundle falls back to the live flow rather
+                # than raising: the callers are terminal paths that must still reach a terminal.
+                snapshot = None
+        if snapshot is None:
+            try:
+                snapshot = self._resolve_flow(p)
+            except PipelineFailed:
+                self._git.set_private_report_dir(None)
+                return
+        resolved = resolve_output_policy(
+            snapshot.doc.output_policy, p.task.id, snapshot.doc.report_dir
+        )
+        if not resolved.private:
+            self._git.set_private_report_dir(None)
+            return
+        self._git.set_private_report_dir(resolved.report_subdir, resolved.report_base)
 
     def _freeze_live_control_bundle(
         self, p: _Pipeline, bundle_dir: Path
@@ -2910,6 +2959,19 @@ class Orchestrator:
                 p, Status.MANUAL_ACTION_REQUIRED, manual_reason=f"control plane: {exc}"
             )
         assert snapshot.source_path is not None
+        # A private deliverable never enters git on ANY terminal, not just the publish one, so the
+        # resolved directory is excluded from the staging set. Declared here from the snapshot in
+        # hand (an `adopt` resume runs the live flow, which this is and the frozen bundle is not);
+        # `_declare_private_report_dir` makes the same declaration from durable state on every
+        # commit route that never enters the engine. Unconditional (``None`` when the deliverable
+        # is not private) so no declaration survives into the next task.
+        resolved_policy = resolve_output_policy(
+            snapshot.doc.output_policy, p.task.id, snapshot.doc.report_dir
+        )
+        self._git.set_private_report_dir(
+            resolved_policy.report_subdir if resolved_policy.private else None,
+            resolved_policy.report_base if resolved_policy.private else None,
+        )
         node_overrides = self._resolve_node_overrides(p, snapshot)
         if run_state is None:
             run_state = FlowRunState(flow_fingerprint=snapshot.flow_fingerprint)
@@ -3778,9 +3840,9 @@ class Orchestrator:
         # The flow's private report dir (or None) for a `report` output_artifact slot: the migrated
         # security_audit report node returns the report as structured output, which the orchestrator
         # writes here privately instead of the agent writing into .worc/ itself.
-        report_dir = resolve_output_policy(snapshot.doc.output_policy, p.task.id).report_dir(
-            self._config.repo.local_path
-        )
+        report_dir = resolve_output_policy(
+            snapshot.doc.output_policy, p.task.id, snapshot.doc.report_dir
+        ).report_dir(self._config.repo.local_path)
         # Live control-plane digests already warned about in this run — see the verify method.
         reported_control_drift: set[str] = set()
 
@@ -4355,6 +4417,10 @@ class Orchestrator:
                 "(exchange unsafe); no commit/push"
             )
             return self._go_terminal(p, status, manual_reason=error)
+        # This is a commit path, and most of the routes into it never entered the engine (the
+        # park ceiling, `run_task`'s infra-error handler), so the private report directory is
+        # declared here rather than trusted to have been declared upstream.
+        self._declare_private_report_dir(p)
         moved = False
         try:
             moved = self._finalize_task_artifacts(p, status) is not None
