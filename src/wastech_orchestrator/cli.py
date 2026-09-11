@@ -519,7 +519,9 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"show only the last N terminal tasks (default {_LIST_RECENT_DEFAULT})",
     )
     list_view.add_argument(
-        "--all", action="store_true", help="show every known task, across all statuses"
+        "--all",
+        action="store_true",
+        help="show every known task, across all statuses, plus the ids the gate rejected",
     )
     list_cmd.add_argument(
         "--format",
@@ -4237,15 +4239,21 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def _task_entry(row: TaskRow, *, executor_alive: bool = True) -> dict[str, str | None]:
+def _task_entry(
+    row: TaskRow, *, executor_alive: bool = True, pr_url: str | None = None
+) -> dict[str, str | None]:
     # Status label via the shared renderer: a RUNNING row shows "parked (no daemon)" when neither
     # the daemon nor a `run` is alive, else "(paused)" on a B-lite provider-outage park, else the
     # plain status. The default keeps terminal rows (recent/all) and any direct caller unchanged.
+    # ``pr_url`` is passed in rather than queried here: the same entry is built for the monitor's
+    # recent block and for ``worc tasks``, neither of which renders a URL, so a per-row lookup on
+    # a polling refresh would buy nothing there.
     return {
         "task_id": row.task_id,
         "status": _display_status(row, executor_alive=executor_alive),
         "title": row.title,
         "branch": row.branch,
+        "pr_url": pr_url,
     }
 
 
@@ -4253,12 +4261,14 @@ def _pending_entry(path: Path, scan: _PendingScan, rank: int) -> dict[str, str |
     # A queued file has no DB row yet, so this view is file-derived. It carries the scheduler's own
     # ranking — the 1-based rank position plus the priority/queue it sorted on — so the operator
     # reads the *run* order here, not the file manager's alphabetical listing. An unparseable file
-    # has no id and is shown by filename instead.
+    # has no id and is shown by filename instead. ``pr_url`` is always null (nothing has run yet)
+    # and is carried anyway so every listing entry has the same shape for a scripted consumer.
     return {
         "task_id": scan.task_id,
         "status": "pending",
         "title": None,
         "branch": None,
+        "pr_url": None,
         "file": path.name,
         "rank": str(rank),
         "priority": _PRIORITY_LABEL.get(scan.priority_rank, "mid"),
@@ -4284,6 +4294,11 @@ def _entry_line(entry: dict[str, str | None]) -> str:
     branch = entry.get("branch")
     if branch:
         line += f"  ({branch})"
+    # A gate-rejected entry has neither title nor branch — the reason it was refused is the only
+    # thing the line can usefully carry, and the only reason the operator is being shown the id.
+    reason = entry.get("validation_reason")
+    if reason:
+        line += f"  ({reason})"
     return line
 
 
@@ -4630,6 +4645,59 @@ def cmd_shell(args: argparse.Namespace) -> int:
     )
 
 
+#: The ``--all`` section built from the ledger rather than from a ``tasks`` row. Named once because
+#: the id views have to recognise and drop it: a rejected id is not one any verb accepts.
+_REJECTED_SECTION = "rejected"
+
+
+def _row_entries(
+    store: StateStore | None, rows: Sequence[TaskRow], *, executor_alive: bool = True
+) -> list[dict[str, str | None]]:
+    """Task rows as listing entries, each carrying the PR URL its publish op recorded."""
+    return [
+        _task_entry(
+            row,
+            executor_alive=executor_alive,
+            pr_url=_recorded_pr_url(store, row.task_id) if store is not None else None,
+        )
+        for row in rows
+    ]
+
+
+def _rejected_entries(logs_root: Path, known_ids: set[str]) -> list[dict[str, str | None]]:
+    """Gate-rejected ids as listing entries, read off the append-only ledger (never written).
+
+    A validation reject happens before the task is ever claimed, so it leaves no ``tasks`` row and
+    the ledger is the only durable record of it — without this section the id and the reason are
+    reachable only from inside the private runtime home. ``known_ids`` (every id the store has a
+    row for) is what keeps the section honest: an id that was fixed and re-submitted under the same
+    name has a row and is an ordinary task again, so it drops out here by construction.
+    """
+    ledger = Ledger(logs_root)
+    # The ledger is append-only, so the last record wins for an id that was rejected more than once.
+    latest = {
+        task_id: record
+        for record in ledger.records()
+        if isinstance(task_id := record.get("id"), str) and task_id not in known_ids
+    }
+    return [
+        {
+            "task_id": task_id,
+            "status": _REJECTED_SECTION,
+            "title": None,
+            "branch": None,
+            "pr_url": None,
+            "validation_reason": record.get("validation_reason"),
+            "rejected_at": record.get("finished_at"),
+        }
+        # The same predicate the duplicate-id gate uses, so the two can never disagree about which
+        # ledger trace is "rejects only" — this section must not describe an id the gate would
+        # refuse to let through, nor hide one it would.
+        for task_id, record in latest.items()
+        if ledger.only_validation_rejects(task_id)
+    ]
+
+
 def _list_sections(
     args: argparse.Namespace, config: OrchestratorConfig, store: StateStore | None
 ) -> list[tuple[str, list[dict[str, str | None]]]]:
@@ -4648,18 +4716,26 @@ def _list_sections(
     executor_alive = _executor_alive(config)
     if args.all:
         rows = store.all_tasks() if store else []
-        return [("all", [_task_entry(r, executor_alive=executor_alive) for r in rows])]
+        # ``--all`` is the "everything worc knows" view, which is where the rejects belong: they are
+        # the one class of task the store cannot account for.
+        return [
+            ("all", _row_entries(store, rows, executor_alive=executor_alive)),
+            (
+                _REJECTED_SECTION,
+                _rejected_entries(worc_home_for(config) / "logs", {r.task_id for r in rows}),
+            ),
+        ]
     if args.pending:
         return [("pending", pending)]
     if args.recent is not None:
         rows = store.recent_tasks(args.recent) if store else []
-        return [("recent", [_task_entry(r) for r in rows])]
+        return [("recent", _row_entries(store, rows))]
     active = store.find_active_tasks() if store else []
     recent = store.recent_tasks(_LIST_RECENT_DEFAULT) if store else []
     return [
-        ("active", [_task_entry(r, executor_alive=executor_alive) for r in active]),
+        ("active", _row_entries(store, active, executor_alive=executor_alive)),
         ("pending", pending),
-        ("recent", [_task_entry(r) for r in recent]),
+        ("recent", _row_entries(store, recent)),
     ]
 
 
@@ -4686,8 +4762,19 @@ def _list_ids(store: StateStore | None, scope: str | None) -> int:
 def _print_section_ids(sections: list[tuple[str, list[dict[str, str | None]]]]) -> int:
     """Print the bare ids of the focused sections: the same disk+DB source as the table view,
     so `--pending --format ids` lists queued tasks that have no DB row yet. An unparseable pending
-    file has no id and is skipped (there is no usable id to print)."""
-    ids = {tid for _, items in sections for e in items if (tid := e.get("task_id"))}
+    file has no id and is skipped (there is no usable id to print).
+
+    The rejected section is left out: this list feeds completion and scripting, and a pending file
+    is an id the id-taking verbs will accept, while a gate-rejected one never becomes a task at all
+    — offering it would complete to an id every verb refuses.
+    """
+    ids = {
+        tid
+        for name, items in sections
+        if name != _REJECTED_SECTION
+        for e in items
+        if (tid := e.get("task_id"))
+    }
     for task_id in sorted(ids):
         print(task_id)
     return 0
@@ -4695,9 +4782,11 @@ def _print_section_ids(sections: list[tuple[str, list[dict[str, str | None]]]]) 
 
 def cmd_list(args: argparse.Namespace) -> int:
     """Enumerate tasks read-only: the active task, the ``tasks/pending`` queue, and recent terminal
-    tasks. The default view shows all three; ``--pending`` / ``--recent [N]`` / ``--all`` focus it.
+    tasks. The default view shows all three; ``--pending`` / ``--recent [N]`` / ``--all`` focus it,
+    and ``--all`` adds the ids worc's gate rejected (no row, so nothing else can show them).
     ``--format ids`` prints bare ids (the completion/scripting source) and ``--scope`` filters them
-    to what a given command accepts. Opens the DB read-only (``status``'s path) and never mutates.
+    to what a given command accepts. Opens the DB read-only (``status``'s path) and never mutates;
+    the ledger behind the rejected section is read the same way.
     """
     _configure_runtime_logging(args)
     config = load_config_for(args)

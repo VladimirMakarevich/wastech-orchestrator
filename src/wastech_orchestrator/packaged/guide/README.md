@@ -113,6 +113,45 @@ For machine-generated input, a `.json` object works too. Every front-matter fiel
 }
 ```
 
+## Reading task state from a script
+
+If something outside the orchestrator has to follow the tasks it submitted — a tracker connector, a dashboard, a shell script — `worc list --format json` is the surface to read, and the only one meant as a contract. It prints one JSON array on stdout and exits `0`; the database and the ledger behind it are opened read-only, so the command writes nothing. Check the exit code before parsing: an unreadable configuration or an incompatible database exits `2` and prints a plain `error: …` line where the JSON would have been. Every entry carries:
+
+| Key | Value |
+| --- | --- |
+| `task_id` | The task's id. Absent (`null`) only for a queued file whose front matter could not be parsed — that entry is identified by `file` instead. |
+| `status` | The display label (see below). |
+| `title` | The task title, or `null`. |
+| `branch` | The branch the task works on, or `null` before one exists. |
+| `pr_url` | The URL of the pull request the task opened, or `null` if it opened none. |
+
+An entry for a file still queued in `tasks/pending/` adds `file` (the filename), `rank` (its 1-based position in the run order), `priority` and `queue`; its `title`, `branch` and `pr_url` are `null`, because nothing has run yet.
+
+Two things a consumer has to know:
+
+- **`--all` lists database rows only.** A queued file has no row yet, so it appears in the default view and under `--pending`, never under `--all`. Conversely the default view's `recent` section is capped at the last few terminal tasks — `--all` is the uncapped view of everything the database holds.
+- **`status` is a display label, not the raw status.** It is the status value (`new`, `validated`, `preparing`, `running`, `pending`, `done`, `failed`, `manual_action_required`) with a parenthesised suffix wherever the bare word would mislead: `running (paused)` and `running (paused until <timestamp>)` while a provider outage is waited out, and `parked (no daemon)` for a `running` task whose executor is gone (parked at its checkpoint, not executing). Match the **leading token**, not the whole string, and read `parked` as a running task that is not moving. One further value, `rejected`, is not a task status at all — see below.
+
+### Rejected tasks
+
+`worc list --all` carries a second section that has no database rows behind it. A task the validation gate refuses never becomes a row: the file is quarantined and the refusal is appended to the completed-tasks ledger, so without this section the id and the reason are visible only inside the orchestrator's private runtime directory. Each such id appears once, built from its newest refusal:
+
+```json
+{
+  "task_id": "gh-9",
+  "status": "rejected",
+  "title": null,
+  "branch": null,
+  "pr_url": null,
+  "validation_reason": "injection_suspected",
+  "rejected_at": "2026-09-11T02:00:00+00:00"
+}
+```
+
+An id enters the section when every ledger trace it has is a refusal and the database holds no row for it; it leaves the moment a corrected file is submitted under the same id and accepted, because from then on it is an ordinary task with an ordinary row. With no ledger yet, the section is simply empty. In the table view the same ids print under a `rejected:` heading with the reason in parentheses.
+
+Rejected ids are deliberately absent from the default view and from `--format ids`: no command takes one as an argument, so offering them would only complete to ids that every verb refuses.
+
 ## Where this fits
 
 These docs are distilled for authoring, and they are complete for that purpose: you do not need anything outside this guide to write a task. The orchestrator's own repository carries the same material with extra contributor-facing detail, which matters only if you are working on the orchestrator itself.
