@@ -1,6 +1,6 @@
 # Phase 01 — `references:` task field appended to the PR body
 
-- **Status:** ☐
+- **Status:** ☑
 - **Depends on:** none
 - **Delivers:** FR-W1 — a task may carry `references:`; worc validates it fail-closed and appends the lines verbatim to the PR body it opens, under `## References`. No tracker semantics enter worc.
 
@@ -48,5 +48,5 @@ Give any external producer of tasks one opaque channel into the PR body, so a co
 
 ## Acceptance for this phase
 
-- [ ] AC-W1 passes in full.
-- [ ] `ruff check .`, `ruff format --check .`, `mypy src`, `lint-imports` and `pytest` are green; `python tools/mdlint.py` is green.
+- [x] AC-W1 passes in full.
+- [x] `ruff check .`, `ruff format --check .`, `mypy src`, `lint-imports` and `pytest` are green; `python tools/mdlint.py` is green.

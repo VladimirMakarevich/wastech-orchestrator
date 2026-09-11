@@ -54,6 +54,24 @@ _PR_POLICIES = frozenset(
 #: How many adopted commits a PR notice lists before it stops enumerating.
 _NOTICE_COMMIT_CAP = 10
 
+#: The heading the task's ``references`` lines are published under, at the foot of the PR body.
+_REFERENCES_HEADING = "## References"
+
+
+def _references_block(references: tuple[str, ...]) -> str | None:
+    """The PR-body section for a task's ``references`` lines, or ``None`` when it has none.
+
+    Each line is emitted exactly as the task carried it, as one Markdown list item and nothing
+    else. That is the whole contract: the orchestrator learns no tracker's syntax, so it neither
+    recognises a closing keyword nor rewrites a link — a producer that wants one places it here
+    and owns what it says. The gate has already bounded the count, the length and the single-line
+    shape, so there is nothing left to defend against at render time.
+    """
+    if not references:
+        return None
+    lines = "\n".join(f"- {reference}" for reference in references)
+    return f"{_REFERENCES_HEADING}\n\n{lines}"
+
 
 def _local_adoption_notice(count: int) -> str | None:
     """A PR-body line for commits this run adopted locally, or ``None`` when there were none.
@@ -261,6 +279,10 @@ class PublishNodeRunner:
             title=self._in.pull_request_title or ctx.task_id,
             body_path=body_path or "",
             notice=notice,
+            # Built here rather than beside ``body_path`` above so it exists only on the path that
+            # actually opens a PR: under a ``commit``/``push`` cap the returns above have already
+            # been taken, and a section nobody will publish is never rendered.
+            references_block=_references_block(self._in.references),
         )
 
     def _require_dangerous_diff_approval(self, node: PublishNode, ctx: NodeContext) -> None:

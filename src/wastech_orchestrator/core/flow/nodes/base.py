@@ -330,6 +330,7 @@ class GitPort(Protocol):
 
     #: ``notice`` is prepended to the PR body — used to declare commits publishing had to adopt,
     #: without which the PR's base-measured diff would silently describe someone else's work too.
+    #: ``references_block`` is appended to it: the task's own opaque lines, published unread.
     def create_pr(
         self,
         task_id: str,
@@ -338,6 +339,7 @@ class GitPort(Protocol):
         title: str,
         body_path: str,
         notice: str | None = None,
+        references_block: str | None = None,
     ) -> str | None: ...
 
     def write_current_diff(self, task_id: str) -> str: ...
@@ -472,3 +474,6 @@ class NodeInputs:
     commit_message: str | None = None
     #: notification recipients for HITL prompts (the task's contacts).
     contacts: tuple[str, ...] = ()
+    #: the task's opaque ``references`` lines, appended to the PR body under ``## References`` when
+    #: publishing opens one. Carried, never read: the orchestrator does not know what they mean.
+    references: tuple[str, ...] = ()
