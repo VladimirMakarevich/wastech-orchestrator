@@ -1,6 +1,6 @@
 # Phase 02 — `pr_url` and a `rejected` section in `worc list --format json`
 
-- **Status:** ☐
+- **Status:** ☑
 - **Depends on:** none
 - **Delivers:** FR-W2 — every JSON entry `worc list` prints for a known task carries `pr_url` (URL or `null`); FR-W3 — the `--all` view gains a `rejected` section derived from the ledger (Q-12, option b); the shipped guide names the JSON entry shape as the scripting contract.
 
@@ -44,5 +44,5 @@ Let an external process learn, from the one read-only command worc already offer
 
 ## Acceptance for this phase
 
-- [ ] AC-W2 and AC-W3 pass.
-- [ ] `ruff check .`, `ruff format --check .`, `mypy src`, `lint-imports` and `pytest` are green; `python tools/mdlint.py` is green.
+- [x] AC-W2 and AC-W3 pass.
+- [x] `ruff check .`, `ruff format --check .`, `mypy src`, `lint-imports` and `pytest` are green; `python tools/mdlint.py` is green.

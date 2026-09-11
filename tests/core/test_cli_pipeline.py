@@ -17,8 +17,10 @@ from wastech_orchestrator.core.orchestrator import (
     PipelineResult,
 )
 from wastech_orchestrator.core.state_machine import Status
+from wastech_orchestrator.git_manager import KIND_PR
+from wastech_orchestrator.ledger import Ledger, LedgerRecord
 from wastech_orchestrator.observability import logging as obslog
-from wastech_orchestrator.state_store import StateStore, TaskRow
+from wastech_orchestrator.state_store import PublishOpRow, StateStore, TaskRow
 from wastech_orchestrator.task.model import DEFAULT_QUEUE
 
 # Every test here is a slow integration test (real git / subprocess / process tree).
@@ -836,6 +838,229 @@ def test_cmd_list_format_json(git_repo, tmp_path: Path, capsys: pytest.CaptureFi
     assert code == 0
     data = json.loads(capsys.readouterr().out)
     assert any(entry["task_id"] == "task-done" and entry["status"] == "done" for entry in data)
+
+
+def _seed_pr_op(clone: Path, task_id: str, url: str) -> None:
+    store = StateStore.open(clone / ".worc" / "state.db")
+    store.record_publish_op(
+        PublishOpRow(
+            task_id=task_id,
+            kind=KIND_PR,
+            fingerprint="fp",
+            status="completed",
+            result_ref=url,
+        )
+    )
+    store.close()
+
+
+def _seed_rejects(clone: Path, records: list[LedgerRecord]) -> None:
+    ledger = Ledger(clone / ".worc" / "logs")
+    for record in records:
+        ledger.append(record)
+
+
+def _reject_record(task_id: str, reason: str, finished_at: str) -> LedgerRecord:
+    # The shape the orchestrator appends for a gate reject: no branch, the id as the title, and the
+    # reason code. There is no ``tasks`` row for such an id.
+    return LedgerRecord(
+        id=task_id,
+        title=task_id,
+        final_status=Status.FAILED.value,
+        finished_at=finished_at,
+        validation_reason=reason,
+    )
+
+
+def _seed_reject_fixture(clone: Path) -> None:
+    """One id rejected twice with no row, one rejected then re-submitted and run, one plain row,
+    and one whose ledger trace is not refusals only."""
+    _seed_list_db(
+        clone,
+        [
+            TaskRow(task_id="gh-10", title="Ten", status=Status.DONE),
+            TaskRow(task_id="gh-11", title="Eleven", status=Status.DONE),
+        ],
+    )
+    _seed_rejects(
+        clone,
+        [
+            _reject_record("gh-9", "missing_description", "2026-09-11T01:00:00+00:00"),
+            _reject_record("gh-10", "injection_suspected", "2026-09-11T01:05:00+00:00"),
+            _reject_record("gh-12", "missing_description", "2026-09-11T01:30:00+00:00"),
+            # A run that reached a terminal carries no reason, so gh-12's trace is no longer
+            # refusals only — having no row is not on its own enough to call an id rejected.
+            LedgerRecord(
+                id="gh-12",
+                title="Twelve",
+                final_status=Status.DONE.value,
+                finished_at="2026-09-11T01:40:00+00:00",
+            ),
+            _reject_record("gh-9", "injection_suspected", "2026-09-11T02:00:00+00:00"),
+        ],
+    )
+
+
+def test_cmd_list_json_carries_pr_url(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The URL an external process needs is the one the completed `pr` publish op recorded; a task
+    # that opened no PR carries the key anyway, as null, so the entry shape does not vary.
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_list_db(
+        git_repo.clone,
+        [
+            TaskRow(task_id="task-pr", title="With PR", status=Status.DONE),
+            TaskRow(task_id="task-nopr", title="No PR", status=Status.DONE),
+        ],
+    )
+    _seed_pr_op(git_repo.clone, "task-pr", "https://example.test/o/r/pull/7")
+    pending = git_repo.clone / "tasks" / "pending"
+    pending.mkdir(parents=True, exist_ok=True)
+    _complete_task_file(pending / "task-queued.md", "task-queued")
+
+    code = cli.main(["--config", str(config), "list", "--all", "--format", "json"])
+
+    assert code == 0
+    entries = {e["task_id"]: e for e in json.loads(capsys.readouterr().out)}
+    assert entries["task-pr"]["pr_url"] == "https://example.test/o/r/pull/7"
+    assert entries["task-nopr"]["pr_url"] is None
+    # `--all` is the DB-row view: a queued file has no row yet and belongs to the other views.
+    assert "task-queued" not in entries
+
+    # The key is on the row wherever the row is shown, not only under `--all`.
+    for flags in (["--recent", "5"], []):
+        assert cli.main(["--config", str(config), "list", *flags, "--format", "json"]) == 0
+        shown = {e["task_id"]: e for e in json.loads(capsys.readouterr().out)}
+        assert shown["task-pr"]["pr_url"] == "https://example.test/o/r/pull/7", flags
+        assert shown["task-nopr"]["pr_url"] is None, flags
+
+
+def test_cmd_list_json_pending_entry_carries_null_pr_url(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `--all` holds DB rows only, so the file-derived pending entry is asserted where it appears:
+    # the default view and `--pending`.
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    pending = git_repo.clone / "tasks" / "pending"
+    pending.mkdir(parents=True, exist_ok=True)
+    _complete_task_file(pending / "task-queued.md", "task-queued")
+
+    for flags in (["--pending"], []):
+        code = cli.main(["--config", str(config), "list", *flags, "--format", "json"])
+
+        assert code == 0
+        entries = {e["task_id"]: e for e in json.loads(capsys.readouterr().out)}
+        assert entries["task-queued"]["pr_url"] is None
+
+
+def test_cmd_list_all_json_rejected_section(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_reject_fixture(git_repo.clone)
+    ledger_path = git_repo.clone / ".worc" / "logs" / "completed.jsonl"
+    before = ledger_path.read_bytes()
+
+    code = cli.main(["--config", str(config), "list", "--all", "--format", "json"])
+
+    assert code == 0
+    # `list` reads the ledger the way it reads the store: it must never append to it.
+    assert ledger_path.read_bytes() == before
+    data = json.loads(capsys.readouterr().out)
+    rejected = [e for e in data if e["status"] == "rejected"]
+    assert [e["task_id"] for e in rejected] == ["gh-9"]
+    assert rejected[0] == {
+        "task_id": "gh-9",
+        "status": "rejected",
+        "title": None,
+        "branch": None,
+        "pr_url": None,
+        # The latest of the two reject records wins — the ledger is append-only.
+        "validation_reason": "injection_suspected",
+        "rejected_at": "2026-09-11T02:00:00+00:00",
+    }
+    # An id that was re-submitted under the same name and ran has a row, so it is an ordinary task
+    # again and must not be reported as rejected as well.
+    ordinary = {e["task_id"]: e["status"] for e in data if e["status"] != "rejected"}
+    assert ordinary == {"gh-10": "done", "gh-11": "done"}
+
+
+def test_cmd_list_all_table_prints_rejected_section(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_reject_fixture(git_repo.clone)
+
+    code = cli.main(["--config", str(config), "list", "--all"])
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "rejected:" in out
+    # `rejected  <id>  (<reason>)` — the status column, the id, and the only fact the entry holds.
+    assert next(line for line in out.splitlines() if "gh-9" in line).split() == [
+        "rejected",
+        "gh-9",
+        "(injection_suspected)",
+    ]
+    # The human view gains no column: an ordinary row still reads status, id, title.
+    assert next(line for line in out.splitlines() if "gh-10" in line).split() == [
+        "done",
+        "gh-10",
+        "Ten",
+    ]
+
+
+def test_cmd_list_rejected_ids_stay_out_of_the_completion_surface(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A rejected id has no row, so no id-taking verb accepts it; neither the default view nor any
+    # `--format ids` view may offer it.
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_reject_fixture(git_repo.clone)
+
+    for argv in (
+        ["list"],
+        ["list", "--format", "ids"],
+        ["list", "--all", "--format", "ids"],
+        ["list", "--format", "json"],
+    ):
+        code = cli.main(["--config", str(config), *argv])
+
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "gh-9" not in out, argv
+        assert "rejected" not in out, argv
+        # The views still report everything they reported before, so the assertions above are
+        # about the rejected id and not about an empty listing.
+        assert "gh-10" in out, argv
+
+
+def test_cmd_list_all_without_a_ledger_has_no_rejected_entries(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_list_db(git_repo.clone, [TaskRow(task_id="task-done", title="D", status=Status.DONE)])
+    assert not (git_repo.clone / ".worc" / "logs" / "completed.jsonl").exists()
+
+    code = cli.main(["--config", str(config), "list", "--all", "--format", "json"])
+
+    assert code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert [e["task_id"] for e in data] == ["task-done"]
+    assert all(e["status"] != "rejected" for e in data)
 
 
 def test_cmd_list_pending_file_without_id_shown_by_filename(

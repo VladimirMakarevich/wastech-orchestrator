@@ -13,7 +13,7 @@ The critical path is 03 → 04 → 05 → a real end-to-end run. The biggest ris
 | # | Phase | Repository | Delivers | Depends on | Status |
 | --- | --- | --- | --- | --- | --- |
 | 01 | [`references:` task field appended to the PR body](01-worc-references-field.md) | worc (here) | FR-W1: gate validation, `NormalizedTask.references`, publish appends `## References`, guide updated | — | ☑ |
-| 02 | [`pr_url` and a `rejected` section in `worc list --format json`](02-worc-list-json-pr-url.md) | worc (here) | FR-W2: the JSON entry carries `pr_url`; FR-W3: `--all` gains a `rejected` section from the ledger; the guide names the shape as the scripting contract | — | ☐ |
+| 02 | [`pr_url` and a `rejected` section in `worc list --format json`](02-worc-list-json-pr-url.md) | worc (here) | FR-W2: the JSON entry carries `pr_url`; FR-W3: `--all` gains a `rejected` section from the ledger; the guide names the shape as the scripting contract | — | ☑ |
 | 03 | [Connector skeleton: core, GitHub adapter (read side), gate, state, dry run](03-connector-skeleton.md) | connector | FR-C1, C2, C8, C13, C14: `watch --once --dry-run` lists what it would do against a real repository | — | ☐ |
 | 04 | [Task builder and handoff](04-connector-builder-handoff.md) | connector | FR-C3, C4, C5, C6, C7: a gated issue becomes a promoted worc task, idempotently | 03 | ☐ |
 | 05 | [Write-back and reconciliation](05-connector-writeback.md) | connector | FR-C9, C10, C11, C12: labels, comments, PR link, close on merge, failure path; first real end-to-end run | 04 | ☐ |
