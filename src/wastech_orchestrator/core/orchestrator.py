@@ -2383,7 +2383,12 @@ class Orchestrator:
         if snapshot is None:
             try:
                 snapshot = self._resolve_flow(p)
-            except PipelineFailed:
+            except (PipelineFailed, FlowLoadError):
+                # `_resolve_flow` wraps resolution and validation faults, but not a malformed
+                # document: `load_flow` raises `FlowLoadError` straight through it. Both clear
+                # here — the callers are terminal paths, and the call in `_fail` sits outside
+                # `_fail`'s own `try`, so anything raised here would strand the task short of a
+                # terminal with no ledger record.
                 self._git.set_private_report_dir(None)
                 return
         resolved = resolve_output_policy(

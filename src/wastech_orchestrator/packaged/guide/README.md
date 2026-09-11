@@ -116,7 +116,7 @@ For machine-generated input, a `.json` object works too. Every front-matter fiel
 
 ## Reading task state from a script
 
-If something outside the orchestrator has to follow the tasks it submitted — a tracker connector, a dashboard, a shell script — `worc list --format json` is the surface to read, and the only one meant as a contract. It prints one JSON array on stdout and exits `0`; the database and the ledger behind it are opened read-only, so the command writes nothing. Check the exit code before parsing: an unreadable configuration or an incompatible database exits `2` and prints a plain `error: …` line where the JSON would have been. Every entry carries:
+If something outside the orchestrator has to follow the tasks it submitted — a tracker connector, a dashboard, a shell script — `worc list --format json` is the surface to read, and the only one meant as a contract. It prints one JSON array on stdout and exits `0`; the database and the ledger behind it are opened read-only, so the command writes nothing. Check the exit code before parsing: an unreadable configuration, an incompatible database, or (under `--all`) a ledger carrying a half-written line exits `2` and prints a plain `error: …` line where the JSON would have been. Every entry carries:
 
 | Key | Value |
 | --- | --- |

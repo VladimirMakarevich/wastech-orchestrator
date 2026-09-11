@@ -1063,6 +1063,53 @@ def test_cmd_list_all_without_a_ledger_has_no_rejected_entries(
     assert all(e["status"] != "rejected" for e in data)
 
 
+def test_cmd_list_all_reports_a_torn_ledger_line_cleanly(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A half-written ledger line exits 2 with a message, not a traceback out of a listing.
+
+    `list` is the first read-only command to read the ledger, so a torn append after a crash (or a
+    hand edit) became newly reachable. The bad line is not skipped: `Ledger.records` also feeds the
+    duplicate-id gate, and a line silently dropped there would let a re-submitted id through.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_list_db(git_repo.clone, [TaskRow(task_id="task-done", title="D", status=Status.DONE)])
+    _seed_rejects(git_repo.clone, [_reject_record("gh-9", "injection_suspected", "2026-01-01")])
+    completed = git_repo.clone / ".worc" / "logs" / "completed.jsonl"
+    with completed.open("a", encoding="utf-8", newline="") as handle:
+        handle.write('{"id": "gh-10", "validation_re\n')
+
+    code = cli.main(["--config", str(config), "list", "--all", "--format", "json"])
+
+    assert code == 2
+    out = capsys.readouterr().out
+    assert out.startswith("error: cannot read the completed-tasks ledger at ")
+    assert "completed.jsonl" in out
+    # The listing produced no JSON at all rather than a half-built array.
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(out)
+
+
+def test_cmd_list_default_view_survives_a_torn_ledger_line(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Only `--all` reads the ledger, so the default view is unaffected by a torn line."""
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_list_db(git_repo.clone, [TaskRow(task_id="task-done", title="D", status=Status.DONE)])
+    logs = git_repo.clone / ".worc" / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / "completed.jsonl").write_text("{not json\n", encoding="utf-8", newline="")
+
+    code = cli.main(["--config", str(config), "list", "--format", "json"])
+
+    assert code == 0
+    assert [e["task_id"] for e in json.loads(capsys.readouterr().out)] == ["task-done"]
+
+
 def test_cmd_list_pending_file_without_id_shown_by_filename(
     git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

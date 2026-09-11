@@ -6555,6 +6555,48 @@ def _triage_task(tmp_path: Path, task_id: str) -> str:
     return _complete_task(tmp_path, task_id, front_extra="task_type: triage\n")
 
 
+def test_declare_private_report_dir_clears_on_a_malformed_live_flow() -> None:
+    """A malformed live flow clears the declaration instead of raising out of a terminal path.
+
+    `_resolve_flow` wraps resolution and validation faults in `PipelineFailed`, but `load_flow`
+    raises `FlowLoadError` straight through it. The call in `_fail` sits *outside* `_fail`'s own
+    `try`, so anything escaping here would strand the task short of a terminal — no ledger record,
+    no cleanup, the exception out of `resume()`. Reachable when the control bundle is gone (say
+    `worc runs clean`) and the live flow file is mid-edit.
+    """
+
+    from types import SimpleNamespace
+
+    from wastech_orchestrator.core.flow.snapshot import FlowLoadError
+
+    class _Git:
+        def __init__(self) -> None:
+            self.declared: list[tuple[str | None, str | None]] = []
+
+        def set_private_report_dir(self, subdir: str | None, base: str | None = None) -> None:
+            self.declared.append((subdir, base))
+
+    class _Store:
+        def get_control_bundle_digest(self, task_id: str) -> str | None:
+            del task_id
+            return None  # the bundle was reclaimed, so the live flow is the only source
+
+    orch = Orchestrator.__new__(Orchestrator)
+    git = _Git()
+    orch._git = git  # type: ignore[attr-defined]
+    orch._store = _Store()  # type: ignore[attr-defined]
+
+    def _raise(_p: object):
+        raise FlowLoadError("flow.yaml: while parsing a block mapping")
+
+    orch._resolve_flow = _raise  # type: ignore[assignment, method-assign]
+    pipeline = SimpleNamespace(task=SimpleNamespace(id="task-x"))
+
+    orch._declare_private_report_dir(pipeline)  # type: ignore[arg-type]
+
+    assert git.declared == [(None, None)]
+
+
 def test_report_slot_writes_under_the_declared_report_dir(
     git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:

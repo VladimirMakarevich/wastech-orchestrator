@@ -69,7 +69,7 @@ from wastech_orchestrator.git_manager import (
     tasks_ignore_root,
 )
 from wastech_orchestrator.install import config_writer, detect, wizard
-from wastech_orchestrator.ledger import Ledger
+from wastech_orchestrator.ledger import COMPLETED_FILENAME, Ledger, LedgerUnreadableError
 from wastech_orchestrator.memory import (
     AuditActor,
     AuditContext,
@@ -4674,12 +4674,23 @@ def _rejected_entries(logs_root: Path, known_ids: set[str]) -> list[dict[str, st
     name has a row and is an ordinary task again, so it drops out here by construction.
     """
     ledger = Ledger(logs_root)
-    # The ledger is append-only, so the last record wins for an id that was rejected more than once.
-    latest = {
-        task_id: record
-        for record in ledger.records()
-        if isinstance(task_id := record.get("id"), str) and task_id not in known_ids
-    }
+    try:
+        # The ledger is append-only, so the last record wins for an id rejected more than once.
+        latest = {
+            task_id: record
+            for record in ledger.records()
+            if isinstance(task_id := record.get("id"), str) and task_id not in known_ids
+        }
+        rejected_ids = {task_id for task_id in latest if ledger.only_validation_rejects(task_id)}
+    except json.JSONDecodeError as exc:
+        # `list` is the first read-only command to read the ledger, and a torn append after a crash
+        # (or a hand edit) would otherwise surface as a traceback out of a listing. Name the file
+        # and exit 2, the way every other `worc` failure reports. Skipping the bad line instead is
+        # not on offer: `records()` also feeds the duplicate-id gate, which must stay strict.
+        raise LedgerUnreadableError(
+            f"cannot read the completed-tasks ledger at "
+            f"{(logs_root / COMPLETED_FILENAME).as_posix()}: {exc}"
+        ) from exc
     return [
         {
             "task_id": task_id,
@@ -4690,11 +4701,11 @@ def _rejected_entries(logs_root: Path, known_ids: set[str]) -> list[dict[str, st
             "validation_reason": record.get("validation_reason"),
             "rejected_at": record.get("finished_at"),
         }
-        # The same predicate the duplicate-id gate uses, so the two can never disagree about which
-        # ledger trace is "rejects only" — this section must not describe an id the gate would
-        # refuse to let through, nor hide one it would.
+        # `rejected_ids` came from the same predicate the duplicate-id gate uses, so the two can
+        # never disagree about which ledger trace is "rejects only" — this section must not
+        # describe an id the gate would refuse to let through, nor hide one it would.
         for task_id, record in latest.items()
-        if ledger.only_validation_rejects(task_id)
+        if task_id in rejected_ids
     ]
 
 
@@ -5236,6 +5247,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (
         ConfigError,
         IncompatibleStateError,
+        LedgerUnreadableError,
         preflight.GhNotAvailableError,
         preflight.ProviderNotLoggedInError,
     ) as exc:
