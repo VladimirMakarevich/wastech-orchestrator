@@ -10,7 +10,12 @@ import pytest
 
 from wastech_orchestrator.config.schema import BranchMode, OrchestratorConfig, PublishScope
 from wastech_orchestrator.observability.logging import LOGGER_NAME
-from wastech_orchestrator.task.model import REQUIRED_TASK_FIELDS, NodeOverride
+from wastech_orchestrator.task.model import (
+    REFERENCE_MAX_CHARS,
+    REFERENCES_MAX_ITEMS,
+    REQUIRED_TASK_FIELDS,
+    NodeOverride,
+)
 from wastech_orchestrator.task.parser import ParsedSource
 from wastech_orchestrator.task.validation_gate import (
     Completeness,
@@ -317,6 +322,111 @@ def test_subtasks_list_of_strings_passes_gate_shape(config: OrchestratorConfig) 
     assert result.passed is True
     assert result.normalized is not None
     assert result.normalized.subtasks == ("sub/01-a.md", "sub/02-b.md")
+
+
+def _references(value: str) -> ParsedSource:
+    """A minimal valid task whose front matter carries ``references: <value>`` verbatim."""
+    return _src(f"---\nid: task-001\ntitle: T\nreferences: {value}\n---\n\n## Description\n\nx\n")
+
+
+def test_references_list_of_strings_passes(config: OrchestratorConfig) -> None:
+    # The whole point of the field: worc carries the lines without understanding either of them —
+    # no closing keyword is recognised, no URL is parsed.
+    result = _gate(config).validate(_references('["Fixes #142", "https://example.test/AB-7"]'))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.references == ("Fixes #142", "https://example.test/AB-7")
+
+
+def test_references_absent_defaults_empty(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_src(_GOOD))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.references == ()
+
+
+def test_references_non_list_rejected(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_references('"Fixes #142"'))
+    assert result.reason is ValidationReason.INVALID_REFERENCES
+    # Phase A short-circuits, so the gate hands back no task at all — which is what keeps a
+    # malformed field cheap: nothing downstream has a task to create a branch or a run for.
+    assert result.passed is False
+    assert result.normalized is None
+
+
+def test_references_empty_list_rejected(config: OrchestratorConfig) -> None:
+    # A present key with nothing in it is an author mistake, not a request for an empty section.
+    result = _gate(config).validate(_references("[]"))
+    assert result.reason is ValidationReason.INVALID_REFERENCES
+
+
+def test_references_empty_string_element_rejected(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_references('["Fixes #142", ""]'))
+    assert result.reason is ValidationReason.INVALID_REFERENCES
+
+
+def test_references_blank_string_element_rejected(config: OrchestratorConfig) -> None:
+    # Whitespace is not content: it would publish a bullet with nothing after it.
+    result = _gate(config).validate(_references('["   "]'))
+    assert result.reason is ValidationReason.INVALID_REFERENCES
+
+
+def test_references_non_string_element_rejected(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_references('["Fixes #142", 7]'))
+    assert result.reason is ValidationReason.INVALID_REFERENCES
+
+
+def test_references_over_long_entry_rejected(config: OrchestratorConfig) -> None:
+    over_limit = "x" * (REFERENCE_MAX_CHARS + 1)
+    result = _gate(config).validate(_references(f'["{over_limit}"]'))
+    assert result.reason is ValidationReason.INVALID_REFERENCES
+    assert str(REFERENCE_MAX_CHARS) in result.detail
+
+
+def test_references_at_the_length_limit_passes(config: OrchestratorConfig) -> None:
+    # The boundary is inclusive, so the cap cannot drift by one without a test noticing.
+    at_limit = "x" * REFERENCE_MAX_CHARS
+    result = _gate(config).validate(_references(f'["{at_limit}"]'))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert result.normalized.references == (at_limit,)
+
+
+def test_references_too_many_entries_rejected(config: OrchestratorConfig) -> None:
+    too_many = ", ".join(f'"ref {i}"' for i in range(REFERENCES_MAX_ITEMS + 1))
+    result = _gate(config).validate(_references(f"[{too_many}]"))
+    assert result.reason is ValidationReason.INVALID_REFERENCES
+    assert str(REFERENCES_MAX_ITEMS) in result.detail
+
+
+def test_references_at_the_count_limit_passes(config: OrchestratorConfig) -> None:
+    at_limit = ", ".join(f'"ref {i}"' for i in range(REFERENCES_MAX_ITEMS))
+    result = _gate(config).validate(_references(f"[{at_limit}]"))
+    assert result.passed is True
+    assert result.normalized is not None
+    assert len(result.normalized.references) == REFERENCES_MAX_ITEMS
+
+
+def test_references_embedded_newline_rejected_as_shape_not_injection(
+    config: OrchestratorConfig,
+) -> None:
+    # A newline offends both checks — it is also an argv-shaped token — so this is the case that
+    # pins the ORDER: the shape check runs first, and the operator is told the field is malformed
+    # rather than that the task looks like an attack.
+    result = _gate(config).validate(_references('["a\\nb"]'))
+    assert result.reason is ValidationReason.INVALID_REFERENCES
+
+
+def test_references_leading_dash_is_injection_suspected(config: OrchestratorConfig) -> None:
+    # Left to the existing scan, which already recurses into lists: the shape rules deliberately
+    # do not restate its token vocabulary, so the two cannot drift apart.
+    result = _gate(config).validate(_references('["-flag"]'))
+    assert result.reason is ValidationReason.INJECTION_SUSPECTED
+
+
+def test_references_argv_token_is_injection_suspected(config: OrchestratorConfig) -> None:
+    result = _gate(config).validate(_references('["a; b"]'))
+    assert result.reason is ValidationReason.INJECTION_SUSPECTED
 
 
 def test_invalid_task_id(config: OrchestratorConfig) -> None:

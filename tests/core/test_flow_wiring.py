@@ -48,7 +48,9 @@ def _fake_pipeline(**over: object) -> SimpleNamespace:
         "review_findings_path": "/a/review/findings.json",
         "decomposition": SimpleNamespace(accepted=True, n=3),
         "branch": "worc/task-1-x",
-        "task": SimpleNamespace(contacts=("@me",), task_type="implementation"),
+        "task": SimpleNamespace(
+            contacts=("@me",), task_type="implementation", references=("Fixes #142",)
+        ),
     }
     base.update(over)
     return SimpleNamespace(**base)
@@ -77,6 +79,9 @@ def test_build_node_inputs_maps_pipeline_paths(tmp_path: Path) -> None:
     assert inputs.summary_body_path == "/s/summary.md"
     assert inputs.commit_message == "feat: x"
     assert inputs.contacts == ("@me",)
+    # Carried from the task so the publish node can append it to the PR body without the core
+    # ever reading it.
+    assert inputs.references == ("Fixes #142",)
     # Editing-session continuity is durable now (the editing_lineage store), not an in-memory
     # map threaded through NodeInputs.
 
