@@ -3221,6 +3221,8 @@ class FakeGit:
         # Commits publishing found already committed inside the run (an agent's own `git commit`).
         self.locally_adopted = 0
         self.pr_notice: str | None = None
+        # The task's opaque `references` section, recorded the same way as the notice.
+        self.pr_references_block: str | None = None
 
     def commit_code(self, task_id: str, message: str) -> str | None:
         self.calls.append(("commit_code", task_id, message))
@@ -3269,9 +3271,11 @@ class FakeGit:
         title: str,
         body_path: str,
         notice: str | None = None,
+        references_block: str | None = None,
     ) -> str | None:
         self.calls.append(("create_pr", task_id, branch, title, body_path))
         self.pr_notice = notice
+        self.pr_references_block = references_block
         return "https://example/pr/1"
 
     def write_current_diff(self, task_id: str) -> str:
@@ -3392,6 +3396,28 @@ def test_publish_cap_push_stops_before_pr(tmp_path: Path) -> None:
         "adopt_foreign_commits",
         "push",
     ]
+
+
+def test_publish_renders_the_task_references_as_a_pr_body_section(tmp_path: Path) -> None:
+    # The task's opaque lines become one Markdown list under a fixed heading, each exactly as the
+    # task carried it: no closing keyword is recognised and no link is rewritten, because worc
+    # knows no tracker's syntax and must not start guessing at one.
+    git = _publish_git(tmp_path, references=("Fixes #142", "https://example.test/AB-7"))
+    assert git.pr_references_block == "## References\n\n- Fixes #142\n- https://example.test/AB-7"
+
+
+def test_publish_without_references_passes_no_block(tmp_path: Path) -> None:
+    # The ordinary task: nothing is appended and the PR body is the summary as before.
+    git = _publish_git(tmp_path)
+    assert git.pr_references_block is None
+
+
+def test_publish_cap_push_builds_no_references_block(tmp_path: Path) -> None:
+    # A `push` cap opens no PR, so there is no body for a references section to reach — the block
+    # is never built and `gh` is never asked to create anything.
+    git = _publish_git(tmp_path, publish_scope=PublishScope.PUSH, references=("Fixes #142",))
+    assert not any(c[0] == "create_pr" for c in git.calls)
+    assert git.pr_references_block is None
 
 
 def test_publish_forwards_branch_mode_to_push(tmp_path: Path) -> None:

@@ -155,4 +155,5 @@ def build_node_inputs(
         summary_body_path=summary_body_path,
         commit_message=commit_message,
         contacts=tuple(p.task.contacts),
+        references=p.task.references,
     )

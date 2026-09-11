@@ -3008,6 +3008,7 @@ class GitManager:
         title: str,
         body_path: str,
         notice: str | None = None,
+        references_block: str | None = None,
     ) -> str | None:
         """Open a PR with ``summary.md`` as the body. Idempotent. None when PRs are disabled.
 
@@ -3016,6 +3017,9 @@ class GitManager:
         impossible, so the commit+push already stand and the PR step is skipped; and PR reuse — a
         chain of tasks on one branch converges on one PR, so an already-open ``head→base`` PR is
         reused rather than re-created (``gh pr create`` would otherwise fail on the duplicate).
+
+        ``notice`` and ``references_block`` annotate the body, and both are applied before the
+        reuse probe so the reused chain PR carries them exactly as a freshly created one does.
         """
         if not self._config.git.create_pull_request:
             return None
@@ -3028,8 +3032,10 @@ class GitManager:
         existing = self._store.get_publish_op(task_id, KIND_PR, None)
         if existing is not None and existing.status == _STATUS_COMPLETED:
             return existing.result_ref
-        if notice:
-            body_path = self._body_with_notice(task_id, body_path, notice)
+        if notice or references_block:
+            body_path = self._annotated_body(
+                task_id, body_path, notice=notice, references_block=references_block
+            )
         reused = self._find_open_pr(task_id, branch, pr_base)
         if reused is not None:
             # An open PR on this head is reused whether or not one of our rows already names it.
@@ -3070,19 +3076,30 @@ class GitManager:
         self._record_completed(task_id, KIND_PR, branch, pr_url)
         return pr_url
 
-    def _body_with_notice(self, task_id: str, body_path: str, notice: str) -> str:
-        """A copy of the PR body with *notice* on top, written under the task's artifacts.
+    def _annotated_body(
+        self, task_id: str, body_path: str, *, notice: str | None, references_block: str | None
+    ) -> str:
+        """A copy of the PR body with *notice* on top and *references_block* at the foot.
 
         The committed ``summary.md`` is already in a commit, so it is not rewritten; the PR gets
         the annotated copy instead. Falls back to the original body on any read/write failure — a
         missing annotation must not cost the task its pull request.
+
+        The two annotations sit at opposite ends because they address opposite readers: the notice
+        warns about what the diff below it contains, so it has to be seen first, while the
+        references are a footer whatever produced the task expects to find at the end.
+        ``newline=""`` keeps the body byte-identical on every host — the default text mode would
+        rewrite each ``\\n`` to ``\\r\\n`` on Windows and put CRLF into a pull-request body.
         """
         try:
             original = Path(body_path).read_text(encoding="utf-8") if body_path else ""
+            annotated = f"{notice}\n\n{original}" if notice else original
+            if references_block:
+                annotated = f"{annotated.rstrip()}\n\n{references_block}\n"
             dest = task_artifact_dir(self._artifacts_root, task_id) / "pr-body.md"
             dest.parent.mkdir(parents=True, exist_ok=True)
             with dest.open("w", encoding="utf-8", newline="") as fh:
-                fh.write(f"{notice}\n\n{original}")
+                fh.write(annotated)
             return str(dest)
         except OSError:
             return body_path

@@ -1771,6 +1771,149 @@ def test_create_pr_reuse_retitles_to_describe_the_chain(
     assert "--body-file" in edit
 
 
+_REFERENCES_BLOCK = "## References\n\n- Fixes #142\n- https://example.test/AB-7"
+
+
+def test_create_pr_appends_the_references_block_below_the_summary(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # The task's opaque lines ride the body FILE handed to `gh pr create` — never an argv — and
+    # the committed summary the finalize step wrote is left byte-for-byte alone: it is already in
+    # a commit, so the annotated copy is a separate artifact.
+    _task(store)
+    calls: list[list[str]] = []
+    gh = _reuse_gh(calls, list_stdout="[]", create_url="https://x/pull/1")
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    summary = tmp_path / "task-001.summary.md"
+    summary.write_text("# summary\n\nWhat changed.\n", encoding="utf-8", newline="")
+    before = summary.read_bytes()
+
+    gm.create_pr(
+        "task-001",
+        "feature/x",
+        title="t",
+        body_path=str(summary),
+        references_block=_REFERENCES_BLOCK,
+    )
+
+    create = next(c for c in calls if c[:2] == ["pr", "create"])
+    # The structural invariant, asserted rather than assumed: task-authored text reaches `gh` as
+    # file content only. Nothing from the task is anywhere in the argument list.
+    assert not any("Fixes #142" in token for token in create)
+    body_file = Path(create[create.index("--body-file") + 1])
+    assert body_file != summary  # the annotated copy, not the committed file
+    written = body_file.read_bytes()
+    assert b"\r\n" not in written  # `newline=""`: LF on every host, no CRLF in a PR body
+    text = written.decode("utf-8")
+    assert text.startswith("# summary\n\nWhat changed.")
+    assert text.rstrip("\n").endswith(_REFERENCES_BLOCK)
+    assert summary.read_bytes() == before
+
+
+def test_create_pr_without_annotations_sends_the_committed_body_itself(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # No notice and no references ⇒ no annotated copy at all; the committed summary is the body.
+    _task(store)
+    calls: list[list[str]] = []
+    gh = _reuse_gh(calls, list_stdout="[]", create_url="https://x/pull/1")
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    summary = tmp_path / "task-001.summary.md"
+    summary.write_text("# summary\n", encoding="utf-8", newline="")
+
+    gm.create_pr("task-001", "feature/x", title="t", body_path=str(summary))
+
+    create = next(c for c in calls if c[:2] == ["pr", "create"])
+    assert create[create.index("--body-file") + 1] == str(summary)
+
+
+def test_create_pr_body_carries_the_notice_first_and_the_references_last(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # Opposite ends, because they address opposite readers: the notice qualifies the diff below it
+    # and has to be seen first, the references are the footer their producer expects at the end.
+    _task(store)
+    calls: list[list[str]] = []
+    gh = _reuse_gh(calls, list_stdout="[]", create_url="https://x/pull/1")
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    summary = tmp_path / "task-001.summary.md"
+    summary.write_text("# summary\n", encoding="utf-8", newline="")
+
+    gm.create_pr(
+        "task-001",
+        "feature/x",
+        title="t",
+        body_path=str(summary),
+        notice="> **Adopted 1 commit(s)**",
+        references_block=_REFERENCES_BLOCK,
+    )
+
+    create = next(c for c in calls if c[:2] == ["pr", "create"])
+    text = Path(create[create.index("--body-file") + 1]).read_text(encoding="utf-8")
+    assert text.startswith("> **Adopted 1 commit(s)**")
+    assert text.index("# summary") < text.index(_REFERENCES_BLOCK)
+    assert text.rstrip("\n").endswith(_REFERENCES_BLOCK)
+
+
+def test_create_pr_reuse_appends_a_body_carrying_the_references_block(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # The chain-PR case: the annotation is applied before the reuse probe, so the section the
+    # reuse path appends to an already-open PR carries the references too.
+    _task(store)
+    _ours(store, "https://x/pull/9")  # the chain's first task opened it
+    calls: list[list[str]] = []
+    summary = tmp_path / "task-001.summary.md"
+    summary.write_text("This task added the query layer.\n", encoding="utf-8", newline="")
+    before = summary.read_bytes()
+    gh = _reuse_gh(
+        calls,
+        list_stdout='[{"url": "https://x/pull/9", "updatedAt": "2026-01-01"}]',
+        body_stdout="Original body (task 1).",
+    )
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+
+    gm.create_pr(
+        "task-001",
+        "feature/shared",
+        title="Query",
+        body_path=str(summary),
+        references_block=_REFERENCES_BLOCK,
+    )
+
+    edit = next(c for c in calls if c[:2] == ["pr", "edit"])
+    assert not any("Fixes #142" in token for token in edit)  # file content, never argv
+    written = Path(edit[edit.index("--body-file") + 1]).read_text(encoding="utf-8")
+    assert "Original body (task 1)." in written  # the chain's prior content survives
+    assert "This task added the query layer." in written
+    assert _REFERENCES_BLOCK in written
+    assert summary.read_bytes() == before  # the committed summary is read, never rewritten
+
+
+def test_create_pr_falls_back_to_the_plain_body_when_the_copy_cannot_be_written(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # A missing annotation must never cost the task its pull request: an unreadable body path
+    # degrades to sending the original, exactly as the notice path already does.
+    _task(store)
+    calls: list[list[str]] = []
+    gh = _reuse_gh(calls, list_stdout="[]", create_url="https://x/pull/1")
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    missing = tmp_path / "gone" / "task-001.summary.md"  # the parent directory does not exist
+
+    url = gm.create_pr(
+        "task-001",
+        "feature/x",
+        title="t",
+        body_path=str(missing),
+        references_block=_REFERENCES_BLOCK,
+    )
+
+    assert url == "https://x/pull/1"
+    create = next(c for c in calls if c[:2] == ["pr", "create"])
+    assert create[create.index("--body-file") + 1] == str(missing)
+
+
 def test_bound_pr_body_unchanged_within_cap() -> None:
     body = f"head{_SECTION_SEPARATOR}{_TASK_MARKER_PREFIX}t2 -->\n\n## T\n\nshort summary"
     assert _bound_pr_body(body) == body

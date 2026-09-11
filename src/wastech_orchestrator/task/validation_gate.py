@@ -38,6 +38,8 @@ from wastech_orchestrator.task.model import (
     BRANCH_NAME_MAX_LEN,
     COMMIT_TYPES,
     DEFAULT_QUEUE,
+    REFERENCE_MAX_CHARS,
+    REFERENCES_MAX_ITEMS,
     REQUIRED_TASK_FIELDS,
     TASK_ID_PATTERN,
     NodeOverride,
@@ -85,6 +87,10 @@ class ValidationReason(StrEnum):
     DUPLICATE_TASK_ID = "duplicate_task_id"
     INVALID_NODE_OVERRIDE = "invalid_node_override"
     INVALID_DEPENDS_ON = "invalid_depends_on"
+    # ``references:`` shape only — a bounded list of single-line, non-blank strings. The content is
+    # never parsed (the orchestrator knows no tracker syntax), so this is the whole of what can be
+    # checked about it; argv-shaped entries are the injection scan's business, not this one's.
+    INVALID_REFERENCES = "invalid_references"
     INJECTION_SUSPECTED = "injection_suspected"
     # Operator-authored decomposition (``subtasks:``). ``INVALID_SUBTASKS`` is the gate's cheap
     # list-of-strings shape check; the rest are surfaced by the orchestrator's pre-branch operator
@@ -339,6 +345,10 @@ class ValidationGate:
             priority=normalize_priority(frontmatter.get("priority")),
             queue=queue,
             subtasks=tuple(str(s).strip() for s in frontmatter.get("subtasks", [])),
+            # Not stripped, unlike the neighbours above: those are identifiers and paths the
+            # orchestrator matches on, while a reference is text it republishes unchanged. The
+            # shape check already proved each entry is a single non-blank line.
+            references=tuple(frontmatter.get("references", [])),
             node_overrides=node_overrides,
         )
         return None, task
@@ -440,6 +450,10 @@ class ValidationGate:
                     ValidationReason.INVALID_SUBTASKS,
                     "subtasks must be a list of non-empty path strings",
                 )
+        if "references" in fm:
+            references_reject = _check_references(fm["references"])
+            if references_reject is not None:
+                return references_reject
         return None
 
     def _branch_name(self, raw: Any) -> tuple[str | None, _Reject | None]:
@@ -590,6 +604,50 @@ class ValidationGate:
         if has_description and has_acceptance:
             return Completeness.COMPLETE
         return Completeness.NEEDS_ENRICHMENT
+
+
+def _check_references(value: Any) -> _Reject | None:
+    """Bound the shape of ``references:`` — the one front-matter value published verbatim.
+
+    A helper rather than another block in ``_check_field_types`` because the field needs more
+    conditions than any other there, and none of them are shared with a neighbour.
+
+    Every entry ends up as one line of a Markdown list in a pull-request body, so the shape rules
+    are exactly what that demands: a present key carries at least one entry (an empty list is an
+    author mistake, not a way to ask for an empty section), the count and the length stay inside
+    what a reviewer can read, and an entry is a single non-blank line — an embedded newline would
+    silently turn one reference into several, or smuggle a heading into the body. The text itself
+    is not examined: the orchestrator knows no tracker syntax and must not start guessing at one.
+    """
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes):
+        return _Reject(ValidationReason.INVALID_REFERENCES, "references must be a list")
+    if not value:
+        return _Reject(
+            ValidationReason.INVALID_REFERENCES, "references must not be empty when present"
+        )
+    if len(value) > REFERENCES_MAX_ITEMS:
+        return _Reject(
+            ValidationReason.INVALID_REFERENCES,
+            f"references must hold at most {REFERENCES_MAX_ITEMS} entries (got {len(value)})",
+        )
+    for index, entry in enumerate(value):
+        if not isinstance(entry, str) or not entry.strip():
+            return _Reject(
+                ValidationReason.INVALID_REFERENCES,
+                f"references[{index}] must be a non-empty string",
+            )
+        if len(entry) > REFERENCE_MAX_CHARS:
+            return _Reject(
+                ValidationReason.INVALID_REFERENCES,
+                f"references[{index}] must be at most {REFERENCE_MAX_CHARS} characters "
+                f"(got {len(entry)})",
+            )
+        if "\n" in entry or "\r" in entry:
+            return _Reject(
+                ValidationReason.INVALID_REFERENCES,
+                f"references[{index}] must be a single line",
+            )
+    return None
 
 
 def _rej(reason: ValidationReason, detail: str) -> tuple[_Reject, None]:

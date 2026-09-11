@@ -162,6 +162,7 @@ class _Git:
         title: str,
         body_path: str,
         notice: str | None = None,
+        references_block: str | None = None,
     ) -> str | None:
         self.calls.append("create_pr")
         return "url"
