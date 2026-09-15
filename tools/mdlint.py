@@ -5,18 +5,19 @@ One entry point for the local shell and the pre-commit hook, so both run the sam
 same rules rather than two hand-written command lines that drift. Two responsibilities justify a
 script instead of a bare command:
 
-* **Finding the linter.** It is not published to a package registry, so there is no dependency copy
-  in this repository and no bin on PATH to rely on. Resolution is env var, then a sibling checkout,
-  then a local install if one ever exists — reported explicitly, never guessed silently.
+* **Finding the linter.** Normally it is the pinned `@wastech-mdlint/cli` devDependency, so
+  `npm ci` is the whole setup. Two fallbacks survive that for the people who develop the linter
+  itself: an explicit env var, then a sibling checkout. Resolution is most-explicit-first and is
+  reported when it fails, never guessed silently.
 * **Covering both branch states.** The shared config describes the corpus that exists on every
   branch; the branch carrying the derived documentation adds a second, additive config for the
   rules that presuppose it. Running the shared config plus every overlay that is actually present
   makes the command correct on either branch with no branch-name logic anywhere.
 
 Exit codes mirror the linter's own: ``0`` clean, ``1`` findings, ``2`` operational failure. A linter
-that cannot be found is a skip with a note, so committing a typo fix never requires a Node toolchain
-— but not under ``CI``, where the same case is a hard failure, because an automated caller that
-reports success for a gate it never ran is worse than a red one.
+that cannot be found is a skip with a note, so committing a typo fix never requires ``npm ci`` to
+have been run — but not under ``CI``, where the same case is a hard failure, because an automated
+caller that reports success for a gate it never ran is worse than a red one.
 """
 
 from __future__ import annotations
@@ -37,7 +38,8 @@ OVERLAY_CONFIGS = ("wastech-mdlint.docs.config.json",)
 HOME_ENV_VAR = "WASTECH_MDLINT_HOME"
 
 # The linter is a workspace monorepo: this is the CLI package's built entry point inside a
-# checkout of it. `npm install` there writes no files here, and the build output is what runs.
+# checkout of it — the layout of a source checkout, not of the published package, which is why it
+# differs from the `node_modules` path below. `npm install` there writes no files here.
 CLI_ENTRY = Path("packages") / "cli" / "dist" / "index.js"
 
 # Findings must fail the build, so the threshold is pinned here rather than left to the linter's
@@ -60,10 +62,11 @@ def note(message: str) -> None:
 
 
 def find_cli(root: Path) -> Path | None:
-    """Locate the linter's built CLI entry point, or ``None`` when no checkout is available.
+    """Locate the linter's CLI entry point, or ``None`` when none is available.
 
-    Order is most-explicit-first: an operator's env var wins over a lucky sibling directory, and
-    both lose to a dependency install, which exists only once the tool is published and pinned here.
+    The installed dependency wins: it is the version this repository pins, so a stale sibling
+    checkout can never quietly decide what the gate means. The env var and the sibling directory
+    are the escape hatch for developing the linter against this corpus, in that order.
     """
     installed = root / "node_modules" / "@wastech-mdlint" / "cli" / "dist" / "index.js"
     if installed.is_file():
@@ -124,13 +127,13 @@ def main(argv: list[str]) -> int:
     cli = find_cli(root) if node else None
 
     if node is None or cli is None:
-        missing = "node is not on PATH" if node is None else "no linter checkout was found"
+        missing = "node is not on PATH" if node is None else "the linter is not installed"
         if os.environ.get("CI"):
             note(f"cannot run the Markdown gate: {missing}")
             return 2
         note(
-            f"skipped ({missing}). Point {HOME_ENV_VAR} at a built wastech-mdlint checkout "
-            "to run it locally; CI runs it either way."
+            f"skipped ({missing}). Run `npm ci` to install the pinned linter, or point "
+            f"{HOME_ENV_VAR} at a built wastech-mdlint checkout to run one you are developing."
         )
         return 0
 
