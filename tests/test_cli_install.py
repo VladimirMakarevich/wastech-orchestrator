@@ -227,6 +227,93 @@ def test_install_ignores_worc_home_via_tracked_gitignore(
     assert ".worc/" in gitignore
 
 
+def test_install_ignores_the_task_lifecycle_tree_by_default(
+    git_repo: Any, monkeypatch: pytest.MonkeyPatch, git_run: GitRunner
+) -> None:
+    # The default: task files stay out of git, so an operator's `git status` is clean and no
+    # lifecycle file rides a task's pull request. The line is ANCHORED — an unanchored `tasks/`
+    # would also ignore a `src/tasks/` package in the operator's own source tree.
+    _present(monkeypatch, "codex")
+    assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
+    lines = (git_repo.clone / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert "/tasks/" in lines
+    assert "tasks/" not in lines
+    (git_repo.clone / "tasks" / "pending" / "task-001.md").write_text("# t\n", encoding="utf-8")
+    git_run(["check-ignore", "-q", "tasks/pending/task-001.md"], git_repo.clone)  # exit 0 = ignored
+    assert "tasks/" not in git_run(["status", "--porcelain", "-uall"], git_repo.clone)
+    # A same-named directory deeper in the tree is untouched.
+    nested = git_repo.clone / "src" / "tasks"
+    nested.mkdir(parents=True)
+    (nested / "runner.py").write_text("x = 1\n", encoding="utf-8")
+    assert "src/tasks/runner.py" in git_run(["status", "--porcelain", "-uall"], git_repo.clone)
+
+
+def test_install_track_tasks_leaves_the_lifecycle_tree_trackable(
+    git_repo: Any, monkeypatch: pytest.MonkeyPatch, git_run: GitRunner, capsys: Any
+) -> None:
+    _present(monkeypatch, "codex")
+    argv = _ni(git_repo.clone, "--provider", "codex", "--skip-preflight", "--track-tasks")
+    assert cli.main(argv) == 0
+    lines = (git_repo.clone / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert ".worc/" in lines  # the runtime home is ignored either way
+    assert "/tasks/" not in lines
+    assert "you asked to track your tasks" in capsys.readouterr().out
+    (git_repo.clone / "tasks" / "pending" / "task-001.md").write_text("# t\n", encoding="utf-8")
+    porcelain = git_run(["status", "--porcelain", "-uall"], git_repo.clone)
+    assert "tasks/pending/task-001.md" in porcelain
+
+
+def test_install_never_ignores_a_tasks_dir_that_already_holds_tracked_files(
+    git_repo: Any, monkeypatch: pytest.MonkeyPatch, git_run: GitRunner, capsys: Any
+) -> None:
+    # `tasks` is a name a repository may already use for something of its own, and an operator who
+    # tracks their lifecycle tree deletes the seeded line. Both look the same from here, and in
+    # both cases appending the rule would stop *new* files in that directory from ever showing up
+    # in `git status` — a change nobody asked for. Tracked content overrules the default.
+    _present(monkeypatch, "codex")
+    (git_repo.clone / "tasks").mkdir()
+    (git_repo.clone / "tasks" / "own-work.md").write_text("mine\n", encoding="utf-8")
+    git_run(["add", "tasks/own-work.md"], git_repo.clone)
+    git_run(["commit", "-m", "the repo already uses tasks/"], git_repo.clone)
+    assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
+    gitignore = git_repo.clone / ".gitignore"
+    lines = gitignore.read_text(encoding="utf-8").splitlines() if gitignore.exists() else []
+    assert ".worc/" in lines  # the runtime home is still ignored
+    assert "/tasks/" not in lines
+    assert "git already tracks files there" in capsys.readouterr().out
+    (git_repo.clone / "tasks" / "pending" / "task-001.md").write_text("# t\n", encoding="utf-8")
+    porcelain = git_run(["status", "--porcelain", "-uall"], git_repo.clone)
+    assert "tasks/pending/task-001.md" in porcelain
+
+
+def test_install_tasks_dir_override_drives_folders_config_and_ignore_line(
+    git_repo: Any, monkeypatch: pytest.MonkeyPatch, git_run: GitRunner
+) -> None:
+    # One value, three consumers: the scaffolded folders, `paths.tasks_dir`, and the ignore line.
+    # A nested value is the interesting one — the ignore pattern must still be repo-root anchored.
+    _present(monkeypatch, "codex")
+    flags = ("--provider", "codex", "--skip-preflight", "--tasks-dir", "ops/queue")
+    argv = _ni(git_repo.clone, *flags)
+    assert cli.main(argv) == 0
+    assert _loaded(git_repo.clone).paths.tasks_dir == "ops/queue"
+    assert (git_repo.clone / "ops" / "queue" / "pending").is_dir()
+    assert not (git_repo.clone / "tasks").exists()
+    assert "/ops/queue/" in (git_repo.clone / ".gitignore").read_text(encoding="utf-8").splitlines()
+    git_run(["check-ignore", "-q", "ops/queue/pending/t.md"], git_repo.clone)
+
+
+def test_install_rejects_an_unsafe_tasks_dir(
+    git_repo: Any, monkeypatch: pytest.MonkeyPatch, capsys: Any
+) -> None:
+    # The generated config is round-tripped through the semantic validator, so a traversing or
+    # absolute `--tasks-dir` is refused with a clean message, not scaffolded outside the repo.
+    _present(monkeypatch, "codex")
+    argv = _ni(git_repo.clone, "--provider", "codex", "--skip-preflight", "--tasks-dir", "../tasks")
+    assert cli.main(argv) == 2
+    assert "paths.tasks_dir" in capsys.readouterr().out
+    assert _config_for(git_repo.clone) is None
+
+
 def test_install_writes_config_and_guide_into_worc(
     git_repo: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:

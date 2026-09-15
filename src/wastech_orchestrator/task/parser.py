@@ -12,6 +12,7 @@ reported deterministically rather than silently taking the last value.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Hashable
@@ -68,6 +69,19 @@ def read_task_source(path: str | Path) -> ParsedSource:
     """Read a task file as raw bytes, recording its suffix. Decoding is the gate's concern."""
     p = Path(path)
     return ParsedSource(path=str(p), suffix=p.suffix.lower(), raw_bytes=p.read_bytes())
+
+
+def source_digest(raw: bytes) -> str:
+    """The content identity of a task file: sha256 over its bytes with newlines normalized to LF.
+
+    Persisted with the task and compared later against a file found on disk, to answer "is this the
+    same task I already ran?" when the recorded path can no longer answer it. The normalization is
+    load-bearing rather than cosmetic: the file being compared has usually been through a git
+    checkout, and a clone with ``core.autocrlf=true`` (the Windows default) hands back CRLF for
+    content that was committed as LF. A raw byte digest would therefore report every Windows
+    operator's own task file as a stranger's.
+    """
+    return hashlib.sha256(raw.replace(b"\r\n", b"\n")).hexdigest()
 
 
 class _UniqueKeyLoader(yaml.SafeLoader):
@@ -244,6 +258,11 @@ def write_normalized(task: NormalizedTask, artifacts_root: str | Path) -> str:
         "priority": task.priority,
         "queue": task.queue,
         "subtasks": list(task.subtasks),
+        # Persisted for the same restart-safety reason as the gates above, with the failure one
+        # step further out: publishing is the last thing a run does, so a task resumed after a
+        # crash is exactly the task whose pull request still has to be opened — and it would open
+        # with the references silently missing, which whatever produced the task cannot detect.
+        "references": list(task.references),
         "nodes": {node_id: _node_override_json(ov) for node_id, ov in task.node_overrides.items()},
     }
     path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
@@ -306,6 +325,7 @@ def load_normalized(artifacts_root: str | Path, task_id: str) -> NormalizedTask:
         priority=normalize_priority(data.get("priority")),
         queue=data.get("queue") or DEFAULT_QUEUE,
         subtasks=tuple(data.get("subtasks", [])),
+        references=tuple(data.get("references", [])),
         node_overrides=node_overrides,
     )
 

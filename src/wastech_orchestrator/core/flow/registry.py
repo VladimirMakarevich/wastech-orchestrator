@@ -57,9 +57,11 @@ class FlowResolutionError(Exception):
 class FlowCheck:
     """Result of validating one flow for ``worc validate-flow``: fatal error + non-fatal warnings.
 
-    *error* is ``None`` when the flow passes the full validator, else a one-line message. *warnings*
-    are the prompt-variable lint messages (empty for a clean or an unresolved flow — a broken flow's
-    fatal error is the signal, not its lint).
+    *error* is ``None`` when the flow passes the full validator, else the raised error's message
+    verbatim — which for a validation failure is a header line followed by one indented line per
+    violation, so a caller that renders only its first line drops every finding. *warnings* are the
+    prompt-variable lint messages (empty for a clean or an unresolved flow — a broken flow's fatal
+    error is the signal, not its lint).
     """
 
     name: str

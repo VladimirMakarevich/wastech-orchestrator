@@ -80,6 +80,7 @@ def test_allowlist_matches_documented_variables() -> None:
         "subtask_spec_path",
         "memory_path",  # per-node retrieval packet path (memory subsystem, phase 03)
         "predecessor_context",  # intra-task subtask handoff brief path (subtask-context-handoff)
+        "report_dir",  # the flow's resolved report directory for this task (output_policy)
     } == ALLOWED_PROMPT_VARS
 
 

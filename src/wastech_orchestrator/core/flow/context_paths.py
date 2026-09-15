@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
+from wastech_orchestrator.core.flow.output_policy import resolve_output_policy
 from wastech_orchestrator.core.flow.schema import AgentNode, FlowNode, ToolNode
 from wastech_orchestrator.providers.artifacts import (
     TOOL_STDOUT_FILENAME,
@@ -27,14 +28,23 @@ from wastech_orchestrator.providers.artifacts import (
 
 if TYPE_CHECKING:
     from wastech_orchestrator.core.flow.nodes.base import NodeInputs
+    from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 
 
-def build_path_context(inputs: NodeInputs, repo_dir: str) -> dict[str, str | None]:
+def build_path_context(
+    inputs: NodeInputs, repo_dir: str, report_dir: str | None = None
+) -> dict[str, str | None]:
     """The allowlisted path context for a node: repo root + task/plan/diff/checks/review artifacts.
 
     Values are the raw path strings the orchestrator already resolved (``None`` when an artifact
     does not exist yet — e.g. ``diff_path`` before any edit, ``review_path`` before review). No
     secret, full environment, or session id is ever included — only these fixed, allowlisted keys.
+
+    ``report_dir`` is this flow's resolved report directory for this task
+    (:func:`resolve_report_dir` — repo-relative POSIX, ``None`` for ``code_change``). It is the one
+    entry that is not an artifact the orchestrator wrote: it is where the node is *told to write*,
+    which is why it is stated once here for every reader (prompt and tool stdin) rather than
+    reconstructed per runner.
     """
     return {
         "repo": repo_dir,
@@ -43,7 +53,20 @@ def build_path_context(inputs: NodeInputs, repo_dir: str) -> dict[str, str | Non
         "diff_path": inputs.diff_path,
         "checks_path": inputs.checks_path,
         "review_path": inputs.review_path,
+        "report_dir": report_dir,
     }
+
+
+def resolve_report_dir(snapshot: FlowSnapshot, task_id: str) -> str | None:
+    """This flow's report directory for *task_id*: repo-relative POSIX, or ``None``.
+
+    The flow's ``output_policy`` (with its optional ``report_dir`` base) decides it, so the answer
+    is the same one the after-stage write guard and the publish node enforce against — the node is
+    never told to write somewhere its own flow would refuse.
+    """
+    return resolve_output_policy(
+        snapshot.doc.output_policy, task_id, snapshot.doc.report_dir
+    ).report_subdir
 
 
 def build_node_output_paths(

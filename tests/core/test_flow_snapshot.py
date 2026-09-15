@@ -490,6 +490,7 @@ def test_unknown_node_kind_raises(tmp_path: Path) -> None:
 
 def _write(tmp_path: Path, flow_body: str) -> Path:
     """Write a flow YAML whose ``flow:`` body is *flow_body* (already indented)."""
+    tmp_path.mkdir(parents=True, exist_ok=True)
     p = tmp_path / "f.yaml"
     p.write_text("flow:\n" + flow_body)
     return p
@@ -1015,3 +1016,54 @@ def test_skills_with_allow_skills_true_accepted(tmp_path: Path) -> None:
     node = load_flow(_write(tmp_path, body)).nodes_by_id["a"]
     assert isinstance(node, AgentNode)
     assert node.skills == ("acme-tdd",) and node.allow_skills is True
+
+
+# -- report_dir ---------------------------------------------------------------
+
+
+_REPORT_BODY = """\
+  name: t
+  task_type: t
+  permission_ceiling: workspace-write
+  output_policy: private_control_workspace_report
+  publishing: none
+  nodes:
+    - id: a
+      kind: agent
+      role_file: roles/a.md
+  edges: []
+"""
+
+
+def test_report_dir_parsed(tmp_path: Path) -> None:
+    body = _REPORT_BODY.replace(
+        "  publishing: none\n", "  publishing: none\n  report_dir: .worc-connect/triage\n"
+    )
+    assert load_flow(_write(tmp_path, body)).doc.report_dir == ".worc-connect/triage"
+
+
+def test_report_dir_absent_is_none(tmp_path: Path) -> None:
+    assert load_flow(_write(tmp_path, _REPORT_BODY)).doc.report_dir is None
+
+
+def test_report_dir_must_be_a_string(tmp_path: Path) -> None:
+    # A list/mapping would str() into a plausible-looking directory for the path validator to
+    # judge, so the shape is refused at load instead.
+    body = _REPORT_BODY.replace(
+        "  publishing: none\n", "  publishing: none\n  report_dir: [a, b]\n"
+    )
+    with pytest.raises(FlowLoadError, match=r"'report_dir' must be a string"):
+        load_flow(_write(tmp_path, body))
+
+
+def test_fingerprint_covers_report_dir(tmp_path: Path) -> None:
+    # The fingerprint is SHA-256 over the raw `flow:` mapping, so the new key is covered for free —
+    # a flow whose report directory moved is a different control plane.
+    base = load_flow(_write(tmp_path / "a", _REPORT_BODY)).flow_fingerprint
+    moved_body = _REPORT_BODY.replace(
+        "  publishing: none\n", "  publishing: none\n  report_dir: docs/adr\n"
+    )
+    moved = load_flow(_write(tmp_path / "b", moved_body)).flow_fingerprint
+    again = load_flow(_write(tmp_path / "c", moved_body)).flow_fingerprint
+    assert base != moved
+    assert moved == again

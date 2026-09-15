@@ -471,6 +471,79 @@ def test_resolved_profile_not_in_code_commit(
     assert ".worc/checks/resolved-profile.json" not in gm.changed_code_paths()
 
 
+def test_declared_private_report_dir_is_never_in_the_staging_set(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # A private report under a base the operator did NOT gitignore is an ordinary untracked file:
+    # `git status --porcelain` reports the whole untracked tree as one `.worc-connect/` entry, and
+    # staging that entry stages the report with it. Declaring the directory keeps it out of the
+    # staging set and out of the commit, while ordinary code beside it still commits.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    report = git_repo.clone / ".worc-connect" / "triage" / "task-001" / "report.md"
+    report.parent.mkdir(parents=True)
+    report.write_text("verdict: actionable\n", encoding="utf-8")
+    (git_repo.clone / "real.py").write_text("code\n", encoding="utf-8")
+
+    # Undeclared, the porcelain directory entry that contains it is an ordinary code path.
+    assert ".worc-connect/" in gm.changed_code_paths()
+
+    gm.set_private_report_dir(".worc-connect/triage/task-001")
+    assert gm.changed_code_paths() == ["real.py"]
+    sha = gm.commit_code("task-001", "feat: real")
+    assert sha is not None
+    committed = git_run(["show", "--name-only", "--format=", "HEAD"], git_repo.clone).split()
+    assert committed == ["real.py"]
+    # Still on disk and still untracked — withheld from the commit, not deleted or hidden.
+    assert report.is_file()
+    assert ".worc-connect/" in git_run(["status", "--porcelain"], git_repo.clone)
+
+    # Cleared again (the next task's flow declares none), the directory is ordinary once more.
+    gm.set_private_report_dir(None)
+    assert ".worc-connect/" in gm.changed_code_paths()
+
+
+def test_declared_private_report_dir_is_excluded_from_the_merge_sweep(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # `commit_merge_resolution` is the one staging path that sweeps the whole tree (`git add -A`),
+    # so the scoped pathspec cannot protect it; the declared report directory joins the runtime
+    # roots it excludes. Probed through the same helper the merge commit uses.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    assert ":(exclude,top).worc-connect/triage/task-001/" not in gm._runtime_add_excludes()
+    gm.set_private_report_dir(".worc-connect/triage/task-001")
+    assert ":(exclude,top).worc-connect/triage/task-001/" in gm._runtime_add_excludes()
+
+
+def test_merge_sweep_excludes_the_whole_declared_report_base(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # `git add -A` cannot tell this task's report directory from a *sibling* task's leftover under
+    # the same base, so the base — not just `<base>/<task_id>` — is what the merge sweep excludes
+    # and what its staged-set gate rejects. A leftover from an earlier run under an un-ignored base
+    # is exactly the thing a later task's base merge would otherwise sweep in.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    gm.set_private_report_dir(".worc-connect/triage/task-001", ".worc-connect/triage")
+
+    assert ":(exclude,top).worc-connect/triage/" in gm._runtime_add_excludes()
+    # The scoped commit still speaks only for this task's own directory…
+    assert not gm._is_private_report_path(".worc-connect/triage/task-002/report.md")
+    # …while the sweep's question covers every report under the base.
+    assert gm._is_private_report_base_path(".worc-connect/triage/task-002/report.md")
+
+    # The merge-mode gate refuses a sibling report that reached the index some other way.
+    sibling = git_repo.clone / ".worc-connect" / "triage" / "task-002" / "report.md"
+    sibling.parent.mkdir(parents=True)
+    sibling.write_text("an earlier task's verdict\n", encoding="utf-8")
+    gm._git("add", "-f", "--", ".worc-connect/triage/task-002/report.md")
+    with pytest.raises(ManualActionRequired) as excinfo:
+        gm.assert_staged_allowed(None)
+    assert "task-002/report.md" in str(excinfo.value)
+
+
 def test_ensure_runtime_excludes_writes_worc_line_to_local_exclude(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
 ) -> None:
@@ -582,6 +655,40 @@ def test_ensure_path_excluded_reports_failure_for_a_tracked_path(
     git_run(["add", "tracked-cache-target.txt"], git_repo.clone)
     git_run(["commit", "-m", "add a tracked file"], git_repo.clone)
     assert not ensure_path_excluded(git_repo.clone, tracked)
+
+
+def test_append_runtime_excludes_adds_an_anchored_line_for_the_configured_tasks_dir(
+    git_repo, git_run: GitRunner
+) -> None:
+    # `install` passes the configured `paths.tasks_dir`; the line is anchored at the repo root, or a
+    # bare `tasks/` would also ignore a `src/tasks/` package in the operator's own source tree.
+    appended = append_runtime_excludes(git_repo.clone, tasks_dir="ops/queue")
+    assert "/ops/queue/" in appended
+    assert any("delete this line to track tasks" in line for line in appended)
+    git_run(["check-ignore", "-q", "ops/queue/pending/t.md"], git_repo.clone)  # exit 0 = ignored
+    # Idempotent: `install --reconfigure` re-runs the append and must not duplicate the line.
+    assert append_runtime_excludes(git_repo.clone, tasks_dir="ops/queue") == []
+    # And without the argument the tree is left alone — that is how the default is opted out of.
+    fresh = git_repo.clone.parent / "fresh"
+    fresh.mkdir()
+    assert not any("tasks" in line for line in append_runtime_excludes(fresh))
+
+
+def test_ensure_runtime_excludes_never_re_ignores_a_tracked_tasks_tree(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # The per-run safety net repairs the runtime homes only. An operator who deleted the seeded
+    # `/tasks/` line to track their tasks must not find it re-added — least of all to
+    # `.git/info/exclude`, a file they would never think to look in.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.ensure_runtime_excludes()
+    exclude = (git_repo.clone / ".git" / "info" / "exclude").read_text(encoding="utf-8")
+    assert ".worc/" in exclude
+    assert "tasks" not in exclude
+    (git_repo.clone / "tasks" / "pending").mkdir(parents=True)
+    (git_repo.clone / "tasks" / "pending" / "task-001.md").write_text("t\n", encoding="utf-8")
+    porcelain = git_run(["status", "--porcelain", "-uall"], git_repo.clone)
+    assert "tasks/pending/task-001.md" in porcelain
 
 
 def test_append_runtime_excludes_respects_operators_flows_tracking_scheme(
@@ -754,6 +861,61 @@ def test_audit_commit_noop_when_no_tasks(
     assert gm.commit_audit("task-001") is None
 
 
+def test_audit_commit_is_a_noop_when_the_lifecycle_tree_is_gitignored(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # The shape `install` seeds by default. `git add` refuses an explicitly named ignored path
+    # ("use -f"), which used to make this fail *after* checking out a sibling audit branch; now
+    # nothing is staged, nothing is committed, and the branch is never touched.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    (git_repo.clone / ".gitignore").write_text("/tasks/\n", encoding="utf-8")
+    git_run(["add", ".gitignore"], git_repo.clone)
+    git_run(["commit", "-m", "ignore the task lifecycle tree"], git_repo.clone)
+    head_before = git_run(["rev-parse", "HEAD"], git_repo.clone)
+    done = git_repo.clone / "tasks" / "done"
+    done.mkdir(parents=True, exist_ok=True)
+    (done / "task-001.md").write_text("t\n", encoding="utf-8")
+    (done / "task-001.summary.md").write_text("s\n", encoding="utf-8")
+
+    assert gm.commit_audit("task-001") is None
+    assert git_run(["rev-parse", "HEAD"], git_repo.clone) == head_before
+    assert "tasks/" not in git_run(["ls-files"], git_repo.clone)
+
+
+def test_audit_commit_stages_the_tracked_half_of_a_move_under_an_ignored_tree(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # The mixed state an operator reaches by adopting the gitignored default over a tree whose task
+    # files are already committed. A tracked path under an ignored directory is still addable, and
+    # it must be added: skipping the whole commit would leave the deletion side of the move
+    # dangling as a `D` on the base branch — the regression the audit pathspec exists for.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    pending = git_repo.clone / "tasks" / "pending"
+    pending.mkdir(parents=True, exist_ok=True)
+    (pending / "task-001.md").write_text("t\n", encoding="utf-8")
+    git_run(["add", "tasks/pending/task-001.md"], git_repo.clone)
+    (git_repo.clone / ".gitignore").write_text("/tasks/\n", encoding="utf-8")
+    git_run(["add", ".gitignore"], git_repo.clone)
+    git_run(["commit", "-m", "tracked task file, then ignore the tree"], git_repo.clone)
+    # Lifecycle move: pending -> done.
+    (pending / "task-001.md").unlink()
+    done = git_repo.clone / "tasks" / "done"
+    done.mkdir(parents=True, exist_ok=True)
+    (done / "task-001.md").write_text("t\n", encoding="utf-8")
+
+    sha = gm.commit_audit("task-001")
+    assert sha is not None
+    tracked = git_run(["ls-files"], git_repo.clone)
+    assert "tasks/pending/task-001.md" not in tracked  # the deletion is committed
+    assert "tasks/done/task-001.md" not in tracked  # ignored + untracked: never force-added
+    # No dangling `D` to ride back onto base after terminal cleanup.
+    assert "tasks/pending" not in git_run(["status", "--porcelain"], git_repo.clone)
+
+
 def test_audit_commit_stages_lifecycle_move_deletion(
     git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
 ) -> None:
@@ -815,6 +977,46 @@ def test_audit_commit_stages_pending_to_failed_move_deletion(
     assert "tasks/failed/task-001.md" in tracked
     # The working tree is clean: no dangling `D tasks/pending/task-001.md` to ride back to base.
     assert "tasks/pending/task-001.md" not in git_run(["status", "--porcelain"], git_repo.clone)
+
+
+@pytest.mark.parametrize("destination", ["done", "failed"])
+def test_audit_commit_stages_preparing_move_deletion(
+    git_repo,
+    store: StateStore,
+    tmp_path: Path,
+    make_git_config: ConfigFactory,
+    git_run: GitRunner,
+    destination: str,
+) -> None:
+    # A task file committed to base while it was still staged in tasks/preparing/ — an operator
+    # authoring a batch of task files and committing them for review before any of them runs —
+    # and then promoted and moved to its terminal folder must have its *deletion* from preparing
+    # staged too. Without it the branch carries the task file in two lifecycle folders at once and
+    # a dangling `D` rides back onto the base branch after terminal cleanup. Both terminal folders
+    # are covered because the source state, not the destination, is what the pathspec was missing.
+    _task(store)
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    gm.prepare_branch("task-001", "x", epoch=_EPOCH)
+    preparing = git_repo.clone / "tasks" / "preparing"
+    preparing.mkdir(parents=True, exist_ok=True)
+    (preparing / "task-001.md").write_text("t\n", encoding="utf-8")
+    git_run(["add", "tasks/preparing/task-001.md"], git_repo.clone)
+    git_run(["commit", "-m", "track staged task file"], git_repo.clone)
+    # `promote` renames preparing -> pending and the terminal move renames pending -> done/failed;
+    # neither touches the index, so git sees only the source path vanish.
+    (preparing / "task-001.md").unlink()
+    terminal = git_repo.clone / "tasks" / destination
+    terminal.mkdir(parents=True, exist_ok=True)
+    (terminal / "task-001.md").write_text("t\n", encoding="utf-8")
+    (terminal / "task-001.summary.md").write_text("s\n", encoding="utf-8")
+
+    sha = gm.commit_audit("task-001")
+    assert sha is not None
+    tracked = git_run(["ls-files"], git_repo.clone)
+    assert "tasks/preparing/task-001.md" not in tracked
+    assert f"tasks/{destination}/task-001.md" in tracked
+    # The working tree is clean: no dangling `D tasks/preparing/task-001.md` to ride back to base.
+    assert "tasks/preparing/task-001.md" not in git_run(["status", "--porcelain"], git_repo.clone)
 
 
 def test_snapshot_capture_and_partial_change(
@@ -1640,6 +1842,149 @@ def test_create_pr_reuse_retitles_to_describe_the_chain(
     assert edit[edit.index("--title") + 1] == "3 tasks on feature/shared"
     # title and body ride one gh edit call (no extra round-trip)
     assert "--body-file" in edit
+
+
+_REFERENCES_BLOCK = "## References\n\n- Fixes #142\n- https://example.test/AB-7"
+
+
+def test_create_pr_appends_the_references_block_below_the_summary(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # The task's opaque lines ride the body FILE handed to `gh pr create` — never an argv — and
+    # the committed summary the finalize step wrote is left byte-for-byte alone: it is already in
+    # a commit, so the annotated copy is a separate artifact.
+    _task(store)
+    calls: list[list[str]] = []
+    gh = _reuse_gh(calls, list_stdout="[]", create_url="https://x/pull/1")
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    summary = tmp_path / "task-001.summary.md"
+    summary.write_text("# summary\n\nWhat changed.\n", encoding="utf-8", newline="")
+    before = summary.read_bytes()
+
+    gm.create_pr(
+        "task-001",
+        "feature/x",
+        title="t",
+        body_path=str(summary),
+        references_block=_REFERENCES_BLOCK,
+    )
+
+    create = next(c for c in calls if c[:2] == ["pr", "create"])
+    # The structural invariant, asserted rather than assumed: task-authored text reaches `gh` as
+    # file content only. Nothing from the task is anywhere in the argument list.
+    assert not any("Fixes #142" in token for token in create)
+    body_file = Path(create[create.index("--body-file") + 1])
+    assert body_file != summary  # the annotated copy, not the committed file
+    written = body_file.read_bytes()
+    assert b"\r\n" not in written  # `newline=""`: LF on every host, no CRLF in a PR body
+    text = written.decode("utf-8")
+    assert text.startswith("# summary\n\nWhat changed.")
+    assert text.rstrip("\n").endswith(_REFERENCES_BLOCK)
+    assert summary.read_bytes() == before
+
+
+def test_create_pr_without_annotations_sends_the_committed_body_itself(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # No notice and no references ⇒ no annotated copy at all; the committed summary is the body.
+    _task(store)
+    calls: list[list[str]] = []
+    gh = _reuse_gh(calls, list_stdout="[]", create_url="https://x/pull/1")
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    summary = tmp_path / "task-001.summary.md"
+    summary.write_text("# summary\n", encoding="utf-8", newline="")
+
+    gm.create_pr("task-001", "feature/x", title="t", body_path=str(summary))
+
+    create = next(c for c in calls if c[:2] == ["pr", "create"])
+    assert create[create.index("--body-file") + 1] == str(summary)
+
+
+def test_create_pr_body_carries_the_notice_first_and_the_references_last(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # Opposite ends, because they address opposite readers: the notice qualifies the diff below it
+    # and has to be seen first, the references are the footer their producer expects at the end.
+    _task(store)
+    calls: list[list[str]] = []
+    gh = _reuse_gh(calls, list_stdout="[]", create_url="https://x/pull/1")
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    summary = tmp_path / "task-001.summary.md"
+    summary.write_text("# summary\n", encoding="utf-8", newline="")
+
+    gm.create_pr(
+        "task-001",
+        "feature/x",
+        title="t",
+        body_path=str(summary),
+        notice="> **Adopted 1 commit(s)**",
+        references_block=_REFERENCES_BLOCK,
+    )
+
+    create = next(c for c in calls if c[:2] == ["pr", "create"])
+    text = Path(create[create.index("--body-file") + 1]).read_text(encoding="utf-8")
+    assert text.startswith("> **Adopted 1 commit(s)**")
+    assert text.index("# summary") < text.index(_REFERENCES_BLOCK)
+    assert text.rstrip("\n").endswith(_REFERENCES_BLOCK)
+
+
+def test_create_pr_reuse_appends_a_body_carrying_the_references_block(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # The chain-PR case: the annotation is applied before the reuse probe, so the section the
+    # reuse path appends to an already-open PR carries the references too.
+    _task(store)
+    _ours(store, "https://x/pull/9")  # the chain's first task opened it
+    calls: list[list[str]] = []
+    summary = tmp_path / "task-001.summary.md"
+    summary.write_text("This task added the query layer.\n", encoding="utf-8", newline="")
+    before = summary.read_bytes()
+    gh = _reuse_gh(
+        calls,
+        list_stdout='[{"url": "https://x/pull/9", "updatedAt": "2026-01-01"}]',
+        body_stdout="Original body (task 1).",
+    )
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+
+    gm.create_pr(
+        "task-001",
+        "feature/shared",
+        title="Query",
+        body_path=str(summary),
+        references_block=_REFERENCES_BLOCK,
+    )
+
+    edit = next(c for c in calls if c[:2] == ["pr", "edit"])
+    assert not any("Fixes #142" in token for token in edit)  # file content, never argv
+    written = Path(edit[edit.index("--body-file") + 1]).read_text(encoding="utf-8")
+    assert "Original body (task 1)." in written  # the chain's prior content survives
+    assert "This task added the query layer." in written
+    assert _REFERENCES_BLOCK in written
+    assert summary.read_bytes() == before  # the committed summary is read, never rewritten
+
+
+def test_create_pr_falls_back_to_the_plain_body_when_the_copy_cannot_be_written(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory
+) -> None:
+    # A missing annotation must never cost the task its pull request: an unreadable body path
+    # degrades to sending the original, exactly as the notice path already does.
+    _task(store)
+    calls: list[list[str]] = []
+    gh = _reuse_gh(calls, list_stdout="[]", create_url="https://x/pull/1")
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config, gh_runner=gh)
+    missing = tmp_path / "gone" / "task-001.summary.md"  # the parent directory does not exist
+
+    url = gm.create_pr(
+        "task-001",
+        "feature/x",
+        title="t",
+        body_path=str(missing),
+        references_block=_REFERENCES_BLOCK,
+    )
+
+    assert url == "https://x/pull/1"
+    create = next(c for c in calls if c[:2] == ["pr", "create"])
+    assert create[create.index("--body-file") + 1] == str(missing)
 
 
 def test_bound_pr_body_unchanged_within_cap() -> None:

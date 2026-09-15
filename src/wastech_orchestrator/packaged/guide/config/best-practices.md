@@ -82,7 +82,7 @@ The safe default publish shape is:
 
 - create a PR;
 - do not auto-merge it;
-- keep the audit commit on the task branch.
+- keep the audit commit on the task branch (if you track the task lifecycle tree at all — by default it is gitignored and there is no audit commit).
 
 Move away from that only when the repository already has branch protection and required checks enforcing the same bar.
 

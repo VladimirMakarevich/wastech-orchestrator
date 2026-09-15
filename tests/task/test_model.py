@@ -106,7 +106,9 @@ def test_schema_constants() -> None:
     # A clean task carries only identity/dispatch (``task_type`` selects the flow) + the sanctioned
     # task-wins gates: ``nodes.<node-id>.enabled`` (disable), ``auto_merge``,
     # ``prompt_audit``, ``decomposition``, and ``trust_level``. No provider/model/reasoning/refined.
-    # ``commit_type`` joins them as the only channel into a commit message, which no node can write.
+    # ``commit_type`` joins them as the only channel into a commit message, which no node can write,
+    # and ``references`` as the only channel into the pull-request body, which the task's producer
+    # fills with text the orchestrator republishes without reading.
     assert {
         "id",
         "title",
@@ -126,6 +128,7 @@ def test_schema_constants() -> None:
         "queue",
         "subtasks",
         "nodes",
+        "references",
     } == ALLOWED_TASK_KEYS
     assert {"id", "title"} == REQUIRED_TASK_FIELDS
     assert REQUIRED_TASK_FIELDS <= ALLOWED_TASK_KEYS

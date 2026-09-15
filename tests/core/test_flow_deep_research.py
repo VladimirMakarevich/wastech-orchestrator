@@ -14,14 +14,17 @@ from typing import Any
 from tests.conftest import BUILTIN_FLOWS_DIR
 
 from wastech_orchestrator.config.schema import AgentsConfig, DecompositionConfig
+from wastech_orchestrator.core.flow.context_paths import resolve_report_dir
 from wastech_orchestrator.core.flow.engine import FlowEngine, NodeContext, NodeOutcome, NodeResult
 from wastech_orchestrator.core.flow.nodes import NodeInputs, NodeServices
 from wastech_orchestrator.core.flow.nodes.checks import ChecksNodeRunner
 from wastech_orchestrator.core.flow.nodes.evaluator import EvaluatorNodeRunner
 from wastech_orchestrator.core.flow.postprocess import write_node_output
+from wastech_orchestrator.core.flow.prompt import read_role_file
 from wastech_orchestrator.core.flow.registry import FlowRegistry
 from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import AgentNode, ChecksNode, FlowNode
+from wastech_orchestrator.core.prompts import render_prompt
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.providers.base import AgentRunResult, ProviderId, RunStatus
 from wastech_orchestrator.routing.router import ResolvedRoute, RouteSource, StageOutcome
@@ -533,3 +536,21 @@ def test_critic_states_its_rules_once_then_continues(tmp_path: Path) -> None:
     assert all(r.continuation_prompt is not None for r in resumed)
     # Both texts ride the request, so the seam still has the full one if the session is dropped.
     assert all(r.prompt for r in resumed)
+
+
+def test_synthesis_prompt_renders_the_resolved_report_directory() -> None:
+    # The deliverable's location is no longer literal text in the prompt: it renders the engine's
+    # own resolution, so an operator who sets `report_dir` moves the instruction with it. Without
+    # this the agent would keep writing to docs/research/ and the after-stage guard would hard-stop
+    # the task on the first write.
+    node = DEEP_RESEARCH.nodes_by_id["synthesis"]
+    assert isinstance(node, AgentNode)
+    template = read_role_file(DEEP_RESEARCH.source_path.parent, node.role_file)  # type: ignore[union-attr]
+    assert "docs/research" not in template
+
+    default = render_prompt(template, {"report_dir": resolve_report_dir(DEEP_RESEARCH, "t")})
+    assert "`docs/research/t/report.md`" in default
+    assert "`docs/research/t/sources.json`" in default
+
+    moved = render_prompt(template, {"report_dir": "docs/adr/t"})
+    assert "`docs/adr/t/report.md`" in moved and "docs/research" not in moved

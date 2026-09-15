@@ -43,9 +43,14 @@ paths:                              # where the task lifecycle lives (optional; 
                                     # in — compose a task there, then `worc promote` it into pending.
                                     # Rename to avoid clashing with a repo that already uses tasks/.
                                     # Must be repo-relative (no .. / absolute) and NOT under .worc/
-                                    # (that home is gitignored — the audit trail would be lost). The
-                                    # lifecycle subfolder names are fixed. `install` only scaffolds
-                                    # the default tasks/; for another name, create its subfolders.
+                                    # (that home is the agent's read-deny root and is never
+                                    # committed). The lifecycle subfolder names are fixed.
+                                    # `install --tasks-dir` scaffolds this dir and gitignores it;
+                                    # rename it here later and you move the /tasks/ line in
+                                    # .gitignore (and create the subfolders) yourself.
+                                    # The tree is gitignored by default — delete that line, or
+                                    # install with --track-tasks, to commit task files as an
+                                    # audit trail.
 
 agents:
   allowed:                            # providers this instance may launch; must include the primary
@@ -394,8 +399,10 @@ git:
                                     #   mechanical (no flow); only a conflicting base-merge runs it.
   footprint:                        # audit-trail policy. Runtime files always live under the
                                     # gitignored <repo>/.worc/ home; only the task file and its
-                                    # <id>.summary.md are committed, at the repo root under tasks/.
-                                    # This is a separate audit commit, not a second code commit.
+                                    # <id>.summary.md are committed, at the repo root under
+                                    # paths.tasks_dir. A separate audit commit, not a second code
+                                    # commit — and INERT while that tree is gitignored, which is
+                                    # what `install` seeds unless you asked to track tasks.
     audit_commit_message: "chore(worc): audit trail for {task_id}"
     audit_on_branch: task           # task = same branch as the code; sibling = <branch>-audit
 

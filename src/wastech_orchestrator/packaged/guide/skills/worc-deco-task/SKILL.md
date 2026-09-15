@@ -67,7 +67,7 @@ depends_on: ["cart-model"] # optional; slugs of EARLIER subtasks only
 
 ## Hard rules / fail-closed reasons
 
-The whole split is validated **before any branch** and quarantined (to `.worc/tasks/rejected/` — the runtime quarantine, deliberately outside the git-tracked `tasks/` tree) on any violation:
+The whole split is validated **before any branch** and quarantined (to `.worc/tasks/rejected/` — the runtime quarantine, deliberately outside the `tasks/` lifecycle tree) on any violation:
 
 - **Count out of range** — fewer than 2 or more than `max_subtasks` (`subtask_count_out_of_range`).
 - **Forward / self / unknown dependency** — a subtask's `depends_on` may reference only the slugs of subtasks **before** it; the gate enforces a linear order (`subtask_depends_forward`).

@@ -18,7 +18,10 @@ Two kinds of key survive that rule and are written even though they look ordinar
 
 ``paths.tasks_dir``, ``checks.command_sets`` and ``telegram.enabled`` are the third kind: written
 at their default as *affordances* — the operator has to know where tasks live, has to author the
-check gate, and should find the HITL switch without reading the reference.
+check gate, and should find the HITL switch without reading the reference. ``paths.tasks_dir``
+carries the value the install actually used (``--tasks-dir``), because ``install`` scaffolds those
+folders and seeds their ignore rule from the same value: a config saying one thing while the
+directory on disk says another is the one way this key can hurt.
 
 ``build_and_validate`` round-trips the rendered text back through the loader and the semantic
 validator, so the installer can never emit a config that is structurally broken or contradictory.
@@ -43,9 +46,9 @@ _HEADER = (
     "# Deliberately small: what the install resolved, plus the few knobs you reach for first.\n"
     "# Any key NOT here runs at its documented default — you add one only to change it.\n"
     "# All paths are absolute. The orchestrator's runtime files live under the gitignored\n"
-    "# <repo>/.worc/ home (this config included); the task + its summary are committed in the\n"
-    "# repo under tasks/. Every field, default and validation rule is documented in the annotated\n"
-    "# config.example.yaml installed alongside this file under .worc/.\n"
+    "# <repo>/.worc/ home (this config included), and the paths.tasks_dir lifecycle tree is\n"
+    "# gitignored too unless you asked to track it. Every field, default and validation rule is\n"
+    "# documented in the annotated config.example.yaml beside this file under .worc/.\n"
 )
 
 _FOOTER = (
@@ -71,6 +74,12 @@ _FOOTER = (
 )
 
 
+#: Where task files live unless ``--tasks-dir`` says otherwise. Names the schema default in one
+#: place, so the generated ``paths.tasks_dir``, the lifecycle folders ``install`` scaffolds, and the
+#: ignore line it seeds cannot describe three different directories.
+DEFAULT_TASKS_DIR = "tasks"
+
+
 @dataclass(frozen=True)
 class InstallSpec:
     """The settings the wizard resolves and the config generator serializes."""
@@ -81,6 +90,16 @@ class InstallSpec:
     providers: tuple[ProviderId, ...]
     create_pull_request: bool
     auto_mode: bool
+    #: Whether the task lifecycle tree goes into git. Unlike its neighbours this is an install
+    #: *action*, not a config key: ``False`` (the default) makes ``install`` seed an ignore line for
+    #: ``tasks_dir`` in the tracked ``.gitignore``, ``True`` writes no line and leaves the tree
+    #: trackable. Nothing records the answer beyond that line — git's own ignore state is the
+    #: single source of truth afterwards, which is also what the runtime reads, so an operator who
+    #: changes their mind edits ``.gitignore`` and nothing here has to be kept in step with it.
+    track_tasks: bool = False
+    #: The lifecycle tree's repo-relative path — ``paths.tasks_dir``, the folders to scaffold, and
+    #: the root to ignore, all from one value.
+    tasks_dir: str = DEFAULT_TASKS_DIR
 
 
 def _ordered_providers(providers: tuple[ProviderId, ...]) -> tuple[ProviderId, ...]:
@@ -132,9 +151,10 @@ def build_config_mapping(spec: InstallSpec) -> dict[str, Any]:
             "local_path": str(spec.repo_local_path),
             "base_branch": spec.base_branch,
         },
-        # An affordance, not a knob: written at its default because the operator has to know where
-        # task files go, and because a repo that already uses `tasks/` needs to rename it here.
-        "paths": {"tasks_dir": "tasks"},
+        # An affordance, not a knob: written because the operator has to know where task files go,
+        # and because a repo that already uses `tasks/` needs to rename it. Whatever the install
+        # resolved, so the config, the scaffolded folders and the ignore line agree.
+        "paths": {"tasks_dir": spec.tasks_dir},
         "agents": {
             "allowed": [pid.value for pid in providers],
             "providers": {

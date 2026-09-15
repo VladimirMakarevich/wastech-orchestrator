@@ -73,6 +73,7 @@ _FLOW_FIELDS = frozenset(
         "permission_ceiling",
         "output_policy",
         "publishing",
+        "report_dir",
         "network_policy",
         "defaults",
         "nodes",
@@ -760,6 +761,14 @@ def _parse_flow_doc(raw: dict[str, Any], source: str) -> FlowDoc:
     np_raw = raw.get("network_policy")
     network_policy = _enum(NetworkPolicy, np_raw, ctx) if np_raw is not None else None
 
+    # A path, not a scalar to coerce: ``str()`` on a list/mapping would turn a malformed value into
+    # a plausible-looking directory name for the path validator to judge, so refuse it here.
+    report_dir = raw.get("report_dir")
+    if report_dir is not None and not isinstance(report_dir, str):
+        raise FlowLoadError(
+            f"'report_dir' must be a string in {ctx}, got {type(report_dir).__name__}"
+        )
+
     return FlowDoc(
         name=name,
         task_type=task_type,
@@ -769,6 +778,7 @@ def _parse_flow_doc(raw: dict[str, Any], source: str) -> FlowDoc:
         nodes=nodes,
         edges=edges,
         budgets=MappingProxyType({str(k): int(v) for k, v in budgets_raw.items()}),
+        report_dir=report_dir,
         network_policy=network_policy,
         decomposition=_parse_decomposition(raw.get("decomposition")),
         supervisor=_parse_supervisor(raw.get("supervisor")),

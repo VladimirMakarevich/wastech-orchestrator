@@ -50,7 +50,7 @@ The reference is split by concern, so a page you open to answer one question is 
 
 | Field | Type | Default | Constraint | When to use |
 | --- | --- | --- | --- | --- |
-| `paths.tasks_dir` | string | `"tasks"` | Repo-relative (no absolute, `~`, or `..`); must **not** live under `.worc/`. Lifecycle subfolder names (`preparing`/`pending`/`done`/`failed`) are fixed. | The repo-relative dir holding the task lifecycle. Rename it only to avoid clashing with a repo that already uses `tasks/`. `install` scaffolds the default `tasks/`; for another name, create its subfolders yourself. |
+| `paths.tasks_dir` | string | `"tasks"` | Repo-relative (no absolute, `~`, or `..`); must **not** live under `.worc/`. Lifecycle subfolder names (`preparing`/`pending`/`done`/`failed`) are fixed. | The repo-relative dir holding the task lifecycle. Rename it only to avoid clashing with a repo that already uses `tasks/`. `install --tasks-dir` scaffolds it and gitignores it; rename it afterwards and you move the `/tasks/` line in `.gitignore` — and create the subfolders — yourself. |
 
 ## `git` — publishing and audit trail
 
@@ -62,7 +62,7 @@ The reference is split by concern, so a page you open to answer one question is 
 | `git.auto_merge_strategy` | `merge` \| `squash` \| `rebase` | `squash` | The `gh pr merge` strategy when a merge fires. For `merge`/`squash` the orchestrator writes the commit message itself — subject `feat(<task-id>): <title> (#N)`, empty body — rather than letting your repository's squash settings take the PR title and concatenate the branch's commits (which would drop the Conventional Commits type and carry the private audit-trail commit into your base branch). `worc merge-task --dry-run` prints it. |
 | `git.auto_merge_wait_for_checks` | bool | `false` | `true` arms GitHub-native auto-merge (`--auto`) — merge only after required checks pass. |
 | `git.merge_flow` | string | `"merge"` | The flow `worc merge-task` runs to resolve base-merge conflicts (seeded at `.worc/flows/merge.yaml`). Clean merges are mechanical; only a conflicting base-merge runs it. |
-| `git.footprint.audit_commit_message` | string | `"chore(worc): audit trail for {task_id}"` | Template for the separate audit commit (the task file + its `<id>.summary.md`, not a second code commit). |
+| `git.footprint.audit_commit_message` | string | `"chore(worc): audit trail for {task_id}"` | Template for the separate audit commit (the task file + its `<id>.summary.md`, not a second code commit). Inert while the lifecycle tree is gitignored — `install`'s default — because then there is no audit commit at all. |
 | `git.footprint.audit_on_branch` | `task` \| `sibling` | `task` | `task` = audit commit on the same branch as the code; `sibling` = on `<branch>-audit`. |
 
 ### When the task branch already exists on the remote

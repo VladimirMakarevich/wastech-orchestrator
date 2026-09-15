@@ -38,7 +38,7 @@ def _utc_now_iso() -> str:
 # in place is beyond an additive-only migration, and with no production data anywhere the honest
 # answer is to recreate the local ``state.db`` rather than run on a shape the code does not match
 # (see :func:`_enforce_schema_version`).
-DB_SCHEMA_VERSION = 26
+DB_SCHEMA_VERSION = 27
 
 
 class IncompatibleStateError(Exception):
@@ -50,7 +50,21 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
     Idempotent: each column add is guarded by a ``PRAGMA table_info`` check, so this is a no-op on
     a brand-new DB (``_SCHEMA`` already created the columns) and adds only what an older DB lacks.
+    Split per table so each group stays readable as it grows.
     """
+    _migrate_task_columns(conn)
+    # The commit a push actually left on the remote, so a branch someone else moved is
+    # distinguishable from the one we put there. Nullable — NULL is its real meaning ("not pushed by
+    # us"), not a placeholder, so no default. ``fingerprint`` is deliberately left alone: it keys
+    # push idempotency, and reusing it would change the short-circuit this column exists to fix.
+    publish_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(publish_operations)")}
+    if "pushed_sha" not in publish_cols:
+        conn.execute("ALTER TABLE publish_operations ADD COLUMN pushed_sha TEXT")
+    _migrate_usage_columns(conn)
+
+
+def _migrate_task_columns(conn: sqlite3.Connection) -> None:
+    """Additive ``tasks`` columns an older database can lack, each with why it is nullable."""
     task_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(tasks)")}
     # The FlowRunState checkpoint columns (flow-engine execution path).
     if "current_node" not in task_cols:
@@ -67,6 +81,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
     # the next tick", so the column can only ever shorten a wait, never extend one.
     if "blocked_until" not in task_cols:
         conn.execute("ALTER TABLE tasks ADD COLUMN blocked_until TEXT")
+    # The content digest of the task source, so a task file found on disk can be recognized as this
+    # task's own even after the terminal move rewrote ``source_path`` out from under it. Nullable
+    # because a row written before the file was read has nothing to record yet.
+    if "source_sha256" not in task_cols:
+        conn.execute("ALTER TABLE tasks ADD COLUMN source_sha256 TEXT")
     # Cumulative per-loop rework totals, never reset — unlike the consecutive ``*_fix_cycles``
     # columns, which zero when the loop converges and so read 0 on a task that reworked N times.
     if "test_fix_total" not in task_cols:
@@ -110,14 +129,6 @@ def _migrate(conn: sqlite3.Connection) -> None:
     for column in ("gate_reference_sha", "push_url_digest", "base_ref"):
         if column not in task_cols:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} TEXT")
-    # The commit a push actually left on the remote, so a branch someone else moved is
-    # distinguishable from the one we put there. Nullable — NULL is its real meaning ("not pushed by
-    # us"), not a placeholder, so no default. ``fingerprint`` is deliberately left alone: it keys
-    # push idempotency, and reusing it would change the short-circuit this column exists to fix.
-    publish_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(publish_operations)")}
-    if "pushed_sha" not in publish_cols:
-        conn.execute("ALTER TABLE publish_operations ADD COLUMN pushed_sha TEXT")
-    _migrate_usage_columns(conn)
 
 
 def _migrate_usage_columns(conn: sqlite3.Connection) -> None:
@@ -197,6 +208,7 @@ CREATE TABLE IF NOT EXISTS tasks (
     title TEXT NOT NULL,
     status TEXT NOT NULL,
     source_path TEXT,
+    source_sha256 TEXT,
     branch TEXT,
     slug TEXT,
     created_at TEXT NOT NULL,
@@ -397,6 +409,11 @@ class TaskRow:
     title: str
     status: Status
     source_path: str | None = None
+    #: Digest of the task file's content as this attempt read it (newline-normalized; see
+    #: ``task.parser.source_digest``). ``source_path`` alone cannot answer "is this file still the
+    #: task I ran?" — a terminal move rewrites it to the lifecycle folder while the committed copy
+    #: reappears in ``pending/`` on the base branch — so identity is carried by content, not path.
+    source_sha256: str | None = None
     branch: str | None = None
     slug: str | None = None
     validation_passed: bool | None = None
@@ -703,7 +720,7 @@ class StateStore:
             c.execute(
                 """
                 INSERT INTO tasks (
-                    task_id, title, status, source_path, branch, slug,
+                    task_id, title, status, source_path, source_sha256, branch, slug,
                     created_at, updated_at, validation_passed, validation_reason,
                     refinement_ran, refinement_skip_reason,
                     test_fix_cycles, review_fix_cycles,
@@ -712,11 +729,12 @@ class StateStore:
                     subtask_count, active_subtask, subtasks_completed,
                     failure_report_path, cleanup_target_branch, cleanup_completed,
                     cleanup_completed_at, cleanup_last_error, finished_at
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(task_id) DO UPDATE SET
                     title = excluded.title,
                     status = excluded.status,
                     source_path = excluded.source_path,
+                    source_sha256 = excluded.source_sha256,
                     validation_passed = excluded.validation_passed,
                     updated_at = excluded.updated_at
                 """,
@@ -725,6 +743,7 @@ class StateStore:
                     row.title,
                     row.status.value,
                     row.source_path,
+                    row.source_sha256,
                     row.branch,
                     row.slug,
                     row.created_at or now,
@@ -1914,6 +1933,7 @@ def _task_from_row(row: sqlite3.Row) -> TaskRow:
         title=row["title"],
         status=Status(row["status"]),
         source_path=row["source_path"],
+        source_sha256=row["source_sha256"],
         branch=row["branch"],
         slug=row["slug"],
         validation_passed=_ob(row["validation_passed"]),

@@ -17,8 +17,10 @@ from wastech_orchestrator.core.orchestrator import (
     PipelineResult,
 )
 from wastech_orchestrator.core.state_machine import Status
+from wastech_orchestrator.git_manager import KIND_PR
+from wastech_orchestrator.ledger import Ledger, LedgerRecord
 from wastech_orchestrator.observability import logging as obslog
-from wastech_orchestrator.state_store import StateStore, TaskRow
+from wastech_orchestrator.state_store import PublishOpRow, StateStore, TaskRow
 from wastech_orchestrator.task.model import DEFAULT_QUEUE
 
 # Every test here is a slow integration test (real git / subprocess / process tree).
@@ -53,7 +55,7 @@ class _FakeOrch:
         self.resume_calls = 0
         self.refresh_calls = 0
         self.notifier = notifier  # the next-task gate reads this
-        self._settled = dict(settled or {})  # task_id -> TaskRow (scanner terminal-skip guard)
+        self._settled = set(settled or ())  # ids the orchestrator calls their own leftover file
 
     def resume(self):
         self.resume_calls += 1
@@ -62,8 +64,8 @@ class _FakeOrch:
     def acquire_slot(self, task_id: str) -> bool:
         return True
 
-    def lookup_task(self, task_id: str):
-        return self._settled.get(task_id)
+    def settled_own_file(self, task_id: str, _task_file: Path) -> bool:
+        return task_id in self._settled
 
     def refresh_repo(self) -> None:
         self.refresh_calls += 1
@@ -125,18 +127,13 @@ def test_watch_manual_blocks_continuation(make_git_config, git_repo, tmp_path: P
 
 
 def test_watch_skips_settled_own_file(make_git_config, git_repo, tmp_path: Path) -> None:
-    # A manual_action_required task keeps its file in pending/ (branch preserved for the operator).
-    # The daemon must skip it, not re-run it into a duplicate_task_id reject; an independent pending
-    # task still runs.
+    # A settled task's own file lingering in pending/ must be skipped, not re-run into a
+    # duplicate_task_id reject; an independent pending task still runs. Which files count as a
+    # settled task's own is the orchestrator's decision (Orchestrator.settled_own_file); this pins
+    # that the scanner honors it and keeps going.
     config = make_git_config(git_repo.clone, auto_mode=True)
     folder = _pending_fm(tmp_path, "a", "b")
-    row = TaskRow(
-        task_id="a",
-        title="a",
-        status=Status.MANUAL_ACTION_REQUIRED,
-        source_path=str(folder / "a.md"),
-    )
-    orch = _FakeOrch(runs=[_done("b")], settled={"a": row})
+    orch = _FakeOrch(runs=[_done("b")], settled={"a"})
     results = cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
     assert orch.run_calls == [str(folder / "b.md")]  # 'a' skipped, 'b' still runs
     assert [r.task_id for r in results] == ["b"]
@@ -147,13 +144,7 @@ def test_watch_reruns_when_settled_file_differs(make_git_config, git_repo, tmp_p
     # fall through to run_task (the gate then rejects it loudly as a duplicate id).
     config = make_git_config(git_repo.clone, auto_mode=False)
     folder = _pending_fm(tmp_path, "a")
-    row = TaskRow(
-        task_id="a",
-        title="a",
-        status=Status.FAILED,
-        source_path=str(tmp_path / "elsewhere" / "a.md"),
-    )
-    orch = _FakeOrch(runs=[_done("a")], settled={"a": row})
+    orch = _FakeOrch(runs=[_done("a")], settled=())
     cli.watch_once(orch, config, folder)  # type: ignore[arg-type]
     assert orch.run_calls == [str(folder / "a.md")]  # collision falls through to the gate
 
@@ -849,6 +840,276 @@ def test_cmd_list_format_json(git_repo, tmp_path: Path, capsys: pytest.CaptureFi
     assert any(entry["task_id"] == "task-done" and entry["status"] == "done" for entry in data)
 
 
+def _seed_pr_op(clone: Path, task_id: str, url: str) -> None:
+    store = StateStore.open(clone / ".worc" / "state.db")
+    store.record_publish_op(
+        PublishOpRow(
+            task_id=task_id,
+            kind=KIND_PR,
+            fingerprint="fp",
+            status="completed",
+            result_ref=url,
+        )
+    )
+    store.close()
+
+
+def _seed_rejects(clone: Path, records: list[LedgerRecord]) -> None:
+    ledger = Ledger(clone / ".worc" / "logs")
+    for record in records:
+        ledger.append(record)
+
+
+def _reject_record(task_id: str, reason: str, finished_at: str) -> LedgerRecord:
+    # The shape the orchestrator appends for a gate reject: no branch, the id as the title, and the
+    # reason code. There is no ``tasks`` row for such an id.
+    return LedgerRecord(
+        id=task_id,
+        title=task_id,
+        final_status=Status.FAILED.value,
+        finished_at=finished_at,
+        validation_reason=reason,
+    )
+
+
+def _seed_reject_fixture(clone: Path) -> None:
+    """One id rejected twice with no row, one rejected then re-submitted and run, one plain row,
+    and one whose ledger trace is not refusals only."""
+    _seed_list_db(
+        clone,
+        [
+            TaskRow(task_id="gh-10", title="Ten", status=Status.DONE),
+            TaskRow(task_id="gh-11", title="Eleven", status=Status.DONE),
+        ],
+    )
+    _seed_rejects(
+        clone,
+        [
+            _reject_record("gh-9", "missing_description", "2026-09-11T01:00:00+00:00"),
+            _reject_record("gh-10", "injection_suspected", "2026-09-11T01:05:00+00:00"),
+            _reject_record("gh-12", "missing_description", "2026-09-11T01:30:00+00:00"),
+            # A run that reached a terminal carries no reason, so gh-12's trace is no longer
+            # refusals only — having no row is not on its own enough to call an id rejected.
+            LedgerRecord(
+                id="gh-12",
+                title="Twelve",
+                final_status=Status.DONE.value,
+                finished_at="2026-09-11T01:40:00+00:00",
+            ),
+            _reject_record("gh-9", "injection_suspected", "2026-09-11T02:00:00+00:00"),
+        ],
+    )
+
+
+def test_cmd_list_json_carries_pr_url(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The URL an external process needs is the one the completed `pr` publish op recorded; a task
+    # that opened no PR carries the key anyway, as null, so the entry shape does not vary.
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_list_db(
+        git_repo.clone,
+        [
+            TaskRow(task_id="task-pr", title="With PR", status=Status.DONE),
+            TaskRow(task_id="task-nopr", title="No PR", status=Status.DONE),
+        ],
+    )
+    _seed_pr_op(git_repo.clone, "task-pr", "https://example.test/o/r/pull/7")
+    pending = git_repo.clone / "tasks" / "pending"
+    pending.mkdir(parents=True, exist_ok=True)
+    _complete_task_file(pending / "task-queued.md", "task-queued")
+
+    code = cli.main(["--config", str(config), "list", "--all", "--format", "json"])
+
+    assert code == 0
+    entries = {e["task_id"]: e for e in json.loads(capsys.readouterr().out)}
+    assert entries["task-pr"]["pr_url"] == "https://example.test/o/r/pull/7"
+    assert entries["task-nopr"]["pr_url"] is None
+    # `--all` is the DB-row view: a queued file has no row yet and belongs to the other views.
+    assert "task-queued" not in entries
+
+    # The key is on the row wherever the row is shown, not only under `--all`.
+    for flags in (["--recent", "5"], []):
+        assert cli.main(["--config", str(config), "list", *flags, "--format", "json"]) == 0
+        shown = {e["task_id"]: e for e in json.loads(capsys.readouterr().out)}
+        assert shown["task-pr"]["pr_url"] == "https://example.test/o/r/pull/7", flags
+        assert shown["task-nopr"]["pr_url"] is None, flags
+
+
+def test_cmd_list_json_pending_entry_carries_null_pr_url(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # `--all` holds DB rows only, so the file-derived pending entry is asserted where it appears:
+    # the default view and `--pending`.
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    pending = git_repo.clone / "tasks" / "pending"
+    pending.mkdir(parents=True, exist_ok=True)
+    _complete_task_file(pending / "task-queued.md", "task-queued")
+
+    for flags in (["--pending"], []):
+        code = cli.main(["--config", str(config), "list", *flags, "--format", "json"])
+
+        assert code == 0
+        entries = {e["task_id"]: e for e in json.loads(capsys.readouterr().out)}
+        assert entries["task-queued"]["pr_url"] is None
+
+
+def test_cmd_list_all_json_rejected_section(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_reject_fixture(git_repo.clone)
+    ledger_path = git_repo.clone / ".worc" / "logs" / "completed.jsonl"
+    before = ledger_path.read_bytes()
+
+    code = cli.main(["--config", str(config), "list", "--all", "--format", "json"])
+
+    assert code == 0
+    # `list` reads the ledger the way it reads the store: it must never append to it.
+    assert ledger_path.read_bytes() == before
+    data = json.loads(capsys.readouterr().out)
+    rejected = [e for e in data if e["status"] == "rejected"]
+    assert [e["task_id"] for e in rejected] == ["gh-9"]
+    assert rejected[0] == {
+        "task_id": "gh-9",
+        "status": "rejected",
+        "title": None,
+        "branch": None,
+        "pr_url": None,
+        # The latest of the two reject records wins — the ledger is append-only.
+        "validation_reason": "injection_suspected",
+        "rejected_at": "2026-09-11T02:00:00+00:00",
+    }
+    # An id that was re-submitted under the same name and ran has a row, so it is an ordinary task
+    # again and must not be reported as rejected as well.
+    ordinary = {e["task_id"]: e["status"] for e in data if e["status"] != "rejected"}
+    assert ordinary == {"gh-10": "done", "gh-11": "done"}
+
+
+def test_cmd_list_all_table_prints_rejected_section(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_reject_fixture(git_repo.clone)
+
+    code = cli.main(["--config", str(config), "list", "--all"])
+
+    assert code == 0
+    out = capsys.readouterr().out
+    assert "rejected:" in out
+    # `rejected  <id>  (<reason>)` — the status column, the id, and the only fact the entry holds.
+    assert next(line for line in out.splitlines() if "gh-9" in line).split() == [
+        "rejected",
+        "gh-9",
+        "(injection_suspected)",
+    ]
+    # The human view gains no column: an ordinary row still reads status, id, title.
+    assert next(line for line in out.splitlines() if "gh-10" in line).split() == [
+        "done",
+        "gh-10",
+        "Ten",
+    ]
+
+
+def test_cmd_list_rejected_ids_stay_out_of_the_completion_surface(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # A rejected id has no row, so no id-taking verb accepts it; neither the default view nor any
+    # `--format ids` view may offer it.
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_reject_fixture(git_repo.clone)
+
+    for argv in (
+        ["list"],
+        ["list", "--format", "ids"],
+        ["list", "--all", "--format", "ids"],
+        ["list", "--format", "json"],
+    ):
+        code = cli.main(["--config", str(config), *argv])
+
+        assert code == 0
+        out = capsys.readouterr().out
+        assert "gh-9" not in out, argv
+        assert "rejected" not in out, argv
+        # The views still report everything they reported before, so the assertions above are
+        # about the rejected id and not about an empty listing.
+        assert "gh-10" in out, argv
+
+
+def test_cmd_list_all_without_a_ledger_has_no_rejected_entries(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_list_db(git_repo.clone, [TaskRow(task_id="task-done", title="D", status=Status.DONE)])
+    assert not (git_repo.clone / ".worc" / "logs" / "completed.jsonl").exists()
+
+    code = cli.main(["--config", str(config), "list", "--all", "--format", "json"])
+
+    assert code == 0
+    data = json.loads(capsys.readouterr().out)
+    assert [e["task_id"] for e in data] == ["task-done"]
+    assert all(e["status"] != "rejected" for e in data)
+
+
+def test_cmd_list_all_reports_a_torn_ledger_line_cleanly(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A half-written ledger line exits 2 with a message, not a traceback out of a listing.
+
+    `list` is the first read-only command to read the ledger, so a torn append after a crash (or a
+    hand edit) became newly reachable. The bad line is not skipped: `Ledger.records` also feeds the
+    duplicate-id gate, and a line silently dropped there would let a re-submitted id through.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_list_db(git_repo.clone, [TaskRow(task_id="task-done", title="D", status=Status.DONE)])
+    _seed_rejects(git_repo.clone, [_reject_record("gh-9", "injection_suspected", "2026-01-01")])
+    completed = git_repo.clone / ".worc" / "logs" / "completed.jsonl"
+    with completed.open("a", encoding="utf-8", newline="") as handle:
+        handle.write('{"id": "gh-10", "validation_re\n')
+
+    code = cli.main(["--config", str(config), "list", "--all", "--format", "json"])
+
+    assert code == 2
+    out = capsys.readouterr().out
+    assert out.startswith("error: cannot read the completed-tasks ledger at ")
+    assert "completed.jsonl" in out
+    # The listing produced no JSON at all rather than a half-built array.
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(out)
+
+
+def test_cmd_list_default_view_survives_a_torn_ledger_line(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Only `--all` reads the ledger, so the default view is unaffected by a torn line."""
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_list_db(git_repo.clone, [TaskRow(task_id="task-done", title="D", status=Status.DONE)])
+    logs = git_repo.clone / ".worc" / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    (logs / "completed.jsonl").write_text("{not json\n", encoding="utf-8", newline="")
+
+    code = cli.main(["--config", str(config), "list", "--format", "json"])
+
+    assert code == 0
+    assert [e["task_id"] for e in json.loads(capsys.readouterr().out)] == ["task-done"]
+
+
 def test_cmd_list_pending_file_without_id_shown_by_filename(
     git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -1086,3 +1347,57 @@ def test_cmd_watch_auto_mode_two_tasks(
         tracked = git_run(["ls-tree", "-r", "--name-only", branch], git_repo.clone)
         assert f"tasks/done/{tid}.md" in tracked
         assert f"tasks/done/{tid}.summary.md" in tracked
+
+
+def test_a_settled_tasks_own_file_survives_the_next_watch_tick(
+    git_repo,
+    fake_cli,
+    git_run,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The full default-configuration chain that made a successful task report as failed.
+
+    ``tasks/`` is tracked (that is what makes it the audit trail), so promote commits the file on
+    base while the terminal move is committed on the task branch. Returning to base then restores
+    the pending copy underneath the finished task, and the next poll tick finds it again. Nothing
+    about that is exotic — every element of it is a default — so the second tick, and an explicit
+    ``run`` on the same file, must both leave the operator's tree and ledger exactly as they were.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    pending = git_repo.clone / "tasks" / "pending"
+    pending.mkdir(parents=True)
+    claude_cmd = fake_cli("success_edit", "claude")
+    codex_cmd = fake_cli("success_edit", "codex")
+    config = _write_cli_config(project, git_repo.clone, claude_cmd=claude_cmd, codex_cmd=codex_cmd)
+    task_file = pending / "task-301.md"
+    _complete_task_file(task_file, "task-301")
+    # The promote commit: without it the file cannot come back, and the defect cannot reproduce.
+    git_run(["add", "tasks/pending/task-301.md"], git_repo.clone)
+    git_run(["commit", "-m", "promote task-301"], git_repo.clone)
+    monkeypatch.chdir(project)
+
+    assert cli.main(["--config", str(config), "watch"]) == 0
+    ledger_path = git_repo.clone / ".worc" / "logs" / "completed.jsonl"
+    records = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
+    assert [r["final_status"] for r in records] == ["done"]
+    assert task_file.exists()  # restored by the base-branch checkout that ends the run
+
+    assert cli.main(["--config", str(config), "watch"]) == 0
+
+    records = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
+    assert [r["final_status"] for r in records] == ["done"]  # no second, contradicting record
+    assert task_file.exists()
+    assert not (project / "rejected").exists()  # the tracked file was never moved out of the tree
+    assert git_run(["status", "--porcelain", "--", "tasks"], git_repo.clone) == ""
+
+    # An explicit run has no scanner guard in front of it: it still answers loudly, but the reject
+    # path must not touch the file, the ledger or the operator's notifications either.
+    assert cli.main(["--config", str(config), "run", str(task_file)]) != 0
+    assert "duplicate_task_id" in capsys.readouterr().err
+    records = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
+    assert [r["final_status"] for r in records] == ["done"]
+    assert task_file.exists()
+    assert not (project / "rejected").exists()

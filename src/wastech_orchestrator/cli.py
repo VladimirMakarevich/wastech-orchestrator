@@ -65,9 +65,11 @@ from wastech_orchestrator.git_manager import (
     append_runtime_excludes,
     ensure_path_excluded,
     gh_repo_pin,
+    tasks_dir_has_tracked_files,
+    tasks_ignore_root,
 )
 from wastech_orchestrator.install import config_writer, detect, wizard
-from wastech_orchestrator.ledger import Ledger
+from wastech_orchestrator.ledger import COMPLETED_FILENAME, Ledger, LedgerUnreadableError
 from wastech_orchestrator.memory import (
     AuditActor,
     AuditContext,
@@ -87,7 +89,13 @@ from wastech_orchestrator.providers._adapter_base import IsolationCapabilityRepo
 from wastech_orchestrator.providers.base import AuthProbe, AuthState, ProviderId
 from wastech_orchestrator.providers.claude import claude_config_home
 from wastech_orchestrator.providers.codex import codex_config_home
-from wastech_orchestrator.runtime_layout import CONTROL_HOME_DIRNAME, RuntimeLayout, runs_root
+from wastech_orchestrator.runtime_layout import (
+    CONTROL_HOME_DIRNAME,
+    EXCHANGE_HOME_DIRNAME,
+    TRACKED_LIFECYCLE_STATES,
+    RuntimeLayout,
+    runs_root,
+)
 from wastech_orchestrator.security.env import (
     describe_expansions,
     expand_allowed_environment,
@@ -139,24 +147,31 @@ _LIST_RECENT_DEFAULT = 10
 
 # The orchestrator's runtime home inside the target repo is named by `runtime_layout`
 # (`CONTROL_HOME_DIRNAME` / `PRIVATE_HOME_DIRNAME`, both `.worc` today). Everything the orchestrator
-# generates or installs lives under `<repo>/.worc/` — gitignored as a whole — except the audit
-# trail: the task lifecycle dirs below sit at the repo root and are audit-committed. Consumers reach
-# the home via `layout_for(config)` (private) / `.control_home`, never a rebuilt `.worc` literal.
+# generates or installs lives under `<repo>/.worc/` — gitignored as a whole. The task lifecycle dirs
+# below are the one exception to the *location*: they sit at the repo root, so an operator who wants
+# their task files reviewed or pushed can track them. They too are gitignored by default. Consumers
+# reach the home via `layout_for(config)` (private) / `.control_home`, never a rebuilt `.worc`
+# literal.
 
-# Task lifecycle dirs created at the repo root by `install` (tracked; the audit commit captures the
-# task file + its `<id>.summary.md` in done/failed). `tasks/rejected` is the quarantine and
-# lives under `.worc/` instead, so rejected tasks are never swept into the audit commit.
-# `tasks/preparing` is the staging area: the watch scanner never looks in it, so a task file can be
-# composed there without being picked up mid-write. `promote` moves a finished file into `pending`.
-# These are the install-time *default* layout (`paths.tasks_dir` defaults to "tasks"); the runtime
-# reads `config.paths.tasks_dir` (see `pending_dir`). An operator who configures a different
-# directory creates its lifecycle subfolders themselves.
-REPO_TASK_DIRS: tuple[str, ...] = (
-    "tasks/preparing",
-    "tasks/pending",
-    "tasks/done",
-    "tasks/failed",
-)
+
+def repo_task_dirs(tasks_dir: str) -> tuple[str, ...]:
+    """The task lifecycle dirs `install` creates under *tasks_dir* at the repo root.
+
+    Gitignored by default (`install` seeds the rule) and tracked when the operator asks, in which
+    case the audit commit captures the task file + its `<id>.summary.md` in done/failed.
+    `.worc/tasks/rejected` is NOT here: the quarantine lives under the private home, so a rejected
+    task is never swept into a commit whichever way the tree is ignored. `preparing/` is the staging
+    area — the watch scanner never looks in it, so a task file can be composed there without being
+    picked up mid-write, and `promote` moves the finished file into `pending/`.
+
+    The state names are derived, never restated: a folder `install` scaffolds but the audit commit's
+    pathspec does not know about is a task file committed twice. The parent is the operator's to
+    name (`paths.tasks_dir`, `install --tasks-dir`), and the runtime reads it from the config (see
+    `pending_dir`), so an operator who renames it *after* installing creates the subfolders — and
+    moves the ignore line — themselves.
+    """
+    return tuple(f"{tasks_dir}/{state}" for state in TRACKED_LIFECYCLE_STATES)
+
 
 # Runtime dirs created under `<repo>/.worc/` by `install` (all gitignored).
 WORC_RUNTIME_DIRS: tuple[str, ...] = ("logs", "workspace", "tasks/rejected")
@@ -283,6 +298,21 @@ def build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="process pending tasks back-to-back (default: no)",
+    )
+    install_cmd.add_argument(
+        "--track-tasks",
+        dest="track_tasks",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="commit task files as an audit trail (default: no — the lifecycle tree is gitignored)",
+    )
+    install_cmd.add_argument(
+        "--tasks-dir",
+        dest="tasks_dir",
+        default=None,
+        metavar="DIR",
+        help="repo-relative task lifecycle directory to scaffold and write as paths.tasks_dir "
+        f"(default: {config_writer.DEFAULT_TASKS_DIR})",
     )
     install_cmd.add_argument(
         "--non-interactive",
@@ -489,7 +519,9 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"show only the last N terminal tasks (default {_LIST_RECENT_DEFAULT})",
     )
     list_view.add_argument(
-        "--all", action="store_true", help="show every known task, across all statuses"
+        "--all",
+        action="store_true",
+        help="show every known task, across all statuses, plus the ids the gate rejected",
     )
     list_cmd.add_argument(
         "--format",
@@ -1257,10 +1289,12 @@ def worc_home_for(config: OrchestratorConfig) -> Path:
 
 
 def tasks_root_for(config: OrchestratorConfig) -> Path:
-    """The repo root that holds the tracked ``tasks/`` lifecycle dirs (the audit trail).
+    """The repo root that holds the ``paths.tasks_dir`` lifecycle dirs.
 
-    Unlike :func:`worc_home_for`, ``tasks/`` stays at the repo root so the task file and its
-    committed ``<id>.summary.md`` can be audit-committed into the repo's history.
+    Unlike :func:`worc_home_for`, the lifecycle tree stays at the repo root so the task file and
+    its ``<id>.summary.md`` *can* be audit-committed into the repo's history — the one root the
+    operator may choose to track. ``install`` gitignores it by default; the location is what makes
+    the choice available at all.
     """
     return Path(config.repo.local_path)
 
@@ -1725,24 +1759,6 @@ def _claim_allowed(
     return False
 
 
-def _already_settled(orchestrator: Orchestrator, task_id: str, task_file: Path) -> bool:
-    """True iff ``task_id`` already reached a terminal status and ``task_file`` is its own leftover.
-
-    A ``manual_action_required`` task keeps its file in ``pending/`` by design (branch preserved,
-    the operator reviews/publishes); a committed-``tasks/`` done/failed move can also resurface in
-    ``pending/`` after a base-branch checkout. Either way the daemon must **not** re-run it — that
-    would re-reject it as ``duplicate_task_id`` and quarantine the operator's file. A *different*
-    file colliding on a used id is left to fall through to the gate, which rejects it loudly.
-    """
-    row = orchestrator.lookup_task(task_id)
-    if row is None or row.status not in TERMINAL or not row.source_path:
-        return False
-    try:
-        return Path(row.source_path).resolve() == task_file.resolve()
-    except OSError:
-        return False
-
-
 def watch_once(
     orchestrator: Orchestrator,
     config: OrchestratorConfig,
@@ -1773,9 +1789,9 @@ def watch_once(
     all a single pass with no operator summary needs.
 
     A pending file whose id already reached a terminal status and is that task's own leftover is
-    also skipped (:func:`_already_settled`): a ``manual_action_required`` task keeps its file in
-    ``pending/`` for the operator, and re-running it would only reject it as ``duplicate_task_id``
-    and quarantine the file. Resolving it (``rerun``/``finalize``) is the operator's call.
+    also skipped (:meth:`Orchestrator.settled_own_file`): re-running it would only reject it as
+    ``duplicate_task_id`` and quarantine the operator's own file. Resolving it
+    (``rerun``/``finalize``) is the operator's call.
 
     Eligible tasks are ranked by ``priority`` (high → mid → low), ties broken by the natural,
     platform-stable filename order from :func:`natural_sort_key`. ``depends_on`` is always stronger:
@@ -1803,10 +1819,11 @@ def watch_once(
         task_id, depends_on = scan.task_id, scan.depends_on
         if not orchestrator.acquire_slot(""):
             break  # the slot is not free (an active task remains)
-        if task_id is not None and _already_settled(orchestrator, task_id, task_file):
-            # A terminal task's own file lingering in pending/ (e.g. manual_action_required keeps
-            # it there for the operator). Never re-run it — that would reject it as a duplicate id
-            # and quarantine the file. Non-blocking skip, like a WAITING dependency.
+        if task_id is not None and orchestrator.settled_own_file(task_id, task_file):
+            # A terminal task's own file lingering in pending/ — either kept there for the operator
+            # (manual_action_required) or restored by the base-branch checkout that ends the run.
+            # Never re-run it: that would reject it as a duplicate id and quarantine the file.
+            # Non-blocking skip, like a WAITING dependency.
             _LOG.info("task %s already settled; leaving its file for the operator", task_id)
             continue
         if task_id is not None and depends_on:
@@ -3685,7 +3702,13 @@ def cmd_validate_flow(args: argparse.Namespace) -> int:
             print(f"flow {check.name}: OK")
         else:
             ok = False
-            print(f"flow {check.name}: FAIL — {check.error.splitlines()[0]}")
+            # A flow validation error is a header line followed by one already-indented line per
+            # violation; printing only the first line leaves the operator a trailing colon and no
+            # way to reach the findings short of calling the registry from Python.
+            header, *violations = check.error.splitlines()
+            print(f"flow {check.name}: FAIL — {header}")
+            for violation in violations:
+                print(violation if violation.startswith(" ") else f"  {violation}")
         for warning in check.warnings:
             print(f"flow {check.name}: WARN — {warning} (renders verbatim to the agent)")
     return 0 if ok else 1
@@ -4216,15 +4239,21 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
-def _task_entry(row: TaskRow, *, executor_alive: bool = True) -> dict[str, str | None]:
+def _task_entry(
+    row: TaskRow, *, executor_alive: bool = True, pr_url: str | None = None
+) -> dict[str, str | None]:
     # Status label via the shared renderer: a RUNNING row shows "parked (no daemon)" when neither
     # the daemon nor a `run` is alive, else "(paused)" on a B-lite provider-outage park, else the
     # plain status. The default keeps terminal rows (recent/all) and any direct caller unchanged.
+    # ``pr_url`` is passed in rather than queried here: the same entry is built for the monitor's
+    # recent block and for ``worc tasks``, neither of which renders a URL, so a per-row lookup on
+    # a polling refresh would buy nothing there.
     return {
         "task_id": row.task_id,
         "status": _display_status(row, executor_alive=executor_alive),
         "title": row.title,
         "branch": row.branch,
+        "pr_url": pr_url,
     }
 
 
@@ -4232,12 +4261,14 @@ def _pending_entry(path: Path, scan: _PendingScan, rank: int) -> dict[str, str |
     # A queued file has no DB row yet, so this view is file-derived. It carries the scheduler's own
     # ranking — the 1-based rank position plus the priority/queue it sorted on — so the operator
     # reads the *run* order here, not the file manager's alphabetical listing. An unparseable file
-    # has no id and is shown by filename instead.
+    # has no id and is shown by filename instead. ``pr_url`` is always null (nothing has run yet)
+    # and is carried anyway so every listing entry has the same shape for a scripted consumer.
     return {
         "task_id": scan.task_id,
         "status": "pending",
         "title": None,
         "branch": None,
+        "pr_url": None,
         "file": path.name,
         "rank": str(rank),
         "priority": _PRIORITY_LABEL.get(scan.priority_rank, "mid"),
@@ -4263,6 +4294,11 @@ def _entry_line(entry: dict[str, str | None]) -> str:
     branch = entry.get("branch")
     if branch:
         line += f"  ({branch})"
+    # A gate-rejected entry has neither title nor branch — the reason it was refused is the only
+    # thing the line can usefully carry, and the only reason the operator is being shown the id.
+    reason = entry.get("validation_reason")
+    if reason:
+        line += f"  ({reason})"
     return line
 
 
@@ -4609,6 +4645,70 @@ def cmd_shell(args: argparse.Namespace) -> int:
     )
 
 
+#: The ``--all`` section built from the ledger rather than from a ``tasks`` row. Named once because
+#: the id views have to recognise and drop it: a rejected id is not one any verb accepts.
+_REJECTED_SECTION = "rejected"
+
+
+def _row_entries(
+    store: StateStore | None, rows: Sequence[TaskRow], *, executor_alive: bool = True
+) -> list[dict[str, str | None]]:
+    """Task rows as listing entries, each carrying the PR URL its publish op recorded."""
+    return [
+        _task_entry(
+            row,
+            executor_alive=executor_alive,
+            pr_url=_recorded_pr_url(store, row.task_id) if store is not None else None,
+        )
+        for row in rows
+    ]
+
+
+def _rejected_entries(logs_root: Path, known_ids: set[str]) -> list[dict[str, str | None]]:
+    """Gate-rejected ids as listing entries, read off the append-only ledger (never written).
+
+    A validation reject happens before the task is ever claimed, so it leaves no ``tasks`` row and
+    the ledger is the only durable record of it — without this section the id and the reason are
+    reachable only from inside the private runtime home. ``known_ids`` (every id the store has a
+    row for) is what keeps the section honest: an id that was fixed and re-submitted under the same
+    name has a row and is an ordinary task again, so it drops out here by construction.
+    """
+    ledger = Ledger(logs_root)
+    try:
+        # The ledger is append-only, so the last record wins for an id rejected more than once.
+        latest = {
+            task_id: record
+            for record in ledger.records()
+            if isinstance(task_id := record.get("id"), str) and task_id not in known_ids
+        }
+        rejected_ids = {task_id for task_id in latest if ledger.only_validation_rejects(task_id)}
+    except json.JSONDecodeError as exc:
+        # `list` is the first read-only command to read the ledger, and a torn append after a crash
+        # (or a hand edit) would otherwise surface as a traceback out of a listing. Name the file
+        # and exit 2, the way every other `worc` failure reports. Skipping the bad line instead is
+        # not on offer: `records()` also feeds the duplicate-id gate, which must stay strict.
+        raise LedgerUnreadableError(
+            f"cannot read the completed-tasks ledger at "
+            f"{(logs_root / COMPLETED_FILENAME).as_posix()}: {exc}"
+        ) from exc
+    return [
+        {
+            "task_id": task_id,
+            "status": _REJECTED_SECTION,
+            "title": None,
+            "branch": None,
+            "pr_url": None,
+            "validation_reason": record.get("validation_reason"),
+            "rejected_at": record.get("finished_at"),
+        }
+        # `rejected_ids` came from the same predicate the duplicate-id gate uses, so the two can
+        # never disagree about which ledger trace is "rejects only" — this section must not
+        # describe an id the gate would refuse to let through, nor hide one it would.
+        for task_id, record in latest.items()
+        if task_id in rejected_ids
+    ]
+
+
 def _list_sections(
     args: argparse.Namespace, config: OrchestratorConfig, store: StateStore | None
 ) -> list[tuple[str, list[dict[str, str | None]]]]:
@@ -4627,18 +4727,26 @@ def _list_sections(
     executor_alive = _executor_alive(config)
     if args.all:
         rows = store.all_tasks() if store else []
-        return [("all", [_task_entry(r, executor_alive=executor_alive) for r in rows])]
+        # ``--all`` is the "everything worc knows" view, which is where the rejects belong: they are
+        # the one class of task the store cannot account for.
+        return [
+            ("all", _row_entries(store, rows, executor_alive=executor_alive)),
+            (
+                _REJECTED_SECTION,
+                _rejected_entries(worc_home_for(config) / "logs", {r.task_id for r in rows}),
+            ),
+        ]
     if args.pending:
         return [("pending", pending)]
     if args.recent is not None:
         rows = store.recent_tasks(args.recent) if store else []
-        return [("recent", [_task_entry(r) for r in rows])]
+        return [("recent", _row_entries(store, rows))]
     active = store.find_active_tasks() if store else []
     recent = store.recent_tasks(_LIST_RECENT_DEFAULT) if store else []
     return [
-        ("active", [_task_entry(r, executor_alive=executor_alive) for r in active]),
+        ("active", _row_entries(store, active, executor_alive=executor_alive)),
         ("pending", pending),
-        ("recent", [_task_entry(r) for r in recent]),
+        ("recent", _row_entries(store, recent)),
     ]
 
 
@@ -4665,8 +4773,19 @@ def _list_ids(store: StateStore | None, scope: str | None) -> int:
 def _print_section_ids(sections: list[tuple[str, list[dict[str, str | None]]]]) -> int:
     """Print the bare ids of the focused sections: the same disk+DB source as the table view,
     so `--pending --format ids` lists queued tasks that have no DB row yet. An unparseable pending
-    file has no id and is skipped (there is no usable id to print)."""
-    ids = {tid for _, items in sections for e in items if (tid := e.get("task_id"))}
+    file has no id and is skipped (there is no usable id to print).
+
+    The rejected section is left out: this list feeds completion and scripting, and a pending file
+    is an id the id-taking verbs will accept, while a gate-rejected one never becomes a task at all
+    — offering it would complete to an id every verb refuses.
+    """
+    ids = {
+        tid
+        for name, items in sections
+        if name != _REJECTED_SECTION
+        for e in items
+        if (tid := e.get("task_id"))
+    }
     for task_id in sorted(ids):
         print(task_id)
     return 0
@@ -4674,9 +4793,11 @@ def _print_section_ids(sections: list[tuple[str, list[dict[str, str | None]]]]) 
 
 def cmd_list(args: argparse.Namespace) -> int:
     """Enumerate tasks read-only: the active task, the ``tasks/pending`` queue, and recent terminal
-    tasks. The default view shows all three; ``--pending`` / ``--recent [N]`` / ``--all`` focus it.
+    tasks. The default view shows all three; ``--pending`` / ``--recent [N]`` / ``--all`` focus it,
+    and ``--all`` adds the ids worc's gate rejected (no row, so nothing else can show them).
     ``--format ids`` prints bare ids (the completion/scripting source) and ``--scope`` filters them
-    to what a given command accepts. Opens the DB read-only (``status``'s path) and never mutates.
+    to what a given command accepts. Opens the DB read-only (``status``'s path) and never mutates;
+    the ledger behind the rejected section is read the same way.
     """
     _configure_runtime_logging(args)
     config = load_config_for(args)
@@ -4878,14 +4999,15 @@ def _install_backup_config(path: Path) -> Path:
     return backup
 
 
-def _install_create_dirs(repo_local_path: Path) -> None:
-    """Create the tracked task dirs at the repo root and the gitignored ``.worc/`` runtime dirs.
+def _install_create_dirs(repo_local_path: Path, tasks_dir: str) -> None:
+    """Create the task lifecycle dirs at the repo root and the gitignored ``.worc/`` runtime dirs.
 
-    Idempotent. The repo task dirs are created empty, so they do not appear in ``git status`` until
-    a task writes into them; everything under ``.worc/`` is gitignored as a whole.
+    Idempotent. The lifecycle dirs are created empty, so they do not appear in ``git status`` until
+    a task writes into them (and not even then, unless the operator asked to track them);
+    everything under ``.worc/`` is gitignored as a whole.
     """
     worc_home = RuntimeLayout.default(repo_local_path).control_home
-    for rel in REPO_TASK_DIRS:
+    for rel in repo_task_dirs(tasks_dir):
         (repo_local_path / rel).mkdir(parents=True, exist_ok=True)
     for rel in WORC_RUNTIME_DIRS:
         (worc_home / rel).mkdir(parents=True, exist_ok=True)
@@ -4916,14 +5038,22 @@ def _install_print_plan(
     print("  checks:     command_sets (author in config.yaml)")
     print(f"  create_pr:  {spec.create_pull_request}")
     print(f"  auto_mode:  {spec.auto_mode}")
-    for rel in REPO_TASK_DIRS:
+    for rel in repo_task_dirs(spec.tasks_dir):
         print(f"  would create {spec.repo_local_path / rel}")
     for rel in WORC_RUNTIME_DIRS:
         print(f"  would create {worc_home / rel}")
     print(f"  would create {worc_home / 'guide'}/ (agent task-authoring docs)")
     print(f"  would create {worc_home / 'flows'}/ (built-in flows + node prompt templates)")
     print(f"  would create {worc_home / ENV_EXAMPLE_FILENAME} (secrets template)")
-    print(f"  would ignore {CONTROL_HOME_DIRNAME}/ via .gitignore")
+    roots = [f"{CONTROL_HOME_DIRNAME}/", f"{EXCHANGE_HOME_DIRNAME}/"]
+    ignore_tasks = not spec.track_tasks and not tasks_dir_has_tracked_files(
+        spec.repo_local_path, spec.tasks_dir
+    )
+    if ignore_tasks:
+        roots.append(tasks_ignore_root(spec.tasks_dir)[1])
+    print(f"  would ignore {', '.join(roots)} via .gitignore")
+    if not ignore_tasks:
+        print(f"  would leave {spec.tasks_dir}/ tracked (task files committed as an audit trail)")
     if missing:
         print(f"  note: provider(s) not on PATH: {', '.join(p.value for p in missing)}")
 
@@ -4950,8 +5080,10 @@ def cmd_install(args: argparse.Namespace) -> int:
     Runs the wizard to resolve settings, then idempotently writes a validated ``config.yaml`` into
     ``<repo>/.worc/``, scaffolds the runtime + task dirs, copies the task-authoring guide and
     editable copies of the built-in flows + their per-node prompt templates into ``.worc/flows/``,
-    and gitignores ``.worc/``. Re-running is a no-op unless ``--reconfigure`` (which backs up and
-    regenerates). After a successful write it auto-runs preflight.
+    and gitignores ``.worc/`` — plus the task lifecycle tree, unless ``--track-tasks`` (or a yes to
+    the wizard's question) asks for the task files to be committed. Re-running is a no-op unless
+    ``--reconfigure`` (which backs up and regenerates). After a successful write it auto-runs
+    preflight.
     """
     _configure_runtime_logging(args)
     try:
@@ -4960,6 +5092,8 @@ def cmd_install(args: argparse.Namespace) -> int:
             provider=args.provider,
             create_pr=args.create_pr,
             auto_mode=args.auto_mode,
+            track_tasks=args.track_tasks,
+            tasks_dir=args.tasks_dir,
             non_interactive=args.non_interactive,
             prompter=wizard.ConsolePrompter(),
         )
@@ -4982,7 +5116,7 @@ def cmd_install(args: argparse.Namespace) -> int:
         print(f"install: backed up existing config to {_install_backup_config(config_path)}")
 
     text = config_writer.build_and_validate(spec)
-    _install_create_dirs(spec.repo_local_path)
+    _install_create_dirs(spec.repo_local_path, spec.tasks_dir)
     _install_atomic_write(config_path, text)
     print(f"install: wrote {config_path}")
     # An editable copy of the task-authoring guide lives in .worc/. --reconfigure refreshes it to
@@ -5016,9 +5150,29 @@ def cmd_install(args: argparse.Namespace) -> int:
         print(f"install: wrote {worc_home / 'config.example.yaml'} (commented reference)")
     if _install_write_env_example(worc_home):
         print(f"install: wrote {worc_home / ENV_EXAMPLE_FILENAME} (copy to .worc/.env, fill in)")
-    # Gitignore the whole .worc/ runtime home so the operator's `git status` stays clean.
-    if append_runtime_excludes(spec.repo_local_path):
-        print(f"install: ignored {CONTROL_HOME_DIRNAME}/ via .gitignore")
+    # Gitignore the whole .worc/ runtime home so the operator's `git status` stays clean, and the
+    # task lifecycle tree with it unless the operator asked to track their tasks — or git already
+    # tracks something there, which overrules the answer rather than quietly ignoring a directory
+    # somebody is keeping in git. The answer is recorded nowhere else: from here on git's own ignore
+    # state is what the runtime reads, so the operator changes their mind by editing that one line.
+    already_tracked = tasks_dir_has_tracked_files(spec.repo_local_path, spec.tasks_dir)
+    ignore_tasks = not spec.track_tasks and not already_tracked
+    appended = append_runtime_excludes(
+        spec.repo_local_path, tasks_dir=spec.tasks_dir if ignore_tasks else None
+    )
+    if appended:
+        roots = ", ".join(line for line in appended if not line.startswith("#"))
+        print(f"install: ignored {roots} via .gitignore")
+    if not ignore_tasks:
+        why = (
+            "git already tracks files there"
+            if already_tracked and not spec.track_tasks
+            else "you asked to track your tasks"
+        )
+        print(
+            f"install: left {spec.tasks_dir}/ tracked ({why}) — the task file and its summary are "
+            "committed as an audit trail on the task's branch"
+        )
     if outcome.missing_providers:
         names = ", ".join(p.value for p in outcome.missing_providers)
         print(f"install: note — selected provider(s) not on PATH yet: {names}")
@@ -5093,6 +5247,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (
         ConfigError,
         IncompatibleStateError,
+        LedgerUnreadableError,
         preflight.GhNotAvailableError,
         preflight.ProviderNotLoggedInError,
     ) as exc:
