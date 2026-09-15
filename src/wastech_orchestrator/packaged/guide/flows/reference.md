@@ -13,6 +13,7 @@ A flow is a validated graph of typed nodes joined by outcome-labelled edges, sto
 | `permission_ceiling` | **yes** | `read-only` \| `workspace-write` | — | A hard cap: no node's `permission_profile` may exceed it, and no task may widen it. | The maximum filesystem access any node in this flow can have. Keep it as low as the flow needs. |
 | `output_policy` | **yes** | `code_change` \| `repository_document` \| `private_control_workspace_report` | — | Governs _where writing nodes may write_ and _what the flow must produce_ (see below). | The kind of deliverable this flow produces. |
 | `publishing` | **yes** | `pull_request` \| `documentation_pull_request` \| `local_artifact` \| `private_control_workspace_report` \| `none` | — | The publish node's `policy` must match the flow's intent (see below). | Where the flow's output ends up (its terminal publishing behavior). |
+| `report_dir` | no | string (repo-relative POSIX directory) | absent ⇒ the policy's own home | Repo-relative POSIX only: no absolute path, no drive letter, no `..`, no backslash, every segment portable and not a Windows device name (`con`, `com1`, …), and never the runtime homes (`.worc/`, `.worc-io/`), your `paths.tasks_dir` tree, or `.git/`. Refused at load on a `code_change` flow (it has no report directory). | Where this flow's report deliverable lives, for both report policies (see below). |
 | `network_policy` | no | `advisories` \| `research` | absent ⇒ no network | Absence = no network for any node unless a node sets `network_access: true`. | The flow-wide network grant (see below). |
 | `nodes` | **yes** | list | — | Non-empty; exactly one entry node; every node reaches a terminal. | The graph's nodes. |
 | `edges` | no | list | `[]` | (see Edges) | The transitions. |
@@ -26,10 +27,26 @@ A flow is a validated graph of typed nodes joined by outcome-labelled edges, sto
 | Value | What writing nodes may write | Must produce | Enters git? | When to use |
 | --- | --- | --- | --- | --- |
 | `code_change` | Anywhere in the repo (the deliverable _is_ the diff, guarded by the dangerous-diff gate). | — | Yes (normal diff). | Code/implementation flows. Pairs with `publishing: pull_request`. |
-| `repository_document` | **Only** `docs/research/<task_id>/`. | `report.md` + `sources.json` | Yes (committable document). | Research/analysis flows that ship a document into the repo. Pairs with `publishing: documentation_pull_request`. |
-| `private_control_workspace_report` | Orchestrator-written into `.worc/security-reports/<task_id>/` from the report node's structured output (`output_artifact: report`); the node is read-only. | `report.md` | **No — private, fail-closed.** Any attempt to stage/commit/PR it is refused. | Sensitive reports (e.g. security audits) that must never enter git. Pairs with `publishing: none` (or `private_control_workspace_report`). |
+| `repository_document` | **Only** `<report_dir>/<task_id>/`, `docs/research` by default. | `report.md` + `sources.json` | Yes (committable document). | Research/analysis flows that ship a document into the repo. Pairs with `publishing: documentation_pull_request`. |
+| `private_control_workspace_report` | **Only** `<report_dir>/<task_id>/`, `.worc/security-reports` by default. The packaged `security_audit` has its report orchestrator-written there from the report node's structured output (`output_artifact: report`), so that node is read-only. | `report.md` | **No — private, fail-closed.** Any attempt to stage/commit/PR it is refused. | Sensitive reports (e.g. security audits) that must never enter git. Pairs with `publishing: none` (or `private_control_workspace_report`). |
 
 The write confinement is enforced twice: an after-stage write guard on every workspace-write node, and again at publish. Pick `output_policy` to match what the flow actually creates — a mismatch (e.g. a research flow trying to edit `src/`) is blocked at runtime.
+
+### `report_dir` — moving the deliverable's home
+
+Both report policies write to `<report_dir>/<task_id>/`, and `report_dir` names only the **base**: the engine still appends `/<task_id>` itself, so per-task collision-freedom and the self-identifying report directory are not yours to lose. What the flow must produce there does not move with it — `report.md` + `sources.json` for `repository_document`, `report.md` for `private_control_workspace_report` — and neither does privacy.
+
+```yaml
+flow:
+  output_policy: repository_document
+  report_dir: docs/adr # deliverables land in docs/adr/<task_id>/
+```
+
+The value is validated at load and the refusal names the key and the rule it broke. It must be a repo-relative POSIX directory: no absolute path, no drive letter (`C:/x`), no `..`, no backslash (refused, never converted), no empty segment (so no trailing `/`), every segment portable on every OS and not a Windows device name — and it must not overlap the orchestrator's own roots (`.worc/`, `.worc-io/`), the task lifecycle tree you configured as `paths.tasks_dir`, or `.git/`. A leading-dot directory outside those is ordinary: `.worc-connect/triage` is a fine base. On a `code_change` flow the key is a load error rather than a silent no-op, because that policy resolves no report directory at all.
+
+**A private report under a base outside `.worc/` is yours to gitignore.** The validator cannot see your ignore rules and does not pretend to, so the guarantee is carried at run time, in two places. At publish: a private report whose files are git-trackable ends the task at `manual_action_required` rather than reaching staging, a commit, or a PR. And under every other terminal too: a task that stops before publish still commits and pushes its branch, so the report directory is excluded from that commit's staging set — on every route that commits, a fresh-process `worc resume` included. A base merge stages the whole tree, so there the whole base is excluded, earlier leftovers with it. The report stays on disk, untracked, and terminal cleanup names it as an unaccounted change instead of publishing it. So if you point `private_control_workspace_report` at `.worc-connect/triage`, add that directory to `.gitignore` first: a run that leaves it un-ignored ends in manual action either way, and you clean the leftover up by hand.
+
+The prompts of the nodes that write it should name `{report_dir}` rather than a literal path (see [prompt-variables.md](prompt-variables.md)); a prompt that hardcodes the old directory keeps writing there and the after-stage guard hard-stops the task on the first write.
 
 ### `publishing` — where the output ends up
 

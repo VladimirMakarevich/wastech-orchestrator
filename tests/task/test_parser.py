@@ -227,6 +227,16 @@ def test_publish_round_trips(tmp_path: Path, value: PublishScope | None) -> None
     assert load_normalized(tmp_path, "task-001").publish is value
 
 
+@pytest.mark.parametrize("value", [("Fixes #142", "https://example.test/AB-7"), ()])
+def test_references_round_trips(tmp_path: Path, value: tuple[str, ...]) -> None:
+    # Restart-safety at the very end of a run: publishing is the last thing a task does, so a
+    # resumed task is exactly the one whose PR has still to be opened — losing the references here
+    # would open it without the section and nothing downstream could tell.
+    task = NormalizedTask(id="task-001", title="T", description="Do it", references=value)
+    write_normalized(task, tmp_path)
+    assert load_normalized(tmp_path, "task-001").references == value
+
+
 @pytest.mark.parametrize("value", ["backend", "default"])
 def test_queue_round_trips(tmp_path: Path, value: str) -> None:
     # Restart-safety: a resumed task must keep its queue tag, so the same instance still owns it.

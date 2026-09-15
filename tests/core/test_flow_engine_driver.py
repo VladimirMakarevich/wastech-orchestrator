@@ -147,6 +147,7 @@ class _FakeGit:
         title: str,
         body_path: str,
         notice: str | None = None,
+        references_block: str | None = None,
     ) -> str | None:
         return "https://example/pr/1"
 

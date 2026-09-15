@@ -13,7 +13,7 @@
 - **[config/best-practices.md](config/best-practices.md)** — safe defaults, checks layout, and common config mistakes.
 - **[skills/worc-config/SKILL.md](skills/worc-config/SKILL.md)** — a copy-ready skill that interviews the operator and assembles a project-specific config.
 - **[flows/README.md](flows/README.md)** — author a _custom flow_ (a new `task_type`): the graph of steps, where the flow YAML + its prompts live, registration, and validation.
-- **[flows/reference.md](flows/reference.md)** — the **complete field reference** for flows: every flow-level and node-level field (including `output_policy`, `publishing`, `permission_ceiling`, `network_policy`), plus edges and validation.
+- **[flows/reference.md](flows/reference.md)** — the **complete field reference** for flows: every flow-level and node-level field (including `output_policy`, `report_dir`, `publishing`, `permission_ceiling`, `network_policy`), plus edges and validation.
 - **[flows/roles.md](flows/roles.md)** — author a flow's **role prompts**: the built-in evaluator roles, the per-node output contract, output slots, and the supervisor layer.
 - **[flows/prompt-variables.md](flows/prompt-variables.md)** — the `{name}` variable allowlist role prompts may reference.
 - **[skills/worc-flow/SKILL.md](skills/worc-flow/SKILL.md)** — a copy-ready skill that authors a new custom flow (graph, output kind, route) end-to-end.
@@ -70,6 +70,7 @@ Only the fields below are allowed. **Any other key makes the task rejected** (`u
 | `prompt_audit` | no | boolean | `true`/`false` forces prompt-audit recording for this task; omit = config default. |
 | `decomposition` | no | boolean | `true`/`false` permits/forbids decomposition for this task (task-wins over `agents.decomposition.enabled`); omit = config default. Only flips the gate — the flow + planning still decide whether a split happens. See the decision guide. |
 | `contacts` | no | list of strings | Plain-text mentions in Telegram notifications and human-in-the-loop prompts. No access control. |
+| `references` | no | list of strings | Lines appended **verbatim** to the pull-request body, under a `## References` heading, when the run opens a PR. 1–16 entries, each a single non-blank line of at most 200 characters. **Fail-closed** — a wrong shape rejects the task (`invalid_references`) — and scanned for argv-shaped tokens like every other value (`injection_suspected`). worc never interprets an entry: it knows no issue tracker's syntax, so a closing keyword (`Fixes #142`) or a back-link does whatever the host you publish to makes of it, and nothing more. Intended for a tool that files tasks on your behalf; leave it out of a hand-written task. A no-op wherever no PR is opened (`publish: commit`/`push`, or a flow with no PR). |
 | `depends_on` | no | list of strings | Other **task ids** that must be **merged** before this task may start (non-blocking, merge-gated: the scheduler skips a dependent while a dependency is unmerged and runs other eligible tasks meanwhile). For _separate_ tasks that build on each other — not for splitting one task. Listing the task's own id rejects it (`invalid_depends_on`). |
 | `subtasks` | no | list of strings | Operator-authored decomposition: ordered repository-relative paths to per-subtask spec files, run sequentially on one branch into one PR. The gate checks only the list shape; the paths, files, count, and linear ordering are checked at the pre-branch preflight. **Author it with the `worc-deco-task` skill**, not by hand. |
 | `priority` | no | `low` \| `mid` \| `high` | Scheduling order under `watch`: eligible tasks run `high → mid → low`, ties by **natural (numeric-aware)** filename order (`p9` before `p10`, same on every OS). `depends_on` is always stronger. Read the effective order from `worc list` / `worc top`, not your file manager. Omit/unrecognised ⇒ `mid` (fail-open — never rejects). |
@@ -112,6 +113,45 @@ For machine-generated input, a `.json` object works too. Every front-matter fiel
   "description": "## Description\n\nAdd a bounded retry budget.\n\n## Acceptance criteria\n\n- [ ] Stops after 5 failed attempts.\n"
 }
 ```
+
+## Reading task state from a script
+
+If something outside the orchestrator has to follow the tasks it submitted — a tracker connector, a dashboard, a shell script — `worc list --format json` is the surface to read, and the only one meant as a contract. It prints one JSON array on stdout and exits `0`; the database and the ledger behind it are opened read-only, so the command writes nothing. Check the exit code before parsing: an unreadable configuration, an incompatible database, or (under `--all`) a ledger carrying a half-written line exits `2` and prints a plain `error: …` line where the JSON would have been. Every entry carries:
+
+| Key | Value |
+| --- | --- |
+| `task_id` | The task's id. Absent (`null`) only for a queued file whose front matter could not be parsed — that entry is identified by `file` instead. |
+| `status` | The display label (see below). |
+| `title` | The task title, or `null`. |
+| `branch` | The branch the task works on, or `null` before one exists. |
+| `pr_url` | The URL of the pull request the task opened, or `null` if it opened none. |
+
+An entry for a file still queued in `tasks/pending/` adds `file` (the filename), `rank` (its 1-based position in the run order), `priority` and `queue`; its `title`, `branch` and `pr_url` are `null`, because nothing has run yet.
+
+Two things a consumer has to know:
+
+- **`--all` lists database rows only.** A queued file has no row yet, so it appears in the default view and under `--pending`, never under `--all`. Conversely the default view's `recent` section is capped at the last few terminal tasks — `--all` is the uncapped view of everything the database holds.
+- **`status` is a display label, not the raw status.** It is the status value (`new`, `validated`, `preparing`, `running`, `pending`, `done`, `failed`, `manual_action_required`) with a parenthesised suffix wherever the bare word would mislead: `running (paused)` and `running (paused until <timestamp>)` while a provider outage is waited out, and `parked (no daemon)` for a `running` task whose executor is gone (parked at its checkpoint, not executing). Match the **leading token**, not the whole string, and read `parked` as a running task that is not moving. One further value, `rejected`, is not a task status at all — see below.
+
+### Rejected tasks
+
+`worc list --all` carries a second section that has no database rows behind it. A task the validation gate refuses never becomes a row: the file is quarantined and the refusal is appended to the completed-tasks ledger, so without this section the id and the reason are visible only inside the orchestrator's private runtime directory. Each such id appears once, built from its newest refusal:
+
+```json
+{
+  "task_id": "gh-9",
+  "status": "rejected",
+  "title": null,
+  "branch": null,
+  "pr_url": null,
+  "validation_reason": "injection_suspected",
+  "rejected_at": "2026-09-11T02:00:00+00:00"
+}
+```
+
+An id enters the section when every ledger trace it has is a refusal and the database holds no row for it; it leaves the moment a corrected file is submitted under the same id and accepted, because from then on it is an ordinary task with an ordinary row. With no ledger yet, the section is simply empty. In the table view the same ids print under a `rejected:` heading with the reason in parentheses.
+
+Rejected ids are deliberately absent from the default view and from `--format ids`: no command takes one as an argument, so offering them would only complete to ids that every verb refuses.
 
 ## Where this fits
 

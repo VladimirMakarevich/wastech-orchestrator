@@ -31,6 +31,15 @@ STUCK_FILENAME = "stuck.md"
 INFRA_LOOP = "infra"
 
 
+class LedgerUnreadableError(Exception):
+    """The ledger file exists but carries a line that is not a JSON record.
+
+    Raised only by read-only *presentation* callers, which prefer a clean message over a traceback.
+    :meth:`Ledger.records` itself stays strict on purpose: the duplicate-id gate reads it, and a
+    torn line silently skipped there would let a re-submitted id through as if it were new.
+    """
+
+
 @dataclass(frozen=True)
 class LedgerRecord:
     """One terminal-transition record. Fields beyond the core set apply when relevant."""

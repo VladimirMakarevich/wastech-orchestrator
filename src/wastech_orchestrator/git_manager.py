@@ -121,8 +121,9 @@ def _runtime_exclude_pathspecs(roots: Sequence[str]) -> tuple[str, ...]:
     ``top`` anchors each pattern at the repo root instead of the process cwd: a bare
     ``:(exclude).worc/`` is resolved relative to where git was launched, so the same argument
     silently stops excluding anything the moment it runs from a subdirectory. Callers pass a subset
-    of :data:`RUNTIME_EXCLUDED_DIRS` so the roots cannot drift from the ones the ignore lines and
-    the changed-path filter already use.
+    of :data:`RUNTIME_EXCLUDED_DIRS` — plus, for the tree-sweeping merge, the run's private report
+    directory — so the roots cannot drift from the ones the ignore lines and the changed-path
+    filter already use.
     """
     return tuple(f":(exclude,top){r}/" for r in roots)
 
@@ -691,6 +692,25 @@ def _parse_name_only_z(output: str) -> list[str]:
     return [item for item in output.split("\0") if item]
 
 
+def _under_declared_dir(path: str, declared: str | None) -> bool:
+    """Whether handing *path* to ``git add`` would stage something inside *declared*.
+
+    True for *declared* itself, for anything under it, and for an **ancestor** directory:
+    ``git status --porcelain`` collapses a wholly-untracked tree into a single ``dir/`` entry, and
+    handing that entry to ``git add`` stages every file beneath it — which is how a private report
+    reached a commit in the first place. Dropping the ancestor costs nothing a report run produced:
+    the after-stage write guard confines its writing nodes to the report directory itself.
+    ``None`` (nothing declared) is never a match.
+    """
+    if declared is None:
+        return False
+    normalized = path.replace("\\", "/").strip("/")
+    base = declared.replace("\\", "/").strip("/")
+    return (
+        normalized == base or normalized.startswith(f"{base}/") or base.startswith(f"{normalized}/")
+    )
+
+
 def _parse_name_status_z(output: str) -> list[tuple[str, str, str | None]]:
     """``(status, path, previous_path)`` records from ``git diff --name-status -z`` output.
 
@@ -1085,6 +1105,12 @@ class GitManager:
         # is excluded here, alongside the gitignored `.worc/` runtime home.
         self._tasks_dir = config.paths.tasks_dir
         self._excluded_dirs = (*RUNTIME_EXCLUDED_DIRS, self._tasks_dir)
+        # The declared task's private report directory and its base, or None — see
+        # `set_private_report_dir`. Per task rather than per config: they come from the flow's
+        # `output_policy` + `report_dir`, which this object does not and must not resolve.
+        # Deliberately NOT folded into `_excluded_dirs`.
+        self._private_report_dir: str | None = None
+        self._private_report_base: str | None = None
         # The allowlist, scrubbed of the publication-retargeting names and hardened; applies to both
         # `git` (`_run`) and `gh` (`_gh`), which shells out to git. See `build_git_env`.
         self._env = build_git_env(config.security)
@@ -2181,11 +2207,15 @@ class GitManager:
     # --- staging + commit ---------------------------------------------------------
 
     def changed_code_paths(self) -> list[str]:
-        """The changed paths that are *not* orchestration artifacts (the code staging set)."""
+        """The changed paths that are *not* orchestration artifacts (the code staging set).
+
+        Also drops the declared task's private report directory (:meth:`set_private_report_dir`),
+        which is not an artifact path but must never be committed either.
+        """
         porcelain = self._git("status", "--porcelain", "-z").stdout
         paths: list[str] = []
         for _code, path in _parse_porcelain_status_z(porcelain):
-            if self._is_artifact_path(path):
+            if self._is_artifact_path(path) or self._is_private_report_path(path):
                 continue
             paths.append(path)
         return paths
@@ -2288,6 +2318,54 @@ class GitManager:
         normalized = path.replace("\\", "/")
         return any(normalized == d or normalized.startswith(f"{d}/") for d in self._excluded_dirs)
 
+    def set_private_report_dir(self, subdir: str | None, base: str | None = None) -> None:
+        """Declare the current task's private report directory (repo-relative POSIX), or clear it.
+
+        A ``private_control_workspace_report`` deliverable must never enter git. Its home is under
+        the gitignored runtime home by default, which :attr:`_excluded_dirs` already covers, but a
+        flow may point ``report_dir`` at any repo-relative base — and a base the operator forgot to
+        gitignore makes the report an ordinary untracked file that the code commit sweeps in. The
+        publish node refuses such a task, but that refusal runs only on the publish path: every
+        ``failed``/``manual_action_required`` terminal commits and pushes the code paths too. So the
+        directory is excluded from the *staging set*, which is the one place every commit path goes
+        through.
+
+        Two values, because the two staging paths see different sets. *subdir* is this task's own
+        resolved directory (``<base>/<task_id>``) and scopes the **scoped** commit, which stages an
+        explicit list of this task's changed paths. *base* is the directory the flow named, and
+        scopes the **tree-sweeping** merge commit (``git add -A``) and its staged-set gate: a
+        sweep picks up a *sibling* task's leftover report under the same un-ignored base just as
+        readily as this task's, and that report is no safer for having been written by an earlier
+        run. *base* defaults to *subdir* so a caller that knows only the per-task directory still
+        gets the narrower guarantee rather than none.
+
+        Deliberately NOT added to :attr:`_excluded_dirs`: that tuple answers "is this path
+        orchestration machinery", and the private report must stay **visible** through it — the
+        publish node's leak refusal and the after-stage write guard both read
+        :meth:`changed_code_entries`, and hiding the report from them would replace a fail-closed
+        refusal with silence.
+
+        Declared from durable state by every entry point that can reach a commit, not once per
+        engine run: the engine is not the only thing that commits, and a terminal reached in a
+        fresh process before the engine starts would otherwise find no declaration at all.
+        ``None`` clears it, for a task whose deliverable is not private.
+        """
+        self._private_report_dir = subdir
+        self._private_report_base = base if base is not None else subdir
+
+    def _is_private_report_path(self, path: str) -> bool:
+        """Whether staging *path* would stage **this task's** private report (the scoped commit)."""
+        return _under_declared_dir(path, self._private_report_dir)
+
+    def _is_private_report_base_path(self, path: str) -> bool:
+        """Whether staging *path* would stage **any** private report under the declared base.
+
+        The tree-sweeping merge commit's question: ``git add -A`` does not distinguish this task's
+        report directory from a sibling task's leftover beside it, so the whole declared base is
+        off limits there.
+        """
+        return _under_declared_dir(path, self._private_report_base)
+
     def _fully_staged_deletions(self) -> set[str]:
         """Code paths whose deletion is already fully staged (porcelain ``D `` — staged in the
         index, absent from the working tree).
@@ -2351,9 +2429,19 @@ class GitManager:
         config reviewable in history) does hold tracked files, and there git accepts the exclusion.
         Probed per root, not once for the pair, because an installed repo reaches the two states
         independently. Uncached: the one caller runs at most once per base merge.
+
+        The declared private report **base** joins the roots when one is declared: ``git add -A``
+        sweeps the whole tree, so it is the one staging path a scoped pathspec does not protect,
+        and an un-gitignored report base is exactly the case that needs it. The base and not just
+        this task's subdirectory, because the sweep cannot tell a sibling task's leftover report
+        under the same base from this one's. It goes through the same ignore probe for the same
+        reason — naming a wholly-ignored root aborts ``git add``.
         """
+        roots = [*RUNTIME_EXCLUDED_DIRS]
+        if self._private_report_base is not None:
+            roots.append(self._private_report_base)
         return _runtime_exclude_pathspecs(
-            [d for d in RUNTIME_EXCLUDED_DIRS if not self._git("check-ignore", "-q", f"{d}/").ok]
+            [d for d in roots if not self._git("check-ignore", "-q", f"{d}/").ok]
         )
 
     def _tasks_dir_ignored(self) -> bool:
@@ -2451,16 +2539,23 @@ class GitManager:
         succeeded. A rename *source* is exempt from the allowlist (it is being moved out, and its
         destination is validated) unless it is a runtime-artifact path outside the allowlist — a
         rename FROM ``.worc-io``/``.worc``/``tasks`` would exfiltrate it. ``allowed=None`` is the
-        merge exclude-mode: a base merge stages arbitrary base code, so only staged *artifact* paths
-        (either endpoint of a rename) are rejected. An ignore rule never makes a staged entry safe.
+        merge exclude-mode: a base merge stages arbitrary base code, so only staged *artifact*
+        paths, and anything under the declared private report **base**
+        (:meth:`set_private_report_dir`), are rejected — either endpoint of a rename. The base, not
+        just this task's subdirectory: the sweep that stages the set cannot tell a sibling task's
+        leftover report from this one's, and neither may enter a commit. An ignore rule never makes
+        a staged entry safe.
         """
         self.assert_exchange_never_staged()
         offenders: list[str] = []
         staged = self._git("diff", "--cached", "--name-status", "-z").stdout
         for _status, path, previous in _parse_name_status_z(staged):
-            if allowed is None:  # merge exclude-mode: reject only a staged artifact endpoint
+            if allowed is None:  # merge exclude-mode: reject only a staged artifact/report endpoint
                 offenders += [
-                    p for p in (path, previous) if p is not None and self._is_artifact_path(p)
+                    p
+                    for p in (path, previous)
+                    if p is not None
+                    and (self._is_artifact_path(p) or self._is_private_report_base_path(p))
                 ]
                 continue
             if not self._within_allowlist(path, allowed):  # added/surviving path must be allowed
@@ -3008,6 +3103,7 @@ class GitManager:
         title: str,
         body_path: str,
         notice: str | None = None,
+        references_block: str | None = None,
     ) -> str | None:
         """Open a PR with ``summary.md`` as the body. Idempotent. None when PRs are disabled.
 
@@ -3016,6 +3112,9 @@ class GitManager:
         impossible, so the commit+push already stand and the PR step is skipped; and PR reuse — a
         chain of tasks on one branch converges on one PR, so an already-open ``head→base`` PR is
         reused rather than re-created (``gh pr create`` would otherwise fail on the duplicate).
+
+        ``notice`` and ``references_block`` annotate the body, and both are applied before the
+        reuse probe so the reused chain PR carries them exactly as a freshly created one does.
         """
         if not self._config.git.create_pull_request:
             return None
@@ -3028,8 +3127,10 @@ class GitManager:
         existing = self._store.get_publish_op(task_id, KIND_PR, None)
         if existing is not None and existing.status == _STATUS_COMPLETED:
             return existing.result_ref
-        if notice:
-            body_path = self._body_with_notice(task_id, body_path, notice)
+        if notice or references_block:
+            body_path = self._annotated_body(
+                task_id, body_path, notice=notice, references_block=references_block
+            )
         reused = self._find_open_pr(task_id, branch, pr_base)
         if reused is not None:
             # An open PR on this head is reused whether or not one of our rows already names it.
@@ -3070,19 +3171,30 @@ class GitManager:
         self._record_completed(task_id, KIND_PR, branch, pr_url)
         return pr_url
 
-    def _body_with_notice(self, task_id: str, body_path: str, notice: str) -> str:
-        """A copy of the PR body with *notice* on top, written under the task's artifacts.
+    def _annotated_body(
+        self, task_id: str, body_path: str, *, notice: str | None, references_block: str | None
+    ) -> str:
+        """A copy of the PR body with *notice* on top and *references_block* at the foot.
 
         The committed ``summary.md`` is already in a commit, so it is not rewritten; the PR gets
         the annotated copy instead. Falls back to the original body on any read/write failure — a
         missing annotation must not cost the task its pull request.
+
+        The two annotations sit at opposite ends because they address opposite readers: the notice
+        warns about what the diff below it contains, so it has to be seen first, while the
+        references are a footer whatever produced the task expects to find at the end.
+        ``newline=""`` keeps the body byte-identical on every host — the default text mode would
+        rewrite each ``\\n`` to ``\\r\\n`` on Windows and put CRLF into a pull-request body.
         """
         try:
             original = Path(body_path).read_text(encoding="utf-8") if body_path else ""
+            annotated = f"{notice}\n\n{original}" if notice else original
+            if references_block:
+                annotated = f"{annotated.rstrip()}\n\n{references_block}\n"
             dest = task_artifact_dir(self._artifacts_root, task_id) / "pr-body.md"
             dest.parent.mkdir(parents=True, exist_ok=True)
             with dest.open("w", encoding="utf-8", newline="") as fh:
-                fh.write(f"{notice}\n\n{original}")
+                fh.write(annotated)
             return str(dest)
         except OSError:
             return body_path

@@ -24,6 +24,9 @@ queue: "default" # routes the task to the worc instance whose orchestrator.queue
 contacts: # handles surfaced for human-in-the-loop prompts and approvals
   - "@team-lead"
   - "@webhooks-oncall"
+references: # lines appended VERBATIM to the PR body under a "## References" heading when the run opens a PR. 1..16 entries, each a single non-blank line of <=200 chars. Fail-closed (a wrong shape REJECTS the task as invalid_references) and injection-scanned like every other value. worc never interprets an entry — it knows no tracker's syntax, so a closing keyword or a back-link does whatever the host you publish to makes of it. Meant for a tool that files tasks for you; omit it when writing a task by hand. No-op wherever no PR is opened.
+  - "Fixes #142"
+  - "https://example.test/AB-7"
 # depends_on: ["task-webhook-model"] # other TASK ids that must be MERGED before this one may start
 #   (non-blocking: the scheduler runs other eligible tasks meanwhile). For SEPARATE tasks that build
 #   on each other — not for splitting one task. Listing this task's own id rejects it.
