@@ -144,7 +144,7 @@ Either way the graph must route the skip: a skipped non-terminal node yields its
 
 ## Role files (prompts)
 
-A node's prompt is the content of its `role_file` — plus, on a turn that continues a session the node has already spoken on, the optional [`resume_role_file`](#continuation-prompts-resume_role_file) beside it. Both render the same variable set on the same node. Role files render only an allowlisted set of path/metadata variables — `{task_path}`, `{repo_path}` (alias `{repo}`), `{plan_path}`, `{diff_path}`, `{checks_path}`, `{review_path}`, `{memory_path}`, `{subtask_order}`/`{subtask_count}`/`{subtask_spec_path}`, `{predecessor_context}` (the intra-task subtask handoff brief), `{report_dir}` (the resolved repo-relative per-task directory the flow's writing nodes are confined to — `docs/research/<task_id>`, or whatever base the flow's `report_dir` names), the two metadata scalars `{task_id}` and `{stage}`, plus every agent/tool node's `{<node_id>_path}` — never task bodies, diffs, env, or secrets. A variable that is empty for a given node renders as the empty string; wrap optional references in a conditional block `{?name}…{/name}` so they drop cleanly when empty. `{report_dir}` is the one exception to that rule: a role prompt naming it (or `{?report_dir}`) on a `code_change` flow is a fatal flow-load error, not an empty render, because that policy resolves no report directory and `{report_dir}/report.md` would silently become `/report.md`. For the full variable contract and which runner populates each, see [configuration.md → Prompt templates](configuration.md#prompt-templates-no-longer-a-config-block).
+A node's prompt is the content of its `role_file` — plus, on a turn that continues a session the node has already spoken on, the optional [`resume_role_file`](#continuation-prompts-resume_role_file) beside it. Both render the same variable set on the same node. Role files render only an allowlisted set of path/metadata variables — `{task_path}`, `{repo_path}` (alias `{repo}`), `{plan_path}`, `{diff_path}`, `{checks_path}`, `{review_path}`, `{memory_path}`, `{subtask_order}`/`{subtask_count}`/`{subtask_spec_path}`, `{predecessor_context}` (the intra-task subtask handoff brief), `{report_dir}` (the resolved repo-relative per-task directory the flow's writing nodes are confined to — `docs/research/<task_id>`, or whatever base the flow's `report_dir` names), the two metadata scalars `{task_id}` and `{stage}`, plus every agent/tool node's `{<node_id>_path}` — never task bodies, diffs, env, or secrets. A variable that is empty for a given node renders as the empty string; wrap optional references in a conditional block `{?name}…{/name}` so they drop cleanly when empty. `{report_dir}` is the one exception to that rule: a role prompt naming it (or `{?report_dir}`) on a `code_change` flow is a fatal flow-load error, not an empty render, because that policy resolves no report directory and `{report_dir}/report.md` would silently become `/report.md`. For the full variable contract and which runner populates each, see [Configuration → Prompt templates](configuration-flows-supervisor.md#prompt-templates-no-longer-a-config-block).
 
 `role_file` paths are contained to the flow directory: a path with `..` or an absolute path is rejected at load. Keep prompts inside your `<task_type>/` folder.
 
@@ -179,7 +179,7 @@ The shipped flows use it: `implementation/implementation.continue.md`, `implemen
 
 ## Per-node overrides
 
-Every `agent`/`evaluator` node may pin its own `provider` (`codex` | `claude`), `model`, and `reasoning`; omit any and the node inherits the `config.yaml` provider defaults (`provider` ⇒ the global primary). A node may also set `network_access: true|false` to override the flow-wide network default for that node alone, and `git_evidence: true` to ask for the [read-only git verbs](#read-only-git-evidence-git_evidence). Spend more reasoning where rework is decided (review), less on mechanical steps. See [configuration.md → Per-node overrides in flows](configuration.md#per-node-overrides-in-flows).
+Every `agent`/`evaluator` node may pin its own `provider` (`codex` | `claude`), `model`, and `reasoning`; omit any and the node inherits the `config.yaml` provider defaults (`provider` ⇒ the global primary). A node may also set `network_access: true|false` to override the flow-wide network default for that node alone, and `git_evidence: true` to ask for the [read-only git verbs](#read-only-git-evidence-git_evidence). Spend more reasoning where rework is decided (review), less on mechanical steps. See [Configuration → Per-node overrides in flows](configuration-flows-supervisor.md#per-node-overrides-in-flows).
 
 ### Read-only git evidence (`git_evidence`)
 
@@ -222,7 +222,7 @@ Six things to know before you rely on it.
 - **The off-switch stops invocation, not reading.** With skills off the session genuinely reports no skill tool and an empty skill list — a real CLI gate, not prompt text. It does not make the files invisible: a node with a shell can still find a `SKILL.md`, read it and follow it as ordinary text. Read it as "this node will not run a skill as a step", never as "this node cannot see them".
 - **Agent nodes only.** `skills` and `allow_skills` on an `evaluator` are a fatal unknown-field error at load. An evaluator is forced `read-only` and returns a typed findings contract a skill could disturb, so every evaluator — and every supervisor turn — runs with skills off.
 
-An empty `skills: []` is rejected (omitting the key already means "off"), and `skills` cannot be combined with `allow_skills: false`. The declared names and the resolved switch are persisted on the node run and in the [prompt audit](configuration.md#prompt_audit).
+An empty `skills: []` is rejected (omitting the key already means "off"), and `skills` cannot be combined with `allow_skills: false`. The declared names and the resolved switch are persisted on the node run and in the [prompt audit](configuration-flows-supervisor.md#prompt_audit).
 
 ### Flow-level `defaults`
 
@@ -468,6 +468,6 @@ Two failure modes are worth calling out because they cost you a queued task rath
 
 ## See also
 
-- [Configuration → Flows](configuration.md#flows-task_type-dispatch-and-operator-flows) — the flow/config split and the full validation contract.
+- [Configuration → Flows](configuration-flows-supervisor.md#flows-task_type-dispatch-and-operator-flows) — the flow/config split and the full validation contract.
 - [Cookbook → Customize a node's prompt](cookbook.md#7a-customize-a-nodes-prompt) — editing a prompt without a new flow.
 - [Task authoring](task-authoring.md) — how a task selects a flow via `task_type`.

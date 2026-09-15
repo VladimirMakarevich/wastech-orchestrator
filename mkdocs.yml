@@ -38,6 +38,10 @@ nav:
       - Glossary: glossary.md
   - Reference:
       - Configuration: configuration.md
+      - Configuration - Runtime and Repository: configuration-runtime.md
+      - Configuration - Agents and Security: configuration-agents.md
+      - Configuration - Validation, Checks, and Git: configuration-checks-git.md
+      - Configuration - Flows, Prompts, and Supervisor: configuration-flows-supervisor.md
       - Task Authoring: task-authoring.md
       - Flow Authoring: flow-authoring.md
       - Telegram: telegram.md

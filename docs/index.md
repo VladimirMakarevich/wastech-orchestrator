@@ -19,7 +19,11 @@ A lean orchestrator that turns Markdown tasks into reviewed Pull Requests — dr
 
 |  |  |
 | --- | --- |
-| [Configuration](configuration.md) | Every `config.yaml` field, default, and validation rule |
+| [Configuration](configuration.md) | The entry page: minimal shape, discovery, and an index of every `config.yaml` key |
+| [Configuration → runtime](configuration-runtime.md) | `orchestrator`, `repo`, `paths`, `telegram`, `logging`, `memory` |
+| [Configuration → agents and security](configuration-agents.md) | `agents` (providers, retry, decomposition, `extra_args`) and the `security` envelope |
+| [Configuration → validation, checks, git](configuration-checks-git.md) | The task validation limits, the quality gate, and Git publishing |
+| [Configuration → flows and supervisor](configuration-flows-supervisor.md) | Prompt templates, flow dispatch and per-node overrides, `supervisor`, `tools`, `prompt_audit` |
 | [Glossary](glossary.md) | Canonical vocabulary for commands, configs, states, flows, artifacts, and legacy terms |
 | [Task authoring](task-authoring.md) | How to write valid task files accepted by the validation gate |
 | [Flow authoring](flow-authoring.md) | How to author, register, validate, and debug a custom flow (`task_type`) |
