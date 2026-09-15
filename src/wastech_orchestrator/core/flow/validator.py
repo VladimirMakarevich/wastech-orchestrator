@@ -12,7 +12,9 @@ one pass:
      agent ``permission_profile`` ≤ ``permission_ceiling``; ``extra_args`` pass
      :func:`~wastech_orchestrator.security.forbidden_args.find_forbidden_args`; ``role_file`` and
      ``resume_role_file`` paths contain no traversal (``..`` or absolute); a ``resume_role_file``
-     is declared only where a session is actually resumed.
+     is declared only where a session is actually resumed; the flow's optional ``report_dir`` is a
+     portable repo-relative POSIX directory outside the runtime homes and ``.git/`` (see
+     :func:`_check_report_dir`).
 
 :func:`validate_flow_against_config` is the **config-aware** third layer: it needs the
 ``OrchestratorConfig`` (node providers ∈ ``agents.allowed``; node reasoning is valid for the
@@ -42,18 +44,27 @@ and before any provider launch. Together the three layers form the fatal gate.
 
 from __future__ import annotations
 
+import posixpath
+import re
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 from wastech_orchestrator.config.schema import OrchestratorConfig
 from wastech_orchestrator.core.flow.contracts import (
+    OutputPolicy,
     PermissionProfile,
     SessionScope,
     resolve_network_access,
 )
 from wastech_orchestrator.core.flow.engine import skip_outcome
-from wastech_orchestrator.core.flow.prompt import RoleFileError, read_role_file
+from wastech_orchestrator.core.flow.output_policy import within_subdir
+from wastech_orchestrator.core.flow.prompt import (
+    RoleFileError,
+    read_role_file,
+    references_variable,
+)
 from wastech_orchestrator.core.flow.prompt_vars import valid_prompt_vars
 from wastech_orchestrator.core.flow.schema import (
     REWORK_OUTCOMES,
@@ -72,7 +83,12 @@ from wastech_orchestrator.providers.capabilities import (
     is_reasoning_supported,
     reasoning_levels_for,
 )
+from wastech_orchestrator.runtime_layout import CONTROL_HOME_DIRNAME, EXCHANGE_HOME_DIRNAME
 from wastech_orchestrator.security.forbidden_args import find_forbidden_args
+from wastech_orchestrator.security.identifiers import (
+    is_portable_path_segment,
+    is_windows_reserved_name,
+)
 from wastech_orchestrator.security.profiles import is_same_or_stricter
 
 
@@ -101,7 +117,7 @@ def validate_flow(snapshot: FlowSnapshot) -> None:
 
     :raises FlowValidationError: if any graph or ceiling violation is found.
     """
-    violations = _check_graph(snapshot) + _check_ceiling(snapshot)
+    violations = _check_graph(snapshot) + _check_ceiling(snapshot) + _check_report_dir(snapshot)
     if violations:
         raise FlowValidationError(violations)
 
@@ -120,7 +136,8 @@ def validate_flow_against_config(
     configured provider can reach, a flow-local ``supervisor.observe.mode`` broader than the
     operator's global cadence (unless ``supervisor.enabled`` is false — there is then no cadence to
     widen), a ``tool`` node naming an unregistered executable (when a
-    :class:`~.tools_registry.ToolRegistry` is supplied), an agent node asking for skills under
+    :class:`~.tools_registry.ToolRegistry` is supplied), a ``report_dir`` overlapping the
+    operator's configured task lifecycle tree, an agent node asking for skills under
     ``security.strict_isolation: true`` or naming one that is not in the target repository, or a
     node whose ``extra_args`` select a provider full-access mode — refused at **every** value of
     ``security.strict_isolation``, since there is no opt-in to it and never was one at this layer.
@@ -518,6 +535,175 @@ def _check_path(node_id: str, path: str, errs: list[Violation], field: str = "ro
         )
 
 
+# -- report directory ---------------------------------------------------------
+#
+# ``flow.report_dir`` moves the deliverable of a *report* output policy. It is the one flow field
+# that names a directory the writing agent is then told to write into, so it is validated as a
+# path-identity value, reject-not-sanitize: the shape rules below and the per-segment rules of
+# :mod:`~wastech_orchestrator.security.identifiers` (the same helpers that guard a task id and a
+# node id), never a rewrite of the operator's value. Two roots are refused here, config-free — the
+# runtime homes and ``.git/``; the operator's configured task lifecycle tree is refused by the
+# config-aware layer, which is the only one that can see ``paths.tasks_dir``.
+#
+# What is deliberately NOT checked: whether the base is gitignored. The validator cannot see the
+# ignore state, and pretending to would turn a guarantee into a guess. The "a private report never
+# enters git" invariant is carried at run time instead, in two places that together cover every
+# terminal: the publish node refuses a report with any git-trackable file (so a forgotten ignore
+# rule ends the task at ``manual_action_required``), and the resolved private directory is dropped
+# from the code commit's staging set for the whole run (``GitManager.set_private_report_dir``), so
+# a terminal that never reaches publish cannot commit it either.
+
+#: Repo roots ``report_dir`` may never name, live under, or contain: the private/control home, the
+#: agent exchange, and git's own directory. Each entry is ``(root, what it is)`` for the message.
+_RESERVED_REPORT_ROOTS: tuple[tuple[str, str], ...] = (
+    (CONTROL_HOME_DIRNAME, "the orchestrator's control/private home"),
+    (EXCHANGE_HOME_DIRNAME, "the agent exchange"),
+    (".git", "git's own directory"),
+)
+
+#: ``C:`` / ``c:`` — a Windows drive prefix makes the value absolute on one host and a bizarre
+#: relative directory on the others. The ``:`` is rejected per segment too; this is the precise
+#: message for the case an operator actually hits.
+_DRIVE_LETTER_RE = re.compile(r"^[A-Za-z]:")
+
+#: The whole-value shape rules, in the order they are reported. First match wins: once the value is
+#: not a repo-relative POSIX path, splitting it into segments says nothing useful.
+_REPORT_DIR_SHAPE_RULES: tuple[tuple[Callable[[str], bool], str], ...] = (
+    (lambda v: not v.strip(), "must be a non-empty repo-relative POSIX directory"),
+    (lambda v: v != v.strip(), "must not carry leading or trailing whitespace"),
+    (
+        lambda v: "\\" in v,
+        "must use '/' separators — a backslash is refused, never converted to one",
+    ),
+    (
+        lambda v: _DRIVE_LETTER_RE.match(v) is not None,
+        "must be repo-relative — a drive letter is not a repo-relative path",
+    ),
+    (lambda v: v.startswith("/"), "must be repo-relative — an absolute path is not allowed"),
+    (
+        lambda v: "" in v.split("/"),
+        "must not contain an empty path segment (no leading, trailing or doubled '/')",
+    ),
+)
+
+
+def _report_dir_shape_rule(value: str) -> str | None:
+    """The first whole-value shape rule *value* breaks, or ``None`` when it breaks none."""
+    return next((rule for matches, rule in _REPORT_DIR_SHAPE_RULES if matches(value)), None)
+
+
+def _report_dir_segment_rule(segment: str) -> str | None:
+    """The rule this path segment breaks, or ``None``. Portability is decided host-independently."""
+    if segment in (".", ".."):
+        return f"must not contain a {segment!r} segment (no traversal, no bare '.')"
+    if is_windows_reserved_name(segment):
+        return f"segment {segment!r} is a reserved Windows device name (refused on every host)"
+    if not is_portable_path_segment(segment):
+        return f"segment {segment!r} is not a portable path segment"
+    return None
+
+
+def _overlaps_root(value: str, root: str) -> bool:
+    """True iff repo-relative *value* is *root*, lies under it, or contains it (case-insensitive).
+
+    Both directions matter: a ``report_dir`` *under* a reserved root writes into it, and one that
+    *contains* it makes the reserved tree a subdirectory of the flow's deliverable. Case is folded
+    because a case-insensitive filesystem resolves ``.WORC/x`` to the same directory as ``.worc/x``.
+
+    The **root** is normalized first, the value deliberately is not. One root is the operator's own
+    ``paths.tasks_dir``, which the config validator accepts in any spelling its safety rule allows
+    — ``./tasks``, ``tasks/.``, ``tasks//queue``, ``tasks\\queue`` all name the directory ``tasks``
+    resolves to — and :func:`within_subdir` only strips separators, so it cannot see through a
+    ``.`` segment: without this, ``paths.tasks_dir: ./tasks`` let ``report_dir: tasks/x`` through.
+    The value needs no such treatment: an untidy ``report_dir`` is refused outright by the shape
+    and segment rules (reject, never rewrite), so by the time it is compared it is already the one
+    spelling the engine will use.
+    """
+    lowered = value.casefold()
+    root_lowered = posixpath.normpath(root.replace("\\", "/").strip().casefold())
+    return within_subdir(lowered, root_lowered) or within_subdir(root_lowered, lowered)
+
+
+def _report_dir_root_violations(
+    value: str, category: Literal["ceiling", "config"], roots: Iterable[tuple[str, str]]
+) -> list[Violation]:
+    """Refuse a ``report_dir`` that overlaps a reserved repository root."""
+    return [
+        Violation(
+            category,
+            f"flow report_dir {value!r}: must not overlap {what} ({root!r})",
+        )
+        for root, what in roots
+        if _overlaps_root(value, root)
+    ]
+
+
+def _check_report_dir(snap: FlowSnapshot) -> list[Violation]:
+    """Validate the flow's optional ``report_dir`` and the ``{report_dir}`` prompt references.
+
+    Three rules, all fatal at load:
+
+    * the **path rule** — shape, per-segment portability, reserved roots (above);
+    * ``report_dir`` on a ``code_change`` flow, which resolves no report directory at all: the key
+      would be accepted and inert, and an inert path key reads as protection the flow does not
+      have;
+    * ``{report_dir}`` in the role prompt of a ``code_change`` flow, which would render **empty** —
+      turning an instruction to write into ``{report_dir}/report.md`` into one naming
+      ``/report.md``. Refused rather than rendered, on the same reasoning.
+    """
+    doc = snap.doc
+    errs: list[Violation] = []
+    if doc.report_dir is not None:
+        value = doc.report_dir
+        shape_rule = _report_dir_shape_rule(value)
+        if shape_rule is not None:
+            errs.append(Violation("ceiling", f"flow report_dir {value!r}: {shape_rule}"))
+        else:
+            errs += [
+                Violation("ceiling", f"flow report_dir {value!r}: {rule}")
+                for segment in value.split("/")
+                if (rule := _report_dir_segment_rule(segment)) is not None
+            ]
+            errs += _report_dir_root_violations(value, "ceiling", _RESERVED_REPORT_ROOTS)
+    if doc.output_policy is OutputPolicy.CODE_CHANGE:
+        if doc.report_dir is not None:
+            errs.append(
+                Violation(
+                    "ceiling",
+                    f"flow report_dir {doc.report_dir!r}: output_policy 'code_change' resolves no "
+                    "report directory, so the key would be silently ignored (drop it, or select a "
+                    "report output_policy)",
+                )
+            )
+        errs += _check_report_dir_references(snap)
+    return errs
+
+
+def _check_report_dir_references(snap: FlowSnapshot) -> list[Violation]:
+    """Refuse ``{report_dir}`` in the role prompts of a flow that resolves no report directory.
+
+    Best-effort on IO, like the anti-drift lint: a role file that cannot be read here is skipped
+    (a missing or traversing one is caught by the fatal path check and when the node runs). Both
+    prompts of a node are scanned, and the flat ``{report_dir}`` and the conditional
+    ``{?report_dir}`` form alike — a block that can never be kept is dead prose whose author
+    believes it works.
+    """
+    if snap.source_path is None:
+        return []  # unit-constructed snapshot: no role files on disk to scan
+    flow_dir = snap.source_path.parent
+    return [
+        Violation(
+            "ceiling",
+            f"node {node.id!r}: role prompt references {{report_dir}}, but output_policy "
+            "'code_change' resolves no report directory — the variable would render empty (name "
+            "the directory literally, or select a report output_policy)",
+        )
+        for node in snap.doc.nodes
+        if isinstance(node, AgentNode | EvaluatorNode)
+        and references_variable(flow_dir, (node.role_file, node.resume_role_file), "report_dir")
+    ]
+
+
 # -- config consistency -------------------------------------------------------
 
 
@@ -684,6 +870,18 @@ def _check_config_consistency(
                 )
             )
 
+    # 2c. ``report_dir`` vs the operator's task lifecycle tree. The other reserved roots are fixed
+    #     names refused config-free; this one is the operator's to name (``paths.tasks_dir``), so
+    #     it can only be checked here. A flow's deliverable writing into the lifecycle tree would
+    #     put agent-written files where the task files live — and, with tracking on, into the audit
+    #     commit's own pathspec.
+    if doc.report_dir is not None:
+        errs += _report_dir_root_violations(
+            doc.report_dir,
+            "config",
+            ((config.paths.tasks_dir, "the task lifecycle tree (paths.tasks_dir)"),),
+        )
+
     # 3. Every ``tool`` node names a registered, contained, executable operator tool. The name
     #    is a free operator string (like a flow name), so — like the provider check — it is resolved
     #    here, fail-closed, before any launch. Skipped when no registry is wired (config-free unit
@@ -775,8 +973,10 @@ def lint_prompt_variables(snapshot: FlowSnapshot) -> list[PromptVarWarning]:
                 seen.add((template_file, token))
                 warnings.append(PromptVarWarning(role_file=template_file, token=token))
     # The flow-local supervisor prompts (observe / finalize / handoff lenses) are role files too,
-    # but the supervisor populates only ``_SUPERVISOR_PROMPT_VARS`` — so a node-allowlist variable
-    # there renders verbatim just the same. Scan them against that tiny set.
+    # but the supervisor populates only ``_SUPERVISOR_PROMPT_VARS``. A node-allowlist name there is
+    # worse than a typo, not better: the renderer is handed the full ``ALLOWED_PROMPT_VARS``, so
+    # ``{report_dir}`` / ``{plan_path}`` in a ``supervisor.md`` render as the **empty string** on
+    # every flow rather than passing through verbatim. Scan them against that tiny set.
     supervisor = snapshot.doc.supervisor
     if supervisor is not None:
         for role_file in (

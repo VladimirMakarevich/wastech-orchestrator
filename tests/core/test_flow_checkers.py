@@ -55,7 +55,9 @@ class _Store:
         self.check_runs.append(run)
 
 
-def _snapshot(node: ChecksNode, output_policy: OutputPolicy) -> FlowSnapshot:
+def _snapshot(
+    node: ChecksNode, output_policy: OutputPolicy, report_dir: str | None = None
+) -> FlowSnapshot:
     doc = FlowDoc(
         name="t",
         task_type="t",
@@ -65,6 +67,7 @@ def _snapshot(node: ChecksNode, output_policy: OutputPolicy) -> FlowSnapshot:
         nodes=(node,),
         edges=(),
         budgets=MappingProxyType({}),
+        report_dir=report_dir,
     )
     return FlowSnapshot(
         doc=doc,
@@ -80,6 +83,7 @@ def _run_checks_node(
     repo_dir: Path,
     artifacts_root: Path,
     output_policy: OutputPolicy,
+    report_dir: str | None = None,
     run_process: Any = None,
     task_id: str = "t",
     inputs: NodeInputs | None = None,
@@ -95,7 +99,7 @@ def _run_checks_node(
         run_process=run_process or _default_unused_runner,
     )
     ctx = NodeContext(
-        snapshot=_snapshot(node, output_policy),
+        snapshot=_snapshot(node, output_policy, report_dir),
         run_state=FlowRunState(flow_fingerprint="fp"),
         node=node,
         task_id=task_id,
@@ -337,6 +341,28 @@ def test_citation_node_passes_for_verified_manifest(tmp_path: Path) -> None:
     # Per-run: report under stages/<node>/run-<id>/ (node ran first → node_run_id 1).
     assert (node_run_dir(art, "t", "citation_check", 1) / "citation.json").is_file()
     assert store.completed[-1]["outcome"] == "pass"
+
+
+def test_citation_node_reads_the_manifest_from_the_flows_report_dir(tmp_path: Path) -> None:
+    # The manifest is looked up in the flow's RESOLVED report directory, so a flow that moved its
+    # deliverable is still checked — rather than the checker looking where nobody wrote and
+    # returning "uncheckable: missing" as a vacuous pass.
+    repo, art = tmp_path / "repo", tmp_path / "art"
+    repo.mkdir()
+    _write_sources(repo / "docs" / "adr" / "t", [{"id": "x", "path": "src/ghost.py"}])
+    node = ChecksNode(id="citation_check", kind="checks", checker="citation")
+    result, _ = _run_checks_node(
+        node,
+        repo_dir=repo,
+        artifacts_root=art,
+        output_policy=OutputPolicy.REPOSITORY_DOCUMENT,
+        report_dir="docs/adr",
+    )
+    assert result.outcome.kind == "fail"  # the moved manifest was found and graded
+    verdicts = json.loads(
+        (node_run_dir(art, "t", "citation_check", 1) / "citation.json").read_text("utf-8")
+    )
+    assert verdicts["manifest_path"] == "docs/adr/t/sources.json"
 
 
 def test_citation_node_fails_for_hallucinated_manifest(tmp_path: Path) -> None:

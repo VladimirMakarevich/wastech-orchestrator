@@ -176,7 +176,9 @@ class ChecksNodeRunner:
     def _run_citation(self, node: ChecksNode, ctx: NodeContext, run_id: int) -> NodeResult:
         """Validate the flow's citation manifest; a hallucinated citation → ``fail``."""
         checks_dir = self._checks_dir(ctx.task_id)
-        resolved = resolve_output_policy(ctx.snapshot.doc.output_policy, ctx.task_id)
+        resolved = resolve_output_policy(
+            ctx.snapshot.doc.output_policy, ctx.task_id, ctx.snapshot.doc.report_dir
+        )
         report_dir = resolved.report_dir(self._s.repo_dir)
         # A missing manifest (no report dir, or the named file absent) → uncheckable, never a crash.
         # The filename comes from the node, so a flow whose writing node names its manifest anything

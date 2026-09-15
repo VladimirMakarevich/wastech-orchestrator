@@ -38,6 +38,7 @@ from typing import Any
 from wastech_orchestrator.core.flow.context_paths import (
     build_node_output_paths,
     build_path_context,
+    resolve_report_dir,
 )
 from wastech_orchestrator.core.flow.contracts import (
     SessionScope,
@@ -567,7 +568,9 @@ class EvaluatorNodeRunner:
         reader of. ``test_the_agent_and_evaluator_runners_publish_the_same_variable_names`` compares
         the two key sets so the next omission fails a test rather than a run.
         """
-        paths = build_path_context(self._in, self._s.repo_dir)
+        paths = build_path_context(
+            self._in, self._s.repo_dir, resolve_report_dir(ctx.snapshot, ctx.task_id)
+        )
         variables: dict[str, object | None] = {
             "task_id": ctx.task_id,
             "stage": node.id,

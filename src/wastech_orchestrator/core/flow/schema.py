@@ -328,6 +328,14 @@ class FlowDoc:
     nodes: tuple[FlowNode, ...]
     edges: tuple[Edge, ...]
     budgets: MappingProxyType[str, int]
+    #: base directory for the deliverable of a *report* ``output_policy``, repo-relative POSIX and
+    #: **without** the per-task segment: the engine still appends ``/<task_id>`` itself, so a flow
+    #: selects a home, never an arbitrary template. ``None`` (default) keeps each policy's built-in
+    #: home (``docs/research`` / ``<private home>/security-reports``). Validated at load — no
+    #: absolute path, no drive letter, no ``..``, no backslash, every segment portable, and never
+    #: the runtime homes, the task lifecycle tree or ``.git/``. Ignored by ``code_change`` (which
+    #: has no report directory), where declaring it is a load error rather than a silent no-op.
+    report_dir: str | None = None
     network_policy: NetworkPolicy | None = None
     decomposition: DecompositionConfig | None = None
     #: flow-local supervisor prompt overrides + the follow-ups opt-in; ``None`` → the supervisor

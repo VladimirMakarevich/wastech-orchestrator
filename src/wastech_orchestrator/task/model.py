@@ -62,6 +62,7 @@ ALLOWED_TASK_KEYS: frozenset[str] = frozenset(
         "priority",
         "queue",
         "nodes",
+        "references",
     }
 )
 # The front-matter keys a task must carry, enforced by ``task.validation_gate`` (which additionally
@@ -69,6 +70,13 @@ ALLOWED_TASK_KEYS: frozenset[str] = frozenset(
 # becomes a branch fragment, a run directory, and a state-store key, so a config able to drop it
 # would break identity rather than relax a policy (config v35 removed the key that pretended to).
 REQUIRED_TASK_FIELDS: frozenset[str] = frozenset({"id", "title"})
+
+# ``references:`` bounds, fail-closed at the gate. The list is short because the section it becomes
+# is a footer a reviewer reads at a glance, and each line is capped well under a Markdown list
+# item's readable width: the value is emitted into the pull-request body untouched, so an unbounded
+# one would be body text the orchestrator published and nobody chose.
+REFERENCES_MAX_ITEMS = 16
+REFERENCE_MAX_CHARS = 200
 
 # The Conventional-Commits types a task may choose for its own commits (``commit_type``), and the
 # default when it chooses none. The commit message is orchestrator-owned — no node can write into
@@ -254,6 +262,13 @@ class NormalizedTask:
     # exactly like an accepted agent split (one branch, one PR). The gate validates only the list
     # shape; path/file/count/linear validation runs at the pre-branch preflight in ``run_task``.
     subtasks: tuple[str, ...] = ()
+    # Opaque lines a task's producer wants in the pull-request body, appended verbatim under a
+    # ``## References`` heading when publishing opens a PR. The orchestrator never reads them: they
+    # exist so an external producer (an issue tracker bridge, a release script) can place its own
+    # closing keyword or back-link in the body without the orchestrator learning that tracker's
+    # syntax. Empty by default, and a no-op wherever no PR is opened. Bounded and injection-scanned
+    # at the gate, because the content goes straight into text the orchestrator publishes.
+    references: tuple[str, ...] = ()
     # Per-node front matter, keyed by flow node id: the disable toggle plus the best-effort
     # model/reasoning/provider overrides. The gate validates shape only; for the disable toggle node
     # existence against the resolved flow is checked at flow resolution (fail-closed → terminal
