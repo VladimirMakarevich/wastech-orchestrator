@@ -235,7 +235,7 @@ When a node escalates, the run blocks until a human answers (via the configured 
 - **Provide acceptance criteria.** A non-empty `## Acceptance criteria` makes the orchestrator skip refinement (it is deterministic — there is no flag), so a complete task goes straight to planning.
 - **Existing levers, if you want to bypass a node entirely.** `nodes.planning.enabled: false` skips planning altogether (no `plan.md` is produced and downstream prompts simply omit the plan — use only when planning adds nothing); `auto_merge: true` skips the human **PR review** before the merge (the dangerous-diff guard still applies). Neither relaxes an embedded planning/refinement escalation — they remove or bypass the step.
 
-In short: a well-specified task completes unattended because no node needs to ask; an under-specified one will (correctly) stop for a human. See [operations.md → Running](operations.md#4-running) for how this interacts with `auto_mode`.
+In short: a well-specified task completes unattended because no node needs to ask; an under-specified one will (correctly) stop for a human. See [operations → Running](operations-running.md#4-running) for how this interacts with `auto_mode`.
 
 ## prompt_audit
 

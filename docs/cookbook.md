@@ -458,7 +458,7 @@ checks:
         - { name: build, argv: ["xcodebuild", "build"], cwd: "ios" }
 ```
 
-An **empty diff** runs nothing (the checks node passes vacuously); a changed path claimed by **no** set runs no set on its account (cover shared/root files with a no-`paths` catch-all set). A skipped `skip_if_unavailable` set is recorded loudly and **blocks `git.auto_merge`** even when the node passes. See [`checks`](configuration-checks-git.md#checks) for every field and [operations.md](operations.md#command-set-diagnostics) for the `preflight`/`status` command-set summary.
+An **empty diff** runs nothing (the checks node passes vacuously); a changed path claimed by **no** set runs no set on its account (cover shared/root files with a no-`paths` catch-all set). A skipped `skip_if_unavailable` set is recorded loudly and **blocks `git.auto_merge`** even when the node passes. See [`checks`](configuration-checks-git.md#checks) for every field and [operations → command-set diagnostics](operations-preflight.md#command-set-diagnostics) for the `preflight`/`status` command-set summary.
 
 Two things about that catch-all worth knowing before you rely on it:
 

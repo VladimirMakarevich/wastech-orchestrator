@@ -31,7 +31,7 @@ worc rerun <task-id> --continue --dry-run
 - If the task had exhausted its fix-loop budget (`manual_action_required`, stuck at `max_fix_cycles`), resuming into that same loop asks interactively whether to reset it, e.g. `review_fix budget is exhausted (15/15). Reset it to allow further review→fixing rounds? [y/N]`. Answer `y`, or pass `--reset-fix-budget` to skip the prompt in a script, or `--no-reset-fix-budget` to decline and refuse the resume instead. This prompt is never skipped by `-y/--yes` — resetting a fix budget is a consequential decision on purpose.
 - Each `--continue` attempt appends a new ledger record linked to the failed one, so the retry history stays visible.
 
-See [Operations → Re-attempting a terminal task](operations.md#re-attempting-a-terminal-task-rerun) for the full set of `rerun` options, including the fresh, from-scratch mode.
+See [Operations → Re-attempting a terminal task](operations-running.md#re-attempting-a-terminal-task-rerun) for the full set of `rerun` options, including the fresh, from-scratch mode.
 
 ## 2. A task failed with an error — how to re-run it
 
@@ -109,7 +109,7 @@ worc watch                                      # or `up` in the shell
 
 ## 4. Track your operator flows (`.worc/flows/`) in git
 
-**Problem:** `install` gitignores the whole `.worc/` runtime home as one unit — `state.db`, `logs/`, `workspace/`, `config.yaml`, and your editable `flows/` copies all disappear from `git status` together (see [Operations → Installation](operations.md#1-installation)). But `.worc/flows/` holds the actual behavior you hand-author: the flow YAML files and their prompts (see [Flow authoring](flow-authoring.md)). By default that content has no git history, produces no diff to review, and can't be shared with teammates or shipped through a PR — you have to pass files around some other way.
+**Problem:** `install` gitignores the whole `.worc/` runtime home as one unit — `state.db`, `logs/`, `workspace/`, `config.yaml`, and your editable `flows/` copies all disappear from `git status` together (see [Operations → Installation](operations-install.md#1-installation)). But `.worc/flows/` holds the actual behavior you hand-author: the flow YAML files and their prompts (see [Flow authoring](flow-authoring.md)). By default that content has no git history, produces no diff to review, and can't be shared with teammates or shipped through a PR — you have to pass files around some other way.
 
 **Solution:** replace the blanket `.worc/` line in the repo's tracked `.gitignore` with a wildcard pattern that ignores everything under `.worc/` **except** `flows/`:
 
@@ -135,7 +135,7 @@ git commit -m "chore: track .worc/flows in git"
 - **The orchestrator won't fight you.** A parent-directory exclusion from _any_ source — tracked `.gitignore`, the untracked clone-local `.git/info/exclude`, or the global excludes file — blocks re-inclusion of its children, regardless of which file or line added it. Two mechanisms could otherwise reintroduce a blanket `.worc/` line and silently defeat your `!.worc/flows/` negation: the per-task-run safety net (`ensure_runtime_excludes()`) and `install --reconfigure`'s `.gitignore` writer. Both check whether a runtime-only path (`.worc/state.db`) is already ignored before appending anything, so once you've switched to the wildcard scheme they leave it alone.
 - **Same trick works for other subdirectories** — e.g. add `!.worc/tools/` if you also want the packaged tool executables tracked.
 
-See also: [flow-authoring.md](flow-authoring.md#where-flows-live) for where flows and prompts live, and [operations.md](operations.md#1-installation) for what `install` writes into `.worc/` by default.
+See also: [flow-authoring.md](flow-authoring.md#where-flows-live) for where flows and prompts live, and [operations → Installation](operations-install.md#1-installation) for what `install` writes into `.worc/` by default.
 
 ## 5. Fix conflicting Codex installations on Windows
 
@@ -251,4 +251,4 @@ git commit -m "chore: track the task lifecycle in git"
 - **Already-committed task files keep working after you switch to the default.** A tracked file under an ignored tree is still committed when a lifecycle move deletes it, so no dangling deletion is left on your base branch; the newly moved copies simply stop being added.
 - **What the orchestrator records either way.** Tracking task files is a convenience, not the record: `state.db`, `logs/completed.jsonl`, `logs/<task-id>/`, and the `<task-id>.summary.md` beside the task file are written whether or not git sees any of it.
 
-See also: [Configuration → `paths`](configuration-runtime.md#paths) for the key itself, [Operations → Installation](operations.md#1-installation) for what `install` writes, and [section 4](#4-track-your-operator-flows-worcflows-in-git) above for the same question asked of `.worc/flows/`.
+See also: [Configuration → `paths`](configuration-runtime.md#paths) for the key itself, [Operations → Installation](operations-install.md#1-installation) for what `install` writes, and [section 4](#4-track-your-operator-flows-worcflows-in-git) above for the same question asked of `.worc/flows/`.
