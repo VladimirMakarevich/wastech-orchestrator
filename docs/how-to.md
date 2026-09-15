@@ -251,4 +251,4 @@ git commit -m "chore: track the task lifecycle in git"
 - **Already-committed task files keep working after you switch to the default.** A tracked file under an ignored tree is still committed when a lifecycle move deletes it, so no dangling deletion is left on your base branch; the newly moved copies simply stop being added.
 - **What the orchestrator records either way.** Tracking task files is a convenience, not the record: `state.db`, `logs/completed.jsonl`, `logs/<task-id>/`, and the `<task-id>.summary.md` beside the task file are written whether or not git sees any of it.
 
-See also: [Configuration → `paths`](configuration.md#paths) for the key itself, [Operations → Installation](operations.md#1-installation) for what `install` writes, and [section 4](#4-track-your-operator-flows-worcflows-in-git) above for the same question asked of `.worc/flows/`.
+See also: [Configuration → `paths`](configuration-runtime.md#paths) for the key itself, [Operations → Installation](operations.md#1-installation) for what `install` writes, and [section 4](#4-track-your-operator-flows-worcflows-in-git) above for the same question asked of `.worc/flows/`.

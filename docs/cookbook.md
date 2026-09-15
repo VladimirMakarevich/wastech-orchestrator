@@ -74,7 +74,7 @@ For all configuration fields, see [configuration.md](configuration.md).
 
 **The generated `config.yaml` is deliberately small.** It carries what the install resolved (`repo`, the selected providers, `git`, the `auto_mode` answer), the `security` posture, and three affordances at their default so you can find them (`paths.tasks_dir`, an empty `checks.command_sets`, `telegram.enabled`). Every other block is **absent and running at its documented default** — the file's own footer lists them block by block. Add a block only to change something; the annotated `config.example.yaml` installed beside it is the complete reference.
 
-**It wrote `security.strict_isolation: false`, and that value _is_ the advanced mode.** Not a slightly relaxed sandbox: it forwards your shell's environment whole to every process run on the agent's behalf, hands every node a shell and the full tool surface (the skill tool included), lets the agent write wherever your own account can rather than only in the clone, raises **no OS sandbox for Claude on any host**, and puts every node online whatever its flow granted. What remains is a four-level floor, and only the first level is mechanical — and mechanical on Codex alone, which keeps its generated permission profile at either value of the key. **Read [configuration.md → The advanced mode](configuration.md#the-advanced-mode-strict_isolation-false) before your first real run** and decide deliberately; setting `strict_isolation: true` (or deleting the key — an omitted key means `true`) is the fail-closed posture.
+**It wrote `security.strict_isolation: false`, and that value _is_ the advanced mode.** Not a slightly relaxed sandbox: it forwards your shell's environment whole to every process run on the agent's behalf, hands every node a shell and the full tool surface (the skill tool included), lets the agent write wherever your own account can rather than only in the clone, raises **no OS sandbox for Claude on any host**, and puts every node online whatever its flow granted. What remains is a four-level floor, and only the first level is mechanical — and mechanical on Codex alone, which keeps its generated permission profile at either value of the key. **Read [Configuration → The advanced mode](configuration-agents.md#the-advanced-mode-strict_isolation-false) before your first real run** and decide deliberately; setting `strict_isolation: true` (or deleting the key — an omitted key means `true`) is the fail-closed posture.
 
 Two things the mode does **not** do, because they are the usual misreading: it unlocks no provider full-access mode (both selectors are refused at every value of the key), and it skips no proof — the per-provider capability probes run either way, and under `false` most of all, since there the generated permission profile is the whole local floor.
 
@@ -217,7 +217,7 @@ Exit codes:
 | `2` | The task reached `manual_action_required` — or the run was refused before it started (unreadable/too-new config, a dependency that is not merged yet). |
 | `3` | Paused, not terminal: every provider was transiently unavailable. The task stays resumable and the next `run`/`watch`/restart continues it from its checkpoint. Distinguishing this from `1` is the point — a CI job should retry, not triage. |
 
-A successful task runs through validation, branch preparation, optional refinement, planning, implementation, checks (testing), review, fixing if needed, the whole-task `documentation` pass, then publishing — commit, push, and PR creation — followed by terminal cleanup back to `repo.base_branch`. The plain-language summary that becomes the PR body is **not** a separate stage: the supervisor layer writes it at task close (see [configuration.md](configuration.md#supervisor)) — and with that layer switched off, the deterministic report is the body instead.
+A successful task runs through validation, branch preparation, optional refinement, planning, implementation, checks (testing), review, fixing if needed, the whole-task `documentation` pass, then publishing — commit, push, and PR creation — followed by terminal cleanup back to `repo.base_branch`. The plain-language summary that becomes the PR body is **not** a separate stage: the supervisor layer writes it at task close (see [`supervisor`](configuration-flows-supervisor.md#supervisor)) — and with that layer switched off, the deterministic report is the body instead.
 
 ### Find a task to act on (`list`) + Tab-completion
 
@@ -364,7 +364,7 @@ A node's declared `provider`/`model`/`reasoning` are the **defaults**; a **task*
 
 ## 7a. Customize a Node's Prompt
 
-To add repository-specific engineering rules or a review rubric to a stage without editing Python, edit that node's **`role_file`** (see [configuration.md](configuration.md#prompt-templates-no-longer-a-config-block)). `install` delivers the built-in flows + their role files under `.worc/flows/` (each flow's prompts in its own `<task_type>/` subdir), and `.worc/flows/` is the only copy the orchestrator reads, so edit the delivered role file (a custom operator flow likewise keeps its role files under its own `.worc/flows/<task_type>/` subdir). The role file's content **is** the prompt template — edit it and the change takes effect on the next run.
+To add repository-specific engineering rules or a review rubric to a stage without editing Python, edit that node's **`role_file`** (see [prompt templates](configuration-flows-supervisor.md#prompt-templates-no-longer-a-config-block)). `install` delivers the built-in flows + their role files under `.worc/flows/` (each flow's prompts in its own `<task_type>/` subdir), and `.worc/flows/` is the only copy the orchestrator reads, so edit the delivered role file (a custom operator flow likewise keeps its role files under its own `.worc/flows/<task_type>/` subdir). The role file's content **is** the prompt template — edit it and the change takes effect on the next run.
 
 For example, a review node's role file replaced with a security rubric:
 
@@ -458,7 +458,7 @@ checks:
         - { name: build, argv: ["xcodebuild", "build"], cwd: "ios" }
 ```
 
-An **empty diff** runs nothing (the checks node passes vacuously); a changed path claimed by **no** set runs no set on its account (cover shared/root files with a no-`paths` catch-all set). A skipped `skip_if_unavailable` set is recorded loudly and **blocks `git.auto_merge`** even when the node passes. See [configuration.md](configuration.md#checks) for every field and [operations.md](operations.md#command-set-diagnostics) for the `preflight`/`status` command-set summary.
+An **empty diff** runs nothing (the checks node passes vacuously); a changed path claimed by **no** set runs no set on its account (cover shared/root files with a no-`paths` catch-all set). A skipped `skip_if_unavailable` set is recorded loudly and **blocks `git.auto_merge`** even when the node passes. See [`checks`](configuration-checks-git.md#checks) for every field and [operations.md](operations.md#command-set-diagnostics) for the `preflight`/`status` command-set summary.
 
 Two things about that catch-all worth knowing before you rely on it:
 
