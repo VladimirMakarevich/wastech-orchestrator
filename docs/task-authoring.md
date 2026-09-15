@@ -6,7 +6,7 @@ Tasks can be Markdown (`.md`) or JSON (`.json`). Markdown is the normal operator
 
 > **Writing tasks with an AI agent?** A compact, agent-facing version of this guide ships in [`packaged/guide/`](../src/wastech_orchestrator/packaged/guide/README.md) and is copied to `<repo>/.worc/guide/` at `install` time. Point an agent at that local `.worc/guide/` folder and ask it to "write a task for this orchestrator." This document remains the full operator reference.
 
-Start from the packaged example tasks — `task-minimal.md` and `task-rich.md`, installed under `<repo>/.worc/guide/tasks/` — as editable starting points. Compose a task in the repo's `tasks/preparing/` staging directory (the watcher never scans it, so a half-written draft is never picked up mid-write), then `worc promote <id>` moves it into the repo's own `tasks/pending/` directory at the repository root; commit and push it there — that is how a teammate hands the orchestrator work over git. The `tasks/` lifecycle directories are git-tracked and intentionally not ignored; only the orchestrator's own `.worc/` home is gitignored.
+Start from the packaged example tasks — `task-minimal.md` and `task-rich.md`, installed under `<repo>/.worc/guide/tasks/` — as editable starting points. Compose a task in the repo's `tasks/preparing/` staging directory (the watcher never scans it, so a half-written draft is never picked up mid-write), then `worc promote <id>` moves it into the repo's own `tasks/pending/` directory at the repository root. By default the `tasks/` lifecycle tree is gitignored alongside the orchestrator's own `.worc/` home — `install` seeds the ignore line for the configured `paths.tasks_dir` (the wizard asks `Track task files in git?`, default no; `--track-tasks` / `--no-track-tasks` answer it without prompting). Handing a task to a teammate over git — commit the promoted file and push — needs that tree tracked: say yes at install, or delete the seeded line from `.gitignore`.
 
 The canonical task rules are enforced by the validation gate in the code (`src/wastech_orchestrator/task/`). For the meaning of all task-file fields, task statuses, and related vocabulary, see the [Glossary](glossary.md).
 
@@ -72,10 +72,11 @@ Allowed fields:
 | `queue` | no | non-empty string | Routes the task to a worc instance whose `orchestrator.queue` selector equals this value (plain string equality). Lets several instances share one task pool without colliding. Omitted ⇒ `"default"`. **Fail-closed**: a malformed value (non-string, or empty/whitespace) rejects the task. See [`queue`](#queue). |
 | `subtasks` | no | list of strings | Operator-authored decomposition: ordered references to per-subtask spec files. Presence ⇒ the task runs as a split (one branch, one PR). See [`subtasks`](#subtasks-operator-authored-decomposition). |
 | `nodes` | no | mapping | Per-node overrides keyed by flow node id: `enabled: false` disables a node, and `model` / `reasoning` / `provider` overlay that node's executor for this run (best-effort). See [`nodes`](#nodes). |
+| `references` | no | list of strings | Lines appended **verbatim** to the pull-request body under a `## References` heading when the run opens a PR. 1–16 entries, each a single non-blank line of at most 200 characters. **Fail-closed** — a wrong shape rejects the task (`invalid_references`) — and scanned for argv-shaped tokens like every other value (`injection_suspected`). worc never interprets an entry (it knows no issue tracker's syntax). Intended for a tool that files tasks on your behalf; a no-op wherever no PR is opened. See [`references`](#references). |
 
 The current validation gate rejects unknown fields fail-closed (`unknown_top_level_field`). Keep task front matter limited to the fields above. A task can overlay a flow node's `model`/`reasoning`/`provider` per run via the `nodes` block (best-effort — an invalid value is warned and skipped at run time, never fatal), but cannot change commands, `extra_args`, credentials, sandbox, or any security policy (see [Provider, model, reasoning](#provider-model-reasoning)).
 
-A task **rejected at the validation gate** (before it was ever claimed — no branch, no `state.db` row) does not reserve its `id`. The normal loop works: the rejected file lands in `.worc/tasks/rejected/` with a reason, you fix it, and submit again **under the same `id`** — it is not treated as a `duplicate_task_id`. On the console the reject prints the machine reason **and** the offending field + cause (e.g. `title: argv-shaped token`), so you can see what to fix without opening the JSON report. A real duplicate (a task that was actually claimed / has a branch) is still rejected.
+A task **rejected at the validation gate** (before it was ever claimed — no branch, no `state.db` row) does not reserve its `id`. The normal loop works: the rejected file lands in `.worc/tasks/rejected/` with a reason, you fix it, and submit again **under the same `id`** — it is not treated as a `duplicate_task_id`. On the console the reject prints the machine reason **and** the offending field + cause (e.g. `title: argv-shaped token`), so you can see what to fix without opening the JSON report. A real duplicate (a task that was actually claimed / has a branch) is still rejected. One case is deliberately not treated as one: a **settled** (terminal) task's **own** file resurfacing in `tasks/pending/` — after a checkout restores the pending copy of a tracked task file, say — is recognised by its content digest (`tasks.source_sha256`) and is neither re-run nor quarantined; it stays where you have it, appends no second ledger record and sends no notification. A reworded file that merely reuses a settled id is still quarantined (left in the queue it would be re-rejected on every poll tick), but it too appends no second record and sends no notification.
 
 ### Front-matter values are plain text
 
@@ -432,6 +433,20 @@ Rules:
 - `enabled` must be a boolean; `model`/`reasoning`/`provider` must each be a non-empty string; the `nodes` block must be a mapping and each value a mapping (or null);
 - the gate validates **shape only** — it cannot see the flow or config, so node-id existence (for `enabled`) and override validity (for `model`/`reasoning`/`provider`) are resolved later, not at the gate.
 
+## `references`
+
+`references` is the one channel a task has into the pull-request body. Each entry is an opaque single-line string; when the run opens a PR, the lines are appended verbatim — one Markdown list item each — under a `## References` heading at the foot of the body, on both the new-PR path and the path that reuses an already-open PR on the task head:
+
+```yaml
+references:
+  - "Fixes #142"
+  - "https://example.test/AB-7"
+```
+
+worc never reads the lines: it recognises no closing keyword, rewrites no link, and knows no tracker's syntax — a `Fixes #142` does whatever the host you publish to makes of it, and nothing more. The field exists so a tool that files tasks on your behalf (an issue-tracker bridge, a release script) can place its back-link or closing keyword without worc learning what it means; a hand-written task normally leaves it out.
+
+The gate checks the **shape** fail-closed (`invalid_references`): the value must be a list of 1 to 16 entries, each a non-blank string of at most 200 characters with no embedded newline. That check runs before the injection scan, so an argv-shaped entry (a leading `-`, a backtick, `;`, `|`, `$(`) still reports `injection_suspected` like any other front-matter value. The committed `<id>.summary.md` is never rewritten — the annotated body is a separate `pr-body.md` copy under the task's artifacts, and that copy is what `gh pr create --body-file` receives. Wherever no PR is opened (`publish: commit`/`push`, or a flow with no PR-publishing node) the field is a no-op.
+
 ## Body Sections
 
 Use these sections by default:
@@ -580,7 +595,7 @@ For JSON, `description` is the body text. It is not a front matter field and is 
 
 Before promoting a task into `tasks/pending/`:
 
-- compose it in the repository's own `tasks/preparing/` staging directory (the watcher never scans it), then `worc promote <id>` moves it into `tasks/pending/` (git-tracked); commit and push;
+- compose it in the repository's own `tasks/preparing/` staging directory (the watcher never scans it), then `worc promote <id>` moves it into `tasks/pending/`; commit and push it only if you chose to track the lifecycle tree at install (`--track-tasks`) — by default it is gitignored;
 - use a lowercase normalized `id`;
 - write a short, specific `title`;
 - include a clear `## Description`;
