@@ -96,7 +96,7 @@ The per-node fields that override something `config.yaml` sets, plus the evaluat
 | `max_rework_per_stage` | evaluator | `1` | Rework loops a **non-blocking** evaluator (e.g. `test_quality`) may trigger before it accepts. When the budget is spent with a finding still open it accepts and continues (never `manual`); the orchestrator emits a console warning + a ⚠️ Telegram trace (`accept (rework budget exhausted)`) so an operator knows the stage moved on and may need follow-up. **Ignored for a blocking evaluator** (the default): a blocking loop is bounded by the flow's named-loop budget (e.g. `budgets.review_fix`), then parks to `manual`. |
 | `gate_severity` | evaluator | `high` | Minimum finding severity that gates (`blocking`/`critical`/`high`/`medium`/`low`): a finding at least this severe drives `rework`, less-severe ones are advisory. Default `high` blocks high/critical/blocking. Lower it (e.g. `low`) so a content critic blocks on any finding — pair with a larger fix budget for the extra rework rounds. Orthogonal to `blocking`. |
 
-Note: **disabling** a node is not a flow field — it is a per-task override (`nodes.<id>.enabled: false` in the task file; see [operations.md](operations.md#disabling-flow-nodes-per-task)).
+Note: **disabling** a node is not a flow field — it is a per-task override (`nodes.<id>.enabled: false` in the task file; see [operations → disabling flow nodes](operations-publishing.md#disabling-flow-nodes-per-task)).
 
 ## `supervisor`
 

@@ -11,7 +11,13 @@ A lean orchestrator that turns Markdown tasks into reviewed Pull Requests — dr
 |  |  |
 | --- | --- |
 | [How it works](how-it-works.md) | The mental model: the fixed line of steps, who runs each one, the fix loops, decomposition, and how a task ends |
-| [Operations](operations.md) | Install, upgrades, authorization, preflight, running, the Git footprint, diagnostics, and the recovery playbook |
+| [Operations](operations.md) | The entry page of the operations guide: the map of its six chapters |
+| [Operations → install, upgrade, authorize](operations-install.md) | Binding the orchestrator to a repository, moving it to a new version, and where credentials live |
+| [Operations → preflight](operations-preflight.md) | What `preflight` proves, the command-set summary, and validating flows |
+| [Operations → running tasks](operations-running.md) | `run` and `watch`, provider outages, `rerun` / `finalize` / `merge-task`, and the stop ladder |
+| [Operations → logs, state, notifications](operations-logs.md) | Structured logs, `logs clean`, `runs clean`, `worc memory`, and Telegram |
+| [Operations → git footprint and publishing](operations-publishing.md) | The audit commit, the PR body, auto-merge, and per-task node overrides |
+| [Operations → diagnostics and recovery](operations-diagnostics.md) | Reading a run's artifacts, and the `manual_action_required` playbook |
 | [Cookbook](cookbook.md) | A from-zero walkthrough: install, repo config, preflight, a first task, `watch`, per-node routing and prompts, checks, and the audit commit |
 | [How-To](how-to.md) | Problem-first troubleshooting recipes for situations you run into operating the orchestrator |
 

@@ -1,0 +1,87 @@
+# Operations: Diagnostics and Recovery
+
+Part of the [operations guide](operations.md): reading the artifacts a run produced, and the playbook for a task parked in `manual_action_required`.
+
+## 6. Diagnostics — reading what a run produced
+
+All artifacts live under `<repo>/.worc/logs/<task-id>/`. SQLite (`<repo>/.worc/state.db`) is the authoritative state; the artifacts and ledger are the human-facing index.
+
+```text
+logs/
+  completed.jsonl                 # append-only ledger: one record per terminal task
+  <task-id>/
+    task.normalized.json          # the parsed task
+    validation_report.json        # §19 gate verdict (pass or reject reason)
+    task.enriched.md              # refinement output (if it ran)
+    plan.md                       # planning output
+    current.diff                  # working-tree diff at the last checkpoint (redacted)
+    publish-error.txt             # the redacted git stderr of a failed publish node
+    hitl/*.json                   # durable redacted question/approval + recovery handles
+    prompt-audit/                 # who-ran-what + redacted prompt (only when prompt_audit)
+      <NNNNNN>-<node>[-subNN].md  #   one step: fenced-json header, then the prompt verbatim
+      timeline.jsonl              #   the machine-readable half: one whole record per line
+    summary.md / summary.json     # the whole-task handoff → PR body ({what, summary, [follow_ups], …})
+    failure_report.json / stuck.md# written iff the task ended manual_action_required
+    checks/<NNN>.log              # each check command's output (redacted)
+    stages/<node-id>/
+      history.jsonl               # one line per run of this node (run_id, outcome, findings, dir)
+      run-<node-run-id>/          # one dir per node run — every re-run kept, never clobbered
+        rendered-prompt.md        # the exact node prompt sent (redacted; from the node's role_file)
+        findings.json / summary.md# review/evaluator findings + summary (this pass)
+        <node-id>.out.md          # the node's output, exposed downstream as {<node-id>_path}
+        citation.json / dependency_scan.json  # checks-node reports (this pass)
+        stdout.txt / stderr.txt   # tool-node redacted streams
+        <attempt>-<provider>/     # provider attempts for this run
+          request.json            # redacted request (argv, no secrets)
+          stdout.log / stderr.log # redacted process output
+          events.jsonl            # redacted provider event stream
+          result.json             # normalized AgentRunResult
+    publish/terminal-cleanup.json # the terminal base-branch cleanup decision
+```
+
+- **The ledger** (`completed.jsonl`): grep here first — id, title, branch, `pr_url`, `final_status`, `fix_iterations`, terminal cleanup status, and a pointer to `failure_report.json` when stuck.
+- **Why a task is stuck**: open `stuck.md` (human-readable) / `failure_report.json` (machine). They record which fix loop and which limit was exhausted, all counter values, the last failing check output, the last blocking review findings, and the final diff — plus, for a decomposed task, the failing subtask `k` of `n` and the SHAs already committed.
+- **Audit completeness**: SQLite records every `node_runs` and `provider_attempts` row (primary **and** any fallback), each artifact is registered with a **sha256 checksum**, and every commit/push/PR carries an idempotency fingerprint so a restart never double-publishes. Every `provider_attempts` row carries a `task_id`, and the constant supervisor layer's own provider calls are recorded too (with `node_run_id` NULL, since it is not a flow node) — so a whole-task cost/usage roll-up is `SELECT … FROM provider_attempts WHERE task_id = ?` (no `node_runs` join) and includes the supervisor spend. Per-attempt cost (`usage_cost`) is filled from the provider's own figure when the CLI emits one — Claude's stream-json `total_cost_usd`; Codex emits no dollar figure, so its `usage_cost` stays NULL. A **hard `--force-full` kill** SIGKILLs the daemon mid-node, so the running node's own completion write never happens; the next terminal transition (`finalize`, or a clean pipeline terminal) reconciles those orphans — the `node_runs` row is closed to `aborted` and the killed attempt gets a `provider_attempts` row with `usage_delta_status='unknown'` — so an operator-killed run is auditable, not silently stranded `running`. Both audit tables record the attempt/check's **real measured interval** (`started_at`/`finished_at` taken from the run, not two clock reads at row-write time), so a duration roll-up is meaningful.
+- **Node run vs. attempt**: `run-<node-run-id>` is reserved in SQLite before the provider starts and changes for every repeated node invocation, including each fixing cycle and recovery run. `<attempt>` starts at `1` inside that run and increments only for provider fallback.
+- **Per-run history is preserved, never overwritten**: every operator-facing artifact a node produces (the rendered prompt, review `findings.json`/`summary.md`, the generic `<node-id>.out.md`, checks reports, tool streams) is written under that run's `stages/<node-id>/run-<node-run-id>/` dir, next to its provider attempts — so a `review → fixing → testing → review` loop keeps each pass's findings instead of clobbering the last. Read `stages/<node-id>/history.jsonl` for the chronological index of a node's runs (one line per run: `run_id`, `outcome`, `findings` count, `dir`). This history is exempt from `logging.artifacts` pruning and is removed only by an explicit [`worc logs clean`](operations.md) of the whole task tree.
+- **No secrets anywhere**: `request.json`, the stdout/stderr/events logs, diffs, SQLite rows, the ledger, and the failure report are all redacted; `denied_read_paths` (`.env`, `secrets/**`) are excluded from agent reads and their values are scrubbed from any sink.
+- **The agent-facing exchange and its terminal snapshots** (WRI-007): while a task runs, its curated agent-readable artifacts (plan, diff, findings, checks input, HITL packet) live in the in-repo **exchange** `<repo>/.worc-io/<task-id>/`. At every terminal status (`done`/`failed`/`manual_action_required`) the orchestrator **seals** a checksum-verified copy into the private audit at `.worc/runs/exchange-seals/<task-id>/seal-<NNNNNN>/` (`manifest.json` + the sealed files) and then **removes** the active `.worc-io/<task-id>/` — so a terminal task never leaves an agent-readable exchange behind for the next task. Debug a terminal exchange from the newest `seal-*` snapshot (and the raw `.worc/logs/<task-id>/` audit), not from `.worc-io/`. `rerun --continue` restores the latest verified snapshot before resuming; a fresh `rerun`/restart starts from an empty exchange. If mutation detection (WRI-002) flags an agent-side change, the tree is quarantined instead of sealed under `.worc/runs/exchange-quarantine/<task-id>/<NNNNNN>/` (with `evidence.json` recording the expected vs observed manifests) and continue is refused — a fresh rerun is required. There is no configuration option that keeps a terminal exchange agent-readable. Seals are evicted automatically for a successful task ([`logging.clean_runs_on_success`](configuration-runtime.md#logging)) and on demand with [`worc runs clean`](operations-logs.md#reclaiming-per-task-runtime-state-runs-clean); quarantined evidence is removed only by `runs clean --include-quarantine`.
+
+- **Rendered node prompts**: `stages/<node-id>/run-<node-run-id>/rendered-prompt.md` is the exact (redacted) instruction the agent received for that run — read it first to confirm a `role_file` edit took effect and rendered as intended (a re-running node keeps one per run). This includes the constant supervisor layer's own turns (`stages/supervisor/run-<node-run-id>/`) — observe/finalize/handoff are audited the same way, even though the supervisor is not a flow node.
+
+Use the operator log for live monitoring. Provider `stdout.log` and `stderr.log` are finalized and redacted after the subprocess exits, so do not tail them while an attempt is still running.
+
+### Troubleshooting node prompts
+
+- **A `role_file` edit "did nothing"** — confirm you edited the role file the node actually uses. `install` delivers the built-in flows + their role files under `.worc/flows/` (each flow's prompts in its own `<task_type>/` subdir), and `.worc/flows/` is the only copy the orchestrator reads, so edit the copy there (a custom operator flow likewise keeps its role files under its own `.worc/flows/<task_type>/` subdir). Compare `rendered-prompt.md` against your file.
+- **A `{placeholder}` printed literally** — only the allowlisted variables interpolate (see [prompt templates](configuration-flows-supervisor.md#prompt-templates-no-longer-a-config-block)); any other `{...}` is intentionally left verbatim so code/JSON braces survive. A path variable with no value for that node renders empty.
+
+---
+
+## 7. Recovery playbook — `manual_action_required`
+
+A task ends in `manual_action_required` (exit `2`) when the orchestrator stops safely and needs a human. It is **not** `failed` (which is for unrecoverable invalid-task/config/security/git errors). The task file is **left in place** (not moved to `tasks/done` or `tasks/failed`) and automatic continuation is blocked until you resolve it.
+
+Common causes and what to do:
+
+| Cause (from `stuck.md` / logs / `cleanup_last_error`) | Action |
+| --- | --- |
+| **Fix budget exhausted** — `max_fix_cycles` or the global `max_total_fix_iterations` hit. | Read `stuck.md`: the last failing check / blocking findings and the final diff. Fix manually on the task branch, or refine the task, then re-submit. |
+| **Checks gate incomplete** — a required toolchain could not launch, or every selected set was skipped (including the `skip_if_unavailable` set that was the only one the diff selected). | Install the toolchain on the host, or narrow/extend the selecting `paths`, or disable that checks node for the task (`nodes.<id>.enabled: false`). A fix loop cannot install toolchains, so this never routes to `fixing`. |
+| **Git control state drifted** (WRI-009) — the index / HEAD / task ref / repo-local config / hooks changed across a workspace-write attempt. | Inspect `git status` and the repo-local config/hooks; reconcile by hand, then `rerun --continue`. Note this does **not** park on a `read-only` node holding the git-evidence grant — there it only warns and continues. |
+| **Terminal cleanup unsafe** — base-branch checkout would lose uncommitted work or the branch state is ambiguous (§8.3). | Inspect the repo (`git status`); reconcile by hand, commit/stash or discard intentionally, return to `base_branch`, then re-run `watch`. |
+| **More than one active task on restart** (inconsistent state, §13). | Only one task may be active. Decide which to keep, mark the others resolved, then re-run. |
+| **Exchange contaminated** (WRI-002/007) — the agent mutated the read-only exchange; the tree was quarantined to `.worc/runs/exchange-quarantine/<task-id>/`. | Inspect `evidence.json` (expected vs observed). `rerun --continue` is refused; start a fresh `rerun` (which discards the contaminated tree and re-derives the exchange). |
+| **Terminal exchange cleanup blocked** — the snapshot sealed but the active `.worc-io/<task-id>/` could not be removed (a Windows lock/read-only). Later launches are blocked (`exchange_active_unsafe`). | Clear the lock / remove the stale `.worc-io/<task-id>/` by hand (the verified `seal-*` snapshot is safe), then re-run. |
+| **Provider tree not proven quiescent** (WRI-012 `containment_unverified`) — a background/detached descendant may still be writing, so the terminal **seal, commit/push, and base-branch cleanup are all withheld** and the tree is left in place (`cleanup_last_error` reads "not proven quiescent"). Later launches are blocked (`exchange_active_unsafe`). | Find and kill the surviving descendant (the diagnostic records pids), then remove the stale `.worc-io/<task-id>/` by hand and re-run. The uncommitted work stays on the task branch working tree. |
+| **Exchange not clean at start** — a stale/foreign entry in `.worc-io/` (e.g. a prior task whose seal was interrupted) blocks the next launch; the new task ends `manual_action_required` naming the offending entry, without launching any provider. | Remove the named `.worc-io/<entry>/` by hand (a verified `seal-*` snapshot under `.worc/` is safe to keep), then re-run. |
+| **Codex sandbox could not enforce** (WRI-003 `capability_unavailable`) — before each `codex exec`, a no-model `codex sandbox` canary proves the generated profile is OS-enforced. On an old Codex CLI or a host missing the sandbox helper it cannot run, so the attempt fails **pre-model** with `capability_unavailable` (fallback-eligible only to a provider that can itself isolate the node, else `manual_action_required`). | Upgrade/repair the Codex CLI (on Windows see the sandbox-helper entry under [Windows troubleshooting](operations-install.md#windows-troubleshooting)); run `worc preflight`, whose live capability smoke reproduces this before a task runs. Or route the node to Claude / opt out with `strict_isolation: false`. |
+| **Codex permission profile not enforcing** (WRI-003 `configuration_error`) — the canary found a path that **should** be denied but was actually readable/writable: the profile is not enforcing. A **non-fallback security** result — the run stops, no other provider is tried. | This is a real isolation failure, not a flake: do **not** weaken the profile. Check for a conflicting managed/MDM Codex policy or a tampered install; `worc preflight`'s capability smoke reports the leaking probe. Fix the host policy, then re-run. |
+
+A §19-**rejected** task is different: it is terminal `failed`, quarantined to `.worc/tasks/rejected/` (under the gitignored home, so a rejected task never rides the audit commit) with a `validation_report.json` (and a `validation_reason` in the ledger), and never gets a branch. Fix the task file (e.g. add a Description, a valid `id`, remove injection-shaped front-matter) and re-submit by promoting it from `tasks/preparing/` (or dropping the corrected file back into `tasks/pending/`). `worc list --all` lists such ids under `rejected:` with the reason (see [`worc list`](operations-running.md#listing-tasks-and-shell-completion-list--completion)); a re-submission under the same id is accepted, and the id leaves that section once it has a row.
+
+**A finished task's own file reappearing in `tasks/pending/` is not a failure.** With the lifecycle tree tracked and `audit_on_branch: task`, `promote` left your commit of the file on base while the terminal move into `tasks/done/` was committed on the task branch — so returning to base restores the pending copy. The orchestrator recognises it by **content** (`tasks.source_sha256`, newline-normalized so a `core.autocrlf` checkout still matches): the daemon skips it, `worc run` on it answers `duplicate_task_id` with `already done; its task file was left in place`, and it is neither re-run nor quarantined. A reject of an id that already reached a terminal status appends **no second ledger record and sends no notification**. Only a file that merely **reuses** a settled id — different content — is still quarantined (`id already used by a <status> task; give this file a new id`), because left in the queue it would be re-rejected every tick.
+
+Recovery is idempotent: re-running `watch`/`run` resumes the single in-flight task, reuses the existing branch, continues from its persisted **flow checkpoint** (`{completed_nodes, current_node, loop_counters, publish_operations}` — not a per-stage status, those are gone), and never re-commits/re-pushes a completed operation. A resumed `fixing`/`review` node is handed the same inputs a fresh run produced — they are rebuilt from disk plus `state.db` (`current.diff`, `plan.md`, the newest quality-failed `checks/<NNN>.log`, and the findings of the last recorded `in_flow_verdict`) and re-published into the current task's exchange, so the agent reads exchange paths exactly as it would on a first pass, and the fix counters are not incremented a second time.
+
+The `tasks/` lifecycle tree at the repo root is where live task files belong; it is gitignored by default and becomes the git-tracked audit trail only if you asked `install` to track it (see [§5](operations-publishing.md#5-git-footprint-and-the-audit-commit)). The runtime home `.worc/` and the agent-facing exchange `.worc-io/` are always gitignored by `install` (all three lines appended to `.gitignore`), so their contents never ride a commit.

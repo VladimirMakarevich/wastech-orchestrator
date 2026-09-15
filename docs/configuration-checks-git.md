@@ -128,7 +128,7 @@ checks:
         - { name: build, argv: ["xcodebuild", "build"], cwd: "ios" }
 ```
 
-A stale `discovery` or flat `commands` key from an older config is **tolerated (ignored) on load**; `upgrade-config` strips it (config `schema_version` **15**). See [operations.md](operations.md#command-set-diagnostics) for the `preflight`/`status` command-set summary.
+A stale `discovery` or flat `commands` key from an older config is **tolerated (ignored) on load**; `upgrade-config` strips it (config `schema_version` **15**). See [operations → command-set diagnostics](operations-preflight.md#command-set-diagnostics) for the `preflight`/`status` command-set summary.
 
 ## `git`
 
@@ -169,9 +169,9 @@ Publishing does not assume the branch on `origin` got there by us, and it never 
 | **diverged, and is exactly the commit we recorded pushing** | a lease-guarded force-push replaces our own stale push |
 | **diverged from something we never pushed** | those commits are merged in **locally**, the quality gate re-runs over the combination, and only a pass reaches `origin` |
 
-An open pull request on the task head is adopted, retitled, and appended to. A push is refused outright when the destination of `origin` changed during the task. The full behaviour — what a failing gate or a merge conflict does, where the adoption is reported, and how the destination baseline is taken — is in [operations.md → When the branch on `origin` already holds something](operations.md#when-the-branch-on-origin-already-holds-something).
+An open pull request on the task head is adopted, retitled, and appended to. A push is refused outright when the destination of `origin` changed during the task. The full behaviour — what a failing gate or a merge conflict does, where the adoption is reported, and how the destination baseline is taken — is in [operations → When the branch on `origin` already holds something](operations-publishing.md#when-the-branch-on-origin-already-holds-something).
 
-Auto-merge is **off by default** and only affects the publish step — the mid-pipeline [dangerous-diff approval](configuration-agents.md#trust_level-approval-policy) still fires, the orchestrator never passes `--admin` or force-pushes, and a blocked merge ends the task `manual_action_required` with the PR left open (never `failed`). Enable it only when protected branches and required CI checks already enforce your quality gate. See [operations.md](operations.md#auto-merge-to-the-base-branch-danger-bypasses-human-review) for the full behavior, the per-task override, and the audit record.
+Auto-merge is **off by default** and only affects the publish step — the mid-pipeline [dangerous-diff approval](configuration-agents.md#trust_level-approval-policy) still fires, the orchestrator never passes `--admin` or force-pushes, and a blocked merge ends the task `manual_action_required` with the PR left open (never `failed`). Enable it only when protected branches and required CI checks already enforce your quality gate. See [operations → auto-merge](operations-publishing.md#auto-merge-to-the-base-branch-danger-bypasses-human-review) for the full behavior, the per-task override, and the audit record.
 
 ### The canonical layout
 
@@ -181,13 +181,13 @@ There is one canonical layout — there are no footprint modes to choose. Everyt
 
 **`runs/` is the one parent of every per-task runtime root:** `control-bundles/` (the frozen control snapshot), `instruction-bundles/` (the canonical task packet + the root repository instruction files under one manifest digest), `exchange-seals/` (the checksum-verified terminal snapshot of the exchange, written at _every_ terminal, success included), and `exchange-quarantine/` (a mutation-flagged exchange kept as tainted evidence). They are grouped rather than scattered beside the operator's own `config.yaml` / `flows/` / `guide/` because they share one property: private state keyed by task id, written by one run, never agent-readable. Grouping also gives the internal read-deny set a single named entry and retention a single root — see [`logging.clean_runs_on_success`](configuration-runtime.md#logging) and `worc runs clean`.
 
-The only things **not** under `.worc/` are the `tasks/` lifecycle dirs (`preparing`/`pending`/`done`/`failed`; the name is [`paths.tasks_dir`](configuration-runtime.md#paths)) at the repo root — gitignored by default, git-tracked if you asked for that at install. Tracked, the moved task file plus its `<id>.summary.md` in `done/` or `failed/` are the committed audit trail, staged **only for that task** (never `git add -- tasks/` wholesale). A finished task's own file that git restores to the queue folder on the return to base is recognised by content and left alone — see [the recovery playbook](operations.md#7-recovery-playbook--manual_action_required).
+The only things **not** under `.worc/` are the `tasks/` lifecycle dirs (`preparing`/`pending`/`done`/`failed`; the name is [`paths.tasks_dir`](configuration-runtime.md#paths)) at the repo root — gitignored by default, git-tracked if you asked for that at install. Tracked, the moved task file plus its `<id>.summary.md` in `done/` or `failed/` are the committed audit trail, staged **only for that task** (never `git add -- tasks/` wholesale). A finished task's own file that git restores to the queue folder on the return to base is recognised by content and left alone — see [the recovery playbook](operations-diagnostics.md#7-recovery-playbook--manual_action_required).
 
 The code commit stages changes with an explicit scoped pathspec that never includes a path under `.worc/`, `.worc-io/`, the configured tasks dir (it rides the separate audit commit), or a private report directory a flow's `report_dir` placed outside `.worc/`.
 
 ### `git.footprint`
 
-The remaining footprint policy is just the audit commit, which happens only while the lifecycle tree is tracked in git. With the tree gitignored and nothing tracked under it (`install`'s default) both keys below are inert — no branch is touched and the run's record lives in `state.db`, `logs/completed.jsonl` and the `<id>.summary.md` on disk. The mixed state (tree ignored, some task files already committed) still commits the tracked half of each move; see [operations.md §5](operations.md#5-git-footprint-and-the-audit-commit).
+The remaining footprint policy is just the audit commit, which happens only while the lifecycle tree is tracked in git. With the tree gitignored and nothing tracked under it (`install`'s default) both keys below are inert — no branch is touched and the run's record lives in `state.db`, `logs/completed.jsonl` and the `<id>.summary.md` on disk. The mixed state (tree ignored, some task files already committed) still commits the tracked half of each move; see [operations → Git footprint](operations-publishing.md#5-git-footprint-and-the-audit-commit).
 
 | Field | Values | Default | Meaning |
 | --- | --- | --- | --- |

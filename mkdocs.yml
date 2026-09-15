@@ -33,6 +33,12 @@ nav:
   - Getting Started:
       - How It Works: how-it-works.md
       - Operations: operations.md
+      - Operations - Install, Upgrade, Authorize: operations-install.md
+      - Operations - Preflight and Validation: operations-preflight.md
+      - Operations - Running Tasks: operations-running.md
+      - Operations - Logs, State, and Notifications: operations-logs.md
+      - Operations - Git Footprint and Publishing: operations-publishing.md
+      - Operations - Diagnostics and Recovery: operations-diagnostics.md
       - Cookbook: cookbook.md
       - How-To: how-to.md
       - Glossary: glossary.md
