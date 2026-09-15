@@ -2,11 +2,12 @@ name: ci
 
 # Quality gate on every pull request and on pushes to any long-lived branch (dev / main / release / site).
 # `dev` matters most: all real work merges there, so without it in the push list those merge commits
-# would run no CI at all outside of pull requests. Nothing here reads docs/, so the docs-less `dev`
-# tree needs no special handling (see .agents/rules/git-workflow.md §A). The Markdown gate is not
-# here yet: its linter is published now and pinned as a devDependency, so a job is a Node setup plus
-# `npm ci` away, but adding one is its own change. It runs as a local pre-commit hook until then,
-# which means the corpus is only checked on machines where that hook is installed.
+# would run no CI at all outside of pull requests. The Python jobs read no docs/, so the docs-less
+# `dev` tree needs no special handling (see .agents/rules/git-workflow.md §A) — and the `markdown`
+# job needs none either, because the corpus is defined by the configs present in the checkout rather
+# than by a branch name: `docs/**` selects the queue on `dev` and the queue plus the published guide
+# on `site`, and the additive `wastech-mdlint.docs.config.json` runs only where it exists. The gate
+# is no longer only as strong as a contributor's pre-commit hook.
 #
 # WRI-006 (cross-platform isolation verification): cross-platform behaviour is a hard repository
 # invariant, so the deterministic test suite — which exercises provider command generation, the typed
@@ -76,6 +77,36 @@ jobs:
 
       - name: Dependency hygiene (deptry)
         run: deptry src
+
+  markdown:
+    name: markdown gate (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The linter requires >= 24.17.0 (all three @wastech-mdlint packages declare it).
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      # tools/mdlint.py is a stdlib-only script, so the project itself is never installed here — this
+      # step only guarantees that `python` resolves, which is not true of a bare Ubuntu runner.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      # `npm ci` installs exactly the lockfile, so the gate cannot change meaning between this run and
+      # a contributor's without the lockfile change being visible in the diff.
+      - name: Install the linter (npm ci)
+        run: npm ci
+
+      # The same entry point the pre-commit hook runs, so the two can never drift apart. Under CI the
+      # script exits 2 rather than skipping when the linter is missing: a gate that reports success
+      # for a pass it never ran is worse than a red one.
+      - name: Markdown gate (wastech-mdlint)
+        run: python tools/mdlint.py
 
   test:
     name: tests (${{ matrix.os }} / py${{ matrix.python-version }})
