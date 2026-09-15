@@ -148,7 +148,7 @@ paths:
 
 The value is validated as repo-relative: no absolute path, no `~`, no `..` traversal, and it must **not** live under the `.worc/` home (the agent's read-deny root, excluded from every commit by path, and already home to the `tasks/rejected` quarantine). A repo-relative subpath (e.g. `config/tasks`) is allowed. The lifecycle subfolder names themselves are fixed.
 
-`worc install --tasks-dir DIR` scaffolds this directory, writes it here, and seeds its ignore line, all from the one value. Rename it **afterwards** and you do those last two steps yourself: create the lifecycle subfolders (the orchestrator does not auto-create a renamed root) and move the `/tasks/` line in `.gitignore`, because the orchestrator asks git about whatever directory this key names. While that directory is gitignored — `install`'s default — the audit commit is a no-op and lifecycle moves simply do not appear in Git history; no extra config either way.
+`worc install --tasks-dir DIR` scaffolds this directory, writes it here, and seeds its ignore line, all from the one value (an unsafe value is refused by the config validator). Whether the line is seeded is the wizard's `Track task files in git?` question (default no; `--track-tasks` / `--no-track-tasks`); no config key records the answer — git's ignore state is what the runtime reads (see [How-To → Track your task files in git](how-to.md#6-track-your-task-files-tasks-in-git)). Rename it **afterwards** and you do those last two steps yourself: create the lifecycle subfolders (the orchestrator does not auto-create a renamed root) and move the `/tasks/` line in `.gitignore`, because the orchestrator asks git about whatever directory this key names. While that directory is gitignored — `install`'s default — the audit commit is a no-op and lifecycle moves simply do not appear in Git history; no extra config either way.
 
 ## `agents`
 
@@ -528,7 +528,7 @@ validation:
 Current task front matter fields are:
 
 ```text
-id, title, task_type, branch_name, branch_mode, branch_ref, publish, trust_level, auto_merge, prompt_audit, decomposition, contacts, depends_on, priority, queue, subtasks, nodes
+id, title, task_type, branch_name, branch_mode, branch_ref, publish, trust_level, commit_type, auto_merge, prompt_audit, decomposition, contacts, references, depends_on, priority, queue, subtasks, nodes
 ```
 
 A task is deliberately "clean" (PRE.3): it carries only identity/dispatch fields plus the sanctioned exceptions — the per-node `nodes.<node-id>` block and `auto_merge` (task-wins). The **flow node** still declares the provider/`model`/`reasoning` defaults; a task may overlay them per run via `nodes.<node-id>.{model,reasoning,provider}` (best-effort — an invalid override is warned and skipped at run time, never fatal), but it never patches the graph. `decompose` was removed (the flow decides splitting); refinement-skip is deterministic (completeness classification, no `refined` flag). Inside a `nodes.<node-id>` block the valid sub-keys are `enabled`, `model`, `reasoning`, and `provider`.
@@ -675,29 +675,26 @@ Auto-merge is **off by default** and only affects the publish step — the mid-p
 
 ### The canonical layout
 
-There is one canonical layout — there are no footprint modes to choose. Everything the orchestrator generates or installs lives under a single gitignored `<repo>/.worc/` home: `config.yaml` (plus the commented `config.example.yaml` reference), `guide/`, `flows/` (editable flow + role-prompt copies), `tools/` (delivered `tool`-node executables), `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `memory/`, `security-reports/`, `workspace/`, `runs/`, and the `tasks/rejected` quarantine. `install` appends two lines — `.worc/` and the sibling `.worc-io/` exchange (the redacted, agent-facing current-task surface, WRI-001) — to the repo's tracked `.gitignore`.
+There is one canonical layout — there are no footprint modes to choose. Everything the orchestrator generates or installs lives under a single gitignored `<repo>/.worc/` home: `config.yaml` (plus the commented `config.example.yaml` reference), `guide/`, `flows/` (editable flow + role-prompt copies), `tools/` (delivered `tool`-node executables), `state.db` (+ `-wal`/`-shm`), `orchestrator.pid`, `logs/` (plan, diffs, stage logs, `summary.json`, validation reports), `memory/`, `security-reports/`, `workspace/`, `runs/`, and the `tasks/rejected` quarantine. `install` appends two lines — `.worc/` and the sibling `.worc-io/` exchange (the redacted, agent-facing current-task surface, WRI-001) — to the repo's tracked `.gitignore`, and, unless you asked it to track task files, a third **anchored** `/tasks/` line for the lifecycle tree (anchored so a `src/tasks/` package of your own is untouched; see [`paths.tasks_dir`](#paths)).
 
-**`runs/` is the one parent of every per-task runtime root:** `control-bundles/` (the frozen control snapshot), `instruction-bundles/` (the canonical task packet + the root repository instruction files under one manifest digest), `exchange-seals/` (the checksum-verified terminal snapshot of the exchange, written at _every_ terminal, success included), and `exchange-quarantine/` (a mutation-flagged exchange kept as tainted evidence). They are grouped rather than scattered beside the operator's own `config.yaml` / `flows/` / `guide/` because they share one property: private state keyed by task id, written by one run, never agent-readable. Grouping also gives the internal read-deny set a single named entry and retention a single root — see [`logging.clean_runs_on_success`](#logging) and `worc runs clean`. There is no migration code: in a workspace installed before the rename, the four pre-rename directories are simply orphaned at the `.worc/` root and can be deleted by hand.
+`security-reports/` and `docs/research/` are only the **default** report bases: a flow-level `report_dir` moves either (never into `.worc/`, `.worc-io/`, `.git/` or the [`paths.tasks_dir`](#paths) tree), and a private base outside `.worc/` is yours to gitignore — see [`report_dir` in the flow-authoring guide](flow-authoring.md#report_dir--moving-the-deliverables-home).
 
-The only things **not** under `.worc/` are the `tasks/` lifecycle dirs (`preparing`/`pending`/`done`/`failed`), which sit at the repo root — gitignored by default, and git-tracked if you asked for that at install (or deleted the seeded ignore line afterwards). (`tasks` is the default name; it is configurable via [`paths.tasks_dir`](#paths) — substitute the configured name throughout this section.) The committed audit trail is the moved task file plus its `<id>.summary.md` in `tasks/done` or `tasks/failed`; the orchestrator's audit commit stages **only that task's own files** (never `git add -- tasks/` wholesale), so a concurrently-pending task is never swept in.
+**`runs/` is the one parent of every per-task runtime root:** `control-bundles/` (the frozen control snapshot), `instruction-bundles/` (the canonical task packet + the root repository instruction files under one manifest digest), `exchange-seals/` (the checksum-verified terminal snapshot of the exchange, written at _every_ terminal, success included), and `exchange-quarantine/` (a mutation-flagged exchange kept as tainted evidence). They are grouped rather than scattered beside the operator's own `config.yaml` / `flows/` / `guide/` because they share one property: private state keyed by task id, written by one run, never agent-readable. Grouping also gives the internal read-deny set a single named entry and retention a single root — see [`logging.clean_runs_on_success`](#logging) and `worc runs clean`.
 
-The code commit always stages changes with an explicit scoped pathspec and excludes `.worc/` and the configured tasks dir — `.worc/` is gitignored, and the tasks dir rides the separate audit commit instead.
+The only things **not** under `.worc/` are the `tasks/` lifecycle dirs (`preparing`/`pending`/`done`/`failed`; the name is [`paths.tasks_dir`](#paths)) at the repo root — gitignored by default, git-tracked if you asked for that at install. Tracked, the moved task file plus its `<id>.summary.md` in `done/` or `failed/` are the committed audit trail, staged **only for that task** (never `git add -- tasks/` wholesale). A finished task's own file that git restores to the queue folder on the return to base is recognised by content and left alone — see [the recovery playbook](operations.md#7-recovery-playbook--manual_action_required).
+
+The code commit stages changes with an explicit scoped pathspec that never includes a path under `.worc/`, `.worc-io/`, the configured tasks dir (it rides the separate audit commit), or a private report directory a flow's `report_dir` placed outside `.worc/`.
 
 ### `git.footprint`
 
-The remaining footprint policy is just the audit commit — which happens only while the lifecycle tree is tracked in git. With that tree gitignored (`install`'s default) both keys below are inert: nothing is staged, no branch is touched, and the run's record lives in `state.db`, `logs/completed.jsonl` and the `<id>.summary.md` on disk instead.
+The remaining footprint policy is just the audit commit, which happens only while the lifecycle tree is tracked in git. With the tree gitignored and nothing tracked under it (`install`'s default) both keys below are inert — no branch is touched and the run's record lives in `state.db`, `logs/completed.jsonl` and the `<id>.summary.md` on disk. The mixed state (tree ignored, some task files already committed) still commits the tracked half of each move; see [operations.md §5](operations.md#5-git-footprint-and-the-audit-commit).
 
 | Field | Values | Default | Meaning |
 | --- | --- | --- | --- |
 | `audit_commit_message` | string | `"chore(worc): audit trail for {task_id}"` | Commit message for the orchestrator's task+summary audit commit (`{task_id}` is substituted). |
 | `audit_on_branch` | `task`, `sibling` | `task` | Where the audit commit lands: `task` — on the task branch alongside the code; `sibling` — on a separate `<branch>-audit` branch. |
 
-This is not a second code commit. The audit commit is the task's durable paper trail in Git: which task the branch was working on, which lifecycle folder it ended in (`done` / `failed`), and the short human-readable handoff in `<id>.summary.md`.
-
-In practice that means a branch can carry two different commits with different jobs:
-
-- a **code commit** with the source changes;
-- an **audit commit** with `tasks/<state>/<id>.md` plus `tasks/<state>/<id>.summary.md`.
+This is not a second code commit: the audit commit is the task's paper trail in Git — which task the branch was working on, which lifecycle folder it ended in, and the handoff in `<id>.summary.md` — so a branch carries a **code commit** with the source changes and an **audit commit** with `tasks/<state>/<id>.md` plus `<id>.summary.md`.
 
 ## `telegram`
 
@@ -1053,7 +1050,7 @@ agents:
       extra_args: []
 ```
 
-Note there is no `sandbox:` key here. `sandbox: read-only` / `sandbox: workspace-write` is **rejected at config load** — the access level moved to `permission_profile`, and the only value `sandbox` still accepts is the full-access escape `danger-full-access` (see [`agents.providers`](#agentsproviders)). `upgrade-config` folds a legacy value into `permission_profile` for you.
+Note there is no `sandbox:` key here: it is **rejected at config load at any value** (removed in `schema_version` 38 — the access level is `permission_profile`, and the provider full-access modes are refused outright; see [`agents.providers`](#agentsproviders)). `upgrade-config` does not delete the line for you.
 
 Audit commit on a separate sibling branch (keeps the code branch free of the orchestrator's commit):
 
@@ -1084,7 +1081,7 @@ Before running tasks:
 - every allowed provider has an `agents.providers` entry;
 - `max_total_fix_iterations >= max_fix_cycles`;
 - `agents.decomposition.max_subtasks >= 2`;
-- the target repo's tracked `.gitignore` ignores `.worc/` (`install` appends it);
+- the target repo's tracked `.gitignore` ignores `.worc/` and `.worc-io/` (`install` appends both), plus the anchored `/tasks/` line for the lifecycle tree unless you chose to track task files;
 - the target clone does not track `.worc/`;
 - no `extra_args` disable sandbox or approvals — the two provider full-access selectors are refused at every value of `security.strict_isolation`, so a config carrying one never loads;
 - `security.allowed_environment` covers `PATH` (a load error otherwise) and, on Windows, `SystemRoot` (a launch-critical preflight FAIL, re-checked at `run` / `watch` / `rerun` start);

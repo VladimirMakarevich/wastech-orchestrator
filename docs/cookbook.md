@@ -86,7 +86,7 @@ Do not point `repo.local_path` at the source checkout open in your IDE. Use one 
 wastech-self/
   .venv/                 # control environment running the known-good orchestrator
   .worc/                 # orchestrator home (config.yaml, logs/, state.db, workspace/, ...)
-  tasks/                 # git-tracked task lifecycle dirs at the repo root
+  tasks/                 # task lifecycle dirs at the repo root (gitignored by default; --track-tasks to commit them)
   workspace/
     repo/                 # separate clone modified by coding agents
 ```
@@ -402,8 +402,8 @@ task_type: deep_research
 | `task_type` | Deliverable |
 | --- | --- |
 | `implementation` (default) | A code change, published as a pull request. |
-| `deep_research` | A research report under `docs/research/<task-id>/`. |
-| `security_audit` | A security review. It declares `publishing: none`, and its report lands in the gitignored `.worc/security-reports/<task-id>/` — never in a commit. |
+| `deep_research` | A research report under `docs/research/<task-id>/` — the policy's default home; a flow may move the base with `report_dir: <base>` (the engine still appends `/<task-id>`). |
+| `security_audit` | A security review. It declares `publishing: none`, and its report lands in the gitignored `.worc/security-reports/<task-id>/` — never in a commit. That too is a default a flow may move with `report_dir`; a private base outside `.worc/` is yours to gitignore (the publish step refuses a git-trackable report, and the report directory is kept out of the code commit's staging set either way). |
 | `blog_article` / `blog_article_revise` | A new authorial article written from scratch, or an improvement pass over one that already exists. |
 | `content_chapter` / `content_translate` | A long-form chapter reworked in place, or a source-language chapter adapted into English. |
 | `merge` | Not selected by a task: this is the conflict-resolution flow `merge-task` runs (`git.merge_flow`). |
@@ -418,7 +418,7 @@ They are ordinary YAML under `.worc/flows/`, so a copy with a new name and a mat
 
 `refinement` here is a **scoping** pass and runs on every task: it decomposes the question into sub-questions and anchors each to where its evidence lives. (It used to be gated on `derived.needs_refinement`, which is only true for an ill-formed task file — so on any well-formed task the scoping pass never ran. A complete task file and a scoped question are different things.) Skip it per task when the question is narrow enough.
 
-**What the deliverable directory contains.** `deep_research` declares `output_policy: repository_document`, so every write is confined to `docs/research/<task-id>/` and the bundle must produce `report.md` + `sources.json`. The organizing pass before the writer (`architecture_design`) deliberately writes **no file** — it returns its blueprint as its output and the writer consumes it. An intermediate blueprint written into the report directory ships in the pull request next to the deliverable, and the run that proved this shipped two documents that disagreed about coverage. So the report directory holds the deliverable and nothing else.
+**What the deliverable directory contains.** `deep_research` declares `output_policy: repository_document`, so every write is confined to its report directory — `docs/research/<task-id>/` by default, or `<report_dir>/<task-id>/` once the flow names another base (its `synthesis` prompt reads the directory as `{report_dir}`, so moving it needs no prompt edit) — and the bundle must produce `report.md` + `sources.json`. The organizing pass before the writer (`architecture_design`) deliberately writes **no file** — it returns its blueprint as its output and the writer consumes it. An intermediate blueprint written into the report directory ships in the pull request next to the deliverable, and the run that proved this shipped two documents that disagreed about coverage. So the report directory holds the deliverable and nothing else.
 
 ## 8. Configure Checks
 
@@ -506,14 +506,14 @@ The audit commit exists to answer a different question than the code commit:
 - the code commit says **what changed in the source tree**;
 - the audit commit says **which task was completed and what its outcome was**.
 
-Typical history for a successful task:
+Typical history for a successful task with the lifecycle tree tracked:
 
 ```text
 feat(task-123): add rate limiting
 chore(worc): audit trail for task-123
 ```
 
-The first commit carries the source diff. The second carries only the task trail under `tasks/`: the moved `task-123.md` plus `task-123.summary.md`. Everything under `.worc/` stays local and is never committed.
+The first commit carries the source diff. The second carries only the task trail under `tasks/`: the moved `task-123.md` plus `task-123.summary.md` — and, if you had committed the task file in `preparing/` or `pending/` first, its removal from there, so the file never sits in two lifecycle folders at once. Under the gitignored default only the first commit exists. Everything under `.worc/` stays local and is never committed.
 
 ## 10. Inspect Logs And Artifacts
 
