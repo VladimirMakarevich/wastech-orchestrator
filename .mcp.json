@@ -2,7 +2,7 @@
   "mcpServers": {
     "wastech-mdlint": {
       "command": "node",
-      "args": ["${WASTECH_MDLINT_HOME}/packages/mcp-server/dist/index.js"]
+      "args": ["node_modules/@wastech-mdlint/mcp-server/dist/index.js"]
     }
   }
 }
