@@ -68,13 +68,13 @@ Between 11:23 and 11:29 UTC two orchestrator processes were live against one `st
 The check and the write are two separate operations with real work between them:
 
 ```python
-owner = _executor_owner(config)          # cli.py — the check
+owner = _executor_owner(config)  # cli.py — the check
 if owner is not None:
     return 1
-orchestrator = build_orchestrator(...)   # opens state.db, resolves the layout, scans dependencies
+orchestrator = build_orchestrator(...)  # opens state.db, resolves the layout, scans dependencies
 ...
 runner_path = process_control.runner_file_path(worc_home_for(config))
-process_control.write_pid_file(runner_path)   # the write, unconditional
+process_control.write_pid_file(runner_path)  # the write, unconditional
 ```
 
 Two processes that pass the check inside that window both proceed, and `write_pid_file` **overwrites** whatever is there — after which `worc stop` targets the wrong process and `status` / `list` / `top` report the wrong executor. `cmd_watch` has the same shape and a **wider** window: its checks sit at `cli.py:3851`/`:3860`, while `write_pid_file(pid_path)` runs at `:3902` — after `build_orchestrator`, after the console print, and inside the `with controller` block.
@@ -220,7 +220,7 @@ No `request.json` exists anywhere in this run (`find logs -name request.json` is
 
 ```python
 _ARTIFACT_KEEP: dict[str, set[str]] = {
-    "minimal":  {RESULT_FILENAME},
+    "minimal": {RESULT_FILENAME},
     "standard": {RESULT_FILENAME, STDOUT_FILENAME, STDERR_FILENAME},
 }
 ```
@@ -459,7 +459,7 @@ The run's diff touched `AGENTS.md` **and** `.rules/wastime-journey-rules.md`. Th
 
 ```python
 REPO_INSTRUCTION_NAMES = ("AGENTS.md", "AGENTS.override.md", "CLAUDE.md")
-GOVERNANCE_PATH_GLOBS  = (".agents/rules/**",)   # "A constant, never a config key"
+GOVERNANCE_PATH_GLOBS = (".agents/rules/**",)  # "A constant, never a config key"
 ```
 
 The intent behind the comment is right — an operator must not be able to switch the notice off. But "not a config key" is being read as "not extensible", and a repository that keeps its rule set anywhere other than `.agents/rules/` gets a notice covering part of its governance and silently omitting the rest.

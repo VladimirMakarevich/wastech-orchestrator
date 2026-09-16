@@ -77,7 +77,7 @@ The private read-deny projection keeps `.worc` unreadable to agents at **either*
 
 ```python
 REPO_INSTRUCTION_NAMES = ("AGENTS.md", "AGENTS.override.md", "CLAUDE.md")
-GOVERNANCE_PATH_GLOBS  = (".agents/rules/**",)   # "A constant, never a config key"
+GOVERNANCE_PATH_GLOBS = (".agents/rules/**",)  # "A constant, never a config key"
 ```
 
 The intent behind the comment is right: an operator must not be able to switch the notice off. But "not a config key" is being read as "not extensible", and a repository that keeps its rule set anywhere else gets a notice covering part of its governance and silently omitting the rest. In this run the diff touched `AGENTS.md` **and** `.rules/wastime-journey-rules.md`; the ledger reported `governance_changed: ["AGENTS.md"]` only. Half a governance edit reached the pull request unannounced.
