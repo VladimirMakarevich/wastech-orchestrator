@@ -20,6 +20,14 @@ Where to find the design detail:
 
 ## Open backlog
 
+### Defects
+
+Reproduced failures in shipped behavior, as distinct from unbuilt features. An item leaves this table the same way any other does — when it lands, the code and its tests become the record.
+
+| Item | Summary | Source / constraint |
+| --- | --- | --- |
+| [`merge-task` never reaches the merge flow on a conflict](merge-task-exchange-containment.md) | `worc merge-task` aborts before the `conflict_resolution` node's first provider call whenever the base-merge conflicts — the only case the merge flow exists for; a clean merge is mechanical and unaffected. `_run_merge_flow` deliberately publishes no task packet, so `build_node_inputs` leaves `task_path` pointing at the live `tasks/<state>/<id>.md`, and containment rejects the request. Not a configuration or prompt problem: `task_path` is a request field, so clearing it from role prompts changes nothing. Reproduced twice on `0.14.0a1`; present in `dev`. | Fix is one line (`inputs.task_path = None`) plus a regression test. No schema, config or flow-file change. Uncovered because no test drives `_run_merge_flow` at all. The transactional guarantee held throughout — `git merge --abort` ran, the tree stayed clean, the PR stayed open. |
+
 ### Other deferred features
 
 These are deferred by the v1 spec or described in architecture notes; not scheduled.
