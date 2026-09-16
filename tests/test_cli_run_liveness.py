@@ -122,6 +122,86 @@ def test_stop_does_not_offer_to_continue_a_task_that_is_executing(
     assert "4242" in note
 
 
+def test_a_second_run_refuses_while_the_first_owns_the_clone(
+    monkeypatch: pytest.MonkeyPatch,
+    in_repo_config: OrchestratorConfig,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    # `run` is the executor every other command is refused for; it must refuse itself the same way,
+    # or two engines drive the same branch in the same clone.
+    _mark_running(in_repo_config)
+    marker = process_control.runner_file_path(cli.worc_home_for(in_repo_config))
+    before = marker.read_bytes()
+    monkeypatch.setattr(cli, "load_config_for", lambda args: in_repo_config)
+    monkeypatch.setattr(process_control, "is_running", lambda pid, **kw: True)
+    started: list[int] = []
+    monkeypatch.setattr(cli, "build_orchestrator", lambda *a, **k: started.append(1))
+
+    code = cli.main(["run", str(_task_file(tmp_path))])
+
+    assert code == 1
+    assert started == []  # refused before any engine was built
+    assert "4242" in capsys.readouterr().out
+    assert marker.read_bytes() == before  # the first executor's record is still its own
+
+
+def test_a_run_that_loses_the_race_refuses_instead_of_stealing_the_marker(
+    monkeypatch: pytest.MonkeyPatch,
+    in_repo_config: OrchestratorConfig,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    # The window the owner check cannot cover: it has already answered "free", and the marker is
+    # only written once the engine is built. A second executor that claims the slot in between must
+    # be discovered by the write itself — and its record left exactly as it wrote it, since a
+    # `stop` issued afterwards addresses whoever the marker names.
+    marker = process_control.runner_file_path(cli.worc_home_for(in_repo_config))
+    winner: dict[str, bytes] = {}
+    ran: list[str] = []
+
+    class _Orch:
+        def run_task(self, task_file: str) -> PipelineResult:
+            ran.append(task_file)
+            return PipelineResult(task_id="task-1", final_status=Status.DONE)
+
+    def build_and_lose_the_race(*_a: object, **_k: object) -> _Orch:
+        process_control.write_pid_file(marker, pid=4242)
+        winner["record"] = marker.read_bytes()
+        return _Orch()
+
+    monkeypatch.setattr(cli, "load_config_for", lambda args: in_repo_config)
+    monkeypatch.setattr(cli, "build_orchestrator", build_and_lose_the_race)
+    monkeypatch.setattr(process_control, "is_running", lambda pid, **kw: True)
+
+    code = cli.main(["run", str(_task_file(tmp_path))])
+
+    assert code == 1
+    assert ran == []  # no second engine over the same branch
+    assert "4242" in capsys.readouterr().out
+    assert marker.read_bytes() == winner["record"]  # neither overwritten nor reaped by the loser
+
+
+def test_a_run_reclaims_a_marker_left_behind_by_a_dead_executor(
+    monkeypatch: pytest.MonkeyPatch, in_repo_config: OrchestratorConfig, tmp_path: Path
+) -> None:
+    # A hard kill leaves the marker on disk. Refusing on it would make one crash block the clone
+    # until an operator deleted a file by hand.
+    _mark_running(in_repo_config)
+    marker = process_control.runner_file_path(cli.worc_home_for(in_repo_config))
+    monkeypatch.setattr(cli, "load_config_for", lambda args: in_repo_config)
+    monkeypatch.setattr(process_control, "is_running", lambda pid, **kw: False)
+
+    class _Orch:
+        def run_task(self, task_file: str) -> PipelineResult:
+            return PipelineResult(task_id="task-1", final_status=Status.DONE)
+
+    monkeypatch.setattr(cli, "build_orchestrator", lambda *a, **k: _Orch())
+
+    assert cli.main(["run", str(_task_file(tmp_path))]) == 0
+    assert not marker.exists()
+
+
 def test_rerun_refuses_while_a_run_owns_the_clone(
     monkeypatch: pytest.MonkeyPatch,
     in_repo_config: OrchestratorConfig,
