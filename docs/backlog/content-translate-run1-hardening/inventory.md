@@ -63,22 +63,32 @@ Between 11:23 and 11:29 UTC two orchestrator processes were live against one `st
 
 ### Root cause
 
-[`cmd_run`](../../src/wastech_orchestrator/cli.py) records the executor and never checks whether one is already recorded:
+> **Corrected 2026-09-16 against `dev`.** An earlier draft of this section said `cmd_run` never checks whether an executor is already recorded. That is not true: [`cmd_run`](../../../src/wastech_orchestrator/cli.py) calls `_executor_owner(config)` — which probes the daemon PID file **and** the runner file — and refuses with a non-zero exit before building anything. The guard landed in `f12a3ad` (2026-09-03) and ships in `v0.12.0a1` onward, so the run that produced this document had it. The defect is not a missing check; it is a **non-atomic** one. Do not implement the old step 1 — it is already there.
+
+The check and the write are two separate operations with real work between them:
 
 ```python
+owner = _executor_owner(config)          # cli.py — the check
+if owner is not None:
+    return 1
+orchestrator = build_orchestrator(...)   # opens state.db, resolves the layout, scans dependencies
+...
 runner_path = process_control.runner_file_path(worc_home_for(config))
-process_control.write_pid_file(runner_path)
+process_control.write_pid_file(runner_path)   # the write, unconditional
 ```
 
-`cmd_watch` in the same file does the opposite — it reads both the daemon PID file and the runner file and refuses with `watch: already running (pid …); stop it first`. So the guard exists, is well shaped, and is simply not applied on the `run` path. Worse, the second `run` **overwrites** the first's runner file, after which `worc stop` targets the wrong process and `status` / `list` / `top` report the wrong executor.
+Two processes that pass the check inside that window both proceed, and `write_pid_file` **overwrites** whatever is there — after which `worc stop` targets the wrong process and `status` / `list` / `top` report the wrong executor. `cmd_watch` has the same shape and a **wider** window: its checks sit at `cli.py:3851`/`:3860`, while `write_pid_file(pid_path)` runs at `:3902` — after `build_orchestrator`, after the console print, and inside the `with controller` block.
 
-The task-level `duplicate_task_id` gate does not help: it governs claiming a **pending file**, and `resume()` runs before claiming, so the second process resumed the in-flight task before the gate ever spoke.
+Which of the two shapes produced this run's overlap is not recoverable: no process-level log was kept, and the per-task log directories hold no executor identity. Both are in scope, because both are the same defect.
+
+The task-level `duplicate_task_id` gate does not help either: it governs claiming a **pending file**, and `resume()` runs before claiming, so the second process resumed the in-flight task before the gate ever spoke.
 
 ### Fix steps
 
-1. In `cmd_run`, before `write_pid_file`, run the same two checks `cmd_watch` runs (`running_daemon_pid` over `pid_file_path` and `runner_file_path`) and refuse with a non-zero exit naming the live PID.
-2. Make `write_pid_file` refuse to overwrite a live marker rather than clobbering it, so the guard cannot be lost to a race between the check and the write.
-3. Regression test: two `run` invocations over one `worc_home`, second returns non-zero and leaves the first's marker intact.
+1. ~~In `cmd_run`, run the same two checks `cmd_watch` runs.~~ **Already done** — see the correction above. Verify and move on.
+2. Make the claim atomic: `write_pid_file` acquires the marker exclusively (`O_EXCL`) and refuses when a **live** record already holds it, so the guard cannot be lost to a race between the check and the write. A stale record (dead PID, or alive but recycled) is still reclaimed, which is what keeps a crash from refusing every later command forever.
+3. Apply it on both paths — `cmd_run`'s runner file and `cmd_watch`'s daemon PID file. `cmd_watch`'s window is the wider one.
+4. Regression tests, one per path: two `run` invocations over one `worc_home`, second returns non-zero and leaves the first's marker intact; the same for two `watch` invocations. The `run` case has no coverage today — [`test_cli_run_liveness.py`](../../../tests/test_cli_run_liveness.py) asserts that `rerun`, `watch`, `finalize` and `prs` refuse under a live `run`, but never that a second `run` does.
 
 ### Scope and expected impact
 
@@ -114,7 +124,7 @@ The flow had declared `budgets: {form_fix: 6}`. Two rounds were spent.
 
 ### Root cause — two defects, one mechanism
 
-[`_is_repeated_no_finding_failure`](../../src/wastech_orchestrator/core/flow/nodes/tool.py) parks on the second identical failure when `contract.findings` is empty, and [`_findings_from`](../../src/wastech_orchestrator/core/flow/nodes/tool.py) reads only a **top-level `findings` array**. A tool that reports through `data` — which the contract explicitly permits, since `parse_tool_output` documents `data` as a first-class field — therefore looks finding-less on every failure it will ever produce.
+[`_is_repeated_no_finding_failure`](../../../src/wastech_orchestrator/core/flow/nodes/tool.py) parks on the second identical failure when `contract.findings` is empty, and [`_findings_from`](../../../src/wastech_orchestrator/core/flow/nodes/tool.py) reads only a **top-level `findings` array**. A tool that reports through `data` — which the contract explicitly permits, since `parse_tool_output` documents `data` as a first-class field — therefore looks finding-less on every failure it will ever produce.
 
 1. **The message is wrong about the facts.** "Without findings" reads as "the tool said nothing", and the operator goes looking for a broken tool. The true statement is narrower: the tool produced no _structured_ findings, so the fixer had no typed handle. A tool whose entire output is `data` is a supported shape, not a malfunction.
 2. **A declared budget is voided without a word.** The stall detector sits above `budgets`, knows nothing about it, and takes precedence. A flow author writes 6 and gets 2, with no diagnostic at authoring time, at validation time, or at runtime.
@@ -123,7 +133,7 @@ The flow had declared `budgets: {form_fix: 6}`. Two rounds were spent.
 
 1. Reword the exception: name the missing structured channel, not the tool's silence, and quote the head of the repeated stdout so the operator sees what actually repeated.
 2. Add a validator or `preflight` warning: a `kind: tool` node whose tool returns `fail` without a top-level `findings` array makes the stall detector authoritative and its declared loop budget unreachable. Say so once, at the place the budget is written.
-3. Decide, and document either way, whether the detector should require `min(_STALL_REPEAT_LIMIT, budget)` repeats when `data` is non-empty, rather than a fixed second occurrence. A tool that reports through `data` is currently held to a stricter standard than one that reports through `findings`, which is the opposite of the intent.
+3. **Decided 2026-09-16 — three-tier.** `findings` present → the detector stays off, as today. `findings` absent but `data` non-empty → the failure counts as actionable and the detector becomes a **backstop**: it fires at the node's declared loop budget, not on the second repeat. Neither present → park on the second repeat, as today. A tool that reports through `data` was held to a stricter standard than one that reports through `findings`, which is the opposite of the intent. Note that the constant this step originally named, `_STALL_REPEAT_LIMIT`, does not exist: the second-occurrence threshold is hard-coded in `_is_repeated_no_finding_failure` via the in-memory `_last_no_finding_failure` map. Nodes with no declared budget keep the threshold of 2.
 4. Document the `findings` contract in the operator-facing tool guidance, next to `outcome` — it is currently discoverable only from the source.
 
 ### Scope and expected impact
@@ -142,7 +152,7 @@ The loop ended on the no-progress guard, not on a verdict — `failure_report.js
 
 ### Root cause
 
-[`_check_stall`](../../src/wastech_orchestrator/core/flow/engine.py) breaks a loop after `_STALL_NO_CHANGE_LIMIT` consecutive rework charges that leave the tree unchanged. Its state is two plain dicts on the engine instance:
+[`_check_stall`](../../../src/wastech_orchestrator/core/flow/engine.py) breaks a loop after `_STALL_NO_CHANGE_LIMIT` consecutive rework charges that leave the tree unchanged. Its state is two plain dicts on the engine instance:
 
 ```python
 # EXPERIMENTAL(no-work-infra). No-effective-work stall guard (transient, never persisted — a
@@ -182,7 +192,7 @@ logs/en-adapt-01a/parked-01a_…_en.md          3.4 KB
 
 ### Root cause
 
-The field is cleared only when a task row is reset ([`state_store.py`](../../src/wastech_orchestrator/state_store.py), the `reset` path writes `failure_report_path=None`). At the terminal, [`_finish`](../../src/wastech_orchestrator/core/orchestrator.py) reads `if row is not None and not row.failure_report_path:` and writes a report when one is **missing** — it never removes one that is present.
+The field is cleared only when a task row is reset ([`state_store.py`](../../../src/wastech_orchestrator/state_store.py), the `reset` path writes `failure_report_path=None`). At the terminal, [`_finish`](../../../src/wastech_orchestrator/core/orchestrator.py) reads `if row is not None and not row.failure_report_path:` and writes a report when one is **missing** — it never removes one that is present.
 
 For a non-blocking evaluator this is the ordinary path, not an edge case: the stall guard writes the report, the flow continues because the lens does not block, and the task succeeds with the pointer still set. Every `content_translate` run with a non-converging lens will look like this.
 
@@ -206,7 +216,7 @@ No `request.json` exists anywhere in this run (`find logs -name request.json` is
 
 ### Root cause
 
-[`providers/artifacts.py`](../../src/wastech_orchestrator/providers/artifacts.py):
+[`providers/artifacts.py`](../../../src/wastech_orchestrator/providers/artifacts.py):
 
 ```python
 _ARTIFACT_KEEP: dict[str, set[str]] = {
@@ -215,7 +225,7 @@ _ARTIFACT_KEEP: dict[str, set[str]] = {
 }
 ```
 
-`REQUEST_FILENAME` is written by `write_request_artifact` and then pruned at every level except `full`. Two places in the codebase depend on it existing: [`ledger.py`](../../src/wastech_orchestrator/ledger.py) calls it "the only artifact carrying the permission profile and full `argv`", and [`observability.py`](../../src/wastech_orchestrator/core/flow/observability.py) describes cross-checking the prompt-audit's effective model against it.
+`REQUEST_FILENAME` is written by `write_request_artifact` and then pruned at every level except `full`. Two places in the codebase depend on it existing: [`ledger.py`](../../../src/wastech_orchestrator/ledger.py) calls it "the only artifact carrying the permission profile and full `argv`", and [`observability.py`](../../../src/wastech_orchestrator/core/flow/observability.py) describes cross-checking the prompt-audit's effective model against it.
 
 The retention priority is inverted. This run kept 14.2 MB of raw provider stdout — 83% of the whole `.worc/` footprint — and discarded the ~2 KB per attempt that answers "with which flags and under which permission profile was the CLI actually launched". For a product whose central invariant is the permission ceiling, that is the wrong file to drop.
 
@@ -248,7 +258,7 @@ The value **is** recorded, in `prompt-audit/timeline.jsonl`, and recorded well �
 }
 ```
 
-That file is how this review confirmed resolution was correct on every node of both tasks. But `prompt_audit` defaults to **false** ([`config/schema.py`](../../src/wastech_orchestrator/config/schema.py): `prompt_audit: bool = False`; the packaged example ships `prompt_audit: false`). The operator here enabled it by hand. Out of the box, the model that ran a node survives only in the CLI's `init` event inside `stdout.log`, which itself disappears at `logging.artifacts: minimal`.
+That file is how this review confirmed resolution was correct on every node of both tasks. But `prompt_audit` defaults to **false** ([`config/schema.py`](../../../src/wastech_orchestrator/config/schema.py): `prompt_audit: bool = False`; the packaged example ships `prompt_audit: false`). The operator here enabled it by hand. Out of the box, the model that ran a node survives only in the CLI's `init` event inside `stdout.log`, which itself disappears at `logging.artifacts: minimal`.
 
 ### Fix steps
 
@@ -271,7 +281,7 @@ Orchestrator default; schema touch (column add, version bump). Makes per-model c
 | claude   | 24       | 28.8 M       | $38.21        |
 | codex    | 13       | 8.4 M        | —             |
 
-[`providers/claude.py`](../../src/wastech_orchestrator/providers/claude.py) sets `cost=coerce_usage_cost(total_cost_usd)`. [`providers/codex.py`](../../src/wastech_orchestrator/providers/codex.py) sets no cost anywhere. The orchestrator therefore reports $38.21 as the price of a run in which Codex handled 23% of the input tokens — and on `en-adapt-01a` Codex was the single heaviest node (`fidelity_critic`, 6.5 M tokens).
+[`providers/claude.py`](../../../src/wastech_orchestrator/providers/claude.py) sets `cost=coerce_usage_cost(total_cost_usd)`. [`providers/codex.py`](../../../src/wastech_orchestrator/providers/codex.py) sets no cost anywhere. The orchestrator therefore reports $38.21 as the price of a run in which Codex handled 23% of the input tokens — and on `en-adapt-01a` Codex was the single heaviest node (`fidelity_critic`, 6.5 M tokens).
 
 The understatement scales with how much of a flow runs on Codex, which makes the number worse precisely where it matters most.
 
@@ -346,13 +356,13 @@ The second bundle:
 }
 ```
 
-No manifest, no observed changes, no `tree/`. Evidence containing no evidence — and [`runs_retention.py`](../../src/wastech_orchestrator/runs_retention.py) correctly excludes the quarantine root from automatic reclamation, so it is kept forever.
+No manifest, no observed changes, no `tree/`. Evidence containing no evidence — and [`runs_retention.py`](../../../src/wastech_orchestrator/runs_retention.py) correctly excludes the quarantine root from automatic reclamation, so it is kept forever.
 
 Separately, `tasks.exchange_contaminated` is now `0` for both tasks while the quarantine bundles sit on disk. The database no longer points at the incident; the only link left is the directory name.
 
 ### Root cause
 
-[`_terminal_exchange`](../../src/wastech_orchestrator/core/orchestrator.py) enters the quarantine branch on `if contaminated or mutation is not None`. On the second terminal the stored `contaminated` flag was still set from the first, and `mutation` was `None`, so `expected=None` and `observed=()`. [`quarantine_contaminated`](../../src/wastech_orchestrator/core/flow/exchange_seal.py) then creates the directory and writes evidence unconditionally, and only afterwards checks `os.path.lexists(task_dir)` — which is false, because the tree already moved into bundle `000001`. The result is `mkdir` plus a contentless JSON.
+[`_terminal_exchange`](../../../src/wastech_orchestrator/core/orchestrator.py) enters the quarantine branch on `if contaminated or mutation is not None`. On the second terminal the stored `contaminated` flag was still set from the first, and `mutation` was `None`, so `expected=None` and `observed=()`. [`quarantine_contaminated`](../../../src/wastech_orchestrator/core/flow/exchange_seal.py) then creates the directory and writes evidence unconditionally, and only afterwards checks `os.path.lexists(task_dir)` — which is false, because the tree already moved into bundle `000001`. The result is `mkdir` plus a contentless JSON.
 
 ### Fix steps
 
@@ -375,7 +385,7 @@ id 45  en-adapt-01  conflict_resolution  agent  running  started 12:39:11  finis
 id 46  en-adapt-01  conflict_resolution  agent  running  started 12:40:43  finished NULL
 ```
 
-Two runs of `worc merge-task`, both stopped by the containment defect documented in [merge-task-exchange-containment.md](merge-task-exchange-containment.md) — since fixed. Their node rows were never closed. `en-adapt-01` is `done` and permanently holds two open node runs with no `provider_used` and no `finished_at`.
+Two runs of `worc merge-task`, both stopped by the containment defect documented in [merge-task-exchange-containment.md](../merge-task-exchange-containment.md) — since fixed. Their node rows were never closed. `en-adapt-01` is `done` and permanently holds two open node runs with no `provider_used` and no `finished_at`.
 
 ### Root cause
 
@@ -391,7 +401,7 @@ The general shape: any node that raises `NodeManualRequired` **before** its prov
 
 ### Scope and expected impact
 
-Orchestrator default. Belongs with the merge-flow work in [merge-flow-conflict-competence.md](merge-flow-conflict-competence.md) — it is the state-store half of the same seam.
+Orchestrator default. Belongs with the merge-flow work in [merge-flow-conflict-competence.md](../merge-flow-conflict-competence.md) — it is the state-store half of the same seam.
 
 ---
 
@@ -424,7 +434,7 @@ At 11:23:36 the second process rejected a pending file as `duplicate_task_id` an
 
 ### Root cause
 
-The guard for exactly this exists — `settled_own_file`, whose call site in [`cli.py`](../../src/wastech_orchestrator/cli.py) is commented _"re-running it would only reject it as `duplicate_task_id` and quarantine the operator's own file"_ — and it lives on the `watch` path only.
+The guard for exactly this exists — `settled_own_file`, whose call site in [`cli.py`](../../../src/wastech_orchestrator/cli.py) is commented _"re-running it would only reject it as `duplicate_task_id` and quarantine the operator's own file"_ — and it lives on the `watch` path only.
 
 ### Fix steps
 
@@ -445,7 +455,7 @@ The run's diff touched `AGENTS.md` **and** `.rules/wastime-journey-rules.md`. Th
 
 ### Root cause
 
-[`instruction_bundle.py`](../../src/wastech_orchestrator/core/flow/instruction_bundle.py):
+[`instruction_bundle.py`](../../../src/wastech_orchestrator/core/flow/instruction_bundle.py):
 
 ```python
 REPO_INSTRUCTION_NAMES = ("AGENTS.md", "AGENTS.override.md", "CLAUDE.md")
@@ -473,7 +483,7 @@ Orchestrator default. Restores the notice's completeness for repositories with t
 
 ### Root cause
 
-The mechanism to report this exists and is thoughtful: [`_announce_observe_cadence`](../../src/wastech_orchestrator/core/orchestrator.py) prints the configured mode, the mode in force, and the dropped triggers, and its docstring explains precisely why the loss is worth naming. It logs at `info`. The config in force set `logging.level: warning`. Nobody saw it.
+The mechanism to report this exists and is thoughtful: [`_announce_observe_cadence`](../../../src/wastech_orchestrator/core/orchestrator.py) prints the configured mode, the mode in force, and the dropped triggers, and its docstring explains precisely why the loss is worth naming. It logs at `info`. The config in force set `logging.level: warning`. Nobody saw it.
 
 ### Fix steps
 
@@ -494,7 +504,7 @@ Orchestrator default. One level change; makes an existing good mechanism actuall
 
 **The stuck report has no provider evidence.** `failure_report.json` carries `"provider_attempts": []` although more than twenty attempts existed at the time, eight of them on the stuck node, and `"last_check_log": null` because that field reads `check_runs` and tool nodes do not write there. The report cannot answer "which provider call produced the repeated finding", which is the first question anyone asks it.
 
-**`artifacts.path` mixes conventions.** 160 of 162 rows are absolute (`/Users/<user>/…`); the two `summary_md` rows are repo-relative (`tasks/done/en-adapt-01.summary.md`). One column, two conventions, and the absolute form embeds a home directory — which makes `state.db` non-portable and sits badly with the stored-path rule in [coding-style.md](../../.agents/rules/coding-style.md).
+**`artifacts.path` mixes conventions.** 160 of 162 rows are absolute (`/Users/<user>/…`); the two `summary_md` rows are repo-relative (`tasks/done/en-adapt-01.summary.md`). One column, two conventions, and the absolute form embeds a home directory — which makes `state.db` non-portable and sits badly with the stored-path rule in [coding-style.md](../../../.agents/rules/coding-style.md).
 
 **Ledger attempt numbers have gaps.** `completed.jsonl` for `en-adapt-01a` records attempts 1, 1, 1, 2, 5, 6, 7 — 3 and 4 never appear, and the first entry is duplicated. Whether this is P0.1's concurrency or a write path of its own, the ledger is currently not a complete record of attempts, and `list` / `status` are built on it. Determine which, then either fix it or document the ledger as "terminal transitions observed", not "every attempt".
 
