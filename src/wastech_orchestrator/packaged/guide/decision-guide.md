@@ -8,6 +8,7 @@ You usually do not choose this — the operator does — but it affects where yo
 
 - **`run <task-file>`** processes exactly one task file, end to end. The argument is a **path** to the file (e.g. `tasks/pending/my-task.md`), not a task id.
 - **`watch`** polls the `tasks/pending/` folder and processes tasks promoted there, looping with periodic git sync.
+- A third shape is not a command: an agent running the copy-ready **`worc-night-run`** skill (`.worc/guide/skills/worc-night-run/SKILL.md`) drives the queue one task at a time with `run`, and clears the blockers a `watch` loop would simply stop at. That is the unattended-overnight option; `watch` is the unattended option for a night where nothing goes wrong.
 
 A live task belongs in the repo's own `tasks/pending/` directory — and if the lifecycle tree is tracked in git (an install answer; gitignored by default), committing and pushing it there is how a teammate hands work to a watching orchestrator. Compose the file in the `tasks/preparing/` staging folder first (the watcher never scans it), then `worc promote <id>` moves it into `tasks/pending/` once it is complete, so a half-written draft is never picked up mid-edit.
 

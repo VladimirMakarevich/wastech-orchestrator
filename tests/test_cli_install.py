@@ -321,10 +321,11 @@ def test_install_writes_config_and_guide_into_worc(
     assert cli.main(_ni(git_repo.clone, "--provider", "codex", "--skip-preflight")) == 0
     worc = git_repo.clone / ".worc"
     # The generated config and the installed guide bundle land under .worc/. The guide includes the
-    # task docs, the copy-ready task/config skills (`worc-task` / `worc-deco-task` / `worc-config`)
-    # and the flow-authoring skills (`worc-flow` / `worc-flow-role` / `worc-flow-tune`) gathered
-    # under a single `guide/skills/` folder, and the config helper subtree. (The built-in flows and
-    # their per-node prompt templates also land there — see the dedicated test below.)
+    # task docs, the copy-ready task/config skills (`worc-task` / `worc-deco-task` / `worc-config`),
+    # the flow-authoring skills (`worc-flow` / `worc-flow-role` / `worc-flow-tune`) and the
+    # unattended-run skill (`worc-night-run`) gathered under a single `guide/skills/` folder, and
+    # the config helper subtree. (The built-in flows and their per-node prompt templates also land
+    # there — see the dedicated test below.)
     assert (worc / "guide" / "README.md").is_file()
     assert (worc / "guide" / "tasks" / "task-minimal.md").is_file()
     assert (worc / "guide" / "tasks" / "task-rich.md").is_file()
@@ -335,6 +336,7 @@ def test_install_writes_config_and_guide_into_worc(
     assert (worc / "guide" / "skills" / "worc-flow" / "SKILL.md").is_file()
     assert (worc / "guide" / "skills" / "worc-flow-role" / "SKILL.md").is_file()
     assert (worc / "guide" / "skills" / "worc-flow-tune" / "SKILL.md").is_file()
+    assert (worc / "guide" / "skills" / "worc-night-run" / "SKILL.md").is_file()
     assert (worc / "config.yaml").is_file()
 
 
