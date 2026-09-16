@@ -7,8 +7,9 @@ from pathlib import Path
 import pytest
 
 from wastech_orchestrator import cli, process_control
+from wastech_orchestrator.core.orchestrator import Orchestrator
 from wastech_orchestrator.core.state_machine import Status
-from wastech_orchestrator.git_manager import GitManager
+from wastech_orchestrator.git_manager import GitManager, ManualActionRequired
 from wastech_orchestrator.state_store import PublishOpRow, StateStore, TaskRow
 
 _ENV = ["PATH", "HOME", "USERPROFILE", "SYSTEMROOT", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA"]
@@ -203,3 +204,27 @@ def test_merge_task_still_refuses_a_real_merge_while_the_daemon_runs(
 
     assert code == 1
     assert "watch daemon is running" in capsys.readouterr().out
+
+
+def test_merge_task_reports_a_manual_action_without_a_traceback(
+    project, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A merge that stops for a human (a staging gate, a merge-flow node needing action, a
+    # conflicted path carrying no decision) must read as an operator message with exit 2 — the
+    # class escaped this command uncaught before, so the operator got a Python traceback.
+    proj, clone = project
+    config = _write_config(proj, clone)
+    _seed_open_pr(clone)
+    monkeypatch.setattr(GitManager, "verify_pr_state", lambda self, url: "OPEN")
+
+    def refuse(self, task_id: str, **kwargs: object) -> None:
+        raise ManualActionRequired("2 of 3 conflicted path(s) carry no decision")
+
+    monkeypatch.setattr(Orchestrator, "merge_task", refuse)
+
+    code = cli.main(["--config", str(config), "merge-task", "task-1", "-y"])
+
+    assert code == 2
+    out = capsys.readouterr().out
+    assert "merge-task: manual action required" in out
+    assert "carry no decision" in out

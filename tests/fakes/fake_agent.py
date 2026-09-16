@@ -373,14 +373,68 @@ def _resolve_conflicts_in_tree(root: Path) -> None:
                 path.write_text(_keep_ours(text), encoding="utf-8")
 
 
+def _report_path_from_prompt(prompt: str) -> Path | None:
+    """The conflict inventory path the orchestrator put in the prompt's context footer, if any."""
+    for line in prompt.splitlines():
+        if line.strip().startswith("- conflicts: "):
+            return Path(line.split(": ", 1)[1].strip())
+    return None
+
+
+def _paths_in_report(report: Path) -> list[str]:
+    """The conflicted repo-relative paths named by the report's ``## <path> — …`` headings."""
+    try:
+        text = report.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    return [
+        line[3:].split(" — ", 1)[0].strip()
+        for line in text.splitlines()
+        if line.startswith("## ") and " — " in line
+    ]
+
+
+def _resolve_reported_conflicts(root: Path, prompt: str, *, delete_unmarked: bool) -> None:
+    """Resolve every path the conflict report names — the way a competent merge agent would.
+
+    Marker files are merged down to one side; a marker-less conflict (a file one side deleted, a
+    binary both sides added) is decided explicitly, by rewriting it or by deleting it, because
+    leaving it exactly as the merge left it records no decision.
+    """
+    report = _report_path_from_prompt(prompt)
+    if report is None:
+        return
+    for rel in _paths_in_report(report):
+        path = root / rel
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            with contextlib.suppress(OSError):
+                path.unlink()  # a binary conflict: decide it by dropping the file
+            continue
+        if "<<<<<<<" in text:
+            with contextlib.suppress(OSError):
+                path.write_text(_keep_ours(text), encoding="utf-8")
+        elif delete_unmarked:
+            with contextlib.suppress(OSError):
+                path.unlink()
+        else:
+            with contextlib.suppress(OSError):
+                path.write_text(text + "resolved by the merge agent\n", encoding="utf-8")
+
+
 def main() -> int:
     cli_name = sys.argv[1] if len(sys.argv) > 1 else "codex"
     scenario = sys.argv[2] if len(sys.argv) > 2 else "success"
     cli_args = sys.argv[3:]
 
-    # Drain stdin (the prompt) so the parent's write never raises a broken pipe.
+    # Drain stdin (the prompt) so the parent's write never raises a broken pipe. Kept rather than
+    # discarded: the merge scenarios read the conflict report path out of its context footer.
+    prompt = ""
     with contextlib.suppress(OSError):
-        sys.stdin.read()
+        prompt = sys.stdin.read()
 
     # The Codex adapter runs a no-model ``codex sandbox -P`` canary BEFORE ``exec``. Model
     # it scenario-independently (exchange readable, private/writes denied) so the canary passes and
@@ -408,6 +462,31 @@ def main() -> int:
     # by the merge-flow (worc merge-task) integration test.
     if scenario == "resolve_conflicts":
         _resolve_conflicts_in_tree(Path.cwd())
+        scenario = "success"
+
+    # ``resolve_conflicts_all`` / ``resolve_conflicts_by_deleting`` work from the conflict report
+    # instead of from markers, so they also decide the marker-less conflicts (modify/delete, binary)
+    # that ``resolve_conflicts`` leaves exactly as the merge left them.
+    if scenario in ("resolve_conflicts_all", "resolve_conflicts_by_deleting"):
+        _resolve_reported_conflicts(
+            Path.cwd(), prompt, delete_unmarked=scenario == "resolve_conflicts_by_deleting"
+        )
+        scenario = "success"
+
+    # ``mangle_conflicts`` edits every conflicted file without resolving it: the bytes move (so the
+    # decision gate is satisfied) while the markers stay (so the commit seam's own guard must fire).
+    if scenario == "mangle_conflicts":
+        for path in Path.cwd().rglob("*"):
+            rel = path.relative_to(Path.cwd())
+            if any(part.startswith(".") for part in rel.parts) or not path.is_file():
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            if "<<<<<<<" in text:
+                with contextlib.suppress(OSError):
+                    path.write_text(text + "touched but not resolved\n", encoding="utf-8")
         scenario = "success"
 
     # Transient infra scenarios — identical failure surface for both dialects, so handled here:

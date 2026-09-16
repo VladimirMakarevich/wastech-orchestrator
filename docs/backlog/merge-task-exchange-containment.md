@@ -1,6 +1,6 @@
 # `worc merge-task` never reaches the merge flow: `task_path` breaches exchange containment
 
-Status: **defect, reproduced** Date: 2026-09-16 Owner: Vladimir Makarevich
+Status: **fixed** Date: 2026-09-16 Owner: Vladimir Makarevich
 
 ## Problem
 
@@ -36,9 +36,9 @@ Two consequences worth stating plainly, because both cost time to re-derive:
 
 ## Why it was not caught
 
-No test drives `_run_merge_flow`. Searching `tests/` for it returns only `tests/install/test_config_writer.py`, which asserts the `git.merge_flow` config key exists — not that the flow runs. Containment has coverage (`tests/core/test_flow_threat_model.py` among others), but nothing composes the two, so the one call path where a node input is deliberately left unpublished is the one path never exercised.
+This document's first answer — "no test drives `_run_merge_flow`" — was wrong, and the real answer is more useful. `tests/core/test_merge_task.py` has driven the whole routine against a real conflicting merge, a real exchange root and fake provider CLIs since the feature landed, and it passed throughout. It passed because its fixture seeded a `TaskRow` with **no `source_path`**, so `_degraded_pipeline` set `task_file` to `""` — and containment skips falsy values (`if value`), which made the one field under test invisible. A test can exercise the exact call path and still prove nothing if its fixture is cheaper than reality; the fixture now carries `tasks/done/m1.md`, which is what makes that test a regression test.
 
-## Proposed minimal fix
+## How it was fixed
 
 One line in `_run_merge_flow`, immediately after `build_node_inputs`, making the function's stated intent true of its inputs:
 
@@ -49,14 +49,14 @@ One line in `_run_merge_flow`, immediately after `build_node_inputs`, making the
 inputs.task_path = None
 ```
 
-`{task_path}` then renders empty in merge role prompts, which is the honest result — there is no task packet to point at.
+`{task_path}` renders empty in merge role prompts, which is the honest result — there is no task packet to point at. Two things landed beside it:
 
-A regression test belongs with it: drive `_run_merge_flow` far enough to build the request and assert `assert_orchestration_paths_contained` passes. The cheap version needs no provider — building `NodeInputs` for the merge flow and asserting `task_path is None` pins the invariant that made this possible.
+- `merge_task` converts a `NodeManualRequired` raised inside the merge flow into `ManualActionRequired`, and `cmd_merge_task` prints it with exit 2. The node-layer class is not `git_manager.ManualActionRequired`, so it escaped the CLI uncaught and reached the operator as a Python traceback.
+- The merge flow now receives a conflict inventory as `{conflicts_path}`, and the orchestrator refuses to commit a conflicted path the flow left byte-identical to what the merge put there. Both are the neighbouring defect this one hid: a conflict with no markers was being committed silently. See [merge-flow-conflict-competence.md](merge-flow-conflict-competence.md) for what is still open.
 
-## Open questions
+## What stayed open
 
-- **Should the merge flow publish a task packet instead?** The comment in `_run_merge_flow` already anticipates this — "A future merge agent needing richer repository conventions would wire them here" — and a merge agent that knew the task's acceptance criteria could resolve a conflict better than one working from markers alone. That is a larger change than the fix above and should not block it: clear the field now, decide about the packet separately.
-- **Should containment fail loudly at wiring time rather than at launch?** The breach is decidable when `NodeInputs` is built, not only when the request is assembled. Asserting earlier would have turned this into a startup error in any flow that forgets to publish an input, instead of a runtime failure on the one path nobody tested.
+Both questions this document raised — whether the merge flow should publish a task packet, and whether containment should fail at wiring time rather than at launch — moved to [merge-flow-conflict-competence.md](merge-flow-conflict-competence.md) with the rest of the merge-flow work.
 
 ## Scope / risk
 
@@ -64,4 +64,4 @@ Core only; no schema, config or flow-file change, and no migration. The risk of 
 
 ## Note for anyone writing merge role prompts
 
-Because the merge flow publishes no task packet **by design**, its roles cannot rely on `{task_path}` even after the containment bug is fixed. Write them against the conflicted working tree, which carries both sides of every hunk. Wrap `{diff_path}` and `{checks_path}` in `{?name}…{/name}` blocks: both can legitimately be empty when `conflict_resolution` starts, since no workspace-write edit and no checks run have happened yet in that flow.
+Because the merge flow publishes no task packet **by design**, its roles cannot rely on `{task_path}`. Write them against the conflicted working tree and against `{conflicts_path}`, the inventory the orchestrator publishes for exactly this purpose. Wrap `{diff_path}` and `{checks_path}` in `{?name}…{/name}` blocks: both can legitimately be empty when `conflict_resolution` starts, since no workspace-write edit and no checks run have happened yet in that flow.

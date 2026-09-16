@@ -208,6 +208,10 @@ class AgentRunRequest:
     check_artifacts_path: str | None = None
     review_artifacts_path: str | None = None
     human_input_path: str | None = None
+    # The merge flow's conflict inventory: every conflicted path, its kind, and what the working
+    # tree holds for it. Its own field rather than a reused one, because a node resolving a merge
+    # is told what conflicted, not what the task was.
+    conflicts_path: str | None = None
     # On a rework re-entry, the previous author (e.g. ``fixing``) node's report — its own
     # account of what it did or why it could not address the last findings. Set by the evaluator
     # runner from the exchange (``None`` on the first pass / for non-evaluator requests), so the
@@ -304,6 +308,7 @@ def build_context_footer(request: AgentRunRequest) -> str:
         ("diff", request.diff_path),
         ("checks", request.check_artifacts_path),
         ("review", request.review_artifacts_path),
+        ("conflicts", request.conflicts_path),
         ("prior_fix", request.rework_report_path),
         ("human_input", request.human_input_path),
         ("packet", request.supervisor_packet_path),

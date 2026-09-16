@@ -417,8 +417,8 @@ telegram:                           # human-in-the-loop + notifications (optiona
 # (each flow owns its prompts under `.worc/flows/<task_type>/*.md`). Edit the role file to
 # customize a node's prompt. Role files render only allowlisted path/metadata variables ({task_id}
 # {stage} {repo_path} {task_path} {plan_path} {diff_path} {checks_path} {review_path}
-# {memory_path} {subtask_order} {subtask_count} {subtask_spec_path}) — never task bodies, diffs,
-# env, or secrets.
+# {memory_path} {subtask_order} {subtask_count} {subtask_spec_path} {predecessor_context}
+# {conflicts_path} {report_dir}) — never task bodies, diffs, env, or secrets.
 
 supervisor:                         # oversight layer above any flow (not a node) — on by default
   enabled: true                     # false = the layer is never built: no per-step notes, no whole-task

@@ -805,6 +805,7 @@ class AgentNodeRunner:
             diff_path=self._in.diff_path,
             check_artifacts_path=self._in.checks_path,
             review_artifacts_path=self._in.review_path,
+            conflicts_path=self._in.conflicts_path,
             human_input_path=human_input_path,
             output_schema=output_schema,
             model=node.model,

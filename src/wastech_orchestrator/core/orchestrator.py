@@ -160,6 +160,8 @@ from wastech_orchestrator.core.supervisor_packet import build_packet_facts
 from wastech_orchestrator.core.supervisor_usage import summarize_spend
 from wastech_orchestrator.git_manager import (
     CleanupOutcome,
+    ConflictedPath,
+    ConflictEvidence,
     GitCommandError,
     GitManager,
     ManualActionRequired,
@@ -484,6 +486,155 @@ def _ledger_has_manual(ledger: Ledger, task_id: str) -> bool:
 def _ledger_attempt_count(ledger: Ledger, task_id: str) -> int:
     """How many terminal records the ledger already holds for ``task_id`` (prior attempts)."""
     return sum(1 for rec in ledger.records() if rec.get("id") == task_id)
+
+
+#: Cap on the conflicted paths named in one refusal (the reason string stays bounded and
+#: secret-free, like the drift evidence cap the Git Manager renders its own refusals under).
+_UNDECIDED_EVIDENCE_CAP = 20
+
+
+def _conflict_worktree_state(entry: ConflictedPath) -> str:
+    """One clause describing what the working tree holds for a conflicted path right now."""
+    if not entry.exists:
+        return "nothing is there (no readable file at this path)"
+    if entry.binary:
+        return "a binary file — a conflict in one carries no markers and cannot be merged textually"
+    if entry.has_markers:
+        return "a text file carrying conflict markers (`<<<<<<<`)"
+    return "a text file with **no conflict markers** — one side's content, verbatim"
+
+
+def _conflict_decision_advice(entry: ConflictedPath) -> str:
+    """What would count as a resolution of this conflicted path, in the agent's own terms."""
+    if entry.evidence is ConflictEvidence.OUT_OF_BAND:
+        return (
+            "this one cannot be resolved by editing a file here — name it in your final message "
+            "and leave it alone"
+        )
+    if entry.evidence is ConflictEvidence.NOTHING_TO_DECIDE:
+        return "both sides removed it; there is nothing to decide and nothing to do"
+    if entry.has_markers:
+        return "remove every conflict marker and leave the single merged version you chose"
+    return (
+        "there are no markers here: the file you see is the side Git picked for you, not a "
+        "resolution. Write the content you choose, or delete the file — a path left exactly as it "
+        "is records no decision and the merge will be refused"
+    )
+
+
+def _format_conflict_report(task_id: str, conflicts: Sequence[ConflictedPath]) -> str:
+    """The merge flow's conflict inventory, as the document the agent reads (``{conflicts_path}``).
+
+    Pure and deterministic: every clause is interpolated from a :class:`ConflictedPath`, so the
+    core renders Git's verdict without re-deriving it and without comparing anything to a Git
+    literal — :class:`ConflictEvidence` is the only field it branches on.
+    """
+    lines = [
+        f"# Merge conflicts — {task_id}",
+        "",
+        (
+            "The base branch was merged into this task's branch and stopped on the conflicts "
+            "below. Resolve every one of them by editing the working tree. Not every conflict has "
+            "markers: read each entry's own line about what is there and what would count as a "
+            "decision. The orchestrator commits what the working tree holds, and refuses to commit "
+            "a conflicted path it cannot see a decision on."
+        ),
+        "",
+    ]
+    for entry in conflicts:
+        lines += [
+            f"## {entry.path} — {entry.description} (`{entry.code}`)",
+            "",
+            "- sides: merge base {base} · our side {ours} · incoming side {theirs}".format(
+                base="has it" if entry.has_base else "does not have it",
+                ours="has it" if entry.has_ours else "does not have it",
+                theirs="has it" if entry.has_theirs else "does not have it",
+            ),
+            f"- working tree: {_conflict_worktree_state(entry)}",
+            f"- to decide: {_conflict_decision_advice(entry)}",
+            "",
+        ]
+    blocked = [entry.path for entry in conflicts if entry.evidence is ConflictEvidence.OUT_OF_BAND]
+    if blocked:
+        lines += [
+            "## These you cannot resolve here",
+            "",
+            (
+                "A submodule pointer (and anything the tree does not hold as a regular file) is "
+                "decided by a commit id, not by file content, so no edit in this working tree can "
+                "express it. Leave these alone and name them in your final message:"
+            ),
+            "",
+            *[f"- {path}" for path in blocked],
+            "",
+        ]
+    return "\n".join(lines)
+
+
+def _undecided_conflicts(
+    before: Sequence[ConflictedPath], after: Sequence[ConflictedPath]
+) -> list[tuple[ConflictedPath, str]]:
+    """Every conflicted path the merge flow left without an observable decision, and why.
+
+    Pure — no Git, no IO: the two snapshots come from
+    :meth:`~wastech_orchestrator.git_manager.GitManager.conflicted_paths` either side of the flow,
+    so this compares nothing but the working tree. It never reads ``code``/``description`` (those
+    are rendered into the refusal, never branched on), which keeps Git's index vocabulary out of
+    the core.
+
+    The honest limitation, stated where it is implemented: for a conflict with no markers — a file
+    one side deleted, a binary both sides added — Git drops one side into the working tree, so "I
+    read both sides and chose to keep ours, unchanged" leaves exactly the tree that "nobody looked
+    at it" leaves. Both are reported here. A refused correct resolution costs one manual merge with
+    the pull request still open and nothing committed; an accepted undecided one ships a merge
+    nobody made into a reviewed branch. That ordering is the whole point.
+    """
+    current_by_path = {entry.path: entry for entry in after}
+    undecided: list[tuple[ConflictedPath, str]] = []
+    for entry in before:
+        current = current_by_path.get(entry.path)
+        if current is None:
+            continue  # the entry left the index — something resolved it in Git itself
+        if entry.evidence is ConflictEvidence.NOTHING_TO_DECIDE:
+            continue  # both sides removed it: the absence already there is the only outcome
+        if entry.evidence is ConflictEvidence.OUT_OF_BAND:
+            undecided.append((entry, "cannot be resolved by editing a file in this working tree"))
+            continue
+        if entry.exists != current.exists:
+            continue  # the file was deleted or restored — a decision either way
+        if entry.digest is None or current.digest is None:
+            undecided.append((entry, "the working tree holds nothing readable at this path"))
+            continue
+        if entry.digest == current.digest:
+            undecided.append((entry, "byte-identical to what the merge left there"))
+    return undecided
+
+
+def _undecided_conflicts_reason(
+    undecided: Sequence[tuple[ConflictedPath, str]], *, total: int, base_branch: str
+) -> str:
+    """The operator-facing refusal for a merge nobody finished deciding (bounded, secret-free)."""
+    shown = undecided[:_UNDECIDED_EVIDENCE_CAP]
+    lines = [
+        (
+            f"refusing to commit the base merge: {len(undecided)} of {total} conflicted path(s) "
+            "carry no decision."
+        )
+    ]
+    lines += [f"  - {entry.path} [{entry.code}] {entry.description}: {why}" for entry, why in shown]
+    if len(undecided) > len(shown):
+        lines.append(f"  - (+{len(undecided) - len(shown)} more)")
+    lines += [
+        "Nothing was committed; the merge was aborted and the pull request is still open.",
+        (
+            'A conflict whose correct answer really is "keep our side, unchanged" leaves the same '
+            "working tree as one nobody looked at, and this refuses both. Finish those paths by "
+            f"hand (`git merge origin/{base_branch}`, resolve, `git commit`) and re-run "
+            "`worc merge-task` — it then takes the clean path — or adjust the merge flow's role "
+            "prompt and re-run."
+        ),
+    ]
+    return "\n".join(lines)
 
 
 def _format_predecessor_floor(
@@ -1903,9 +2054,48 @@ class Orchestrator:
                         f"base merge conflicts and --no-resolve was set; PR left open: {pr_url}"
                     )
                 p = self._degraded_pipeline(row)  # minimal pipeline from the stored row
-                if not self._run_merge_flow(p, self._resolve_merge_flow()):
+                # The inventory is taken once, before the flow: it is both what the agent is told
+                # (the published report) and the "before" half the decision gate compares against.
+                before = self._git.conflicted_paths()
+                try:
+                    resolved = self._run_merge_flow(
+                        p,
+                        self._resolve_merge_flow(),
+                        conflicts_path=self._publish_conflict_report(p, before),
+                    )
+                except NodeManualRequired as exc:
+                    # A merge-flow node that needs a human (exchange integrity, a denied dangerous
+                    # diff) raises the node-layer class, which the task driver maps to a status and
+                    # this routine did not catch at all — it escaped the CLI as a traceback.
+                    # Converted once, here, to the class this routine already uses for a
+                    # human-needed block, so the abort below still runs and the class survives.
+                    raise ManualActionRequired(f"merge flow stopped: {exc}") from exc
+                if not resolved:
                     raise PipelineFailed(
                         f"the merge flow produced no clean, passing tree; PR left open: {pr_url}"
+                    )
+                # Every conflicted path must show a decision before anything is staged. Run here,
+                # not at the commit seam: the "before" half belongs to this routine, and
+                # `commit_merge_resolution` records a started publish op the moment it is entered —
+                # a refusal after that would leave a started-never-finished row for a merge that
+                # was then aborted.
+                after = self._git.conflicted_paths()
+                staged_away = {e.path for e in before} - {e.path for e in after}
+                if staged_away:
+                    # The merge role forbids git mutations; one happened. The resolution is taken
+                    # (its content is in the tree either way), the fact is not swallowed.
+                    log.warning(
+                        "[MERGE-TASK] a conflicted path left the index during the merge flow",
+                        extra={"paths": ", ".join(sorted(staged_away))},
+                    )
+                undecided = _undecided_conflicts(before, after)
+                if undecided:
+                    raise ManualActionRequired(
+                        _undecided_conflicts_reason(
+                            undecided,
+                            total=len(before),
+                            base_branch=self._config.repo.base_branch,
+                        )
                     )
             else:
                 log.info("[MERGE-TASK] clean base merge", extra={"branch": branch})
@@ -2759,9 +2949,14 @@ class Orchestrator:
                 f"merge flow {self._config.git.merge_flow!r} could not be resolved: {exc}"
             ) from exc
 
-    def _run_merge_flow(self, p: _Pipeline, snapshot: FlowSnapshot) -> bool:
+    def _run_merge_flow(
+        self, p: _Pipeline, snapshot: FlowSnapshot, *, conflicts_path: str | None = None
+    ) -> bool:
         """Run the merge flow on the already-merged, conflict-marked working tree; True iff it ends
         clean and green.
+
+        ``conflicts_path`` is the published conflict inventory this flow's roles read; the caller
+        holds it because it takes the same snapshot for its own decision gate.
 
         Transactional + ephemeral: a fresh ``FlowRunState`` and a no-op recorder (no checkpoint
         written to the task row, so no clash with ``rerun --continue``), no supervisor, no post-node
@@ -2781,6 +2976,14 @@ class Orchestrator:
             commit_message=f"merge({p.task.id}): resolve base-merge conflicts",
             summary_body_path=self._fallback_summary_path(p),
         )
+        # Nothing re-points ``task_path`` on this route (no packet is published, see above), so the
+        # builder's live ``tasks/<state>/<id>.md`` would be the one non-exchange path in every
+        # request this flow makes — the containment breach that killed the run before the first
+        # provider call. The merge agent's context is the conflicted working tree, not the task.
+        inputs.task_path = None
+        # What this flow is told instead: which paths conflicted, of what kind, and what the
+        # working tree holds for each (the redacted exchange copy of the inventory).
+        inputs.conflicts_path = conflicts_path
         services = self._build_engine_services(p, finalize=None)
         run_state = FlowRunState(flow_fingerprint=snapshot.flow_fingerprint)
         result = drive_flow(
@@ -2795,6 +2998,37 @@ class Orchestrator:
             is_cancelled=self._is_cancelled,
         )
         return result.status is Status.DONE
+
+    def _publish_conflict_report(
+        self, p: _Pipeline, conflicts: Sequence[ConflictedPath]
+    ) -> str | None:
+        """Write the merge flow's conflict inventory and return its exchange path (or ``None``).
+
+        Published **before** the flow runs, so it sits inside every agent attempt's
+        exchange-integrity bracket rather than mutating the exchange under one. The private copy
+        under ``logs/<task-id>/merge/`` is the audit record; the redacted exchange copy is what the
+        role prompts read as ``{conflicts_path}``. ``None`` when nothing conflicted — the clean
+        merge path writes no report at all; with no exchange wired (a unit harness) the private
+        path is returned, exactly as every other publication seam degrades.
+        """
+        if not conflicts:
+            return None
+        content = redact_text(
+            _format_conflict_report(p.task.id, conflicts),
+            extra_secrets=self._memory_extra_secrets(),
+        )
+        path = task_artifact_dir(self._artifacts_root, p.task.id) / "merge" / "conflicts.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        self._register_artifact(p.task.id, "merge_conflicts", str(path))
+        return publish_artifact(
+            str(self._exchange_root),
+            p.task.id,
+            "merge/conflicts.md",
+            content,
+            extra_secrets=self._memory_extra_secrets(),
+            private_path=path.as_posix(),
+        )
 
     def _announce_environment_patterns(self, p: _Pipeline) -> None:
         """Announce what each ``allowed_environment`` prefix pattern resolved to — once, up front.

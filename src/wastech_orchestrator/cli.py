@@ -2592,6 +2592,12 @@ def cmd_merge_task(args: argparse.Namespace) -> int:
     except (PipelineFailed, GitCommandError) as exc:
         print(f"merge-task: {exc}")
         return 1
+    except ManualActionRequired as exc:
+        # A merge that stopped for a human (a staging gate, a merge-flow node, a conflicted path
+        # carrying no decision) keeps its own class: exit 2, not the 1 an ordinary failure gets.
+        # `main`'s handler would also print it, but without the prefix every other line here has.
+        print(f"merge-task: manual action required — {exc}")
+        return 2
     suffix = f" → {result.pr_url}" if result.pr_url else ""
     print(f"{result.task_id}: {result.final_status.value}{suffix} (merged)")
     return _EXIT_BY_STATUS.get(result.final_status, 1)

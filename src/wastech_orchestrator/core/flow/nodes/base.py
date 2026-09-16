@@ -458,6 +458,11 @@ class NodeInputs:
     #: region or for a subtask with no predecessors. Injected as ``{predecessor_context}`` into the
     #: region's ``implementation`` node only when its template references it (node-driven opt-in).
     predecessor_context_path: str | None = None
+    #: the merge flow's conflict inventory — one redacted exchange document listing every
+    #: conflicted path, its kind, and what the working tree holds for it. Set by the orchestrator
+    #: when it hands a conflicted tree to the merge flow; ``None`` in every ordinary task run.
+    #: Injected as ``{conflicts_path}``.
+    conflicts_path: str | None = None
     #: the normalized ``checks.command_sets`` (diff-selected at run time by the checks node). An
     #: empty tuple means *no gate* — the checks node passes vacuously.
     check_sets: tuple[ResolvedCheckSet, ...] = ()

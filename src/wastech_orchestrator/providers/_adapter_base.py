@@ -760,6 +760,8 @@ class BaseCliProvider:
             "check_artifacts_path": request.check_artifacts_path,
             "review_artifacts_path": request.review_artifacts_path,
             "human_input_path": request.human_input_path,
+            "conflicts_path": request.conflicts_path,
+            "rework_report_path": request.rework_report_path,
             "supervisor_packet_path": request.supervisor_packet_path,
         }
         representation: dict[str, Any] = {

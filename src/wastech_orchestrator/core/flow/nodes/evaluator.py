@@ -458,6 +458,7 @@ class EvaluatorNodeRunner:
             diff_path=self._in.diff_path,
             check_artifacts_path=self._in.checks_path,
             review_artifacts_path=self._in.review_path,
+            conflicts_path=self._in.conflicts_path,
             # On a rework re-entry, hand the reviewer the previous author node's report so it
             # judges "was the finding addressed" with the implementer's account (including a stated
             # blocker) in hand, not the diff alone. ``None`` on the first pass (no prior report).

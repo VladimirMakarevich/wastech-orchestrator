@@ -18,11 +18,13 @@ from wastech_orchestrator.config.schema import MergeStrategy
 from wastech_orchestrator.core.orchestrator import PipelineFailed
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import (
+    KIND_MERGE_COMMIT,
     KIND_PR,
     KIND_PR_MERGE,
     GitResult,
     ManualActionRequired,
 )
+from wastech_orchestrator.providers.artifacts import task_artifact_dir
 from wastech_orchestrator.runtime_layout import RuntimeLayout
 from wastech_orchestrator.state_store import PublishOpRow, StateStore, TaskRow
 
@@ -100,7 +102,18 @@ git:
 
 
 def _seed_task(store: StateStore, status: Status = Status.DONE) -> None:
-    store.insert_task(TaskRow(task_id="m1", title="merge me", status=status, branch=_BRANCH))
+    # `source_path` is deliberately realistic: a finished task's row carries its lifecycle path,
+    # and an empty one hid the exchange-containment breach in `_run_merge_flow` from every test
+    # here (the containment walk skips falsy values, so `""` was never checked).
+    store.insert_task(
+        TaskRow(
+            task_id="m1",
+            title="merge me",
+            status=status,
+            branch=_BRANCH,
+            source_path="tasks/done/m1.md",
+        )
+    )
     store.record_publish_op(
         PublishOpRow(
             task_id="m1", kind=KIND_PR, fingerprint=_BRANCH, status="completed", result_ref=_URL
@@ -108,22 +121,37 @@ def _seed_task(store: StateStore, status: Status = Status.DONE) -> None:
     )
 
 
-def _setup_branch(git_run: GitRunner, clone: Path, *, conflict: bool) -> None:
+def _setup_branch(
+    git_run: GitRunner, clone: Path, *, conflict: bool, marker_less: bool = False
+) -> None:
     """Create ``worc/m1`` with a committed change + push it, then advance origin/main.
 
     ``conflict``: base and branch edit the same file (README.md) → a conflicting base-merge.
-    Otherwise they edit different files → a clean base-merge.
+    Otherwise they edit different files → a clean base-merge. ``marker_less`` adds a second,
+    modify/delete conflict on ``shared.txt`` (the branch edits it, the base deletes it) — the shape
+    Git resolves by leaving OUR file in the tree with no marker in it, so nothing in the file says
+    whether anyone decided anything.
     """
+    if marker_less:
+        (clone / "shared.txt").write_text("base\n", encoding="utf-8")
+        git_run(["add", "shared.txt"], clone)
+        git_run(["commit", "-m", "seed shared"], clone)
+        git_run(["push", "origin", "main"], clone)
     git_run(["checkout", "-b", _BRANCH, "main"], clone)
     target = "README.md" if conflict else "feature.txt"
     (clone / target).write_text("branch side\n", encoding="utf-8")
     git_run(["add", target], clone)
+    if marker_less:
+        (clone / "shared.txt").write_text("task edit\n", encoding="utf-8")
+        git_run(["add", "shared.txt"], clone)
     git_run(["commit", "-m", "task change"], clone)
     git_run(["push", "-u", "origin", _BRANCH], clone)
     git_run(["checkout", "main"], clone)
     base_target = "README.md" if conflict else "BASE.md"
     (clone / base_target).write_text("base side\n", encoding="utf-8")
     git_run(["add", base_target], clone)
+    if marker_less:
+        git_run(["rm", "shared.txt"], clone)
     git_run(["commit", "-m", "base change"], clone)
     git_run(["push", "origin", "main"], clone)
 
@@ -199,12 +227,16 @@ def test_conflict_unresolved_aborts_and_keeps_pr_open(
     git_repo, fake_cli, git_run, tmp_path: Path
 ) -> None:
     gh = FakeGh("OPEN")
-    # ``success`` edits nothing, so the conflict markers survive the flow.
+    # ``success`` edits nothing, so the conflicted file is byte-identical to what the merge left.
+    # The decision gate now names that before the commit seam's marker guard would (it runs
+    # earlier, and refuses "nobody decided" rather than "a marker survived"), so the class is the
+    # human-needed one; the marker guard's own coverage is
+    # `test_the_marker_guard_still_fires_when_the_gate_passes` below.
     orch = _build(git_repo, fake_cli, tmp_path, scenario="success", gh=gh)
     _seed_task(orch._store)
     _setup_branch(git_run, git_repo.clone, conflict=True)
 
-    with pytest.raises(PipelineFailed):
+    with pytest.raises(ManualActionRequired):
         orch.merge_task("m1", strategy=MergeStrategy.SQUASH, wait_for_checks=False)
 
     assert gh.merge_called is False  # never reached the merge
@@ -335,3 +367,111 @@ def test_a_staging_gate_refusal_still_aborts_the_merge(
 
     assert orch._git.merge_in_progress() is False  # restored, not wedged mid-merge
     assert gh.merge_called is False
+
+
+def test_the_conflict_report_reaches_the_agent_and_the_audit_tree(
+    git_repo, fake_cli, git_run, tmp_path: Path
+) -> None:
+    # The agent is told what conflicted instead of being sent to find markers itself: a private
+    # audit copy under logs/, and the redacted exchange copy the role prompt reads.
+    gh = FakeGh("OPEN")
+    orch = _build(git_repo, fake_cli, tmp_path, scenario="resolve_conflicts_all", gh=gh)
+    _seed_task(orch._store)
+    _setup_branch(git_run, git_repo.clone, conflict=True, marker_less=True)
+
+    orch.merge_task("m1", strategy=MergeStrategy.SQUASH, wait_for_checks=False)
+
+    private = task_artifact_dir(orch._artifacts_root, "m1") / "merge" / "conflicts.md"
+    published = git_repo.clone / ".worc-io" / "m1" / "merge" / "conflicts.md"
+    assert private.is_file() and published.is_file()
+    report = private.read_text(encoding="utf-8")
+    assert "## README.md — both sides modified it (`UU`)" in report
+    assert "## shared.txt — we modified it, base deleted it (`UD`)" in report
+    assert "no conflict markers" in report  # the marker-less one is named as such
+
+
+def test_a_marker_less_conflict_nobody_decided_is_refused(
+    git_repo, fake_cli, git_run, tmp_path: Path
+) -> None:
+    # The defect this gate exists for: `git add -A` would have taken the side Git happened to leave
+    # in the tree and committed it, with `git diff --cached --check` seeing nothing to complain
+    # about. `resolve_conflicts` strips markers only, so `shared.txt` is left exactly as-is.
+    gh = FakeGh("OPEN")
+    orch = _build(git_repo, fake_cli, tmp_path, scenario="resolve_conflicts", gh=gh)
+    _seed_task(orch._store)
+    _setup_branch(git_run, git_repo.clone, conflict=True, marker_less=True)
+
+    with pytest.raises(ManualActionRequired) as exc:
+        orch.merge_task("m1", strategy=MergeStrategy.SQUASH, wait_for_checks=False)
+
+    message = str(exc.value)
+    assert "shared.txt" in message and "no decision" in message
+    assert "README.md" not in message  # the marker conflict WAS resolved — only the silent one
+    assert gh.merge_called is False
+    assert orch._git.merge_in_progress() is False  # transactional: the tree is restored
+    assert orch._store.get_task("m1").status is Status.DONE  # never downgraded
+    # The gate runs before the commit seam, so the ledger carries no started-never-finished merge.
+    assert orch._store.get_publish_op("m1", KIND_MERGE_COMMIT, None) is None
+
+
+def test_a_marker_less_conflict_resolved_by_rewriting_is_merged(
+    git_repo, fake_cli, git_run, tmp_path: Path
+) -> None:
+    gh = FakeGh("OPEN")
+    orch = _build(git_repo, fake_cli, tmp_path, scenario="resolve_conflicts_all", gh=gh)
+    _seed_task(orch._store)
+    _setup_branch(git_run, git_repo.clone, conflict=True, marker_less=True)
+
+    result = orch.merge_task("m1", strategy=MergeStrategy.SQUASH, wait_for_checks=False)
+
+    assert result.final_status is Status.DONE
+    assert gh.merge_called is True
+    assert "resolved by the merge agent" in (git_repo.clone / "shared.txt").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_a_marker_less_conflict_resolved_by_deleting_is_merged(
+    git_repo, fake_cli, git_run, tmp_path: Path
+) -> None:
+    # Accepting the base's deletion is a decision too, and the working tree shows it.
+    gh = FakeGh("OPEN")
+    orch = _build(git_repo, fake_cli, tmp_path, scenario="resolve_conflicts_by_deleting", gh=gh)
+    _seed_task(orch._store)
+    _setup_branch(git_run, git_repo.clone, conflict=True, marker_less=True)
+
+    result = orch.merge_task("m1", strategy=MergeStrategy.SQUASH, wait_for_checks=False)
+
+    assert result.final_status is Status.DONE
+    assert gh.merge_called is True
+    assert not (git_repo.clone / "shared.txt").exists()
+
+
+def test_the_marker_guard_still_fires_when_the_gate_passes(
+    git_repo, fake_cli, git_run, tmp_path: Path
+) -> None:
+    # Neither guard subsumes the other: the gate asks "did anyone decide", the commit seam asks
+    # "is the decision sane". `mangle_conflicts` moves the bytes without removing the markers.
+    gh = FakeGh("OPEN")
+    orch = _build(git_repo, fake_cli, tmp_path, scenario="mangle_conflicts", gh=gh)
+    _seed_task(orch._store)
+    _setup_branch(git_run, git_repo.clone, conflict=True)
+
+    with pytest.raises(PipelineFailed, match="conflict marker"):
+        orch.merge_task("m1", strategy=MergeStrategy.SQUASH, wait_for_checks=False)
+
+    assert gh.merge_called is False
+    assert orch._git.merge_in_progress() is False
+
+
+def test_clean_base_merge_writes_no_conflict_report(
+    git_repo, fake_cli, git_run, tmp_path: Path
+) -> None:
+    gh = FakeGh("OPEN")
+    orch = _build(git_repo, fake_cli, tmp_path, scenario="success", gh=gh)
+    _seed_task(orch._store)
+    _setup_branch(git_run, git_repo.clone, conflict=False)
+
+    orch.merge_task("m1", strategy=MergeStrategy.SQUASH, wait_for_checks=False)
+
+    assert not (task_artifact_dir(orch._artifacts_root, "m1") / "merge").exists()
