@@ -3735,7 +3735,9 @@ def cmd_validate_flow(args: argparse.Namespace) -> int:
             for violation in violations:
                 print(violation if violation.startswith(" ") else f"  {violation}")
         for warning in check.warnings:
-            print(f"flow {check.name}: WARN — {warning} (renders verbatim to the agent)")
+            # Each warning carries its own consequence: the lints report different problems, so a
+            # single shared suffix would be wrong for all but one of them.
+            print(f"flow {check.name}: WARN — {warning}")
     return 0 if ok else 1
 
 
