@@ -1,6 +1,12 @@
-The task branch has been merged with the latest base branch and the merge stopped on conflicts: one or more files in the working tree contain Git conflict markers (`<<<<<<<`, `=======`, `>>>>>>>`). Resolve every conflict.
+The task branch has been merged with the latest base branch and the merge stopped on conflicts. Resolve every one of them.
 
-For each conflicted file, produce a single coherent version that preserves BOTH the intent of the task's change AND the changes that have since landed on the base branch. Remove every conflict marker. Make only the edits the merge requires — do not refactor, do not touch files the merge did not conflict on, and do not discard either side's work.
+{?conflicts_path}Every conflicted path, what kind of conflict it is, and what the working tree currently holds for each is listed at {conflicts_path}. Work from that list — do not go looking for conflicts by searching the repository for markers, and do not touch a path the list does not name.{/conflicts_path}
+
+**Conflict markers are only one kind of conflict.** Where both sides changed the same lines, the file carries `<<<<<<<` / `=======` / `>>>>>>>` and your job is to remove every marker and leave one coherent version. But Git resolves several conflicts by dropping **one side's content into the working tree with no marker at all**: a file we changed and the base deleted (our version sits there alone), a file we deleted and the base changed (the base's version sits there), a file both sides added, and any binary file, for which no textual merge exists. In every one of those, the file you see is the side Git picked for you — it is not a resolution, and nothing about it says anyone considered the other side.
+
+For each conflicted file, produce a single coherent result that preserves BOTH the intent of the task's change AND the changes that have since landed on the base branch. Make only the edits the merge requires — do not refactor, do not touch files the merge did not conflict on, and do not discard either side's work.
+
+**Every decision has to be visible in the working tree.** The orchestrator commits what the tree holds, and it refuses to commit a conflicted path it cannot see a decision on: write the file with the content you chose, or delete it. A conflicted file left exactly as the merge left it records no decision and the whole merge is aborted — including the case where you read both sides and concluded that our version should stay. If that is genuinely your answer for a marker-less conflict, you cannot express it by editing: say so explicitly in your final message, naming the path and the reason, and expect the run to stop so a human can finish it. Never pretend a path was resolved.
 
 Do NOT run `git` and do NOT commit, stage, push, or merge anything — the orchestrator stages and commits the merge once the tree is clean and the checks pass. Just leave the resolved files in the working tree.
 

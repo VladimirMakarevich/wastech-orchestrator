@@ -40,11 +40,19 @@ class ExchangeMutationManual(NodeManualRequired):
     """
 
     def __init__(
-        self, message: str, *, before: ExchangeManifest | None, after: ExchangeManifest | None
+        self,
+        message: str,
+        *,
+        before: ExchangeManifest | None,
+        after: ExchangeManifest | None,
+        node_id: str | None = None,
     ) -> None:
         super().__init__(message)
         self.before = before
         self.after = after
+        #: the node whose attempt mutated the exchange, recorded in the quarantine bundle so the
+        #: evidence names its own origin rather than leaving it to be read out of a log message.
+        self.node_id = node_id
 
 
 def assert_request_contained(request: AgentRunRequest, exchange_root: str) -> None:
@@ -111,6 +119,7 @@ def assert_exchange_unchanged(
             f"node {node_id!r}: exchange mutated during a provider attempt ({'; '.join(changes)})",
             before=before,
             after=after,
+            node_id=node_id,
         )
 
 

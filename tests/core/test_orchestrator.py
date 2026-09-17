@@ -581,6 +581,7 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
     # Exactly one ledger record; back on the base branch.
     records = ledger.records()
     assert len(records) == 1 and records[0]["final_status"] == "done"
+    assert records[0]["recovered_from_stuck"] is False  # a clean run has nothing to recover from
     assert notifier.calls == [
         {
             "task_id": "task-001",
@@ -597,6 +598,53 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
     assert row.branch is not None
     branches = git_run(["branch", "--list", row.branch], git_repo.clone)
     assert row.branch in branches
+
+
+def test_a_recovered_task_does_not_advertise_the_failure_it_survived(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # The ordinary path for a non-blocking evaluator, not an edge case: a guard ends its loop and
+    # writes the report, the flow continues because that lens does not gate publication, and the
+    # task succeeds — which used to ship a ledger line reading `done` beside a pointer to a failure
+    # report, with nothing to tell a reader which of the two to believe.
+    providers = _both()
+    orch, store, ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    task_file = _complete_task(tmp_path)
+    task_dir = art / "logs" / "task-001"
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_and_trip_a_guard(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+            task_dir.mkdir(parents=True, exist_ok=True)
+            (task_dir / "failure_report.json").write_text(
+                json.dumps({"loop": "fidelity_fix", "limit_exhausted": "repeated_findings"}),
+                encoding="utf-8",
+            )
+            (task_dir / "stuck.md").write_text("the critic asked for the impossible\n", "utf-8")
+            store.update_task("task-001", failure_report_path=str(task_dir / "failure_report.json"))
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_and_trip_a_guard  # type: ignore[method-assign]
+
+    assert orch.run_task(task_file).final_status is Status.DONE
+
+    row = store.get_task("task-001")
+    assert row is not None
+    assert row.failure_report_path is None  # a finished task is not failing on anything
+    assert row.recovered_loop == "fidelity_fix"  # …but the run is still marked as a survived one
+    # The evidence is kept, under a name that says the run survived what is inside it.
+    assert not (task_dir / "failure_report.json").exists()
+    assert not (task_dir / "stuck.md").exists()
+    assert (task_dir / "recovered-failure_report.json").exists()
+    assert (task_dir / "recovered-stuck.md").exists()
+    record = ledger.records()[0]
+    assert record["final_status"] == "done"
+    assert record["failure_report"] is None
+    assert record["recovered_from_stuck"] is True
+    assert record["recovered_loop"] == "fidelity_fix"
 
 
 def _run_happy_task_with_trace(
@@ -1089,6 +1137,42 @@ def test_a_flow_narrowing_the_observation_cadence_says_so_once(
     assert package_log_text().count("observation cadence narrowed by the flow") == 1
     said = [f for f in fields if f.get("configured_observe_mode")]
     assert [(f["configured_observe_mode"], f["observe_mode"]) for f in said] == [("all", "events")]
+
+
+def test_the_cadence_line_survives_logging_level_warning(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # P2.14: the mechanism was fine and the level was not. The config that produced this rule set
+    # `logging.level: warning`, so the line was written at `info` and filtered out — twelve rework
+    # events, zero observations, and nothing anywhere saying why. It reports a configured setting
+    # being discarded, which is exactly what WARNING is for.
+    providers = _both()
+    orch, _store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"supervisor_observe": "all"},
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    levels: list[int] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if "observation cadence narrowed" in record.getMessage():
+                levels.append(record.levelno)
+
+    logger = logging.getLogger("wastech_orchestrator")
+    handler = _Collect(level=logging.WARNING)  # exactly what `logging.level: warning` lets through
+    logger.addHandler(handler)
+    try:
+        assert orch.run_task(_complete_task(tmp_path, "task-warn")).final_status is Status.DONE
+    finally:
+        logger.removeHandler(handler)
+
+    assert levels == [logging.WARNING]
 
 
 def test_no_cadence_line_when_the_flow_declares_nothing_to_narrow(
@@ -5907,6 +5991,52 @@ def test_governance_edit_reports_notice_on_all_surfaces(
     assert notifier.calls[-1]["governance_changed"] == expected
 
 
+def test_a_repositorys_own_rule_locations_reach_the_notice(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # The run that exposed this touched `AGENTS.md` and `.rules/wastime-journey-rules.md`, and the
+    # ledger reported only the first: half a governance edit reached the pull request unannounced.
+    # `repo.governance_paths` ADDS the repository's own locations to the built-in set, on every
+    # surface the built-in set already reaches.
+    _commit_agents_md(git_repo, git_run, "ORIGINAL REPO RULES\n")
+    rules = git_repo.clone / ".rules" / "journey.md"
+    rules.parent.mkdir(parents=True, exist_ok=True)
+    rules.write_text("original rule\n", encoding="utf-8")
+    git_run(["add", ".rules/journey.md"], git_repo.clone)
+    git_run(["commit", "-m", "add rules"], git_repo.clone)
+
+    providers = _both()
+    notifier = RecordingNotifier()
+    orch, store, ledger, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+        config_kwargs={"governance_paths": [".rules/**"]},
+    )
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "AGENTS.md").write_text("EDITED BY TASK\n", encoding="utf-8")
+            rules.write_text("edited rule\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    result = orch.run_task(_pending_task_in_repo(git_repo, "task-gov-extra"))
+
+    assert result.final_status is Status.DONE
+    expected = [".rules/journey.md", "AGENTS.md"]  # sorted: "." < "A"
+    assert ledger.records()[-1]["governance_changed"] == expected
+    assert notifier.calls[-1]["governance_changed"] == tuple(expected)
+    branch = store.get_task("task-gov-extra").branch
+    summary = git_run(["show", f"{branch}:tasks/done/task-gov-extra.summary.md"], git_repo.clone)
+    assert "`.rules/journey.md`" in summary and "`AGENTS.md`" in summary
+
+
 def test_ordinary_task_emits_no_governance_notice(
     git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:
@@ -6025,17 +6155,44 @@ def test_seal_terminal_exchange_quarantines_on_mutation(
     before = build_exchange_manifest(task_dir, "task-contam")
     (task_dir / "plan.md").write_text("MUTATED BY AGENT\n", encoding="utf-8")  # agent edit
     after = build_exchange_manifest(task_dir, "task-contam")
-    mutation = ExchangeMutationManual("mutated", before=before, after=after)
+    mutation = ExchangeMutationManual(
+        "mutated", before=before, after=after, node_id="fidelity_critic"
+    )
     store.update_task("task-contam", exchange_contaminated=1)
 
     orch._seal_terminal_exchange(
-        "task-contam", final=Status.MANUAL_ACTION_REQUIRED, mutation=mutation
+        "task-contam", final=Status.MANUAL_ACTION_REQUIRED, attempt=3, mutation=mutation
     )
 
     assert not task_dir.exists()  # removed from the active root
     qroot = exchange_quarantine_root(art, "task-contam")
     assert qroot.is_dir() and any(qroot.iterdir())  # relocated as contaminated evidence
     assert not exchange_seal_root(art, "task-contam").exists()  # never sealed / restore-eligible
+    # The database points at the incident, not only the directory name: the contamination flag is
+    # cleared by an operator continue, and when it was, nothing in state.db named the evidence.
+    refs = store.get_task("task-contam").quarantine_refs
+    assert refs and Path(refs[0]).is_dir()
+    doc = json.loads((Path(refs[0]) / "evidence.json").read_text(encoding="utf-8"))
+    assert doc["node_id"] == "fidelity_critic" and doc["attempt"] == 3 and doc["created_at"]
+
+
+def test_a_second_terminal_with_nothing_to_quarantine_mints_no_bundle(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # The stored contamination flag survives the first terminal, which already moved the tree into
+    # bundle 000001. A second terminal then entered the quarantine branch with no manifest, no
+    # observed changes and no live tree — and minted a directory holding a contentless JSON, in the
+    # one private root retention never reclaims.
+    orch, store, _, art = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    store.insert_task(TaskRow(task_id="task-again", title="t", status=Status.RUNNING))
+    store.update_task("task-again", exchange_contaminated=1)
+
+    orch._seal_terminal_exchange("task-again", final=Status.DONE, attempt=2)
+
+    assert not exchange_quarantine_root(art, "task-again").exists()
+    assert store.get_task("task-again").quarantine_refs == ()
 
 
 def test_seal_terminal_exchange_survives_bare_oserror(
@@ -6057,7 +6214,7 @@ def test_seal_terminal_exchange_survives_bare_oserror(
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr("wastech_orchestrator.core.orchestrator.seal_exchange", _boom)
-    orch._seal_terminal_exchange("task-enospc", final=Status.DONE)  # must not raise
+    orch._seal_terminal_exchange("task-enospc", final=Status.DONE, attempt=1)  # must not raise
 
     assert store.get_exchange_guard("task-enospc")[1] is True  # exchange_active_unsafe set
 
@@ -6712,3 +6869,83 @@ def test_private_report_survives_a_park_ceiling_terminal_in_a_fresh_process(
     assert report.is_file()
     assert ".worc-connect/" in git_run(["status", "--porcelain"], git_repo.clone)
     assert git_run(["diff", "--cached", "--name-only"], git_repo.clone).strip() == ""
+
+
+def test_registered_artifact_paths_are_posix_and_relative_to_the_worc_home(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # P2.15: one convention for ``artifacts.path``. The table's only writer normalizes, because
+    # its callers hand over whatever they have — absolute for the artifact tree, already-relative
+    # for the lifecycle summary — and this run's table ended up with 160 absolute paths embedding
+    # a home directory beside two relative ones.
+    orch, store, _ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    store.insert_task(TaskRow(task_id="task-art", title="t", status=Status.RUNNING))
+    inside = task_artifact_dir(art, "task-art") / "plan.md"
+    inside.parent.mkdir(parents=True, exist_ok=True)
+    inside.write_text("plan", encoding="utf-8")
+    outside = Path(git_repo.clone) / "tasks" / "done" / "task-art.summary.md"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text("summary", encoding="utf-8")
+
+    orch._register_artifact("task-art", "plan", str(inside))
+    orch._register_artifact("task-art", "summary_md", str(outside))
+
+    cur = store._conn.execute("SELECT kind, path FROM artifacts WHERE task_id = ?", ("task-art",))
+    stored = {row["kind"]: row["path"] for row in cur}
+    assert stored["plan"] == "logs/task-art/plan.md"
+    # Outside the home is still relative and still free of a home directory — never an absolute
+    # path, which is what makes state.db unreadable on another machine.
+    assert stored["summary_md"].endswith("tasks/done/task-art.summary.md")
+    for path in stored.values():
+        assert "\\" not in path  # POSIX on every OS, per the stored-path rule
+        assert not Path(path).is_absolute()
+        assert str(Path.home()) not in path
+
+
+def test_a_reject_that_quarantines_reports_where_the_file_went(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # P2.12: the quarantine lives under the private home, which the operator does not browse and
+    # agents cannot read. A move that is not announced is a file that disappeared — so the
+    # destination travels on the result (for the command's own output) and is logged at the one
+    # place the move happens (for every other path).
+    orch, _store, ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    bad = tmp_path / "task-bad.md"
+    bad.write_text("---\nid: task-bad\ntitle: t\nunknown_key: x\n---\n\nbody\n", encoding="utf-8")
+
+    with _log_fields() as fields:
+        result = orch.run_task(str(bad))
+
+    assert result.final_status is Status.FAILED
+    assert result.validation_reason is not None
+    assert result.quarantine_path is not None
+    moved = Path(result.quarantine_path)
+    assert moved.is_file() and not bad.exists()  # the file really went there
+    assert [f["destination"] for f in fields if f.get("destination")] == [moved.as_posix()]
+    assert ledger.has_task_id("task-bad")
+
+
+def test_a_successful_terminal_says_what_it_kept_and_how_to_reclaim_it(
+    git_repo, make_git_config, tmp_path: Path, package_log_text
+) -> None:
+    # P2.16: `clean_runs_on_success` reclaims runs/ only — per-task log dirs are out of its scope
+    # by design. Both facts were true and unconnected, so the operator's correct observation was
+    # "the logs did not get cleaned". One line joins them, names the size, gives the command, and
+    # points at the setting that would shrink it. Nothing about leftover branches: out of scope.
+    providers = _both()
+    orch, _store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    assert orch.run_task(_complete_task(tmp_path, "task-kept")).final_status is Status.DONE
+
+    text = package_log_text()
+    assert "this task's logs kept at" in text
+    assert "worc logs clean" in text
+    assert "logging.artifacts: minimal" in text
+    assert "branch" not in text.split("this task's logs kept at")[1].split("\n")[0]

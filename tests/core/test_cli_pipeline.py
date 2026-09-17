@@ -20,7 +20,13 @@ from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import KIND_PR
 from wastech_orchestrator.ledger import Ledger, LedgerRecord
 from wastech_orchestrator.observability import logging as obslog
-from wastech_orchestrator.state_store import PublishOpRow, StateStore, TaskRow
+from wastech_orchestrator.state_store import (
+    NodeRunRow,
+    ProviderAttemptRow,
+    PublishOpRow,
+    StateStore,
+    TaskRow,
+)
 from wastech_orchestrator.task.model import DEFAULT_QUEUE
 
 # Every test here is a slow integration test (real git / subprocess / process tree).
@@ -726,6 +732,113 @@ def test_cmd_status_running_without_daemon_shows_parked(
     assert "node=implementation" in output  # the resume checkpoint still shows
 
 
+def _seed_unpriced_attempts(clone: Path, task_id: str) -> None:
+    """Give *task_id* a Claude attempt with a cost and Codex attempts with none (the real shape).
+
+    Codex's CLI emits no USD at all, so its rows carry NULL cost while its token counts are real —
+    which is exactly how a summed total comes out systematically low.
+    """
+    store = StateStore.open(clone / ".worc" / "state.db")
+    run_id = store.record_node_run(
+        NodeRunRow(task_id=task_id, node_id="critic", node_kind="evaluator", status="running")
+    )
+    store.record_provider_attempt(
+        ProviderAttemptRow(
+            task_id=task_id,
+            node_run_id=run_id,
+            provider="claude",
+            attempt=1,
+            usage_cost=15.81,
+            usage_input_total=1_000,
+        )
+    )
+    for n in (1, 2):
+        store.record_provider_attempt(
+            ProviderAttemptRow(
+                task_id=task_id,
+                node_run_id=run_id,
+                provider="codex",
+                attempt=n,
+                usage_input_total=4_200_000,
+            )
+        )
+    store.close()
+
+
+def test_cmd_status_names_the_unaccounted_cost(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # P1.7: no price table and no estimate — the gap is stated. A silent zero is worse.
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_active_status_db(git_repo.clone)
+    _seed_unpriced_attempts(git_repo.clone, "task-active")
+    monkeypatch.setattr(cli, "_daemon_alive", lambda _c: True)
+
+    assert cli.main(["--config", str(config), "status"]) == 0
+    out = capsys.readouterr().out
+    assert "cost_not_accounted=Codex cost not accounted (2 attempts, 8.4 M input tokens)" in out
+
+
+def test_cmd_status_says_nothing_when_every_attempt_is_priced(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_active_status_db(git_repo.clone)
+    store = StateStore.open(git_repo.clone / ".worc" / "state.db")
+    run_id = store.record_node_run(
+        NodeRunRow(task_id="task-active", node_id="impl", node_kind="agent", status="running")
+    )
+    store.record_provider_attempt(
+        ProviderAttemptRow(
+            task_id="task-active",
+            node_run_id=run_id,
+            provider="claude",
+            attempt=1,
+            usage_cost=1.25,
+            usage_input_total=900,
+        )
+    )
+    store.close()
+    monkeypatch.setattr(cli, "_daemon_alive", lambda _c: True)
+
+    assert cli.main(["--config", str(config), "status"]) == 0
+    assert "cost_not_accounted" not in capsys.readouterr().out
+
+
+def test_cmd_list_footer_names_the_unaccounted_cost(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_list_db(git_repo.clone, [TaskRow(task_id="task-done", title="Done", status=Status.DONE)])
+    _seed_unpriced_attempts(git_repo.clone, "task-done")
+
+    assert cli.main(["--config", str(config), "list"]) == 0
+    out = capsys.readouterr().out
+    assert "note: Codex cost not accounted (2 attempts, 8.4 M input tokens)" in out
+
+
+def test_cmd_list_json_view_carries_no_prose_footer(
+    git_repo, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The machine surfaces stay machine surfaces; ``summary.json`` carries the same fact typed.
+    project = tmp_path / "project"
+    project.mkdir()
+    config = _write_cli_config(project, git_repo.clone, claude_cmd="claude", codex_cmd="codex")
+    _seed_list_db(git_repo.clone, [TaskRow(task_id="task-done", title="Done", status=Status.DONE)])
+    _seed_unpriced_attempts(git_repo.clone, "task-done")
+
+    assert cli.main(["--config", str(config), "list", "--format", "json"]) == 0
+    out = capsys.readouterr().out
+    assert "cost not accounted" not in out
+    json.loads(out)  # still valid JSON, nothing appended
+
+
 def _seed_list_db(clone: Path, rows: list[TaskRow]) -> None:
     store = StateStore.open(clone / ".worc" / "state.db")
     for row in rows:
@@ -1393,10 +1506,15 @@ def test_a_settled_tasks_own_file_survives_the_next_watch_tick(
     assert not (project / "rejected").exists()  # the tracked file was never moved out of the tree
     assert git_run(["status", "--porcelain", "--", "tasks"], git_repo.clone) == ""
 
-    # An explicit run has no scanner guard in front of it: it still answers loudly, but the reject
-    # path must not touch the file, the ledger or the operator's notifications either.
+    # An explicit run now carries the same guard the scanner has (P2.12), so it refuses before the
+    # gate ever sees the file — with the terminal status and the two verbs that resolve it, rather
+    # than a `duplicate_task_id` whose reject path would quarantine the operator's own file into a
+    # directory they do not browse. The tree, the ledger and the notifications stay as they were.
     assert cli.main(["--config", str(config), "run", str(task_file)]) != 0
-    assert "duplicate_task_id" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "already reached a terminal" in err
+    assert "worc rerun" in err and "worc finalize" in err
+    assert "duplicate_task_id" not in err
     records = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
     assert [r["final_status"] for r in records] == ["done"]
     assert task_file.exists()

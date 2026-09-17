@@ -292,6 +292,52 @@ def test_check_flows_reports_ok_for_valid_operator_flow(tmp_path: Path) -> None:
     assert checks[0].error is None
 
 
+_TOOL_GATE_YAML = """\
+flow:
+  name: gated
+  task_type: gated
+  permission_ceiling: workspace-write
+  output_policy: code_change
+  publishing: pull_request
+  budgets:
+    form_fix: 6
+  nodes:
+    - id: work
+      kind: agent
+      role_file: roles/work.md
+    - id: gate
+      kind: tool
+      tool: check_form
+    - id: fix
+      kind: agent
+      role_file: roles/work.md
+    - id: out
+      kind: publish
+      policy: pull_request
+  edges:
+    - { from: work, to: gate }
+    - { from: gate, to: out, outcome: pass }
+    - { from: gate, to: fix, outcome: fail, loop: form_fix }
+    - { from: fix, to: gate }
+"""
+
+
+def test_check_flows_warns_where_a_tool_nodes_budget_is_written(tmp_path: Path) -> None:
+    # `validate-flow` is where an author reads their own flow back, so it is where the condition on
+    # the number belongs: with no top-level `findings` the budget bounds identical failures, not
+    # planned fix rounds. Non-fatal — the flow is valid either way.
+    flows_dir = tmp_path / "flows"
+    flows_dir.mkdir()
+    (flows_dir / "gated.yaml").write_text(_TOOL_GATE_YAML)
+
+    check = FlowRegistry(operator_flows_dir=flows_dir).check_flows(["gated"])[0]
+
+    assert check.error is None
+    assert len(check.warnings) == 1
+    assert "'gate'" in check.warnings[0] and "6" in check.warnings[0]
+    assert "findings" in check.warnings[0]
+
+
 def test_check_flows_flags_broken_flow_without_raising(tmp_path: Path) -> None:
     flows_dir = tmp_path / "flows"
     flows_dir.mkdir()

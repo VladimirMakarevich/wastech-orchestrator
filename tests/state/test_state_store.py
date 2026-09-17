@@ -336,6 +336,48 @@ def test_provider_attempt_usage_columns_round_trip(store: StateStore) -> None:
     assert row.provider_usage_raw == '{"input_tokens":282699}'
 
 
+def test_provider_attempt_model_columns_round_trip(store: StateStore) -> None:
+    # P1.6: the effective model/reasoning is a queryable column, so per-model cost is a GROUP BY
+    # rather than a grep — and it survives with ``prompt_audit`` off, which is the default.
+    store.insert_task(_new_task())
+    run_id = store.record_node_run(
+        NodeRunRow(task_id="task-001", node_id="critic", node_kind="evaluator", status="running")
+    )
+    store.record_provider_attempt(
+        ProviderAttemptRow(
+            task_id="task-001",
+            node_run_id=run_id,
+            provider="codex",
+            attempt=1,
+            model="gpt-5.6-sol",
+            reasoning="high",
+            status="succeeded",
+            usage_input_total=6_500_000,
+        )
+    )
+    row = store.get_provider_attempts(run_id)[0]
+    assert (row.model, row.reasoning) == ("gpt-5.6-sol", "high")
+    cur = store._conn.execute(
+        "SELECT model, SUM(usage_input_total) AS tokens FROM provider_attempts GROUP BY model"
+    )
+    assert [(r["model"], r["tokens"]) for r in cur.fetchall()] == [("gpt-5.6-sol", 6_500_000)]
+
+
+def test_provider_attempt_model_columns_default_null(store: StateStore) -> None:
+    # NULL is the real meaning — no model was resolved for this launch — never a placeholder.
+    store.insert_task(_new_task())
+    run_id = store.record_node_run(
+        NodeRunRow(task_id="task-001", node_id="revise", node_kind="agent", status="running")
+    )
+    store.record_provider_attempt(
+        ProviderAttemptRow(
+            task_id="task-001", node_run_id=run_id, provider="codex", attempt=1, status="failed"
+        )
+    )
+    row = store.get_provider_attempts(run_id)[0]
+    assert row.model is None and row.reasoning is None
+
+
 def test_provider_attempt_usage_columns_default_null(store: StateStore) -> None:
     # A result-less attempt (no usage) leaves every usage column NULL.
     store.insert_task(_new_task())
@@ -887,6 +929,88 @@ def test_reset_for_rerun_clears_editing_lineage(store: StateStore) -> None:
     assert store.get_editing_lineage("task-001", "implementation") is None
 
 
+def _record_verdict(
+    store: StateStore,
+    findings_json: str,
+    *,
+    node_id: str = "critic",
+    subtask: int | None = None,
+) -> None:
+    """One evaluator pass: the node run that produced the verdict, then the verdict itself."""
+    run_id = store.record_node_run(
+        NodeRunRow(
+            task_id="task-001",
+            node_id=node_id,
+            node_kind="evaluator",
+            subtask_order=subtask,
+            status="succeeded",
+        )
+    )
+    store.record_evaluation(
+        EvaluationRow(
+            task_id="task-001",
+            node_id=node_id,
+            source_node_run_id=run_id,
+            subtask_order=subtask,
+            kind="in_flow_verdict",
+            verdict="rework",
+            findings_json=findings_json,
+        )
+    )
+
+
+_SAME = '[{"severity": "high", "reason": "rewrite the brief"}]'
+
+
+def test_consecutive_identical_findings_counts_the_current_run_only(store: StateStore) -> None:
+    # The signal is a *current* run of repeats, not a total: a pass that found something else means
+    # the loop was still moving, and everything before it is no longer evidence of a stuck critic.
+    store.insert_task(_new_task())
+    for findings in (_SAME, _SAME, '[{"reason": "something else"}]', _SAME, _SAME):
+        _record_verdict(store, findings)
+
+    assert store.consecutive_identical_findings("task-001", node_id="critic") == 2
+
+
+def test_consecutive_identical_findings_ignores_other_nodes_and_subtasks(store: StateStore) -> None:
+    # Two nodes repeating their own verdicts are two loops, and a decomposed task's units are
+    # separate runs of the same node — neither may be counted into the other's streak.
+    store.insert_task(_new_task())
+    _record_verdict(store, _SAME, subtask=0)
+    _record_verdict(store, _SAME, node_id="other")
+    _record_verdict(store, _SAME, subtask=1)
+
+    assert store.consecutive_identical_findings("task-001", node_id="critic", subtask_order=1) == 1
+
+
+def test_consecutive_identical_findings_is_zero_without_findings(store: StateStore) -> None:
+    # An empty verdict repeating says nothing about a critic asking for the impossible, which is the
+    # only thing this count is evidence of.
+    store.insert_task(_new_task())
+    _record_verdict(store, "[]")
+    _record_verdict(store, "[]")
+
+    assert store.consecutive_identical_findings("task-001", node_id="critic") == 0
+    assert store.consecutive_identical_findings("task-001", node_id="never-ran") == 0
+
+
+def test_a_fresh_rerun_does_not_inherit_the_previous_attempts_repeats(store: StateStore) -> None:
+    # A rerun starts the loop counters at zero, so the guard derived from the verdicts must start
+    # over too — otherwise the new attempt is parked on its first pass for the old attempt's
+    # repeats. The immutable rows stay; what scopes them is the node runs the reset deletes.
+    store.insert_task(_new_task())
+    for _ in range(3):
+        _record_verdict(store, _SAME)
+    assert store.consecutive_identical_findings("task-001", node_id="critic") == 3
+
+    store.reset_task_for_rerun("task-001")
+
+    assert store.get_evaluations("task-001")  # the audit trail is untouched…
+    assert store.consecutive_identical_findings("task-001", node_id="critic") == 0  # …but not read
+    _record_verdict(store, _SAME)
+    assert store.consecutive_identical_findings("task-001", node_id="critic") == 1
+
+
 def test_evaluations_append_only_and_counted(store: StateStore) -> None:
     store.insert_task(_new_task())
     for i, verdict in enumerate(("rework", "accept", "rework"), start=1):
@@ -903,3 +1027,31 @@ def test_evaluations_append_only_and_counted(store: StateStore) -> None:
     rows = store.get_evaluations("task-001")
     assert [r.verdict for r in rows] == ["rework", "accept", "rework"]  # append-only
     assert store.count_rework_verdicts("task-001") == 2  # the per-instance limit derives from COUNT
+
+
+def test_quarantine_refs_accumulate_and_survive_the_flag_being_cleared(tmp_path: Path) -> None:
+    # `exchange_contaminated` is legitimately cleared by an operator `rerun --continue`, and when it
+    # was, nothing in the database pointed at the incident any more — the only surviving link was a
+    # directory name under the one private root retention never reclaims.
+    store = StateStore.open(tmp_path / "state.db")
+    store.insert_task(TaskRow(task_id="t1", title="T", status=Status.RUNNING))
+    store.update_task("t1", exchange_contaminated=1)
+
+    store.append_quarantine_ref("t1", ".worc/runs/exchange-quarantine/t1/000001")
+    store.append_quarantine_ref("t1", ".worc/runs/exchange-quarantine/t1/000002")
+    store.append_quarantine_ref("t1", ".worc/runs/exchange-quarantine/t1/000001")  # idempotent
+    store.update_task("t1", exchange_contaminated=0)
+
+    assert store.get_task("t1").quarantine_refs == (
+        ".worc/runs/exchange-quarantine/t1/000001",
+        ".worc/runs/exchange-quarantine/t1/000002",
+    )
+    store.close()
+
+
+def test_a_task_with_no_quarantine_reads_an_empty_tuple(tmp_path: Path) -> None:
+    # NULL is the column's real meaning ("no bundle"), and it must not read as a one-element list.
+    store = StateStore.open(tmp_path / "state.db")
+    store.insert_task(TaskRow(task_id="t1", title="T", status=Status.RUNNING))
+    assert store.get_task("t1").quarantine_refs == ()
+    store.close()

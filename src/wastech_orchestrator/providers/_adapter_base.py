@@ -713,6 +713,8 @@ class BaseCliProvider:
             usage=usage,
             normalized_usage=parsed.normalized_usage,
             session_id=parsed.session_id,
+            model=self._config.effective_model(request.model),
+            reasoning=self._config.effective_reasoning(request.reasoning),
             stdout_path=paths.stdout_path,
             stderr_path=paths.stderr_path,
             event_log_path=paths.events_path,
@@ -760,6 +762,8 @@ class BaseCliProvider:
             "check_artifacts_path": request.check_artifacts_path,
             "review_artifacts_path": request.review_artifacts_path,
             "human_input_path": request.human_input_path,
+            "conflicts_path": request.conflicts_path,
+            "rework_report_path": request.rework_report_path,
             "supervisor_packet_path": request.supervisor_packet_path,
         }
         representation: dict[str, Any] = {
@@ -798,14 +802,16 @@ class BaseCliProvider:
             exit_code=proc.exit_code,
             started_at=started_at,
             finished_at=finished_at,
+            model=self._config.effective_model(request.model),
+            reasoning=self._config.effective_reasoning(request.reasoning),
             stdout_path=paths.stdout_path,
             stderr_path=paths.stderr_path,
             event_log_path=paths.events_path,
             error=error,
         )
         write_result_artifact(paths, result)
-        # ``minimal`` is strict — only result.json survives, even on failure (it records the exit
-        # code + normalized error class). ``standard`` keeps stdout/stderr for debuggability.
+        # ``minimal`` is strict — only result.json + request.json survive, even on failure (the
+        # outcome, and what was requested to produce it). ``standard`` adds stdout/stderr.
         prune_attempt_artifacts(paths, self._artifact_level)
         return result
 

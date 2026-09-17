@@ -7,6 +7,7 @@ temporary git repo with a bare ``origin`` remote.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
@@ -16,6 +17,7 @@ from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import (
     KIND_MERGE_COMMIT,
     KIND_PR_MERGE,
+    ConflictEvidence,
     GitCommandError,
     GitManager,
     GitResult,
@@ -328,3 +330,191 @@ def test_merge_in_progress_false_without_merge(
 ) -> None:
     gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
     assert gm.merge_in_progress() is False
+
+
+# --- conflicted_paths: the conflict inventory the merge gate and the conflict report read --------
+
+
+def _seed_base_file(git_run: GitRunner, clone: Path, path: str, content: str) -> None:
+    """Commit ``path`` on main and push it, so it exists in the merge base of any later branch."""
+    git_run(["checkout", "main"], clone)
+    (clone / path).write_text(content, encoding="utf-8")
+    git_run(["add", path], clone)
+    git_run(["commit", "-m", f"base seed {path}"], clone)
+    git_run(["push", "origin", "main"], clone)
+
+
+def _delete_on_base(git_run: GitRunner, clone: Path, path: str) -> None:
+    """Delete ``path`` on main and push it (the base drops a file the branch still has)."""
+    git_run(["checkout", "main"], clone)
+    git_run(["rm", path], clone)
+    git_run(["commit", "-m", f"base deletes {path}"], clone)
+    git_run(["push", "origin", "main"], clone)
+
+
+def _branch_deleting(git_run: GitRunner, clone: Path, branch: str, path: str) -> None:
+    """Create ``branch`` off main whose only change is deleting ``path``."""
+    git_run(["checkout", "-b", branch, "main"], clone)
+    git_run(["rm", path], clone)
+    git_run(["commit", "-m", f"task deletes {path}"], clone)
+    git_run(["push", "-u", "origin", branch], clone)
+    git_run(["checkout", "main"], clone)
+
+
+def _conflict_on(gm: GitManager, git_run: GitRunner, clone: Path, path: str) -> None:
+    """The ordinary both-modified conflict on ``path``, left in flight."""
+    _branch_with_change(git_run, clone, "worc/t1", path, "branch side\n")
+    _advance_base(git_run, clone, path, "base side\n")
+    assert gm.update_branch_with_base("worc/t1", "main") is True
+
+
+def test_conflicted_paths_is_empty_without_a_merge(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # The gate must be inert on the clean path: no merge in flight means no unmerged index entry.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+
+    assert gm.conflicted_paths() == ()
+
+
+def test_conflicted_paths_reports_both_modified_with_markers(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    _conflict_on(gm, git_run, git_repo.clone, "README.md")
+
+    (entry,) = gm.conflicted_paths()
+
+    assert entry.path == "README.md"
+    assert entry.code == "UU"
+    assert (entry.has_base, entry.has_ours, entry.has_theirs) == (True, True, True)
+    assert entry.evidence is ConflictEvidence.WORKTREE_BYTES
+    assert entry.exists is True and entry.digest is not None
+    assert entry.has_markers is True and entry.binary is False
+
+
+def test_conflicted_paths_reports_a_modify_delete_without_markers(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # The defect this inventory exists for: git leaves OUR file in the tree with no marker in it,
+    # so nothing downstream could tell a resolution from an untouched file.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    _seed_base_file(git_run, git_repo.clone, "shared.txt", "base\n")
+    _branch_with_change(git_run, git_repo.clone, "worc/t1", "shared.txt", "task edit\n")
+    _delete_on_base(git_run, git_repo.clone, "shared.txt")
+    assert gm.update_branch_with_base("worc/t1", "main") is True
+
+    (entry,) = gm.conflicted_paths()
+
+    assert entry.code == "UD"
+    assert (entry.has_base, entry.has_ours, entry.has_theirs) == (True, True, False)
+    assert entry.evidence is ConflictEvidence.WORKTREE_BYTES
+    assert entry.exists is True  # our version sits there, alone and unmarked
+    assert entry.has_markers is False
+
+
+def test_conflicted_paths_reports_a_delete_modify_without_markers(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    _seed_base_file(git_run, git_repo.clone, "shared.txt", "base\n")
+    _branch_deleting(git_run, git_repo.clone, "worc/t1", "shared.txt")
+    _advance_base(git_run, git_repo.clone, "shared.txt", "base edit\n")
+    assert gm.update_branch_with_base("worc/t1", "main") is True
+
+    (entry,) = gm.conflicted_paths()
+
+    assert entry.code == "DU"
+    assert (entry.has_base, entry.has_ours, entry.has_theirs) == (True, False, True)
+    assert entry.has_markers is False
+
+
+def test_conflicted_paths_reports_a_binary_add_add_as_binary(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # A binary conflict can carry no markers at all — there is no textual form to merge.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    clone = git_repo.clone
+    git_run(["checkout", "-b", "worc/t1", "main"], clone)
+    (clone / "blob.bin").write_bytes(b"\x00branch\x00")
+    git_run(["add", "blob.bin"], clone)
+    git_run(["commit", "-m", "task adds a binary"], clone)
+    git_run(["push", "-u", "origin", "worc/t1"], clone)
+    git_run(["checkout", "main"], clone)
+    (clone / "blob.bin").write_bytes(b"\x00base\x00")
+    git_run(["add", "blob.bin"], clone)
+    git_run(["commit", "-m", "base adds a binary"], clone)
+    git_run(["push", "origin", "main"], clone)
+    assert gm.update_branch_with_base("worc/t1", "main") is True
+
+    (entry,) = gm.conflicted_paths()
+
+    assert entry.code == "AA"
+    assert (entry.has_base, entry.has_ours, entry.has_theirs) == (False, True, True)
+    assert entry.binary is True and entry.has_markers is False
+
+
+def test_conflicted_paths_track_the_working_tree_across_an_edit(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # The before/after channel the merge gate reads: the index identity is stable (nobody may run
+    # `git add`), and only the working-tree probe moves.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    _conflict_on(gm, git_run, git_repo.clone, "README.md")
+    (before,) = gm.conflicted_paths()
+
+    (git_repo.clone / "README.md").write_text("resolved\n", encoding="utf-8")
+    (after,) = gm.conflicted_paths()
+
+    assert (after.path, after.code, after.evidence) == (before.path, before.code, before.evidence)
+    assert after.digest != before.digest
+    assert after.has_markers is False
+
+    (git_repo.clone / "README.md").unlink()
+    (gone,) = gm.conflicted_paths()
+    assert gone.code == before.code  # still the same unmerged entry
+    assert gone.exists is False and gone.digest is None
+
+
+def test_conflicted_paths_handles_a_non_ascii_path(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # `-z` output never C-quotes; a Cyrillic name must survive the parse and resolve on disk.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    _conflict_on(gm, git_run, git_repo.clone, "документ.md")
+
+    (entry,) = gm.conflicted_paths()
+
+    assert entry.path == "документ.md"
+    assert entry.digest is not None
+
+
+def test_conflicted_paths_probes_an_unreadable_entry_as_undecidable(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    # A path the tree holds as something other than a regular file is evidence of nothing; it must
+    # probe as unreadable (the caller then refuses) rather than raise out of the inventory.
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    _conflict_on(gm, git_run, git_repo.clone, "README.md")
+    (git_repo.clone / "README.md").unlink()
+    (git_repo.clone / "README.md").mkdir()
+
+    (entry,) = gm.conflicted_paths()
+
+    assert entry.exists is False and entry.digest is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics")
+def test_conflicted_paths_does_not_follow_a_symlink(
+    git_repo, store: StateStore, tmp_path: Path, make_git_config: ConfigFactory, git_run: GitRunner
+) -> None:
+    gm = _manager(git_repo, store, tmp_path / "art", make_git_config)
+    _conflict_on(gm, git_run, git_repo.clone, "README.md")
+    decoy = tmp_path / "decoy.txt"
+    decoy.write_text("not the conflicted file\n", encoding="utf-8")
+    (git_repo.clone / "README.md").unlink()
+    (git_repo.clone / "README.md").symlink_to(decoy)
+
+    (entry,) = gm.conflicted_paths()
+
+    assert entry.exists is False and entry.digest is None

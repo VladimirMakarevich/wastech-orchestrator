@@ -15,7 +15,13 @@ from wastech_orchestrator.core.flow.run_state import FlowRunState
 from wastech_orchestrator.core.flow.schema import AgentNode
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.providers.artifacts import node_run_dir
-from wastech_orchestrator.state_store import EvaluationRow, NodeRunRow, StateStore, TaskRow
+from wastech_orchestrator.state_store import (
+    EvaluationRow,
+    NodeRunRow,
+    ProviderAttemptRow,
+    StateStore,
+    TaskRow,
+)
 
 
 def _store(tmp_path: Path) -> StateStore:
@@ -101,6 +107,82 @@ def test_recorder_failure_report_carries_findings_and_diff(tmp_path: Path) -> No
     assert "changed" in report["final_diff"]
     stuck = (Path(path).parent / "stuck.md").read_text(encoding="utf-8")
     assert "schema drift" in stuck
+
+
+def test_loop_guard_report_names_the_stuck_nodes_provider_attempts(tmp_path: Path) -> None:
+    # P2.15: "which provider call produced the repeated finding" is the first question this report
+    # is opened with, and the loop-guard path answered it with an empty list while the infra path
+    # answered it properly. One derivation now serves both.
+    store = _store(tmp_path)
+    first = store.record_node_run(NodeRunRow(task_id="t1", node_id="critic", node_kind="evaluator"))
+    store.record_provider_attempt(
+        ProviderAttemptRow(task_id="t1", node_run_id=first, provider="claude", attempt=1)
+    )
+    last = store.record_node_run(NodeRunRow(task_id="t1", node_id="critic", node_kind="evaluator"))
+    for n, provider in ((1, "codex"), (2, "codex")):
+        store.record_provider_attempt(
+            ProviderAttemptRow(
+                task_id="t1",
+                node_run_id=last,
+                provider=provider,
+                attempt=n,
+                error_class="task_failure",
+                exit_code=1,
+                started_at=f"2026-01-01T00:0{n}:00+00:00",
+            )
+        )
+    recorder = StateStoreRunRecorder(store, "t1", artifacts_root=tmp_path)
+    path = recorder.write_failure_report(
+        node_id="critic",
+        loop="review_fix",
+        limit_name="repeated_findings",
+        run_state=FlowRunState(flow_fingerprint="fp", current_node="critic"),
+    )
+    report = json.loads(Path(path).read_text(encoding="utf-8"))
+    # The LAST run of that node id, not every run of it: a fix loop runs the same node repeatedly.
+    assert [a["attempt"] for a in report["provider_attempts"]] == [1, 2]
+    assert {a["provider"] for a in report["provider_attempts"]} == {"codex"}
+    # Whitelisted fields only — no attempt_dir into the private tree, no usage columns.
+    assert set(report["provider_attempts"][0]) == {
+        "provider",
+        "attempt",
+        "error_class",
+        "exit_code",
+        "started_at",
+    }
+    assert "## Provider attempts" in (Path(path).parent / "stuck.md").read_text(encoding="utf-8")
+
+
+def test_a_tool_nodes_report_says_why_it_has_no_check_log(tmp_path: Path) -> None:
+    # A tool node never writes ``check_runs``, so the report's null is a property of the node.
+    store = _store(tmp_path)
+    store.record_node_run(NodeRunRow(task_id="t1", node_id="form_gate", node_kind="tool"))
+    recorder = StateStoreRunRecorder(store, "t1", artifacts_root=tmp_path)
+    path = recorder.write_failure_report(
+        node_id="form_gate",
+        loop="form_fix",
+        limit_name="max_fix_cycles",
+        run_state=FlowRunState(flow_fingerprint="fp", current_node="form_gate"),
+    )
+    report = json.loads(Path(path).read_text(encoding="utf-8"))
+    assert report["last_check_log"] is None
+    note = report["last_check_log_note"]
+    assert "tool node" in note and "stdout.txt" in note
+    assert note in (Path(path).parent / "stuck.md").read_text(encoding="utf-8")
+
+
+def test_an_agent_nodes_report_adds_no_check_log_note(tmp_path: Path) -> None:
+    # Nothing is invented for a node kind that legitimately could have written one.
+    store = _store(tmp_path)
+    store.record_node_run(NodeRunRow(task_id="t1", node_id="review", node_kind="evaluator"))
+    recorder = StateStoreRunRecorder(store, "t1", artifacts_root=tmp_path)
+    path = recorder.write_failure_report(
+        node_id="review",
+        loop="review_fix",
+        limit_name="max_fix_cycles",
+        run_state=FlowRunState(flow_fingerprint="fp", current_node="review"),
+    )
+    assert "last_check_log_note" not in json.loads(Path(path).read_text(encoding="utf-8"))
 
 
 def _run(**overrides: object) -> NodeRunRow:

@@ -22,9 +22,14 @@ Outcome contract (see :func:`parse_tool_output`), in priority order:
 4. Otherwise the **exit code** gates: ``0`` → ``pass``, non-zero → ``fail`` (linter style). Any JSON
    object still enriches ``findings`` / ``data``.
 
-Two identical ``fail`` results without findings from the same tool node park on the second result,
-before another fix edge can be charged. This bounds a degenerate gate/fixer loop whose checker says
-the same non-actionable thing after the fixer changed real content.
+An identical ``fail`` repeated by the same tool node is bounded, and by how much depends on what
+the tool reported — "no findings" is not one situation but three. A top-level ``findings`` array
+gives the fixer typed handles, so the detector stays off. No ``findings`` but a non-empty ``data``
+object is still an actionable failure (the contract treats ``data`` as a first-class channel), so
+the limit is the node's own declared loop budget: the detector is the backstop for a loop that will
+never converge, never a second, stricter budget that quietly overrides the number the author wrote.
+Neither channel means nothing downstream can act on the repeat at all, and the second identical
+result parks the task before another fix edge can be charged.
 
 The core **records** ``findings`` (→ ``NodeOutcome.findings``) and ``data`` (→
 ``NodeOutcome.structured_output``) but never *applies* them: there is no code path where a returned
@@ -54,11 +59,14 @@ from wastech_orchestrator.core.flow.engine import Finding, NodeContext, NodeOutc
 from wastech_orchestrator.core.flow.nodes.base import (
     NodeInputs,
     NodeManualRequired,
+    NodeRun,
     NodeServices,
+    open_node_run,
 )
 from wastech_orchestrator.core.flow.nodes.exchange_publish import publish_node_run_file
 from wastech_orchestrator.core.flow.schema import FlowNode, ToolNode
 from wastech_orchestrator.core.flow.tools_registry import ToolResolutionError
+from wastech_orchestrator.core.loop_control import declared_loop_budget
 from wastech_orchestrator.git_manager import ChangedPath, GitControlState
 from wastech_orchestrator.providers.artifacts import (
     TOOL_STDERR_FILENAME,
@@ -80,7 +88,13 @@ _MEDIUM_SEVERITIES = frozenset({"warning", "medium", "moderate"})
 # cannot launch a batch file directly with ``shell=False`` — it must run through the command
 # interpreter. `.exe`/`.com` are PE images CreateProcess starts directly, so they are NOT here.
 _BATCH_SUFFIXES = frozenset({".bat", ".cmd"})
-_STDERR_HEAD_CHARS = 500
+_STREAM_HEAD_CHARS = 500
+
+#: Consecutive byte-identical ``fail`` results that park a tool node which reported through neither
+#: structured channel — no ``findings``, no ``data``. Nothing downstream can act on such a repeat,
+#: so the second one ends it. A failure that *does* carry ``data`` is actionable and defers to the
+#: node's declared loop budget instead.
+_UNSTRUCTURED_REPEAT_LIMIT = 2
 
 
 class ToolContractError(Exception):
@@ -98,6 +112,14 @@ class ToolContract:
     outcome: str  # pass | fail | route:<label>
     findings: tuple[Finding, ...] = ()
     data: Mapping[str, object] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _IdenticalFailures:
+    """How many times in a row one tool node returned this exact failure output."""
+
+    fingerprint: str
+    count: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,11 +142,12 @@ class ToolNodeRunner:
         # Transient by design, like the engine's no-file-change stall guard: a restart gives the
         # repaired environment a fresh chance, while one live run cannot burn its full fix budget
         # on an identical no-finding verdict.
-        self._last_no_finding_failure: dict[str, str] = {}
+        self._identical_failures: dict[str, _IdenticalFailures] = {}
 
     def run(self, node: FlowNode, ctx: NodeContext) -> NodeResult:
         assert isinstance(node, ToolNode)
-        run_id = self._s.store.record_node_run(
+        with open_node_run(
+            self._s,
             NodeRunRow(
                 task_id=ctx.task_id,
                 node_id=node.id,
@@ -132,9 +155,14 @@ class ToolNodeRunner:
                 subtask_order=ctx.subtask_order,
                 status="running",
                 started_at=self._s.clock(),
-            )
-        )
-        tool_path = self._resolve(node, run_id)
+            ),
+        ) as run:
+            return self._run_tool(node, ctx, run)
+
+    def _run_tool(self, node: ToolNode, ctx: NodeContext, run: NodeRun) -> NodeResult:
+        """Resolve, launch and gate the tool, inside the lifetime its row is already open for."""
+        run_id = run.id
+        tool_path = self._resolve(node, run)
 
         # Per-run dir keyed by node.id + run_id (mirrors agent/evaluator runs): a tool node that
         # re-runs in a loop keeps every pass's streams; {<node_id>_path} resolves the latest run.
@@ -178,7 +206,7 @@ class ToolNodeRunner:
         # (1) Infrastructure failure — launch error / timeout → manual, never a quality fail. It
         #     mirrors the one existing external-command gate (checks command-profile); no fix loop.
         if result.launch_error is not None or result.timed_out:
-            self._complete(run_id, status="timeout" if result.timed_out else "launch_error")
+            self._complete(run, status="timeout" if result.timed_out else "launch_error")
             reason = "timed out" if result.timed_out else "could not be launched"
             raise NodeManualRequired(
                 f"tool node {node.id!r}: the tool {node.tool!r} {reason} — an infrastructure "
@@ -193,8 +221,8 @@ class ToolNodeRunner:
             and not redacted_stdout.strip()
             and redacted_stderr.strip()
         ):
-            self._complete(run_id, status="crashed")
-            stderr_head = _stderr_head(redacted_stderr)
+            self._complete(run, status="crashed")
+            stderr_head = _stream_head(redacted_stderr)
             raise NodeManualRequired(
                 f"tool node {node.id!r}: the tool {node.tool!r} exited with code "
                 f"{result.exit_code} without stdout; the checker crashed or malfunctioned. "
@@ -206,20 +234,25 @@ class ToolNodeRunner:
         try:
             contract = parse_tool_output(result.exit_code, redacted_stdout)
         except ToolContractError as exc:
-            self._complete(run_id, status="invalid_output")
+            self._complete(run, status="invalid_output")
             raise NodeManualRequired(
                 f"tool node {node.id!r}: the tool {node.tool!r} emitted an invalid outcome ({exc}) "
                 "— failing closed to manual review"
             ) from exc
 
-        if self._is_repeated_no_finding_failure(node, contract, result.exit_code, redacted_stdout):
-            self._complete(run_id, status="stalled", outcome=contract.outcome)
+        repeats = self._repeated_unfixable_failure(
+            node, ctx, contract, result.exit_code, redacted_stdout
+        )
+        if repeats is not None:
+            self._complete(run, status="stalled", outcome=contract.outcome)
             raise NodeManualRequired(
-                f"tool node {node.id!r}: the tool {node.tool!r} repeated an identical failure "
-                "without findings; task parked before another fix iteration could be charged"
+                f"tool node {node.id!r}: the tool {node.tool!r} returned the same failure "
+                f"{repeats} times with no top-level 'findings' array, so no fix iteration could be "
+                f"given a typed handle on it; task parked. Repeated output: "
+                f"{_stream_head(redacted_stdout)!r}"
             )
 
-        self._complete(run_id, status=_run_status(contract.outcome), outcome=contract.outcome)
+        self._complete(run, status=_run_status(contract.outcome), outcome=contract.outcome)
         drift, wrote = self._control_drift(control_before, ctx.task_id)
         return NodeResult(
             node_id=node.id,
@@ -264,7 +297,7 @@ class ToolNodeRunner:
         summary = control_drift.summary() if control_drift is not None else None
         return summary, git.changed_code_entries(task_id) != before.tree
 
-    def _resolve(self, node: ToolNode, run_id: int) -> Path:
+    def _resolve(self, node: ToolNode, run: NodeRun) -> Path:
         """Resolve the tool name → executable, fail-closed to manual if the registry can't.
 
         Validation already resolved every ``tool`` at preflight, so this succeeds in the normal
@@ -272,7 +305,7 @@ class ToolNodeRunner:
         """
         registry = self._s.tool_registry
         if registry is None:
-            self._complete(run_id, status="launch_error")
+            self._complete(run, status="launch_error")
             raise NodeManualRequired(
                 f"tool node {node.id!r}: no operator tool registry is configured "
                 "(no .worc/tools/ layer) — cannot run a tool node"
@@ -280,7 +313,7 @@ class ToolNodeRunner:
         try:
             return registry.resolve(node.tool)
         except ToolResolutionError as exc:
-            self._complete(run_id, status="launch_error")
+            self._complete(run, status="launch_error")
             raise NodeManualRequired(f"tool node {node.id!r}: {exc}") from exc
 
     def _build_stdin(self, node: ToolNode, ctx: NodeContext) -> str:
@@ -312,30 +345,50 @@ class ToolNodeRunner:
         (node_dir / TOOL_STDERR_FILENAME).write_text(redacted_stderr, encoding="utf-8")
         return redacted_stdout, redacted_stderr
 
-    def _is_repeated_no_finding_failure(
+    def _repeated_unfixable_failure(
         self,
         node: ToolNode,
+        ctx: NodeContext,
         contract: ToolContract,
         exit_code: int | None,
         redacted_stdout: str,
-    ) -> bool:
-        """Detect the second identical, non-actionable failure from one tool node."""
+    ) -> int | None:
+        """How many identical failures in a row, once that run of them must stop the loop.
+
+        ``None`` while the loop may continue. The threshold is the third tier of the contract in the
+        module docstring: a failure carrying ``data`` is actionable, so it is bounded by the number
+        the flow author wrote for this node's loop rather than by a detector that knows nothing
+        about it — a tool that reports through ``data`` was otherwise held to a stricter standard
+        than one that reports through ``findings``, which is backwards. A failure carrying neither
+        channel keeps the two-strike limit, and a declared budget does not extend it: nothing
+        downstream can act on the repeat, so more rounds of it buy nothing.
+        """
         if contract.outcome != "fail" or contract.findings:
-            self._last_no_finding_failure.pop(node.id, None)
-            return False
+            self._identical_failures.pop(node.id, None)
+            return None
         fingerprint = sha256(f"{exit_code}\0{redacted_stdout}".encode()).hexdigest()
-        repeated = self._last_no_finding_failure.get(node.id) == fingerprint
-        self._last_no_finding_failure[node.id] = fingerprint
-        return repeated
+        previous = self._identical_failures.get(node.id)
+        streak = (
+            previous.count + 1
+            if previous is not None and previous.fingerprint == fingerprint
+            else 1
+        )
+        self._identical_failures[node.id] = _IdenticalFailures(
+            fingerprint=fingerprint, count=streak
+        )
+        limit = _UNSTRUCTURED_REPEAT_LIMIT
+        if contract.data:
+            declared = declared_loop_budget(ctx.snapshot, node.id)
+            if declared is not None:
+                limit = max(declared, _UNSTRUCTURED_REPEAT_LIMIT)
+        return streak if streak >= limit else None
 
     def _register(self, task_id: str, node_id: str, path: str) -> None:
         if self._s.register_artifact is not None:
             self._s.register_artifact(task_id, f"tool:{node_id}", path)
 
-    def _complete(self, run_id: int, *, status: str, outcome: str | None = None) -> None:
-        self._s.store.complete_node_run(
-            run_id, status=status, outcome=outcome, finished_at=self._s.clock()
-        )
+    def _complete(self, run: NodeRun, *, status: str, outcome: str | None = None) -> None:
+        run.complete(status=status, outcome=outcome)
 
 
 def _launch_argv(tool_path: Path) -> list[str]:
@@ -371,6 +424,17 @@ def parse_tool_output(exit_code: int | None, stdout: str) -> ToolContract:
     else:
         outcome = "pass" if exit_code == 0 else "fail"
     return ToolContract(outcome=outcome, findings=findings, data=data)
+
+
+def tool_reported_data(stdout: str) -> Mapping[str, object] | None:
+    """The ``data`` object a tool reported on stdout, or ``None`` when it reported none.
+
+    Pure, and the read side of the same contract :func:`parse_tool_output` gates on — the step
+    record calls it to put a gate's own measurements in front of the reader that has to write about
+    them, without re-deciding an outcome the engine already routed on (which is why it takes no exit
+    code). Kept here, beside the parser, so the contract is stated once.
+    """
+    return _data_from(_parse_json_object(stdout))
 
 
 def _validated_outcome(raw: object) -> str:
@@ -443,6 +507,11 @@ def _read_text(path: Path) -> str:
         return ""
 
 
-def _stderr_head(stderr: str) -> str:
-    """Return a compact bounded diagnostic suitable for the operator-facing stop reason."""
-    return " ".join(stderr.strip().splitlines())[:_STDERR_HEAD_CHARS]
+def _stream_head(stream: str) -> str:
+    """Return a compact bounded diagnostic suitable for the operator-facing stop reason.
+
+    Both call sites pass an already-redacted stream, which is what makes quoting it safe: the
+    operator needs to see what the tool actually said, and a park message is read far more often
+    than the artifact it points at.
+    """
+    return " ".join(stream.strip().splitlines())[:_STREAM_HEAD_CHARS]

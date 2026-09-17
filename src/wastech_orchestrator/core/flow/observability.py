@@ -148,6 +148,12 @@ def record_provider_attempts(
     summation-safe per-run delta against the resumed session's baseline. Takes the store + clock
     explicitly (not a full ``NodeServices``) so the supervisor, which has no ``NodeServices``,
     reuses the same recorder.
+
+    Every row also carries the effective ``model`` / ``reasoning`` of its attempt, read off the
+    same :class:`ProviderAttempt` the prompt-audit step is rendered from. That shared source is the
+    point: ``prompt_audit`` is off by default, so a per-model cost query must not depend on it, and
+    two independent resolutions of "what did this node run on" is exactly how a recorded model came
+    to disagree with what a fallback attempt actually ran.
     """
     for attempt in outcome.attempts:
         result = attempt.result
@@ -162,6 +168,12 @@ def record_provider_attempts(
                 supervisor_function=supervisor_function,
                 provider=attempt.provider.value,
                 attempt=attempt.attempt,
+                # The SAME :class:`ProviderAttempt` fields the prompt-audit record below reads, so
+                # the mandatory accounting table and the optional audit aid cannot disagree about
+                # what a node ran on — and so the answer survives with ``prompt_audit`` off, which
+                # is the shipped default.
+                model=attempt.model,
+                reasoning=attempt.reasoning,
                 status=attempt.status.value if attempt.status else None,
                 error_class=attempt.error_class.value if attempt.error_class else None,
                 exit_code=result.exit_code if result else None,

@@ -40,6 +40,9 @@ def build_path_context(
     does not exist yet — e.g. ``diff_path`` before any edit, ``review_path`` before review). No
     secret, full environment, or session id is ever included — only these fixed, allowlisted keys.
 
+    ``conflicts_path`` is the merge flow's conflict inventory — populated only while a conflicted
+    base merge is being resolved, empty everywhere else.
+
     ``report_dir`` is this flow's resolved report directory for this task
     (:func:`resolve_report_dir` — repo-relative POSIX, ``None`` for ``code_change``). It is the one
     entry that is not an artifact the orchestrator wrote: it is where the node is *told to write*,
@@ -53,6 +56,7 @@ def build_path_context(
         "diff_path": inputs.diff_path,
         "checks_path": inputs.checks_path,
         "review_path": inputs.review_path,
+        "conflicts_path": inputs.conflicts_path,
         "report_dir": report_dir,
     }
 

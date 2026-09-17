@@ -19,6 +19,7 @@ from typing import Any
 
 import yaml
 
+from wastech_orchestrator.checks.model import is_safe_relpath
 from wastech_orchestrator.config.schema import (
     CONFIG_SCHEMA_VERSION,
     DEFAULT_TOOL_TIMEOUT_SECONDS,
@@ -410,6 +411,7 @@ def _build_repo(raw: Any, issues: list[str]) -> RepoConfig:
             "branch_prefix",
             "branch_mode",
             "checkout_base_on_cleanup",
+            "governance_paths",
         },
         "repo",
         issues,
@@ -423,7 +425,37 @@ def _build_repo(raw: Any, issues: list[str]) -> RepoConfig:
             m.get("branch_mode"), BranchMode, "repo.branch_mode", issues, BranchMode.NEW
         ),
         checkout_base_on_cleanup=_opt_bool(m, "checkout_base_on_cleanup", "repo", issues),
+        governance_paths=_governance_paths(m, issues),
     )
+
+
+def _governance_paths(m: Mapping[str, Any], issues: list[str]) -> tuple[str, ...]:
+    """``repo.governance_paths`` — plain repo-relative globs that ADD to the governance floor.
+
+    The key can only widen the set the orchestrator reports on, and the guarantee is structural: it
+    has no exclusion syntax, so there is nothing an operator can write that removes a path from the
+    floor. What this refuses is the forms someone might reach for in the belief that there is one. A
+    leading ``!`` borrowed from ``.gitignore`` would otherwise be read literally as a filename and
+    match nothing — a silent no-op instead of the removal it was meant to be, which is the worst of
+    the three possible outcomes. An absolute, ``~``-rooted or traversing value is refused for the
+    same reason every other path key refuses one: these patterns are matched against repo-relative
+    POSIX paths, so such a value could never match anything either.
+    """
+    where = "repo.governance_paths"
+    values = _str_tuple(m, "governance_paths", (), "repo", issues)
+    for value in values:
+        if value.strip().startswith("!"):
+            issues.append(
+                f"{where}: {value!r} looks like an exclusion, and this key has none to express — "
+                "it only ADDS to the governance set (the agent-rules tree plus the root "
+                "instruction files), which no configuration can shrink or switch off"
+            )
+        elif not is_safe_relpath(value):
+            issues.append(
+                f"{where}: {value!r} must be a repo-relative glob (no absolute path, no '~', no "
+                "'..' traversal) — the patterns are matched against repo-relative POSIX paths"
+            )
+    return values
 
 
 def _build_paths(raw: Any, issues: list[str]) -> PathsConfig:

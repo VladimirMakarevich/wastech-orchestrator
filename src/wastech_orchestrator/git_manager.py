@@ -29,6 +29,7 @@ import tempfile
 import time
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
 
 from wastech_orchestrator.config.schema import (
@@ -679,6 +680,45 @@ class ChangedPath:
     previous_path: str | None = None
 
 
+class ConflictEvidence(StrEnum):
+    """How a resolution of one conflicted path could become visible in the working tree.
+
+    The caller's merge gate branches on this and never on :attr:`ConflictedPath.code`, so Git's
+    index vocabulary — stage numbers, mode bits, the two-letter codes — stays on this side of the
+    seam and the core keeps asking only "could anyone tell a decision was made here?".
+    """
+
+    WORKTREE_BYTES = "worktree_bytes"
+    """The file's content IS the answer: a decision shows up as different bytes, or as the file
+    being gone. Every ordinary conflict, textual or binary."""
+
+    NOTHING_TO_DECIDE = "nothing_to_decide"
+    """Both sides removed the path (the index holds the base stage alone): no content can express
+    a preference, and the absence the working tree already shows is the only possible outcome."""
+
+    OUT_OF_BAND = "out_of_band"
+    """A real decision that editing a file in this working tree cannot express — a submodule
+    gitlink (the answer is a commit id), or an entry the tree holds as something other than a
+    regular file. An agent that may not run Git cannot resolve one, so the caller refuses."""
+
+
+@dataclass(frozen=True)
+class ConflictedPath:
+    """One unmerged index entry, plus a probe of what the working tree holds for it right now."""
+
+    path: str  # repo-relative POSIX, exactly as Git reports it
+    code: str  # Git's porcelain two-letter code, derived from which stages the index holds
+    description: str  # one plain clause, e.g. "we modified it, base deleted it"
+    has_base: bool  # index stage 1 (the merge base)
+    has_ours: bool  # index stage 2 (the task branch)
+    has_theirs: bool  # index stage 3 (the branch being merged in)
+    evidence: ConflictEvidence
+    exists: bool  # a regular file sits at this path right now
+    digest: str | None  # sha256 of the working-tree bytes; None when nothing readable is there
+    binary: bool  # a NUL byte in the scanned head — advisory, for the report
+    has_markers: bool  # a conflict-marker line in the scanned head — advisory, for the report
+
+
 # --- machine-safe Git path parsing (NUL-delimited `-z` output) ------------------------------
 #
 # Git's default text output C-quotes any path with a non-ASCII/space/quote/control byte (e.g. a
@@ -801,6 +841,44 @@ def _parse_ls_files_stage_z(output: str) -> dict[str, tuple[str, str, str]]:
             continue
         mode, blob_sha, stage = parts
         entries[path] = (mode, blob_sha, stage)
+    return entries
+
+
+#: Bytes of a conflicted file read for the advisory binary / conflict-marker probe. The digest is
+#: taken over the whole file (it is the gate's evidence); only the human-readable hints are bounded.
+_CONFLICT_SCAN_BYTES = 1_048_576
+#: Git's mode for a submodule entry (a gitlink): the "content" is a commit id, not file bytes.
+_GITLINK_MODE = "160000"
+#: ``frozenset`` of index stages -> (porcelain code, plain clause, what a decision could look like).
+#: Total over every stage set ``git ls-files -u`` can produce; anything outside it fails closed.
+_CONFLICT_BY_STAGES: dict[frozenset[int], tuple[str, str, ConflictEvidence]] = {
+    frozenset({1, 2, 3}): ("UU", "both sides modified it", ConflictEvidence.WORKTREE_BYTES),
+    frozenset({2, 3}): ("AA", "both sides added it", ConflictEvidence.WORKTREE_BYTES),
+    frozenset({1, 2}): ("UD", "we modified it, base deleted it", ConflictEvidence.WORKTREE_BYTES),
+    frozenset({1, 3}): ("DU", "we deleted it, base modified it", ConflictEvidence.WORKTREE_BYTES),
+    frozenset({2}): ("AU", "only we added it", ConflictEvidence.WORKTREE_BYTES),
+    frozenset({3}): ("UA", "only base added it", ConflictEvidence.WORKTREE_BYTES),
+    frozenset({1}): ("DD", "both sides deleted it", ConflictEvidence.NOTHING_TO_DECIDE),
+}
+
+
+def _parse_ls_files_unmerged_z(output: str) -> dict[str, list[tuple[str, int]]]:
+    """``{path: [(mode, stage), ...]}`` from ``git ls-files -u -z`` output.
+
+    Same record shape as :func:`_parse_ls_files_stage_z` (``<mode> <sha> <stage>\t<path>``), but an
+    unmerged path carries up to three of them — which is the whole signal — so the stages are
+    accumulated per path instead of overwriting each other. A malformed record is skipped, not
+    crashed on, exactly as the sibling parser does.
+    """
+    entries: dict[str, list[tuple[str, int]]] = {}
+    for record in output.split("\0"):
+        if not record or "\t" not in record:
+            continue
+        meta, path = record.split("\t", 1)
+        parts = meta.split()
+        if len(parts) != 3 or not parts[2].isdigit():  # malformed line — skip rather than crash
+            continue
+        entries.setdefault(path, []).append((parts[0], int(parts[2])))
     return entries
 
 
@@ -1640,6 +1718,87 @@ class GitManager:
         """
         if self.merge_in_progress():
             self._git("merge", "--abort")
+
+    def conflicted_paths(self) -> tuple[ConflictedPath, ...]:
+        """Every unmerged index entry, with what the working tree holds for it at this instant.
+
+        Reads ``git ls-files -u -z`` — the **index** alone, and that choice carries the design: the
+        operator merge routine takes this snapshot twice, once before handing the conflicted tree to
+        the merge flow and once after, and the merge role forbids the agent from running Git, so the
+        set of unmerged entries is identical across the pair. Only the working-tree probe moves,
+        which is exactly the question the caller asks. ``git status --porcelain`` would fold
+        worktree state into the identity and the two snapshots could disagree about which paths are
+        even in play.
+
+        ``code``/``description``/``evidence`` are **derived** from which of stages 1/2/3 the index
+        holds (:data:`_CONFLICT_BY_STAGES`), so no second Git call can contradict the first; an
+        unknown stage set or a submodule gitlink resolves to
+        :attr:`ConflictEvidence.OUT_OF_BAND` rather than raising.
+
+        ``()`` when no merge is in flight — a clean index has no unmerged entries. Checked
+        (:meth:`_git_checked`), not best-effort: this feeds a gate, and a Git invocation that failed
+        must raise rather than read as "nothing conflicted".
+
+        ``has_markers``/``binary`` are advisory report content from a bounded head scan
+        (:data:`_CONFLICT_SCAN_BYTES`); the authoritative marker refusal stays ``git diff --cached
+        --check`` in :meth:`commit_merge_resolution`. ``digest`` covers the whole file — it is the
+        gate's evidence and must not be bounded. A path whose bytes do not resolve on this host
+        (undecodable name, too long, locked, replaced by a directory) probes as unreadable, which
+        the caller treats as "no decision", never as "fine".
+        """
+        raw = self._git_checked("ls-files", "-u", "-z")
+        entries: list[ConflictedPath] = []
+        for path, stages in _parse_ls_files_unmerged_z(raw).items():
+            code, description, evidence = _CONFLICT_BY_STAGES.get(
+                frozenset(stage for _mode, stage in stages),
+                (
+                    "??",
+                    "an unmerged entry Git described in a shape we do not model",
+                    ConflictEvidence.OUT_OF_BAND,
+                ),
+            )
+            if any(mode == _GITLINK_MODE for mode, _stage in stages):
+                evidence = ConflictEvidence.OUT_OF_BAND
+                description = f"{description} (a submodule gitlink — the answer is a commit id)"
+            held = {stage for _mode, stage in stages}
+            exists, digest, binary, has_markers = self._probe_conflict_file(
+                Path(self._clone) / path
+            )
+            entries.append(
+                ConflictedPath(
+                    path=path,
+                    code=code,
+                    description=description,
+                    has_base=1 in held,
+                    has_ours=2 in held,
+                    has_theirs=3 in held,
+                    evidence=evidence,
+                    exists=exists,
+                    digest=digest,
+                    binary=binary,
+                    has_markers=has_markers,
+                )
+            )
+        return tuple(sorted(entries, key=lambda entry: entry.path))
+
+    @staticmethod
+    def _probe_conflict_file(path: Path) -> tuple[bool, str | None, bool, bool]:
+        """``(exists, digest, binary, has_markers)`` for one conflicted path, no-follow.
+
+        A symlink, a directory (a submodule checkout), a device node or an absent path all probe as
+        unreadable — the caller must refuse such an entry, not guess about it. Any :class:`OSError`
+        degrades to the same answer for the same reason: an unreadable file is evidence of nothing.
+        """
+        try:
+            if path.is_symlink() or not path.is_file():
+                return (False, None, False, False)
+            digest = sha256_file(path)
+            with path.open("rb") as handle:
+                head = handle.read(_CONFLICT_SCAN_BYTES)
+        except OSError:
+            return (False, None, False, False)
+        markers = head.startswith(b"<<<<<<< ") or b"\n<<<<<<< " in head
+        return (True, digest, b"\0" in head, markers)
 
     def _assert_push_destination_unchanged(self, task_id: str | None = None) -> None:
         """Refuse to push when ``origin``'s push URL no longer resolves where it did at branch prep.

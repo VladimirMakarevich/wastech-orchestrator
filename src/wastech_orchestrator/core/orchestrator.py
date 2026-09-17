@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import sqlite3
 import time
@@ -32,6 +33,7 @@ from wastech_orchestrator.config.schema import (
     OrchestratorConfig,
 )
 from wastech_orchestrator.core import observe_cadence
+from wastech_orchestrator.core.cost_gap import cost_gaps
 from wastech_orchestrator.core.decomposition import (
     REASON_N_OUT_OF_RANGE,
     DecompositionDecision,
@@ -104,6 +106,7 @@ from wastech_orchestrator.core.flow.postprocess import (
 )
 from wastech_orchestrator.core.flow.recorder import (
     StateStoreRunRecorder,
+    failing_node_evidence,
     fell_back_from,
     hydrate_run_state,
     read_final_diff,
@@ -160,16 +163,19 @@ from wastech_orchestrator.core.supervisor_packet import build_packet_facts
 from wastech_orchestrator.core.supervisor_usage import summarize_spend
 from wastech_orchestrator.git_manager import (
     CleanupOutcome,
+    ConflictedPath,
+    ConflictEvidence,
     GitCommandError,
     GitManager,
     ManualActionRequired,
 )
 from wastech_orchestrator.ledger import (
+    FAILURE_REPORT_FILENAME,
     INFRA_LOOP,
+    RECOVERED_PREFIX,
     STUCK_FILENAME,
     Ledger,
     LedgerRecord,
-    NodeFailureEvidence,
     write_failure_report,
 )
 from wastech_orchestrator.memory import (
@@ -482,8 +488,167 @@ def _ledger_has_manual(ledger: Ledger, task_id: str) -> bool:
 
 
 def _ledger_attempt_count(ledger: Ledger, task_id: str) -> int:
-    """How many terminal records the ledger already holds for ``task_id`` (prior attempts)."""
-    return sum(1 for rec in ledger.records() if rec.get("id") == task_id)
+    """How many times ``task_id`` has already reached a terminal, per the ledger.
+
+    Gate refusals are not counted. They are appended for an id that was never claimed — there is no
+    ``tasks`` row, no branch and no work — so counting one would number the first real run as a
+    re-attempt and give it a ``rerun_of`` pointing at a run that never happened. The duplicate-id
+    gate already treats such records as non-reserving for the same reason.
+    """
+    return sum(
+        1
+        for rec in ledger.records()
+        if rec.get("id") == task_id and not rec.get("validation_reason")
+    )
+
+
+#: Cap on the conflicted paths named in one refusal (the reason string stays bounded and
+#: secret-free, like the drift evidence cap the Git Manager renders its own refusals under).
+_UNDECIDED_EVIDENCE_CAP = 20
+
+
+def _conflict_worktree_state(entry: ConflictedPath) -> str:
+    """One clause describing what the working tree holds for a conflicted path right now."""
+    if not entry.exists:
+        return "nothing is there (no readable file at this path)"
+    if entry.binary:
+        return "a binary file — a conflict in one carries no markers and cannot be merged textually"
+    if entry.has_markers:
+        return "a text file carrying conflict markers (`<<<<<<<`)"
+    return "a text file with **no conflict markers** — one side's content, verbatim"
+
+
+def _conflict_decision_advice(entry: ConflictedPath) -> str:
+    """What would count as a resolution of this conflicted path, in the agent's own terms."""
+    if entry.evidence is ConflictEvidence.OUT_OF_BAND:
+        return (
+            "this one cannot be resolved by editing a file here — name it in your final message "
+            "and leave it alone"
+        )
+    if entry.evidence is ConflictEvidence.NOTHING_TO_DECIDE:
+        return "both sides removed it; there is nothing to decide and nothing to do"
+    if entry.has_markers:
+        return "remove every conflict marker and leave the single merged version you chose"
+    return (
+        "there are no markers here: the file you see is the side Git picked for you, not a "
+        "resolution. Write the content you choose, or delete the file — a path left exactly as it "
+        "is records no decision and the merge will be refused"
+    )
+
+
+def _format_conflict_report(task_id: str, conflicts: Sequence[ConflictedPath]) -> str:
+    """The merge flow's conflict inventory, as the document the agent reads (``{conflicts_path}``).
+
+    Pure and deterministic: every clause is interpolated from a :class:`ConflictedPath`, so the
+    core renders Git's verdict without re-deriving it and without comparing anything to a Git
+    literal — :class:`ConflictEvidence` is the only field it branches on.
+    """
+    lines = [
+        f"# Merge conflicts — {task_id}",
+        "",
+        (
+            "The base branch was merged into this task's branch and stopped on the conflicts "
+            "below. Resolve every one of them by editing the working tree. Not every conflict has "
+            "markers: read each entry's own line about what is there and what would count as a "
+            "decision. The orchestrator commits what the working tree holds, and refuses to commit "
+            "a conflicted path it cannot see a decision on."
+        ),
+        "",
+    ]
+    for entry in conflicts:
+        lines += [
+            f"## {entry.path} — {entry.description} (`{entry.code}`)",
+            "",
+            "- sides: merge base {base} · our side {ours} · incoming side {theirs}".format(
+                base="has it" if entry.has_base else "does not have it",
+                ours="has it" if entry.has_ours else "does not have it",
+                theirs="has it" if entry.has_theirs else "does not have it",
+            ),
+            f"- working tree: {_conflict_worktree_state(entry)}",
+            f"- to decide: {_conflict_decision_advice(entry)}",
+            "",
+        ]
+    blocked = [entry.path for entry in conflicts if entry.evidence is ConflictEvidence.OUT_OF_BAND]
+    if blocked:
+        lines += [
+            "## These you cannot resolve here",
+            "",
+            (
+                "A submodule pointer (and anything the tree does not hold as a regular file) is "
+                "decided by a commit id, not by file content, so no edit in this working tree can "
+                "express it. Leave these alone and name them in your final message:"
+            ),
+            "",
+            *[f"- {path}" for path in blocked],
+            "",
+        ]
+    return "\n".join(lines)
+
+
+def _undecided_conflicts(
+    before: Sequence[ConflictedPath], after: Sequence[ConflictedPath]
+) -> list[tuple[ConflictedPath, str]]:
+    """Every conflicted path the merge flow left without an observable decision, and why.
+
+    Pure — no Git, no IO: the two snapshots come from
+    :meth:`~wastech_orchestrator.git_manager.GitManager.conflicted_paths` either side of the flow,
+    so this compares nothing but the working tree. It never reads ``code``/``description`` (those
+    are rendered into the refusal, never branched on), which keeps Git's index vocabulary out of
+    the core.
+
+    The honest limitation, stated where it is implemented: for a conflict with no markers — a file
+    one side deleted, a binary both sides added — Git drops one side into the working tree, so "I
+    read both sides and chose to keep ours, unchanged" leaves exactly the tree that "nobody looked
+    at it" leaves. Both are reported here. A refused correct resolution costs one manual merge with
+    the pull request still open and nothing committed; an accepted undecided one ships a merge
+    nobody made into a reviewed branch. That ordering is the whole point.
+    """
+    current_by_path = {entry.path: entry for entry in after}
+    undecided: list[tuple[ConflictedPath, str]] = []
+    for entry in before:
+        current = current_by_path.get(entry.path)
+        if current is None:
+            continue  # the entry left the index — something resolved it in Git itself
+        if entry.evidence is ConflictEvidence.NOTHING_TO_DECIDE:
+            continue  # both sides removed it: the absence already there is the only outcome
+        if entry.evidence is ConflictEvidence.OUT_OF_BAND:
+            undecided.append((entry, "cannot be resolved by editing a file in this working tree"))
+            continue
+        if entry.exists != current.exists:
+            continue  # the file was deleted or restored — a decision either way
+        if entry.digest is None or current.digest is None:
+            undecided.append((entry, "the working tree holds nothing readable at this path"))
+            continue
+        if entry.digest == current.digest:
+            undecided.append((entry, "byte-identical to what the merge left there"))
+    return undecided
+
+
+def _undecided_conflicts_reason(
+    undecided: Sequence[tuple[ConflictedPath, str]], *, total: int, base_branch: str
+) -> str:
+    """The operator-facing refusal for a merge nobody finished deciding (bounded, secret-free)."""
+    shown = undecided[:_UNDECIDED_EVIDENCE_CAP]
+    lines = [
+        (
+            f"refusing to commit the base merge: {len(undecided)} of {total} conflicted path(s) "
+            "carry no decision."
+        )
+    ]
+    lines += [f"  - {entry.path} [{entry.code}] {entry.description}: {why}" for entry, why in shown]
+    if len(undecided) > len(shown):
+        lines.append(f"  - (+{len(undecided) - len(shown)} more)")
+    lines += [
+        "Nothing was committed; the merge was aborted and the pull request is still open.",
+        (
+            'A conflict whose correct answer really is "keep our side, unchanged" leaves the same '
+            "working tree as one nobody looked at, and this refuses both. Finish those paths by "
+            f"hand (`git merge origin/{base_branch}`, resolve, `git commit`) and re-run "
+            "`worc merge-task` — it then takes the clean path — or adjust the merge flow's role "
+            "prompt and re-run."
+        ),
+    ]
+    return "\n".join(lines)
 
 
 def _format_predecessor_floor(
@@ -525,6 +690,48 @@ def effective_skip(task: NormalizedTask) -> frozenset[str]:
     time the engine consumes this set it is known to name real, safely-skippable nodes.
     """
     return task.disabled_nodes()
+
+
+def _dir_size_bytes(path: Path) -> int | None:
+    """Total size of the files under ``path``, or ``None`` when it cannot be measured.
+
+    Best-effort by contract — this feeds an advisory operator line, never a decision. A tree that
+    disappears mid-walk, or a file the process cannot stat, contributes nothing rather than raising
+    into a terminal transition that has already been decided.
+    """
+    if not path.is_dir():
+        return None
+    total = 0
+    try:
+        for entry in path.rglob("*"):
+            try:
+                if entry.is_file():
+                    total += entry.stat().st_size
+            except OSError:
+                continue
+    except OSError:
+        return None
+    return total
+
+
+def _human_bytes(size: int) -> str:
+    """``"14.2 MB"`` — a size an operator reads, not a byte count they have to divide."""
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{int(value)} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
+def _render_packet_drift_section(sentence: str) -> str:
+    """Markdown callout for the summary / PR body: the task file moved under a running task.
+
+    The same sentence the resume logged, repeated where a reviewer will see it — a log line is gone
+    by the time anyone reads the pull request, and "which version of the task is this against" is a
+    question the diff cannot answer on its own.
+    """
+    return f"\n\n## Task file changed after the run started\n\n{sentence}\n"
 
 
 def _render_governance_section(paths: tuple[str, ...]) -> str:
@@ -624,6 +831,10 @@ class PipelineResult:
     #: opaque ("injection_suspected"); this carries e.g. ``agents.review: forbidden flag shape`` so
     #: the operator sees WHICH field and WHY on the console without opening the JSON report.
     validation_detail: str | None = None
+    #: where a rejected task file was moved, when it was moved. The quarantine lives under the
+    #: private home, which the operator does not browse and agents cannot read, so a reject that
+    #: does not print this is a file that disappeared. ``None`` when nothing was moved.
+    quarantine_path: str | None = None
 
 
 class SlotBusyError(Exception):
@@ -656,6 +867,10 @@ class _Pipeline:
     branch: str = ""
     slug: str = ""
     check_sets: tuple[ResolvedCheckSet, ...] = ()  # normalized command_sets, resolved at preflight
+    #: Set on a resume whose live task file no longer matches the frozen packet: the operator-facing
+    #: sentence, logged once and then carried into ``summary.md`` so it survives into the pull
+    #: request. ``None`` on every run where the file is still the one that was frozen.
+    packet_drift: str | None = None
     # The frozen ``(bundle-key, sha256)`` entries accumulated while the agent inputs are frozen
     # (task packet, then the root repository instructions). Combined with the control-plane digest
     # into the composite ``instruction_manifest_digest`` by ``_finalize_instruction_bundle``.
@@ -793,8 +1008,6 @@ class Orchestrator:
         # the Router, so a stop either interrupts at a clean node boundary or suppresses fallback
         # when a hard-killed provider exits abnormally mid-node.
         self._is_cancelled = is_cancelled
-        # Per-id attempt number stamped onto the next ledger record, set by ``rerun``/``continue``.
-        self._rerun_attempt: dict[str, int] = {}
         # Task ids whose next resume is an operator ``rerun --continue`` that ADOPTS the current
         # on-disk control plane (re-freeze) instead of loading the frozen bundle. Set in
         # ``continue_task`` for the span of one resume; automatic crash-recovery never sets it, so
@@ -1488,7 +1701,6 @@ class Orchestrator:
             force_reset_remote=force_reset_remote,
         )
         self._store.reset_task_for_rerun(task_id)
-        self._rerun_attempt[task_id] = prior + 1
         self._log(task_id).info("rerun: fresh attempt", extra={"attempt": prior + 1})
         return self.run_task(source_path)
 
@@ -1521,7 +1733,6 @@ class Orchestrator:
         # Restart-in-place also starts clean; the run re-publishes into the exchange.
         clear_exchange_task_dir(self._exchange_root, task_id)
         self._store.reset_task_for_rerun(task_id)  # DB-only reset; the branch is left untouched
-        self._rerun_attempt[task_id] = prior + 1
         self._log(task_id).info("rerun: restart in place", extra={"attempt": prior + 1})
         return self.run_task(source_path)
 
@@ -1550,7 +1761,6 @@ class Orchestrator:
             raise PipelineFailed(
                 f"cannot continue '{task_id}': no recoverable stage recorded; use a fresh rerun"
             )
-        self._rerun_attempt[task_id] = _ledger_attempt_count(self._ledger, task_id) + 1
         self._apply_continue_controls(
             task_id,
             current_node=current_node,
@@ -1774,7 +1984,8 @@ class Orchestrator:
         # The operator finalize/merge/PR-sync paths are terminal producers that bypass
         # ``_go_terminal``, so they must seal the exchange too. Idempotent — a no-op when the
         # pipeline terminal already sealed and removed the active exchange for this task.
-        self._seal_terminal_exchange(task_id, final=declared)
+        attempt = _ledger_attempt_count(self._ledger, task_id) + 1
+        self._seal_terminal_exchange(task_id, final=declared, attempt=attempt)
         self._evict_run_artifacts(task_id, final=declared)
         self._relocate_task_file(row.source_path, task_id, declared)
         consume_pending_interactions(self._artifacts_root, task_id)
@@ -1903,9 +2114,48 @@ class Orchestrator:
                         f"base merge conflicts and --no-resolve was set; PR left open: {pr_url}"
                     )
                 p = self._degraded_pipeline(row)  # minimal pipeline from the stored row
-                if not self._run_merge_flow(p, self._resolve_merge_flow()):
+                # The inventory is taken once, before the flow: it is both what the agent is told
+                # (the published report) and the "before" half the decision gate compares against.
+                before = self._git.conflicted_paths()
+                try:
+                    resolved = self._run_merge_flow(
+                        p,
+                        self._resolve_merge_flow(),
+                        conflicts_path=self._publish_conflict_report(p, before),
+                    )
+                except NodeManualRequired as exc:
+                    # A merge-flow node that needs a human (exchange integrity, a denied dangerous
+                    # diff) raises the node-layer class, which the task driver maps to a status and
+                    # this routine did not catch at all — it escaped the CLI as a traceback.
+                    # Converted once, here, to the class this routine already uses for a
+                    # human-needed block, so the abort below still runs and the class survives.
+                    raise ManualActionRequired(f"merge flow stopped: {exc}") from exc
+                if not resolved:
                     raise PipelineFailed(
                         f"the merge flow produced no clean, passing tree; PR left open: {pr_url}"
+                    )
+                # Every conflicted path must show a decision before anything is staged. Run here,
+                # not at the commit seam: the "before" half belongs to this routine, and
+                # `commit_merge_resolution` records a started publish op the moment it is entered —
+                # a refusal after that would leave a started-never-finished row for a merge that
+                # was then aborted.
+                after = self._git.conflicted_paths()
+                staged_away = {e.path for e in before} - {e.path for e in after}
+                if staged_away:
+                    # The merge role forbids git mutations; one happened. The resolution is taken
+                    # (its content is in the tree either way), the fact is not swallowed.
+                    log.warning(
+                        "[MERGE-TASK] a conflicted path left the index during the merge flow",
+                        extra={"paths": ", ".join(sorted(staged_away))},
+                    )
+                undecided = _undecided_conflicts(before, after)
+                if undecided:
+                    raise ManualActionRequired(
+                        _undecided_conflicts_reason(
+                            undecided,
+                            total=len(before),
+                            base_branch=self._config.repo.base_branch,
+                        )
                     )
             else:
                 log.info("[MERGE-TASK] clean base merge", extra={"branch": branch})
@@ -2668,6 +2918,7 @@ class Orchestrator:
             # task was parked could be committed unchecked (the fresh path always records the digest
             # via ``freeze_task_packet``).
             p.instruction_entries.extend(loaded.entries)
+            self._announce_task_packet_drift(p, inputs, frozen_at=loaded.frozen_at)
             self._publish_frozen_task_packet(p, inputs, bundle_dir)
             return
         if bundle_dir.exists():
@@ -2696,6 +2947,37 @@ class Orchestrator:
         # no repository-instruction secret gate (the agent could read the live file regardless).
         p.instruction_entries.extend(freeze_repository_instructions(bundle_dir, files))
         self._publish_frozen_task_packet(p, inputs, bundle_dir)
+
+    def _announce_task_packet_drift(
+        self, p: _Pipeline, inputs: NodeInputs, *, frozen_at: str | None
+    ) -> None:
+        """Say, on every resume, when the live task file no longer matches the frozen packet.
+
+        Freezing is correct and stays: without it a run is not reproducible, and a workspace-write
+        node could rewrite the instructions it is being judged against. What was missing is any
+        signal at all. An operator who corrects a task mid-run sees nothing change, concludes the
+        agent is ignoring them, and the run finishes on the stale text — which on the run that
+        produced this is exactly the contradiction its critic then reported ten times.
+
+        Compared against the frozen packet's own digest (the canonical copy is a byte-for-byte
+        ``copy2`` of the file as it was), so this answers "is the run still on what you submitted",
+        not "has anything anywhere moved". The sentence is also parked on the pipeline so it reaches
+        ``summary.md`` and survives into the pull request; a resume with no live file on disk, or
+        with no frozen packet, says nothing.
+        """
+        frozen = self._task_packet_digest(p)
+        live = inputs.task_path
+        if frozen is None or not live or not Path(live).is_file():
+            return
+        if sha256_file(live) == frozen:
+            return
+        when = f" frozen at {frozen_at}" if frozen_at else " frozen at the start of the run"
+        p.packet_drift = (
+            f"The task file changed after this run started. The run continues on the packet"
+            f"{when}, not on the file as it is now — that is what makes the run reproducible. "
+            f"To apply the edit, stop the run (`worc stop`) and start it again."
+        )
+        self._log(p.task.id).warning(p.packet_drift, extra={"task_file": Path(live).as_posix()})
 
     def _publish_frozen_task_packet(
         self, p: _Pipeline, inputs: NodeInputs, bundle_dir: Path
@@ -2739,7 +3021,11 @@ class Orchestrator:
             bundle_dir,
             entries=p.instruction_entries,
             control_digest=control_digest,
-            metadata={"orchestrator_version": __version__},
+            # ``frozen_at`` is metadata, not an entry, so it stays out of the composite digest: it
+            # is what a later resume quotes back to the operator when their task file has moved
+            # under the run, and a timestamp inside the identity would make every re-freeze a
+            # different bundle.
+            metadata={"orchestrator_version": __version__, "frozen_at": self._clock()},
         )
         self._store.update_task(p.task.id, instruction_manifest_digest=digest)
         label = "agent inputs re-bound (adopt)" if adopt else "agent inputs frozen"
@@ -2759,9 +3045,14 @@ class Orchestrator:
                 f"merge flow {self._config.git.merge_flow!r} could not be resolved: {exc}"
             ) from exc
 
-    def _run_merge_flow(self, p: _Pipeline, snapshot: FlowSnapshot) -> bool:
+    def _run_merge_flow(
+        self, p: _Pipeline, snapshot: FlowSnapshot, *, conflicts_path: str | None = None
+    ) -> bool:
         """Run the merge flow on the already-merged, conflict-marked working tree; True iff it ends
         clean and green.
+
+        ``conflicts_path`` is the published conflict inventory this flow's roles read; the caller
+        holds it because it takes the same snapshot for its own decision gate.
 
         Transactional + ephemeral: a fresh ``FlowRunState`` and a no-op recorder (no checkpoint
         written to the task row, so no clash with ``rerun --continue``), no supervisor, no post-node
@@ -2781,6 +3072,14 @@ class Orchestrator:
             commit_message=f"merge({p.task.id}): resolve base-merge conflicts",
             summary_body_path=self._fallback_summary_path(p),
         )
+        # Nothing re-points ``task_path`` on this route (no packet is published, see above), so the
+        # builder's live ``tasks/<state>/<id>.md`` would be the one non-exchange path in every
+        # request this flow makes — the containment breach that killed the run before the first
+        # provider call. The merge agent's context is the conflicted working tree, not the task.
+        inputs.task_path = None
+        # What this flow is told instead: which paths conflicted, of what kind, and what the
+        # working tree holds for each (the redacted exchange copy of the inventory).
+        inputs.conflicts_path = conflicts_path
         services = self._build_engine_services(p, finalize=None)
         run_state = FlowRunState(flow_fingerprint=snapshot.flow_fingerprint)
         result = drive_flow(
@@ -2795,6 +3094,37 @@ class Orchestrator:
             is_cancelled=self._is_cancelled,
         )
         return result.status is Status.DONE
+
+    def _publish_conflict_report(
+        self, p: _Pipeline, conflicts: Sequence[ConflictedPath]
+    ) -> str | None:
+        """Write the merge flow's conflict inventory and return its exchange path (or ``None``).
+
+        Published **before** the flow runs, so it sits inside every agent attempt's
+        exchange-integrity bracket rather than mutating the exchange under one. The private copy
+        under ``logs/<task-id>/merge/`` is the audit record; the redacted exchange copy is what the
+        role prompts read as ``{conflicts_path}``. ``None`` when nothing conflicted — the clean
+        merge path writes no report at all; with no exchange wired (a unit harness) the private
+        path is returned, exactly as every other publication seam degrades.
+        """
+        if not conflicts:
+            return None
+        content = redact_text(
+            _format_conflict_report(p.task.id, conflicts),
+            extra_secrets=self._memory_extra_secrets(),
+        )
+        path = task_artifact_dir(self._artifacts_root, p.task.id) / "merge" / "conflicts.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        self._register_artifact(p.task.id, "merge_conflicts", str(path))
+        return publish_artifact(
+            str(self._exchange_root),
+            p.task.id,
+            "merge/conflicts.md",
+            content,
+            extra_secrets=self._memory_extra_secrets(),
+            private_path=path.as_posix(),
+        )
 
     def _announce_environment_patterns(self, p: _Pipeline) -> None:
         """Announce what each ``allowed_environment`` prefix pattern resolved to — once, up front.
@@ -2933,11 +3263,17 @@ class Orchestrator:
                     # this an operator who has read the diagnosis could not continue at all, only
                     # re-pay for a fresh run. The daemon's own crash recovery sets no such marker
                     # and still refuses.
+                    refs = self._store.get_task(p.task.id)
                     self._store.update_task(p.task.id, exchange_contaminated=0)
                     contaminated = False
                     self._log(p.task.id).warning(
                         "continuing over an exchange flagged contaminated by mutation detection — "
-                        "the operator asked for this resume; the quarantined evidence is kept"
+                        "the operator asked for this resume; the quarantined evidence is kept at "
+                        "%s",
+                        ", ".join(refs.quarantine_refs) if refs else "(no bundle recorded)",
+                        extra={
+                            "quarantine_refs": list(refs.quarantine_refs) if refs else [],
+                        },
                     )
                 ensure_current_exchange(
                     self._exchange_root,
@@ -3330,6 +3666,14 @@ class Orchestrator:
                 # (refreshed by every agent edit-node). The engine only compares it for equality
                 # across rework charges — stays domain-free. Drop this kwarg to disable the guard.
                 diff_fingerprint=lambda: read_final_diff(self._artifacts_root, p.task.id),
+                # The second no-progress signal, derived from the verdicts already recorded: how
+                # many times in a row this node has returned the same finding set. Read from the
+                # store on demand rather than carried in memory, so a restart — which zeroes the
+                # fingerprint streak above while the persisted loop counters keep counting — cannot
+                # hide a loop that will never converge. Drop this kwarg to disable the guard.
+                repeated_findings=lambda node_id: self._store.consecutive_identical_findings(
+                    p.task.id, node_id=node_id, subtask_order=subtask
+                ),
                 subtask_order=subtask,
                 region=region,
                 disabled_nodes=p.skip,
@@ -3798,6 +4142,11 @@ class Orchestrator:
 
         Whether a ``failure`` / ``fallback`` trigger *should* survive a narrowing is a question for
         the operator, not for this method. It makes the loss visible; it does not decide it.
+
+        ``WARNING``, not ``info``: it reports a configured setting being discarded, which is what
+        that level is for — and the run that produced this rule was configured at
+        ``logging.level: warning``, so the line it needed was written and then filtered out. A
+        mechanism nobody can see is not a mechanism.
         """
         if in_force is configured:
             return
@@ -3807,7 +4156,7 @@ class Orchestrator:
         }
         if in_force is ObserveMode.NONE and self._config.supervisor.observe.triggers:
             extra["dropped_triggers"] = ",".join(self._config.supervisor.observe.triggers)
-        self._log(p.task.id).info(
+        self._log(p.task.id).warning(
             "observation cadence narrowed by the flow; the whole-task summary is unaffected",
             extra=extra,
         )
@@ -4243,6 +4592,7 @@ class Orchestrator:
         reach the pull-request body on every path rather than only the local metadata.
         """
         evaluations = self._store.get_evaluations(p.task.id)
+        attempts = self._store.get_provider_attempts_for_task(p.task.id)
         # Merged, not assigned: on a degraded DONE the supervisor already computed its own list
         # (and merged the same findings into it) but produced no prose, so this writer runs second.
         # A bare assignment would drop the layer's own debt notes from the body AND from the
@@ -4259,7 +4609,6 @@ class Orchestrator:
                 flow_name=p.flow_name,
                 evaluations=evaluations,
                 artifacts_root=self._artifacts_root,
-                exchange_root=self._exchange_root,
                 repo_dir=self._config.repo.local_path,
             ),
             follow_ups=follow_ups,
@@ -4269,7 +4618,11 @@ class Orchestrator:
             degraded=degraded,
             # Present exactly when the layer made calls, so an operator can tell "the layer never
             # ran" from "it ran and could not finish" without a second marker.
-            supervisor_usage=summarize_spend(self._store.get_provider_attempts_for_task(p.task.id)),
+            supervisor_usage=summarize_spend(attempts),
+            # Beside it, what that figure does NOT cover: one shipped provider reports no USD, so a
+            # cost total summed from the column is partial whenever the flow used it. Stated, never
+            # estimated.
+            cost_gaps=cost_gaps(attempts),
         )
 
     def _task_ref(self, p: _Pipeline) -> str | None:
@@ -4290,7 +4643,10 @@ class Orchestrator:
         never a block. Empty on ordinary tasks, so there is no noise there.
         """
         p.governance_changed = governance_changed_paths(
-            self._git.changed_code_paths_since_task_base()
+            self._git.changed_code_paths_since_task_base(),
+            # Additive only: this widens the floor to wherever this repository keeps its rules, and
+            # there is no value of it that makes a floor path stop being reported.
+            extra_globs=self._config.repo.governance_paths,
         )
         if p.governance_changed:
             self._log(p.task.id).warning(
@@ -4317,6 +4673,8 @@ class Orchestrator:
         self._capture_governance_changed(p)
         dest = self._move_task_file(p, final)
         body = self._summary_md_body(p, degraded=degraded)
+        if p.packet_drift:
+            body += _render_packet_drift_section(p.packet_drift)
         if p.governance_changed:
             body += _render_governance_section(p.governance_changed)
         # After `_summary_md_body`, because that call is what runs the deterministic producer of
@@ -4476,6 +4834,40 @@ class Orchestrator:
             log.warning("terminal summary not written", extra={"error": str(exc)})
             return False
 
+    def _recover_failure_artifacts(self, task_id: str) -> str | None:
+        """Retire a survived failure's artifacts at the transition to ``done``; return its loop.
+
+        For a non-blocking evaluator this is the ordinary path rather than an edge case: a guard
+        ends the loop and writes the report, the flow continues because that lens does not gate
+        publication, and the task succeeds — leaving a ledger line that read ``done`` beside a
+        pointer to a failure report, with nothing to tell a reader which of the two to believe. The
+        evidence itself is worth keeping, so the artifacts are renamed rather than deleted: the
+        prefix says the run survived what is inside them.
+
+        Returns the loop the report names, which is what the ledger records instead of the path.
+        Best-effort by construction — the terminal status is already decided, so a filesystem or
+        JSON problem is logged and the task still finishes. ``None`` when there is no report, which
+        is the clean and common case.
+        """
+        task_dir = task_artifact_dir(self._artifacts_root, task_id)
+        report = task_dir / FAILURE_REPORT_FILENAME
+        if not report.is_file():
+            return None
+        loop: str | None = None
+        try:
+            parsed = json.loads(report.read_text(encoding="utf-8"))
+            if isinstance(parsed, dict) and isinstance(parsed.get("loop"), str):
+                loop = parsed["loop"]
+            for name in (FAILURE_REPORT_FILENAME, STUCK_FILENAME):
+                artifact = task_dir / name
+                if artifact.is_file():
+                    artifact.replace(task_dir / f"{RECOVERED_PREFIX}{name}")
+        except (OSError, ValueError) as exc:
+            self._log(task_id).warning(
+                "failure artifacts not retired on a recovered task", extra={"error": str(exc)}
+            )
+        return loop
+
     def _write_infra_failure_report(
         self,
         p: _Pipeline,
@@ -4502,47 +4894,11 @@ class Orchestrator:
                 last_check_log=None,
                 last_review_findings=read_last_findings(self._store, p.task.id),
                 final_diff=read_final_diff(self._artifacts_root, p.task.id),
-                failing_node=NodeFailureEvidence(
-                    node_id=node_id,
-                    provider_attempts=self._provider_attempt_evidence(p.task.id, node_id),
-                ),
+                failing_node=failing_node_evidence(self._store, p.task.id, node_id),
             )
             self._store.update_task(p.task.id, failure_report_path=report_path)
         except (OSError, sqlite3.Error) as exc:
             self._log(p.task.id).warning("failure report not written", extra={"error": str(exc)})
-
-    def _provider_attempt_evidence(
-        self, task_id: str, node_id: str | None
-    ) -> tuple[Mapping[str, Any], ...]:
-        """The failing node run's provider attempts, projected to secret-free report fields.
-
-        Read from the store rather than threaded through the exception: both node runners record the
-        attempts *before* they raise, so every row is already durable by the time a terminal is
-        decided — the exception carries the decision input, the store carries the evidence.
-
-        ``()`` when there is no node to attribute the attempts to, because a whole-task dump would
-        mix in nodes that already succeeded and the supervisor layer's own provider calls.
-        """
-        if node_id is None:
-            return ()
-        runs = [run for run in self._store.get_node_runs(task_id) if run.node_id == node_id]
-        # Ascending by id, so the last match is the run that just failed — a fix loop or a subtask
-        # region legitimately runs the same node id several times within one task.
-        run_id = runs[-1].id if runs else None
-        if run_id is None:
-            return ()
-        # An explicit whitelist, never the whole row: the attempt directory is a path into the
-        # private artifact tree and the usage columns are not part of an operator artifact.
-        return tuple(
-            {
-                "provider": row.provider,
-                "attempt": row.attempt,
-                "error_class": row.error_class,
-                "exit_code": row.exit_code,
-                "started_at": row.started_at,
-            }
-            for row in self._store.get_provider_attempts(run_id)
-        )
 
     def _reconcile_open_node_runs(self, task_id: str, *, reason: str) -> None:
         """Close node runs left ``running`` by a hard stop, at a terminal transition.
@@ -4554,7 +4910,9 @@ class Orchestrator:
         to ``aborted`` and each
         killed provider node earns a ``provider_attempts`` row — ``usage_delta_status='unknown'``,
         because the partial run's real token usage is not recoverable — so an aborted run is not
-        free in the cost roll-up. A no-op on a clean terminal (no orphan rows exist), and it emits
+        free in the cost roll-up. The reason is written to ``abort_reason``: it is not a skip, and
+        the column named for skips is reserved for the ``when``-false rows that really are one.
+        A no-op on a clean terminal (no orphan rows exist), and it emits
         ``WARNING`` naming the reconciled nodes, since an operator abort is exactly the event a
         operator needs to see and the SIGKILLed daemon logged nothing itself.
         """
@@ -4563,7 +4921,7 @@ class Orchestrator:
             task_id,
             finished_at=finished_at,
             error_class=ErrorClass.CANCELLED.value,
-            skip_reason=reason,
+            abort_reason=reason,
         )
         if not closed:
             return
@@ -4679,15 +5037,31 @@ class Orchestrator:
         # The flow checkpoint marks where ``rerun --continue`` re-enters — meaningful only for a
         # non-success terminal. A ``done`` task has no resume position, so clear it (``node_runs``
         # stay for the audit trail); otherwise keep ``current_node`` for the operator to continue.
+        recovered_loop: str | None = None
         if final is Status.DONE:
+            recovered_loop = self._recover_failure_artifacts(p.task.id)
             self._store.update_task(
-                p.task.id, current_node=None, flow_run_counters=None, flow_fingerprint=None
+                p.task.id,
+                current_node=None,
+                flow_run_counters=None,
+                flow_fingerprint=None,
+                # A task that finished is not failing on anything, whatever a guard wrote earlier in
+                # the run. The pointer goes with the artifacts it named.
+                failure_report_path=None,
+                recovered_loop=recovered_loop,
             )
         self._transition(p, final, finished_at=self._clock())
         if not already_moved:
             self._move_task_file(p, final)
+        attempt = _ledger_attempt_count(self._ledger, p.task.id) + 1
         self._append_ledger(
-            p, final, pr_url=pr_url, cleanup_safe=cleanup.safe, merge_outcome=merge_outcome
+            p,
+            final,
+            pr_url=pr_url,
+            cleanup_safe=cleanup.safe,
+            attempt=attempt,
+            merge_outcome=merge_outcome,
+            recovered_loop=recovered_loop,
         )
         self._notify_terminal(
             task_id=p.task.id,
@@ -4706,12 +5080,17 @@ class Orchestrator:
         # after the quiescence barrier has proven the provider tree empty (an unproven tree already
         # set ``exchange_active_unsafe`` and blocks the seal). Never raises — the terminal status is
         # already recorded and must stay stable.
-        self._seal_terminal_exchange(p.task.id, final=final, mutation=mutation)
+        self._seal_terminal_exchange(p.task.id, final=final, attempt=attempt, mutation=mutation)
         self._evict_run_artifacts(p.task.id, final=final)
         return PipelineResult(task_id=p.task.id, final_status=final, pr_url=pr_url)
 
     def _seal_terminal_exchange(
-        self, task_id: str, *, final: Status, mutation: ExchangeMutationManual | None = None
+        self,
+        task_id: str,
+        *,
+        final: Status,
+        attempt: int,
+        mutation: ExchangeMutationManual | None = None,
     ) -> None:
         """Seal / quarantine the task's active exchange at a terminal transition.
 
@@ -4721,6 +5100,10 @@ class Orchestrator:
         was already sealed/removed (e.g. an operator ``finalize`` after the pipeline terminal) is a
         no-op. ``mutation`` carries the before/after manifests for a detected-mutation
         terminal, so the contaminated tree is quarantined as evidence and never sealed.
+
+        ``attempt`` is this terminal's ordinal among the task's ledger records, counted the same way
+        :meth:`_append_ledger` counts it. It goes into a quarantine bundle so two bundles for one
+        task id say which run of it each belongs to, rather than leaving that to directory mtime.
         """
         log = self._log(task_id)
         try:
@@ -4749,11 +5132,19 @@ class Orchestrator:
                     task_id,
                     expected=expected,
                     observed_changes=observed,
+                    created_at=self._clock(),
+                    node_id=mutation.node_id if mutation is not None else None,
+                    attempt=attempt,
                 )
-                log.warning(
-                    "contaminated exchange quarantined (never restore-eligible)",
-                    extra={"evidence": evidence.as_posix()},
-                )
+                if evidence is not None:
+                    # On the task row, not only in the directory name: the contamination flag is
+                    # cleared by an operator continue, and when it was, nothing in the database
+                    # pointed at the incident any more.
+                    self._store.append_quarantine_ref(task_id, evidence.as_posix())
+                    log.warning(
+                        "contaminated exchange quarantined (never restore-eligible)",
+                        extra={"evidence": evidence.as_posix()},
+                    )
             except ExchangeCleanupBlocked as exc:
                 self._store.update_task(task_id, exchange_active_unsafe=1)
                 log.error("contaminated exchange quarantine blocked", extra={"error": str(exc)})
@@ -4814,7 +5205,10 @@ class Orchestrator:
         Never raises: the terminal status and its ledger record are already written, so a cleanup
         that cannot finish is logged and left for the operator's own ``runs clean``.
         """
-        if final is not Status.DONE or not self._config.logging.clean_runs_on_success:
+        if final is not Status.DONE:
+            return
+        if not self._config.logging.clean_runs_on_success:
+            self._announce_terminal_footprint(task_id, runs_evicted=False)
             return
         log = self._log(task_id)
         try:
@@ -4837,6 +5231,32 @@ class Orchestrator:
             return
         if removed:
             log.info("run artifacts evicted", extra={"roots": len(removed)})
+        self._announce_terminal_footprint(task_id, runs_evicted=bool(removed))
+
+    def _announce_terminal_footprint(self, task_id: str, *, runs_evicted: bool) -> None:
+        """One line at a successful terminal: what was reclaimed, what was kept, and how to get it.
+
+        ``clean_runs_on_success`` works exactly as documented and reclaims ``runs/`` only — per-task
+        log directories are out of its scope by design. Both facts were true and unconnected, so
+        the operator's entirely correct observation was "the logs did not get cleaned". This line
+        is the sentence that joins them, and it names ``logging.artifacts: minimal`` beside the
+        size because raw provider stdout is what that size is almost entirely made of.
+
+        Best-effort and never raising: the terminal status is already decided, so a directory that
+        cannot be measured simply goes unreported.
+        """
+        task_dir = task_artifact_dir(self._artifacts_root, task_id)
+        kept = _dir_size_bytes(task_dir)
+        if kept is None:
+            return
+        self._log(task_id).info(
+            "run state %s; this task's logs kept at %s (%s) — reclaim with `worc logs clean`, "
+            "and `logging.artifacts: minimal` keeps far less of it next time",
+            "reclaimed" if runs_evicted else "kept (logging.clean_runs_on_success is off)",
+            task_dir.as_posix(),
+            _human_bytes(kept),
+            extra={"logs_kept_bytes": kept, "runs_evicted": runs_evicted},
+        )
 
     def _move_task_file(self, p: _Pipeline, final: Status) -> Path | None:
         """Move the task file to its lifecycle folder; see _relocate_task_file."""
@@ -4923,9 +5343,10 @@ class Orchestrator:
         row = self._store.get_task(task_id)
         settled = _classify_settled(row, task_file)
         detail = result.detail or None
+        quarantined: str | None = None
         if row is None or settled is _SettledFile.NOT_SETTLED:
             self._log(task_id).info("validation rejected", extra={"reason": reason})
-            self._quarantine(task_file)
+            quarantined = self._quarantine(task_file)
             self._ledger.append(
                 LedgerRecord(
                     id=task_id,
@@ -4941,22 +5362,26 @@ class Orchestrator:
                 task_id=task_id, final_status=Status.FAILED, pr_url=None, reason=reason
             )
         else:
-            detail = self._reject_settled(task_file, settled, row)
+            detail, quarantined = self._reject_settled(task_file, settled, row)
         return PipelineResult(
             task_id=task_id,
             final_status=Status.FAILED,
             validation_reason=reason,
             validation_detail=detail,
+            quarantine_path=quarantined,
         )
 
-    def _reject_settled(self, task_file: str, settled: _SettledFile, row: TaskRow) -> str:
+    def _reject_settled(
+        self, task_file: str, settled: _SettledFile, row: TaskRow
+    ) -> tuple[str, str | None]:
         """Report a reject of an already-terminal id without re-recording its outcome.
 
-        Returns the operator-facing detail for the result, so the console says what actually
-        happened rather than a bare reason code. Only a file proven to be a *different* task is
-        quarantined: left in the queue it would be re-rejected on every poll tick and, with auto
-        mode off, consume that tick's single-task budget forever. The settled task's own file — and
-        any file whose identity cannot be established — stays exactly where the operator has it.
+        Returns the operator-facing detail for the result and where the file went (``None`` when it
+        stayed put), so the console says what actually happened rather than a bare reason code.
+        Only a file proven to be a *different* task is quarantined: left in the queue it would be
+        re-rejected on every poll tick and, with auto mode off, consume that tick's single-task
+        budget forever. The settled task's own file — and any file whose identity cannot be
+        established — stays exactly where the operator has it.
         """
         status = row.status.value
         if settled is _SettledFile.FOREIGN:
@@ -4964,16 +5389,16 @@ class Orchestrator:
                 "rejected a different task file reusing a settled id",
                 extra={"status": status, "quarantined": True},
             )
-            self._quarantine(task_file)
-            return f"id already used by a {status} task; give this file a new id"
+            dest = self._quarantine(task_file)
+            return f"id already used by a {status} task; give this file a new id", dest
         self._log(row.task_id).warning(
             "skipped a reject for an already-settled task; its file was left in place",
             extra={"status": status, "verified": settled is _SettledFile.OWN},
         )
-        return f"already {status}; its task file was left in place"
+        return f"already {status}; its task file was left in place", None
 
     def _quarantine(self, task_file: str) -> str | None:
-        """Move the task file into ``.worc/tasks/rejected/`` (the quarantine) when it exists.
+        """Move the task file into ``.worc/tasks/rejected/`` (the quarantine); return where it went.
 
         A relative ``validation.quarantine_folder`` (the default ``./.worc/tasks/rejected``) is
         resolved against the repository root, not the process working directory: the operator runs
@@ -4990,9 +5415,13 @@ class Orchestrator:
             quarantine_dir.mkdir(parents=True, exist_ok=True)
             dest = quarantine_dir / src.name
             src.replace(dest)
-            return str(dest)
         except OSError:
             return None
+        # Said here, at the one place the move happens, so every reject path announces it — the
+        # destination is under the private home, which the operator does not browse and agents
+        # cannot read, so a silent move is a file that vanished.
+        self._log(src.stem).warning("task file quarantined", extra={"destination": dest.as_posix()})
+        return str(dest)
 
     def _check_sets(self, p: _Pipeline) -> tuple[ResolvedCheckSet, ...]:
         """The normalized command sets; recompute from config if not resolved yet (e.g. on resume).
@@ -5035,12 +5464,47 @@ class Orchestrator:
         Idempotent (the store upserts on ``(task_id, kind, path)``); a missing file is skipped and
         registration never raises into the terminal path. Requires the ``tasks`` row to exist (FK),
         so a-rejected task — which has no row — is not registered here.
+
+        The stored path is normalized here because this is the table's **only** writer: callers
+        hand over whatever they have (absolute for the artifact tree, already-relative for the
+        lifecycle summary), and one column carrying two conventions is what left this run's
+        ``artifacts`` table with 160 absolute paths embedding a home directory beside two relative
+        ones.
         """
         if not path or not Path(path).exists():
             return
         self._store.register_artifact(
-            ArtifactRow(task_id=task_id, kind=kind, path=path, checksum=sha256_file(path))
+            ArtifactRow(
+                task_id=task_id,
+                kind=kind,
+                path=self._artifact_relpath(path),
+                checksum=sha256_file(path),
+            )
         )
+
+    def _artifact_relpath(self, path: str) -> str:
+        """One convention for ``artifacts.path``: POSIX, relative to the worc home.
+
+        Relative because an absolute path embeds the operator's home directory, which makes
+        ``state.db`` unreadable on any other machine and leaks a name into a file that is otherwise
+        free of one; POSIX because the repository's path rule requires every stored, compared or
+        displayed path string to be identical on every OS. The worc home is the anchor rather than
+        the repository root because that is where the artifacts live — the lifecycle ``summary.md``
+        sits outside it and comes out as ``../tasks/done/<id>.summary.md``, which is still relative
+        and still home-free.
+
+        The table has no reader in ``src/`` and, being greenfield, no rows worth migrating, so the
+        convention starts at the writer and applies from the next run.
+
+        Falls back to the absolute POSIX form only when no relative path exists at all (a different
+        Windows drive) — an honest absolute beats a fabricated relative one.
+        """
+        target = Path(path).resolve()
+        home = Path(self._artifacts_root).resolve()
+        try:
+            return Path(os.path.relpath(target, home)).as_posix()
+        except ValueError:
+            return target.as_posix()
 
     # --- store helpers --------------------------------------------------------------------
 
@@ -5348,10 +5812,20 @@ class Orchestrator:
         *,
         pr_url: str | None,
         cleanup_safe: bool,
+        attempt: int,
         merge_outcome: str | None = None,
+        recovered_loop: str | None = None,
     ) -> None:
         task_row = self._store.get_task(p.task.id)
-        attempt = self._rerun_attempt.get(p.task.id, 1)
+        # Derived here, from the ledger, at the moment of the append — not carried from whenever a
+        # rerun was planned. The carried value was a per-process map that nothing ever cleared, so
+        # every later terminal of the same id in that process reused it: one run's ledger shows
+        # attempts 1, 1, 1, 2, 5, 6, 7 for a task that reached a terminal seven times. Counted this
+        # way the number is this record's own ordinal among the id's terminals, which is the only
+        # thing the ledger can honestly claim to know — it holds one record per terminal
+        # transition, not one per run of the pipeline and not one per provider attempt. It is the
+        # caller's to compute, because the quarantine bundle written at the same terminal records
+        # the same number and the two must not be able to disagree.
         self._ledger.append(
             LedgerRecord(
                 id=p.task.id,
@@ -5372,5 +5846,7 @@ class Orchestrator:
                 rerun_of=p.task.id if attempt > 1 else None,
                 governance_changed=p.governance_changed,
                 advanced_mode=self._advanced_mode,
+                recovered_from_stuck=recovered_loop is not None,
+                recovered_loop=recovered_loop,
             )
         )

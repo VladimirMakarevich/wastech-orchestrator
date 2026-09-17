@@ -29,7 +29,9 @@ from wastech_orchestrator.core.flow.engine import NodeContext, NodeOutcome, Node
 from wastech_orchestrator.core.flow.nodes.base import (
     NodeInputs,
     NodeManualRequired,
+    NodeRun,
     NodeServices,
+    open_node_run,
 )
 from wastech_orchestrator.core.flow.nodes.diff_gate import (
     consume_prior_approval,
@@ -136,7 +138,8 @@ class PublishNodeRunner:
 
     def run(self, node: FlowNode, ctx: NodeContext) -> NodeResult:
         assert isinstance(node, PublishNode)
-        run_id = self._s.store.record_node_run(
+        with open_node_run(
+            self._s,
             NodeRunRow(
                 task_id=ctx.task_id,
                 node_id=node.id,
@@ -144,8 +147,12 @@ class PublishNodeRunner:
                 subtask_order=ctx.subtask_order,
                 status="running",
                 started_at=self._s.clock(),
-            )
-        )
+            ),
+        ) as run:
+            return self._publish_run(node, ctx, run)
+
+    def _publish_run(self, node: PublishNode, ctx: NodeContext, run: NodeRun) -> NodeResult:
+        """Publish through the GitManager, inside the lifetime its ``node_runs`` row is open for."""
         try:
             result_ref = self._publish(node, ctx)
         except GitCommandError as exc:
@@ -167,22 +174,14 @@ class PublishNodeRunner:
                 "publish git operation failed", extra={"error": detail, "policy": node.policy.value}
             )
             self._record_publish_error(ctx, node, detail)
-            self._s.store.complete_node_run(
-                run_id,
-                status="failed",
-                outcome=None,
-                error_class="publish_failed",
-                finished_at=self._s.clock(),
-            )
+            run.complete(status="failed", outcome=None, error_class="publish_failed")
             raise NodeManualRequired(
                 f"publish node {node.id!r} ({node.policy.value}) could not complete the git "
                 f"publish (resumable via rerun --continue): {detail}"
             ) from exc
-        self._s.store.complete_node_run(
-            run_id,
+        run.complete(
             status="published",
             outcome="done",
-            finished_at=self._s.clock(),
             # `commit_sha_after` is the node's result reference; for a publish node that is the PR
             # URL (a PR policy) or None (no-git policies) — not a commit SHA. See NodeRunRow.
             commit_sha_after=result_ref,
@@ -190,7 +189,7 @@ class PublishNodeRunner:
         return NodeResult(
             node_id=node.id,
             outcome=NodeOutcome("done", adopted_commits=self._adopted),
-            node_run_id=run_id,
+            node_run_id=run.id,
         )
 
     def _record_publish_error(self, ctx: NodeContext, node: PublishNode, detail: str) -> None:

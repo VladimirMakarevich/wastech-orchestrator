@@ -63,24 +63,39 @@ _BUNDLE_FORMAT = 1
 REPO_INSTRUCTION_NAMES: tuple[str, ...] = ("AGENTS.md", "AGENTS.override.md", "CLAUDE.md")
 
 #: Repo-relative globs for the *other* governance content: the versioned agent-rules tree. Together
-#: with :data:`REPO_INSTRUCTION_NAMES` this is the fixed governance set whose edits are reported to
-#: the operator. A constant, never a config key — notification is not gated.
+#: with :data:`REPO_INSTRUCTION_NAMES` this is the governance FLOOR whose edits are reported to the
+#: operator.
+#:
+#: Not switchable, and not the whole set. Those are different statements, and reading the first as
+#: the second is what produced the defect this comment now carries: a repository keeping its rules
+#: anywhere else got a notice covering part of its governance and silently omitting the rest. What
+#: must never be gateable is the *notification* — no configuration can shrink this tuple or turn it
+#: off, because an operator switching the notice off is the one outcome it exists to prevent.
+#: Where a repository keeps its rules is repository knowledge worc cannot guess, so
+#: ``repo.governance_paths`` **adds** to it (see :func:`governance_changed_paths`). That key's
+#: additive-only guarantee is carried by its shape — it has no syntax for an exclusion — and the
+#: config validator refuses any value that tries to introduce one.
 GOVERNANCE_PATH_GLOBS: tuple[str, ...] = (".agents/rules/**",)
 
 
-def governance_changed_paths(paths: Iterable[str]) -> tuple[str, ...]:
+def governance_changed_paths(
+    paths: Iterable[str], *, extra_globs: Iterable[str] = ()
+) -> tuple[str, ...]:
     """The sorted subset of repo-relative ``paths`` that are governance/instruction files.
 
     Governance = the root instruction files (:data:`REPO_INSTRUCTION_NAMES`, matched by exact
-    repo-root name) plus anything under :data:`GOVERNANCE_PATH_GLOBS` (``.agents/rules/**``). These
+    repo-root name), anything under :data:`GOVERNANCE_PATH_GLOBS` (``.agents/rules/**``), and
+    anything under ``extra_globs`` — the operator's ``repo.governance_paths``. These
     files are ordinary, editable repository content; when a task's diff touches them the
     orchestrator emits an operator notice (console/log, PR summary, ledger, Telegram) instead of
     blocking the edit. Pure and deterministic — matching only, no I/O.
+
+    ``extra_globs`` can only widen the set: it is unioned with the constant, never consulted
+    against it, so there is no value of it that makes a floor path stop matching.
     """
+    globs = (*GOVERNANCE_PATH_GLOBS, *extra_globs)
     hits = {
-        path
-        for path in paths
-        if path in REPO_INSTRUCTION_NAMES or path_matches_any(path, GOVERNANCE_PATH_GLOBS)
+        path for path in paths if path in REPO_INSTRUCTION_NAMES or path_matches_any(path, globs)
     }
     return tuple(sorted(hits))
 
@@ -105,6 +120,11 @@ class LoadedInstructionBundle:
     #: resumed run repopulate ``instruction_entries`` so the lifecycle-vs-packet audit check runs
     #: on resume exactly as on the fresh path.
     entries: tuple[tuple[str, str], ...] = ()
+    #: When the bundle was frozen, as the manifest's ``metadata.frozen_at`` recorded it. Carried so
+    #: a resumed run can tell the operator *which* version of their task file it is still running
+    #: on. ``None`` for a manifest written before the field existed — the warning then omits the
+    #: instant rather than inventing one.
+    frozen_at: str | None = None
 
 
 def instruction_bundle_dir(private_home: Path, task_id: str) -> Path:
@@ -294,6 +314,11 @@ def load_instruction_bundle(
             f"frozen instruction bundle content drifted from its recorded digest "
             f"({bundle_dir.as_posix()})"
         )
+    metadata = manifest.get("metadata")
+    frozen_at = metadata.get("frozen_at") if isinstance(metadata, dict) else None
     return LoadedInstructionBundle(
-        root=bundle_dir, manifest_digest=expected_digest, entries=tuple(file_entries)
+        root=bundle_dir,
+        manifest_digest=expected_digest,
+        entries=tuple(file_entries),
+        frozen_at=str(frozen_at) if isinstance(frozen_at, str) else None,
     )

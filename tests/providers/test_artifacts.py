@@ -159,18 +159,29 @@ def _seed_attempt(tmp_path: Path, task_id: str = "task-001") -> ArtifactPaths:
     return paths
 
 
-def test_prune_minimal_keeps_only_result_json(tmp_path: Path) -> None:
+def test_prune_minimal_keeps_result_and_request(tmp_path: Path) -> None:
+    # request.json survives even the strictest level: it is the only artifact carrying the argv and
+    # the permission profile the attempt ran under, and result.json cannot be read without it.
     paths = _seed_attempt(tmp_path)
     prune_attempt_artifacts(paths, "minimal")
     survivors = {entry.name for entry in Path(paths.attempt_dir).iterdir()}
-    assert survivors == {"result.json"}
+    assert survivors == {"result.json", "request.json"}
 
 
-def test_prune_standard_keeps_stdout_stderr_result(tmp_path: Path) -> None:
+def test_prune_standard_keeps_request_stdout_stderr_result(tmp_path: Path) -> None:
     paths = _seed_attempt(tmp_path)
     prune_attempt_artifacts(paths, "standard")
     survivors = {entry.name for entry in Path(paths.attempt_dir).iterdir()}
-    assert survivors == {"result.json", "stdout.log", "stderr.log"}
+    assert survivors == {"result.json", "request.json", "stdout.log", "stderr.log"}
+
+
+@pytest.mark.parametrize("level", ["minimal", "standard", "full"])
+def test_request_json_survives_every_shipped_level(tmp_path: Path, level: str) -> None:
+    # The security record is level-independent: the permission ceiling is this product's central
+    # invariant, so the file proving what a launch was allowed to do is never the one dropped.
+    paths = _seed_attempt(tmp_path, task_id=f"task-req-{level}")
+    prune_attempt_artifacts(paths, level)
+    assert (Path(paths.attempt_dir) / "request.json").is_file()
 
 
 @pytest.mark.parametrize("level", ["full", "weird-unknown-level"])
@@ -204,7 +215,7 @@ def test_per_run_payloads_survive_minimal_pruning(tmp_path: Path) -> None:
     findings.write_text("{}", encoding="utf-8")
     prune_attempt_artifacts(paths, "minimal")
     assert findings.is_file()  # the per-run payload is untouched
-    assert {e.name for e in Path(paths.attempt_dir).iterdir()} == {"result.json"}
+    assert {e.name for e in Path(paths.attempt_dir).iterdir()} == {"result.json", "request.json"}
 
 
 def test_append_node_history_appends_one_line_per_call(tmp_path: Path) -> None:

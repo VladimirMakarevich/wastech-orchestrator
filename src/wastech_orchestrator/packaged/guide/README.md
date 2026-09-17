@@ -19,6 +19,7 @@
 - **[skills/worc-flow/SKILL.md](skills/worc-flow/SKILL.md)** — a copy-ready skill that authors a new custom flow (graph, output kind, route) end-to-end.
 - **[skills/worc-flow-role/SKILL.md](skills/worc-flow-role/SKILL.md)** — a copy-ready skill that writes or revises a single node's role prompt without a new flow.
 - **[skills/worc-flow-tune/SKILL.md](skills/worc-flow-tune/SKILL.md)** — a copy-ready skill that tunes a flow's per-node provider/model/reasoning/budgets without changing the graph.
+- **[skills/worc-night-run/SKILL.md](skills/worc-night-run/SKILL.md)** — a copy-ready skill that drives a queue of already-written tasks to completion unattended: one task at a time, clearing blockers and retrying through a bounded escalation ladder, abandoning a task after four starts, and leaving a per-task write-up under `.worc/night-runs/`.
 
 ## What the orchestrator does with your task
 
@@ -100,6 +101,12 @@ The validation gate rejects a task **before** any branch or agent runs. To alway
 7. Keep it reasonably sized (the gate caps file size, line count, and per-line length).
 
 Completeness (separate from rejection): if the task lacks acceptance criteria, it is **not** rejected — the refinement stage runs to enrich it. Provide acceptance criteria when you want refinement skipped (it is skipped automatically for a complete task; there is no flag).
+
+### Editing a task while it runs
+
+**You cannot.** The task packet is frozen at the moment the run starts, and every node reads the frozen copy — that is what makes a run reproducible, and what stops a node with write access from rewriting the instructions it is being judged against. Editing the file afterwards changes nothing about the run in progress.
+
+Because that used to happen in silence, the orchestrator now says so: on the next resume it compares your file against the frozen packet and, when they differ, prints a `WARNING` naming the instant the packet was frozen and stating that `worc stop` plus a fresh start is what applies the edit. The same sentence goes into `summary.md`, so it reaches the pull request rather than dying in a log. Expect the run to end `manual_action_required` in that case: the audit commit refuses to commit a lifecycle task file that no longer matches the packet the work was judged against.
 
 ## JSON tasks
 
