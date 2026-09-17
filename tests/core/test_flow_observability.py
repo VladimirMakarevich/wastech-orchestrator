@@ -188,6 +188,43 @@ def test_record_provider_attempts_writes_one_row_per_attempt() -> None:
     assert store.rows[0].exit_code == 1
 
 
+def test_attempt_rows_and_prompt_audit_agree_on_model(tmp_path: Path) -> None:
+    # P1.6: the mandatory accounting table and the optional prompt audit are written from the same
+    # ProviderAttempt, so they cannot disagree about what a node ran on — asserted, not assumed.
+    store = _FakeStore()
+    outcome = _outcome()
+    record_provider_attempts(store, lambda: "ts", task_id="task-1", node_run_id=7, outcome=outcome)
+    write_prompt_audit(
+        artifacts_root=str(tmp_path),
+        task_id="task-1",
+        node_id="implementation",
+        subtask=None,
+        run_id=7,
+        prompt="p",
+        route=_route(),
+        outcome=outcome,
+        configured_model=None,
+        configured_reasoning=None,
+        skills_allowed=False,
+        skills_required=(),
+        started_at="t0",
+        secrets=(),
+        register=_register([]),
+    )
+    timeline = (
+        (task_artifact_dir(tmp_path, "task-1") / "prompt-audit" / "timeline.jsonl")
+        .read_text("utf-8")
+        .splitlines()
+    )
+    audited = {
+        a["provider"]: (a["model"], a["reasoning"]) for a in json.loads(timeline[0])["agents"]
+    }
+    recorded = {r.provider: (r.model, r.reasoning) for r in store.rows}
+    assert recorded == audited
+    assert recorded["codex"] == ("gpt-5.5", "xhigh")
+    assert recorded["claude"] == ("claude-opus-5", "high")
+
+
 def test_record_provider_attempts_stamps_result_interval_not_clock() -> None:
     # The row carries the attempt's real measured interval (taken from the result), not two
     # identical clock reads at row-write time — so ``SUM(finished_at - started_at)`` is a duration.

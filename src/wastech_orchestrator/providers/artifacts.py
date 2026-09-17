@@ -52,10 +52,15 @@ TOOL_STDERR_FILENAME = "stderr.txt"
 
 # Which per-attempt files survive at each ``logging.artifacts`` level. ``full`` (or any unknown
 # level) keeps everything. ``result.json`` is always kept — it is the machine-readable outcome and
-# carries the exit code + normalized error class even on failure.
+# carries the exit code + normalized error class even on failure. ``request.json`` is kept at every
+# level too, for the same reason and one more: it is the only artifact carrying the full ``argv``
+# and the permission profile an attempt was launched under, so pruning it leaves a product whose
+# central invariant is the permission ceiling unable to say what any attempt was allowed to do —
+# and ``result.json`` is not interpretable without knowing what was requested. It costs kilobytes
+# per attempt, against the megabytes of raw ``stdout.log`` that ``standard`` already keeps.
 _ARTIFACT_KEEP: dict[str, set[str]] = {
-    "minimal": {RESULT_FILENAME},
-    "standard": {RESULT_FILENAME, STDOUT_FILENAME, STDERR_FILENAME},
+    "minimal": {RESULT_FILENAME, REQUEST_FILENAME},
+    "standard": {RESULT_FILENAME, REQUEST_FILENAME, STDOUT_FILENAME, STDERR_FILENAME},
 }
 
 

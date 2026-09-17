@@ -32,6 +32,7 @@ from wastech_orchestrator.config.schema import (
     OrchestratorConfig,
 )
 from wastech_orchestrator.core import observe_cadence
+from wastech_orchestrator.core.cost_gap import cost_gaps
 from wastech_orchestrator.core.decomposition import (
     REASON_N_OUT_OF_RANGE,
     DecompositionDecision,
@@ -4487,6 +4488,7 @@ class Orchestrator:
         reach the pull-request body on every path rather than only the local metadata.
         """
         evaluations = self._store.get_evaluations(p.task.id)
+        attempts = self._store.get_provider_attempts_for_task(p.task.id)
         # Merged, not assigned: on a degraded DONE the supervisor already computed its own list
         # (and merged the same findings into it) but produced no prose, so this writer runs second.
         # A bare assignment would drop the layer's own debt notes from the body AND from the
@@ -4513,7 +4515,11 @@ class Orchestrator:
             degraded=degraded,
             # Present exactly when the layer made calls, so an operator can tell "the layer never
             # ran" from "it ran and could not finish" without a second marker.
-            supervisor_usage=summarize_spend(self._store.get_provider_attempts_for_task(p.task.id)),
+            supervisor_usage=summarize_spend(attempts),
+            # Beside it, what that figure does NOT cover: one shipped provider reports no USD, so a
+            # cost total summed from the column is partial whenever the flow used it. Stated, never
+            # estimated.
+            cost_gaps=cost_gaps(attempts),
         )
 
     def _task_ref(self, p: _Pipeline) -> str | None:

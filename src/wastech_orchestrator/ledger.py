@@ -86,12 +86,12 @@ class LedgerRecord:
     governance_changed: tuple[str, ...] = ()
     # Whether the run went through the operator's advanced mode (``security.strict_isolation:
     # false``): the agent received the parent environment whole, and the controls that mode relaxes
-    # were not in effect. The one durable answer to "what was this run allowed to do" — the
-    # effective security posture is written nowhere else that survives the task, since the attempt's
-    # ``request.json`` (the only artifact carrying the permission profile and full ``argv``) is
-    # deleted at the end of every attempt under the shipped ``logging.artifacts`` levels. The ledger
-    # is append-only and never rewritten. Defaults to ``False`` so a record written by an older
-    # version reads as "not in the mode", which is what it was.
+    # were not in effect. The run-level answer to "what was this run allowed to do", beside the
+    # per-attempt one in each ``request.json`` (the only artifact carrying the permission profile
+    # and full ``argv``, now retained at every ``logging.artifacts`` level for exactly this reason).
+    # This one outlives them: the ledger is append-only and never rewritten, while ``logs/`` is
+    # reclaimable. Defaults to ``False`` so a record written by an older version reads as "not in
+    # the mode", which is what it was.
     advanced_mode: bool = False
     # A loop guard stopped a fix loop and the task nevertheless reached ``done`` — the ordinary
     # shape for a non-blocking evaluator, whose verdict does not gate publication.

@@ -336,6 +336,48 @@ def test_provider_attempt_usage_columns_round_trip(store: StateStore) -> None:
     assert row.provider_usage_raw == '{"input_tokens":282699}'
 
 
+def test_provider_attempt_model_columns_round_trip(store: StateStore) -> None:
+    # P1.6: the effective model/reasoning is a queryable column, so per-model cost is a GROUP BY
+    # rather than a grep — and it survives with ``prompt_audit`` off, which is the default.
+    store.insert_task(_new_task())
+    run_id = store.record_node_run(
+        NodeRunRow(task_id="task-001", node_id="critic", node_kind="evaluator", status="running")
+    )
+    store.record_provider_attempt(
+        ProviderAttemptRow(
+            task_id="task-001",
+            node_run_id=run_id,
+            provider="codex",
+            attempt=1,
+            model="gpt-5.6-sol",
+            reasoning="high",
+            status="succeeded",
+            usage_input_total=6_500_000,
+        )
+    )
+    row = store.get_provider_attempts(run_id)[0]
+    assert (row.model, row.reasoning) == ("gpt-5.6-sol", "high")
+    cur = store._conn.execute(
+        "SELECT model, SUM(usage_input_total) AS tokens FROM provider_attempts GROUP BY model"
+    )
+    assert [(r["model"], r["tokens"]) for r in cur.fetchall()] == [("gpt-5.6-sol", 6_500_000)]
+
+
+def test_provider_attempt_model_columns_default_null(store: StateStore) -> None:
+    # NULL is the real meaning — no model was resolved for this launch — never a placeholder.
+    store.insert_task(_new_task())
+    run_id = store.record_node_run(
+        NodeRunRow(task_id="task-001", node_id="revise", node_kind="agent", status="running")
+    )
+    store.record_provider_attempt(
+        ProviderAttemptRow(
+            task_id="task-001", node_run_id=run_id, provider="codex", attempt=1, status="failed"
+        )
+    )
+    row = store.get_provider_attempts(run_id)[0]
+    assert row.model is None and row.reasoning is None
+
+
 def test_provider_attempt_usage_columns_default_null(store: StateStore) -> None:
     # A result-less attempt (no usage) leaves every usage column NULL.
     store.insert_task(_new_task())

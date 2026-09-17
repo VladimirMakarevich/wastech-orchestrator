@@ -130,11 +130,13 @@ def _migrate_task_columns(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_usage_columns(conn: sqlite3.Connection) -> None:
-    """Additive usage columns: the per-run delta, the task anchor, and the supervisor phase label.
+    """Additive attempt columns: the per-run delta, the task anchor, the supervisor phase label,
+    and the effective model/reasoning.
 
-    The per-run delta on ``provider_attempts`` and the running cumulative snapshot on the two
-    lineage tables are all nullable, so no defaults. ``task_id`` anchors an attempt to its task so a
-    cost roll-up needs no join through ``node_runs`` — NOT NULL with a placeholder default, because
+    The per-run delta on ``provider_attempts``, the effective ``model``/``reasoning`` of the
+    attempt, and the running cumulative snapshot on the two lineage tables are all nullable, so no
+    defaults. ``task_id`` anchors an attempt to its task so a cost roll-up needs no join through
+    ``node_runs`` — NOT NULL with a placeholder default, because
     only that shape makes the additive ALTER legal; every writer supplies the real id. The coupled
     ``node_run_id`` nullability (the supervisor layer is not a graph node, so it has no
     ``node_runs`` row to point at) is fresh-schema-only: SQLite cannot drop a column's NOT NULL in
@@ -146,6 +148,10 @@ def _migrate_usage_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE provider_attempts ADD COLUMN task_id TEXT NOT NULL DEFAULT ''")
     for column, decl in (
         ("supervisor_function", "TEXT"),
+        # The effective model/reasoning of the attempt — nullable, because NULL is its real
+        # meaning (no model was resolved for this launch), not a placeholder.
+        ("model", "TEXT"),
+        ("reasoning", "TEXT"),
         ("usage_scope", "TEXT"),
         ("usage_input_total", "INTEGER"),
         ("usage_cache_read", "INTEGER"),
@@ -290,6 +296,14 @@ CREATE TABLE IF NOT EXISTS provider_attempts (
     supervisor_function TEXT,
     provider TEXT NOT NULL,
     attempt INTEGER NOT NULL,
+    -- The EFFECTIVE model and reasoning this attempt ran on (the node's override, else the
+    -- provider's configured default), written from the same ``ProviderAttempt`` record the
+    -- prompt-audit timeline reads, so the mandatory table and the optional reading aid cannot
+    -- disagree. Per attempt, because a cross-provider fallback re-resolves against the
+    -- substitute's own config. NULL when the provider configures none and the node overrode
+    -- nothing — the CLI's own default then decided, and no value exists to record.
+    model TEXT,
+    reasoning TEXT,
     status TEXT,
     error_class TEXT,
     exit_code INTEGER,
@@ -510,6 +524,11 @@ class ProviderAttemptRow:
     # Which supervisor phase made the call, or ``None`` for a graph node. A plain string, like the
     # usage block below, so this storage layer stays free of the supervisor's own vocabulary.
     supervisor_function: str | None = None
+    # The effective model / reasoning this attempt ran on, as the router resolved them for the
+    # request the adapter was handed (see the ``provider_attempts`` DDL). Plain strings for the
+    # same reason the usage block is plain scalars — the storage layer knows no provider domain.
+    model: str | None = None
+    reasoning: str | None = None
     status: str | None = None
     error_class: str | None = None
     exit_code: int | None = None
@@ -1370,12 +1389,13 @@ class StateStore:
             c.execute(
                 """
                 INSERT INTO provider_attempts (
-                    task_id, node_run_id, supervisor_function, provider, attempt, status,
+                    task_id, node_run_id, supervisor_function, provider, attempt, model,
+                    reasoning, status,
                     error_class, exit_code, attempt_dir, started_at, finished_at,
                     usage_scope, usage_input_total, usage_cache_read, usage_cache_write,
                     usage_uncached_input, usage_output_total, usage_reasoning_output, usage_cost,
                     usage_delta_status, provider_usage_raw
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     attempt.task_id,
@@ -1383,6 +1403,8 @@ class StateStore:
                     attempt.supervisor_function,
                     attempt.provider,
                     attempt.attempt,
+                    attempt.model,
+                    attempt.reasoning,
                     attempt.status,
                     attempt.error_class,
                     attempt.exit_code,
@@ -1404,7 +1426,8 @@ class StateStore:
 
     # Shared SELECT columns for provider_attempts (mirrored by _provider_attempt_from_row).
     _PROVIDER_ATTEMPT_COLUMNS = (
-        "task_id, node_run_id, supervisor_function, provider, attempt, status, error_class, "
+        "task_id, node_run_id, supervisor_function, provider, attempt, model, reasoning, "
+        "status, error_class, "
         "exit_code, attempt_dir, "
         "started_at, finished_at, usage_scope, usage_input_total, usage_cache_read, "
         "usage_cache_write, usage_uncached_input, usage_output_total, usage_reasoning_output, "
@@ -1904,6 +1927,8 @@ def _provider_attempt_from_row(row: sqlite3.Row) -> ProviderAttemptRow:
         supervisor_function=row["supervisor_function"],
         provider=row["provider"],
         attempt=row["attempt"],
+        model=row["model"],
+        reasoning=row["reasoning"],
         status=row["status"],
         error_class=row["error_class"],
         exit_code=row["exit_code"],
