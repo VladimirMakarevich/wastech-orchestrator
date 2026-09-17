@@ -4602,7 +4602,6 @@ class Orchestrator:
                 flow_name=p.flow_name,
                 evaluations=evaluations,
                 artifacts_root=self._artifacts_root,
-                exchange_root=self._exchange_root,
                 repo_dir=self._config.repo.local_path,
             ),
             follow_ups=follow_ups,

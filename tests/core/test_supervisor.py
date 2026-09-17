@@ -132,6 +132,15 @@ class FakeRouter:
         )
 
 
+def _art(tmp_path: Path) -> Path:
+    """The private artifact root, inside the repo dir — exactly where ``<repo>/.worc`` really is.
+
+    It matters for the packet: its ``diff_path`` / ``findings_path`` name the durable private copies
+    under ``logs/``, and a tree outside the clone has no repo-relative name to give them.
+    """
+    return tmp_path / "repo" / ".worc"
+
+
 def _store(tmp_path: Path) -> StateStore:
     store = StateStore.open(tmp_path / "state.db")
     store.insert_task(TaskRow(task_id=_TASK, title="T", status=Status.RUNNING))
@@ -176,7 +185,7 @@ def _supervisor(
         store=store,
         repo_dir=repo_dir,
         git=git,
-        artifacts_root=str(tmp_path / "art"),
+        artifacts_root=str(_art(tmp_path)),
         exchange_root=exchange_root,
         flow_dir=tmp_path,
         flow_supervisor=flow_supervisor,
@@ -423,7 +432,7 @@ def test_supervisor_observe_writes_rendered_prompt_when_registered(tmp_path: Pat
     sup.observe(task_id=_TASK, node_id="implementation", node_run_id=5, outcome_kind="done")
 
     rendered = (
-        node_run_dir(str(tmp_path / "art"), _TASK, "supervisor", 5) / "rendered-prompt.md"
+        node_run_dir(str(_art(tmp_path)), _TASK, "supervisor", 5) / "rendered-prompt.md"
     ).read_text("utf-8")
     assert rendered  # the observe turn's prompt was persisted
     kinds = {k for _, k, _ in registered}
@@ -578,7 +587,7 @@ def test_supervisor_finalize_best_effort_when_llm_unavailable(tmp_path: Path) ->
 
     path = sup.finalize(task_id=_TASK, task_title="T").summary_path
     assert path is None
-    summary_json = Path(task_artifact_dir(tmp_path / "art", _TASK)) / "summary.json"
+    summary_json = Path(task_artifact_dir(_art(tmp_path), _TASK)) / "summary.json"
     assert summary_json.exists()
     assert len([e for e in store.get_evaluations(_TASK) if e.kind == "supervisor_final"]) == 1
 
@@ -619,11 +628,11 @@ def test_finalize_discards_a_collapsed_summary_instead_of_publishing_it(
     result = sup.finalize(task_id=_TASK, task_title="T")
 
     assert result.summary_path is None
-    assert not (Path(task_artifact_dir(tmp_path / "art", _TASK)) / "summary.md").exists()
+    assert not (Path(task_artifact_dir(_art(tmp_path), _TASK)) / "summary.md").exists()
     logged = package_log_text()
     assert f"below the {_SUMMARY_MIN_CHARS}-char floor" in logged and "'test'" in logged
     payload = json.loads(
-        (Path(task_artifact_dir(tmp_path / "art", _TASK)) / "summary.json").read_text("utf-8")
+        (Path(task_artifact_dir(_art(tmp_path), _TASK)) / "summary.json").read_text("utf-8")
     )
     assert payload["summary"] == ""
 
@@ -678,7 +687,7 @@ def test_finalize_writes_prompt_audit_when_enabled(tmp_path: Path) -> None:
     )
     sup.finalize(task_id=_TASK, task_title="T")
 
-    audit_dir = task_artifact_dir(str(tmp_path / "art"), _TASK) / "prompt-audit"
+    audit_dir = task_artifact_dir(str(_art(tmp_path)), _TASK) / "prompt-audit"
     # finalize's node_run_id is the reserved ``0`` sentinel (not a node_runs id).
     step_path = audit_dir / "000000-supervisor.md"
     assert step_path.exists()
@@ -851,19 +860,24 @@ def _run_row(store: StateStore, node: str, kind: str, **kwargs: Any) -> int:
 
 def _node_output(tmp_path: Path, node: str, run_id: int, text: str) -> None:
     """Write the per-run ``<node_id>.out.md`` the orchestrator writes for an agent node."""
-    run_dir = node_run_dir(tmp_path / "art", _TASK, node, run_id)
+    run_dir = node_run_dir(_art(tmp_path), _TASK, node, run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / f"{node}.out.md").write_text(text, encoding="utf-8")
 
 
 def _seed_diff(tmp_path: Path, text: str = _DIFF) -> None:
     """Write both copies of ``current.diff``: the private artifact and the exchange copy."""
-    task_dir = task_artifact_dir(tmp_path / "art", _TASK)
+    task_dir = task_artifact_dir(_art(tmp_path), _TASK)
     task_dir.mkdir(parents=True, exist_ok=True)
     (task_dir / "current.diff").write_text(text, encoding="utf-8")
     exchange_task = tmp_path / "repo" / ".worc-io" / _TASK
     exchange_task.mkdir(parents=True, exist_ok=True)
     (exchange_task / "current.diff").write_text(text, encoding="utf-8")
+
+
+def _packet_diff_path() -> str:
+    """The packet's own name for ``current.diff``: the private copy, relative to the repo."""
+    return f".worc/logs/{_TASK}/current.diff"
 
 
 def test_packet_is_a_pure_function_of_durable_state(tmp_path: Path) -> None:
@@ -891,7 +905,7 @@ def test_packet_paths_are_repo_relative_posix(tmp_path: Path) -> None:
 
     packet = json.loads(sup._build_packet(_TASK, "T", []))
 
-    assert packet["changes"]["diff_path"] == f".worc-io/{_TASK}/current.diff"
+    assert packet["changes"]["diff_path"] == _packet_diff_path()
     # Every path the packet names is relative and POSIX (the inlined diff body is exempt — it is
     # verbatim artifact content, not a path the packet authored).
     for path in [*packet["changes"]["paths"], packet["changes"]["diff_path"]]:
@@ -934,7 +948,7 @@ def test_packet_inlines_a_small_diff_but_only_references_a_large_one(tmp_path: P
     large = json.loads(sup._build_packet(_TASK, "T", []))["changes"]
     assert "diff" not in large  # above the bound only the stats + the artifact path remain
     assert large["paths"] == ["src/parser.py"]
-    assert large["diff_path"] == f".worc-io/{_TASK}/current.diff"
+    assert large["diff_path"] == _packet_diff_path()
 
 
 def test_packet_bounds_a_long_step_message(tmp_path: Path) -> None:
@@ -1075,14 +1089,16 @@ def test_packet_names_the_latest_evaluator_findings(tmp_path: Path) -> None:
             findings_json="[]",
         )
     )
-    findings = tmp_path / "repo" / ".worc-io" / _TASK / "stages" / "review" / "run-000012"
+    findings = node_run_dir(_art(tmp_path), _TASK, "review", 12)
     findings.mkdir(parents=True, exist_ok=True)
     (findings / "findings.json").write_text('{"findings": []}\n', encoding="utf-8")
     sup = _wired(tmp_path, FakeRouter(), store)
 
     packet = json.loads(sup._build_packet(_TASK, "T", store.get_evaluations(_TASK)))
 
-    assert packet["findings_path"] == f".worc-io/{_TASK}/stages/review/run-000012/findings.json"
+    # The private copy, which survives terminal cleanup — the exchange one the packet used to name
+    # is removed with the exchange, so every path in a saved packet pointed at nothing.
+    assert packet["findings_path"] == f".worc/logs/{_TASK}/stages/review/run-000012/findings.json"
 
 
 def test_packet_publication_redacts_and_keeps_a_private_copy(tmp_path: Path) -> None:
@@ -1099,7 +1115,7 @@ def test_packet_publication_redacts_and_keeps_a_private_copy(tmp_path: Path) -> 
         "utf-8"
     )
     assert "hunter2-secret" not in published
-    private = node_run_dir(tmp_path / "art", _TASK, "supervisor", 0) / "packet.json"
+    private = node_run_dir(_art(tmp_path), _TASK, "supervisor", 0) / "packet.json"
     assert private.is_file()  # the unredacted authoritative copy stays in the audit dir
 
 
@@ -1121,7 +1137,7 @@ def test_finalize_failed_does_not_clobber_existing_summary_json(tmp_path: Path) 
     real = _prose("Real summary.")
     sup_ok = _supervisor(tmp_path, FakeRouter([_ok("s1", real)]), store)
     sup_ok.finalize(task_id=_TASK, task_title="T")
-    summary_json = Path(task_artifact_dir(tmp_path / "art", _TASK)) / "summary.json"
+    summary_json = Path(task_artifact_dir(_art(tmp_path), _TASK)) / "summary.json"
     assert json.loads(summary_json.read_text("utf-8"))["summary"] == real
 
     # A later finalize whose turn fails must not blank it.
@@ -1676,7 +1692,7 @@ def test_handoff_records_subtask_in_prompt_audit(tmp_path: Path) -> None:
     )
     sup.handoff(task_id=_TASK, subtask_order=2, floor_context="F")
 
-    audit_dir = task_artifact_dir(str(tmp_path / "art"), _TASK) / "prompt-audit"
+    audit_dir = task_artifact_dir(str(_art(tmp_path)), _TASK) / "prompt-audit"
     step_path = audit_dir / f"{_HANDOFF_RUN_ID_BASE + 2:06d}-supervisor-sub02.md"
     assert step_path.exists()
     assert '"subtask": 2' in step_path.read_text("utf-8")
@@ -2028,7 +2044,7 @@ def test_summary_json_reports_what_the_layer_spent_per_phase(tmp_path: Path) -> 
     sup.finalize(task_id=_TASK, task_title="T")
 
     payload = json.loads(
-        (Path(task_artifact_dir(tmp_path / "art", _TASK)) / "summary.json").read_text("utf-8")
+        (Path(task_artifact_dir(_art(tmp_path), _TASK)) / "summary.json").read_text("utf-8")
     )
     usage = payload["supervisor_usage"]
     # Written after the finalize turn, so the most expensive call is in its own report.
@@ -2048,7 +2064,7 @@ def test_summary_json_omits_the_spend_report_when_the_layer_made_no_calls(tmp_pa
     sup.finalize(task_id=_TASK, task_title="T")
 
     payload = json.loads(
-        (Path(task_artifact_dir(tmp_path / "art", _TASK)) / "summary.json").read_text("utf-8")
+        (Path(task_artifact_dir(_art(tmp_path), _TASK)) / "summary.json").read_text("utf-8")
     )
     assert "supervisor_usage" not in payload
 

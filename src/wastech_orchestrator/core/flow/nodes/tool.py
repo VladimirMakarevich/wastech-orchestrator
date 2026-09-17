@@ -420,6 +420,17 @@ def parse_tool_output(exit_code: int | None, stdout: str) -> ToolContract:
     return ToolContract(outcome=outcome, findings=findings, data=data)
 
 
+def tool_reported_data(stdout: str) -> Mapping[str, object] | None:
+    """The ``data`` object a tool reported on stdout, or ``None`` when it reported none.
+
+    Pure, and the read side of the same contract :func:`parse_tool_output` gates on — the step
+    record calls it to put a gate's own measurements in front of the reader that has to write about
+    them, without re-deciding an outcome the engine already routed on (which is why it takes no exit
+    code). Kept here, beside the parser, so the contract is stated once.
+    """
+    return _data_from(_parse_json_object(stdout))
+
+
 def _validated_outcome(raw: object) -> str:
     if isinstance(raw, str) and (
         raw in ("pass", "fail") or (raw.startswith("route:") and len(raw) > len("route:"))

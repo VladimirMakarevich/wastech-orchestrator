@@ -802,7 +802,6 @@ class Supervisor:
                 flow_name=self._flow_name,
                 evaluations=evaluations,
                 artifacts_root=self._artifacts_root,
-                exchange_root=self._exchange_root,
                 repo_dir=self._repo_dir,
                 material_observations=self._finalize_digest(evaluations),
             )
@@ -1321,9 +1320,14 @@ class Supervisor:
                 "in the context below — it is the deterministic record of this run (the changed "
                 "paths and diff stat with a pointer to the full diff, every executed step with its "
                 "outcome and what it reported, the checks that ran, and your own recorded per-step "
-                "observations) — and ground every statement you make in it. Open the artifacts it "
-                "points at when you need more detail than it carries. If something is absent from "
-                "the packet, say so plainly rather than inferring it.\n"
+                "observations) — and ground every statement you make in it. A step carries what "
+                "its node reported inline: a tool gate's `data` and `stdout_head` are its own "
+                "measurements, and a `findings` value is the verdict that evaluator recorded on "
+                "that pass, so describe a gate from its own step rather than from a neighbouring "
+                "one. A field marked with a trailing `…` was cut at this packet's size bound — say "
+                "so rather than completing it. A step carrying a `note` is telling you how to read "
+                "it; follow it and do not report the note itself as an event. If something is "
+                "absent from the packet, say so plainly rather than inferring it.\n"
             )
         if with_follow_ups:
             prompt += (
