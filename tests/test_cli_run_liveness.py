@@ -185,11 +185,12 @@ def test_a_run_that_loses_the_race_refuses_instead_of_stealing_the_marker(
 def test_a_run_reclaims_a_marker_left_behind_by_a_dead_executor(
     monkeypatch: pytest.MonkeyPatch, in_repo_config: OrchestratorConfig, tmp_path: Path
 ) -> None:
-    # A hard kill leaves the marker on disk. Refusing on it would make one crash block the clone
-    # until an operator deleted a file by hand.
+    # A hard kill leaves the marker on disk. Where a dead PID can be recognised as dead, refusing on
+    # it would make one crash block the clone until an operator deleted a file by hand.
     _mark_running(in_repo_config)
     marker = process_control.runner_file_path(cli.worc_home_for(in_repo_config))
     monkeypatch.setattr(cli, "load_config_for", lambda args: in_repo_config)
+    monkeypatch.setattr(process_control, "_can_signal", lambda: True)  # the POSIX branch
     monkeypatch.setattr(process_control, "is_running", lambda pid, **kw: False)
 
     class _Orch:
@@ -200,6 +201,37 @@ def test_a_run_reclaims_a_marker_left_behind_by_a_dead_executor(
 
     assert cli.main(["run", str(_task_file(tmp_path))]) == 0
     assert not marker.exists()
+
+
+def test_a_marker_left_by_a_crash_still_refuses_where_liveness_cannot_be_probed(
+    monkeypatch: pytest.MonkeyPatch,
+    in_repo_config: OrchestratorConfig,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    # The other half of the same branch, and the documented Windows trade-off: `os.kill` cannot
+    # probe a process this one holds no handle to, so the marker's presence is the whole signal and
+    # a crash-left marker reads as a live executor until `stop` or a hand clears it. Asserted with
+    # the platform seam injected, so both branches are exercised on every host.
+    _mark_running(in_repo_config)
+    marker = process_control.runner_file_path(cli.worc_home_for(in_repo_config))
+    before = marker.read_bytes()
+    monkeypatch.setattr(cli, "load_config_for", lambda args: in_repo_config)
+    monkeypatch.setattr(process_control, "_can_signal", lambda: False)  # the Windows branch
+    monkeypatch.setattr(
+        process_control,
+        "is_running",
+        lambda pid, **kw: pytest.fail("liveness must not be probed where the platform cannot"),
+    )
+    started: list[int] = []
+    monkeypatch.setattr(cli, "build_orchestrator", lambda *a, **k: started.append(1))
+
+    code = cli.main(["run", str(_task_file(tmp_path))])
+
+    assert code == 1
+    assert started == []
+    assert "4242" in capsys.readouterr().out
+    assert marker.read_bytes() == before  # and the loser never touches what it refused on
 
 
 def test_rerun_refuses_while_a_run_owns_the_clone(
