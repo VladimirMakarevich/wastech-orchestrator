@@ -167,7 +167,9 @@ from wastech_orchestrator.git_manager import (
     ManualActionRequired,
 )
 from wastech_orchestrator.ledger import (
+    FAILURE_REPORT_FILENAME,
     INFRA_LOOP,
+    RECOVERED_PREFIX,
     STUCK_FILENAME,
     Ledger,
     LedgerRecord,
@@ -3564,6 +3566,14 @@ class Orchestrator:
                 # (refreshed by every agent edit-node). The engine only compares it for equality
                 # across rework charges — stays domain-free. Drop this kwarg to disable the guard.
                 diff_fingerprint=lambda: read_final_diff(self._artifacts_root, p.task.id),
+                # The second no-progress signal, derived from the verdicts already recorded: how
+                # many times in a row this node has returned the same finding set. Read from the
+                # store on demand rather than carried in memory, so a restart — which zeroes the
+                # fingerprint streak above while the persisted loop counters keep counting — cannot
+                # hide a loop that will never converge. Drop this kwarg to disable the guard.
+                repeated_findings=lambda node_id: self._store.consecutive_identical_findings(
+                    p.task.id, node_id=node_id, subtask_order=subtask
+                ),
                 subtask_order=subtask,
                 region=region,
                 disabled_nodes=p.skip,
@@ -4710,6 +4720,40 @@ class Orchestrator:
             log.warning("terminal summary not written", extra={"error": str(exc)})
             return False
 
+    def _recover_failure_artifacts(self, task_id: str) -> str | None:
+        """Retire a survived failure's artifacts at the transition to ``done``; return its loop.
+
+        For a non-blocking evaluator this is the ordinary path rather than an edge case: a guard
+        ends the loop and writes the report, the flow continues because that lens does not gate
+        publication, and the task succeeds — leaving a ledger line that read ``done`` beside a
+        pointer to a failure report, with nothing to tell a reader which of the two to believe. The
+        evidence itself is worth keeping, so the artifacts are renamed rather than deleted: the
+        prefix says the run survived what is inside them.
+
+        Returns the loop the report names, which is what the ledger records instead of the path.
+        Best-effort by construction — the terminal status is already decided, so a filesystem or
+        JSON problem is logged and the task still finishes. ``None`` when there is no report, which
+        is the clean and common case.
+        """
+        task_dir = task_artifact_dir(self._artifacts_root, task_id)
+        report = task_dir / FAILURE_REPORT_FILENAME
+        if not report.is_file():
+            return None
+        loop: str | None = None
+        try:
+            parsed = json.loads(report.read_text(encoding="utf-8"))
+            if isinstance(parsed, dict) and isinstance(parsed.get("loop"), str):
+                loop = parsed["loop"]
+            for name in (FAILURE_REPORT_FILENAME, STUCK_FILENAME):
+                artifact = task_dir / name
+                if artifact.is_file():
+                    artifact.replace(task_dir / f"{RECOVERED_PREFIX}{name}")
+        except (OSError, ValueError) as exc:
+            self._log(task_id).warning(
+                "failure artifacts not retired on a recovered task", extra={"error": str(exc)}
+            )
+        return loop
+
     def _write_infra_failure_report(
         self,
         p: _Pipeline,
@@ -4913,15 +4957,29 @@ class Orchestrator:
         # The flow checkpoint marks where ``rerun --continue`` re-enters — meaningful only for a
         # non-success terminal. A ``done`` task has no resume position, so clear it (``node_runs``
         # stay for the audit trail); otherwise keep ``current_node`` for the operator to continue.
+        recovered_loop: str | None = None
         if final is Status.DONE:
+            recovered_loop = self._recover_failure_artifacts(p.task.id)
             self._store.update_task(
-                p.task.id, current_node=None, flow_run_counters=None, flow_fingerprint=None
+                p.task.id,
+                current_node=None,
+                flow_run_counters=None,
+                flow_fingerprint=None,
+                # A task that finished is not failing on anything, whatever a guard wrote earlier in
+                # the run. The pointer goes with the artifacts it named.
+                failure_report_path=None,
+                recovered_loop=recovered_loop,
             )
         self._transition(p, final, finished_at=self._clock())
         if not already_moved:
             self._move_task_file(p, final)
         self._append_ledger(
-            p, final, pr_url=pr_url, cleanup_safe=cleanup.safe, merge_outcome=merge_outcome
+            p,
+            final,
+            pr_url=pr_url,
+            cleanup_safe=cleanup.safe,
+            merge_outcome=merge_outcome,
+            recovered_loop=recovered_loop,
         )
         self._notify_terminal(
             task_id=p.task.id,
@@ -5583,6 +5641,7 @@ class Orchestrator:
         pr_url: str | None,
         cleanup_safe: bool,
         merge_outcome: str | None = None,
+        recovered_loop: str | None = None,
     ) -> None:
         task_row = self._store.get_task(p.task.id)
         attempt = self._rerun_attempt.get(p.task.id, 1)
@@ -5606,5 +5665,7 @@ class Orchestrator:
                 rerun_of=p.task.id if attempt > 1 else None,
                 governance_changed=p.governance_changed,
                 advanced_mode=self._advanced_mode,
+                recovered_from_stuck=recovered_loop is not None,
+                recovered_loop=recovered_loop,
             )
         )

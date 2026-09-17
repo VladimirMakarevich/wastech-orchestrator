@@ -1410,6 +1410,11 @@ def _display_status(row: TaskRow, *, executor_alive: bool) -> str:
 
     A pause carrying a provider-reported wake instant names it, because otherwise a daemon correctly
     waiting out a limit is indistinguishable from a hung one.
+
+    A ``done`` task whose run had a fix loop stopped by a guard says so. It succeeded and is not
+    failing on anything — its failure artifacts were retired at the terminal — but a run that needed
+    a loop cut short is worth a second look, and the alternative was leaving the reader to infer it
+    from a stale report path.
     """
     if row.status is Status.RUNNING and not executor_alive:
         return "parked (no daemon)"
@@ -1417,6 +1422,8 @@ def _display_status(row: TaskRow, *, executor_alive: bool) -> str:
         if row.blocked_until:
             return f"{row.status.value} (paused until {row.blocked_until})"
         return f"{row.status.value} (paused)"
+    if row.status is Status.DONE and row.recovered_loop:
+        return f"{row.status.value} (recovered: {row.recovered_loop})"
     return row.status.value
 
 

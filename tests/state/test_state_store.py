@@ -887,6 +887,55 @@ def test_reset_for_rerun_clears_editing_lineage(store: StateStore) -> None:
     assert store.get_editing_lineage("task-001", "implementation") is None
 
 
+def _verdict(
+    findings_json: str, *, node_id: str = "critic", subtask: int | None = None
+) -> EvaluationRow:
+    return EvaluationRow(
+        task_id="task-001",
+        node_id=node_id,
+        source_node_run_id=None,
+        subtask_order=subtask,
+        kind="in_flow_verdict",
+        verdict="rework",
+        findings_json=findings_json,
+    )
+
+
+_SAME = '[{"severity": "high", "reason": "rewrite the brief"}]'
+
+
+def test_consecutive_identical_findings_counts_the_current_run_only(store: StateStore) -> None:
+    # The signal is a *current* run of repeats, not a total: a pass that found something else means
+    # the loop was still moving, and everything before it is no longer evidence of a stuck critic.
+    store.insert_task(_new_task())
+    for findings in (_SAME, _SAME, '[{"reason": "something else"}]', _SAME, _SAME):
+        store.record_evaluation(_verdict(findings))
+
+    assert store.consecutive_identical_findings("task-001", node_id="critic") == 2
+
+
+def test_consecutive_identical_findings_ignores_other_nodes_and_subtasks(store: StateStore) -> None:
+    # Two nodes repeating their own verdicts are two loops, and a decomposed task's units are
+    # separate runs of the same node — neither may be counted into the other's streak.
+    store.insert_task(_new_task())
+    store.record_evaluation(_verdict(_SAME, subtask=0))
+    store.record_evaluation(_verdict(_SAME, node_id="other"))
+    store.record_evaluation(_verdict(_SAME, subtask=1))
+
+    assert store.consecutive_identical_findings("task-001", node_id="critic", subtask_order=1) == 1
+
+
+def test_consecutive_identical_findings_is_zero_without_findings(store: StateStore) -> None:
+    # An empty verdict repeating says nothing about a critic asking for the impossible, which is the
+    # only thing this count is evidence of.
+    store.insert_task(_new_task())
+    store.record_evaluation(_verdict("[]"))
+    store.record_evaluation(_verdict("[]"))
+
+    assert store.consecutive_identical_findings("task-001", node_id="critic") == 0
+    assert store.consecutive_identical_findings("task-001", node_id="never-ran") == 0
+
+
 def test_evaluations_append_only_and_counted(store: StateStore) -> None:
     store.insert_task(_new_task())
     for i, verdict in enumerate(("rework", "accept", "rework"), start=1):
