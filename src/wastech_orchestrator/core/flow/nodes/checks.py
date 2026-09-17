@@ -43,7 +43,9 @@ from wastech_orchestrator.core.flow.engine import NodeContext, NodeOutcome, Node
 from wastech_orchestrator.core.flow.nodes.base import (
     NodeInputs,
     NodeManualRequired,
+    NodeRun,
     NodeServices,
+    open_node_run,
 )
 from wastech_orchestrator.core.flow.nodes.exchange_publish import publish_file
 from wastech_orchestrator.core.flow.output_policy import resolve_output_policy
@@ -62,7 +64,8 @@ class ChecksNodeRunner:
 
     def run(self, node: FlowNode, ctx: NodeContext) -> NodeResult:
         assert isinstance(node, ChecksNode)
-        run_id = self._s.store.record_node_run(
+        with open_node_run(
+            self._s,
             NodeRunRow(
                 task_id=ctx.task_id,
                 node_id=node.id,
@@ -70,17 +73,17 @@ class ChecksNodeRunner:
                 subtask_order=ctx.subtask_order,
                 status="running",
                 started_at=self._s.clock(),
-            )
-        )
-        if node.checker == "citation":
-            return self._run_citation(node, ctx, run_id)
-        if node.checker == "dependency_scan":
-            return self._run_dependency_scan(node, ctx, run_id)
-        return self._run_command_profile(node, ctx, run_id)
+            ),
+        ) as run:
+            if node.checker == "citation":
+                return self._run_citation(node, ctx, run)
+            if node.checker == "dependency_scan":
+                return self._run_dependency_scan(node, ctx, run)
+            return self._run_command_profile(node, ctx, run)
 
     # -- command_profile ------------------------------------------------------
 
-    def _run_command_profile(self, node: ChecksNode, ctx: NodeContext, run_id: int) -> NodeResult:
+    def _run_command_profile(self, node: ChecksNode, ctx: NodeContext, run: NodeRun) -> NodeResult:
         before = self._capture()  # working-tree state before the checks can mutate anything
         # Diff-select which command sets to run (Р3) from the change vs base — committed (e.g. an
         # already-committed decomposed subtask) *and* uncommitted, not just the working tree, so a
@@ -90,15 +93,13 @@ class ChecksNodeRunner:
         selected = select_check_sets(self._in.check_sets, changed)
         if not selected:
             # Empty diff (nothing changed) or no command_sets configured → nothing to check → pass.
-            return self._complete(run_id, node, passed=True)
+            return self._complete(run, node, passed=True)
         outcome = self._run_checks(ctx, selected)
         if outcome.any_launch_failed or outcome.nothing_ran:
             # Incomplete gate: a required toolchain was absent, or every selected check was
             # skipped — changed code went unchecked. Fail closed to manual (a fix loop cannot
             # install host toolchains). This precedence wins over a co-occurring quality failure.
-            self._s.store.complete_node_run(
-                run_id, status="incomplete", outcome=None, finished_at=self._s.clock()
-            )
+            run.complete(status="incomplete", outcome=None)
             raise NodeManualRequired(
                 f"checks node {node.id!r}: the quality gate could not fully run (a required "
                 "toolchain is absent on the host, or every selected check was skipped) — changed "
@@ -106,20 +107,18 @@ class ChecksNodeRunner:
             )
         if outcome.any_quality_failed:
             self._publish_first_failure_log(ctx, outcome)
-            return self._complete(run_id, node, passed=False)
+            return self._complete(run, node, passed=False)
         if self._mutated_working_tree(before):
             # Green-but-dirtying guard: a passing check that rewrote commit-candidate files must not
             # pass silently. Fail closed to manual review.
-            self._s.store.complete_node_run(
-                run_id, status="dirtied_working_tree", outcome=None, finished_at=self._s.clock()
-            )
+            run.complete(status="dirtied_working_tree", outcome=None)
             raise NodeManualRequired(
                 f"checks node {node.id!r}: a check mutated the working tree "
                 "(commit-candidate files changed across the check run) — a green-but-dirtying "
                 "check must not pass silently"
             )
-        self._publish_command_report(ctx, node, run_id, outcome)
-        return self._complete(run_id, node, passed=True)
+        self._publish_command_report(ctx, node, run.id, outcome)
+        return self._complete(run, node, passed=True)
 
     def _publish_command_report(
         self, ctx: NodeContext, node: ChecksNode, run_id: int, outcome: CheckOutcome
@@ -173,7 +172,7 @@ class ChecksNodeRunner:
 
     # -- citation ------------------------------------------------------------
 
-    def _run_citation(self, node: ChecksNode, ctx: NodeContext, run_id: int) -> NodeResult:
+    def _run_citation(self, node: ChecksNode, ctx: NodeContext, run: NodeRun) -> NodeResult:
         """Validate the flow's citation manifest; a hallucinated citation → ``fail``."""
         checks_dir = self._checks_dir(ctx.task_id)
         resolved = resolve_output_policy(
@@ -187,7 +186,7 @@ class ChecksNodeRunner:
         started_at = self._s.clock()  # bracket the (in-process) validation work
         report = validate_citations(self._s.repo_dir, manifest)
         finished_at = self._s.clock()
-        run_dir = self._run_dir(ctx.task_id, node.id, run_id)
+        run_dir = self._run_dir(ctx.task_id, node.id, run.id)
         artifact = run_dir / "citation.json"
         artifact.write_text(_citation_json(report, self._repo_relpath(manifest)), encoding="utf-8")
         self._record_check_run(
@@ -202,7 +201,7 @@ class ChecksNodeRunner:
         )
         self._register(ctx.task_id, "citation", str(artifact))
         self._publish_citation_report(ctx, artifact)
-        return self._complete(run_id, node, passed=report.passed)
+        return self._complete(run, node, passed=report.passed)
 
     def _publish_citation_report(self, ctx: NodeContext, artifact: Path) -> None:
         """Publish the per-entry verdicts and point ``{checks_path}`` at them, on BOTH outcomes.
@@ -223,9 +222,9 @@ class ChecksNodeRunner:
 
     # -- dependency_scan -----------------------------------------------------
 
-    def _run_dependency_scan(self, node: ChecksNode, ctx: NodeContext, run_id: int) -> NodeResult:
+    def _run_dependency_scan(self, node: ChecksNode, ctx: NodeContext, run: NodeRun) -> NodeResult:
         """Run the core-owned advisory scanners as evidence; always ``pass`` (the scan ran)."""
-        run_dir = self._run_dir(ctx.task_id, node.id, run_id)
+        run_dir = self._run_dir(ctx.task_id, node.id, run.id)
         report = run_dependency_scan(
             repo_dir=self._s.repo_dir,
             logs_dir=run_dir / "dependency_scan",
@@ -250,19 +249,14 @@ class ChecksNodeRunner:
                 finished_at=scan.finished_at,
             )
         self._register(ctx.task_id, "dependency_scan", str(artifact))
-        return self._complete(run_id, node, passed=report.passed)
+        return self._complete(run, node, passed=report.passed)
 
     # -- shared helpers -------------------------------------------------------
 
-    def _complete(self, run_id: int, node: ChecksNode, *, passed: bool) -> NodeResult:
+    def _complete(self, run: NodeRun, node: ChecksNode, *, passed: bool) -> NodeResult:
         result_kind = "pass" if passed else "fail"
-        self._s.store.complete_node_run(
-            run_id,
-            status="passed" if passed else "failed",
-            outcome=result_kind,
-            finished_at=self._s.clock(),
-        )
-        return NodeResult(node_id=node.id, outcome=NodeOutcome(result_kind), node_run_id=run_id)
+        run.complete(status="passed" if passed else "failed", outcome=result_kind)
+        return NodeResult(node_id=node.id, outcome=NodeOutcome(result_kind), node_run_id=run.id)
 
     def _repo_relpath(self, path: Path) -> str | None:
         """*path* relative to the clone (POSIX), or ``None`` when it lies outside it.

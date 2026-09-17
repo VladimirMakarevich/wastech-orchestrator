@@ -2,7 +2,7 @@
 # Copy to config.yaml and fill it in for your project. config.yaml is NOT committed to git.
 # This is the packaged copy used by `wastech-orchestrator init` (the only example config; nothing else to sync).
 
-schema_version: 40                  # config format version; the orchestrator refuses newer configs
+schema_version: 41                  # config format version; the orchestrator refuses newer configs
 
 orchestrator:
   auto_mode:
@@ -36,6 +36,21 @@ repo:
                                     #   and current stay on the branch). false = never return (a
                                     #   global off switch, incl. new). true = force new + existing
                                     #   to return. current always stays regardless.
+  governance_paths: []              # ADDITIVE: repo-relative globs naming where THIS repository
+                                    #   keeps its rules, added to the set worc always reports on
+                                    #   (.agents/rules/** plus root AGENTS.md / AGENTS.override.md /
+                                    #   CLAUDE.md). A task whose diff touches one gets a notice in
+                                    #   the log, the PR summary, the ledger and Telegram — never a
+                                    #   block. Default [] = that built-in set alone.
+                                    #   It can only ADD. There is no exclusion syntax to write, and
+                                    #   a value trying to invent one is refused at load: a leading
+                                    #   "!" , an absolute path, a "~", a ".." traversal. So the
+                                    #   notice cannot be narrowed or switched off from here — what
+                                    #   you can do is tell worc where your own rules live, which it
+                                    #   has no way to guess. Same glob dialect as protected_paths.
+                                    #   Uncomment the entries below and edit for your layout:
+                                    # - ".rules/**"
+                                    # - "docs/conventions/**"
 
 paths:                              # where the task lifecycle lives (optional; omit = defaults)
   tasks_dir: "tasks"                # repo-relative dir holding preparing/pending/done/failed.

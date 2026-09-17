@@ -46,7 +46,9 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeInfraError,
     NodeInputs,
     NodeManualRequired,
+    NodeRun,
     NodeServices,
+    open_node_run,
 )
 from wastech_orchestrator.core.flow.nodes.diff_gate import (
     already_approved_in_task,
@@ -496,7 +498,8 @@ class AgentNodeRunner:
         resume_usage_baseline: NormalizedUsage | None = None,
     ) -> tuple[int, StageOutcome, str | None]:
         started_at = self._s.clock()
-        run_id = self._s.store.record_node_run(
+        with open_node_run(
+            self._s,
             NodeRunRow(
                 task_id=ctx.task_id,
                 node_id=node.id,
@@ -509,8 +512,39 @@ class AgentNodeRunner:
                 started_at=started_at,
                 skills_allowed=resolve_allow_skills(node.allow_skills, node.skills),
                 skills_required=node.skills,
+            ),
+        ) as run:
+            return self._invoke_open(
+                node,
+                ctx,
+                route,
+                run,
+                started_at,
+                human_input_path=human_input_path,
+                resume_session_id=resume_session_id,
+                resume_usage_baseline=resume_usage_baseline,
             )
-        )
+
+    def _invoke_open(
+        self,
+        node: AgentNode,
+        ctx: NodeContext,
+        route: ResolvedRoute,
+        run: NodeRun,
+        started_at: str,
+        *,
+        human_input_path: str | None,
+        resume_session_id: str | None,
+        resume_usage_baseline: NormalizedUsage | None,
+    ) -> tuple[int, StageOutcome, str | None]:
+        """One provider invocation, inside the lifetime its ``node_runs`` row is already open for.
+
+        Everything between the row's reservation and ``run_stage`` lives here — resume resolution,
+        request building, the containment assertion and the two detection brackets. That window is
+        exactly where the open-row defect lives: a containment breach or an integrity failure raises
+        before the provider is ever called, so nothing had recorded an outcome yet.
+        """
+        run_id = run.id
         session_id, baseline, baseline_session_id = self._resolve_resume(
             node, ctx, route, resume_session_id, resume_usage_baseline
         )
@@ -552,7 +586,7 @@ class AgentNodeRunner:
         # to the agent regardless of write access.
         exchange_before = capture_exchange_manifest(self._s.exchange_root, ctx.task_id)
         outcome = self._s.router.run_stage(request, route, snapshot=self._s.snapshot)
-        self._record_completion(run_id, outcome)
+        self._record_completion(run, outcome)
         record_run_observability(
             self._s,
             task_id=ctx.task_id,
@@ -953,7 +987,7 @@ class AgentNodeRunner:
             extra_secrets=self._s.prompt_secrets,
         )
 
-    def _record_completion(self, run_id: int, outcome: StageOutcome) -> None:
+    def _record_completion(self, run: NodeRun, outcome: StageOutcome) -> None:
         result = outcome.result
         if result is not None:
             status = result.status.value
@@ -963,14 +997,12 @@ class AgentNodeRunner:
             error_class = (
                 outcome.terminal_error.error_class.value if outcome.terminal_error else None
             )
-        self._s.store.complete_node_run(
-            run_id,
+        run.complete(
             status=status,
             outcome="done",
             provider_used=outcome.provider_used.value if outcome.provider_used else None,
             error_class=error_class,
             stage_attempts=outcome.stage_attempts,
-            finished_at=self._s.clock(),
         )
 
     def _resolve_resume(

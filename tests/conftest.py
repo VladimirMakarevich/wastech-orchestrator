@@ -234,6 +234,7 @@ def build_git_config(
     extra_environment: Mapping[str, str] | None = None,
     allowed_environment_patterns: Sequence[str] = (),
     strict_isolation: bool = True,
+    governance_paths: Sequence[str] = (),
 ) -> OrchestratorConfig:
     """Build a config pointing ``repo.local_path`` at the clone, with the given footprint/checks.
 
@@ -269,6 +270,12 @@ def build_git_config(
         if checkout_base_on_cleanup is not None
         else ""
     )
+    # Absent => the built-in governance set alone. The key only ever ADDS to it.
+    governance_block = (
+        "  governance_paths:\n" + "".join(f"    - {g!r}\n" for g in governance_paths)
+        if governance_paths
+        else ""
+    )
     paths_block = f"paths:\n  tasks_dir: {tasks_dir!r}\n" if tasks_dir != "tasks" else ""
     # Absent => the shipped default `auto`; pass "strict" in a test that drives the diff-shape gate.
     trust_level_line = f"  trust_level: {trust_level}\n" if trust_level is not None else ""
@@ -301,7 +308,7 @@ repo:
   local_path: {str(clone)!r}
   base_branch: "main"
   branch_prefix: "worc"
-{cleanup_line}{paths_block}agents:
+{cleanup_line}{governance_block}{paths_block}agents:
   allowed: [claude, codex]
   max_fix_cycles: {max_fix_cycles}
   max_total_fix_iterations: {max_total_fix_iterations}

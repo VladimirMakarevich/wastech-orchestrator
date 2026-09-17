@@ -50,6 +50,10 @@ The dangerous-diff gate measures from the last commit the orchestrator made for 
 
 The breach that produced [merge-task-exchange-containment.md](merge-task-exchange-containment.md) was decidable the moment `NodeInputs` was built, and was instead found when the provider request was assembled — on the one route nobody had exercised. Asserting at wiring time would turn "a flow forgot to publish an input" into a startup error in every flow, rather than a runtime failure in one.
 
+## Settled elsewhere, recorded here so one seam is not described in two places
+
+**The `node_runs` row an aborted merge left open — closed 2026-09-17.** Two runs of `worc merge-task` left rows 45 and 46 `running` with no `finished_at` on a task that is `done`, because `merge_task` converts the node-layer `NodeManualRequired` into `ManualActionRequired` at the merge seam: the transactional promise covers git, not the state store. The shape was general — any node that raises before its provider call, on a path that does not reach the task driver's terminal — so the row's lifetime became a context manager at the node layer rather than a special case in `_run_merge_flow`. An exception closes an unfinished row `aborted` with the raised reason in `abort_reason`; a node that recorded its own verdict is never reclosed over. The regression test sits beside the merge-task coverage. Nothing in the eight items above depends on it, and nothing here reopens it.
+
 ## What is deliberately not here
 
 Making the gate smarter about _who_ moved the bytes. A check command that rewrites files (a formatter, a code generator) satisfies the gate on a path the agent never considered; the gate's claim is only that the bytes moved. Tightening that means tracking authorship of working-tree writes, which is a much larger mechanism than the problem justifies — the honest fix is item 2, where the agent states its decisions and the tree stops being the only evidence.

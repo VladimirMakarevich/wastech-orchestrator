@@ -117,6 +117,12 @@ _ADDITIVE_TASK_COLUMNS: tuple[tuple[str, str], ...] = (
     ("gate_reference_sha", "TEXT"),
     ("push_url_digest", "TEXT"),
     ("base_ref", "TEXT"),
+    # Every quarantined-exchange evidence bundle this task produced, as a JSON list of POSIX paths.
+    # ``exchange_contaminated`` is a flag an operator ``rerun --continue`` legitimately clears, and
+    # when it did, the database stopped pointing at the incident entirely: the only surviving link
+    # was a directory name under a root nothing ever lists. The refs are append-only and are never
+    # cleared, so a finished task still names its own evidence. NULL until a bundle exists.
+    ("quarantine_refs", "TEXT"),
 )
 
 
@@ -268,7 +274,8 @@ CREATE TABLE IF NOT EXISTS tasks (
     exchange_active_unsafe INTEGER NOT NULL DEFAULT 0,
     gate_reference_sha TEXT,
     push_url_digest TEXT,
-    base_ref TEXT
+    base_ref TEXT,
+    quarantine_refs TEXT
 );
 
 CREATE TABLE IF NOT EXISTS node_runs (
@@ -488,6 +495,10 @@ class TaskRow:
     # provider reported its own reset time, clamped to the ceiling above. None = attempt on the next
     # tick, so this can only shorten a wait. Rewritten on every park and cleared at terminal.
     blocked_until: str | None = None
+    #: Every quarantined-exchange evidence bundle this task produced, oldest first (POSIX paths).
+    #: Append-only and never cleared — including by the operator continue that clears
+    #: ``exchange_contaminated`` — so a task that finished still names the incident it survived.
+    quarantine_refs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -911,6 +922,21 @@ class StateStore:
         with self._writer(conn) as c:
             c.execute(f"UPDATE tasks SET {assignments} WHERE task_id = ?", params)
 
+    def append_quarantine_ref(
+        self, task_id: str, ref: str, conn: sqlite3.Connection | None = None
+    ) -> None:
+        """Record one quarantined-exchange evidence bundle on the task row (append-only, deduped).
+
+        Append rather than set, because a task can be quarantined more than once, and never cleared,
+        because the flag that used to be the only pointer — ``exchange_contaminated`` — is
+        legitimately cleared by an operator ``rerun --continue``. After that the database named no
+        incident at all while the bundles sat on disk in the one root retention never reclaims.
+        """
+        row = self.get_task(task_id)
+        if row is None or ref in row.quarantine_refs:
+            return
+        self.update_task(task_id, conn, quarantine_refs=json.dumps([*row.quarantine_refs, ref]))
+
     def set_status(
         self, task_id: str, status: Status, conn: sqlite3.Connection | None = None
     ) -> None:
@@ -1106,15 +1132,22 @@ class StateStore:
         stage_attempts: int = 0,
         finished_at: str,
         commit_sha_after: str | None = None,
+        abort_reason: str | None = None,
         conn: sqlite3.Connection | None = None,
     ) -> None:
-        """Finalize a node run reserved by :meth:`record_node_run`."""
+        """Finalize a node run reserved by :meth:`record_node_run`.
+
+        ``abort_reason`` is set only by the node layer's own lifetime guard, for a run that ended
+        without its runner recording a verdict. It is the same column
+        :meth:`reconcile_open_node_runs` writes at a terminal, and never ``skip_reason``: an
+        interrupted run is not a ``when``-false node that never ran.
+        """
         with self._writer(conn) as c:
             cur = c.execute(
                 """
                 UPDATE node_runs
                 SET status = ?, outcome = ?, provider_used = ?, error_class = ?,
-                    stage_attempts = ?, finished_at = ?, commit_sha_after = ?
+                    stage_attempts = ?, finished_at = ?, commit_sha_after = ?, abort_reason = ?
                 WHERE id = ?
                 """,
                 (
@@ -1125,6 +1158,7 @@ class StateStore:
                     stage_attempts,
                     finished_at,
                     commit_sha_after,
+                    abort_reason,
                     run_id,
                 ),
             )
@@ -2097,4 +2131,20 @@ def _task_from_row(row: sqlite3.Row) -> TaskRow:
         updated_at=row["updated_at"],
         blocked_since=row["blocked_since"],
         blocked_until=row["blocked_until"],
+        quarantine_refs=_quarantine_refs(row["quarantine_refs"]),
     )
+
+
+def _quarantine_refs(raw: object) -> tuple[str, ...]:
+    """The stored quarantine-evidence list, or ``()`` when there is none or it is unreadable.
+
+    A row written before the column existed reads NULL; a malformed value reads empty rather than
+    raising, because a task row must stay loadable when the pointer beside it does not parse.
+    """
+    if not isinstance(raw, str) or not raw:
+        return ()
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return ()
+    return tuple(str(item) for item in parsed) if isinstance(parsed, list) else ()

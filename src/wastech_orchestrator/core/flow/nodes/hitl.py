@@ -23,6 +23,7 @@ from wastech_orchestrator.core.flow.nodes.base import (
     NodeInputs,
     NodeManualRequired,
     NodeServices,
+    open_node_run,
 )
 from wastech_orchestrator.core.flow.nodes.human_gate import HumanGate
 from wastech_orchestrator.core.flow.schema import FlowNode, HitlNode
@@ -45,7 +46,8 @@ class HitlNodeRunner:
 
     def run(self, node: FlowNode, ctx: NodeContext) -> NodeResult:
         assert isinstance(node, HitlNode)
-        run_id = self._s.store.record_node_run(
+        with open_node_run(
+            self._s,
             NodeRunRow(
                 task_id=ctx.task_id,
                 node_id=node.id,
@@ -53,20 +55,16 @@ class HitlNodeRunner:
                 subtask_order=ctx.subtask_order,
                 status="running",
                 started_at=self._s.clock(),
-            )
-        )
-        try:
-            result = self._obtain(node, ctx)
-        except NodeManualRequired:
-            self._s.store.complete_node_run(
-                run_id, status="failed", outcome=None, finished_at=self._s.clock()
-            )
-            raise
-        outcome = self._outcome(node, result)
-        self._s.store.complete_node_run(
-            run_id, status="passed", outcome=outcome.kind, finished_at=self._s.clock()
-        )
-        return NodeResult(node_id=node.id, outcome=outcome, node_run_id=run_id)
+            ),
+        ) as run:
+            try:
+                result = self._obtain(node, ctx)
+            except NodeManualRequired:
+                run.complete(status="failed", outcome=None)
+                raise
+            outcome = self._outcome(node, result)
+            run.complete(status="passed", outcome=outcome.kind)
+            return NodeResult(node_id=node.id, outcome=outcome, node_run_id=run.id)
 
     def _obtain(self, node: HitlNode, ctx: NodeContext) -> AskResult:
         """One durable round-trip (or resume a persisted one), validated fail-closed."""

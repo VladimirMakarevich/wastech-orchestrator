@@ -44,6 +44,7 @@ Fill in the repository identity first:
 - `branch_prefix` — usually leave the default `worc`.
 - `branch_mode` — leave the default `new` (fork a fresh task branch from base). Only change it if most tasks on this repo should work in an existing or current branch; individual tasks can override it per-task.
 - `checkout_base_on_cleanup` — leave unset (the default). Unset means each task returns to `base_branch` when it finishes only in `new` mode; `existing`/`current` stay on the branch. Set `false` to never switch back (handy when every task runs on one shared branch), or `true` to force `new` and `existing` back to base.
+- `governance_paths` — set it if this repository keeps its rules anywhere other than `.agents/rules/**` (say `.rules/**` or `docs/conventions/**`). worc always reports a task that edits `.agents/rules/**` or a root `AGENTS.md` / `AGENTS.override.md` / `CLAUDE.md`; this key **adds** your own locations to that set, so a rule edit cannot reach a pull request unannounced. It can only add — there is nothing to write that narrows the notice or switches it off, and a value that tries (a leading `!`, an absolute path) is refused at load.
 
 If the target project needs customer-specific branch names, keep `branch_prefix` default and let individual tasks set `branch_name`.
 

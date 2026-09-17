@@ -1027,3 +1027,31 @@ def test_evaluations_append_only_and_counted(store: StateStore) -> None:
     rows = store.get_evaluations("task-001")
     assert [r.verdict for r in rows] == ["rework", "accept", "rework"]  # append-only
     assert store.count_rework_verdicts("task-001") == 2  # the per-instance limit derives from COUNT
+
+
+def test_quarantine_refs_accumulate_and_survive_the_flag_being_cleared(tmp_path: Path) -> None:
+    # `exchange_contaminated` is legitimately cleared by an operator `rerun --continue`, and when it
+    # was, nothing in the database pointed at the incident any more — the only surviving link was a
+    # directory name under the one private root retention never reclaims.
+    store = StateStore.open(tmp_path / "state.db")
+    store.insert_task(TaskRow(task_id="t1", title="T", status=Status.RUNNING))
+    store.update_task("t1", exchange_contaminated=1)
+
+    store.append_quarantine_ref("t1", ".worc/runs/exchange-quarantine/t1/000001")
+    store.append_quarantine_ref("t1", ".worc/runs/exchange-quarantine/t1/000002")
+    store.append_quarantine_ref("t1", ".worc/runs/exchange-quarantine/t1/000001")  # idempotent
+    store.update_task("t1", exchange_contaminated=0)
+
+    assert store.get_task("t1").quarantine_refs == (
+        ".worc/runs/exchange-quarantine/t1/000001",
+        ".worc/runs/exchange-quarantine/t1/000002",
+    )
+    store.close()
+
+
+def test_a_task_with_no_quarantine_reads_an_empty_tuple(tmp_path: Path) -> None:
+    # NULL is the column's real meaning ("no bundle"), and it must not read as a one-element list.
+    store = StateStore.open(tmp_path / "state.db")
+    store.insert_task(TaskRow(task_id="t1", title="T", status=Status.RUNNING))
+    assert store.get_task("t1").quarantine_refs == ()
+    store.close()
