@@ -93,6 +93,10 @@ Because the in-repository exchange is removed at the end, the newest seal is the
 
 **This is the one whose existence means something happened.** The exchange is a read-only surface for the agent; if the orchestrator's tamper check finds that an agent changed it, the tree is moved here as evidence together with the expected and observed file manifests (`evidence.json`). It is never sealed and never reused to resume a task.
 
+`evidence.json` also carries `created_at`, the `node_id` whose attempt mutated the surface, and the `attempt` — which run of the task this was, the same number the completed-tasks ledger gives that terminal. Two bundles under one task id therefore order and attribute themselves from their own contents, without you reading directory timestamps. A bundle is written only when there is something in it: no expected manifest, no observed changes and no live tree means nothing is recorded at all, and the run logs a `WARNING` saying the evidence of that incident is an earlier bundle.
+
+The bundle is named on the task row too, as `quarantine_refs`. That matters because `rerun --continue` clears the contamination flag on the operator's say-so, and the flag used to be the only thing in the database that pointed here — after a continue, a finished task no longer named the incident it survived at all.
+
 **Normal?** **No.** On healthy runs this directory does not exist at all. If it does, read `evidence.json` — an agent wrote to a surface it was told not to.
 
 **Never deleted automatically**, in either retention mode. It is security evidence, and a cleanup command must not be the thing that removes it. Delete it by hand once you have read it, or pass `worc runs clean --include-quarantine`.

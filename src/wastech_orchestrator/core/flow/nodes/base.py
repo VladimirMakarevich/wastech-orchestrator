@@ -12,7 +12,8 @@ The collaborator fields are typed as narrow :class:`Protocol`\\ s so the real
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
@@ -185,6 +186,7 @@ class NodeRunStorePort(Protocol):
         stage_attempts: int = ...,
         finished_at: str,
         commit_sha_after: str | None = ...,
+        abort_reason: str | None = ...,
     ) -> None: ...
 
     def record_check_run(self, run: CheckRunRow) -> None: ...
@@ -482,3 +484,89 @@ class NodeInputs:
     #: the task's opaque ``references`` lines, appended to the PR body under ``## References`` when
     #: publishing opens one. Carried, never read: the orchestrator does not know what they mean.
     references: tuple[str, ...] = ()
+
+
+@dataclass
+class NodeRun:
+    """One open ``node_runs`` row, handed to the runner that opened it by :func:`open_node_run`.
+
+    A node run has exactly two states on disk — reserved ``running``, then finalized — and the
+    finalize is the runner's own last act. Any exit that skips it strands the row ``running`` with
+    a NULL ``finished_at`` forever: no reader can tell it from a node still executing, and the
+    task's audit trail permanently disagrees with its own terminal status. The whole class of defect
+    is a node that raises **before** its provider call on a path the task driver's terminal does not
+    reach — the merge flow was the one such path, and it left two rows open in a task that is
+    ``done``. Owning the lifetime here rather than fixing that one path is what keeps the next such
+    path from reintroducing it.
+    """
+
+    id: int
+    store: NodeRunStorePort
+    clock: Callable[[], str]
+    #: set by :meth:`complete`; the only thing that tells the context manager the row was finalized.
+    closed: bool = False
+
+    def complete(
+        self,
+        *,
+        status: str,
+        outcome: str | None,
+        provider_used: str | None = None,
+        error_class: str | None = None,
+        stage_attempts: int = 0,
+        commit_sha_after: str | None = None,
+    ) -> None:
+        """Finalize the row with the run's own verdict — the ordinary end of a node run."""
+        self.store.complete_node_run(
+            self.id,
+            status=status,
+            outcome=outcome,
+            provider_used=provider_used,
+            error_class=error_class,
+            stage_attempts=stage_attempts,
+            finished_at=self.clock(),
+            commit_sha_after=commit_sha_after,
+        )
+        self.closed = True
+
+    def abort(self, reason: str) -> None:
+        """Close a row the runner left open, as ``aborted`` with *reason* — a no-op once closed.
+
+        The reason goes to ``abort_reason``, never to ``skip_reason``: this row was run and
+        interrupted, which is the opposite of a ``when``-false node that was not run at all.
+        """
+        if self.closed:
+            return
+        self.store.complete_node_run(
+            self.id,
+            status="aborted",
+            outcome=None,
+            finished_at=self.clock(),
+            abort_reason=reason[:_ABORT_REASON_MAX],
+        )
+        self.closed = True
+
+
+#: Longest ``abort_reason`` a node writes. A raised message can carry a whole provider diagnostic,
+#: and the column is read in a `worc status` line, not in a log viewer.
+_ABORT_REASON_MAX = 500
+
+
+@contextmanager
+def open_node_run(services: NodeServices, row: NodeRunRow) -> Iterator[NodeRun]:
+    """Reserve *row*, yield its :class:`NodeRun`, and guarantee the row is closed on every exit.
+
+    A runner calls ``run.complete(...)`` with its own verdict, exactly as before. What this adds is
+    the guarantee for the exits that do not get there: an exception leaves the row ``aborted`` with
+    the raised reason, and a runner that returns without finalizing leaves it ``aborted`` saying so
+    — visible as a defect rather than invisible as a row still running.
+    """
+    run = NodeRun(
+        id=services.store.record_node_run(row), store=services.store, clock=services.clock
+    )
+    try:
+        yield run
+    except BaseException as exc:
+        run.abort(f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__)
+        raise
+    run.abort("the node runner returned without recording an outcome")

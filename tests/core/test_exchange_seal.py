@@ -20,6 +20,7 @@ from wastech_orchestrator.core.flow.exchange_seal import (
     ExchangeCleanupBlocked,
     ExchangeSealError,
     ensure_current_exchange,
+    exchange_quarantine_root,
     exchange_seal_root,
     quarantine_contaminated,
     restore_for_continue,
@@ -266,10 +267,59 @@ def test_quarantine_moves_tree_and_records_evidence(tmp_path: Path) -> None:
         TASK_ID,
         expected=expected,
         observed_changes=("content changed 'plan.md'",),
+        created_at="2026-01-01T00:00:00+00:00",
+        node_id="review",
+        attempt=2,
     )
 
+    assert evidence is not None
     assert not task_dir.exists()  # removed from the active root
     assert (evidence / "tree" / "plan.md").is_file()  # relocated as evidence
     doc = json.loads((evidence / "evidence.json").read_text(encoding="utf-8"))
     assert doc["observed_changes"] == ["content changed 'plan.md'"]
     assert doc["expected_manifest"]["manifest_digest"]
+    # Two bundles for one task id must order and attribute themselves from their own contents —
+    # before this, only the directory mtime could tell them apart.
+    assert doc["created_at"] == "2026-01-01T00:00:00+00:00"
+    assert doc["node_id"] == "review" and doc["attempt"] == 2
+
+
+def test_quarantine_with_nothing_to_record_creates_no_bundle(tmp_path: Path) -> None:
+    # Reachable on a second terminal: the stored contamination flag is still set, the tree already
+    # moved into the first bundle, and there is no mutation to describe. A directory + a contentless
+    # evidence.json was minted anyway, in the one private root retention correctly never reclaims.
+    exchange_root, private_home = _roots(tmp_path)
+
+    evidence = quarantine_contaminated(
+        exchange_root,
+        private_home,
+        TASK_ID,
+        expected=None,
+        observed_changes=(),
+        created_at="2026-01-01T00:00:00+00:00",
+        node_id=None,
+        attempt=2,
+    )
+
+    assert evidence is None
+    assert not exchange_quarantine_root(private_home, TASK_ID).exists()
+
+
+def test_quarantine_still_records_a_live_tree_with_no_manifest(tmp_path: Path) -> None:
+    # The guard is the conjunction of all three emptiness conditions, not any one of them: a tree
+    # that is here is evidence even when the manifests that would describe it are not.
+    exchange_root, private_home = _roots(tmp_path)
+    _populate(exchange_root)
+
+    evidence = quarantine_contaminated(
+        exchange_root,
+        private_home,
+        TASK_ID,
+        expected=None,
+        observed_changes=(),
+        created_at="2026-01-01T00:00:00+00:00",
+        node_id=None,
+        attempt=1,
+    )
+
+    assert evidence is not None and (evidence / "tree" / "plan.md").is_file()

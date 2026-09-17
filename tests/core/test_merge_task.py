@@ -15,6 +15,7 @@ import pytest
 from wastech_orchestrator.composition import build_orchestrator
 from wastech_orchestrator.config.loader import loads_config
 from wastech_orchestrator.config.schema import MergeStrategy
+from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
 from wastech_orchestrator.core.orchestrator import PipelineFailed
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.git_manager import (
@@ -367,6 +368,42 @@ def test_a_staging_gate_refusal_still_aborts_the_merge(
 
     assert orch._git.merge_in_progress() is False  # restored, not wedged mid-merge
     assert gh.merge_called is False
+
+
+def test_a_merge_flow_node_stopped_before_its_provider_closes_its_row(
+    git_repo, fake_cli, git_run, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `merge_task` converts the node-layer `NodeManualRequired` into `ManualActionRequired` and
+    # aborts the git merge cleanly — the transactional promise covers git, not the state store. Two
+    # real runs of this left `node_runs` rows `running` with no `finished_at` on a task that is
+    # `done`, and no reader can tell such a row from a node still executing. The lifetime is owned
+    # at the node layer now, so this holds for any node that stops before its provider call, on any
+    # path that does not go through the task driver's terminal.
+    gh = FakeGh("OPEN")
+    orch = _build(git_repo, fake_cli, tmp_path, scenario="resolve_conflicts", gh=gh)
+    _seed_task(orch._store)
+    _setup_branch(git_run, git_repo.clone, conflict=True)
+
+    def _breach(request: object, exchange_root: str) -> None:
+        raise NodeManualRequired("exchange containment violation: a private path reached a request")
+
+    monkeypatch.setattr(
+        "wastech_orchestrator.core.flow.nodes.agent.assert_request_contained", _breach
+    )
+
+    with pytest.raises(ManualActionRequired):
+        orch.merge_task("m1", strategy=MergeStrategy.SQUASH, wait_for_checks=False)
+
+    runs = orch._store.get_node_runs("m1")
+    assert runs, "the merge flow must have opened a node run for this to be a regression test"
+    assert not [r for r in runs if r.status == "running" or r.finished_at is None]
+    closed = runs[-1]
+    assert closed.status == "aborted" and closed.finished_at
+    assert "containment violation" in (closed.abort_reason or "")
+    # The reason belongs to `abort_reason`, never `skip_reason`: this node ran and was interrupted,
+    # which is the opposite of a `when`-false node that was never run at all.
+    assert closed.skip_reason is None and not closed.skipped
+    assert orch._git.merge_in_progress() is False  # the transactional git promise still holds
 
 
 def test_the_conflict_report_reaches_the_agent_and_the_audit_tree(

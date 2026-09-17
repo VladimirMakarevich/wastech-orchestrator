@@ -59,7 +59,9 @@ from wastech_orchestrator.core.flow.engine import Finding, NodeContext, NodeOutc
 from wastech_orchestrator.core.flow.nodes.base import (
     NodeInputs,
     NodeManualRequired,
+    NodeRun,
     NodeServices,
+    open_node_run,
 )
 from wastech_orchestrator.core.flow.nodes.exchange_publish import publish_node_run_file
 from wastech_orchestrator.core.flow.schema import FlowNode, ToolNode
@@ -144,7 +146,8 @@ class ToolNodeRunner:
 
     def run(self, node: FlowNode, ctx: NodeContext) -> NodeResult:
         assert isinstance(node, ToolNode)
-        run_id = self._s.store.record_node_run(
+        with open_node_run(
+            self._s,
             NodeRunRow(
                 task_id=ctx.task_id,
                 node_id=node.id,
@@ -152,9 +155,14 @@ class ToolNodeRunner:
                 subtask_order=ctx.subtask_order,
                 status="running",
                 started_at=self._s.clock(),
-            )
-        )
-        tool_path = self._resolve(node, run_id)
+            ),
+        ) as run:
+            return self._run_tool(node, ctx, run)
+
+    def _run_tool(self, node: ToolNode, ctx: NodeContext, run: NodeRun) -> NodeResult:
+        """Resolve, launch and gate the tool, inside the lifetime its row is already open for."""
+        run_id = run.id
+        tool_path = self._resolve(node, run)
 
         # Per-run dir keyed by node.id + run_id (mirrors agent/evaluator runs): a tool node that
         # re-runs in a loop keeps every pass's streams; {<node_id>_path} resolves the latest run.
@@ -198,7 +206,7 @@ class ToolNodeRunner:
         # (1) Infrastructure failure — launch error / timeout → manual, never a quality fail. It
         #     mirrors the one existing external-command gate (checks command-profile); no fix loop.
         if result.launch_error is not None or result.timed_out:
-            self._complete(run_id, status="timeout" if result.timed_out else "launch_error")
+            self._complete(run, status="timeout" if result.timed_out else "launch_error")
             reason = "timed out" if result.timed_out else "could not be launched"
             raise NodeManualRequired(
                 f"tool node {node.id!r}: the tool {node.tool!r} {reason} — an infrastructure "
@@ -213,7 +221,7 @@ class ToolNodeRunner:
             and not redacted_stdout.strip()
             and redacted_stderr.strip()
         ):
-            self._complete(run_id, status="crashed")
+            self._complete(run, status="crashed")
             stderr_head = _stream_head(redacted_stderr)
             raise NodeManualRequired(
                 f"tool node {node.id!r}: the tool {node.tool!r} exited with code "
@@ -226,7 +234,7 @@ class ToolNodeRunner:
         try:
             contract = parse_tool_output(result.exit_code, redacted_stdout)
         except ToolContractError as exc:
-            self._complete(run_id, status="invalid_output")
+            self._complete(run, status="invalid_output")
             raise NodeManualRequired(
                 f"tool node {node.id!r}: the tool {node.tool!r} emitted an invalid outcome ({exc}) "
                 "— failing closed to manual review"
@@ -236,7 +244,7 @@ class ToolNodeRunner:
             node, ctx, contract, result.exit_code, redacted_stdout
         )
         if repeats is not None:
-            self._complete(run_id, status="stalled", outcome=contract.outcome)
+            self._complete(run, status="stalled", outcome=contract.outcome)
             raise NodeManualRequired(
                 f"tool node {node.id!r}: the tool {node.tool!r} returned the same failure "
                 f"{repeats} times with no top-level 'findings' array, so no fix iteration could be "
@@ -244,7 +252,7 @@ class ToolNodeRunner:
                 f"{_stream_head(redacted_stdout)!r}"
             )
 
-        self._complete(run_id, status=_run_status(contract.outcome), outcome=contract.outcome)
+        self._complete(run, status=_run_status(contract.outcome), outcome=contract.outcome)
         drift, wrote = self._control_drift(control_before, ctx.task_id)
         return NodeResult(
             node_id=node.id,
@@ -289,7 +297,7 @@ class ToolNodeRunner:
         summary = control_drift.summary() if control_drift is not None else None
         return summary, git.changed_code_entries(task_id) != before.tree
 
-    def _resolve(self, node: ToolNode, run_id: int) -> Path:
+    def _resolve(self, node: ToolNode, run: NodeRun) -> Path:
         """Resolve the tool name → executable, fail-closed to manual if the registry can't.
 
         Validation already resolved every ``tool`` at preflight, so this succeeds in the normal
@@ -297,7 +305,7 @@ class ToolNodeRunner:
         """
         registry = self._s.tool_registry
         if registry is None:
-            self._complete(run_id, status="launch_error")
+            self._complete(run, status="launch_error")
             raise NodeManualRequired(
                 f"tool node {node.id!r}: no operator tool registry is configured "
                 "(no .worc/tools/ layer) — cannot run a tool node"
@@ -305,7 +313,7 @@ class ToolNodeRunner:
         try:
             return registry.resolve(node.tool)
         except ToolResolutionError as exc:
-            self._complete(run_id, status="launch_error")
+            self._complete(run, status="launch_error")
             raise NodeManualRequired(f"tool node {node.id!r}: {exc}") from exc
 
     def _build_stdin(self, node: ToolNode, ctx: NodeContext) -> str:
@@ -379,10 +387,8 @@ class ToolNodeRunner:
         if self._s.register_artifact is not None:
             self._s.register_artifact(task_id, f"tool:{node_id}", path)
 
-    def _complete(self, run_id: int, *, status: str, outcome: str | None = None) -> None:
-        self._s.store.complete_node_run(
-            run_id, status=status, outcome=outcome, finished_at=self._s.clock()
-        )
+    def _complete(self, run: NodeRun, *, status: str, outcome: str | None = None) -> None:
+        run.complete(status=status, outcome=outcome)
 
 
 def _launch_argv(tool_path: Path) -> list[str]:

@@ -1984,7 +1984,8 @@ class Orchestrator:
         # The operator finalize/merge/PR-sync paths are terminal producers that bypass
         # ``_go_terminal``, so they must seal the exchange too. Idempotent — a no-op when the
         # pipeline terminal already sealed and removed the active exchange for this task.
-        self._seal_terminal_exchange(task_id, final=declared)
+        attempt = _ledger_attempt_count(self._ledger, task_id) + 1
+        self._seal_terminal_exchange(task_id, final=declared, attempt=attempt)
         self._evict_run_artifacts(task_id, final=declared)
         self._relocate_task_file(row.source_path, task_id, declared)
         consume_pending_interactions(self._artifacts_root, task_id)
@@ -3262,11 +3263,17 @@ class Orchestrator:
                     # this an operator who has read the diagnosis could not continue at all, only
                     # re-pay for a fresh run. The daemon's own crash recovery sets no such marker
                     # and still refuses.
+                    refs = self._store.get_task(p.task.id)
                     self._store.update_task(p.task.id, exchange_contaminated=0)
                     contaminated = False
                     self._log(p.task.id).warning(
                         "continuing over an exchange flagged contaminated by mutation detection — "
-                        "the operator asked for this resume; the quarantined evidence is kept"
+                        "the operator asked for this resume; the quarantined evidence is kept at "
+                        "%s",
+                        ", ".join(refs.quarantine_refs) if refs else "(no bundle recorded)",
+                        extra={
+                            "quarantine_refs": list(refs.quarantine_refs) if refs else [],
+                        },
                     )
                 ensure_current_exchange(
                     self._exchange_root,
@@ -5043,11 +5050,13 @@ class Orchestrator:
         self._transition(p, final, finished_at=self._clock())
         if not already_moved:
             self._move_task_file(p, final)
+        attempt = _ledger_attempt_count(self._ledger, p.task.id) + 1
         self._append_ledger(
             p,
             final,
             pr_url=pr_url,
             cleanup_safe=cleanup.safe,
+            attempt=attempt,
             merge_outcome=merge_outcome,
             recovered_loop=recovered_loop,
         )
@@ -5068,12 +5077,17 @@ class Orchestrator:
         # after the quiescence barrier has proven the provider tree empty (an unproven tree already
         # set ``exchange_active_unsafe`` and blocks the seal). Never raises — the terminal status is
         # already recorded and must stay stable.
-        self._seal_terminal_exchange(p.task.id, final=final, mutation=mutation)
+        self._seal_terminal_exchange(p.task.id, final=final, attempt=attempt, mutation=mutation)
         self._evict_run_artifacts(p.task.id, final=final)
         return PipelineResult(task_id=p.task.id, final_status=final, pr_url=pr_url)
 
     def _seal_terminal_exchange(
-        self, task_id: str, *, final: Status, mutation: ExchangeMutationManual | None = None
+        self,
+        task_id: str,
+        *,
+        final: Status,
+        attempt: int,
+        mutation: ExchangeMutationManual | None = None,
     ) -> None:
         """Seal / quarantine the task's active exchange at a terminal transition.
 
@@ -5083,6 +5097,10 @@ class Orchestrator:
         was already sealed/removed (e.g. an operator ``finalize`` after the pipeline terminal) is a
         no-op. ``mutation`` carries the before/after manifests for a detected-mutation
         terminal, so the contaminated tree is quarantined as evidence and never sealed.
+
+        ``attempt`` is this terminal's ordinal among the task's ledger records, counted the same way
+        :meth:`_append_ledger` counts it. It goes into a quarantine bundle so two bundles for one
+        task id say which run of it each belongs to, rather than leaving that to directory mtime.
         """
         log = self._log(task_id)
         try:
@@ -5111,11 +5129,19 @@ class Orchestrator:
                     task_id,
                     expected=expected,
                     observed_changes=observed,
+                    created_at=self._clock(),
+                    node_id=mutation.node_id if mutation is not None else None,
+                    attempt=attempt,
                 )
-                log.warning(
-                    "contaminated exchange quarantined (never restore-eligible)",
-                    extra={"evidence": evidence.as_posix()},
-                )
+                if evidence is not None:
+                    # On the task row, not only in the directory name: the contamination flag is
+                    # cleared by an operator continue, and when it was, nothing in the database
+                    # pointed at the incident any more.
+                    self._store.append_quarantine_ref(task_id, evidence.as_posix())
+                    log.warning(
+                        "contaminated exchange quarantined (never restore-eligible)",
+                        extra={"evidence": evidence.as_posix()},
+                    )
             except ExchangeCleanupBlocked as exc:
                 self._store.update_task(task_id, exchange_active_unsafe=1)
                 log.error("contaminated exchange quarantine blocked", extra={"error": str(exc)})
@@ -5783,6 +5809,7 @@ class Orchestrator:
         *,
         pr_url: str | None,
         cleanup_safe: bool,
+        attempt: int,
         merge_outcome: str | None = None,
         recovered_loop: str | None = None,
     ) -> None:
@@ -5793,8 +5820,9 @@ class Orchestrator:
         # attempts 1, 1, 1, 2, 5, 6, 7 for a task that reached a terminal seven times. Counted this
         # way the number is this record's own ordinal among the id's terminals, which is the only
         # thing the ledger can honestly claim to know — it holds one record per terminal
-        # transition, not one per run of the pipeline and not one per provider attempt.
-        attempt = _ledger_attempt_count(self._ledger, p.task.id) + 1
+        # transition, not one per run of the pipeline and not one per provider attempt. It is the
+        # caller's to compute, because the quarantine bundle written at the same terminal records
+        # the same number and the two must not be able to disagree.
         self._ledger.append(
             LedgerRecord(
                 id=p.task.id,
