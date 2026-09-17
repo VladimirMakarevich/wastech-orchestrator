@@ -924,13 +924,14 @@ def lint_tool_loop_budgets(snapshot: FlowSnapshot) -> list[ToolBudgetWarning]:
     and for every other node kind, whose loops are bounded by their evaluator's verdict rather than
     by a repeated-output detector.
     """
-    return [
-        ToolBudgetWarning(node_id=node.id, budget=budget)
-        for node in snapshot.doc.nodes
-        if isinstance(node, ToolNode)
-        for budget in (declared_loop_budget(snapshot, node.id),)
-        if budget is not None
-    ]
+    warnings: list[ToolBudgetWarning] = []
+    for node in snapshot.doc.nodes:
+        if not isinstance(node, ToolNode):
+            continue
+        budget = declared_loop_budget(snapshot, node.id)
+        if budget is not None:
+            warnings.append(ToolBudgetWarning(node_id=node.id, budget=budget))
+    return warnings
 
 
 # -- prompt-variable anti-drift lint (non-fatal) ------------------------------

@@ -904,6 +904,9 @@ class StateStore:
                 active_subtask=None,
                 subtasks_completed=0,
                 failure_report_path=None,
+                # A fresh attempt is not the attempt that recovered; leaving the loop name behind
+                # would attribute the old run's survived guard to this one's outcome.
+                recovered_loop=None,
                 cleanup_target_branch=None,
                 cleanup_completed=None,
                 cleanup_completed_at=None,
@@ -1715,16 +1718,24 @@ class StateStore:
         asking for the impossible, which is the only thing this is evidence of. ``window`` bounds
         the rows read; a run of repeats longer than it cannot matter, because every threshold above
         this is far smaller.
+
+        Only verdicts whose ``node_runs`` row still exists are counted, which is what scopes the
+        answer to the current attempt: the ``evaluations`` table is immutable and a fresh ``rerun``
+        may not delete from it, but that reset does delete the attempt's node runs, so its verdicts
+        stop being reachable here while remaining in the audit trail. A ``rerun --continue`` keeps
+        both, which is right — it continues the same loop. The join is exact because the run ids
+        are ``AUTOINCREMENT`` and never reused.
         """
         sql = (
-            "SELECT findings_json FROM evaluations "
-            "WHERE task_id = ? AND kind = 'in_flow_verdict' AND node_id = ?"
+            "SELECT e.findings_json FROM evaluations e "
+            "JOIN node_runs n ON n.id = e.source_node_run_id "
+            "WHERE e.task_id = ? AND e.kind = 'in_flow_verdict' AND e.node_id = ?"
         )
         params: list[object] = [task_id, node_id]
         if subtask_order is not None:
-            sql += " AND subtask_order = ?"
+            sql += " AND e.subtask_order = ?"
             params.append(subtask_order)
-        sql += " ORDER BY id DESC LIMIT ?"
+        sql += " ORDER BY e.id DESC LIMIT ?"
         params.append(window)
         rows = self._conn.execute(sql, params).fetchall()
         if not rows:
