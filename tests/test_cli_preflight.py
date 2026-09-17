@@ -392,8 +392,10 @@ def test_preflight_warns_but_stays_ready_on_a_host_without_a_floor(
     rc = cli.cmd_preflight(_args())
     out = capsys.readouterr().out
     assert rc == 0
-    assert "isolation-floor: NONE — claude: " in out
-    assert ".git" in out and ".worc" in out
+    assert "isolation-floor: NONE (claude: native Windows" in out
+    # A status line in the shape of its neighbours, not a paragraph: what the missing floor costs
+    # is `guide/config/security.md`'s job, and the recital that used to follow the cause is gone.
+    assert "state.db integrity are unenforced" not in out
     assert "preflight: ready" in out
 
 
@@ -1314,12 +1316,13 @@ def test_the_mode_announces_the_missing_floor_on_a_host_that_could_sandbox(
     _patch_providers(monkeypatch, _mode(make_git_config(git_repo.clone)))
     assert cli.cmd_preflight(_args()) == 0
     out = capsys.readouterr().out
-    assert "isolation-floor: NONE — claude: the advanced mode" in out
-    # The cost half is the one the shared formatter owns, and it has to be the relaxed tail here.
-    assert "EVERY node here keeps an unsandboxed shell" in out
+    assert "isolation-floor: NONE (claude: strict_isolation=false" in out
+    # One line, in the shape the two lines above it established — the cost recital moved to
+    # `guide/config/security.md`, which the mode's own line already points at.
+    assert "EVERY node here keeps an unsandboxed shell" not in out
     assert "advanced-mode: ON" in out and "preflight: ready" in out
     # Codex is not symmetric and the report must not claim it is.
-    assert "isolation-floor: NONE — codex" not in out
+    assert "isolation-floor: NONE (codex" not in out
 
 
 def test_no_floor_line_on_a_capable_host_under_strict_isolation(

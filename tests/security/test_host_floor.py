@@ -76,7 +76,8 @@ def _table(
 def test_native_windows_has_no_floor() -> None:
     # Today's code deliberately did not flag native Windows at all: it degrades to a Bash-less mode,
     # which was read as "not a preflight failure" and therefore as nothing to say. The floor is
-    # still absent there, and that is what has to be said out loud.
+    # still absent there, and that is what has to be said out loud — briefly: the cause, not an
+    # essay about what the missing floor costs (that lives in `guide/config/security.md`).
     gap = claude_mod.host_floor_gap(
         strict_isolation=True, capability=claude_mod.SandboxCapability.NATIVE_WINDOWS
     )
@@ -107,7 +108,7 @@ def test_the_mode_has_no_floor_on_any_host(capability: claude_mod.SandboxCapabil
     # missing.
     gap = claude_mod.host_floor_gap(strict_isolation=False, capability=capability)
     assert gap is not None, capability
-    assert "advanced mode" in gap and "security.strict_isolation: false" in gap
+    assert "strict_isolation=false" in gap
     # No remedy is offered: the remedy is the operator's own posture decision, not a missing
     # dependency, so the line must not read like something to go and install.
     assert "install" not in gap, capability
@@ -120,7 +121,7 @@ def test_the_mode_and_an_incapable_host_do_not_produce_two_reasons() -> None:
     gap = claude_mod.host_floor_gap(
         strict_isolation=False, capability=claude_mod.SandboxCapability.LINUX_MISSING_DEPS
     )
-    assert gap is not None and "advanced mode" in gap
+    assert gap is not None and "strict_isolation=false" in gap
     assert "bubblewrap" not in gap
 
 
@@ -174,7 +175,7 @@ def test_an_incapable_host_is_never_a_fatal_reason(
 
 
 @pytest.mark.parametrize("capability", _INCAPABLE)
-def test_the_line_states_the_loss_and_matches_the_strict_state(
+def test_the_line_is_a_status_line_naming_the_cause(
     base_config: OrchestratorConfig,
     capability: claude_mod.SandboxCapability,
 ) -> None:
@@ -186,12 +187,16 @@ def test_the_line_states_the_loss_and_matches_the_strict_state(
     (strict,) = describe_host_floor(_with_strict(base_config, True), _table(claude=capability))
     for line in (relaxed, strict):
         assert line.startswith("claude: ")
-        assert ".git" in line and ".worc" in line and "state.db" in line
-    # The tails differ because the truth does: with the master switch off the shell runs
-    # unsandboxed, with it on the shell is withheld instead. One text saying both would be false
-    # half the time.
-    assert "strict_isolation=false" in relaxed and "unsandboxed" in relaxed
-    assert "strict_isolation=true" in strict and "withheld" in strict
+        # The formatter carries the cause and NOTHING else: the paragraph about what the missing
+        # floor costs moved to `guide/config/security.md`, which is what this whole change is. A
+        # regression would show up as the recital coming back, so it is asserted absent by its
+        # most distinctive words rather than by a length budget.
+        assert "state.db" not in line and "quarantine" not in line
+        assert len(line) < 120, line
+    # The two causes still differ, because the truth does: the mode removes the floor on every
+    # host, the host classes remove it only on themselves.
+    assert "strict_isolation=false" in relaxed
+    assert "strict_isolation" not in strict
 
 
 def test_a_capable_host_says_nothing_at_all_under_strict_isolation(
@@ -205,9 +210,7 @@ def test_a_capable_host_gets_the_line_in_the_mode(base_config: OrchestratorConfi
     # under strict isolation must produce a full line in the mode — Claude's only, since Codex
     # keeps its generated profile there. `base_config` is already the mode (the shipped default).
     (line,) = describe_host_floor(base_config, _table())
-    assert line.startswith("claude: ") and "advanced mode" in line
-    assert ".git" in line and ".worc" in line and "state.db" in line
-    assert "strict_isolation=false" in line and "unsandboxed" in line
+    assert line == "claude: strict_isolation=false — no OS sandbox on any host"
 
 
 def test_a_provider_outside_the_allowlist_is_not_asked(base_config: OrchestratorConfig) -> None:
@@ -227,13 +230,11 @@ def test_codex_says_a_windows_host_is_not_classifiable_offline() -> None:
     # inside its first attempt as a canary refusal.
     gap = codex_mod.host_floor_gap(strict_isolation=True, system="Windows")
     assert gap is not None
-    assert "cannot be classified offline" in gap
-    # No `--capability-smoke` flag exists — `worc preflight` runs the smoke unconditionally.
+    assert "not classifiable offline" in gap
+    # The one thing the short line must keep is where the real answer comes from. No
+    # `--capability-smoke` flag exists — `worc preflight` runs the smoke unconditionally.
     assert "worc preflight" in gap
     assert "--capability-smoke" not in gap
-    # And it states the verdict the owner chose, in both directions.
-    assert "warning under strict_isolation: false" in gap
-    assert "refuses the attempt under strict_isolation: true" in gap
 
 
 @pytest.mark.parametrize("system", ["Darwin", "Linux"])
@@ -279,5 +280,5 @@ def test_the_live_table_answers_the_same_on_every_host_the_suite_runs_on(
     either half of the pin is dropped.
     """
     lines = describe_host_floor(_with_strict(base_config, False), HOST_FLOOR_CHECKS)
-    assert len(lines) == 1 and lines[0].startswith("claude: the advanced mode")
+    assert len(lines) == 1 and lines[0].startswith("claude: strict_isolation=false")
     assert describe_host_floor(_with_strict(base_config, True), HOST_FLOOR_CHECKS) == ()

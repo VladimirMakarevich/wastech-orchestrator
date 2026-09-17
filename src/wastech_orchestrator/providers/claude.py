@@ -1108,26 +1108,24 @@ def host_floor_gap(
     node's profile happens to ask for, so the answer is the same whichever node runs next.
 
     The verdict is a loud line, never a refusal (a host that cannot sandbox is still a host an
-    operator may work on), so it must carry the remedy where one exists — and the mode's arm carries
-    none on purpose: the remedy is ``strict_isolation: true``, which is the operator's whole
-    decision rather than a missing dependency. The refusal that does remain is per-attempt and lives
-    in :func:`resolve_claude_tools`, where the node's profile is known: under strict isolation an
-    attempt that would keep a shell on a dependency-less Linux host is refused or loses it, which a
-    fallback provider can cover. ``capability`` defaults to the real host; tests inject it.
+    operator may work on), and it is a *short* line: the cause, in the shape of the ``isolation:`` /
+    ``read-isolation:`` lines it prints beside, with what the missing floor costs left to
+    ``guide/config/security.md``. Brevity must not cost the remedy where one exists — hence
+    "install bubblewrap+socat" — and the mode's arm carries none on purpose: its remedy is
+    ``strict_isolation: true``, the operator's whole posture decision rather than a missing
+    dependency, so naming the key that caused it is the whole answer. The refusal that does remain
+    is per-attempt and lives in :func:`resolve_claude_tools`, where the node's profile is known:
+    under strict isolation an attempt that would keep a shell on a dependency-less Linux host is
+    refused or loses it, which a fallback provider can cover. ``capability`` defaults to the real
+    host; tests inject it.
     """
     if not strict_isolation:
-        return (
-            "the advanced mode (security.strict_isolation: false) raises no OS sandbox for the "
-            "agent shell on any host, so nothing binds the child processes a command starts"
-        )
+        return "strict_isolation=false — no OS sandbox on any host"
     cap = capability if capability is not None else default_sandbox_probe()
     if cap is SandboxCapability.NATIVE_WINDOWS:
-        return "native Windows has no supported OS sandbox for the agent shell"
+        return "native Windows — no supported OS sandbox for the agent shell"
     if cap is SandboxCapability.LINUX_MISSING_DEPS:
-        return (
-            "the Bash OS sandbox needs bubblewrap+socat on PATH (Linux/WSL2) and they are missing; "
-            "install them to get the floor back"
-        )
+        return "Linux/WSL2 — install bubblewrap+socat to get the floor back"
     return None
 
 
