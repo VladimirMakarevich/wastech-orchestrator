@@ -89,6 +89,26 @@ def test_governance_changed_paths_matches_agents_rules_tree_including_nested() -
     )
 
 
+def test_governance_changed_paths_adds_the_repositorys_own_rule_locations() -> None:
+    # The run that exposed this touched `AGENTS.md` and `.rules/wastime-journey-rules.md`; the
+    # ledger reported only the first, so half a governance edit reached the PR unannounced.
+    changed = ("AGENTS.md", ".rules/wastime-journey-rules.md", "src/app.py")
+    assert governance_changed_paths(changed) == ("AGENTS.md",)
+    assert governance_changed_paths(changed, extra_globs=(".rules/**",)) == (
+        ".rules/wastime-journey-rules.md",
+        "AGENTS.md",
+    )
+
+
+def test_governance_extra_globs_can_only_widen_the_set() -> None:
+    # The non-gateable guarantee: there is no value of the operator key that makes a floor path
+    # stop being reported — the two sets are unioned, never consulted against each other.
+    floor = (".agents/rules/security.md", "AGENTS.md")
+    expected = (".agents/rules/security.md", "AGENTS.md")  # sorted; both are floor hits
+    for extra in ((), (".rules/**",), ("!.agents/rules/**",), (".agents/rules/security.md",)):
+        assert governance_changed_paths(floor, extra_globs=extra) == expected
+
+
 def test_governance_changed_paths_ignores_ordinary_paths_empty_and_sorts() -> None:
     assert governance_changed_paths(()) == ()
     assert governance_changed_paths(("src/x.py", "README.md")) == ()

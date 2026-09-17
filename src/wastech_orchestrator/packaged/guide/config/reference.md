@@ -23,7 +23,7 @@ The reference is split by concern, so a page you open to answer one question is 
 
 | Field | Type | Default | Constraint | Meaning |
 | --- | --- | --- | --- | --- |
-| `schema_version` | int | current is `39` | A value **greater** than the orchestrator's supported version fails closed ("upgrade wastech-orchestrator"); equal or lower is accepted, absent is accepted. | The config format version. `worc upgrade-config` re-emits the file at the current version. |
+| `schema_version` | int | current is `41` | A value **greater** than the orchestrator's supported version fails closed ("upgrade wastech-orchestrator"); equal or lower is accepted, absent is accepted. | The config format version. `worc upgrade-config` re-emits the file at the current version. |
 
 ## `orchestrator` — the watch loop and task queue
 
@@ -45,6 +45,7 @@ The reference is split by concern, so a page you open to answer one question is 
 | `repo.branch_prefix` | string | `"worc"` | — | Task branch naming: `worc/<task-id>-<slug>`. Leave default unless the project mandates another prefix. |
 | `repo.branch_mode` | `new` \| `existing` \| `current` | `new` | — | Instance default for where task git ops point (a per-task `branch_mode` overrides it). `new` = fork a fresh branch from base (the only mode where destructive git ops run); `existing` = a named pre-existing branch; `current` = the working-tree branch as-is (no create/switch/clean-check). |
 | `repo.checkout_base_on_cleanup` | bool \| null (tri-state) | `null` | — | Whether terminal cleanup returns the tree to `base_branch`. `null` = defer to `branch_mode` (`new` returns; `existing`/`current` stay); `false` = never return (global off, incl. `new`); `true` = force `new`+`existing` to return. `current` always stays. |
+| `repo.governance_paths` | list of repo-relative globs | `[]` | **Additive only.** Refused at load: a leading `!`, an absolute path, a `~`, a `..` traversal. | Where **this** repository keeps its rules, added to the set worc always reports on — `.agents/rules/**` plus root `AGENTS.md` / `AGENTS.override.md` / `CLAUDE.md`. A task whose diff touches one of them gets a notice in the log, the pull-request summary, the ledger and Telegram; never a block. Set it when your rules live somewhere else (`.rules/**`, `docs/conventions/**`) — otherwise half a governance edit ships unannounced. It can only widen: the key has no syntax for an exclusion, so no configuration can shrink the built-in set or turn the notice off. |
 
 ## `paths` — where the task lifecycle lives
 

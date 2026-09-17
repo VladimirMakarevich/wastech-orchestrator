@@ -5991,6 +5991,52 @@ def test_governance_edit_reports_notice_on_all_surfaces(
     assert notifier.calls[-1]["governance_changed"] == expected
 
 
+def test_a_repositorys_own_rule_locations_reach_the_notice(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # The run that exposed this touched `AGENTS.md` and `.rules/wastime-journey-rules.md`, and the
+    # ledger reported only the first: half a governance edit reached the pull request unannounced.
+    # `repo.governance_paths` ADDS the repository's own locations to the built-in set, on every
+    # surface the built-in set already reaches.
+    _commit_agents_md(git_repo, git_run, "ORIGINAL REPO RULES\n")
+    rules = git_repo.clone / ".rules" / "journey.md"
+    rules.parent.mkdir(parents=True, exist_ok=True)
+    rules.write_text("original rule\n", encoding="utf-8")
+    git_run(["add", ".rules/journey.md"], git_repo.clone)
+    git_run(["commit", "-m", "add rules"], git_repo.clone)
+
+    providers = _both()
+    notifier = RecordingNotifier()
+    orch, store, ledger, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        notifier=notifier,
+        config_kwargs={"governance_paths": [".rules/**"]},
+    )
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_with_edit(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "AGENTS.md").write_text("EDITED BY TASK\n", encoding="utf-8")
+            rules.write_text("edited rule\n", encoding="utf-8")
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_with_edit  # type: ignore[method-assign]
+
+    result = orch.run_task(_pending_task_in_repo(git_repo, "task-gov-extra"))
+
+    assert result.final_status is Status.DONE
+    expected = [".rules/journey.md", "AGENTS.md"]  # sorted: "." < "A"
+    assert ledger.records()[-1]["governance_changed"] == expected
+    assert notifier.calls[-1]["governance_changed"] == tuple(expected)
+    branch = store.get_task("task-gov-extra").branch
+    summary = git_run(["show", f"{branch}:tasks/done/task-gov-extra.summary.md"], git_repo.clone)
+    assert "`.rules/journey.md`" in summary and "`AGENTS.md`" in summary
+
+
 def test_ordinary_task_emits_no_governance_notice(
     git_repo, make_git_config, git_run, tmp_path: Path
 ) -> None:

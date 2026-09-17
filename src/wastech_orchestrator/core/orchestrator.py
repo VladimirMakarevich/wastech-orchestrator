@@ -4643,7 +4643,10 @@ class Orchestrator:
         never a block. Empty on ordinary tasks, so there is no noise there.
         """
         p.governance_changed = governance_changed_paths(
-            self._git.changed_code_paths_since_task_base()
+            self._git.changed_code_paths_since_task_base(),
+            # Additive only: this widens the floor to wherever this repository keeps its rules, and
+            # there is no value of it that makes a floor path stop being reported.
+            extra_globs=self._config.repo.governance_paths,
         )
         if p.governance_changed:
             self._log(p.task.id).warning(

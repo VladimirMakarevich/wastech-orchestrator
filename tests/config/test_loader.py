@@ -714,3 +714,53 @@ def test_the_quench_is_silent_unless_both_keys_disagree() -> None:
         "supervisor:\n  enabled: true\nmemory:\n  enabled: true\n",  # both on
     ):
         assert loads_config(_claude(body)).warnings == (), body
+
+
+# --- repo.governance_paths: additive only (P2.13) -------------------------------
+
+_REPO_WITH_GOVERNANCE = """
+repo:
+  url: "git@example.com:o/r.git"
+  governance_paths:
+{entries}
+agents:
+  allowed:
+    - codex
+  providers:
+    codex:
+      command: "codex"
+"""
+
+
+def _governance(*entries: str) -> str:
+    return _REPO_WITH_GOVERNANCE.format(
+        entries="\n".join(f'    - "{entry}"' for entry in entries) or "    []"
+    )
+
+
+def test_repo_governance_paths_defaults_to_empty() -> None:
+    # Absent = the built-in governance set alone, which is exactly today's behavior.
+    assert loads_config(_LEGACY).config.repo.governance_paths == ()
+
+
+def test_repo_governance_paths_are_read_in_order() -> None:
+    cfg = loads_config(_governance(".rules/**", "docs/conventions/**")).config
+    assert cfg.repo.governance_paths == (".rules/**", "docs/conventions/**")
+
+
+def test_repo_governance_paths_refuses_an_exclusion() -> None:
+    # The key can only ADD, and the guarantee is structural — there is no exclusion syntax. A
+    # leading "!" borrowed from .gitignore would otherwise be read literally as a filename and match
+    # nothing: a silent no-op where the operator meant a removal.
+    for entry in ("!.agents/rules/**", " !AGENTS.md"):
+        with pytest.raises(ConfigError) as exc:
+            loads_config(_governance(entry))
+        assert any("looks like an exclusion" in issue for issue in exc.value.issues)
+
+
+def test_repo_governance_paths_refuses_a_value_that_is_not_a_repo_relative_glob() -> None:
+    # Matched against repo-relative POSIX paths, so none of these could ever match anything.
+    for entry in ("/etc/rules/**", "~/rules/**", "../other-repo/rules/**", "C:/rules/**"):
+        with pytest.raises(ConfigError) as exc:
+            loads_config(_governance(entry))
+        assert any("repo.governance_paths" in issue for issue in exc.value.issues)
