@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import shutil
 import sqlite3
 import time
@@ -105,6 +106,7 @@ from wastech_orchestrator.core.flow.postprocess import (
 )
 from wastech_orchestrator.core.flow.recorder import (
     StateStoreRunRecorder,
+    failing_node_evidence,
     fell_back_from,
     hydrate_run_state,
     read_final_diff,
@@ -174,7 +176,6 @@ from wastech_orchestrator.ledger import (
     STUCK_FILENAME,
     Ledger,
     LedgerRecord,
-    NodeFailureEvidence,
     write_failure_report,
 )
 from wastech_orchestrator.memory import (
@@ -487,8 +488,18 @@ def _ledger_has_manual(ledger: Ledger, task_id: str) -> bool:
 
 
 def _ledger_attempt_count(ledger: Ledger, task_id: str) -> int:
-    """How many terminal records the ledger already holds for ``task_id`` (prior attempts)."""
-    return sum(1 for rec in ledger.records() if rec.get("id") == task_id)
+    """How many times ``task_id`` has already reached a terminal, per the ledger.
+
+    Gate refusals are not counted. They are appended for an id that was never claimed — there is no
+    ``tasks`` row, no branch and no work — so counting one would number the first real run as a
+    re-attempt and give it a ``rerun_of`` pointing at a run that never happened. The duplicate-id
+    gate already treats such records as non-reserving for the same reason.
+    """
+    return sum(
+        1
+        for rec in ledger.records()
+        if rec.get("id") == task_id and not rec.get("validation_reason")
+    )
 
 
 #: Cap on the conflicted paths named in one refusal (the reason string stays bounded and
@@ -947,8 +958,6 @@ class Orchestrator:
         # the Router, so a stop either interrupts at a clean node boundary or suppresses fallback
         # when a hard-killed provider exits abnormally mid-node.
         self._is_cancelled = is_cancelled
-        # Per-id attempt number stamped onto the next ledger record, set by ``rerun``/``continue``.
-        self._rerun_attempt: dict[str, int] = {}
         # Task ids whose next resume is an operator ``rerun --continue`` that ADOPTS the current
         # on-disk control plane (re-freeze) instead of loading the frozen bundle. Set in
         # ``continue_task`` for the span of one resume; automatic crash-recovery never sets it, so
@@ -1642,7 +1651,6 @@ class Orchestrator:
             force_reset_remote=force_reset_remote,
         )
         self._store.reset_task_for_rerun(task_id)
-        self._rerun_attempt[task_id] = prior + 1
         self._log(task_id).info("rerun: fresh attempt", extra={"attempt": prior + 1})
         return self.run_task(source_path)
 
@@ -1675,7 +1683,6 @@ class Orchestrator:
         # Restart-in-place also starts clean; the run re-publishes into the exchange.
         clear_exchange_task_dir(self._exchange_root, task_id)
         self._store.reset_task_for_rerun(task_id)  # DB-only reset; the branch is left untouched
-        self._rerun_attempt[task_id] = prior + 1
         self._log(task_id).info("rerun: restart in place", extra={"attempt": prior + 1})
         return self.run_task(source_path)
 
@@ -1704,7 +1711,6 @@ class Orchestrator:
             raise PipelineFailed(
                 f"cannot continue '{task_id}': no recoverable stage recorded; use a fresh rerun"
             )
-        self._rerun_attempt[task_id] = _ledger_attempt_count(self._ledger, task_id) + 1
         self._apply_continue_controls(
             task_id,
             current_node=current_node,
@@ -4786,47 +4792,11 @@ class Orchestrator:
                 last_check_log=None,
                 last_review_findings=read_last_findings(self._store, p.task.id),
                 final_diff=read_final_diff(self._artifacts_root, p.task.id),
-                failing_node=NodeFailureEvidence(
-                    node_id=node_id,
-                    provider_attempts=self._provider_attempt_evidence(p.task.id, node_id),
-                ),
+                failing_node=failing_node_evidence(self._store, p.task.id, node_id),
             )
             self._store.update_task(p.task.id, failure_report_path=report_path)
         except (OSError, sqlite3.Error) as exc:
             self._log(p.task.id).warning("failure report not written", extra={"error": str(exc)})
-
-    def _provider_attempt_evidence(
-        self, task_id: str, node_id: str | None
-    ) -> tuple[Mapping[str, Any], ...]:
-        """The failing node run's provider attempts, projected to secret-free report fields.
-
-        Read from the store rather than threaded through the exception: both node runners record the
-        attempts *before* they raise, so every row is already durable by the time a terminal is
-        decided — the exception carries the decision input, the store carries the evidence.
-
-        ``()`` when there is no node to attribute the attempts to, because a whole-task dump would
-        mix in nodes that already succeeded and the supervisor layer's own provider calls.
-        """
-        if node_id is None:
-            return ()
-        runs = [run for run in self._store.get_node_runs(task_id) if run.node_id == node_id]
-        # Ascending by id, so the last match is the run that just failed — a fix loop or a subtask
-        # region legitimately runs the same node id several times within one task.
-        run_id = runs[-1].id if runs else None
-        if run_id is None:
-            return ()
-        # An explicit whitelist, never the whole row: the attempt directory is a path into the
-        # private artifact tree and the usage columns are not part of an operator artifact.
-        return tuple(
-            {
-                "provider": row.provider,
-                "attempt": row.attempt,
-                "error_class": row.error_class,
-                "exit_code": row.exit_code,
-                "started_at": row.started_at,
-            }
-            for row in self._store.get_provider_attempts(run_id)
-        )
 
     def _reconcile_open_node_runs(self, task_id: str, *, reason: str) -> None:
         """Close node runs left ``running`` by a hard stop, at a terminal transition.
@@ -4838,7 +4808,9 @@ class Orchestrator:
         to ``aborted`` and each
         killed provider node earns a ``provider_attempts`` row — ``usage_delta_status='unknown'``,
         because the partial run's real token usage is not recoverable — so an aborted run is not
-        free in the cost roll-up. A no-op on a clean terminal (no orphan rows exist), and it emits
+        free in the cost roll-up. The reason is written to ``abort_reason``: it is not a skip, and
+        the column named for skips is reserved for the ``when``-false rows that really are one.
+        A no-op on a clean terminal (no orphan rows exist), and it emits
         ``WARNING`` naming the reconciled nodes, since an operator abort is exactly the event a
         operator needs to see and the SIGKILLed daemon logged nothing itself.
         """
@@ -4847,7 +4819,7 @@ class Orchestrator:
             task_id,
             finished_at=finished_at,
             error_class=ErrorClass.CANCELLED.value,
-            skip_reason=reason,
+            abort_reason=reason,
         )
         if not closed:
             return
@@ -5333,12 +5305,47 @@ class Orchestrator:
         Idempotent (the store upserts on ``(task_id, kind, path)``); a missing file is skipped and
         registration never raises into the terminal path. Requires the ``tasks`` row to exist (FK),
         so a-rejected task — which has no row — is not registered here.
+
+        The stored path is normalized here because this is the table's **only** writer: callers
+        hand over whatever they have (absolute for the artifact tree, already-relative for the
+        lifecycle summary), and one column carrying two conventions is what left this run's
+        ``artifacts`` table with 160 absolute paths embedding a home directory beside two relative
+        ones.
         """
         if not path or not Path(path).exists():
             return
         self._store.register_artifact(
-            ArtifactRow(task_id=task_id, kind=kind, path=path, checksum=sha256_file(path))
+            ArtifactRow(
+                task_id=task_id,
+                kind=kind,
+                path=self._artifact_relpath(path),
+                checksum=sha256_file(path),
+            )
         )
+
+    def _artifact_relpath(self, path: str) -> str:
+        """One convention for ``artifacts.path``: POSIX, relative to the worc home.
+
+        Relative because an absolute path embeds the operator's home directory, which makes
+        ``state.db`` unreadable on any other machine and leaks a name into a file that is otherwise
+        free of one; POSIX because the repository's path rule requires every stored, compared or
+        displayed path string to be identical on every OS. The worc home is the anchor rather than
+        the repository root because that is where the artifacts live — the lifecycle ``summary.md``
+        sits outside it and comes out as ``../tasks/done/<id>.summary.md``, which is still relative
+        and still home-free.
+
+        The table has no reader in ``src/`` and, being greenfield, no rows worth migrating, so the
+        convention starts at the writer and applies from the next run.
+
+        Falls back to the absolute POSIX form only when no relative path exists at all (a different
+        Windows drive) — an honest absolute beats a fabricated relative one.
+        """
+        target = Path(path).resolve()
+        home = Path(self._artifacts_root).resolve()
+        try:
+            return Path(os.path.relpath(target, home)).as_posix()
+        except ValueError:
+            return target.as_posix()
 
     # --- store helpers --------------------------------------------------------------------
 
@@ -5650,7 +5657,14 @@ class Orchestrator:
         recovered_loop: str | None = None,
     ) -> None:
         task_row = self._store.get_task(p.task.id)
-        attempt = self._rerun_attempt.get(p.task.id, 1)
+        # Derived here, from the ledger, at the moment of the append — not carried from whenever a
+        # rerun was planned. The carried value was a per-process map that nothing ever cleared, so
+        # every later terminal of the same id in that process reused it: one run's ledger shows
+        # attempts 1, 1, 1, 2, 5, 6, 7 for a task that reached a terminal seven times. Counted this
+        # way the number is this record's own ordinal among the id's terminals, which is the only
+        # thing the ledger can honestly claim to know — it holds one record per terminal
+        # transition, not one per run of the pipeline and not one per provider attempt.
+        attempt = _ledger_attempt_count(self._ledger, p.task.id) + 1
         self._ledger.append(
             LedgerRecord(
                 id=p.task.id,

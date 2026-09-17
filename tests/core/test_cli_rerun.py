@@ -12,7 +12,11 @@ import pytest
 from tests.conftest import seed_builtin_flows
 
 from wastech_orchestrator import cli
-from wastech_orchestrator.core.orchestrator import Orchestrator, PipelineResult
+from wastech_orchestrator.core.orchestrator import (
+    Orchestrator,
+    PipelineResult,
+    _ledger_attempt_count,
+)
 from wastech_orchestrator.core.state_machine import Status
 from wastech_orchestrator.ledger import Ledger, LedgerRecord
 from wastech_orchestrator.state_store import StateStore, TaskRow
@@ -514,9 +518,9 @@ def test_rerun_restart_in_place_routes_without_branch_reset(
     seen: dict[str, object] = {}
 
     def fake_run_task(self: Orchestrator, source_path: str) -> PipelineResult:
-        # Captured at run time: attempt stamped, per-attempt row state already cleared.
+        # Captured at run time: the ledger linkage is in place, per-attempt row state cleared.
         seen["source_path"] = source_path
-        seen["attempt"] = self._rerun_attempt.get("task-1")
+        seen["prior_terminals"] = _ledger_attempt_count(self._ledger, "task-1")
         row = self._store.get_task("task-1")
         seen["branch_after_reset"] = row.branch if row else "missing-row"
         return PipelineResult(task_id="task-1", final_status=Status.DONE)
@@ -530,7 +534,9 @@ def test_rerun_restart_in_place_routes_without_branch_reset(
     code = cli.main(["--config", str(config), "rerun", "task-1", "--yes"])
     assert code == 0
     assert seen["source_path"] is not None  # re-driven from the top
-    assert seen["attempt"] == 2  # ledger attempt linkage stamped before the run
+    # One terminal already recorded, so the terminal this restart reaches appends attempt 2. The
+    # number is counted at the append, not stamped here, so this is the fact that is true now.
+    assert seen["prior_terminals"] == 1
     assert seen["branch_after_reset"] is None  # reset_task_for_rerun cleared per-attempt state
 
 

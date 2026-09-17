@@ -5,6 +5,14 @@ terminal transition (``done`` / ``failed`` / ``manual_action_required``), never 
 remains the authoritative state; the ledger is a convenience index of what has been done, and the
 duplicate-id source for the gate.
 
+**Terminal transitions observed — not every attempt.** The unit is a transition into a terminal
+status, so a run that was interrupted and resumed appends once (at the terminal it eventually
+reached), and a provider attempt inside a run appends nothing at all: those live in
+``provider_attempts``. ``attempt`` is that record's ordinal among the id's terminals, counted from
+the ledger when the record is appended, with gate refusals excluded — they belong to an id that was
+never claimed. Read it as "the Nth time this id finished", and read a cost or duration roll-up out
+of ``state.db`` rather than out of a record count.
+
 This module also writes the two stuck artifacts — ``failure_report.json`` (machine) and ``stuck.md``
 (human). The whole-task summary that becomes the pull-request body is not here: when no provider
 authored one it is rendered by :mod:`~wastech_orchestrator.core.summary_report` from the run's
@@ -67,9 +75,12 @@ class LedgerRecord:
     decomposed: bool = False
     subtask_count: int | None = None
     subtasks_completed: int | None = None
-    # Re-run linkage (``rerun`` command): ``attempt`` is 1 for the original run and increments per
-    # re-run; ``rerun_of`` is the task id this record re-attempts (set only when ``attempt`` > 1) so
-    # the failure → retry chain is auditable. Old records omit both keys harmlessly.
+    # Re-run linkage (``rerun`` command): ``attempt`` is this record's ordinal among the id's
+    # terminal records — 1 for the first one to finish, incrementing for each later terminal —
+    # and ``rerun_of`` is the task id this record re-attempts (set only when ``attempt`` > 1) so
+    # the failure → retry chain is auditable. It is counted from the ledger at the moment of the
+    # append rather than carried from whenever a rerun was planned, which is what once produced
+    # both duplicates and gaps in one id's sequence. Old records omit both keys harmlessly.
     attempt: int = 1
     rerun_of: str | None = None
     # Operator-finalized marker (``finalize`` command): ``manual`` is true for a record the operator
@@ -203,6 +214,43 @@ class NodeFailureEvidence:
 
     node_id: str | None = None
     provider_attempts: tuple[Mapping[str, Any], ...] = ()
+    #: Why this node has no entry in ``check_runs``, when that is knowable — a ``tool`` node never
+    #: writes there, so the report's ``last_check_log: null`` is a property of the node rather than
+    #: a search that came back empty. Grouped here for the same reason the attempts are: it means
+    #: nothing until you know which node run it is about. ``None`` says nothing, as before.
+    check_log_note: str | None = None
+
+
+def _render_findings(findings: Sequence[Mapping[str, Any]] | None) -> str:
+    """Render evaluator findings as Markdown list items with named fields.
+
+    ``stuck.md`` is read by a human or handed to a recovery agent, and the previous renderer fell
+    back to the mapping itself whenever a finding had no ``title`` — which is every finding the
+    evaluator writes, since its keys are ``severity`` / ``reason`` / ``paths`` / ``gating`` /
+    ``fix``. The section therefore printed Python ``repr``: single-quoted keys and a capitalised
+    ``True``, in a document whose whole purpose is to be read.
+
+    Each finding becomes one bullet — severity and the gate decision up front, then the reason,
+    with the paths and the reviewer's proposed fix as sub-bullets when it supplied them. A mapping
+    shaped differently (an older artifact, another evaluator) degrades to its ``title``/``reason``
+    rather than being dropped: an unreadable finding is still better than a missing one.
+    """
+    lines: list[str] = []
+    for finding in findings or []:
+        severity = str(finding.get("severity") or "unknown")
+        gating = finding.get("gating")
+        gate = "" if gating is None else (" · gating" if gating else " · non-gating")
+        headline = str(finding.get("reason") or finding.get("title") or "(no reason recorded)")
+        lines.append(f"- **{severity}**{gate} — {headline}")
+        paths = finding.get("paths") or ()
+        if isinstance(paths, str):
+            paths = (paths,)
+        if paths:
+            lines.append("  - paths: " + ", ".join(f"`{path}`" for path in paths))
+        fix = finding.get("fix")
+        if fix:
+            lines.append(f"  - proposed fix: {fix}")
+    return "\n".join(lines)
 
 
 def write_failure_report(
@@ -226,6 +274,11 @@ def write_failure_report(
 
     A ``loop`` of :data:`INFRA_LOOP` marks a terminal where no fix-loop budget was spent at all, and
     the human artifact opens by stating that instead of naming a loop that does not exist.
+
+    :attr:`NodeFailureEvidence.check_log_note` says **why** there is no check log when the caller
+    knows: that field reads ``check_runs``, and a tool node never writes there, so a bare ``null``
+    on a report whose stuck node was a tool reads as "we looked and found nothing" when the truth
+    is "this node cannot produce one; its output is elsewhere".
     """
     task_dir = task_artifact_dir(artifacts_root, task_id)
     task_dir.mkdir(parents=True, exist_ok=True)
@@ -243,6 +296,8 @@ def write_failure_report(
         "last_review_findings": [dict(f) for f in (last_review_findings or [])],
         "final_diff": final_diff,
     }
+    if evidence.check_log_note:
+        report["last_check_log_note"] = evidence.check_log_note
     if decomposed is not None:
         report["decomposed"] = {
             "subtask_count": decomposed.subtask_count,
@@ -256,7 +311,7 @@ def write_failure_report(
         json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
 
-    findings_lines = "\n".join(f"- {f.get('title', f)}" for f in (last_review_findings or []))
+    findings_lines = _render_findings(last_review_findings)
     decomposed_md = ""
     if decomposed is not None:
         decomposed_md = (
@@ -290,7 +345,12 @@ def write_failure_report(
         + "\n".join(f"- {k}: {v}" for k, v in counters.items())
         + "\n"
         + decomposed_md
-        + f"\n## Last failing check output\n\n```\n{last_check_log or '(none)'}\n```\n"
+        + "\n## Last failing check output\n\n"
+        + (
+            f"```\n{last_check_log}\n```\n"
+            if last_check_log
+            else f"{evidence.check_log_note or '(none)'}\n"
+        )
         + f"\n## Last blocking review findings\n\n{findings_lines or '(none)'}\n"
         + f"\n## Final diff\n\n```diff\n{final_diff}\n```\n"
     )

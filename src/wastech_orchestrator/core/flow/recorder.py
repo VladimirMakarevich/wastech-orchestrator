@@ -32,7 +32,11 @@ from wastech_orchestrator.ledger import (
     NodeFailureEvidence,
     write_failure_report,
 )
-from wastech_orchestrator.providers.artifacts import node_run_dir, task_artifact_dir
+from wastech_orchestrator.providers.artifacts import (
+    TOOL_STDOUT_FILENAME,
+    node_run_dir,
+    task_artifact_dir,
+)
 from wastech_orchestrator.state_store import NodeRunRow, StateStore
 
 
@@ -50,6 +54,65 @@ def read_last_findings(store: StateStore, task_id: str) -> list[Any] | None:
     except json.JSONDecodeError:
         return None
     return findings if isinstance(findings, list) else None
+
+
+def failing_node_evidence(
+    store: StateStore, task_id: str, node_id: str | None
+) -> NodeFailureEvidence:
+    """What the failing node's own runs prove: its provider attempts, and why it has no check log.
+
+    The single derivation of a stuck report's node evidence, shared by the loop-guard path (this
+    module's recorder) and the infra path in the orchestrator. Two copies is how one of them came
+    to ship an empty ``provider_attempts`` list on a report whose node had eight attempts: the
+    evidence is read from the store, where both node runners already wrote it *before* raising, so
+    it is durable by the time any terminal is decided.
+
+    ``NodeFailureEvidence()`` when there is no node to attribute anything to — a whole-task dump
+    would mix in nodes that already succeeded and the supervisor layer's own calls.
+    """
+    if node_id is None:
+        return NodeFailureEvidence()
+    runs = [run for run in store.get_node_runs(task_id) if run.node_id == node_id]
+    if not runs:
+        return NodeFailureEvidence(node_id=node_id)
+    # Ascending by id, so the last match is the run that just failed — a fix loop or a subtask
+    # region legitimately runs the same node id several times within one task.
+    last = runs[-1]
+    attempts: tuple[dict[str, Any], ...] = ()
+    if last.id is not None:
+        # An explicit whitelist, never the whole row: the attempt directory is a path into the
+        # private artifact tree and the usage columns are not part of an operator artifact.
+        attempts = tuple(
+            {
+                "provider": row.provider,
+                "attempt": row.attempt,
+                "error_class": row.error_class,
+                "exit_code": row.exit_code,
+                "started_at": row.started_at,
+            }
+            for row in store.get_provider_attempts(last.id)
+        )
+    return NodeFailureEvidence(
+        node_id=node_id,
+        provider_attempts=attempts,
+        check_log_note=_check_log_note(last),
+    )
+
+
+def _check_log_note(row: NodeRunRow) -> str | None:
+    """Why this node run has no ``check_runs`` entry, or ``None`` when nothing can be said.
+
+    Only one kind is answerable without guessing: a ``tool`` node never writes ``check_runs`` at
+    all, so its report's null check log is a fact about the node rather than an empty search. Its
+    output is on disk under the run directory, which is what the note points at.
+    """
+    if row.node_kind != "tool":
+        return None
+    where = f"stages/{row.node_id}/run-{row.id:06d}/{TOOL_STDOUT_FILENAME}" if row.id else "its run"
+    return (
+        f"no check log: '{row.node_id}' is a tool node, and tool nodes do not write check runs — "
+        f"their output is the redacted stream at {where} under this task's log directory"
+    )
 
 
 def read_final_diff(artifacts_root: str | Path, task_id: str) -> str:
@@ -202,8 +265,11 @@ class StateStoreRunRecorder:
             last_review_findings=read_last_findings(self._store, self._task_id),
             final_diff=read_final_diff(self._artifacts_root, self._task_id),
             decomposed=self._decomposed_failure(subtask_order),
-            # A fix-loop terminal spent a budget, not a provider, so it carries no attempt evidence.
-            failing_node=NodeFailureEvidence(node_id=node_id),
+            # A fix-loop terminal spent a budget rather than exhausting a provider — but the
+            # question the report is opened with is still "which provider call produced the finding
+            # that kept repeating", and the attempts are the only thing that answers it. Naming
+            # them was the infra path's privilege for no reason other than where the code lived.
+            failing_node=failing_node_evidence(self._store, self._task_id, node_id),
         )
         self._store.update_task(self._task_id, failure_report_path=report_path)
         return report_path

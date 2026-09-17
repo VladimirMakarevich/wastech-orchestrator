@@ -6760,3 +6760,36 @@ def test_private_report_survives_a_park_ceiling_terminal_in_a_fresh_process(
     assert report.is_file()
     assert ".worc-connect/" in git_run(["status", "--porcelain"], git_repo.clone)
     assert git_run(["diff", "--cached", "--name-only"], git_repo.clone).strip() == ""
+
+
+def test_registered_artifact_paths_are_posix_and_relative_to_the_worc_home(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # P2.15: one convention for ``artifacts.path``. The table's only writer normalizes, because
+    # its callers hand over whatever they have — absolute for the artifact tree, already-relative
+    # for the lifecycle summary — and this run's table ended up with 160 absolute paths embedding
+    # a home directory beside two relative ones.
+    orch, store, _ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    store.insert_task(TaskRow(task_id="task-art", title="t", status=Status.RUNNING))
+    inside = task_artifact_dir(art, "task-art") / "plan.md"
+    inside.parent.mkdir(parents=True, exist_ok=True)
+    inside.write_text("plan", encoding="utf-8")
+    outside = Path(git_repo.clone) / "tasks" / "done" / "task-art.summary.md"
+    outside.parent.mkdir(parents=True, exist_ok=True)
+    outside.write_text("summary", encoding="utf-8")
+
+    orch._register_artifact("task-art", "plan", str(inside))
+    orch._register_artifact("task-art", "summary_md", str(outside))
+
+    cur = store._conn.execute("SELECT kind, path FROM artifacts WHERE task_id = ?", ("task-art",))
+    stored = {row["kind"]: row["path"] for row in cur}
+    assert stored["plan"] == "logs/task-art/plan.md"
+    # Outside the home is still relative and still free of a home directory — never an absolute
+    # path, which is what makes state.db unreadable on another machine.
+    assert stored["summary_md"].endswith("tasks/done/task-art.summary.md")
+    for path in stored.values():
+        assert "\\" not in path  # POSIX on every OS, per the stored-path rule
+        assert not Path(path).is_absolute()
+        assert str(Path.home()) not in path

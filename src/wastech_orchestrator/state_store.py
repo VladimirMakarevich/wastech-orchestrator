@@ -53,6 +53,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
     Split per table so each group stays readable as it grows.
     """
     _migrate_task_columns(conn)
+    _migrate_node_run_columns(conn)
     # The commit a push actually left on the remote, so a branch someone else moved is
     # distinguishable from the one we put there. Nullable — NULL is its real meaning ("not pushed by
     # us"), not a placeholder, so no default. ``fingerprint`` is deliberately left alone: it keys
@@ -127,6 +128,19 @@ def _migrate_task_columns(conn: sqlite3.Connection) -> None:
         # bound parameter.
         if column not in task_cols:
             conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} {ddl}")
+
+
+def _migrate_node_run_columns(conn: sqlite3.Connection) -> None:
+    """Add ``node_runs.abort_reason`` when an older database lacks it (idempotent).
+
+    Its own step rather than a line in the usage migration: this column exists to *stop*
+    ``skip_reason`` carrying an abort reason, which is a correctness fix to the audit trail, not
+    accounting. Nullable, and greenfield — rows written before the split are not rewritten, so an
+    old row keeps its overloaded ``skip_reason`` and reads exactly as truthfully as it ever did.
+    """
+    cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(node_runs)")}
+    if "abort_reason" not in cols:
+        conn.execute("ALTER TABLE node_runs ADD COLUMN abort_reason TEXT")
 
 
 def _migrate_usage_columns(conn: sqlite3.Connection) -> None:
@@ -276,7 +290,14 @@ CREATE TABLE IF NOT EXISTS node_runs (
     started_at TEXT,
     finished_at TEXT,
     skipped INTEGER NOT NULL DEFAULT 0,
+    -- Why a ``when``-false node was deterministically NOT executed. It belongs to ``skipped=1``
+    -- rows and to nothing else: an orphaned run closed at a terminal carries ``abort_reason``
+    -- instead. One column meant two things until then, and the run that proved it holds
+    -- ``skipped=0``, ``status='succeeded'`` and a ``skip_reason`` describing an aborted attempt.
     skip_reason TEXT,
+    -- Why a run left ``running`` by a hard stop was closed at a terminal transition. NULL on every
+    -- row that finished on its own, which is what makes an aborted run answerable by query.
+    abort_reason TEXT,
     skills_allowed INTEGER NOT NULL DEFAULT 0,
     skills_required TEXT
 );
@@ -501,7 +522,12 @@ class NodeRunRow:
     started_at: str | None = None
     finished_at: str | None = None
     skipped: bool = False
+    #: why a ``when``-false node was not executed — set only together with ``skipped``. An orphan
+    #: closed at a terminal carries :attr:`abort_reason`; the two are never the same field, so a
+    #: reader can trust "not run because the flow said so" apart from "interrupted mid-run".
     skip_reason: str | None = None
+    #: why a run left ``running`` by a hard stop was closed. ``None`` on a run that finished.
+    abort_reason: str | None = None
     #: whether this node run was allowed to invoke skills at all, and which of the target
     #: repository's skills it was required to invoke. The declared posture, not an observation:
     #: neither CLI reports back which skill actually fired, so a finished run answers "what did
@@ -1013,8 +1039,8 @@ class StateStore:
                     task_id, node_id, node_kind, subtask_order, status, outcome,
                     route_primary, route_fallback, route_source, provider_used, error_class,
                     stage_attempts, commit_sha_before, commit_sha_after, started_at, finished_at,
-                    skipped, skip_reason, skills_allowed, skills_required
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    skipped, skip_reason, abort_reason, skills_allowed, skills_required
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     run.task_id,
@@ -1035,6 +1061,7 @@ class StateStore:
                     run.finished_at,
                     1 if run.skipped else 0,
                     run.skip_reason,
+                    run.abort_reason,
                     1 if run.skills_allowed else 0,
                     _encode_skills(run.skills_required),
                 ),
@@ -1167,7 +1194,7 @@ class StateStore:
         finished_at: str,
         status: str = "aborted",
         error_class: str | None = None,
-        skip_reason: str | None = None,
+        abort_reason: str | None = None,
         conn: sqlite3.Connection | None = None,
     ) -> list[NodeRunRow]:
         """Close any still-``running`` node runs for a task at a terminal transition.
@@ -1181,6 +1208,12 @@ class StateStore:
         distinguishable from one still executing. Returns the **pre-update** rows (so the caller
         can record the killed provider attempt from ``route_primary``), or ``[]`` — the no-orphan
         common case, where a clean run already finalized every node and nothing is reconciled.
+
+        The reason goes into ``abort_reason``, never into ``skip_reason``. They read as synonyms
+        and are not: ``skip_reason`` means "the flow's ``when`` said do not run this", and is set
+        together with ``skipped=1``. Writing an abort there produced the row this split exists to
+        prevent — ``skipped=0``, ``status='succeeded'`` and a ``skip_reason`` explaining an
+        interrupted provider attempt — which no reader could resolve.
         """
         open_rows = [
             _node_run_from_row(row)
@@ -1195,9 +1228,9 @@ class StateStore:
         with self._writer(conn) as c:
             c.execute(
                 "UPDATE node_runs SET status = ?, finished_at = ?, error_class = ?, "
-                "skip_reason = ? WHERE task_id = ? AND status = 'running' "
+                "abort_reason = ? WHERE task_id = ? AND status = 'running' "
                 "AND finished_at IS NULL",
-                (status, finished_at, error_class, skip_reason, task_id),
+                (status, finished_at, error_class, abort_reason, task_id),
             )
         return open_rows
 
@@ -1980,6 +2013,7 @@ def _node_run_from_row(row: sqlite3.Row) -> NodeRunRow:
         finished_at=row["finished_at"],
         skipped=bool(row["skipped"]),
         skip_reason=row["skip_reason"],
+        abort_reason=row["abort_reason"],
         skills_allowed=bool(row["skills_allowed"]),
         skills_required=_decode_skills(row["skills_required"]),
         id=row["id"],
