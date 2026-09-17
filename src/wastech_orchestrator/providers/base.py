@@ -465,6 +465,15 @@ class AgentRunResult:
     # and persisted by the orchestrator, not stored here.
     normalized_usage: NormalizedUsage | None = None
     session_id: str | None = None  # for auditing only
+    # The EFFECTIVE model and reasoning this attempt ran on — the node's override when it declared
+    # one, else the provider's configured default — resolved by the adapter through the same
+    # :class:`ProviderConfig` accessors the argv builder uses, so the record cannot describe a
+    # launch that did not happen. Written into ``result.json``, which until now carried eleven
+    # fields and not the one an operator opens it to find: with ``prompt_audit`` off (the default)
+    # the model that ran a node survived only inside ``stdout.log``. ``None`` when the provider was
+    # given no model/reasoning at all and configures none — the CLI's own default then decided.
+    model: str | None = None
+    reasoning: str | None = None
     stdout_path: str | None = None
     stderr_path: str | None = None
     event_log_path: str | None = None

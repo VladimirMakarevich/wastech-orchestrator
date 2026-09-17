@@ -471,9 +471,12 @@ logging:                            # operator log verbosity + on-disk artifact 
   level: warning                    # debug | info | warning | error. Persists the structured operator
                                     #   trace level; the --log-level CLI flag overrides it when given.
   artifacts: standard               # per-attempt provider files kept under logs/<id>/stages/.../<attempt>-<provider>/:
-                                    #   minimal  = result.json only (even on failure)
+                                    #   minimal  = result.json + request.json (even on failure)
                                     #   standard = + stdout.log, stderr.log  (events.jsonl is a dup of stdout)
-                                    #   full     = all (request.json, events.jsonl, output-schema.json, ...)
+                                    #   full     = all (events.jsonl, output-schema.json, ...)
+                                    # request.json is kept at EVERY level: it is the only artifact carrying the
+                                    #   full argv and the permission profile the attempt ran under, and it costs
+                                    #   kilobytes against the megabytes of raw stdout.
                                     # Prompt-audit is independent (see prompt_audit). Reclaim disk with
                                     # `worc logs clean [--keep N | --all]`.
   clean_runs_on_success: true       # a task that finishes SUCCESSFULLY evicts its own per-task state under

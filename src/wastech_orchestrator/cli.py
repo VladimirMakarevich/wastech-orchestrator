@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import shutil
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -43,6 +44,7 @@ from wastech_orchestrator.config.schema import (
     OrchestratorConfig,
 )
 from wastech_orchestrator.config.validation import validate_config
+from wastech_orchestrator.core.cost_gap import cost_gaps, render_cost_gap
 from wastech_orchestrator.core.flow.registry import FlowRegistry
 from wastech_orchestrator.core.hitl import iter_task_interactions
 from wastech_orchestrator.core.loop_control import ExhaustedLoop
@@ -114,7 +116,12 @@ from wastech_orchestrator.security.isolation import (
     describe_host_floor,
 )
 from wastech_orchestrator.security.launchers import Which, resolve_launcher
-from wastech_orchestrator.state_store import IncompatibleStateError, StateStore, TaskRow
+from wastech_orchestrator.state_store import (
+    IncompatibleStateError,
+    ProviderAttemptRow,
+    StateStore,
+    TaskRow,
+)
 from wastech_orchestrator.task.model import DEFAULT_QUEUE, priority_rank
 from wastech_orchestrator.task.parser import (
     read_subtask_refs,
@@ -2043,6 +2050,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     # is a controlled refusal with a non-zero exit; a malformed file falls through to the gate.
     scan = _scan_pending_meta(Path(args.task_file))
     task_id, depends_on = scan.task_id, scan.depends_on
+    if task_id is not None and orchestrator.settled_own_file(task_id, args.task_file):
+        # The same guard `watch` applies, for the same reason: re-running a terminal task's own
+        # leftover file would reject it as a duplicate id and quarantine the operator's own file
+        # under the private home. Resolving it (`rerun` / `finalize`) is the operator's call.
+        print(
+            f"run: {task_id} already reached a terminal; its task file was left in place. "
+            "Use `worc rerun` to re-attempt it, or `worc finalize` to close it out.",
+            file=sys.stderr,
+        )
+        return 1
     if task_id is not None and depends_on:
         verdict = orchestrator.dependency_eligibility(task_id, depends_on, pending={})
         if verdict.state is not Eligibility.ELIGIBLE:
@@ -2077,6 +2094,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         # sees WHICH front-matter field and WHY without opening the JSON validation report.
         detail = f" ({result.validation_detail})" if result.validation_detail else ""
         print(f"{result.task_id}: rejected — {result.validation_reason}{detail}", file=sys.stderr)
+        if result.quarantine_path:
+            # The quarantine is under the private home, which the operator does not browse and
+            # agents cannot read. Where their file went has to come from the command's output.
+            print(f"  moved to {Path(result.quarantine_path).as_posix()}", file=sys.stderr)
         return _EXIT_BY_STATUS.get(result.final_status, 1)
     suffix = f" → {result.pr_url}" if result.pr_url else ""
     print(f"{result.task_id}: {result.final_status.value}{suffix}")
@@ -4256,6 +4277,7 @@ def cmd_status(args: argparse.Namespace) -> int:
                 latest = store.latest_task()
                 tasks = [] if latest is None else [latest]
         current_nodes = {t.task_id: store.get_flow_checkpoint(t.task_id)[0] for t in tasks}
+        cost_notes = {t.task_id: _cost_gap_note(store, (t.task_id,)) for t in tasks}
     finally:
         store.close()
 
@@ -4285,6 +4307,12 @@ def cmd_status(args: argparse.Namespace) -> int:
             updated = datetime.fromisoformat(task.updated_at)
             elapsed = max(0.0, (now - updated).total_seconds())
             print(f"elapsed_since_update_seconds={elapsed:.1f}")
+        cost_note = cost_notes.get(task.task_id)
+        if cost_note:
+            # Not a cost report — this command prints no total. It is the other half of one: the
+            # attempts whose price is not in ``state.db`` at all, named so a later roll-up over
+            # these rows is not read as the task's whole bill.
+            print(f"cost_not_accounted={cost_note}")
         if task.cleanup_last_error:
             print(f"last_error={task.cleanup_last_error}")
 
@@ -4806,6 +4834,41 @@ def _list_sections(
     ]
 
 
+def _section_task_ids(
+    sections: list[tuple[str, list[dict[str, str | None]]]],
+) -> tuple[str, ...]:
+    """Every distinct task id a listing view showed, in a stable order.
+
+    A pending or gate-rejected entry carries an id with no ``tasks`` row behind it; those simply
+    contribute no attempts, so they need no filtering here.
+    """
+    seen: dict[str, None] = {}
+    for _name, items in sections:
+        for entry in items:
+            task_id = entry.get("task_id")
+            if task_id:
+                seen.setdefault(task_id, None)
+    return tuple(seen)
+
+
+def _cost_gap_note(store: StateStore | None, task_ids: Sequence[str]) -> str | None:
+    """The "what this cost does not cover" sentence for *task_ids*, or ``None``.
+
+    Read-only and best-effort: a listing must not fail over an advisory line, so a store error
+    yields no note rather than an error. One query per task — these views show tens of rows, not
+    thousands, and the alternative is a bespoke aggregate for a footer.
+    """
+    if store is None or not task_ids:
+        return None
+    rows: list[ProviderAttemptRow] = []
+    try:
+        for task_id in task_ids:
+            rows.extend(store.get_provider_attempts_for_task(task_id))
+    except sqlite3.Error:
+        return None
+    return render_cost_gap(cost_gaps(rows))
+
+
 def _list_ids(store: StateStore | None, scope: str | None) -> int:
     """Print bare task ids (one per line, stdout) for completion/scripting.
 
@@ -4875,6 +4938,7 @@ def cmd_list(args: argparse.Namespace) -> int:
                 return _print_section_ids(_list_sections(args, config, store))
             return _list_ids(store, args.scope)
         sections = _list_sections(args, config, store)
+        cost_note = _cost_gap_note(store, _section_task_ids(sections))
     finally:
         if store is not None:
             store.close()
@@ -4896,6 +4960,12 @@ def cmd_list(args: argparse.Namespace) -> int:
                 print(f"  {_entry_line(entry)}")
         else:
             print("  (none)")
+    if cost_note:
+        # A footer, once, over the tasks this view listed: the provider calls whose cost the
+        # database does not hold. Table view only — the json/ids views are machine surfaces and
+        # gain nothing from prose (``summary.json`` carries the same fact per task, structured).
+        print()
+        print(f"note: {cost_note}")
     return 0
 
 

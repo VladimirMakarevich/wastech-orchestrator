@@ -160,6 +160,31 @@ def test_load_returns_file_entries_for_resume(tmp_path: Path) -> None:
     assert packet_digest == hashlib.sha256((bundle / TASK_PACKET_KEY).read_bytes()).hexdigest()
 
 
+def test_load_carries_the_freeze_instant_and_keeps_it_out_of_the_digest(tmp_path: Path) -> None:
+    # P2.11: a resume quotes the instant back to the operator, so the manifest has to carry it.
+    # Metadata, not an entry: a timestamp inside the composite identity would make every re-freeze
+    # a different bundle, and the digest is what a continue verifies.
+    bundle = tmp_path / "bundle"
+    bundle.mkdir(parents=True)
+    _, task_entry = freeze_task_packet(bundle, _write(tmp_path / "t.md", "task body\n"))
+    bare = write_instruction_manifest(bundle, entries=[task_entry], control_digest="ctrl")
+    stamped = write_instruction_manifest(
+        bundle,
+        entries=[task_entry],
+        control_digest="ctrl",
+        metadata={"frozen_at": "2026-09-16T00:52:00+00:00"},
+    )
+    assert stamped == bare  # metadata does not move the identity
+    assert load_instruction_bundle(bundle, stamped).frozen_at == "2026-09-16T00:52:00+00:00"
+
+
+def test_load_of_a_manifest_without_the_instant_says_nothing_rather_than_guessing(
+    tmp_path: Path,
+) -> None:
+    bundle, digest = _frozen_bundle(tmp_path)
+    assert load_instruction_bundle(bundle, digest).frozen_at is None
+
+
 def test_manifest_verify_rejects_wrong_parent_digest(tmp_path: Path) -> None:
     bundle, _ = _frozen_bundle(tmp_path)
     with pytest.raises(InstructionBundleError, match="!= expected"):
