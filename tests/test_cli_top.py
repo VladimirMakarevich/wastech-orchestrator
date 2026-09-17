@@ -443,6 +443,15 @@ def test_display_status_names_the_wake_instant() -> None:
     assert cli._display_status(with_instant, executor_alive=False) == "parked (no daemon)"
 
 
+def test_display_status_separates_a_recovered_done_from_a_clean_one() -> None:
+    # A task that needed a fix loop cut short still succeeded and advertises no failure report, so
+    # without this the only trace left for the reader was a renamed artifact in the log directory.
+    clean = TaskRow(task_id="t1", title="T", status=Status.DONE)
+    assert cli._display_status(clean, executor_alive=True) == "done"
+    recovered = replace(clean, recovered_loop="fidelity_fix")
+    assert cli._display_status(recovered, executor_alive=True) == "done (recovered: fidelity_fix)"
+
+
 def test_build_top_snapshot_carries_the_wake_instant(
     make_git_config: Callable[..., OrchestratorConfig],
     tmp_path: Path,

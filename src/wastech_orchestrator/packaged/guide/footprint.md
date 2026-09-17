@@ -105,6 +105,8 @@ Per-task state accumulates one directory per root per task, so there are two mod
 
 What survives a successful task, and is the audit trail: its record in `logs/completed.jsonl`, its `tasks/done/<task-id>.md` and `<task-id>.summary.md` pair on disk (committed too, if you track the lifecycle tree), its row in `state.db`, and its artifacts under `logs/<task-id>/`.
 
+**A successful task that had a loop cut short says so, once.** A loop guard writes `failure_report.json` and `stuck.md` when it stops a fix loop, and a flow whose evaluator does not gate publication then carries on and finishes — so the run succeeded while those two artifacts still described a live failure. At the transition to `done` they are renamed `recovered-failure_report.json` and `recovered-stuck.md`, the task's pointer to them is cleared, and the ledger record carries `recovered_from_stuck: true` with `recovered_loop` naming the loop instead. `worc list` shows such a task as `done (recovered: <loop>)`. Read the renamed report the same way you would the original: the run finished, but a loop in it could not converge, and `limit_exhausted` says which guard ended it — `no_file_change` (the agent kept emitting output without editing the tree) or `repeated_findings` (the fixer kept working and the verdict never moved, which usually means the finding asks for something the node cannot change).
+
 **A task that ended `failed`, `manual_action_required`, or is parked is never touched**, in either mode. Automatic cleanup on failure would delete the evidence at the exact moment you need it.
 
 **Manual (`logging.clean_runs_on_success: false`).** Nothing is removed automatically — every run keeps its frozen inputs and its seals, so a completed task can still be analyzed. Reclaim on demand:

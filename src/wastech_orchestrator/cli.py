@@ -1360,6 +1360,19 @@ def _executor_alive(config: OrchestratorConfig) -> bool:
     return _daemon_alive(config) or _runner_alive(config)
 
 
+def _runner_owner_note(pid: int) -> str:
+    """How to get a live ``run`` executor out of the way — it can only be waited out.
+
+    ``run`` installs no stop wiring, so the only honest instruction is to wait for it to finish or
+    interrupt it where it runs. Shared by the pre-flight owner check and the exclusive claim that
+    backs it up, so an operator reads one sentence whichever of the two refused.
+    """
+    return (
+        f"a 'run' is executing a task in this clone (pid {pid}); wait for it to finish, "
+        "or interrupt it where it runs"
+    )
+
+
 def _executor_owner(config: OrchestratorConfig) -> str | None:
     """Who owns this worc home right now and what to do about it, or ``None`` when it is free.
 
@@ -1383,10 +1396,7 @@ def _executor_owner(config: OrchestratorConfig) -> str | None:
         )
     runner = process_control.running_daemon_pid(process_control.runner_file_path(root))
     if runner is not None:
-        return (
-            f"a 'run' is executing a task in this clone (pid {runner}); wait for it to finish, "
-            "or interrupt it where it runs"
-        )
+        return _runner_owner_note(runner)
     return None
 
 
@@ -1400,6 +1410,11 @@ def _display_status(row: TaskRow, *, executor_alive: bool) -> str:
 
     A pause carrying a provider-reported wake instant names it, because otherwise a daemon correctly
     waiting out a limit is indistinguishable from a hung one.
+
+    A ``done`` task whose run had a fix loop stopped by a guard says so. It succeeded and is not
+    failing on anything — its failure artifacts were retired at the terminal — but a run that needed
+    a loop cut short is worth a second look, and the alternative was leaving the reader to infer it
+    from a stale report path.
     """
     if row.status is Status.RUNNING and not executor_alive:
         return "parked (no daemon)"
@@ -1407,6 +1422,8 @@ def _display_status(row: TaskRow, *, executor_alive: bool) -> str:
         if row.blocked_until:
             return f"{row.status.value} (paused until {row.blocked_until})"
         return f"{row.status.value} (paused)"
+    if row.status is Status.DONE and row.recovered_loop:
+        return f"{row.status.value} (recovered: {row.recovered_loop})"
     return row.status.value
 
 
@@ -2036,7 +2053,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     # needs the clone idle needs it to refuse. Reaped in `finally` — a marker left behind by a
     # crash would refuse those commands forever.
     runner_path = process_control.runner_file_path(worc_home_for(config))
-    process_control.write_pid_file(runner_path)
+    try:
+        # An exclusive claim, not a recording: the owner check above is separated from this line by
+        # the engine build and the dependency scan, and two `run`s that both saw the slot free in
+        # that window would both proceed — the loser's marker overwritten, after which `stop`
+        # addresses the wrong process. The check stays for the better message in the common case;
+        # the kernel decides the race.
+        process_control.write_pid_file(runner_path, exclusive=True)
+    except process_control.ExecutorBusyError as busy:
+        print(f"run: {_runner_owner_note(busy.pid)}")
+        return 1
     try:
         result = orchestrator.run_task(args.task_file)
     finally:
@@ -3716,7 +3742,9 @@ def cmd_validate_flow(args: argparse.Namespace) -> int:
             for violation in violations:
                 print(violation if violation.startswith(" ") else f"  {violation}")
         for warning in check.warnings:
-            print(f"flow {check.name}: WARN — {warning} (renders verbatim to the agent)")
+            # Each warning carries its own consequence: the lints report different problems, so a
+            # single shared suffix would be wrong for all but one of them.
+            print(f"flow {check.name}: WARN — {warning}")
     return 0 if ok else 1
 
 
@@ -3781,6 +3809,18 @@ def _summarize_watch(results: list[PipelineResult], *, withheld: Sequence[str] =
         )
         print(f"{result.task_id}: {label}")
     return max(_EXIT_BY_STATUS.get(r.final_status, 1) for r in results)
+
+
+def _watcher_busy_note(pid: int, pid_path: Path) -> str:
+    """The refusal a second watcher gets: who holds this artifact root, and the two ways out.
+
+    Shared by the pre-flight check and the exclusive claim that backs it up, so the wording does not
+    depend on which of the two caught the collision.
+    """
+    return (
+        f"watch: already running (pid {pid}); stop it first with "
+        f"'wastech-orchestrator stop', or use 'restart' ({pid_path})"
+    )
 
 
 def cmd_watch(args: argparse.Namespace) -> int:
@@ -3850,10 +3890,7 @@ def cmd_watch(args: argparse.Namespace) -> int:
     # overwritten on start.
     existing = process_control.running_daemon_pid(pid_path)
     if existing is not None:
-        print(
-            f"watch: already running (pid {existing}); stop it first with "
-            f"'wastech-orchestrator stop', or use 'restart' ({pid_path})"
-        )
+        print(_watcher_busy_note(existing, pid_path))
         return 1
     # A `run` holds the same single slot in the same clone, and it is not a watcher — so it is not
     # covered by the PID file above and cannot be stopped by the advice that goes with it.
@@ -3891,15 +3928,26 @@ def cmd_watch(args: argparse.Namespace) -> int:
     results: list[PipelineResult] = []
     daemon_notes = WatchNotes()
     stopped = False
+    claimed = False
     try:
         with controller:
+            # Claim the root before anything else in this block: the check above is separated from
+            # here by the engine build and the console print, so two daemons that both saw it free
+            # in that window would both proceed, the loser's marker overwritten. It is also why the
+            # claim comes first — the sentinel, the children file and the reaping below all belong
+            # to whoever holds the marker, and a refusal must leave the live daemon's files alone.
+            try:
+                process_control.write_pid_file(pid_path, exclusive=True)
+            except process_control.ExecutorBusyError as busy:
+                print(_watcher_busy_note(busy.pid, pid_path))
+                return 1
+            claimed = True
             # Lead our own process group (POSIX, best-effort) so `stop --force-full` can group-kill
             # the daemon without reaching an unrelated group. No-op if we already lead one
             # (foreground job control / console spawn) or on Windows.
             process_control.ensure_own_process_group()
             stop_path.unlink(missing_ok=True)  # clear a stale sentinel so it can't stop us on start
             process_control.clear_children_file(children_path)  # clear a stale handle from a crash
-            process_control.write_pid_file(pid_path)
             results = watch_loop(
                 orchestrator,
                 config,
@@ -3916,16 +3964,18 @@ def cmd_watch(args: argparse.Namespace) -> int:
         print("watch: stopped")
         return 0
     finally:
-        # Reap the active agent's whole subtree before dropping the PID file — closes the main
-        # orphan route (Ctrl-C / crash / clean exit). A soft stop lets the stage finish, so on_reap
-        # already cleared the handle and this is a no-op; a --force-full from another shell already
-        # reaped it.
-        handle = process_control.read_children_record(children_path)
-        if handle is not None:
-            agent_process.kill_agent_subtree(handle.pid, handle.pgid)
-        process_control.clear_children_file(children_path)
-        pid_path.unlink(missing_ok=True)  # clean exit, Ctrl-C, SIGKILL-survivor, or error
-        stop_path.unlink(missing_ok=True)  # reap our own sentinel
+        # Only the holder cleans up: a refused claim must not reap the live daemon's agent or drop
+        # its marker and sentinel. Reap the active agent's whole subtree before dropping the PID
+        # file — closes the main orphan route (Ctrl-C / crash / clean exit). A soft stop lets the
+        # stage finish, so on_reap already cleared the handle and this is a no-op; a --force-full
+        # from another shell already reaped it.
+        if claimed:
+            handle = process_control.read_children_record(children_path)
+            if handle is not None:
+                agent_process.kill_agent_subtree(handle.pid, handle.pgid)
+            process_control.clear_children_file(children_path)
+            pid_path.unlink(missing_ok=True)  # clean exit, Ctrl-C, SIGKILL-survivor, or error
+            stop_path.unlink(missing_ok=True)  # reap our own sentinel
     if stopped:
         print("watch: stopped")  # graceful shutdown (SIGTERM or stop-file)
         return 0

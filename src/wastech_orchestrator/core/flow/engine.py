@@ -65,6 +65,14 @@ CancellationCheck = Callable[[], bool]
 #: diff is (same domain-free contract as :data:`FactResolver`). Injected by the driver; ``None``
 #: leaves the no-effective-work stall guard inert.
 DiffFingerprint = Callable[[], str]
+#: Answers, for one node id, how many times in a row that node has just returned the same finding
+#: set. The companion signal to :data:`DiffFingerprint` and deliberately a different one: that asks
+#: whether the agent changed anything, this asks whether the critic is still asking for the same
+#: thing. The engine only compares the count with a limit — it never learns what a finding is — and
+#: a derived answer (read back from the verdicts already recorded) is what makes it survive the
+#: restarts that zero an in-memory streak while the loop it guards keeps counting. Injected by the
+#: driver; ``None`` leaves the guard inert, like its neighbour.
+RepeatedFindings = Callable[[str], int]
 
 
 class EngineInternalError(Exception):
@@ -263,6 +271,13 @@ class _Stuck:
 #: a fix loop as a no-effective-work stall (the "agent emits tokens but never edits" case the
 #: provider boundary cannot observe).
 _STALL_NO_CHANGE_LIMIT = 2
+
+#: Consecutive identical finding sets from one node that end its fix loop. The stop this catches is
+#: a critic asking for something that cannot be delivered — an input the node may not edit, a
+#: judgement the flow cannot satisfy — where every pass costs a full provider turn and none of them
+#: can converge. Three rather than two: a fixer legitimately misses once, and the third identical
+#: verdict is the first that carries no new information at all.
+_REPEATED_FINDINGS_LIMIT = 3
 _NO_OVERRIDES: Mapping[str, Mapping[str, object]] = MappingProxyType({})
 
 
@@ -313,6 +328,7 @@ class FlowEngine:
         subtask_order: int | None = None,
         post_node: PostNodeHook | None = None,
         diff_fingerprint: DiffFingerprint | None = None,
+        repeated_findings: RepeatedFindings | None = None,
         region: frozenset[str] | None = None,
         disabled_nodes: frozenset[str] = frozenset(),
         node_overrides: Mapping[str, Mapping[str, object]] = _NO_OVERRIDES,
@@ -334,6 +350,10 @@ class FlowEngine:
         self._diff_fingerprint = diff_fingerprint
         self._stall_fp: dict[str, str] = {}
         self._stall_streak: dict[str, int] = {}
+        # The persistent half of the same question, derived from the recorded verdicts rather than
+        # held here — which is the whole point: this one is not reset by a restart. ``None`` =>
+        # inert.
+        self._repeated_findings = repeated_findings
         # Flow node ids the task disabled (``nodes.<id>.enabled: false``); each is skipped exactly
         # like a ``when``-false node — its pass-through outcome takes the forward edge. Re-derived
         # from front-matter every run/resume (not persisted). Existence + routing soundness were
@@ -386,7 +406,7 @@ class FlowEngine:
                 # EXPERIMENTAL(no-work-infra): abort a no-effective-work stall BEFORE charging
                 # rework, so a frozen fix loop is not counted toward its fix budget (it is not real
                 # work); else the budget cap. Drop the `_check_stall` line to disable the guard.
-                stuck = self._check_stall(edge.loop) if edge.loop is not None else None
+                stuck = self._check_stall(node.id, edge.loop) if edge.loop is not None else None
                 if stuck is None:
                     stuck = self._charge_rework(edge)
                 if stuck is not None:
@@ -498,7 +518,35 @@ class FlowEngine:
 
     # -- budget bookkeeping ----------------------------------------------------
 
-    def _check_stall(self, loop: str) -> _Stuck | None:
+    def _check_stall(self, node_id: str, loop: str) -> _Stuck | None:
+        """Both no-progress guards, in the order their evidence is strongest.
+
+        They catch different shapes of the same waste and neither replaces the other: the tree
+        fingerprint says the agent produced no edit, the repeated verdict says the critic keeps
+        asking for the same thing however the tree moved. Which one fired reaches the failure report
+        as ``limit_exhausted``, because "the agent did nothing" and "the critic asked for the
+        impossible" call for opposite responses from the operator.
+        """
+        no_change = self._check_no_file_change(loop)
+        if no_change is not None:
+            return no_change
+        return self._check_repeated_findings(node_id, loop)
+
+    def _check_repeated_findings(self, node_id: str, loop: str) -> _Stuck | None:
+        """Abort ``loop`` after :data:`_REPEATED_FINDINGS_LIMIT` identical finding sets in a row.
+
+        Restart-proof by construction: the count is derived from the verdicts already recorded, so
+        it measures the loop rather than the process. That matters because the loop outlives the
+        process — the persisted loop counters keep counting across a resume, and a guard that did
+        not would let a run that cannot converge burn its whole budget in restarts of two.
+        """
+        if self._repeated_findings is None:
+            return None
+        if self._repeated_findings(node_id) >= _REPEATED_FINDINGS_LIMIT:
+            return _Stuck(loop=loop, limit_name="repeated_findings")
+        return None
+
+    def _check_no_file_change(self, loop: str) -> _Stuck | None:
         """EXPERIMENTAL(no-work-infra). No-effective-work guard: abort ``loop`` when unchanged
         across :data:`_STALL_NO_CHANGE_LIMIT` consecutive rework charges — the "agent emits tokens
         but never edits" stall the provider boundary cannot see (it produced output, just no edit).

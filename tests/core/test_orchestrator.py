@@ -581,6 +581,7 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
     # Exactly one ledger record; back on the base branch.
     records = ledger.records()
     assert len(records) == 1 and records[0]["final_status"] == "done"
+    assert records[0]["recovered_from_stuck"] is False  # a clean run has nothing to recover from
     assert notifier.calls == [
         {
             "task_id": "task-001",
@@ -597,6 +598,53 @@ def test_happy_path_complete_task(git_repo, make_git_config, git_run, tmp_path: 
     assert row.branch is not None
     branches = git_run(["branch", "--list", row.branch], git_repo.clone)
     assert row.branch in branches
+
+
+def test_a_recovered_task_does_not_advertise_the_failure_it_survived(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    # The ordinary path for a non-blocking evaluator, not an edge case: a guard ends its loop and
+    # writes the report, the flow continues because that lens does not gate publication, and the
+    # task succeeds — which used to ship a ledger line reading `done` beside a pointer to a failure
+    # report, with nothing to tell a reader which of the two to believe.
+    providers = _both()
+    orch, store, ledger, art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    task_file = _complete_task(tmp_path)
+    task_dir = art / "logs" / "task-001"
+    orig = providers[ProviderId.CLAUDE].run
+
+    def run_and_trip_a_guard(request: AgentRunRequest) -> AgentRunResult:
+        if request.node_id == "implementation":
+            (git_repo.clone / "feature.py").write_text("x = 1\n", encoding="utf-8")
+            task_dir.mkdir(parents=True, exist_ok=True)
+            (task_dir / "failure_report.json").write_text(
+                json.dumps({"loop": "fidelity_fix", "limit_exhausted": "repeated_findings"}),
+                encoding="utf-8",
+            )
+            (task_dir / "stuck.md").write_text("the critic asked for the impossible\n", "utf-8")
+            store.update_task("task-001", failure_report_path=str(task_dir / "failure_report.json"))
+        return orig(request)
+
+    providers[ProviderId.CLAUDE].run = run_and_trip_a_guard  # type: ignore[method-assign]
+
+    assert orch.run_task(task_file).final_status is Status.DONE
+
+    row = store.get_task("task-001")
+    assert row is not None
+    assert row.failure_report_path is None  # a finished task is not failing on anything
+    assert row.recovered_loop == "fidelity_fix"  # …but the run is still marked as a survived one
+    # The evidence is kept, under a name that says the run survived what is inside it.
+    assert not (task_dir / "failure_report.json").exists()
+    assert not (task_dir / "stuck.md").exists()
+    assert (task_dir / "recovered-failure_report.json").exists()
+    assert (task_dir / "recovered-stuck.md").exists()
+    record = ledger.records()[0]
+    assert record["final_status"] == "done"
+    assert record["failure_report"] is None
+    assert record["recovered_from_stuck"] is True
+    assert record["recovered_loop"] == "fidelity_fix"
 
 
 def _run_happy_task_with_trace(

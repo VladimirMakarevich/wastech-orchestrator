@@ -24,6 +24,11 @@ from wastech_orchestrator.providers.artifacts import task_artifact_dir
 COMPLETED_FILENAME = "completed.jsonl"
 FAILURE_REPORT_FILENAME = "failure_report.json"
 STUCK_FILENAME = "stuck.md"
+#: Prefix the failure artifacts are renamed with once the task they describe went on to succeed.
+#: The evidence is worth keeping — a loop that had to be stopped is worth reading about even on a
+#: run that recovered — but it must stop presenting itself as the live reason a finished task
+#: stopped, which is what a `failure_report.json` beside `final_status: done` did.
+RECOVERED_PREFIX = "recovered-"
 
 #: The ``loop`` value for a terminal that exhausted no fix-loop budget at all — the infrastructure
 #: could not run the node. Shared with the caller that writes such a report so the artifact's first
@@ -88,6 +93,14 @@ class LedgerRecord:
     # is append-only and never rewritten. Defaults to ``False`` so a record written by an older
     # version reads as "not in the mode", which is what it was.
     advanced_mode: bool = False
+    # A loop guard stopped a fix loop and the task nevertheless reached ``done`` — the ordinary
+    # shape for a non-blocking evaluator, whose verdict does not gate publication.
+    # ``recovered_loop`` names the loop that was stopped. Both are how a reader tells a clean run
+    # from a survived one now that such a task advertises no failure report: the pointer is cleared
+    # at the terminal and its artifacts renamed with :data:`RECOVERED_PREFIX`. Old records omit
+    # both harmlessly.
+    recovered_from_stuck: bool = False
+    recovered_loop: str | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -113,6 +126,8 @@ class LedgerRecord:
             "outcome": self.outcome,
             "governance_changed": list(self.governance_changed),
             "advanced_mode": self.advanced_mode,
+            "recovered_from_stuck": self.recovered_from_stuck,
+            "recovered_loop": self.recovered_loop,
         }
 
 

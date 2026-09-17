@@ -38,7 +38,7 @@ def _utc_now_iso() -> str:
 # in place is beyond an additive-only migration, and with no production data anywhere the honest
 # answer is to recreate the local ``state.db`` rather than run on a shape the code does not match
 # (see :func:`_enforce_schema_version`).
-DB_SCHEMA_VERSION = 27
+DB_SCHEMA_VERSION = 28
 
 
 class IncompatibleStateError(Exception):
@@ -63,59 +63,47 @@ def _migrate(conn: sqlite3.Connection) -> None:
     _migrate_usage_columns(conn)
 
 
-def _migrate_task_columns(conn: sqlite3.Connection) -> None:
-    """Additive ``tasks`` columns an older database can lack, each with why it is nullable."""
-    task_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(tasks)")}
+#: Additive ``tasks`` columns an older database can lack, in the order they were introduced, each
+#: with why it is nullable. A table rather than a branch per column: the sequence *is* the schema
+#: delta, and every addition to an if/else chain of this length costs a little more of the
+#: complexity budget without making the delta any easier to read.
+_ADDITIVE_TASK_COLUMNS: tuple[tuple[str, str], ...] = (
     # The FlowRunState checkpoint columns (flow-engine execution path).
-    if "current_node" not in task_cols:
-        conn.execute("ALTER TABLE tasks ADD COLUMN current_node TEXT")
-    if "flow_run_counters" not in task_cols:
-        conn.execute("ALTER TABLE tasks ADD COLUMN flow_run_counters TEXT")
-    if "flow_fingerprint" not in task_cols:
-        conn.execute("ALTER TABLE tasks ADD COLUMN flow_fingerprint TEXT")
+    ("current_node", "TEXT"),
+    ("flow_run_counters", "TEXT"),
+    ("flow_fingerprint", "TEXT"),
     # The soft-pause timestamp: when the task first parked because every allowed provider was
     # transiently unavailable. Set once on first park, cleared at terminal.
-    if "blocked_since" not in task_cols:
-        conn.execute("ALTER TABLE tasks ADD COLUMN blocked_since TEXT")
+    ("blocked_since", "TEXT"),
     # The provider-reported instant a parked task may next attempt a provider. NULL means "retry on
     # the next tick", so the column can only ever shorten a wait, never extend one.
-    if "blocked_until" not in task_cols:
-        conn.execute("ALTER TABLE tasks ADD COLUMN blocked_until TEXT")
+    ("blocked_until", "TEXT"),
     # The content digest of the task source, so a task file found on disk can be recognized as this
     # task's own even after the terminal move rewrote ``source_path`` out from under it. Nullable
     # because a row written before the file was read has nothing to record yet.
-    if "source_sha256" not in task_cols:
-        conn.execute("ALTER TABLE tasks ADD COLUMN source_sha256 TEXT")
+    ("source_sha256", "TEXT"),
     # Cumulative per-loop rework totals, never reset — unlike the consecutive ``*_fix_cycles``
     # columns, which zero when the loop converges and so read 0 on a task that reworked N times.
-    if "test_fix_total" not in task_cols:
-        conn.execute("ALTER TABLE tasks ADD COLUMN test_fix_total INTEGER NOT NULL DEFAULT 0")
-    if "review_fix_total" not in task_cols:
-        conn.execute("ALTER TABLE tasks ADD COLUMN review_fix_total INTEGER NOT NULL DEFAULT 0")
+    ("test_fix_total", "INTEGER NOT NULL DEFAULT 0"),
+    ("review_fix_total", "INTEGER NOT NULL DEFAULT 0"),
+    # The fix loop a guard stopped on a task that nevertheless reached ``done``. Nullable because
+    # NULL is its real meaning ("the run was clean"), not a placeholder.
+    ("recovered_loop", "TEXT"),
     # The frozen control-bundle digest (parent-held identity a continue/resume verifies).
-    if "control_bundle_digest" not in task_cols:
-        conn.execute("ALTER TABLE tasks ADD COLUMN control_bundle_digest TEXT")
+    ("control_bundle_digest", "TEXT"),
     # The frozen agent-input instruction-manifest digest (task packet + root repository
-    # instructions + the control digest). Parent-held identity a
-    # continue/resume verifies; a differing digest is never resumed into the same provider session.
-    if "instruction_manifest_digest" not in task_cols:
-        conn.execute("ALTER TABLE tasks ADD COLUMN instruction_manifest_digest TEXT")
-    # Terminal-exchange sealing guard flags. ``exchange_contaminated`` records that
-    # the tamper check detected an agent-side exchange mutation, so the terminal seam quarantines
-    # the tree as evidence instead of sealing it (and continue is refused).
-    # ``exchange_active_unsafe`` records
+    # instructions + the control digest). Parent-held identity a continue/resume verifies; a
+    # differing digest is never resumed into the same provider session.
+    ("instruction_manifest_digest", "TEXT"),
+    # Terminal-exchange sealing guard flags. ``exchange_contaminated`` records that the tamper check
+    # detected an agent-side exchange mutation, so the terminal seam quarantines the tree as
+    # evidence instead of sealing it (and continue is refused). ``exchange_active_unsafe`` records
     # that the active exchange could not be safely sealed/removed — provider-tree quiescence was
     # unproven, or a Windows lock/read-only blocked cleanup — so every later provider launch is
     # blocked until it is resolved. Both survive a restart (the mutation/lock may be detected in one
     # run and acted on in the next).
-    if "exchange_contaminated" not in task_cols:
-        conn.execute(
-            "ALTER TABLE tasks ADD COLUMN exchange_contaminated INTEGER NOT NULL DEFAULT 0"
-        )
-    if "exchange_active_unsafe" not in task_cols:
-        conn.execute(
-            "ALTER TABLE tasks ADD COLUMN exchange_active_unsafe INTEGER NOT NULL DEFAULT 0"
-        )
+    ("exchange_contaminated", "INTEGER NOT NULL DEFAULT 0"),
+    ("exchange_active_unsafe", "INTEGER NOT NULL DEFAULT 0"),
     # Three per-task reference points, all nullable because NULL is each one's real meaning rather
     # than a placeholder: ``gate_reference_sha`` (the commit the dangerous-diff gate measures the
     # task's change from — NULL: the task's diff base), ``push_url_digest`` (the sha256 of where a
@@ -124,11 +112,21 @@ def _migrate_task_columns(conn: sqlite3.Connection) -> None:
     # never read as a rewrite) and ``base_ref`` (the commit the working branch sat at when the task
     # started — NULL: the config base branch is the start). All three must survive the process:
     # re-derived from ``HEAD`` after the run has committed they walk forward, and the task's
-    # reported change shrinks to whatever is still uncommitted. One loop rather than three
-    # near-identical branches.
-    for column in ("gate_reference_sha", "push_url_digest", "base_ref"):
+    # reported change shrinks to whatever is still uncommitted.
+    ("gate_reference_sha", "TEXT"),
+    ("push_url_digest", "TEXT"),
+    ("base_ref", "TEXT"),
+)
+
+
+def _migrate_task_columns(conn: sqlite3.Connection) -> None:
+    """Add every :data:`_ADDITIVE_TASK_COLUMNS` entry an older database lacks (idempotent)."""
+    task_cols = {str(row[1]) for row in conn.execute("PRAGMA table_info(tasks)")}
+    for column, ddl in _ADDITIVE_TASK_COLUMNS:
+        # Both halves are trusted module constants (no injection); a PRAGMA/DDL name cannot be a
+        # bound parameter.
         if column not in task_cols:
-            conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} TEXT")
+            conn.execute(f"ALTER TABLE tasks ADD COLUMN {column} {ddl}")
 
 
 def _migrate_usage_columns(conn: sqlite3.Connection) -> None:
@@ -229,6 +227,11 @@ CREATE TABLE IF NOT EXISTS tasks (
     active_subtask INTEGER,
     subtasks_completed INTEGER NOT NULL DEFAULT 0,
     failure_report_path TEXT,
+    -- The fix loop a guard stopped on a task that then reached ``done`` anyway (a non-blocking
+    -- evaluator continues past the park). NULL on a clean run. It is what separates "nothing went
+    -- wrong" from "something did, and the run recovered", now that a recovered task no longer
+    -- advertises a failure report it is not failing on.
+    recovered_loop TEXT,
     cleanup_target_branch TEXT,
     cleanup_completed INTEGER,
     cleanup_completed_at TEXT,
@@ -432,6 +435,10 @@ class TaskRow:
     active_subtask: int | None = None
     subtasks_completed: int = 0
     failure_report_path: str | None = None
+    #: The fix loop a guard stopped on a task that then completed anyway. ``None`` on a clean run;
+    #: set (and ``failure_report_path`` cleared) at the transition to ``done``, so a reader never
+    #: has to tell a live failure from a survived one by interpreting a leftover path.
+    recovered_loop: str | None = None
     cleanup_target_branch: str | None = None
     cleanup_completed: bool | None = None
     cleanup_completed_at: str | None = None
@@ -897,6 +904,9 @@ class StateStore:
                 active_subtask=None,
                 subtasks_completed=0,
                 failure_report_path=None,
+                # A fresh attempt is not the attempt that recovered; leaving the loop name behind
+                # would attribute the old run's survived guard to this one's outcome.
+                recovered_loop=None,
                 cleanup_target_branch=None,
                 cleanup_completed=None,
                 cleanup_completed_at=None,
@@ -1687,6 +1697,59 @@ class StateStore:
         row = self._conn.execute(sql, params).fetchone()
         return int(row[0]) if row is not None else 0
 
+    def consecutive_identical_findings(
+        self,
+        task_id: str,
+        *,
+        node_id: str,
+        subtask_order: int | None = None,
+        window: int = 20,
+    ) -> int:
+        """How many of this node's most recent in-flow verdicts carry byte-identical findings.
+
+        The persistent half of the engine's stall guards, and derived rather than stored: the rows
+        are already written for the audit trail, so counting them needs no column, no migration and
+        no bookkeeping that a restart could zero — which is exactly the failure this answers, since
+        an in-memory streak resets on every resume while the loop it guards does not.
+
+        Counts backwards from the latest verdict and stops at the first different one, so it
+        measures a *current* run of repeats, never a total. ``0`` when the node has no verdict yet
+        or its latest one carries no findings — an empty set repeating says nothing about a critic
+        asking for the impossible, which is the only thing this is evidence of. ``window`` bounds
+        the rows read; a run of repeats longer than it cannot matter, because every threshold above
+        this is far smaller.
+
+        Only verdicts whose ``node_runs`` row still exists are counted, which is what scopes the
+        answer to the current attempt: the ``evaluations`` table is immutable and a fresh ``rerun``
+        may not delete from it, but that reset does delete the attempt's node runs, so its verdicts
+        stop being reachable here while remaining in the audit trail. A ``rerun --continue`` keeps
+        both, which is right — it continues the same loop. The join is exact because the run ids
+        are ``AUTOINCREMENT`` and never reused.
+        """
+        sql = (
+            "SELECT e.findings_json FROM evaluations e "
+            "JOIN node_runs n ON n.id = e.source_node_run_id "
+            "WHERE e.task_id = ? AND e.kind = 'in_flow_verdict' AND e.node_id = ?"
+        )
+        params: list[object] = [task_id, node_id]
+        if subtask_order is not None:
+            sql += " AND e.subtask_order = ?"
+            params.append(subtask_order)
+        sql += " ORDER BY e.id DESC LIMIT ?"
+        params.append(window)
+        rows = self._conn.execute(sql, params).fetchall()
+        if not rows:
+            return 0
+        latest = str(rows[0][0])
+        if not _carries_findings(latest):
+            return 0
+        streak = 0
+        for row in rows:
+            if str(row[0]) != latest:
+                break
+            streak += 1
+        return streak
+
     # --- editing_lineage (durable sessions) -----------------------------------------------
 
     def get_editing_lineage(
@@ -1927,6 +1990,19 @@ def _evaluation_from_row(row: sqlite3.Row) -> EvaluationRow:
     )
 
 
+def _carries_findings(findings_json: str) -> bool:
+    """Whether a stored verdict actually names something — an empty list or unusable JSON does not.
+
+    Tolerant on purpose: this decides only whether a repeat counts as evidence, so anything that
+    cannot be read as a non-empty list of findings is treated as "nothing to repeat".
+    """
+    try:
+        parsed = json.loads(findings_json)
+    except ValueError:
+        return False
+    return isinstance(parsed, list) and bool(parsed)
+
+
 def _task_from_row(row: sqlite3.Row) -> TaskRow:
     return TaskRow(
         task_id=row["task_id"],
@@ -1952,6 +2028,7 @@ def _task_from_row(row: sqlite3.Row) -> TaskRow:
         active_subtask=row["active_subtask"],
         subtasks_completed=row["subtasks_completed"],
         failure_report_path=row["failure_report_path"],
+        recovered_loop=row["recovered_loop"],
         cleanup_target_branch=row["cleanup_target_branch"],
         cleanup_completed=_ob(row["cleanup_completed"]),
         cleanup_completed_at=row["cleanup_completed_at"],

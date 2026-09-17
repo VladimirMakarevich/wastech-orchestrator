@@ -27,7 +27,7 @@ from wastech_orchestrator.core.flow.nodes.base import NodeManualRequired
 from wastech_orchestrator.core.flow.nodes.tool import ToolNodeRunner, _launch_argv
 from wastech_orchestrator.core.flow.prompt_vars import node_output_vars
 from wastech_orchestrator.core.flow.run_state import FlowRunState
-from wastech_orchestrator.core.flow.schema import AgentNode, FlowDoc, FlowNode, ToolNode
+from wastech_orchestrator.core.flow.schema import AgentNode, Edge, FlowDoc, FlowNode, ToolNode
 from wastech_orchestrator.core.flow.snapshot import FlowSnapshot
 from wastech_orchestrator.providers.artifacts import (
     TOOL_STDERR_FILENAME,
@@ -142,6 +142,40 @@ def _snapshot(*nodes: FlowNode) -> FlowSnapshot:
         doc=doc,
         nodes_by_id=MappingProxyType({n.id: n for n in nodes}),
         adjacency=MappingProxyType({}),
+        flow_fingerprint="fp",
+    )
+
+
+def _budgeted_snapshot(
+    node: FlowNode, *, budget: int | None, loop: str | None = "form_fix"
+) -> FlowSnapshot:
+    """A snapshot whose tool node anchors a rework edge carrying the author's declared budget.
+
+    ``loop=None`` writes the number inline on the edge instead of into the flow's ``budgets`` map —
+    the same statement in the other spelling.
+    """
+    edge = Edge(
+        from_node=node.id,
+        to="fixer",
+        outcome="fail",
+        loop=loop,
+        budget=None if loop is not None else budget,
+    )
+    budgets = {loop: budget} if loop is not None and budget is not None else {}
+    doc = FlowDoc(
+        name="t",
+        task_type="t",
+        permission_ceiling=PermissionProfile.WORKSPACE_WRITE,
+        output_policy=OutputPolicy.CODE_CHANGE,
+        publishing=PublishingPolicy.PULL_REQUEST,
+        nodes=(node,),
+        edges=(edge,),
+        budgets=MappingProxyType(budgets),
+    )
+    return FlowSnapshot(
+        doc=doc,
+        nodes_by_id=MappingProxyType({node.id: node}),
+        adjacency=MappingProxyType({node.id: (edge,)}),
         flow_fingerprint="fp",
     )
 
@@ -365,12 +399,79 @@ def test_repeated_identical_failure_without_findings_parks_before_another_charge
     ctx = _ctx(_snapshot(_TOOL), _TOOL, run_state)
 
     assert runner.run(_TOOL, ctx).outcome.kind == "fail"
-    with pytest.raises(NodeManualRequired, match="repeated an identical failure without findings"):
+    with pytest.raises(NodeManualRequired) as exc:
         runner.run(_TOOL, ctx)
 
+    message = str(exc.value)
+    # The operator must read "the tool gave me nothing to hand a fixer", not "the tool said
+    # nothing" — the second sends them hunting a broken tool — and must see what repeated.
+    assert "no top-level 'findings' array" in message
+    assert "same linter report" in message
     assert run_state.fix_iterations == 1
     assert store.completed[-1]["status"] == "stalled"
     assert store.completed[-1]["outcome"] == "fail"
+
+
+_DATA_ONLY_FAILURE = json.dumps(
+    {"outcome": "fail", "data": {"violations": {"a.md": ["899 chars exceeds the maximum 800"]}}}
+)
+
+
+@pytest.mark.parametrize("loop", ["form_fix", None])
+def test_an_actionable_data_only_failure_runs_to_the_declared_budget(
+    tmp_path: Path, loop: str | None
+) -> None:
+    # A tool that reports entirely through `data` is a supported shape, not a malfunction, so the
+    # repeat detector must not overrule the number the author wrote — in either spelling of it.
+    fake, store = FakeRunProcess(stdout=_DATA_ONLY_FAILURE, exit_code=1), FakeStore()
+    runner = ToolNodeRunner(_services(tmp_path, fake, store), _inputs(tmp_path))
+    ctx = _ctx(_budgeted_snapshot(_TOOL, budget=6, loop=loop), _TOOL)
+
+    for _ in range(5):
+        assert runner.run(_TOOL, ctx).outcome.kind == "fail"
+
+    with pytest.raises(NodeManualRequired, match="6 times"):
+        runner.run(_TOOL, ctx)
+
+
+def test_a_data_only_failure_keeps_the_two_strike_limit_without_a_declared_budget(
+    tmp_path: Path,
+) -> None:
+    # No number was written down, so there is no plan to defer to and the detector keeps its own.
+    fake, store = FakeRunProcess(stdout=_DATA_ONLY_FAILURE, exit_code=1), FakeStore()
+    runner = ToolNodeRunner(_services(tmp_path, fake, store), _inputs(tmp_path))
+    ctx = _ctx(_budgeted_snapshot(_TOOL, budget=None), _TOOL)
+
+    assert runner.run(_TOOL, ctx).outcome.kind == "fail"
+    with pytest.raises(NodeManualRequired, match="2 times"):
+        runner.run(_TOOL, ctx)
+
+
+def test_a_failure_through_neither_channel_parks_on_the_second_repeat_under_any_budget(
+    tmp_path: Path,
+) -> None:
+    # Nothing downstream can act on this repeat, so more rounds of it buy nothing and the declared
+    # budget does not extend it.
+    fake, store = FakeRunProcess(stdout="plain text report", exit_code=1), FakeStore()
+    runner = ToolNodeRunner(_services(tmp_path, fake, store), _inputs(tmp_path))
+    ctx = _ctx(_budgeted_snapshot(_TOOL, budget=6), _TOOL)
+
+    assert runner.run(_TOOL, ctx).outcome.kind == "fail"
+    with pytest.raises(NodeManualRequired, match="2 times"):
+        runner.run(_TOOL, ctx)
+
+
+def test_a_data_only_failure_that_changes_restarts_the_count(tmp_path: Path) -> None:
+    # The detector bounds a loop that repeats itself, never one that is still moving.
+    fake, store = FakeRunProcess(stdout=_DATA_ONLY_FAILURE, exit_code=1), FakeStore()
+    runner = ToolNodeRunner(_services(tmp_path, fake, store), _inputs(tmp_path))
+    ctx = _ctx(_budgeted_snapshot(_TOOL, budget=3), _TOOL)
+
+    assert runner.run(_TOOL, ctx).outcome.kind == "fail"
+    fake.set_result(stdout=json.dumps({"outcome": "fail", "data": {"n": 2}}), exit_code=1)
+    assert runner.run(_TOOL, ctx).outcome.kind == "fail"
+    # The third run in a row, but only the second of *this* output — a continued count would park.
+    assert runner.run(_TOOL, ctx).outcome.kind == "fail"
 
 
 def test_changed_or_actionable_tool_failure_resets_repeated_failure_guard(tmp_path: Path) -> None:

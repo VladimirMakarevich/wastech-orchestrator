@@ -887,6 +887,88 @@ def test_reset_for_rerun_clears_editing_lineage(store: StateStore) -> None:
     assert store.get_editing_lineage("task-001", "implementation") is None
 
 
+def _record_verdict(
+    store: StateStore,
+    findings_json: str,
+    *,
+    node_id: str = "critic",
+    subtask: int | None = None,
+) -> None:
+    """One evaluator pass: the node run that produced the verdict, then the verdict itself."""
+    run_id = store.record_node_run(
+        NodeRunRow(
+            task_id="task-001",
+            node_id=node_id,
+            node_kind="evaluator",
+            subtask_order=subtask,
+            status="succeeded",
+        )
+    )
+    store.record_evaluation(
+        EvaluationRow(
+            task_id="task-001",
+            node_id=node_id,
+            source_node_run_id=run_id,
+            subtask_order=subtask,
+            kind="in_flow_verdict",
+            verdict="rework",
+            findings_json=findings_json,
+        )
+    )
+
+
+_SAME = '[{"severity": "high", "reason": "rewrite the brief"}]'
+
+
+def test_consecutive_identical_findings_counts_the_current_run_only(store: StateStore) -> None:
+    # The signal is a *current* run of repeats, not a total: a pass that found something else means
+    # the loop was still moving, and everything before it is no longer evidence of a stuck critic.
+    store.insert_task(_new_task())
+    for findings in (_SAME, _SAME, '[{"reason": "something else"}]', _SAME, _SAME):
+        _record_verdict(store, findings)
+
+    assert store.consecutive_identical_findings("task-001", node_id="critic") == 2
+
+
+def test_consecutive_identical_findings_ignores_other_nodes_and_subtasks(store: StateStore) -> None:
+    # Two nodes repeating their own verdicts are two loops, and a decomposed task's units are
+    # separate runs of the same node — neither may be counted into the other's streak.
+    store.insert_task(_new_task())
+    _record_verdict(store, _SAME, subtask=0)
+    _record_verdict(store, _SAME, node_id="other")
+    _record_verdict(store, _SAME, subtask=1)
+
+    assert store.consecutive_identical_findings("task-001", node_id="critic", subtask_order=1) == 1
+
+
+def test_consecutive_identical_findings_is_zero_without_findings(store: StateStore) -> None:
+    # An empty verdict repeating says nothing about a critic asking for the impossible, which is the
+    # only thing this count is evidence of.
+    store.insert_task(_new_task())
+    _record_verdict(store, "[]")
+    _record_verdict(store, "[]")
+
+    assert store.consecutive_identical_findings("task-001", node_id="critic") == 0
+    assert store.consecutive_identical_findings("task-001", node_id="never-ran") == 0
+
+
+def test_a_fresh_rerun_does_not_inherit_the_previous_attempts_repeats(store: StateStore) -> None:
+    # A rerun starts the loop counters at zero, so the guard derived from the verdicts must start
+    # over too — otherwise the new attempt is parked on its first pass for the old attempt's
+    # repeats. The immutable rows stay; what scopes them is the node runs the reset deletes.
+    store.insert_task(_new_task())
+    for _ in range(3):
+        _record_verdict(store, _SAME)
+    assert store.consecutive_identical_findings("task-001", node_id="critic") == 3
+
+    store.reset_task_for_rerun("task-001")
+
+    assert store.get_evaluations("task-001")  # the audit trail is untouched…
+    assert store.consecutive_identical_findings("task-001", node_id="critic") == 0  # …but not read
+    _record_verdict(store, _SAME)
+    assert store.consecutive_identical_findings("task-001", node_id="critic") == 1
+
+
 def test_evaluations_append_only_and_counted(store: StateStore) -> None:
     store.insert_task(_new_task())
     for i, verdict in enumerate(("rework", "accept", "rework"), start=1):

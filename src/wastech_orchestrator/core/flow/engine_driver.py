@@ -28,6 +28,7 @@ from wastech_orchestrator.core.flow.engine import (
     FlowRunResult,
     NodeRunner,
     PostNodeHook,
+    RepeatedFindings,
     RunRecorder,
 )
 from wastech_orchestrator.core.flow.nodes import (
@@ -129,6 +130,8 @@ def drive_flow(
     post_node: PostNodeHook | None = None,
     # EXPERIMENTAL(no-work-infra): feeds the engine's no-effective-work stall guard; None => inert.
     diff_fingerprint: DiffFingerprint | None = None,
+    # Feeds the engine's restart-proof repeated-verdict guard; None => inert.
+    repeated_findings: RepeatedFindings | None = None,
     region: frozenset[str] | None = None,
     disabled_nodes: frozenset[str] = frozenset(),
     node_overrides: Mapping[str, Mapping[str, object]] = MappingProxyType({}),
@@ -153,6 +156,7 @@ def drive_flow(
         subtask_order=subtask_order,
         post_node=post_node,
         diff_fingerprint=diff_fingerprint,
+        repeated_findings=repeated_findings,
         region=region,
         disabled_nodes=disabled_nodes,
         node_overrides=node_overrides,

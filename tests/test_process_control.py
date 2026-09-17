@@ -88,6 +88,122 @@ def test_read_pid_tolerates_absent_empty_garbage_and_bare_integer(tmp_path: Path
     assert pc.read_pid(legacy) is None
 
 
+# --- the exclusive claim --------------------------------------------------------------------------
+
+
+def test_exclusive_claim_writes_the_marker_when_the_slot_is_free(tmp_path: Path) -> None:
+    path = tmp_path / pc.RUNNER_FILENAME
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start, exclusive=True)
+    assert pc.read_pid_record(path) == pc.ProcessIdentity(pid=4242, start_time="start-token")
+
+
+def test_a_claimed_marker_is_byte_identical_to_a_reclaimed_one(tmp_path: Path) -> None:
+    # The O_EXCL create and the temp-file replace are two write paths for one file format; a marker
+    # whose bytes depended on which of them produced it would make every byte-compare host-specific.
+    claimed = tmp_path / "claimed.run"
+    pc.write_pid_file(claimed, pid=4242, start_time_fn=_start, exclusive=True)
+    reclaimed = tmp_path / "reclaimed.run"
+    pc.write_pid_file(reclaimed, pid=4242, start_time_fn=_start)
+    assert claimed.read_bytes() == reclaimed.read_bytes()
+    assert claimed.read_bytes().endswith(b"}\n")  # LF on every host, not CRLF
+
+
+def test_exclusive_claim_refuses_a_live_holder_and_leaves_its_marker_untouched(
+    tmp_path: Path,
+) -> None:
+    # The whole point of the claim: the loser of the race must not overwrite the winner's record,
+    # or `stop` addresses the wrong process from then on.
+    path = tmp_path / pc.RUNNER_FILENAME
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+    before = path.read_bytes()
+
+    with pytest.raises(pc.ExecutorBusyError) as refusal:
+        pc.write_pid_file(
+            path,
+            pid=777,
+            start_time_fn=_start,
+            exclusive=True,
+            kill_fn=FakeProcess(alive=True),
+            can_signal=True,
+        )
+
+    assert refusal.value.pid == 4242  # the caller needs the holder to name it in its refusal
+    assert path.read_bytes() == before
+
+
+def test_exclusive_claim_reclaims_a_dead_holder(tmp_path: Path) -> None:
+    # A crash leaves its marker behind, and a claim that refused on it would make one crash fatal
+    # to the clone until somebody deleted a file by hand.
+    path = tmp_path / pc.RUNNER_FILENAME
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+
+    pc.write_pid_file(
+        path,
+        pid=777,
+        start_time_fn=_start,
+        exclusive=True,
+        kill_fn=FakeProcess(alive=False),
+        can_signal=True,
+    )
+
+    assert pc.read_pid(path) == 777
+
+
+def test_exclusive_claim_reclaims_a_recycled_pid(tmp_path: Path) -> None:
+    # The recorded PID answers a liveness probe, but the start-time token says it belongs to an
+    # unrelated process that inherited the number.
+    path = tmp_path / pc.RUNNER_FILENAME
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+
+    pc.write_pid_file(
+        path,
+        pid=777,
+        start_time_fn=lambda _pid: "a-different-process",
+        exclusive=True,
+        kill_fn=FakeProcess(alive=True),
+        can_signal=True,
+    )
+
+    assert pc.read_pid(path) == 777
+
+
+def test_exclusive_claim_refuses_on_presence_alone_where_liveness_cannot_be_probed(
+    tmp_path: Path,
+) -> None:
+    # Windows: os.kill cannot probe a process this one holds no handle to, so the marker's presence
+    # is the whole signal and O_EXCL is the whole guard — nothing may reach a liveness probe there.
+    path = tmp_path / pc.PID_FILENAME
+    pc.write_pid_file(path, pid=4242, start_time_fn=_start)
+
+    def unprobeable(pid: int, sig: int) -> None:
+        raise AssertionError("liveness must not be probed where the platform cannot probe it")
+
+    with pytest.raises(pc.ExecutorBusyError) as refusal:
+        pc.write_pid_file(
+            path,
+            pid=777,
+            start_time_fn=_start,
+            exclusive=True,
+            kill_fn=unprobeable,
+            can_signal=False,
+        )
+
+    assert refusal.value.pid == 4242
+
+
+def test_exclusive_claim_reclaims_an_unreadable_marker_where_liveness_cannot_be_probed(
+    tmp_path: Path,
+) -> None:
+    # Presence is the signal only for a record that names a holder. A truncated or garbage file
+    # names nobody, so refusing on it would block the clone with no PID anyone could act on.
+    path = tmp_path / pc.PID_FILENAME
+    path.write_text("", encoding="utf-8")
+
+    pc.write_pid_file(path, pid=777, start_time_fn=_start, exclusive=True, can_signal=False)
+
+    assert pc.read_pid(path) == 777
+
+
 # --- is_running -----------------------------------------------------------------------------------
 
 
