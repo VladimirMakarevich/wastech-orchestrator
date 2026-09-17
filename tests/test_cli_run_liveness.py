@@ -53,6 +53,9 @@ def test_run_records_its_own_liveness_and_reaps_it(
     seen: dict[str, object] = {}
 
     class _Orch:
+        def settled_own_file(self, _task_id: str, _task_file: str) -> bool:
+            return False  # these tests are about the executor marker, not the settled-file guard
+
         def run_task(self, task_file: str) -> PipelineResult:
             seen["during"] = marker.exists()
             seen["probe"] = cli._executor_alive(in_repo_config)
@@ -75,6 +78,9 @@ def test_a_failing_run_still_reaps_its_marker(
     marker = process_control.runner_file_path(cli.worc_home_for(in_repo_config))
 
     class _Boom:
+        def settled_own_file(self, _task_id: str, _task_file: str) -> bool:
+            return False  # this test is about the executor marker, not the settled-file guard
+
         def run_task(self, task_file: str) -> PipelineResult:
             raise RuntimeError("provider exploded")
 
@@ -161,6 +167,9 @@ def test_a_run_that_loses_the_race_refuses_instead_of_stealing_the_marker(
     ran: list[str] = []
 
     class _Orch:
+        def settled_own_file(self, _task_id: str, _task_file: str) -> bool:
+            return False  # these tests are about the executor marker, not the settled-file guard
+
         def run_task(self, task_file: str) -> PipelineResult:
             ran.append(task_file)
             return PipelineResult(task_id="task-1", final_status=Status.DONE)
@@ -194,6 +203,9 @@ def test_a_run_reclaims_a_marker_left_behind_by_a_dead_executor(
     monkeypatch.setattr(process_control, "is_running", lambda pid, **kw: False)
 
     class _Orch:
+        def settled_own_file(self, _task_id: str, _task_file: str) -> bool:
+            return False  # these tests are about the executor marker, not the settled-file guard
+
         def run_task(self, task_file: str) -> PipelineResult:
             return PipelineResult(task_id="task-1", final_status=Status.DONE)
 

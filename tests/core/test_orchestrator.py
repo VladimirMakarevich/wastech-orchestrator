@@ -1139,6 +1139,42 @@ def test_a_flow_narrowing_the_observation_cadence_says_so_once(
     assert [(f["configured_observe_mode"], f["observe_mode"]) for f in said] == [("all", "events")]
 
 
+def test_the_cadence_line_survives_logging_level_warning(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # P2.14: the mechanism was fine and the level was not. The config that produced this rule set
+    # `logging.level: warning`, so the line was written at `info` and filtered out — twelve rework
+    # events, zero observations, and nothing anywhere saying why. It reports a configured setting
+    # being discarded, which is exactly what WARNING is for.
+    providers = _both()
+    orch, _store, _, _ = _build(
+        git_repo,
+        make_git_config,
+        tmp_path,
+        providers=providers,
+        check_verdicts=[0],
+        config_kwargs={"supervisor_observe": "all"},
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    levels: list[int] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if "observation cadence narrowed" in record.getMessage():
+                levels.append(record.levelno)
+
+    logger = logging.getLogger("wastech_orchestrator")
+    handler = _Collect(level=logging.WARNING)  # exactly what `logging.level: warning` lets through
+    logger.addHandler(handler)
+    try:
+        assert orch.run_task(_complete_task(tmp_path, "task-warn")).final_status is Status.DONE
+    finally:
+        logger.removeHandler(handler)
+
+    assert levels == [logging.WARNING]
+
+
 def test_no_cadence_line_when_the_flow_declares_nothing_to_narrow(
     git_repo, make_git_config, tmp_path: Path, package_log_text
 ) -> None:
@@ -6793,3 +6829,50 @@ def test_registered_artifact_paths_are_posix_and_relative_to_the_worc_home(
         assert "\\" not in path  # POSIX on every OS, per the stored-path rule
         assert not Path(path).is_absolute()
         assert str(Path.home()) not in path
+
+
+def test_a_reject_that_quarantines_reports_where_the_file_went(
+    git_repo, make_git_config, tmp_path: Path
+) -> None:
+    # P2.12: the quarantine lives under the private home, which the operator does not browse and
+    # agents cannot read. A move that is not announced is a file that disappeared — so the
+    # destination travels on the result (for the command's own output) and is logged at the one
+    # place the move happens (for every other path).
+    orch, _store, ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=_both(), check_verdicts=[0]
+    )
+    bad = tmp_path / "task-bad.md"
+    bad.write_text("---\nid: task-bad\ntitle: t\nunknown_key: x\n---\n\nbody\n", encoding="utf-8")
+
+    with _log_fields() as fields:
+        result = orch.run_task(str(bad))
+
+    assert result.final_status is Status.FAILED
+    assert result.validation_reason is not None
+    assert result.quarantine_path is not None
+    moved = Path(result.quarantine_path)
+    assert moved.is_file() and not bad.exists()  # the file really went there
+    assert [f["destination"] for f in fields if f.get("destination")] == [moved.as_posix()]
+    assert ledger.has_task_id("task-bad")
+
+
+def test_a_successful_terminal_says_what_it_kept_and_how_to_reclaim_it(
+    git_repo, make_git_config, tmp_path: Path, package_log_text
+) -> None:
+    # P2.16: `clean_runs_on_success` reclaims runs/ only — per-task log dirs are out of its scope
+    # by design. Both facts were true and unconnected, so the operator's correct observation was
+    # "the logs did not get cleaned". One line joins them, names the size, gives the command, and
+    # points at the setting that would shrink it. Nothing about leftover branches: out of scope.
+    providers = _both()
+    orch, _store, _ledger, _art = _build(
+        git_repo, make_git_config, tmp_path, providers=providers, check_verdicts=[0]
+    )
+    _patch_impl_edit(providers, git_repo)
+
+    assert orch.run_task(_complete_task(tmp_path, "task-kept")).final_status is Status.DONE
+
+    text = package_log_text()
+    assert "this task's logs kept at" in text
+    assert "worc logs clean" in text
+    assert "logging.artifacts: minimal" in text
+    assert "branch" not in text.split("this task's logs kept at")[1].split("\n")[0]

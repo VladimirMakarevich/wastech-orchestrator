@@ -105,6 +105,11 @@ class LoadedInstructionBundle:
     #: resumed run repopulate ``instruction_entries`` so the lifecycle-vs-packet audit check runs
     #: on resume exactly as on the fresh path.
     entries: tuple[tuple[str, str], ...] = ()
+    #: When the bundle was frozen, as the manifest's ``metadata.frozen_at`` recorded it. Carried so
+    #: a resumed run can tell the operator *which* version of their task file it is still running
+    #: on. ``None`` for a manifest written before the field existed — the warning then omits the
+    #: instant rather than inventing one.
+    frozen_at: str | None = None
 
 
 def instruction_bundle_dir(private_home: Path, task_id: str) -> Path:
@@ -294,6 +299,11 @@ def load_instruction_bundle(
             f"frozen instruction bundle content drifted from its recorded digest "
             f"({bundle_dir.as_posix()})"
         )
+    metadata = manifest.get("metadata")
+    frozen_at = metadata.get("frozen_at") if isinstance(metadata, dict) else None
     return LoadedInstructionBundle(
-        root=bundle_dir, manifest_digest=expected_digest, entries=tuple(file_entries)
+        root=bundle_dir,
+        manifest_digest=expected_digest,
+        entries=tuple(file_entries),
+        frozen_at=str(frozen_at) if isinstance(frozen_at, str) else None,
     )

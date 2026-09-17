@@ -692,6 +692,48 @@ def effective_skip(task: NormalizedTask) -> frozenset[str]:
     return task.disabled_nodes()
 
 
+def _dir_size_bytes(path: Path) -> int | None:
+    """Total size of the files under ``path``, or ``None`` when it cannot be measured.
+
+    Best-effort by contract — this feeds an advisory operator line, never a decision. A tree that
+    disappears mid-walk, or a file the process cannot stat, contributes nothing rather than raising
+    into a terminal transition that has already been decided.
+    """
+    if not path.is_dir():
+        return None
+    total = 0
+    try:
+        for entry in path.rglob("*"):
+            try:
+                if entry.is_file():
+                    total += entry.stat().st_size
+            except OSError:
+                continue
+    except OSError:
+        return None
+    return total
+
+
+def _human_bytes(size: int) -> str:
+    """``"14.2 MB"`` — a size an operator reads, not a byte count they have to divide."""
+    value = float(size)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{int(value)} {unit}" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GB"
+
+
+def _render_packet_drift_section(sentence: str) -> str:
+    """Markdown callout for the summary / PR body: the task file moved under a running task.
+
+    The same sentence the resume logged, repeated where a reviewer will see it — a log line is gone
+    by the time anyone reads the pull request, and "which version of the task is this against" is a
+    question the diff cannot answer on its own.
+    """
+    return f"\n\n## Task file changed after the run started\n\n{sentence}\n"
+
+
 def _render_governance_section(paths: tuple[str, ...]) -> str:
     """Markdown callout for the summary / PR body: this run edited governance files.
 
@@ -789,6 +831,10 @@ class PipelineResult:
     #: opaque ("injection_suspected"); this carries e.g. ``agents.review: forbidden flag shape`` so
     #: the operator sees WHICH field and WHY on the console without opening the JSON report.
     validation_detail: str | None = None
+    #: where a rejected task file was moved, when it was moved. The quarantine lives under the
+    #: private home, which the operator does not browse and agents cannot read, so a reject that
+    #: does not print this is a file that disappeared. ``None`` when nothing was moved.
+    quarantine_path: str | None = None
 
 
 class SlotBusyError(Exception):
@@ -821,6 +867,10 @@ class _Pipeline:
     branch: str = ""
     slug: str = ""
     check_sets: tuple[ResolvedCheckSet, ...] = ()  # normalized command_sets, resolved at preflight
+    #: Set on a resume whose live task file no longer matches the frozen packet: the operator-facing
+    #: sentence, logged once and then carried into ``summary.md`` so it survives into the pull
+    #: request. ``None`` on every run where the file is still the one that was frozen.
+    packet_drift: str | None = None
     # The frozen ``(bundle-key, sha256)`` entries accumulated while the agent inputs are frozen
     # (task packet, then the root repository instructions). Combined with the control-plane digest
     # into the composite ``instruction_manifest_digest`` by ``_finalize_instruction_bundle``.
@@ -2867,6 +2917,7 @@ class Orchestrator:
             # task was parked could be committed unchecked (the fresh path always records the digest
             # via ``freeze_task_packet``).
             p.instruction_entries.extend(loaded.entries)
+            self._announce_task_packet_drift(p, inputs, frozen_at=loaded.frozen_at)
             self._publish_frozen_task_packet(p, inputs, bundle_dir)
             return
         if bundle_dir.exists():
@@ -2895,6 +2946,37 @@ class Orchestrator:
         # no repository-instruction secret gate (the agent could read the live file regardless).
         p.instruction_entries.extend(freeze_repository_instructions(bundle_dir, files))
         self._publish_frozen_task_packet(p, inputs, bundle_dir)
+
+    def _announce_task_packet_drift(
+        self, p: _Pipeline, inputs: NodeInputs, *, frozen_at: str | None
+    ) -> None:
+        """Say, on every resume, when the live task file no longer matches the frozen packet.
+
+        Freezing is correct and stays: without it a run is not reproducible, and a workspace-write
+        node could rewrite the instructions it is being judged against. What was missing is any
+        signal at all. An operator who corrects a task mid-run sees nothing change, concludes the
+        agent is ignoring them, and the run finishes on the stale text — which on the run that
+        produced this is exactly the contradiction its critic then reported ten times.
+
+        Compared against the frozen packet's own digest (the canonical copy is a byte-for-byte
+        ``copy2`` of the file as it was), so this answers "is the run still on what you submitted",
+        not "has anything anywhere moved". The sentence is also parked on the pipeline so it reaches
+        ``summary.md`` and survives into the pull request; a resume with no live file on disk, or
+        with no frozen packet, says nothing.
+        """
+        frozen = self._task_packet_digest(p)
+        live = inputs.task_path
+        if frozen is None or not live or not Path(live).is_file():
+            return
+        if sha256_file(live) == frozen:
+            return
+        when = f" frozen at {frozen_at}" if frozen_at else " frozen at the start of the run"
+        p.packet_drift = (
+            f"The task file changed after this run started. The run continues on the packet"
+            f"{when}, not on the file as it is now — that is what makes the run reproducible. "
+            f"To apply the edit, stop the run (`worc stop`) and start it again."
+        )
+        self._log(p.task.id).warning(p.packet_drift, extra={"task_file": Path(live).as_posix()})
 
     def _publish_frozen_task_packet(
         self, p: _Pipeline, inputs: NodeInputs, bundle_dir: Path
@@ -2938,7 +3020,11 @@ class Orchestrator:
             bundle_dir,
             entries=p.instruction_entries,
             control_digest=control_digest,
-            metadata={"orchestrator_version": __version__},
+            # ``frozen_at`` is metadata, not an entry, so it stays out of the composite digest: it
+            # is what a later resume quotes back to the operator when their task file has moved
+            # under the run, and a timestamp inside the identity would make every re-freeze a
+            # different bundle.
+            metadata={"orchestrator_version": __version__, "frozen_at": self._clock()},
         )
         self._store.update_task(p.task.id, instruction_manifest_digest=digest)
         label = "agent inputs re-bound (adopt)" if adopt else "agent inputs frozen"
@@ -4049,6 +4135,11 @@ class Orchestrator:
 
         Whether a ``failure`` / ``fallback`` trigger *should* survive a narrowing is a question for
         the operator, not for this method. It makes the loss visible; it does not decide it.
+
+        ``WARNING``, not ``info``: it reports a configured setting being discarded, which is what
+        that level is for — and the run that produced this rule was configured at
+        ``logging.level: warning``, so the line it needed was written and then filtered out. A
+        mechanism nobody can see is not a mechanism.
         """
         if in_force is configured:
             return
@@ -4058,7 +4149,7 @@ class Orchestrator:
         }
         if in_force is ObserveMode.NONE and self._config.supervisor.observe.triggers:
             extra["dropped_triggers"] = ",".join(self._config.supervisor.observe.triggers)
-        self._log(p.task.id).info(
+        self._log(p.task.id).warning(
             "observation cadence narrowed by the flow; the whole-task summary is unaffected",
             extra=extra,
         )
@@ -4573,6 +4664,8 @@ class Orchestrator:
         self._capture_governance_changed(p)
         dest = self._move_task_file(p, final)
         body = self._summary_md_body(p, degraded=degraded)
+        if p.packet_drift:
+            body += _render_packet_drift_section(p.packet_drift)
         if p.governance_changed:
             body += _render_governance_section(p.governance_changed)
         # After `_summary_md_body`, because that call is what runs the deterministic producer of
@@ -5084,7 +5177,10 @@ class Orchestrator:
         Never raises: the terminal status and its ledger record are already written, so a cleanup
         that cannot finish is logged and left for the operator's own ``runs clean``.
         """
-        if final is not Status.DONE or not self._config.logging.clean_runs_on_success:
+        if final is not Status.DONE:
+            return
+        if not self._config.logging.clean_runs_on_success:
+            self._announce_terminal_footprint(task_id, runs_evicted=False)
             return
         log = self._log(task_id)
         try:
@@ -5107,6 +5203,32 @@ class Orchestrator:
             return
         if removed:
             log.info("run artifacts evicted", extra={"roots": len(removed)})
+        self._announce_terminal_footprint(task_id, runs_evicted=bool(removed))
+
+    def _announce_terminal_footprint(self, task_id: str, *, runs_evicted: bool) -> None:
+        """One line at a successful terminal: what was reclaimed, what was kept, and how to get it.
+
+        ``clean_runs_on_success`` works exactly as documented and reclaims ``runs/`` only — per-task
+        log directories are out of its scope by design. Both facts were true and unconnected, so
+        the operator's entirely correct observation was "the logs did not get cleaned". This line
+        is the sentence that joins them, and it names ``logging.artifacts: minimal`` beside the
+        size because raw provider stdout is what that size is almost entirely made of.
+
+        Best-effort and never raising: the terminal status is already decided, so a directory that
+        cannot be measured simply goes unreported.
+        """
+        task_dir = task_artifact_dir(self._artifacts_root, task_id)
+        kept = _dir_size_bytes(task_dir)
+        if kept is None:
+            return
+        self._log(task_id).info(
+            "run state %s; this task's logs kept at %s (%s) — reclaim with `worc logs clean`, "
+            "and `logging.artifacts: minimal` keeps far less of it next time",
+            "reclaimed" if runs_evicted else "kept (logging.clean_runs_on_success is off)",
+            task_dir.as_posix(),
+            _human_bytes(kept),
+            extra={"logs_kept_bytes": kept, "runs_evicted": runs_evicted},
+        )
 
     def _move_task_file(self, p: _Pipeline, final: Status) -> Path | None:
         """Move the task file to its lifecycle folder; see _relocate_task_file."""
@@ -5193,9 +5315,10 @@ class Orchestrator:
         row = self._store.get_task(task_id)
         settled = _classify_settled(row, task_file)
         detail = result.detail or None
+        quarantined: str | None = None
         if row is None or settled is _SettledFile.NOT_SETTLED:
             self._log(task_id).info("validation rejected", extra={"reason": reason})
-            self._quarantine(task_file)
+            quarantined = self._quarantine(task_file)
             self._ledger.append(
                 LedgerRecord(
                     id=task_id,
@@ -5211,22 +5334,26 @@ class Orchestrator:
                 task_id=task_id, final_status=Status.FAILED, pr_url=None, reason=reason
             )
         else:
-            detail = self._reject_settled(task_file, settled, row)
+            detail, quarantined = self._reject_settled(task_file, settled, row)
         return PipelineResult(
             task_id=task_id,
             final_status=Status.FAILED,
             validation_reason=reason,
             validation_detail=detail,
+            quarantine_path=quarantined,
         )
 
-    def _reject_settled(self, task_file: str, settled: _SettledFile, row: TaskRow) -> str:
+    def _reject_settled(
+        self, task_file: str, settled: _SettledFile, row: TaskRow
+    ) -> tuple[str, str | None]:
         """Report a reject of an already-terminal id without re-recording its outcome.
 
-        Returns the operator-facing detail for the result, so the console says what actually
-        happened rather than a bare reason code. Only a file proven to be a *different* task is
-        quarantined: left in the queue it would be re-rejected on every poll tick and, with auto
-        mode off, consume that tick's single-task budget forever. The settled task's own file — and
-        any file whose identity cannot be established — stays exactly where the operator has it.
+        Returns the operator-facing detail for the result and where the file went (``None`` when it
+        stayed put), so the console says what actually happened rather than a bare reason code.
+        Only a file proven to be a *different* task is quarantined: left in the queue it would be
+        re-rejected on every poll tick and, with auto mode off, consume that tick's single-task
+        budget forever. The settled task's own file — and any file whose identity cannot be
+        established — stays exactly where the operator has it.
         """
         status = row.status.value
         if settled is _SettledFile.FOREIGN:
@@ -5234,16 +5361,16 @@ class Orchestrator:
                 "rejected a different task file reusing a settled id",
                 extra={"status": status, "quarantined": True},
             )
-            self._quarantine(task_file)
-            return f"id already used by a {status} task; give this file a new id"
+            dest = self._quarantine(task_file)
+            return f"id already used by a {status} task; give this file a new id", dest
         self._log(row.task_id).warning(
             "skipped a reject for an already-settled task; its file was left in place",
             extra={"status": status, "verified": settled is _SettledFile.OWN},
         )
-        return f"already {status}; its task file was left in place"
+        return f"already {status}; its task file was left in place", None
 
     def _quarantine(self, task_file: str) -> str | None:
-        """Move the task file into ``.worc/tasks/rejected/`` (the quarantine) when it exists.
+        """Move the task file into ``.worc/tasks/rejected/`` (the quarantine); return where it went.
 
         A relative ``validation.quarantine_folder`` (the default ``./.worc/tasks/rejected``) is
         resolved against the repository root, not the process working directory: the operator runs
@@ -5260,9 +5387,13 @@ class Orchestrator:
             quarantine_dir.mkdir(parents=True, exist_ok=True)
             dest = quarantine_dir / src.name
             src.replace(dest)
-            return str(dest)
         except OSError:
             return None
+        # Said here, at the one place the move happens, so every reject path announces it — the
+        # destination is under the private home, which the operator does not browse and agents
+        # cannot read, so a silent move is a file that vanished.
+        self._log(src.stem).warning("task file quarantined", extra={"destination": dest.as_posix()})
+        return str(dest)
 
     def _check_sets(self, p: _Pipeline) -> tuple[ResolvedCheckSet, ...]:
         """The normalized command sets; recompute from config if not resolved yet (e.g. on resume).

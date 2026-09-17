@@ -530,13 +530,18 @@ def _impl_fingerprint() -> str:
     return registry.resolve("implementation").flow_fingerprint
 
 
-def _seed_control_bundle(orch, store: StateStore, task_id: str) -> None:
+def _seed_control_bundle(
+    orch, store: StateStore, task_id: str, *, source: Path | None = None
+) -> None:
     """Seed the control + instruction bundles an interrupted task left on disk.
 
     A resume verifies both frozen bundles against their persisted digests before reusing them; these
     recovery tests seed the checkpoint directly (bypassing the fresh run that freezes), so they must
     also freeze the implementation-flow control bundle the checkpoint fingerprints AND a minimal
     instruction bundle (task packet + any tracked root repo instructions), recording both digests.
+
+    ``source`` freezes a real task file instead of the stub, for a test that then edits it and
+    checks what a resume says about the difference.
     """
     from wastech_orchestrator.core.flow.control_bundle import freeze_control_bundle
     from wastech_orchestrator.core.flow.instruction_bundle import (
@@ -558,8 +563,10 @@ def _seed_control_bundle(orch, store: StateStore, task_id: str) -> None:
 
     ib_dir = orch._instruction_bundle_dir(task_id)
     ib_dir.mkdir(parents=True, exist_ok=True)
-    src = ib_dir.parent / f"{task_id}.seed-task.md"
-    src.write_text("# seeded task\n", encoding="utf-8")
+    src = source
+    if src is None:
+        src = ib_dir.parent / f"{task_id}.seed-task.md"
+        src.write_text("# seeded task\n", encoding="utf-8")
     _, task_entry = freeze_task_packet(ib_dir, src)
     repo_root = Path(orch._config.repo.local_path)
     tracked = frozenset(orch._git.list_tracked_files(*REPO_INSTRUCTION_NAMES))
@@ -864,3 +871,144 @@ def test_resume_decomposed_at_subtask_without_duplicate_commit(
     # Exactly one commit for subtask 1 on the branch.
     log = git_run(["log", "--format=%s", f"main..{branch}"], git_repo.clone)
     assert log.count("subtask 1") == 1
+
+
+def test_a_resume_says_the_task_file_changed_under_the_run(
+    git_repo, make_git_config, git_run, tmp_path: Path
+) -> None:
+    """P2.11: the packet is frozen, and until now nothing said so.
+
+    The freeze is correct and stays — without it a run is not reproducible, and a workspace-write
+    node could rewrite the instructions it is judged against. What was missing was any signal: the
+    operator corrected the task mid-run, observed nothing change, and the run finished on the stale
+    text. The warning is said once on the resume and repeated in ``summary.md``, so it survives
+    into the pull request rather than dying with the log line.
+    """
+    import logging
+
+    from wastech_orchestrator.task.model import NormalizedTask
+    from wastech_orchestrator.task.parser import slugify, write_normalized
+
+    providers = _make_providers(git_repo)
+    orch, store, _, art, _ = _build_orchestrator(
+        git_repo, make_git_config, tmp_path, providers, [0]
+    )
+    task_id, title = "resume-drift", "Resume checkpoint"
+    slug = slugify(title)
+    branch = f"worc/{task_id}-{slug}"
+    write_normalized(
+        NormalizedTask(id=task_id, title=title, description="Implement the requested change."),
+        str(art),
+    )
+    source = git_repo.clone / "tasks" / "pending" / f"{task_id}.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        f'---\nid: {task_id}\ntitle: "{title}"\n---\n\n## Description\n\nThe original text.\n',
+        encoding="utf-8",
+    )
+    git_run(["checkout", "-b", branch], git_repo.clone)
+    store.insert_task(
+        TaskRow(
+            task_id=task_id,
+            title=title,
+            status=Status.RUNNING,
+            branch=branch,
+            slug=slug,
+            source_path=str(source),
+            decomposition_accepted=False,
+        )
+    )
+    store.save_flow_checkpoint(
+        task_id,
+        current_node="implementation",
+        counters_json="{}",
+        flow_fingerprint=_impl_fingerprint(),
+        fix_iterations=0,
+    )
+    _seed_control_bundle(orch, store, task_id, source=source)
+
+    # The operator corrects the task while it is parked — exactly the sequence that produced the
+    # ten repeated contradictions this item comes from.
+    source.write_text(
+        source.read_text(encoding="utf-8") + "\nA named ceiling exception the first text lacked.\n",
+        encoding="utf-8",
+    )
+
+    said: list[tuple[int, str]] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            if "task file changed after this run started" in record.getMessage().lower():
+                said.append((record.levelno, record.getMessage()))
+
+    logger = logging.getLogger("wastech_orchestrator")
+    handler = _Collect(level=logging.WARNING)  # must survive `logging.level: warning`
+    logger.addHandler(handler)
+    try:
+        result = orch.resume()
+    finally:
+        logger.removeHandler(handler)
+
+    assert result is not None
+    assert len(said) == 1
+    level, message = said[0]
+    assert level == logging.WARNING  # survives `logging.level: warning`, which is where it was lost
+    assert "worc stop" in message  # names the one thing that actually applies the edit
+    # And it survives into the pull-request body rather than dying with the log line.
+    summary = (git_repo.clone / "tasks" / "done" / f"{task_id}.summary.md").read_text("utf-8")
+    assert "## Task file changed after the run started" in summary
+    assert "worc stop" in summary
+    # The freeze itself is untouched and the run stayed on the packet: the audit commit's
+    # lifecycle-vs-packet guard then refuses to commit a task file that no longer matches what the
+    # run was judged against, so the task parks for the operator instead of shipping quietly. The
+    # warning is what turns that from a mystery into a decision.
+    assert result.final_status is Status.MANUAL_ACTION_REQUIRED
+
+
+def test_a_resume_on_an_unchanged_task_file_says_nothing(
+    git_repo, make_git_config, git_run, tmp_path: Path, package_log_text
+) -> None:
+    # The other direction, so the warning stays a signal: the ordinary resume is silent.
+    from wastech_orchestrator.task.model import NormalizedTask
+    from wastech_orchestrator.task.parser import slugify, write_normalized
+
+    providers = _make_providers(git_repo)
+    orch, store, _, art, _ = _build_orchestrator(
+        git_repo, make_git_config, tmp_path, providers, [0]
+    )
+    task_id, title = "resume-same", "Resume checkpoint"
+    slug = slugify(title)
+    branch = f"worc/{task_id}-{slug}"
+    write_normalized(
+        NormalizedTask(id=task_id, title=title, description="Implement the requested change."),
+        str(art),
+    )
+    source = git_repo.clone / "tasks" / "pending" / f"{task_id}.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        f'---\nid: {task_id}\ntitle: "{title}"\n---\n\n## Description\n\nUnchanged.\n',
+        encoding="utf-8",
+    )
+    git_run(["checkout", "-b", branch], git_repo.clone)
+    store.insert_task(
+        TaskRow(
+            task_id=task_id,
+            title=title,
+            status=Status.RUNNING,
+            branch=branch,
+            slug=slug,
+            source_path=str(source),
+            decomposition_accepted=False,
+        )
+    )
+    store.save_flow_checkpoint(
+        task_id,
+        current_node="implementation",
+        counters_json="{}",
+        flow_fingerprint=_impl_fingerprint(),
+        fix_iterations=0,
+    )
+    _seed_control_bundle(orch, store, task_id, source=source)
+
+    assert orch.resume().final_status is Status.DONE  # type: ignore[union-attr]
+    assert "task file changed after this run started" not in package_log_text().lower()

@@ -2050,6 +2050,16 @@ def cmd_run(args: argparse.Namespace) -> int:
     # is a controlled refusal with a non-zero exit; a malformed file falls through to the gate.
     scan = _scan_pending_meta(Path(args.task_file))
     task_id, depends_on = scan.task_id, scan.depends_on
+    if task_id is not None and orchestrator.settled_own_file(task_id, args.task_file):
+        # The same guard `watch` applies, for the same reason: re-running a terminal task's own
+        # leftover file would reject it as a duplicate id and quarantine the operator's own file
+        # under the private home. Resolving it (`rerun` / `finalize`) is the operator's call.
+        print(
+            f"run: {task_id} already reached a terminal; its task file was left in place. "
+            "Use `worc rerun` to re-attempt it, or `worc finalize` to close it out.",
+            file=sys.stderr,
+        )
+        return 1
     if task_id is not None and depends_on:
         verdict = orchestrator.dependency_eligibility(task_id, depends_on, pending={})
         if verdict.state is not Eligibility.ELIGIBLE:
@@ -2084,6 +2094,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         # sees WHICH front-matter field and WHY without opening the JSON validation report.
         detail = f" ({result.validation_detail})" if result.validation_detail else ""
         print(f"{result.task_id}: rejected — {result.validation_reason}{detail}", file=sys.stderr)
+        if result.quarantine_path:
+            # The quarantine is under the private home, which the operator does not browse and
+            # agents cannot read. Where their file went has to come from the command's output.
+            print(f"  moved to {Path(result.quarantine_path).as_posix()}", file=sys.stderr)
         return _EXIT_BY_STATUS.get(result.final_status, 1)
     suffix = f" → {result.pr_url}" if result.pr_url else ""
     print(f"{result.task_id}: {result.final_status.value}{suffix}")

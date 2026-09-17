@@ -1506,10 +1506,15 @@ def test_a_settled_tasks_own_file_survives_the_next_watch_tick(
     assert not (project / "rejected").exists()  # the tracked file was never moved out of the tree
     assert git_run(["status", "--porcelain", "--", "tasks"], git_repo.clone) == ""
 
-    # An explicit run has no scanner guard in front of it: it still answers loudly, but the reject
-    # path must not touch the file, the ledger or the operator's notifications either.
+    # An explicit run now carries the same guard the scanner has (P2.12), so it refuses before the
+    # gate ever sees the file — with the terminal status and the two verbs that resolve it, rather
+    # than a `duplicate_task_id` whose reject path would quarantine the operator's own file into a
+    # directory they do not browse. The tree, the ledger and the notifications stay as they were.
     assert cli.main(["--config", str(config), "run", str(task_file)]) != 0
-    assert "duplicate_task_id" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "already reached a terminal" in err
+    assert "worc rerun" in err and "worc finalize" in err
+    assert "duplicate_task_id" not in err
     records = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines()]
     assert [r["final_status"] for r in records] == ["done"]
     assert task_file.exists()
