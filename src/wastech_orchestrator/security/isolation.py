@@ -13,8 +13,10 @@ answer does:
 * :func:`describe_host_floor` — "does an OS-enforced write floor exist for this run at all?" The
   verdict is a loud line and nothing more. A host without a sandbox is still a host an operator has
   to work on, and the advanced mode is an operator who chose to do without one, so refusing either
-  would leave them with neither the guarantee nor the work; instead the loss is stated in full, in
-  preflight, in the run log and in the prompt every node receives, and the run continues.
+  would leave them with neither the guarantee nor the work; instead the absence is announced — one
+  status line naming the provider and the cause, in preflight and in the run log — and the run
+  continues. What that absence costs is one paragraph in ``guide/config/security.md``, read once,
+  rather than a recital printed into every report.
 
 The provider-specific meaning of both stays in the adapters (``providers/*.py``) — Codex's sandbox,
 Claude's permission mode and Bash-sandbox host classes — so this module holds no CLI syntax; it only
@@ -72,28 +74,14 @@ class HostFloorCheck(Protocol):
         ...
 
 
-# What is lost wherever no OS-enforced write floor exists, stated rather than softened. ``.worc`` is
-# the more expensive half of the two: with it writable a frozen control plane can be swapped without
-# detection, the exchange cannot be quarantined, and ``state.db`` can be rewritten.
-_FLOOR_LOSS = (
-    "No OS-enforced write floor exists here, so nothing outside the agent CLI's own tool policy "
-    "keeps a write out of the clone's .git or out of .worc — and with .worc writable, "
-    "control-plane tamper detection, exchange quarantine and state.db integrity are unenforced"
-)
-
-# The two tails are adjacent on purpose: both describe the same missing floor, and keeping them one
-# line apart is what stops one of them from drifting into a claim the other contradicts.
-_FLOOR_LOSS_SHELL_UNSANDBOXED = (
-    "; with strict_isolation=false EVERY node here keeps an unsandboxed shell, read-only ones "
-    "included, so anything any of them starts — which no tool policy sees at all — reaches both "
-    "paths directly, and only the prompt's advisory contract and after-the-fact drift detection "
-    "remain"
-)
-_FLOOR_LOSS_SHELL_WITHHELD = (
-    "; with strict_isolation=true the shell is withheld rather than unsandboxed (dropped from the "
-    "tool set, or the attempt refused), which closes the command-execution path and leaves the "
-    "CLI's own file-editing denies as the only boundary"
-)
+# What is lost wherever no OS-enforced write floor exists is deliberately NOT recited here, for the
+# reason the mode's own announcement below was cut down to one line: it is a paragraph in
+# ``guide/config/security.md``, read once, rather than four lines of prose scrolled past in every
+# preflight report and every run log. The line keeps the shape its neighbours established
+# (``isolation: OK (strict_isolation=false)``, ``read-isolation: OFF (…)``) — subject, verdict, and
+# the cause in parentheses — so the report reads as a posture summary instead of an essay. What must
+# survive the brevity is the cause: which provider has no floor, and whether it is the host or the
+# operator's own posture that removed it, because only one of the two has a remedy.
 
 
 # The mode's own announcement, in one formatter for the reason `describe_host_floor` is: preflight
@@ -151,21 +139,15 @@ def describe_host_floor(
 ) -> tuple[str, ...]:
     """One line per provider with no OS-enforced write floor for this run; ``()`` when all have one.
 
-    Each line names the gap and then what it costs, and ``security.strict_isolation`` decides both
-    halves because the truth does. The gap half is the provider's answer to it: under
-    ``strict_isolation: false`` Claude raises no sandbox on any host, while Codex still gets its
-    generated profile — so the mode produces a Claude line on a machine that reports nothing under
-    strict isolation, and never a Codex one. The cost half follows the same flag: with it off the
-    shell runs unsandboxed and anything it starts reaches the denied paths, with it on the attempt
-    loses its shell instead. Both live in one formatter, so preflight, the run log and the prompt
-    preamble can never describe the same run differently; the caller supplies its own framing (a
-    verdict line, a log record, a paragraph).
+    Each line is ``provider: cause`` and nothing else — the caller adds the verdict framing
+    (``isolation-floor: NONE (…)`` in preflight, the same text in the run log), and what the missing
+    floor costs is in ``guide/config/security.md`` rather than in every report. The cause is the
+    provider's own answer to ``security.strict_isolation``, and the flag matters because the truth
+    does: under ``strict_isolation: false`` Claude raises no sandbox on any host, while Codex still
+    gets its generated profile — so the mode produces a Claude line on a machine that says nothing
+    under strict isolation, and never a Codex one. One formatter, so preflight and the run log can
+    never describe the same run differently.
     """
-    tail = (
-        _FLOOR_LOSS_SHELL_WITHHELD
-        if config.security.strict_isolation
-        else _FLOOR_LOSS_SHELL_UNSANDBOXED
-    )
     lines: list[str] = []
     for provider_id in _providers_in_use(config):
         check = checks.get(provider_id)
@@ -174,7 +156,7 @@ def describe_host_floor(
         )
         if gap is None:
             continue
-        lines.append(f"{provider_id.value}: {gap}. {_FLOOR_LOSS}{tail}")
+        lines.append(f"{provider_id.value}: {gap}")
     return tuple(lines)
 
 
